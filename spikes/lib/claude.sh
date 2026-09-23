@@ -50,6 +50,8 @@ claude_launch() {
   } > "$dir/launch.sh"
   chmod +x "$dir/launch.sh"
   lab_pane_run "$pane" "$dir/launch.sh" || return 1
+  # claude_wait_ready reads the pane from here to spot startup dialogs.
+  printf '%s\n' "$pane" > "$dir/pane"
   printf '%s\n' "$pane"
 }
 
@@ -80,9 +82,29 @@ _events_at_least() {
 }
 
 # Waits for the session's SessionStart probe, then gives the TUI a moment.
+# Claude Code shows its workspace-trust dialog before any hook runs when
+# CLAUDE_SPIKE_CWD is not a directory it already trusts; accepting it would
+# edit ~/.claude.json, so the spike stops with a clear message instead.
 claude_wait_ready() { # <dir> [timeout]
-  wait_events "$1" '.event == "SessionStart"' 1 "${2:-60}" || return 1
-  sleep 3
+  local dir=$1 pane deadline
+  pane=$(cat "$dir/pane" 2>/dev/null)
+  deadline=$(( $(date +%s) + ${2:-60} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if _events_at_least "$dir" '.event == "SessionStart"' 1; then
+      sleep 3
+      return 0
+    fi
+    if [ -n "$pane" ] && claude_trust_dialog_shown "$pane"; then
+      lab_die "blocked: untrusted path $CLAUDE_SPIKE_CWD (Claude Code shows its workspace-trust dialog; run the spikes from a checkout Claude Code already trusts)"
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# True when the pane shows Claude Code's "Is this a project you trust?" dialog.
+claude_trust_dialog_shown() { # <pane>
+  lab_pane_read "$1" 2>/dev/null | grep -qF 'I trust this folder'
 }
 
 # Session id and transcript path as reported to the SessionStart probe.

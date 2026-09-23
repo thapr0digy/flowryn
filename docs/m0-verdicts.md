@@ -2,7 +2,7 @@
 
 This is the record for milestone M0 in [`design-v3.html`](design-v3.html) (section 17, "Contract spikes and fixtures before any product code"). Each row is one spike under [`spikes/`](../spikes): the claim it tests, the exact tool version, how it was tested, the verdict, and the evidence. The last sections list every edit made to the design because of these verdicts, plus findings that fall outside the M0 marks.
 
-Run date: 2026-09-23, macOS (Darwin 25.3.0). Verdicts are `confirmed`, `refuted`, `partial` (holds only with a change or a caveat, which the design now states), or `not run`.
+Run date: 2026-09-23, macOS (Darwin 25.3.0), in the trusted task worktree `/Users/pr0digy/.treehouse/flowryn-81557b/1/flowryn`. The Claude-backed spikes need a checkout Claude Code already trusts (see the README). Verdicts are `confirmed`, `refuted`, `partial` (holds only with a change or a caveat, which the design now states), or `not run`.
 
 Tool versions tested:
 

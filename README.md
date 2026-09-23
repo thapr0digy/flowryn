@@ -18,6 +18,8 @@ The spikes are throwaway shell scripts under [`spikes/`](spikes), grouped as `cl
 
 Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; `pi` for the Pi group). Herdr and Claude spikes need Firstmate's lab helper at `${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh`; set `FIRSTMATE_REPO` or `HERDR_LAB_HELPER` to point elsewhere.
 
+The Herdr and Claude spikes start Claude Code from the repo root, so the checkout must be a directory Claude Code already trusts. In an untrusted checkout (a fresh worktree, for example) Claude stops at its workspace-trust dialog before any hook runs, and the spike fails with `blocked: untrusted path <dir>`. The spikes never accept that dialog, because doing so edits `~/.claude.json`. `spikes/run-all.sh` exits non-zero when any spike exits non-zero or records no result.
+
 ```bash
 spikes/run-all.sh                    # every group; provisions and tears down one lab session
 spikes/run-all.sh tasks-axi          # one group: tasks-axi, no-mistakes, herdr, claude or pi
