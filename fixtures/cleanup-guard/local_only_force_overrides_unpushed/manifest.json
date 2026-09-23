@@ -1,0 +1,48 @@
+{
+  "name": "local_only_force_overrides_unpushed",
+  "ported_from": "tests/fm-teardown.test.sh:test_local_only_force_overrides_unpushed",
+  "firstmate_matrix_row": "f",
+  "description": "Same state as local_only_truly_unpushed (one unpushed empty commit, not on local main), but a human-channel approval with action discard is present. Firstmate's --force escape hatch becomes Flowryn's discard: allowed ONLY because of that approval. Without it the verdict is the local_only_truly_unpushed refusal.",
+  "delivery_mode": "local-only",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": {
+      "action": "discard",
+      "channel": "human"
+    }
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "discard",
+    "reason_class": "discard_approved",
+    "without_discard_approval": {
+      "verdict": "refuse",
+      "reason_class": "unpushed"
+    }
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "primary_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

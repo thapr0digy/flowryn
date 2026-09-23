@@ -1,0 +1,50 @@
+{
+  "name": "pr_check_records_remote_head_when_local_lags",
+  "ported_from": "tests/fm-teardown.test.sh:test_pr_check_records_remote_head_when_local_lags",
+  "firstmate_matrix_row": "p",
+  "description": "PR-head recording when the local worktree lags the forge: the forge PR head is a no-mistakes follow-up commit on top of the local HEAD that the worktree never pulled. Recording must store the forge PR head, not the local HEAD.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "record_pr",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": "https://github.com/example/repo/pull/7",
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": [
+      {
+        "number": 7,
+        "head_ref_name": "fm/task-x1",
+        "state": "MERGED",
+        "head": "pr_head"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "record",
+    "reason_class": "forge_pr_head",
+    "recorded_pr_head": "pr_head"
+  },
+  "invariants": [
+    {
+      "check": "same",
+      "a": "pr_head",
+      "b": "local_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "pr_head",
+      "expect": true
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

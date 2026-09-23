@@ -1,0 +1,60 @@
+{
+  "name": "no_pr_recorded_discovers_merged_pr_by_branch",
+  "ported_from": "tests/fm-teardown.test.sh:test_no_pr_recorded_discovers_merged_pr_by_branch_allows",
+  "firstmate_matrix_row": "q",
+  "description": "No PR was ever recorded for the task (no pr=, no pr_head=; e.g. a yolo merge on a repo without PR CI). The guard must discover PR 7 from the task branch name: it reads MERGED with a head that is a no-mistakes auto-fix commit on top of the local HEAD. The squash landed feature.txt on origin/main under a new SHA and the head branch was never pushed/was deleted. Allowed, and the guard must surface the discovered PR URL (Firstmate asserts the resolved URL is recorded on completion).",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": [
+      {
+        "number": 7,
+        "head_ref_name": "fm/task-x1",
+        "state": "MERGED",
+        "head": "pr_head"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "allow",
+    "reason_class": "merged_pr_contains_head",
+    "pr_url": "https://github.com/example/repo/pull/7"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "remote_branch",
+      "remote": "origin",
+      "branch": "fm/task-x1",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "pr_head",
+      "expect": true
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": true
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

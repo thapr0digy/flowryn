@@ -1,0 +1,59 @@
+{
+  "name": "squash_merged_pr_when_head_ancestor_of_pr_head",
+  "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_pr_allows_when_head_ancestor_of_pr_head",
+  "firstmate_matrix_row": "m",
+  "description": "The recorded PR (pr= URL only, no pr_head) reads MERGED with a head that is a forge-side follow-up commit on top of the local HEAD (the worktree never pulled it). Local HEAD is an ancestor of the merged PR head, so its work is contained: allowed. Content is not in origin/main, so only the PR path proves it.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": "https://github.com/example/repo/pull/7",
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": [
+      {
+        "number": 7,
+        "head_ref_name": "fm/task-x1",
+        "state": "MERGED",
+        "head": "pr_head"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "allow",
+    "reason_class": "merged_pr_contains_head"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "same",
+      "a": "local_head",
+      "b": "pr_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "pr_head",
+      "expect": true
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

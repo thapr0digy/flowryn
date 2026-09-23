@@ -1,0 +1,64 @@
+{
+  "name": "squash_merged_same_file_different_content",
+  "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_same_file_different_content_refuses",
+  "firstmate_matrix_row": "q3",
+  "description": "Same squash-merged history, but the worktree is left at the stale pre-rebase head whose shared.txt blob differs from what landed. Not an ancestor of the PR head, its per-commit patch-ids differ, and a 3-way merge of origin/main with it conflicts on shared.txt. Touching the same path is not proof the local content landed: refused, and the worktree, task branch and HEAD must be retained.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": "https://github.com/example/repo/pull/7",
+    "recorded_pr_head": "pr_head",
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": [
+      {
+        "number": 7,
+        "head_ref_name": "fm/task-x1",
+        "state": "MERGED",
+        "head": "pr_head"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "not_in_merged_pr_head"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "same",
+      "a": "local_head",
+      "b": "pre_rebase_head",
+      "expect": true
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "pr_head",
+      "expect": false
+    },
+    {
+      "check": "patches_in",
+      "ref": "pr_head",
+      "expect": false
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

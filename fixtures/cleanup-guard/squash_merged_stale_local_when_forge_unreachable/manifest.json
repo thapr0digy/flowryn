@@ -1,0 +1,53 @@
+{
+  "name": "squash_merged_stale_local_when_forge_unreachable",
+  "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_stale_local_refuses_when_forge_unreachable",
+  "firstmate_matrix_row": "q5",
+  "description": "The stale pre-rebase worktree of squash_merged_same_file_different_content, but the forge is unreachable (every gh call fails). The PR cannot be consulted and the content check is inconclusive (merge-tree conflicts on shared.txt): refused, fail-safe, with the worktree, task branch and HEAD retained.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": "https://github.com/example/repo/pull/7",
+    "recorded_pr_head": "pr_head",
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": false,
+    "error": "unreachable",
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "forge_unreachable_content_absent"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "same",
+      "a": "local_head",
+      "b": "pre_rebase_head",
+      "expect": true
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "pr_head",
+      "expect": false
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

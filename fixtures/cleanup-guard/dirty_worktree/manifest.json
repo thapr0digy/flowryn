@@ -1,0 +1,48 @@
+{
+  "name": "dirty_worktree",
+  "ported_from": "tests/fm-teardown.test.sh:test_dirty_worktree_refuses",
+  "firstmate_matrix_row": "i",
+  "description": "The committed work has fully landed (recorded PR reads MERGED with head = local HEAD, and the content is on origin/main), but feature.txt has an uncommitted edit. Cleanup would discard it: refused, and the refusal must cite uncommitted changes. Dirty always wins.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": "https://github.com/example/repo/pull/7",
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": [
+      {
+        "number": 7,
+        "head_ref_name": "fm/task-x1",
+        "state": "MERGED",
+        "head": "pr_head"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "dirty"
+  },
+  "invariants": [
+    {
+      "check": "dirty",
+      "expect": true
+    },
+    {
+      "check": "same",
+      "a": "local_head",
+      "b": "pr_head",
+      "expect": true
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": true
+    }
+  ]
+}

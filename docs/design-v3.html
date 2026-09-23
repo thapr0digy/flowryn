@@ -32,6 +32,9 @@
   .badge code { line-height: 1; vertical-align: baseline; }
   pre.code { background: var(--color-base-200); border-radius: var(--radius-box, .75rem); padding: .9rem 1rem; font-size: .76rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid color-mix(in oklab, currentColor 10%, transparent); }
   .m0 { display: inline-block; font-size: .68rem; font-weight: 700; letter-spacing: .02em; padding: 0 .45rem; line-height: 1.35rem; border-radius: 999px; border: 1px solid var(--color-warning); color: var(--color-warning); vertical-align: middle; white-space: nowrap; }
+  .m0ok, .m0rev { display: inline-block; font-size: .68rem; font-weight: 700; letter-spacing: .02em; padding: 0 .45rem; line-height: 1.35rem; border-radius: 999px; border: 1px solid; vertical-align: middle; white-space: nowrap; }
+  .m0ok { border-color: var(--color-success); color: var(--color-success); }
+  .m0rev { border-color: var(--color-info); color: var(--color-info); }
   .own { font-weight: 600; color: var(--color-primary); }
   table.table td, table.table th { vertical-align: top; }
   .toc a { text-decoration: none; }
@@ -58,7 +61,7 @@
     <div class="stat bg-base-200 rounded-box"><div class="stat-title">Harnesses in v1</div><div class="stat-value text-primary">2</div><div class="stat-desc">Claude Code · Pi</div></div>
     <div class="stat bg-base-200 rounded-box"><div class="stat-title">Active leaders</div><div class="stat-value text-primary">1</div><div class="stat-desc">lease + handover</div></div>
   </div>
-  <div class="alert alert-soft text-sm"><span><span class="m0">M0</span> marks a claim that depends on platform behavior not yet proven on this machine. Each one is a test in the <a class="link link-primary" href="#milestones">M0 contract spikes</a>. Build nothing that depends on it until the spike passes. Unmarked platform facts were checked against the docs, the installed tools, or Firstmate's code during the v2 review.</span></div>
+  <div class="alert alert-soft text-sm"><span><span class="m0">M0</span> marks a claim that depends on platform behavior not yet proven on this machine. Each one is a test in the <a class="link link-primary" href="#milestones">M0 contract spikes</a>. Build nothing that depends on it until the spike passes. Unmarked platform facts were checked against the docs, the installed tools, or Firstmate's code during the v2 review. After the M0 spikes (<code>docs/m0-verdicts.md</code>): <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span> is confirmed on the tested version, <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span> means the text now says what the spike found, and <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span> is a Pi claim still unverified because Pi is not installed on the test machine.</span></div>
 </header>
 
 <!-- ============ TOC ============ -->
@@ -427,16 +430,16 @@ type Verified = { ok: boolean;
   <table class="table table-sm">
     <thead><tr><th>Need</th><th>Claude Code leader (hooks)</th><th>Pi leader (extension)</th></tr></thead>
     <tbody>
-      <tr><td>Briefing</td><td><code>SessionStart</code> <code>additionalContext</code>. Fires on <code>startup</code>, <code>resume</code>, <code>clear</code> and <code>compact</code>, so it re-grounds the leader after compaction.</td><td><code>session_start</code> attaches the briefing to the first turn with <code>deliverAs: "nextTurn"</code>; re-brief after compaction <span class="m0">M0</span></td></tr>
+      <tr><td>Briefing</td><td><code>SessionStart</code> <code>additionalContext</code>. Fires on <code>startup</code>, <code>resume</code>, <code>clear</code> and <code>compact</code>, so it re-grounds the leader after compaction.</td><td><code>session_start</code> attaches the briefing to the first turn with <code>deliverAs: "nextTurn"</code>; re-brief after compaction <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span></td></tr>
       <tr><td>P1 digest</td><td><code>UserPromptSubmit</code> <code>additionalContext</code>, at most 5 lines and under 2,000 characters. Default hook timeout is 30 s and a timed-out hook's context is discarded, so the hook must answer in well under a second.</td><td><code>sendMessage(…, {deliverAs: "nextTurn"})</code></td></tr>
-      <tr><td>P0 while busy</td><td><code>Stop</code> hook continues the turn with one line in <code>hookSpecificOutput.additionalContext</code> (shown as hook feedback, not an error) <span class="m0">M0</span>. At most two consecutive continuations, far below the cap of 8.</td><td><code>deliverAs: "followUp"</code> (Pi rejects a busy send without it)</td></tr>
-      <tr><td>P0 while idle, you inactive</td><td>An <code>asyncRewake</code> Stop hook runs <code>flowryn hook wait-p0</code>. It blocks on the socket and exits 2 with one line on stderr, which wakes an idle session. Claude does not deduplicate async hooks, so the daemon keeps one waiter per session and tells older ones to exit 0. Timeout 8 h, re-armed by every Stop. <span class="m0">M0</span> behavior when the waiter fires while busy, and whether arming from <code>SessionStart</code> also works.</td><td><code>followUp</code> with <code>triggerTurn: true</code></td></tr>
-      <tr><td>Busy</td><td><code>UserPromptSubmit</code> sets busy; <code>PreToolUse</code>/<code>PostToolUse</code> refresh a busy lease. A manual interrupt fires no hook, so busy is a lease that expires after 10 min without hook events, or at once when <code>idle_prompt</code> fires.</td><td><code>agent_start</code></td></tr>
-      <tr><td>Idle</td><td><code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code>; <code>idle_prompt</code> after an interrupt <span class="m0">M0</span></td><td><code>agent_settled</code> (emitted from a <code>finally</code> block, so it covers abort, retry and compaction)</td></tr>
-      <tr><td>You are inactive</td><td><code>Notification</code> <code>idle_prompt</code>, about 60 s after Claude finishes with no typing since. Better than "pane not focused", which is a check-then-act race. <span class="m0">M0</span> that it fires inside a Herdr pane.</td><td>Only if M0 proves the extension can read the composer: idle for 60 s and the composer empty <span class="m0">M0</span>. Otherwise a Pi P0 never starts a turn; it notifies and waits for your next message (decided in review).</td></tr>
+      <tr><td>P0 while busy</td><td><code>Stop</code> hook continues the turn with one line in <code>hookSpecificOutput.additionalContext</code> (shown as hook feedback, not an error) <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>. At most two consecutive continuations, far below the cap of 8.</td><td><code>deliverAs: "followUp"</code> (Pi rejects a busy send without it)</td></tr>
+      <tr><td>P0 while idle, you inactive</td><td>An <code>asyncRewake</code> Stop hook runs <code>flowryn hook wait-p0</code>. It blocks on the socket and exits 2 with one line on stderr, which wakes an idle session. Claude does not deduplicate async hooks, so the daemon keeps one waiter per session and tells older ones to exit 0. Timeout 8 h, re-armed by every Stop. A waiter that fires while the session is busy is delivered inside the running turn, beside the next tool result, not as a new turn; arming from <code>SessionStart</code> also wakes a fresh idle session <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span>.</td><td><code>followUp</code> with <code>triggerTurn: true</code></td></tr>
+      <tr><td>Busy</td><td><code>UserPromptSubmit</code> sets busy; <code>PreToolUse</code>/<code>PostToolUse</code> refresh a busy lease. A manual interrupt fires no hook, so busy is a lease that expires after 10 min without hook events. <code>idle_prompt</code> clears it at once only after a normal turn end, because nothing fires after an interrupt.</td><td><code>agent_start</code></td></tr>
+      <tr><td>Idle</td><td><code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code>. An interrupt fires none of them and no later <code>idle_prompt</code> <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td><td><code>agent_settled</code> (emitted from a <code>finally</code> block, so it covers abort, retry and compaction)</td></tr>
+      <tr><td>You are inactive</td><td><code>Notification</code> <code>idle_prompt</code>, about 60 s after Claude finishes with no typing since. Better than "pane not focused", which is a check-then-act race. It fires inside a Herdr pane 60 s after the turn, and not at all once you type into the composer after the turn <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>.</td><td>Only if M0 proves the extension can read the composer: idle for 60 s and the composer empty <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span>. Otherwise a Pi P0 never starts a turn; it notifies and waits for your next message (decided in review).</td></tr>
       <tr><td>Human confirmation</td><td>Ask rule <code>Bash(flowryn merge *)</code> plus a <code>PreToolUse</code> hook returning <code>permissionDecision: "ask"</code>; auto mode still prompts (<a class="link" href="#approval">section 7</a>)</td><td><code>ctx.ui.confirm()</code> inside the extension's <code>flowryn_merge</code> tool</td></tr>
-      <tr><td>Leader token</td><td><code>SessionStart</code> hook writes <code>FLOWRYN_TOKEN</code> into <code>CLAUDE_ENV_FILE</code> for later Bash calls <span class="m0">M0</span></td><td>Held in the extension; its registered tools pass it; shell calls get it from the process environment</td></tr>
-      <tr><td>Scoping</td><td>Hooks live in a leader-only settings file passed by <code>flowryn lead</code> with <code>--settings</code>, never in your global settings <span class="m0">M0</span></td><td>Extension loaded by <code>flowryn lead --pi</code> <span class="m0">M0</span> flag</td></tr>
+      <tr><td>Leader token</td><td><code>SessionStart</code> hook writes <code>FLOWRYN_TOKEN</code> into <code>CLAUDE_ENV_FILE</code> for later Bash calls <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span></td><td>Held in the extension; its registered tools pass it; shell calls get it from the process environment</td></tr>
+      <tr><td>Scoping</td><td>Hooks live in a leader-only settings file passed by <code>flowryn lead</code> with <code>--settings</code>, never in your global settings <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span></td><td>Extension loaded by <code>flowryn lead --pi</code> <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span> flag</td></tr>
     </tbody>
   </table>
   </div>
@@ -446,15 +449,15 @@ type Verified = { ok: boolean;
   <table class="table table-sm">
     <thead><tr><th>Capability</th><th>Claude Code worker</th><th>Pi worker</th></tr></thead>
     <tbody>
-      <tr><td>launch</td><td>Herdr <code>pane.split</code> with the run's environment, then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks <span class="m0">M0</span> <code>--settings</code> scoping</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run <span class="m0">M0</span></td></tr>
-      <tr><td>preTrust</td><td>Register workspace trust for the worktree path before launch (Firstmate does this in <code>~/.claude.json</code>). Claude has three dialogs that can wedge a fresh pane (workspace trust, external CLAUDE.md imports, bypass confirmation); none may be answered with keys.</td><td>Pi asks for trust per path on first run; pre-register it <span class="m0">M0</span> where the trust record lives</td></tr>
+      <tr><td>launch</td><td>Herdr <code>pane.split</code> with the run's environment, then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks (<code>--settings</code> scoping <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>)</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span></td></tr>
+      <tr><td>preTrust</td><td>Register workspace trust for the worktree path before launch (Firstmate does this in <code>~/.claude.json</code>). Claude has three dialogs that can wedge a fresh pane (workspace trust, external CLAUDE.md imports, bypass confirmation); none may be answered with keys.</td><td>Pi asks for trust per path on first run; pre-register it <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span> where the trust record lives</td></tr>
       <tr><td>sessionId + isolation proof</td><td><code>SessionStart</code> runs <code>flowryn hook worker-start</code>: reports <code>session_id</code>, cwd, git top-level, git common dir and branch</td><td><code>session_start</code> in the extension reports the same</td></tr>
       <tr><td>busySource</td><td>Hooks: <code>UserPromptSubmit</code>, <code>Pre/PostToolUse</code>, <code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code></td><td>Extension: <code>agent_start</code>, <code>agent_settled</code></td></tr>
-      <tr><td>deliverWhileBusy</td><td><code>PostToolUse</code> returns pending steers as <code>additionalContext</code> beside the next tool result, the documented mid-turn channel; if the turn is ending, <code>Stop</code> continues with the steer</td><td><code>sendMessage(…, {deliverAs: "followUp"})</code>; <span class="m0">M0</span> whether a mid-run steer mode is better</td></tr>
+      <tr><td>deliverWhileBusy</td><td><code>PostToolUse</code> returns pending steers as <code>additionalContext</code> beside the next tool result, the documented mid-turn channel; if the turn is ending, <code>Stop</code> continues with the steer. The worker contract must name this channel: without it, Sonnet 5 flagged a steer as prompt injection and ignored it <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td><td><code>sendMessage(…, {deliverAs: "followUp"})</code>; <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span> whether a mid-run steer mode is better</td></tr>
       <tr><td>deliverToIdle</td><td><code>asyncRewake</code> waiter <code>flowryn hook wait-steer</code> exits 2 with a one-line pointer to <code>flowryn inbox</code></td><td><code>followUp</code> with <code>triggerTurn: true</code></td></tr>
-      <tr><td>interrupt</td><td>Escape through Herdr pane input, verified by a following <code>idle_prompt</code> or process state <span class="m0">M0</span></td><td>Extension abort of the current run <span class="m0">M0</span></td></tr>
-      <tr><td>exit</td><td colspan="2">SIGTERM to the harness process identified by <code>pane.process_info</code> (pid plus start time), verified by the process being gone; SIGKILL after 10 s; never a reused pid</td></tr>
-      <tr><td>resume</td><td><code>claude --resume &lt;session_id&gt;</code> in the same worktree</td><td>Pi's session-resume flag with the stored session <span class="m0">M0</span></td></tr>
+      <tr><td>interrupt</td><td>Escape through Herdr pane input, verified by process state (the running tool's process is gone) and the interrupt marker in the session transcript; no hook and no <code>idle_prompt</code> follow an interrupt <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td><td>Extension abort of the current run <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span></td></tr>
+      <tr><td>exit</td><td colspan="2">SIGTERM to the harness process identified by <code>pane.process_info</code> (pid and executable) plus its start time from the process table, which Herdr does not report, verified by the process being gone; SIGKILL after 10 s; never a reused pid</td></tr>
+      <tr><td>resume</td><td><code>claude --resume &lt;session_id&gt;</code> in the same worktree</td><td>Pi's session-resume flag with the stored session <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span></td></tr>
     </tbody>
   </table>
   </div>
@@ -481,7 +484,7 @@ type Verified = { ok: boolean;
     <thead><tr><th>Rank</th><th>Source</th><th>Can prove</th><th>Cannot prove</th></tr></thead>
     <tbody>
       <tr><td><span class="badge badge-primary badge-sm">1</span></td><td>Systems of record: git remote refs, GitHub PR state, head and checks, no-mistakes run status</td><td>Pushed, PR exists, not draft, checks green, merged, validation outcome</td><td>That the worker is alive</td></tr>
-      <tr><td><span class="badge badge-primary badge-sm">2</span></td><td>Process table via <code>pane.process_info</code>: pid, start time, executable</td><td>The harness process is alive and is the one we launched</td><td>Busy or idle</td></tr>
+      <tr><td><span class="badge badge-primary badge-sm">2</span></td><td>Process table: pid and executable from <code>pane.process_info</code>, start time from <code>ps</code> (Herdr does not report it)</td><td>The harness process is alive and is the one we launched</td><td>Busy or idle</td></tr>
       <tr><td><span class="badge badge-sm">3</span></td><td>Harness lifecycle events from the Flowryn hooks or extension</td><td>Busy, idle, turn ended, session id, working directory</td><td>That the work is correct or finished</td></tr>
       <tr><td><span class="badge badge-sm">4</span></td><td>The worker's own <code>report</code>, <code>ask</code>, <code>deliver</code>, <code>fail</code></td><td>What the worker intends or claims</td><td>Anything rank 1–3 can check; <code>deliver</code> is verified against rank 1</td></tr>
       <tr><td><span class="badge badge-ghost badge-sm">5</span></td><td>Herdr <code>agent_status</code></td><td>Nothing on its own; it triggers a reconcile pass</td><td>A native idle never proves a worker stopped</td></tr>
@@ -504,7 +507,7 @@ type Verified = { ok: boolean;
     <path class="edge" d="M674,72 L684,72" marker-end="url(#a3)"/>
     <g id="r6"><title>Reconcile every non-terminal run against the evidence hierarchy</title><rect class="core" x="686" y="30" width="122" height="84" rx="8"/><text class="lbl" x="747" y="60" text-anchor="middle">6 Reconcile</text><text class="small" x="747" y="80" text-anchor="middle">every open run</text><text class="small" x="747" y="96" text-anchor="middle">rank 1 → 5</text></g>
     <path class="edge" d="M810,72 L820,72" marker-end="url(#a3)"/>
-    <g id="r7"><title>Apply buffered events newer than the snapshot, then run steady state: every event plus a 60-second pass</title><rect class="box" x="822" y="30" width="132" height="84" rx="8"/><text class="lbl" x="888" y="60" text-anchor="middle">7 Steady</text><text class="small" x="888" y="80" text-anchor="middle">apply buffer</text><text class="small" x="888" y="96" text-anchor="middle">event + 60 s pass</text></g>
+    <g id="r7"><title>Re-read every pane named in a buffered event (Herdr events carry no revision or state_change_seq), then run steady state: every event plus a 60-second pass</title><rect class="box" x="822" y="30" width="132" height="84" rx="8"/><text class="lbl" x="888" y="60" text-anchor="middle">7 Steady</text><text class="small" x="888" y="80" text-anchor="middle">re-read buffered</text><text class="small" x="888" y="96" text-anchor="middle">event + 60 s pass</text></g>
     <text class="small" x="480" y="148" text-anchor="middle">Steps 4–7 repeat on every Herdr reconnect. Firstmate's Herdr adapter already uses subscribe-then-snapshot.</text>
   </svg>
 
@@ -577,9 +580,9 @@ type Verified = { ok: boolean;
         <li>The leader runs in <code>--permission-mode auto</code>. Ask rules that match a command's content still prompt in auto mode.</li>
         <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>. The ask rule <code>Bash(flowryn merge *)</code> is a second layer.</li>
         <li>If you approve, the command runs with the leader token. The daemon matches it to the attempt (same session and arguments, under 5 minutes old) and records channel <code>claude-ask</code>.</li>
-        <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable: whether ask rules prompt under bypass is unverified. The merge returns <code>approval_required</code>.</li>
+        <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable. M0 found that the ask rule and the hook's ask both still prompt under bypass, but the leader never runs in bypass, so this refusal stays as defense in depth. The merge returns <code>approval_required</code>.</li>
       </ol>
-      <p class="opacity-75"><span class="m0">M0</span> the hook input carries <code>permission_mode</code>; the prompt appears in auto mode inside a Herdr pane.</p>
+      <p class="opacity-75"><span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span> the hook input carries <code>permission_mode</code> (every event except <code>SessionStart</code>); the prompt appears in auto mode inside a Herdr pane.</p>
     </div></div>
     <div class="card card-border"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-base">Pi leader</h3>
@@ -589,7 +592,7 @@ type Verified = { ok: boolean;
         <li>On yes, it calls the daemon with an approval key it received over the socket at lease claim and never put in any environment. Channel <code>pi-confirm</code>.</li>
         <li>The extension blocks shell calls to <code>flowryn merge</code> and <code>flowryn approve</code>; without the key, a shell merge gets <code>approval_required</code>.</li>
       </ol>
-      <p class="opacity-75"><span class="m0">M0</span> the extension can intercept and block a shell tool call.</p>
+      <p class="opacity-75"><span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span> the extension can intercept and block a shell tool call.</p>
     </div></div>
     <div class="card card-border border-success/50"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-base">Your shell or the board</h3>
@@ -614,7 +617,7 @@ type Verified = { ok: boolean;
       <tr><td>Leader runs under bypass mode</td><td>Harness channel refused when <code>permission_mode</code> is bypass</td><td>Shell channel still works</td></tr>
       <tr><td>Agent calls hook verbs to forge an attempt</td><td>Leader deny rules <code>Bash(flowryn hook *)</code> and <code>Bash(flowryn approve*)</code>; permission rules do not apply to hooks themselves</td><td>An agent using another interpreter to call the binary</td></tr>
       <tr><td>Worker calls leader verbs</td><td>Role tokens; a worker token is refused on leader verbs</td><td>A worker reading the leader's environment with <code>ps</code></td></tr>
-      <tr><td>Agents inside the no-mistakes gate call fleet verbs</td><td>Gate processes carry no Flowryn token <span class="m0">M0</span></td><td>—</td></tr>
+      <tr><td>Agents inside the no-mistakes gate call fleet verbs</td><td>Gate processes carry no Flowryn token: the gate hooks pass only ref updates over the daemon socket, and the launchd daemon runs pipeline agents in its own login-shell environment, never the pusher's <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td><td>—</td></tr>
       <tr><td>Keystrokes forged through the Herdr socket</td><td>Human approve reads a random code from <code>/dev/tty</code></td><td>An attacker that reads the screen; accepted</td></tr>
       <tr><td>Prompt injection in worker text</td><td>Strip ANSI and control characters, truncate to 200 characters, quote, phrase digests as facts; approvals never depend on text</td><td>The leader may still be influenced in conversation</td></tr>
       <tr><td>Other local process on the socket</td><td>Socket in a mode-0700 directory; tokens</td><td>Same-user malware, out of scope</td></tr>
@@ -655,14 +658,14 @@ type Verified = { ok: boolean;
         <li>Run <code>&lt;tasks-axi absolute path&gt; &lt;verb&gt; … --file &lt;path&gt; --json</code> with a 10 s timeout. One intent at a time, which matches tasks-axi's single-supervisor lock (2.5 s advisory timeout).</li>
         <li>On success: mark it <code>applied</code> and store the resulting file hash in <code>backlog_snapshot</code>, in one transaction.</li>
         <li>On failure: stay <code>pending</code>, retry at 1 s, 5 s, 30 s, 2 min, 10 min, then a P1 "backlog out of sync" item.</li>
-        <li>At startup: replay pending intents in order. <code>start</code> and <code>hold</code> are idempotent by their help text; <code>add</code> is made replay-safe because flowrynd mints the task id and checks <code>tasks-axi show &lt;id&gt;</code> first. <span class="m0">M0</span> idempotency of <code>done</code>, <code>unhold</code>, <code>update</code>, <code>mv</code>.</li>
+        <li>At startup: replay pending intents in order. <code>start</code> and <code>hold</code> are idempotent by their help text; <code>add</code> is made replay-safe because flowrynd mints the task id and checks <code>tasks-axi show &lt;id&gt;</code> first. <code>done</code>, <code>unhold</code> and <code>update</code> are idempotent too (a repeat returns <code>already: true</code> and leaves the file unchanged), and so is <code>add</code> with the same id. <code>mv</code> is not (a repeat returns <code>NOT_FOUND</code>), and it moves a task to another backlog file, so the journal never issues it <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span>.</li>
       </ol>
     </div></div>
     <div class="card card-border"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-base">When you edit the backlog by hand</h3>
       <ul class="list-disc ml-5 space-y-1 opacity-90">
         <li>A file watch plus a 60 s hash check notices any change whose hash is not the last applied one.</li>
-        <li>The journal re-reads <code>tasks-axi list --json</code> and diffs it against the snapshot.</li>
+        <li>The journal re-reads <code>tasks-axi list --fields …</code> and diffs it against the snapshot. Read verbs print TOON; tasks-axi 0.2.5 has <code>--json</code> only on mutations.</li>
         <li><strong>Your edit wins</strong> for title, body, priority, dependencies, holds, to-do done state and due date.</li>
         <li><strong>A contradiction with a live run</strong> (an In flight task moved or deleted, or its id changed) becomes a <code>divergence</code> (P1). The run is untouched until you run <code>flowryn divergence resolve &lt;id&gt; keep-run|accept-edit</code>.</li>
         <li>An editor holding a stale buffer can overwrite a CLI write; the hash check catches it as an edit, and the journal re-applies any intent the overwrite erased.</li>
@@ -679,7 +682,7 @@ type Verified = { ok: boolean;
       <tr><td>Question answered or dismissed</td><td><code>decisions</code> closed</td><td><code>unhold &lt;id&gt;</code></td></tr>
       <tr><td>PR or report delivered and verified</td><td>run <code>ready</code>; <code>artifacts</code> row</td><td><code>update &lt;id&gt; --pr &lt;url&gt;</code> or <code>--report &lt;path&gt;</code></td></tr>
       <tr><td>Landed and cleaned</td><td>run <code>cleaned</code></td><td><code>done &lt;id&gt; --pr &lt;url&gt;</code> or <code>--report</code></td></tr>
-      <tr><td>Failed or cancelled with your consent</td><td>run <code>failed</code> or <code>cancelled</code></td><td>back to Queued with <code>hold --kind parked</code> <span class="m0">M0</span> exact verb</td></tr>
+      <tr><td>Failed or cancelled with your consent</td><td>run <code>failed</code> or <code>cancelled</code></td><td><code>reopen &lt;id&gt;</code> (back to Queued), then <code>hold &lt;id&gt; --kind parked --reason …</code> <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span></td></tr>
     </tbody>
   </table>
   </div>
@@ -755,7 +758,7 @@ type Verified = { ok: boolean;
     <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-sm">Races and their resolution</h3>
       <ol class="list-decimal ml-5 space-y-1 opacity-90">
-        <li>Interrupt leaves busy stuck → busy lease expiry and <code>idle_prompt</code>.</li>
+        <li>Interrupt leaves busy stuck → busy lease expiry (no hook and no <code>idle_prompt</code> follow an interrupt).</li>
         <li>Silent hook timeout → carried but not presented, so carried again.</li>
         <li>P0 through both continuation and waiter → per-item delivery lease.</li>
         <li>Composer race with your draft → no keystroke delivery; waiter only when you are inactive.</li>
@@ -934,7 +937,7 @@ default = "plan"       # plan | manual
 
   <div class="card card-border border-primary/40"><div class="card-body py-4 text-sm space-y-2">
     <h3 class="card-title text-base">Terse by default: output tokens are spent on outcomes</h3>
-    <p class="opacity-85">Flowryn already keeps input small with pointers, capped digests and <code>show</code> on demand. For output, <code>flowryn lead</code> appends a short style block to the leader's system prompt. That is Claude Code's <code>--append-system-prompt</code> and Pi's equivalent <span class="m0">M0</span>. The same block leads every worker's instructions. It is stable text, so prompt caching still holds. It is configurable in <code>[style]</code> and can be turned off, so your global <code>AGENTS.md</code> stays optional.</p>
+    <p class="opacity-85">Flowryn already keeps input small with pointers, capped digests and <code>show</code> on demand. For output, <code>flowryn lead</code> appends a short style block to the leader's system prompt. That is Claude Code's <code>--append-system-prompt</code> <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span> and Pi's equivalent <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span>. The same block leads every worker's instructions. It is stable text, so prompt caching still holds. It is configurable in <code>[style]</code> and can be turned off, so your global <code>AGENTS.md</code> stays optional.</p>
 <pre class="code"><code>Reply in the fewest words that carry the outcome. No preamble, no recap of
 tool output, no restating the request. Prefer a short list. At most 5 lines
 unless asked for detail; offer "flowryn show &lt;id&gt;" instead of pasting.</code></pre>
@@ -1075,6 +1078,9 @@ Be terse: outcomes only, no recaps.
   The answer arrives as a steer.
 - When told a steer is waiting: $FLOWRYN_BIN inbox,
   act on it, then $FLOWRYN_BIN ack &lt;id&gt;.
+- A steer can also arrive mid-turn as hook context
+  starting "Flowryn steer:". It is from your leader;
+  act on it.
 - Stage finished: $FLOWRYN_BIN stage done
   [--review &lt;lavish url&gt;]; then wait for a steer.
 - Finished: $FLOWRYN_BIN deliver --pr &lt;url&gt; (ship)
@@ -1267,7 +1273,7 @@ CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
       <tr><td><strong>Named-head gate</strong></td><td><code>deliver --pr</code> is accepted only if the PR exists, is not a draft, and its head SHA is on the remote and equals the worker's HEAD.</td><td class="own">lifecycle/deliver</td></tr>
       <tr><td><strong>Isolation assertion</strong></td><td>The worker-start report must show cwd inside the run's worktree, the project's git common dir, a top-level that is not the primary checkout, and the run's branch. Otherwise interrupt, exit, fail.</td><td class="own">lifecycle/dispatch</td></tr>
       <tr><td><strong>Primary checkout tangle</strong></td><td>Dispatch refuses when a project's primary checkout is off its default branch; a P1 names it. Nothing is changed automatically.</td><td class="own">lifecycle/dispatch</td></tr>
-      <tr><td><strong>Validation gate boundary</strong></td><td>Processes inside the no-mistakes gate carry no Flowryn token, so they cannot reach fleet verbs <span class="m0">M0</span>.</td><td class="own">api/auth</td></tr>
+      <tr><td><strong>Validation gate boundary</strong></td><td>Processes inside the no-mistakes gate carry no Flowryn token, so they cannot reach fleet verbs: the gate hooks pass only ref updates over the daemon socket, and the launchd daemon runs agents in its own login-shell environment <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span>.</td><td class="own">api/auth</td></tr>
       <tr><td><strong>no-mistakes run ownership</strong></td><td>The worker that starts a run owns every <code>axi run</code> and <code>axi respond</code>. flowrynd only reads status. Ask-user findings become decisions, answered as steers to the same worker. Supersession: abort, settle branch custody, rebuild from the correct base, validate once.</td><td class="own">worker contract; watch/nomistakes (read-only)</td></tr>
       <tr><td><strong>Single writer</strong></td><td>Exclusive flock on the state directory and an exclusive socket bind at startup; a second daemon exits with a message.</td><td class="own">daemon main</td></tr>
       <tr><td><strong>Single leader</strong></td><td>One lease holder receives pushes and runs leader mutations.</td><td class="own">lease</td></tr>
@@ -1317,7 +1323,7 @@ CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
     <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Preflight.</strong> macOS; Herdr at or above the pinned minimum with protocol 17; Claude Code and/or Pi versions; git; <code>gh</code> authenticated; tasks-axi at the pinned version; no-mistakes (optional). Missing tools are listed with their install command; nothing is installed without your yes.</div></li>
     <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Data (artifacts) directory.</strong> Where reports, spool and large artifacts go. Default <code>~/.flowryn/data</code>. Any path is allowed; a path under Documents, Desktop or iCloud gets a warning about macOS privacy prompts for a background binary.</div></li>
     <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>State directory.</strong> Holds <code>flowryn.db</code>, its lock and logs. Default <code>~/.flowryn/state</code>. Refused under iCloud, Dropbox, Documents or other synced folders, because SQLite WAL on a synced folder risks corruption. The socket always lives in <code>~/.flowryn/run/</code>.</div></li>
-    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>tasks-axi location.</strong> Paths for <code>backlog.md</code> and <code>todos.md</code> (default in the data directory; an existing backlog may be adopted). init runs <code>tasks-axi list --file … --json</code> on each to prove it can read and write them.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>tasks-axi location.</strong> Paths for <code>backlog.md</code> and <code>todos.md</code> (default in the data directory; an existing backlog may be adopted). init runs <code>tasks-axi list --file …</code> on each (read verbs print TOON; there is no <code>--json</code> for them) to prove it can read and write them.</div></li>
     <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Tool paths.</strong> Records absolute paths for tasks-axi, node, git, gh, herdr, claude, pi and no-mistakes, resolving symlinks. tasks-axi under an nvm directory is flagged, because it breaks on the next Node upgrade. The daemon checks every path at startup.</div></li>
     <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Leaders.</strong> Claude Code, Pi, or both. Writes the leader settings file and the Pi extension into <code>~/.flowryn/leader/</code>, and installs the <code>flowryn</code> skill there. You start a leader with <code>flowryn lead</code> or <code>flowryn lead --pi</code>; your global harness settings are never edited.</div></li>
     <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Workers.</strong> One static profile per harness (model, effort, permission mode). Capacity pools and the host check (defaults: 20 workers, 5 validation, 5 Docker environments, 5 browsers). Workflows (feature, fix, scout) and the default autonomy. The terse style block. Morning-briefing hour (default 05:00).</div></li>
@@ -1370,7 +1376,7 @@ max_triggered_turns_per_hour = 3</code></pre>
       <tr><td>A worker dies mid-turn</td><td>Process identity gone</td><td>Resume once</td><td>P0 on second death</td></tr>
       <tr><td>A worker never reports</td><td>Harness idle 15 min, no outcome</td><td>None (judgment)</td><td>P1 pointer</td></tr>
       <tr><td>A worker wedged on a trust dialog</td><td>No worker-start within 30 s</td><td>None; never keystrokes</td><td>P1 pointer</td></tr>
-      <tr><td>Leader interrupted; busy stuck</td><td>Busy lease expiry, <code>idle_prompt</code></td><td>Marked idle; carried items re-carried</td><td>Nothing</td></tr>
+      <tr><td>Leader interrupted; busy stuck</td><td>Busy lease expiry (nothing fires after an interrupt)</td><td>Marked idle; carried items re-carried</td><td>Nothing</td></tr>
       <tr><td>Digest hook timed out</td><td>No turn end for that turn</td><td>Carried again, deduplicated</td><td>The item, once</td></tr>
       <tr><td>Leader context compacted</td><td><code>SessionStart</code> source <code>compact</code></td><td>Briefing re-lists open actionable items</td><td>The briefing</td></tr>
       <tr><td>tasks-axi fails or lock times out</td><td>Intent exit code</td><td>Intent stays pending; backoff retries</td><td>P1 after 5 failures</td></tr>
@@ -1398,6 +1404,7 @@ max_triggered_turns_per_hour = 3</code></pre>
   <div class="card card-border border-warning/60"><div class="card-body py-4 space-y-3">
     <h3 class="card-title">M0 · Contract spikes and fixtures <span class="badge badge-warning badge-soft badge-sm">before any product code</span></h3>
     <p class="text-sm opacity-85">Throwaway harnesses in a scratch Herdr session named <code>flowryn-contract</code>. Each spike ends with a recorded verdict and the exact version tested. A failed spike changes this document before M1 starts.</p>
+    <p class="text-sm opacity-85"><strong>Result (2026-09-23).</strong> Every Claude, Herdr, tasks-axi and no-mistakes spike has a verdict in <code>docs/m0-verdicts.md</code>, and this document was edited to match. The Pi spikes are written but not run, because Pi is not installed on the test machine; their marks read <span class="m0" title="Not run: pi is not installed on the M0 test machine. See docs/m0-verdicts.md for the desk-check.">M0 · not run</span>. The spikes ran in an isolated lab session created by Firstmate's <code>fm-herdr-lab.sh</code>, not in <code>flowryn-contract</code>. The cleanup-guard fixtures are in <code>fixtures/cleanup-guard/</code>.</p>
     <div class="grid md:grid-cols-2 gap-4 text-sm">
       <div>
         <h4 class="font-semibold">Claude bridge (Claude Code 2.1.281)</h4>

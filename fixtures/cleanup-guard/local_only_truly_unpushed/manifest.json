@@ -1,0 +1,47 @@
+{
+  "name": "local_only_truly_unpushed",
+  "ported_from": "tests/fm-teardown.test.sh:test_local_only_truly_unpushed_refuses",
+  "firstmate_matrix_row": "b",
+  "description": "Local-only task with one empty commit that exists nowhere else: not on any remote, not merged into the local default branch. Cleanup would destroy it, so it is refused.",
+  "delivery_mode": "local-only",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "unpushed"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "primary_main",
+      "expect": false
+    },
+    {
+      "check": "remote_branch",
+      "remote": "origin",
+      "branch": "fm/task-x1",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}
