@@ -1,0 +1,1475 @@
+<!doctype html>
+<html lang="en" data-theme="luxury">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flowryn Architecture v3</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/daisyui.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/daisyui@5.5.19/themes.css">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.2.4/dist/index.global.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { max-width: 100%; overflow-x: hidden; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, td, th, .badge, dt, dd) { overflow-wrap: anywhere; }
+  svg { max-width: 100%; height: auto; }
+  body { background: var(--color-base-100); color: var(--color-base-content); }
+  .fig text { font-family: ui-sans-serif, system-ui, sans-serif; fill: currentColor; }
+  .fig .box { fill: var(--color-base-200); stroke: color-mix(in oklab, currentColor 30%, transparent); stroke-width: 1.2; }
+  .fig .core { fill: color-mix(in oklab, var(--color-primary) 16%, var(--color-base-200)); stroke: var(--color-primary); stroke-width: 1.6; }
+  .fig .inner { fill: var(--color-base-100); stroke: color-mix(in oklab, var(--color-primary) 60%, transparent); stroke-width: 1; }
+  .fig .opt { fill: var(--color-base-200); stroke: color-mix(in oklab, currentColor 30%, transparent); stroke-width: 1.2; stroke-dasharray: 5 4; }
+  .fig .human { fill: color-mix(in oklab, var(--color-success) 14%, var(--color-base-200)); stroke: var(--color-success); stroke-width: 1.6; }
+  .fig .danger { fill: color-mix(in oklab, var(--color-error) 10%, var(--color-base-200)); stroke: var(--color-error); stroke-width: 1.4; }
+  .fig .edge { stroke: color-mix(in oklab, currentColor 50%, transparent); stroke-width: 1.4; fill: none; }
+  .fig .push { stroke: var(--color-primary); stroke-width: 2; fill: none; }
+  .fig .alert { stroke: var(--color-error); stroke-width: 2; fill: none; stroke-dasharray: 5 4; }
+  .fig .ok { stroke: var(--color-success); stroke-width: 2; fill: none; }
+  .fig .small { font-size: 11px; opacity: .8; }
+  .fig .lbl { font-size: 13px; font-weight: 600; }
+  .fig .tiny { font-size: 10px; opacity: .75; }
+  code { font-size: .85em; }
+  .badge code { line-height: 1; vertical-align: baseline; }
+  pre.code { background: var(--color-base-200); border-radius: var(--radius-box, .75rem); padding: .9rem 1rem; font-size: .76rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid color-mix(in oklab, currentColor 10%, transparent); }
+  .m0 { display: inline-block; font-size: .68rem; font-weight: 700; letter-spacing: .02em; padding: 0 .45rem; line-height: 1.35rem; border-radius: 999px; border: 1px solid var(--color-warning); color: var(--color-warning); vertical-align: middle; white-space: nowrap; }
+  .own { font-weight: 600; color: var(--color-primary); }
+  table.table td, table.table th { vertical-align: top; }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  section { scroll-margin-top: 1rem; }
+</style>
+</head>
+<body class="min-h-screen">
+<main class="max-w-5xl mx-auto px-4 sm:px-6 py-10 space-y-16">
+
+<!-- ============ HERO ============ -->
+<header class="space-y-4" id="top">
+  <div class="flex flex-wrap items-center gap-2">
+    <span class="badge badge-primary badge-soft">Architecture · v3 · build spec for M0–M5</span>
+    <span class="badge badge-ghost">CLI <code>flowryn</code> · daemon <code>flowrynd</code></span>
+    <span class="badge badge-ghost">private repo · thapr0digy/flowryn</span>
+    <button id="themeBtn" class="btn btn-xs btn-ghost ml-auto" type="button" aria-label="Toggle light or dark theme">Light / dark</button>
+  </div>
+  <h1 class="text-4xl font-bold leading-tight">Flowryn: one leader agent, a supervised crew, and nothing lost</h1>
+  <p class="text-lg opacity-80 max-w-3xl">You talk to one leader agent in Claude Code or Pi. It dispatches ships (which end in a PR) and scouts (which end in a report) into isolated worktrees in Herdr panes. One daemon, <code>flowrynd</code>, supervises them, holds all runtime state in one SQLite database, and pushes ranked, capped updates to the leader at natural pauses. Everyone, you included, drives it through one CLI.</p>
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+    <div class="stat bg-base-200 rounded-box"><div class="stat-title">Writers of runtime state</div><div class="stat-value text-primary">1</div><div class="stat-desc">flowrynd → flowryn.db</div></div>
+    <div class="stat bg-base-200 rounded-box"><div class="stat-title">Control plane</div><div class="stat-value text-primary">CLI</div><div class="stat-desc">flowryn over a local socket</div></div>
+    <div class="stat bg-base-200 rounded-box"><div class="stat-title">Harnesses in v1</div><div class="stat-value text-primary">2</div><div class="stat-desc">Claude Code · Pi</div></div>
+    <div class="stat bg-base-200 rounded-box"><div class="stat-title">Active leaders</div><div class="stat-value text-primary">1</div><div class="stat-desc">lease + handover</div></div>
+  </div>
+  <div class="alert alert-soft text-sm"><span><span class="m0">M0</span> marks a claim that depends on platform behavior not yet proven on this machine. Each one is a test in the <a class="link link-primary" href="#milestones">M0 contract spikes</a>. Build nothing that depends on it until the spike passes. Unmarked platform facts were checked against the docs, the installed tools, or Firstmate's code during the v2 review.</span></div>
+</header>
+
+<!-- ============ TOC ============ -->
+<nav class="toc card card-border" aria-label="Contents"><div class="card-body py-4">
+  <h2 class="font-semibold">Contents</h2>
+  <ol class="list-decimal ml-5 grid sm:grid-cols-2 gap-x-8 gap-y-1 text-sm">
+    <li><a class="link" href="#changes">What changed from v2</a></li>
+    <li><a class="link" href="#goals">Goals and non-goals</a></li>
+    <li><a class="link" href="#arch">Architecture overview</a></li>
+    <li><a class="link" href="#components">Components and ownership</a></li>
+    <li><a class="link" href="#adapters">Harness adapter interface</a></li>
+    <li><a class="link" href="#reconciler">Reconciler and evidence hierarchy</a></li>
+    <li><a class="link" href="#approval">Approval channel and threat model</a></li>
+    <li><a class="link" href="#stores">tasks-axi vs SQLite, and the intent journal</a></li>
+    <li><a class="link" href="#delivery">Delivery semantics and lanes</a></li>
+    <li><a class="link" href="#lease">Leader lease and handover</a></li>
+    <li><a class="link" href="#workflows">Workflows, capacity and autonomy</a></li>
+    <li><a class="link" href="#cli">CLI design</a></li>
+    <li><a class="link" href="#schema">SQLite schema</a></li>
+    <li><a class="link" href="#safeguards">Safeguards carried from Firstmate</a></li>
+    <li><a class="link" href="#setup">Setup and init</a></li>
+    <li><a class="link" href="#failures">Failure modes and recovery</a></li>
+    <li><a class="link" href="#milestones">Milestones</a></li>
+    <li><a class="link" href="#questions">Open questions</a></li>
+  </ol>
+</div></nav>
+
+<!-- ============ CHANGES ============ -->
+<section class="space-y-4" id="changes">
+  <h2 class="text-2xl font-bold">1 · What changed from v2</h2>
+  <p class="opacity-80 max-w-3xl">The core is unchanged: one daemon is the only writer of runtime state, supervision runs outside the leader's conversation, and the leader gets pointers rather than payloads. Everything below is now a design decision, not an open issue.</p>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>v2 said</th><th>v3 decides</th><th>Section</th></tr></thead>
+    <tbody>
+      <tr><td>MCP is the control layer for leader and workers</td><td>An axi-style <code>flowryn</code> CLI over the daemon socket, taught by a skill. MCP is only an optional thin wrapper generated from the same command registry, and it is not built in v1.</td><td><a class="link" href="#cli">12</a></td></tr>
+      <tr><td>Harness cost is reporting; MCP makes new harnesses free</td><td>Harness cost is lifecycle and push. A typed adapter covers launch, trust, busy source, turn end, push to idle and busy agents, interrupt, exit, resume. Workers get push too.</td><td><a class="link" href="#adapters">5</a></td></tr>
+      <tr><td>Liveness is observed, not guessed</td><td>An explicit reconciler owns current-state truth, using a ranked evidence hierarchy. Herdr status is a hint. Conflicts become divergence events.</td><td><a class="link" href="#reconciler">6</a></td></tr>
+      <tr><td>The policy engine enforces "never merge without your word"</td><td>A human-bound approval record, created by either the harness's own confirmation prompt or <code>flowryn approve</code> in your shell or on the board. Threat model stated as confused-agent-grade.</td><td><a class="link" href="#approval">7</a></td></tr>
+      <tr><td><code>tasks</code> and <code>todos</code> tables in SQLite</td><td>tasks-axi holds tasks and to-dos. SQLite holds runtime state. One ownership table, and every tasks-axi write goes through an intent journal.</td><td><a class="link" href="#stores">8</a></td></tr>
+      <tr><td>Outbox rows with <code>delivered_at</code>/<code>seen_at</code>; score formula; focus; age bump</td><td>Two delivery classes (actionable stays open until you resolve it; informational is at-least-once, confirmed by turn end) and an explicit lane table.</td><td><a class="link" href="#delivery">9</a></td></tr>
+      <tr><td>Nothing about concurrent leaders</td><td>One active leader, held by a lease with explicit handover.</td><td><a class="link" href="#lease">10</a></td></tr>
+      <tr><td>Claude idle wake through Herdr <code>agent.prompt</code> when the pane is unfocused</td><td>An <code>asyncRewake</code> Stop-hook waiter, one per session, gated on the harness's own idle signal plus <code>idle_prompt</code>. No keystroke delivery in v1.</td><td><a class="link" href="#adapters">5</a></td></tr>
+      <tr><td>"Never-discard guard", "merge authority" as names</td><td>Each safeguard has an invariant, an owning module, and fixtures ported from Firstmate.</td><td><a class="link" href="#safeguards">14</a></td></tr>
+      <tr><td>Workers buffer MCP calls and retry</td><td>The CLI spools to disk when the daemon is down; hooks step aside; read verbs fall back to read-only SQLite.</td><td><a class="link" href="#cli">12</a></td></tr>
+      <tr><td>Reattach runs by pane metadata</td><td>The <code>runs</code> row is the authority; metadata is only a correlator. Mismatch means orphaned, never adopted.</td><td><a class="link" href="#reconciler">6</a></td></tr>
+      <tr><td>Scheduler with a priority queue, quota budget and profile routing</td><td>Capacity pools with hard caps and a host check. Phases of an approved plan start by themselves when their blockers land.</td><td><a class="link" href="#workflows">11</a></td></tr>
+      <tr><td>One fixed run lifecycle</td><td>Workflows: stages with human review gates (design and visual QA, reviewed in Lavish). Stage know-how lives in skills.</td><td><a class="link" href="#workflows">11</a></td></tr>
+      <tr><td>Nothing about output length</td><td>A terse-output block in the leader's system prompt and in every worker's instructions.</td><td><a class="link" href="#workflows">11</a></td></tr>
+      <tr><td>Desks, tmux fallback, quota routing, focus, away/quiet, Obsidian, Jira, Herdr plugin board, retention compaction</td><td>Cut from v1 (see non-goals).</td><td><a class="link" href="#goals">2</a></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ GOALS ============ -->
+<section class="space-y-5" id="goals">
+  <h2 class="text-2xl font-bold">2 · Goals and non-goals</h2>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="card card-border border-primary/40"><div class="card-body py-4">
+      <h3 class="card-title text-base">Goals for v1</h3>
+      <ol class="list-decimal ml-5 space-y-2 text-sm">
+        <li><strong>One conversation.</strong> You talk to one leader. Workers, watchers and supervision stay out of its context. It sees one-line pointers and pulls detail with <code>flowryn show</code>.</li>
+        <li><strong>Never interrupt.</strong> Updates land at natural pauses. A P0 may start a leader turn only when the leader is idle and you are not active.</li>
+        <li><strong>Never lose what needs you.</strong> An actionable item stays open until you resolve it, and it is re-listed after every session start and compaction.</li>
+        <li><strong>Rules in code, approval from a human.</strong> Merge, cleanup and destructive actions go through the policy engine, and "your word" is a recorded human approval, not the leader's claim.</li>
+        <li><strong>Restart is a non-event.</strong> Durable state, a reconciler, an intent journal and a spool make a crash of the daemon, a worker or Herdr recoverable without chat memory.</li>
+        <li><strong>Small.</strong> Two harnesses, one runtime, one database. Target about a quarter of Firstmate's surface while keeping its hard-won safeguards.</li>
+        <li><strong>Personal to-dos.</strong> Stored and shown; items due today appear in the morning briefing; overdue items are P1. No separate reminders.</li>
+        <li><strong>Autonomous within limits.</strong> Many workers at once, with hard caps on heavy stages. The next phase starts by itself when the previous one lands. You are needed only at review gates and merges (<a class="link" href="#workflows">section 11</a>).</li>
+        <li><strong>Terse.</strong> The leader and workers answer in as few words as carry the outcome.</li>
+      </ol>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4">
+      <h3 class="card-title text-base">Non-goals for v1</h3>
+      <ul class="list-disc ml-5 space-y-1 text-sm">
+        <li>Harnesses other than Claude Code and Pi, as leader or worker. Each future harness is an adapter that must pass contract tests.</li>
+        <li>Runtimes other than Herdr (no tmux fallback).</li>
+        <li>Adversarial security. The model is confused-agent-grade (<a class="link" href="#approval">section 7</a>).</li>
+        <li>A judgment tier. Anything needing judgment reaches the leader as a one-line pointer. The headless triage runner comes after v1.</li>
+        <li>Desks (persistent scoped workers), quota-aware scheduling and profile routing. One static profile per harness. Capacity pools are in (<a class="link" href="#workflows">section 11</a>).</li>
+        <li>Focus routing, score formulas, automatic "unseen becomes urgent".</li>
+        <li>Away and quiet modes. OS notifications cover absence.</li>
+        <li>Obsidian and Jira integrations; a Herdr plugin-pane board; retention compaction; the MCP wrapper; Claude Code channels and plugin monitors. Lavish needs no integration: workers host review pages and Flowryn records the link and the gate.</li>
+        <li>Linux and native Windows hosts. macOS is the v1 platform. The transport and service seams for the others are defined (<a class="link" href="#cli">section 12</a>).</li>
+        <li>Relay (X mentions), the mail plane, multi-machine fleets.</li>
+      </ul>
+    </div></div>
+  </div>
+  <h3 class="text-lg font-semibold">Premises, corrected</h3>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Firstmate pain</th><th>Real cause</th><th>Flowryn's answer</th></tr></thead>
+    <tbody>
+      <tr><td>Supervision floods the main chat</td><td>The main agent is the supervisor. Firstmate's fix is a second LLM conversation that only exists on Pi (the supervision-branch extension is 2,330 lines).</td><td>Deterministic supervision in <code>flowrynd</code> for every harness; judgment work goes to the leader as pointers.</td></tr>
+      <tr><td>40+ state-file kinds, locks, cursors, generation acks</td><td>Files as the coordination medium. 98 of 739 commit subjects touch wake/ack/cursor handling.</td><td>One SQLite database in WAL mode; event row and state change in one transaction.</td></tr>
+      <tr><td>Harness support is expensive</td><td>Lifecycle and push, not reporting: launch flags, three Claude trust dialogs, per-harness busy truth, eight turn-end mechanisms, composer typing (1,826 lines), version drift (126 commit subjects name a harness).</td><td>Two harnesses, integrated through their own plugin and extension APIs, behind a typed adapter with contract tests. No keystroke typing in v1.</td></tr>
+      <tr><td>Wrong stale or wedged verdicts</td><td>Liveness is inferred everywhere, including in Herdr's own agent status, which is wrong in documented cases.</td><td>A reconciler with a ranked evidence hierarchy, and divergence events instead of silent choices.</td></tr>
+      <tr><td>Long startup context</td><td><code>AGENTS.md</code> is 634 lines, plus a large digest every session; <code>bin/</code> holds about 200 scripts and more than 100,000 lines.</td><td>A one-skill contract, a SessionStart briefing capped at 1.5k tokens, detail on demand.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ ARCHITECTURE ============ -->
+<section class="space-y-4" id="arch">
+  <h2 class="text-2xl font-bold">3 · Architecture overview</h2>
+  <p class="opacity-80 max-w-3xl">Four layers. <strong>Surfaces</strong> are where you are. <strong>Bridges and the CLI</strong> are the only ways into the daemon: bridges carry push and busy/idle signals, the CLI carries every command. <strong>flowrynd</strong> holds all runtime state and makes every decision. <strong>Providers</strong> run the workers and hold the external truth. Primary-colored arrows are pushes; the green box is the human-only path; the red dashed arrow is an OS notification.</p>
+
+  <svg class="fig w-full" viewBox="0 0 960 690" role="img" aria-labelledby="archT archD">
+    <title id="archT">Flowryn v3 layered architecture</title>
+    <desc id="archD">Surfaces at the top, bridges and the flowryn CLI below them, the flowrynd core with its modules in the middle, and Herdr, workers, tasks-axi and external systems at the bottom.</desc>
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker>
+      <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-primary)"/></marker>
+      <marker id="ae" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-error)"/></marker>
+    </defs>
+
+    <text class="small" x="10" y="36">SURFACES</text>
+    <text class="small" x="10" y="160">BRIDGES</text>
+    <text class="small" x="10" y="174">+ CLI</text>
+    <text class="small" x="10" y="250">CORE</text>
+    <text class="small" x="10" y="600">PROVIDERS</text>
+
+    <g id="s-lead"><title>Leader agent: the one conversation you have, in Claude Code or Pi. Exactly one session holds the leader lease.</title>
+      <rect class="box" x="100" y="30" width="250" height="70" rx="10"/>
+      <text class="lbl" x="225" y="58" text-anchor="middle">Leader agent (you talk here)</text>
+      <text class="small" x="225" y="78" text-anchor="middle">Claude Code or Pi · holds the lease</text>
+    </g>
+    <g id="s-shell"><title>Your own shell and the board: flowryn approve, flowryn board, flowryn doctor. The only place human-only verbs run.</title>
+      <rect class="human" x="370" y="30" width="210" height="70" rx="10"/>
+      <text class="lbl" x="475" y="58" text-anchor="middle">Your shell · board</text>
+      <text class="small" x="475" y="78" text-anchor="middle">approve · board · doctor</text>
+    </g>
+    <g id="s-notify"><title>OS and Herdr notifications, rate-limited, for P0 and batched digests only</title>
+      <rect class="box" x="600" y="30" width="140" height="70" rx="10"/>
+      <text class="lbl" x="670" y="58" text-anchor="middle">Notify</text>
+      <text class="small" x="670" y="78" text-anchor="middle">macOS · Herdr</text>
+    </g>
+    <g id="s-obs"><title>Obsidian sync plugin: optional, after v1. Status out first.</title>
+      <rect class="opt" x="760" y="30" width="180" height="70" rx="10"/>
+      <text class="lbl" x="850" y="58" text-anchor="middle">Obsidian</text>
+      <text class="small" x="850" y="78" text-anchor="middle">optional · after v1</text>
+    </g>
+
+    <g id="b-claude"><title>Claude leader bridge: a hook set (SessionStart, UserPromptSubmit, Pre/PostToolUse, Stop, asyncRewake waiter, Notification idle_prompt, StopFailure, SessionEnd) that calls flowryn hook verbs</title>
+      <rect class="box" x="100" y="130" width="120" height="56" rx="8"/>
+      <text class="lbl" x="160" y="154" text-anchor="middle">Claude bridge</text>
+      <text class="small" x="160" y="172" text-anchor="middle">hooks</text>
+    </g>
+    <g id="b-pi"><title>Pi leader bridge: a Pi extension using session_start, agent_start, agent_settled, sendMessage nextTurn/followUp/triggerTurn and ctx.ui.confirm</title>
+      <rect class="box" x="230" y="130" width="120" height="56" rx="8"/>
+      <text class="lbl" x="290" y="154" text-anchor="middle">Pi bridge</text>
+      <text class="small" x="290" y="172" text-anchor="middle">extension</text>
+    </g>
+    <g id="b-cli"><title>flowryn CLI: one command registry, TOON output by default and --json for machines, role-scoped by token, spools to disk when the daemon is down</title>
+      <rect class="box" x="370" y="130" width="210" height="56" rx="8"/>
+      <text class="lbl" x="475" y="154" text-anchor="middle">flowryn CLI</text>
+      <text class="small" x="475" y="172" text-anchor="middle">one registry · TOON/JSON · spool</text>
+    </g>
+
+    <path class="edge" d="M160,102 L160,128" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path class="edge" d="M290,102 L290,128" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path id="e-lead-cli" class="edge" d="M350,92 L392,128" marker-end="url(#a)"><title>The leader runs flowryn commands through its shell tool</title></path>
+    <path class="edge" d="M475,102 L475,128" marker-end="url(#a)"/>
+    <path class="edge" d="M475,188 L475,213" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path class="push" d="M160,213 L160,188" marker-end="url(#ap)"/>
+    <path class="push" d="M290,213 L290,188" marker-end="url(#ap)"/>
+    <path class="alert" d="M670,213 L670,104" marker-end="url(#ae)"/>
+    <path class="edge" d="M850,104 L850,213" stroke-dasharray="4 4" marker-end="url(#a)"/>
+
+    <g id="core"><title>flowrynd: one Bun process, the single writer of flowryn.db, listening on a Unix socket</title>
+      <rect class="core" x="100" y="215" width="840" height="320" rx="14"/>
+      <text class="lbl" x="520" y="238" text-anchor="middle">flowrynd · one Bun process · Unix socket · single writer</text>
+    </g>
+
+    <g id="c-api"><title>API gateway: protocol handshake, token and role checks, idempotency keys, spool ingest</title>
+      <rect class="inner" x="118" y="254" width="190" height="72" rx="8"/>
+      <text class="lbl" x="213" y="278" text-anchor="middle">API gateway</text>
+      <text class="small" x="213" y="296" text-anchor="middle">handshake · tokens</text>
+      <text class="small" x="213" y="312" text-anchor="middle">idempotency · spool ingest</text>
+    </g>
+    <g id="c-life"><title>Lifecycle engine: the only code path that changes a task's or run's lifecycle state</title>
+      <rect class="inner" x="322" y="254" width="190" height="72" rx="8"/>
+      <text class="lbl" x="417" y="278" text-anchor="middle">Lifecycle engine</text>
+      <text class="small" x="417" y="296" text-anchor="middle">sole owner of transitions</text>
+      <text class="small" x="417" y="312" text-anchor="middle">tasks · runs · decisions</text>
+    </g>
+    <g id="c-attn"><title>Attention router: assigns lanes from the lane table, keeps items open, leases deliveries, rate-limits notifications</title>
+      <rect class="inner" x="526" y="254" width="190" height="72" rx="8"/>
+      <text class="lbl" x="621" y="278" text-anchor="middle">Attention router</text>
+      <text class="small" x="621" y="296" text-anchor="middle">lane table · items</text>
+      <text class="small" x="621" y="312" text-anchor="middle">presentations · notify</text>
+    </g>
+    <g id="c-policy"><title>Policy engine: role checks, approvals, merge gate, cleanup guard, destructive gates</title>
+      <rect class="inner" x="730" y="254" width="192" height="72" rx="8"/>
+      <text class="lbl" x="826" y="278" text-anchor="middle">Policy engine</text>
+      <text class="small" x="826" y="296" text-anchor="middle">approvals · merge gate</text>
+      <text class="small" x="826" y="312" text-anchor="middle">cleanup guard</text>
+    </g>
+
+    <g id="c-recon"><title>Reconciler: owns liveness; ranks evidence; emits divergence; runs deterministic auto-actions</title>
+      <rect class="inner" x="118" y="342" width="190" height="72" rx="8"/>
+      <text class="lbl" x="213" y="366" text-anchor="middle">Reconciler</text>
+      <text class="small" x="213" y="384" text-anchor="middle">evidence hierarchy</text>
+      <text class="small" x="213" y="400" text-anchor="middle">divergence · auto-actions</text>
+    </g>
+    <g id="c-watch"><title>Watchers: Herdr event subscription, GitHub PR and checks with ETags, no-mistakes status, backlog file changes, Claude quota notifications</title>
+      <rect class="inner" x="322" y="342" width="190" height="72" rx="8"/>
+      <text class="lbl" x="417" y="366" text-anchor="middle">Watchers</text>
+      <text class="small" x="417" y="384" text-anchor="middle">Herdr · GitHub · no-mistakes</text>
+      <text class="small" x="417" y="400" text-anchor="middle">backlog file · quota</text>
+    </g>
+    <g id="c-sched"><title>Scheduler: grants stage starts against capacity pools and the host check, auto-dispatches approved-plan tasks whose blockers landed, pauses on usage limits</title>
+      <rect class="inner" x="526" y="342" width="190" height="72" rx="8"/>
+      <text class="lbl" x="621" y="366" text-anchor="middle">Scheduler</text>
+      <text class="small" x="621" y="384" text-anchor="middle">capacity pools · host check</text>
+      <text class="small" x="621" y="400" text-anchor="middle">auto-dispatch phases</text>
+    </g>
+    <g id="c-lease"><title>Lease manager: exactly one leader session holds the lease; explicit handover</title>
+      <rect class="inner" x="730" y="342" width="192" height="72" rx="8"/>
+      <text class="lbl" x="826" y="366" text-anchor="middle">Lease manager</text>
+      <text class="small" x="826" y="384" text-anchor="middle">one leader · epoch</text>
+      <text class="small" x="826" y="400" text-anchor="middle">claim · release · banner</text>
+    </g>
+
+    <g id="c-journal"><title>Intent journal: the only caller of tasks-axi. Write intent, run tasks-axi, mark applied; replay at startup.</title>
+      <rect class="inner" x="118" y="430" width="190" height="86" rx="8"/>
+      <text class="lbl" x="213" y="456" text-anchor="middle">Intent journal</text>
+      <text class="small" x="213" y="474" text-anchor="middle">sole caller of tasks-axi</text>
+      <text class="small" x="213" y="490" text-anchor="middle">replay at startup</text>
+    </g>
+    <g id="c-db"><title>flowryn.db: SQLite in WAL mode. An append-only events table plus current-state tables, changed together in one transaction.</title>
+      <rect class="inner" x="322" y="430" width="600" height="86" rx="8"/>
+      <text class="lbl" x="622" y="456" text-anchor="middle">flowryn.db · SQLite WAL</text>
+      <text class="small" x="622" y="474" text-anchor="middle">events (append-only) + current state in one transaction</text>
+      <text class="small" x="622" y="490" text-anchor="middle">runs · items · decisions · approvals · lease · intents · messages</text>
+    </g>
+
+    <g id="p-herdr"><title>Herdr runtime: worktree.create, pane.split (with env), agent.start, pane.process_info, agent.get, events.subscribe</title>
+      <rect class="box" x="100" y="580" width="200" height="84" rx="10"/>
+      <text class="lbl" x="200" y="606" text-anchor="middle">Herdr runtime</text>
+      <text class="small" x="200" y="626" text-anchor="middle">worktree · pane · agent</text>
+      <text class="small" x="200" y="642" text-anchor="middle">events (hint only)</text>
+    </g>
+    <g id="p-workers"><title>Workers: ships and scouts on Claude Code or Pi, each with the Flowryn worker hook set or extension for busy signals and steer push</title>
+      <rect class="box" x="316" y="580" width="250" height="84" rx="10"/>
+      <text class="lbl" x="441" y="606" text-anchor="middle">Workers (ship · scout)</text>
+      <text class="small" x="441" y="626" text-anchor="middle">Claude Code · Pi</text>
+      <text class="small" x="441" y="642" text-anchor="middle">worker hooks / extension</text>
+    </g>
+    <g id="p-tasks"><title>tasks-axi: backlog.md for tasks and todos.md for personal to-dos, at the location chosen at setup</title>
+      <rect class="box" x="582" y="580" width="160" height="84" rx="10"/>
+      <text class="lbl" x="662" y="606" text-anchor="middle">tasks-axi</text>
+      <text class="small" x="662" y="626" text-anchor="middle">backlog.md</text>
+      <text class="small" x="662" y="642" text-anchor="middle">todos.md</text>
+    </g>
+    <g id="p-ext"><title>External systems of record: git remotes, GitHub PRs and checks, no-mistakes run status</title>
+      <rect class="box" x="758" y="580" width="182" height="84" rx="10"/>
+      <text class="lbl" x="849" y="606" text-anchor="middle">Systems of record</text>
+      <text class="small" x="849" y="626" text-anchor="middle">git · GitHub</text>
+      <text class="small" x="849" y="642" text-anchor="middle">no-mistakes</text>
+    </g>
+
+    <path class="edge" d="M200,537 L200,578" marker-start="url(#a)" marker-end="url(#a)"/>
+    <path class="edge" d="M300,622 L314,622"/>
+    <path id="e-report" class="edge" d="M420,578 L420,537" marker-end="url(#a)"><title>Workers call flowryn report, ask, deliver, fail through the CLI</title></path>
+    <text class="tiny" x="414" y="562" text-anchor="end">flowryn report</text>
+    <path id="e-steer" class="push" d="M462,537 L462,578" marker-end="url(#ap)"><title>Steers pushed to workers through their hooks or extension</title></path>
+    <text class="tiny" x="468" y="562">steer push</text>
+    <path class="edge" d="M662,537 L662,578" marker-end="url(#a)"/>
+    <text class="tiny" x="668" y="562">journal only</text>
+    <path class="edge" d="M849,537 L849,578" marker-start="url(#a)" marker-end="url(#a)"/>
+  </svg>
+
+  <div class="grid md:grid-cols-3 gap-3">
+    <div class="card bg-base-200"><div class="card-body py-4"><h3 class="card-title text-sm">Principle 1 · One writer per fact</h3><p class="text-sm opacity-80">Only <code>flowrynd</code> writes <code>flowryn.db</code>. Only the intent journal calls tasks-axi. No fact lives in both stores.</p></div></div>
+    <div class="card bg-base-200"><div class="card-body py-4"><h3 class="card-title text-sm">Principle 2 · Evidence, not guesses</h3><p class="text-sm opacity-80">Reports, harness events and Herdr status are evidence of different strength. The reconciler decides, and says so when evidence conflicts.</p></div></div>
+    <div class="card bg-base-200"><div class="card-body py-4"><h3 class="card-title text-sm">Principle 3 · Rules in code, consent from a human</h3><p class="text-sm opacity-80">The policy engine enforces merge, cleanup and destructive gates, and accepts "your word" only as a human-channel approval record.</p></div></div>
+  </div>
+  <p class="text-sm opacity-75"><strong>Stack.</strong> TypeScript on Bun 1.3, with <code>bun:sqlite</code>, compiled to one binary that serves as both <code>flowryn</code> and <code>flowrynd</code> (about 60 MB; 9.3 ms median startup measured, fast enough for per-prompt hooks). The build step re-signs the binary with <code>codesign --force --sign -</code>, because the compiled ad-hoc signature is invalid as shipped.</p>
+</section>
+
+<!-- ============ COMPONENTS ============ -->
+<section class="space-y-4" id="components">
+  <h2 class="text-2xl font-bold">4 · Components and ownership</h2>
+  <p class="opacity-80 max-w-3xl">Every piece of state has exactly one owning module. "Writes" means the only module allowed to change it. Other modules ask the owner. Module paths are the proposed source layout.</p>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Component</th><th>Responsible for</th><th>Writes (sole owner)</th><th>Never does</th></tr></thead>
+    <tbody>
+      <tr><td><strong>API gateway</strong><br><code>src/api/</code></td><td>Socket, protocol handshake, token → role resolution, idempotency, spool ingest</td><td class="own"><code>idempotency</code>, <code>spool_ingested</code></td><td>Decide policy; change lifecycle state</td></tr>
+      <tr><td><strong>Lifecycle engine</strong><br><code>src/lifecycle/</code></td><td>Task, run and decision state machines; workflow stages and gates; dispatch; promotion of a scout to a ship</td><td class="own"><code>runs.state</code>, <code>runs.stage</code>, <code>gates</code>, <code>task_policy</code>, <code>decisions</code>; tasks-axi lifecycle through the journal</td><td>Call tasks-axi directly; judge liveness</td></tr>
+      <tr><td><strong>Intent journal</strong><br><code>src/journal/</code></td><td>Every tasks-axi mutation; replay at startup; backlog reconciliation after hand edits</td><td class="own"><code>intents</code>, <code>backlog_snapshot</code>; the tasks-axi files</td><td>Decide which transition should happen</td></tr>
+      <tr><td><strong>Reconciler</strong><br><code>src/reconcile/</code></td><td>Current-state truth for each run; evidence ranking; reattach; divergence; the four deterministic auto-actions</td><td class="own"><code>runs.liveness</code>, <code>run_evidence</code>, <code>divergences</code></td><td>Change lifecycle state itself (it asks the lifecycle engine); adopt a pane by label</td></tr>
+      <tr><td><strong>Watchers</strong><br><code>src/watch/</code></td><td>Herdr subscription; GitHub PR/check polling with ETags; no-mistakes status (read-only); backlog file changes; Claude usage-limit notifications</td><td>Nothing; they emit observations to the reconciler</td><td>Respond to a no-mistakes run; retry a failed poll forever</td></tr>
+      <tr><td><strong>Attention router</strong><br><code>src/attention/</code></td><td>Lane assignment from the lane table; actionable and informational items; presentation leases; OS notifications</td><td class="own"><code>items</code>, <code>presentations</code>, <code>notifications</code></td><td>Score events numerically; route by focus</td></tr>
+      <tr><td><strong>Policy engine</strong><br><code>src/policy/</code></td><td>Role checks per verb; approvals; merge gate; cleanup guard; destructive gates</td><td class="own"><code>approvals</code>, <code>merges</code></td><td>Accept an agent's statement as approval</td></tr>
+      <tr><td><strong>Lease manager</strong><br><code>src/lease/</code></td><td>Which leader session receives pushes and may run leader mutations</td><td class="own"><code>leader_lease</code>, <code>leader_sessions</code></td><td>Grant approval authority (a lease is not consent)</td></tr>
+      <tr><td><strong>Scheduler</strong><br><code>src/sched/</code></td><td>Grant stage starts against capacity pools and the host check; auto-dispatch approved-plan tasks whose blockers landed; pause dispatch while a Claude usage limit is active</td><td class="own"><code>pool_leases</code>; dispatch itself goes through the lifecycle engine</td><td>Choose models by quota (post-v1)</td></tr>
+      <tr><td><strong>Harness adapters</strong><br><code>src/harness/{claude,pi}/</code></td><td>Launch args, pre-trust, busy source, push, interrupt, exit, resume, session id (<a class="link" href="#adapters">section 5</a>)</td><td>No durable state of their own</td><td>Type into a composer (v1)</td></tr>
+      <tr><td><strong>Herdr runtime</strong><br><code>src/runtime/herdr/</code></td><td>Worktree, pane and agent operations; event subscription; process info</td><td>Nothing; Herdr's own state is external</td><td>Call <code>worktree.remove</code> with <code>force</code> unless the cleanup guard allowed discarding</td></tr>
+      <tr><td><strong>CLI</strong><br><code>src/cli/</code></td><td>The one command registry; TOON and JSON rendering; spooling; hook verbs</td><td class="own">Spool files, one writer per file</td><td>Infer a task from the working directory</td></tr>
+      <tr><td><strong>Bridges</strong><br><code>bridges/claude-leader/</code>, <code>bridges/pi/</code></td><td>Carry push and busy/idle signals between a harness and the daemon</td><td>Nothing</td><td>Contain business logic. Anything a bridge decides must be reproducible with the CLI.</td></tr>
+      <tr><td><strong>Board</strong><br><code>flowryn board</code></td><td>Zero-token live view in a terminal; approve action</td><td>Nothing (reads SQLite read-only; approve goes through the socket)</td><td>Run inside an agent pane</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ ADAPTERS ============ -->
+<section class="space-y-5" id="adapters">
+  <h2 class="text-2xl font-bold">5 · The harness adapter interface</h2>
+  <p class="opacity-80 max-w-3xl">Supporting a harness costs lifecycle and push, not reporting. So the adapter is a typed interface covering exactly those, and v1 implements it twice: Claude Code and Pi. Each capability uses the harness's own hooks or extension API. Herdr keystroke delivery is not a v1 path; the only keystroke v1 sends is the interrupt key.</p>
+
+  <div class="grid lg:grid-cols-2 gap-4">
+<pre class="code"><code>// src/harness/types.ts — one adapter per harness
+interface HarnessAdapter {
+  id: "claude" | "pi";
+  // Lifecycle
+  launch(spec: LaunchSpec): LaunchPlan;
+    // args for Herdr agent.start; env goes on
+    // pane.split, whose params include env
+  preTrust(worktree: string): Promise&lt;Trust&gt;;
+    // register trust before launch;
+    // never answer a dialog with keys
+  sessionId(run: RunRef): SessionId | null;
+    // captured by the worker-start hook
+  interrupt(run: RunRef): Promise&lt;Verified&gt;;
+  exit(run: RunRef): Promise&lt;Verified&gt;;
+  resume(run: RunRef, s: SessionId): LaunchPlan;
+  // Busy truth: harness events, never screen text
+  busySource: "hooks" | "extension";
+  translate(ev: HookEvent): Signal;
+    // busy | tool | turn_ended | failed | ended
+  // Push to workers
+  deliverWhileBusy(run: RunRef, m: Steer): Ticket;
+  deliverToIdle(run: RunRef, m: Steer): Ticket;
+  // Contract
+  contractSuite(): ContractTest[];
+}</code></pre>
+<pre class="code"><code>// bridges/* — runs inside the leader harness
+interface LeaderBridge {
+  briefing(src: "startup" | "resume"
+             | "clear" | "compact"): Text;
+    // ≤ 1.5k tokens, facts not commands
+  attachNextTurn(digest: Text): Carried;  // P1
+  deliverAfterTurn(line: Text): Carried;  // P0, busy
+  wakeIdle(line: Text): Carried;          // P0, idle
+  confirm(q: MergeSummary): Promise&lt;boolean&gt;;
+  userActivity(): "active" | "inactive"
+                | "unknown";
+  heartbeat(): void;       // keeps the lease fresh
+}
+
+// A Ticket or Carried value is not "seen".
+// Presentation is confirmed only by the next
+// turn end in the same session (section 9).
+
+type Verified = { ok: boolean;
+  evidence: "hook" | "process" | "timeout" };</code></pre>
+  </div>
+
+  <h3 class="text-lg font-semibold">Leader bridges: push mapped to each harness</h3>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Need</th><th>Claude Code leader (hooks)</th><th>Pi leader (extension)</th></tr></thead>
+    <tbody>
+      <tr><td>Briefing</td><td><code>SessionStart</code> <code>additionalContext</code>. Fires on <code>startup</code>, <code>resume</code>, <code>clear</code> and <code>compact</code>, so it re-grounds the leader after compaction.</td><td><code>session_start</code> attaches the briefing to the first turn with <code>deliverAs: "nextTurn"</code>; re-brief after compaction <span class="m0">M0</span></td></tr>
+      <tr><td>P1 digest</td><td><code>UserPromptSubmit</code> <code>additionalContext</code>, at most 5 lines and under 2,000 characters. Default hook timeout is 30 s and a timed-out hook's context is discarded, so the hook must answer in well under a second.</td><td><code>sendMessage(…, {deliverAs: "nextTurn"})</code></td></tr>
+      <tr><td>P0 while busy</td><td><code>Stop</code> hook continues the turn with one line in <code>hookSpecificOutput.additionalContext</code> (shown as hook feedback, not an error) <span class="m0">M0</span>. At most two consecutive continuations, far below the cap of 8.</td><td><code>deliverAs: "followUp"</code> (Pi rejects a busy send without it)</td></tr>
+      <tr><td>P0 while idle, you inactive</td><td>An <code>asyncRewake</code> Stop hook runs <code>flowryn hook wait-p0</code>. It blocks on the socket and exits 2 with one line on stderr, which wakes an idle session. Claude does not deduplicate async hooks, so the daemon keeps one waiter per session and tells older ones to exit 0. Timeout 8 h, re-armed by every Stop. <span class="m0">M0</span> behavior when the waiter fires while busy, and whether arming from <code>SessionStart</code> also works.</td><td><code>followUp</code> with <code>triggerTurn: true</code></td></tr>
+      <tr><td>Busy</td><td><code>UserPromptSubmit</code> sets busy; <code>PreToolUse</code>/<code>PostToolUse</code> refresh a busy lease. A manual interrupt fires no hook, so busy is a lease that expires after 10 min without hook events, or at once when <code>idle_prompt</code> fires.</td><td><code>agent_start</code></td></tr>
+      <tr><td>Idle</td><td><code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code>; <code>idle_prompt</code> after an interrupt <span class="m0">M0</span></td><td><code>agent_settled</code> (emitted from a <code>finally</code> block, so it covers abort, retry and compaction)</td></tr>
+      <tr><td>You are inactive</td><td><code>Notification</code> <code>idle_prompt</code>, about 60 s after Claude finishes with no typing since. Better than "pane not focused", which is a check-then-act race. <span class="m0">M0</span> that it fires inside a Herdr pane.</td><td>Only if M0 proves the extension can read the composer: idle for 60 s and the composer empty <span class="m0">M0</span>. Otherwise a Pi P0 never starts a turn; it notifies and waits for your next message (decided in review).</td></tr>
+      <tr><td>Human confirmation</td><td>Ask rule <code>Bash(flowryn merge *)</code> plus a <code>PreToolUse</code> hook returning <code>permissionDecision: "ask"</code>; auto mode still prompts (<a class="link" href="#approval">section 7</a>)</td><td><code>ctx.ui.confirm()</code> inside the extension's <code>flowryn_merge</code> tool</td></tr>
+      <tr><td>Leader token</td><td><code>SessionStart</code> hook writes <code>FLOWRYN_TOKEN</code> into <code>CLAUDE_ENV_FILE</code> for later Bash calls <span class="m0">M0</span></td><td>Held in the extension; its registered tools pass it; shell calls get it from the process environment</td></tr>
+      <tr><td>Scoping</td><td>Hooks live in a leader-only settings file passed by <code>flowryn lead</code> with <code>--settings</code>, never in your global settings <span class="m0">M0</span></td><td>Extension loaded by <code>flowryn lead --pi</code> <span class="m0">M0</span> flag</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 class="text-lg font-semibold">Worker adapters: lifecycle and push to workers</h3>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Capability</th><th>Claude Code worker</th><th>Pi worker</th></tr></thead>
+    <tbody>
+      <tr><td>launch</td><td>Herdr <code>pane.split</code> with the run's environment, then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks <span class="m0">M0</span> <code>--settings</code> scoping</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run <span class="m0">M0</span></td></tr>
+      <tr><td>preTrust</td><td>Register workspace trust for the worktree path before launch (Firstmate does this in <code>~/.claude.json</code>). Claude has three dialogs that can wedge a fresh pane (workspace trust, external CLAUDE.md imports, bypass confirmation); none may be answered with keys.</td><td>Pi asks for trust per path on first run; pre-register it <span class="m0">M0</span> where the trust record lives</td></tr>
+      <tr><td>sessionId + isolation proof</td><td><code>SessionStart</code> runs <code>flowryn hook worker-start</code>: reports <code>session_id</code>, cwd, git top-level, git common dir and branch</td><td><code>session_start</code> in the extension reports the same</td></tr>
+      <tr><td>busySource</td><td>Hooks: <code>UserPromptSubmit</code>, <code>Pre/PostToolUse</code>, <code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code></td><td>Extension: <code>agent_start</code>, <code>agent_settled</code></td></tr>
+      <tr><td>deliverWhileBusy</td><td><code>PostToolUse</code> returns pending steers as <code>additionalContext</code> beside the next tool result, the documented mid-turn channel; if the turn is ending, <code>Stop</code> continues with the steer</td><td><code>sendMessage(…, {deliverAs: "followUp"})</code>; <span class="m0">M0</span> whether a mid-run steer mode is better</td></tr>
+      <tr><td>deliverToIdle</td><td><code>asyncRewake</code> waiter <code>flowryn hook wait-steer</code> exits 2 with a one-line pointer to <code>flowryn inbox</code></td><td><code>followUp</code> with <code>triggerTurn: true</code></td></tr>
+      <tr><td>interrupt</td><td>Escape through Herdr pane input, verified by a following <code>idle_prompt</code> or process state <span class="m0">M0</span></td><td>Extension abort of the current run <span class="m0">M0</span></td></tr>
+      <tr><td>exit</td><td colspan="2">SIGTERM to the harness process identified by <code>pane.process_info</code> (pid plus start time), verified by the process being gone; SIGKILL after 10 s; never a reused pid</td></tr>
+      <tr><td>resume</td><td><code>claude --resume &lt;session_id&gt;</code> in the same worktree</td><td>Pi's session-resume flag with the stored session <span class="m0">M0</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-sm">Contract tests gate every harness version</h3>
+      <p class="opacity-85">Each adapter ships a contract suite: launch in a scratch Herdr session named <code>flowryn-contract</code>, capture the session id, observe busy and idle, deliver while busy and while idle, interrupt, exit, resume. <code>flowryn doctor --contracts</code> runs it and records the passing harness version. The daemon checks the installed version at startup and before each launch, and refuses to dispatch on a version with no passing record (<code>code: contract_unverified</code>).</p>
+    </div></div>
+    <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-sm">Adding a harness after v1</h3>
+      <p class="opacity-85">Write the adapter and its contract suite, pinned to the installed version. A harness without native push would use Herdr <code>agent.prompt</code> only after proving the composer is empty, which is the costly subsystem Firstmate carries (1,826 lines). The interface keeps that fallback possible without v1 building it.</p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ RECONCILER ============ -->
+<section class="space-y-5" id="reconciler">
+  <h2 class="text-2xl font-bold">6 · The reconciler and the evidence hierarchy</h2>
+  <p class="opacity-80 max-w-3xl">Herdr's agent status is itself inferred, and it is wrong in documented cases: idle while a harness waits on a long foreground tool, a Pi registration kept after Pi exited, Cursor always blocked, and <code>working</code> left behind by an agent killed mid-turn. Herdr's event stream has no replay, and restarting the Herdr server kills every harness process. So one component, the reconciler, owns current-state truth for each run, and it ranks its sources.</p>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Rank</th><th>Source</th><th>Can prove</th><th>Cannot prove</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-primary badge-sm">1</span></td><td>Systems of record: git remote refs, GitHub PR state, head and checks, no-mistakes run status</td><td>Pushed, PR exists, not draft, checks green, merged, validation outcome</td><td>That the worker is alive</td></tr>
+      <tr><td><span class="badge badge-primary badge-sm">2</span></td><td>Process table via <code>pane.process_info</code>: pid, start time, executable</td><td>The harness process is alive and is the one we launched</td><td>Busy or idle</td></tr>
+      <tr><td><span class="badge badge-sm">3</span></td><td>Harness lifecycle events from the Flowryn hooks or extension</td><td>Busy, idle, turn ended, session id, working directory</td><td>That the work is correct or finished</td></tr>
+      <tr><td><span class="badge badge-sm">4</span></td><td>The worker's own <code>report</code>, <code>ask</code>, <code>deliver</code>, <code>fail</code></td><td>What the worker intends or claims</td><td>Anything rank 1–3 can check; <code>deliver</code> is verified against rank 1</td></tr>
+      <tr><td><span class="badge badge-ghost badge-sm">5</span></td><td>Herdr <code>agent_status</code></td><td>Nothing on its own; it triggers a reconcile pass</td><td>A native idle never proves a worker stopped</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <svg class="fig w-full" viewBox="0 0 960 170" role="img" aria-labelledby="recT">
+    <title id="recT">Startup and reconnect sequence of the reconciler</title>
+    <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker></defs>
+    <g id="r1"><title>Take the exclusive flock on the state directory, bind the socket exclusively, run forward-only migrations</title><rect class="box" x="6" y="30" width="122" height="84" rx="8"/><text class="lbl" x="67" y="60" text-anchor="middle">1 Lock</text><text class="small" x="67" y="80" text-anchor="middle">flock · socket</text><text class="small" x="67" y="96" text-anchor="middle">migrate</text></g>
+    <path class="edge" d="M130,72 L140,72" marker-end="url(#a3)"/>
+    <g id="r2"><title>Replay pending tasks-axi intents in order, idempotently</title><rect class="box" x="142" y="30" width="122" height="84" rx="8"/><text class="lbl" x="203" y="60" text-anchor="middle">2 Intents</text><text class="small" x="203" y="80" text-anchor="middle">replay pending</text><text class="small" x="203" y="96" text-anchor="middle">tasks-axi writes</text></g>
+    <path class="edge" d="M266,72 L276,72" marker-end="url(#a3)"/>
+    <g id="r3"><title>Ingest spooled worker calls, deduplicated by ULID</title><rect class="box" x="278" y="30" width="122" height="84" rx="8"/><text class="lbl" x="339" y="60" text-anchor="middle">3 Spool</text><text class="small" x="339" y="80" text-anchor="middle">ingest, dedupe</text><text class="small" x="339" y="96" text-anchor="middle">by ULID</text></g>
+    <path class="edge" d="M402,72 L412,72" marker-end="url(#a3)"/>
+    <g id="r4"><title>Subscribe to Herdr events first, and buffer them</title><rect class="core" x="414" y="30" width="122" height="84" rx="8"/><text class="lbl" x="475" y="60" text-anchor="middle">4 Subscribe</text><text class="small" x="475" y="80" text-anchor="middle">events.subscribe</text><text class="small" x="475" y="96" text-anchor="middle">buffer events</text></g>
+    <path class="edge" d="M538,72 L548,72" marker-end="url(#a3)"/>
+    <g id="r5"><title>Take a snapshot of panes and agents, noting revision and state_change_seq</title><rect class="core" x="550" y="30" width="122" height="84" rx="8"/><text class="lbl" x="611" y="60" text-anchor="middle">5 Snapshot</text><text class="small" x="611" y="80" text-anchor="middle">revision</text><text class="small" x="611" y="96" text-anchor="middle">state_change_seq</text></g>
+    <path class="edge" d="M674,72 L684,72" marker-end="url(#a3)"/>
+    <g id="r6"><title>Reconcile every non-terminal run against the evidence hierarchy</title><rect class="core" x="686" y="30" width="122" height="84" rx="8"/><text class="lbl" x="747" y="60" text-anchor="middle">6 Reconcile</text><text class="small" x="747" y="80" text-anchor="middle">every open run</text><text class="small" x="747" y="96" text-anchor="middle">rank 1 → 5</text></g>
+    <path class="edge" d="M810,72 L820,72" marker-end="url(#a3)"/>
+    <g id="r7"><title>Apply buffered events newer than the snapshot, then run steady state: every event plus a 60-second pass</title><rect class="box" x="822" y="30" width="132" height="84" rx="8"/><text class="lbl" x="888" y="60" text-anchor="middle">7 Steady</text><text class="small" x="888" y="80" text-anchor="middle">apply buffer</text><text class="small" x="888" y="96" text-anchor="middle">event + 60 s pass</text></g>
+    <text class="small" x="480" y="148" text-anchor="middle">Steps 4–7 repeat on every Herdr reconnect. Firstmate's Herdr adapter already uses subscribe-then-snapshot.</text>
+  </svg>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Rules</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li><strong>Higher rank wins</strong>, and a conflict is recorded, never silently resolved. Example: <code>deliver</code> names a PR that GitHub shows as draft or whose head is not on the remote → a <code>divergence</code> event (P1) and the run stays <code>running</code>.</li>
+        <li><strong>Liveness</strong> is one of <code>starting</code>, <code>busy</code>, <code>idle</code>, <code>blocked_dialog</code>, <code>dead</code>, <code>orphaned</code>, <code>unknown</code>. The reconciler writes it; only the lifecycle engine changes <code>runs.state</code>, on the reconciler's request.</li>
+        <li><strong>Reattach</strong> only when pane id, worktree path and a live harness process identity (pid plus start time plus executable) all match the <code>runs</code> row. Pane metadata (<code>flowryn:&lt;run&gt;</code>, written with no TTL) only finds candidates. A mismatch is <code>orphaned</code>; a run is never adopted by label.</li>
+        <li><strong>Husks.</strong> A pane with no live harness process is <code>dead</code>. At startup, many husks at once mean the Herdr server restarted. The supported Herdr update path is <code>herdr update --handoff</code>, and <code>flowryn doctor</code> checks the Herdr version against the pinned minimum and protocol 17.</li>
+        <li><strong>Trust wedge.</strong> Process alive but no worker-start event within 30 s of launch → <code>blocked_dialog</code>, reported as a P1 pointer. No keystrokes.</li>
+      </ul>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">The only automatic actions in v1</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li>Resume a <code>dead</code> run <strong>once</strong> from its stored <code>agent_session</code>, in the same worktree. A second death is a P0 "failure needing you".</li>
+        <li>Re-ring an unacknowledged steer, up to 3 times, 5 minutes apart; then a P1.</li>
+        <li>Clean up after a merge the daemon itself proved. The cleanup guard still runs.</li>
+        <li>Re-arm monitoring after a restart: waiters, subscription, PR polls.</li>
+      </ol>
+      <p class="opacity-80">Everything that needs judgment reaches the leader as one pointer line in its lane: a worker idle for 15 minutes without an outcome, busy with no hook event for 30 minutes, a divergence, an orphan. A headless triage runner (a stateless per-event <code>claude -p</code> or Pi print-mode call with a fixed prompt and a spend cap) is the first post-v1 addition.</p>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ APPROVAL ============ -->
+<section class="space-y-5" id="approval">
+  <h2 class="text-2xl font-bold">7 · The approval channel and threat model</h2>
+  <p class="opacity-80 max-w-3xl">Code can enforce green checks and yolo posture, but "you said merge" has only one witness: the leader agent, which is the component the rule constrains. So a merge without yolo needs an <strong>approval record</strong> that only a human channel can create. Both channels are accepted: the harness's own confirmation prompt, and <code>flowryn approve</code> in your shell or on the board.</p>
+
+  <svg class="fig w-full" viewBox="0 0 960 320" role="img" aria-labelledby="apT">
+    <title id="apT">How a merge gets approved and proven</title>
+    <defs>
+      <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker>
+      <marker id="a4g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-success)"/></marker>
+    </defs>
+    <g id="ap-lead"><title>The leader asks to merge a task's PR</title><rect class="box" x="8" y="14" width="210" height="58" rx="8"/><text class="lbl" x="113" y="38" text-anchor="middle">Leader</text><text class="small" x="113" y="56" text-anchor="middle">flowryn merge T17</text></g>
+    <g id="ap-harness"><title>Channel 1: the harness prompts you. Claude ask rule plus PreToolUse ask; Pi ctx.ui.confirm in the extension.</title><rect class="human" x="8" y="112" width="210" height="72" rx="8"/><text class="lbl" x="113" y="138" text-anchor="middle">1 · Harness prompt</text><text class="small" x="113" y="156" text-anchor="middle">Claude ask rule</text><text class="small" x="113" y="172" text-anchor="middle">Pi ctx.ui.confirm</text></g>
+    <g id="ap-shell"><title>Channel 2: you type flowryn approve in your own shell, or press approve on the board, and enter the challenge code from /dev/tty</title><rect class="human" x="8" y="222" width="210" height="72" rx="8"/><text class="lbl" x="113" y="248" text-anchor="middle">2 · flowryn approve</text><text class="small" x="113" y="266" text-anchor="middle">your shell · board</text><text class="small" x="113" y="282" text-anchor="middle">/dev/tty challenge</text></g>
+    <g id="ap-yolo"><title>yolo: a per-project posture you set. Merges green, in-scope, non-sensitive work without a human record.</title><rect class="opt" x="262" y="90" width="180" height="50" rx="8"/><text class="lbl" x="352" y="111" text-anchor="middle">yolo posture</text><text class="small" x="352" y="128" text-anchor="middle">green · not sensitive</text></g>
+    <g id="ap-rec"><title>approvals row: bound to task, canonical PR URL and head SHA; single use; expires after 24 hours; void if the head changes</title><rect class="core" x="262" y="150" width="180" height="96" rx="8"/><text class="lbl" x="352" y="176" text-anchor="middle">approvals row</text><text class="small" x="352" y="196" text-anchor="middle">bound to head SHA</text><text class="small" x="352" y="212" text-anchor="middle">single use · 24 h</text><text class="small" x="352" y="228" text-anchor="middle">channel + actor</text></g>
+    <path class="ok" d="M220,150 L260,178" marker-end="url(#a4g)"/>
+    <path class="ok" d="M220,256 L260,222" marker-end="url(#a4g)"/>
+    <g id="ap-gate"><title>Merge gate, in order: canonical PR for the task; not draft and head on the remote; every check green, or exactly one waived by a human; approval record or yolo; not sensitive unless human-approved</title><rect class="inner" x="490" y="40" width="220" height="210" rx="10"/><text class="lbl" x="600" y="66" text-anchor="middle">Merge gate (policy)</text>
+      <text class="small" x="506" y="94">1 canonical PR for the task</text>
+      <text class="small" x="506" y="116">2 not draft · head on remote</text>
+      <text class="small" x="506" y="138">3 all checks green, or one</text>
+      <text class="small" x="518" y="154">check waived by a human</text>
+      <text class="small" x="506" y="176">4 approval record or yolo</text>
+      <text class="small" x="506" y="198">5 sensitive → human only</text>
+      <text class="small" x="506" y="224">else: refuse with a code</text></g>
+    <path class="edge" d="M220,43 L488,90" marker-end="url(#a4)"/>
+    <path class="edge" d="M444,115 L488,122" marker-end="url(#a4)"/>
+    <path class="edge" d="M444,198 L488,180" marker-end="url(#a4)"/>
+    <g id="ap-merge"><title>GitHub merge request</title><rect class="box" x="752" y="40" width="96" height="60" rx="8"/><text class="lbl" x="800" y="66" text-anchor="middle">GitHub</text><text class="small" x="800" y="84" text-anchor="middle">merge</text></g>
+    <g id="ap-proof"><title>Proof: the PR reads merged with a merge commit SHA. Otherwise the merge is unproven and the task is not landed.</title><rect class="box" x="752" y="130" width="96" height="60" rx="8"/><text class="lbl" x="800" y="156" text-anchor="middle">Proof</text><text class="small" x="800" y="174" text-anchor="middle">merged + SHA</text></g>
+    <g id="ap-clean"><title>Cleanup, still guarded by the landed-work check</title><rect class="box" x="752" y="220" width="96" height="60" rx="8"/><text class="lbl" x="800" y="246" text-anchor="middle">Cleanup</text><text class="small" x="800" y="264" text-anchor="middle">guarded</text></g>
+    <path class="edge" d="M712,70 L750,70" marker-end="url(#a4)"/>
+    <path class="edge" d="M800,102 L800,128" marker-end="url(#a4)"/>
+    <path class="edge" d="M800,192 L800,218" marker-end="url(#a4)"/>
+    <text class="tiny" x="860" y="160">unproven →</text><text class="tiny" x="860" y="174">not landed, P1</text>
+  </svg>
+
+  <div class="grid lg:grid-cols-3 gap-4 text-sm">
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Claude leader</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li>The leader runs in <code>--permission-mode auto</code>. Ask rules that match a command's content still prompt in auto mode.</li>
+        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>. The ask rule <code>Bash(flowryn merge *)</code> is a second layer.</li>
+        <li>If you approve, the command runs with the leader token. The daemon matches it to the attempt (same session and arguments, under 5 minutes old) and records channel <code>claude-ask</code>.</li>
+        <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable: whether ask rules prompt under bypass is unverified. The merge returns <code>approval_required</code>.</li>
+      </ol>
+      <p class="opacity-75"><span class="m0">M0</span> the hook input carries <code>permission_mode</code>; the prompt appears in auto mode inside a Herdr pane.</p>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Pi leader</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li>Pi has no permission system, so the extension is the gate.</li>
+        <li>Its <code>flowryn_merge</code> tool shows PR title, URL, head SHA and checks through <code>ctx.ui.confirm()</code>.</li>
+        <li>On yes, it calls the daemon with an approval key it received over the socket at lease claim and never put in any environment. Channel <code>pi-confirm</code>.</li>
+        <li>The extension blocks shell calls to <code>flowryn merge</code> and <code>flowryn approve</code>; without the key, a shell merge gets <code>approval_required</code>.</li>
+      </ol>
+      <p class="opacity-75"><span class="m0">M0</span> the extension can intercept and block a shell tool call.</p>
+    </div></div>
+    <div class="card card-border border-success/50"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Your shell or the board</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li><code>flowryn approve T17</code> refuses when any <code>FLOWRYN_*</code> token is in the environment (an agent pane) or stdin/stdout is not a TTY.</li>
+        <li>It prints the PR URL, head SHA and check summary, then reads a random 4-letter code from <code>/dev/tty</code>, so piped input cannot answer it.</li>
+        <li>The board's approve key does the same. Channel <code>cli-tty</code> or <code>board</code>, actor <code>$USER</code>.</li>
+        <li><code>--allow-red &lt;check&gt;</code> names one failing check to waive. Only a human channel can create it; every other check must be green.</li>
+      </ol>
+    </div></div>
+  </div>
+
+  <div class="alert alert-soft text-sm"><span><strong>Sensitive work.</strong> A task is sensitive when you or the leader mark it at dispatch (<code>--sensitive</code>) or the worker's <code>deliver --sensitive</code> flags security impact. Destructive actions (<code>cleanup --discard</code>, project removal, a forced worktree removal) are always sensitive. Sensitive actions need a human-channel record even under yolo.</span></div>
+
+  <h3 class="text-lg font-semibold">Threat model: confused-agent-grade</h3>
+  <p class="text-sm opacity-80 max-w-3xl">Flowryn protects against agents that are wrong, confused or prompt-injected into ordinary misuse. It does not protect against a deliberate attacker running as your user: Herdr exports <code>HERDR_SOCKET_PATH</code> into every pane, so any worker process can read or type into any pane, the leader's included. That residual risk is accepted and stated.</p>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Threat</th><th>Mitigation</th><th>Residual</th></tr></thead>
+    <tbody>
+      <tr><td>Leader claims you approved</td><td>Approval record from a human channel only</td><td>None within grade</td></tr>
+      <tr><td>Leader runs under bypass mode</td><td>Harness channel refused when <code>permission_mode</code> is bypass</td><td>Shell channel still works</td></tr>
+      <tr><td>Agent calls hook verbs to forge an attempt</td><td>Leader deny rules <code>Bash(flowryn hook *)</code> and <code>Bash(flowryn approve*)</code>; permission rules do not apply to hooks themselves</td><td>An agent using another interpreter to call the binary</td></tr>
+      <tr><td>Worker calls leader verbs</td><td>Role tokens; a worker token is refused on leader verbs</td><td>A worker reading the leader's environment with <code>ps</code></td></tr>
+      <tr><td>Agents inside the no-mistakes gate call fleet verbs</td><td>Gate processes carry no Flowryn token <span class="m0">M0</span></td><td>—</td></tr>
+      <tr><td>Keystrokes forged through the Herdr socket</td><td>Human approve reads a random code from <code>/dev/tty</code></td><td>An attacker that reads the screen; accepted</td></tr>
+      <tr><td>Prompt injection in worker text</td><td>Strip ANSI and control characters, truncate to 200 characters, quote, phrase digests as facts; approvals never depend on text</td><td>The leader may still be influenced in conversation</td></tr>
+      <tr><td>Other local process on the socket</td><td>Socket in a mode-0700 directory; tokens</td><td>Same-user malware, out of scope</td></tr>
+      <tr><td>Replayed approval</td><td>Single use, bound to head SHA, 24 h expiry</td><td>—</td></tr>
+      <tr><td>Stale CLI in an old worker</td><td>Protocol handshake on every call</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ STORES ============ -->
+<section class="space-y-5" id="stores">
+  <h2 class="text-2xl font-bold">8 · tasks-axi vs SQLite, and the intent journal</h2>
+  <p class="opacity-80 max-w-3xl">Two stores share one lifecycle, with no shared transaction and a human who may hand-edit the backlog. Firstmate spends 1,255 lines of <code>bin/fm-backlog-transition-lib.sh</code> keeping such a pair coherent. Flowryn keeps it small with three rules: each fact lives in one store, only the intent journal calls tasks-axi, and your hand edits win unless they contradict a live run.</p>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>State</th><th>Store</th><th>Only automated writer</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Task id, title, body, kind, repo, priority, <code>blocked-by</code>, section (Queued / In flight / Done), holds with <code>--until</code>, completion link</td><td><span class="badge badge-sm">tasks-axi</span> <code>backlog.md</code></td><td>Intent journal</td><td>You may hand-edit</td></tr>
+      <tr><td>Personal to-dos: text, done, due date</td><td><span class="badge badge-sm">tasks-axi</span> <code>todos.md</code> (<code>--kind todo</code>)</td><td>Intent journal</td><td>tasks-axi 0.2.5 has no due field, so the due date is the body's first line, <code>due: YYYY-MM-DD</code>. Hand-editable.</td></tr>
+      <tr><td>Per task: delivery mode, yolo, sensitive, reason for a deviation</td><td><span class="badge badge-primary badge-sm">SQLite</span> <code>task_policy</code></td><td>Lifecycle engine</td><td>Set at intake</td></tr>
+      <tr><td>Project registry: repo, path, default branch, default mode, yolo posture, priority</td><td><span class="badge badge-primary badge-sm">SQLite</span> <code>projects</code></td><td>Lifecycle engine via <code>flowryn project</code></td><td></td></tr>
+      <tr><td>Runs, panes, sessions, liveness, evidence, divergences</td><td><span class="badge badge-primary badge-sm">SQLite</span></td><td>Lifecycle engine, reconciler</td><td></td></tr>
+      <tr><td>Your decisions ("captain calls")</td><td><span class="badge badge-primary badge-sm">SQLite</span> <code>decisions</code> only</td><td>Lifecycle engine</td><td>The tasks-axi <code>hold --kind captain</code> is a projection the journal sets and clears</td></tr>
+      <tr><td>Events, items, presentations, notifications, approvals, merges, lease, steers, intents</td><td><span class="badge badge-primary badge-sm">SQLite</span></td><td>Their owning modules (<a class="link" href="#components">section 4</a>)</td><td></td></tr>
+      <tr><td>Scout reports and large artifacts</td><td>Files in the artifacts directory; path in <code>artifacts</code></td><td>The worker writes the file; the daemon records the path</td><td></td></tr>
+      <tr><td>Configuration</td><td><code>config.toml</code></td><td>You, through <code>flowryn init</code> or an editor</td><td>Reloaded on SIGHUP</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Intent journal protocol</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li>In one SQLite transaction: the runtime change (for example a run row in <code>launching</code>), an <code>intents</code> row in <code>pending</code>, and an event.</li>
+        <li>Run <code>&lt;tasks-axi absolute path&gt; &lt;verb&gt; … --file &lt;path&gt; --json</code> with a 10 s timeout. One intent at a time, which matches tasks-axi's single-supervisor lock (2.5 s advisory timeout).</li>
+        <li>On success: mark it <code>applied</code> and store the resulting file hash in <code>backlog_snapshot</code>, in one transaction.</li>
+        <li>On failure: stay <code>pending</code>, retry at 1 s, 5 s, 30 s, 2 min, 10 min, then a P1 "backlog out of sync" item.</li>
+        <li>At startup: replay pending intents in order. <code>start</code> and <code>hold</code> are idempotent by their help text; <code>add</code> is made replay-safe because flowrynd mints the task id and checks <code>tasks-axi show &lt;id&gt;</code> first. <span class="m0">M0</span> idempotency of <code>done</code>, <code>unhold</code>, <code>update</code>, <code>mv</code>.</li>
+      </ol>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">When you edit the backlog by hand</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>A file watch plus a 60 s hash check notices any change whose hash is not the last applied one.</li>
+        <li>The journal re-reads <code>tasks-axi list --json</code> and diffs it against the snapshot.</li>
+        <li><strong>Your edit wins</strong> for title, body, priority, dependencies, holds, to-do done state and due date.</li>
+        <li><strong>A contradiction with a live run</strong> (an In flight task moved or deleted, or its id changed) becomes a <code>divergence</code> (P1). The run is untouched until you run <code>flowryn divergence resolve &lt;id&gt; keep-run|accept-edit</code>.</li>
+        <li>An editor holding a stale buffer can overwrite a CLI write; the hash check catches it as an edit, and the journal re-applies any intent the overwrite erased.</li>
+      </ul>
+    </div></div>
+  </div>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Lifecycle step (lifecycle engine)</th><th>SQLite, same transaction as the intent</th><th>tasks-axi, through the journal</th></tr></thead>
+    <tbody>
+      <tr><td>Dispatch</td><td>run <code>launching</code>; <code>task_policy</code> row</td><td><code>add &lt;id&gt; … --start</code> or <code>start &lt;id&gt;</code></td></tr>
+      <tr><td>Blocking question opened</td><td><code>decisions</code> open</td><td><code>hold &lt;id&gt; --kind captain --reason …</code></td></tr>
+      <tr><td>Question answered or dismissed</td><td><code>decisions</code> closed</td><td><code>unhold &lt;id&gt;</code></td></tr>
+      <tr><td>PR or report delivered and verified</td><td>run <code>ready</code>; <code>artifacts</code> row</td><td><code>update &lt;id&gt; --pr &lt;url&gt;</code> or <code>--report &lt;path&gt;</code></td></tr>
+      <tr><td>Landed and cleaned</td><td>run <code>cleaned</code></td><td><code>done &lt;id&gt; --pr &lt;url&gt;</code> or <code>--report</code></td></tr>
+      <tr><td>Failed or cancelled with your consent</td><td>run <code>failed</code> or <code>cancelled</code></td><td>back to Queued with <code>hold --kind parked</code> <span class="m0">M0</span> exact verb</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="text-sm opacity-75">Invariant checked by the reconciler on every pass: a task is In flight if and only if it has a non-terminal run.</p>
+</section>
+
+<!-- ============ DELIVERY ============ -->
+<section class="space-y-5" id="delivery">
+  <h2 class="text-2xl font-bold">9 · Delivery semantics and the lane table</h2>
+  <p class="opacity-80 max-w-3xl">No harness can observe that the leader "saw" something. A timed-out <code>UserPromptSubmit</code> hook's context is discarded; <code>Stop</code> does not fire on an interrupt; hook context is invisible to you in the transcript. So "never lose" is defined by two delivery classes rather than by read receipts, and the leader never has to call an acknowledgement command.</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="card card-border border-primary/40"><div class="card-body py-4 text-sm space-y-2">
+      <h3 class="card-title text-base">Actionable items: never closed by delivery</h3>
+      <p class="opacity-85">Open decisions, ready PRs and reports, failures, blockers, divergences, overdue to-dos. Each stays open until something resolves it: your answer, a merge or decline, <code>flowryn dismiss</code>, a to-do marked done, or the reconciler seeing the resolution happen elsewhere (a PR merged on GitHub). Every briefing, including the one after compaction, and every <code>flowryn fleet</code> lists them. That is the "never lose" guarantee.</p>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 text-sm space-y-2">
+      <h3 class="card-title text-base">Informational items: at least once</h3>
+      <p class="opacity-85">Outcomes you should know but need not act on, like a yolo merge or an automatic resume. Stable ids. An item is <em>carried</em> when a hook returns it and <em>presented</em> only when the same session's next turn end follows (Claude <code>Stop</code>, Pi <code>agent_settled</code>). A turn with no turn end (interrupt, hook timeout, API error) means the item is carried again next turn, deduplicated by id. After 3 attempts it drops to the board.</p>
+    </div></div>
+  </div>
+
+  <svg class="fig w-full" viewBox="0 0 920 260" role="img" aria-labelledby="flowT">
+    <title id="flowT">Event path from source to the lanes</title>
+    <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker></defs>
+    <g id="f-in"><title>Sources: worker CLI calls, harness hooks, the reconciler, GitHub and no-mistakes watchers, the backlog watcher, to-do due dates</title><rect class="box" x="6" y="92" width="150" height="70" rx="8"/><text class="lbl" x="81" y="118" text-anchor="middle">Event in</text><text class="small" x="81" y="136" text-anchor="middle">CLI · hooks · reconciler</text><text class="small" x="81" y="151" text-anchor="middle">watchers · to-dos</text></g>
+    <path class="edge" d="M158,127 L184,127" marker-end="url(#a2)"/>
+    <g id="f-persist"><title>One transaction: the event row, the current-state change, and an item if the event needs attention</title><rect class="box" x="186" y="92" width="130" height="70" rx="8"/><text class="lbl" x="251" y="118" text-anchor="middle">Persist</text><text class="small" x="251" y="136" text-anchor="middle">event + state</text><text class="small" x="251" y="151" text-anchor="middle">+ item, one tx</text></g>
+    <path class="edge" d="M318,127 L344,127" marker-end="url(#a2)"/>
+    <g id="f-class"><title>Classify by the lane table: event kind decides lane and class; project priority and due date only order items within a lane</title><rect class="core" x="346" y="92" width="140" height="70" rx="8"/><text class="lbl" x="416" y="118" text-anchor="middle">Lane table</text><text class="small" x="416" y="136" text-anchor="middle">kind → lane + class</text><text class="small" x="416" y="151" text-anchor="middle">no score, no focus</text></g>
+    <path class="edge" d="M488,112 L556,44" marker-end="url(#a2)"/>
+    <path class="edge" d="M488,127 L556,129" marker-end="url(#a2)"/>
+    <path class="edge" d="M488,142 L556,214" marker-end="url(#a2)"/>
+    <g id="f-p0"><title>P0: needs you now. Notify at once; deliver after the current turn if busy; start a turn only if the leader is idle and you are inactive.</title><rect class="box" x="558" y="12" width="354" height="62" rx="8" style="stroke:var(--color-error)"/><text class="lbl" x="574" y="36">P0 · Needs you now</text><text class="small" x="574" y="56">notify now · after this turn · wake only if idle and you're away</text></g>
+    <g id="f-p1"><title>P1: attached to your next message as a digest of at most 5 lines</title><rect class="box" x="558" y="98" width="354" height="62" rx="8" style="stroke:var(--color-warning)"/><text class="lbl" x="574" y="122">P1 · Next time you speak</text><text class="small" x="574" y="142">≤ 5-line digest on your next message · never starts a turn</text></g>
+    <g id="f-p2"><title>P2: board and fleet only, zero leader tokens</title><rect class="box" x="558" y="184" width="354" height="62" rx="8"/><text class="lbl" x="574" y="208">P2 · Board only</text><text class="small" x="574" y="228">flowryn board · fleet on request · zero leader tokens</text></g>
+  </svg>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Lane</th><th>Event kinds</th><th>Class</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-error badge-sm">P0</span></td><td>A worker's blocking question · a failure that needs you (after the one automatic resume) · a sensitive or destructive action waiting for you</td><td>Actionable</td></tr>
+      <tr><td><span class="badge badge-warning badge-sm">P1</span></td><td>PR ready or merge-ready · review gate ready (design, visual QA) · scout report ready · non-blocking question · divergence · worker idle without an outcome or possibly stuck · unproven merge · backlog out of sync · trust dialog blocking a worker · overdue to-do</td><td>Actionable</td></tr>
+      <tr><td><span class="badge badge-warning badge-sm">P1</span></td><td>Yolo merge completed · phase started automatically · automatic resume happened · a steer finally acknowledged after re-rings</td><td>Informational</td></tr>
+      <tr><td><span class="badge badge-sm">P2</span></td><td>Progress reports, successful automatic actions, watcher noise</td><td>Informational, never pushed</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Lane</th><th>Leader busy</th><th>Idle, you active</th><th>Idle, you inactive</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge badge-error badge-sm">P0</span></td><td>After this turn: Claude Stop continuation, Pi <code>followUp</code>. Notify.</td><td>Notify; top of your next digest</td><td>Start a turn: Claude waiter; Pi <code>triggerTurn</code> only if a composer read is proven, otherwise notify only. Notify.</td></tr>
+      <tr><td><span class="badge badge-warning badge-sm">P1</span></td><td>Next digest</td><td>Next digest</td><td>Next digest; never starts a turn</td></tr>
+      <tr><td><span class="badge badge-sm">P2</span></td><td colspan="3">Never pushed</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-sm">Ordering, aging, limits</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>Within a lane: project priority, then due date, then age. An item never changes lane on its own.</li>
+        <li>Only actionable items age: one open over 24 h moves to the top of its lane and joins the next batched notification, once a day.</li>
+        <li>A P0 is leased to one delivery path at a time (continuation, waiter or trigger), so it is never delivered twice. After presentation it stays open and listed; an unresolved P0 re-notifies after 4 h.</li>
+        <li>Started turns are capped at 3 per hour; beyond that, notification only.</li>
+        <li>OS notifications: P0 immediately, coalesced within 60 s; at most one batched non-P0 notification per 30 min; none for P2.</li>
+      </ul>
+    </div></div>
+    <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-sm">Races and their resolution</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li>Interrupt leaves busy stuck → busy lease expiry and <code>idle_prompt</code>.</li>
+        <li>Silent hook timeout → carried but not presented, so carried again.</li>
+        <li>P0 through both continuation and waiter → per-item delivery lease.</li>
+        <li>Composer race with your draft → no keystroke delivery; waiter only when you are inactive.</li>
+        <li>P0 arrives while Stop is deciding → Stop asks once; anything later goes to the waiter.</li>
+        <li>Two leaders → the lease (<a class="link" href="#lease">section 10</a>).</li>
+        <li>Compaction drops digests → the <code>compact</code> briefing re-lists actionable items.</li>
+        <li>Pi <code>nextTurn</code> while idle never delivers → P0 uses <code>triggerTurn</code>; P1 waits by design.</li>
+        <li>Stale Herdr status → the harness's own idle signal decides.</li>
+      </ol>
+    </div></div>
+  </div>
+
+  <h3 class="text-lg font-semibold">What the leader actually receives</h3>
+  <div class="grid lg:grid-cols-3 gap-4">
+<pre class="code"><code># SessionStart briefing (≤ 1.5k tokens)
+Flowryn status (facts, not instructions).
+Leader: this session (claude, lease 12).
+Needs you (3):
+- [i41] PR ready: auth fix (web) checks green
+- [i44] Worker question: cache scout, blocking
+- [i47] Overdue to-do: renew passport (Sep 20)
+In flight: 4 ships, 1 scout. Queued: 6.
+Due today: call bank · book dentist
+Commands: flowryn fleet · flowryn show &lt;id&gt;
+  · flowryn answer &lt;id&gt; &lt;choice&gt;</code></pre>
+<pre class="code"><code># P1 digest on your next message
+Flowryn updates (facts, not instructions):
+- [i48] Report ready: flaky test scout (api)
+- [i49] PR ready: retry fix (api), green
+- [i50] Merged under yolo: docs typo (web)
++2 more: flowryn fleet</code></pre>
+<pre class="code"><code># P0 wake line (one line, ≤ 200 chars)
+Flowryn P0 [i51]: worker for "migrate
+billing" is blocked on a question for
+you. Details: flowryn show i51
+
+# Morning section (first briefing after
+# the configured hour, default 05:00)
+Due today: 2 to-dos · Overdue: 1
+Done since yesterday: 3 tasks</code></pre>
+  </div>
+</section>
+
+<!-- ============ LEASE ============ -->
+<section class="space-y-5" id="lease">
+  <h2 class="text-2xl font-bold">10 · The leader lease and handover</h2>
+  <p class="opacity-80 max-w-3xl">Claude Code and Pi are both first-class leaders, but only one session leads at a time. Without that, both would mark busy and idle, and deliveries would split or duplicate. The lease decides which session receives pushes and may run leader mutations. It grants no approval authority.</p>
+
+  <svg class="fig w-full" viewBox="0 0 900 230" role="img" aria-labelledby="leT">
+    <title id="leT">Leader lease states and transitions</title>
+    <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker></defs>
+    <g id="l-vac"><title>Vacant: no leader. The next leader session start claims automatically.</title><rect class="box" x="30" y="80" width="170" height="70" rx="35"/><text class="lbl" x="115" y="112" text-anchor="middle">Vacant</text><text class="small" x="115" y="130" text-anchor="middle">no pushes</text></g>
+    <g id="l-held"><title>Held at epoch n by one session: receives pushes, heartbeats on every hook or extension event and every 60 seconds</title><rect class="core" x="365" y="80" width="170" height="70" rx="35"/><text class="lbl" x="450" y="112" text-anchor="middle">Held (epoch n)</text><text class="small" x="450" y="130" text-anchor="middle">heartbeat ≤ 60 s</text></g>
+    <g id="l-stale"><title>Stale: no heartbeat for 10 minutes AND the reconciler shows the holder's process gone</title><rect class="box" x="700" y="80" width="170" height="70" rx="35"/><text class="lbl" x="785" y="112" text-anchor="middle">Stale</text><text class="small" x="785" y="130" text-anchor="middle">holder proven dead</text></g>
+    <path class="edge" d="M200,100 L363,100" marker-end="url(#a5)"/><text class="small" x="282" y="92" text-anchor="middle">session start: auto-claim</text>
+    <path class="edge" d="M363,132 L200,132" marker-end="url(#a5)"/><text class="small" x="282" y="150" text-anchor="middle">release · SessionEnd</text>
+    <path class="edge" d="M537,100 L698,100" marker-end="url(#a5)"/><text class="small" x="618" y="92" text-anchor="middle">no heartbeat + dead</text>
+    <path class="edge" d="M698,132 L537,132" marker-end="url(#a5)"/><text class="small" x="618" y="150" text-anchor="middle">session start: auto-claim, n+1</text>
+    <path class="edge" d="M420,78 C400,20 500,20 480,78" marker-end="url(#a5)"/><text class="small" x="450" y="24" text-anchor="middle">flowryn leader claim → n+1</text>
+    <text class="small" x="450" y="200" text-anchor="middle">A live but silent holder (a sleeping laptop) is never taken over automatically; only an explicit claim moves the lease.</text>
+  </svg>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Claim and handover</h3>
+      <ol class="list-decimal ml-5 space-y-1 opacity-90">
+        <li>A new leader session's start hook asks the daemon for the lease. Vacant or stale → claimed (epoch + 1). Held → this session becomes read-only.</li>
+        <li>You move leadership by asking the new session to run <code>flowryn leader claim</code>, or by running it in your shell with <code>--session &lt;id&gt;</code>.</li>
+        <li>On claim: epoch + 1; a new leader token and approval key are issued; the old waiter is told to exit 0 silently; informational items carried but not presented in the old session are re-queued; actionable items need nothing, because the new briefing lists them.</li>
+        <li>The old session's next hook or extension event shows one banner line: "leadership moved to pi in pane w3:p1".</li>
+      </ol>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Holder vs read-only session</h3>
+      <div class="overflow-x-auto"><table class="table table-xs">
+        <thead><tr><th></th><th>Holder</th><th>Read-only</th></tr></thead>
+        <tbody>
+          <tr><td>Briefing</td><td>Full</td><td>One banner line: "read-only: leader is claude in pane w1:p2"</td></tr>
+          <tr><td>Digests, P0</td><td>Yes</td><td>None</td></tr>
+          <tr><td><code>fleet</code>, <code>show</code></td><td>Yes</td><td>Yes</td></tr>
+          <tr><td><code>dispatch</code>, <code>steer</code>, <code>answer</code>, <code>merge</code>, <code>cleanup</code></td><td>Yes</td><td>Refused: <code>not_leader</code></td></tr>
+          <tr><td><code>leader claim</code></td><td>—</td><td>Yes</td></tr>
+        </tbody>
+      </table></div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============ WORKFLOWS ============ -->
+<section class="space-y-5" id="workflows">
+  <h2 class="text-2xl font-bold">11 · Workflows, capacity and autonomy</h2>
+  <p class="opacity-80 max-w-3xl">You work in a particular way. You review a design in Lavish, the crew builds and writes tests on its own, visual QA collects evidence you review in Lavish, you ask for changes until it looks right, and then it ships. You want the next phase to start as soon as the previous one lands. And you want many workers running at once, while heavy stages such as Docker environments, visual QA and no-mistakes stay under hard caps. Flowryn splits this into two parts. It owns <strong>when and whether</strong>: stages, human review gates, capacity and auto-dispatch, because those need durable state, supervision and human-bound approval. <strong>Skills</strong> own <strong>how</strong>: how to test a stack with a front end, back end and database, how to walk an app with <code>chrome-devtools-axi</code> and capture evidence, and how to build the Lavish evidence page.</p>
+
+  <svg class="fig w-full" viewBox="0 0 960 200" role="img" aria-labelledby="wfT">
+    <title id="wfT">The default feature workflow: stages, gates and capacity pools</title>
+    <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker></defs>
+    <g id="w-design"><title>Design stage: the worker builds the design as a Lavish page and iterates with you there</title><rect class="box" x="6" y="40" width="128" height="70" rx="8"/><text class="lbl" x="70" y="66" text-anchor="middle">Design</text><text class="small" x="70" y="84" text-anchor="middle">Lavish page</text><text class="tiny" x="70" y="100" text-anchor="middle">pool: worker</text></g>
+    <path class="edge" d="M136,75 L150,75" marker-end="url(#a6)"/>
+    <g id="w-gate1"><title>Review gate: you approve the design through a human channel, or send changes back</title><rect class="human" x="152" y="46" width="96" height="58" rx="29"/><text class="lbl" x="200" y="72" text-anchor="middle">You approve</text><text class="tiny" x="200" y="90" text-anchor="middle">review gate</text></g>
+    <path class="edge" d="M250,75 L264,75" marker-end="url(#a6)"/>
+    <g id="w-build"><title>Build stage: code plus generated tests that check the design's assumptions, run autonomously</title><rect class="box" x="266" y="40" width="128" height="70" rx="8"/><text class="lbl" x="330" y="66" text-anchor="middle">Build + tests</text><text class="small" x="330" y="84" text-anchor="middle">autonomous</text><text class="tiny" x="330" y="100" text-anchor="middle">pool: worker</text></g>
+    <path class="edge" d="M396,75 L410,75" marker-end="url(#a6)"/>
+    <g id="w-qa"><title>Visual QA stage: run the app in its Docker environments, walk it with chrome-devtools-axi, capture evidence, publish it as a Lavish page</title><rect class="box" x="412" y="40" width="140" height="70" rx="8"/><text class="lbl" x="482" y="66" text-anchor="middle">Visual QA</text><text class="small" x="482" y="84" text-anchor="middle">evidence → Lavish</text><text class="tiny" x="482" y="100" text-anchor="middle">pools: docker · browser</text></g>
+    <path class="edge" d="M554,75 L568,75" marker-end="url(#a6)"/>
+    <g id="w-gate2"><title>Review gate: you approve the QA evidence, or send changes back to Build with your words as a steer</title><rect class="human" x="570" y="46" width="96" height="58" rx="29"/><text class="lbl" x="618" y="72" text-anchor="middle">You approve</text><text class="tiny" x="618" y="90" text-anchor="middle">review gate</text></g>
+    <path class="edge" d="M668,75 L682,75" marker-end="url(#a6)"/>
+    <g id="w-ship"><title>Ship stage: the project's delivery mode, for example the no-mistakes pipeline through a PR</title><rect class="box" x="684" y="40" width="140" height="70" rx="8"/><text class="lbl" x="754" y="66" text-anchor="middle">Ship</text><text class="small" x="754" y="84" text-anchor="middle">no-mistakes → PR</text><text class="tiny" x="754" y="100" text-anchor="middle">pool: validation</text></g>
+    <path class="edge" d="M826,75 L840,75" marker-end="url(#a6)"/>
+    <g id="w-merge"><title>Merge gate: the approval channel of section 7</title><rect class="human" x="842" y="46" width="112" height="58" rx="29"/><text class="lbl" x="898" y="72" text-anchor="middle">Merge</text><text class="tiny" x="898" y="90" text-anchor="middle">approval (§7)</text></g>
+    <path id="w-changes" class="alert" d="M618,106 C618,170 330,170 330,114" marker-end="url(#a6)"><title>Changes requested: back to Build, with your words delivered as a steer</title></path>
+    <text class="small" x="474" y="186" text-anchor="middle">changes requested → back to Build with your words</text>
+  </svg>
+
+  <div class="grid lg:grid-cols-2 gap-4">
+<pre class="code"><code># config.toml — workflows are data; stage know-how is skills
+[workflows.feature]
+stages = [
+  { id = "design", skill = "flowryn-design", gate = "review" },
+  { id = "build",  skill = "flowryn-build-test" },
+  { id = "qa",     skill = "flowryn-visual-qa",
+    pools = ["docker_env", "browser"], gate = "review" },
+  { id = "ship",   pools = ["validation"], gate = "merge" },
+]
+[workflows.fix]        # the plain v1 ship
+stages = [ { id = "build" },
+  { id = "ship", pools = ["validation"], gate = "merge" } ]
+[workflows.scout]
+stages = [ { id = "investigate", gate = "none" } ]</code></pre>
+<pre class="code"><code>[capacity]             # hard caps; every run holds "worker"
+worker     = 20        # live worker panes
+validation = 5         # concurrent no-mistakes runs
+docker_env = 5         # local Docker environments
+browser    = 5         # visual QA browser sessions
+
+[capacity.host]        # checked before any new grant
+min_free_mem_gb   = 8
+max_load_per_core = 1.5
+
+[autonomy]
+default = "plan"       # plan | manual
+# plan: tasks from an approved plan start by
+# themselves when their blockers have landed</code></pre>
+  </div>
+
+  <div class="grid md:grid-cols-3 gap-4 text-sm">
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Stages and gates</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>A run moves through its workflow's stages in order. The lifecycle engine owns <code>runs.stage</code>. By default one worker and one worktree carry the whole run, so context survives. A stage with <code>fresh = true</code> gets a new worker, for example for an independent QA pass.</li>
+        <li>The worker finishes a stage with <code>flowryn stage done [--review &lt;url&gt;]</code>. It hosts the Lavish page itself, as Firstmate's workers do.</li>
+        <li>A <code>review</code> gate opens a P1 item: "design ready for review" with the link. You iterate with the worker inside Lavish. You pass the gate with a human channel: <code>flowryn approve &lt;task&gt; --gate design</code> or the board. The leader can also ask through its confirmation prompt with <code>flowryn gate pass</code>, which carries an ask rule. <code>flowryn gate changes &lt;task&gt; --body-file -</code> sends the run back to the named stage with your words.</li>
+        <li>Gates are human-bound like merges (<a class="link" href="#approval">section 7</a>). A worker saying "you approved it in Lavish" is not a pass.</li>
+      </ul>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Capacity pools</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>Each stage names the pools it needs. The scheduler starts a stage only when every pool has a free slot and the host check passes. Slots are rows in <code>pool_leases</code>, tied to run and stage.</li>
+        <li>Slots are released at stage end or run end. The reconciler also releases them when a run dies. A leak is impossible because no process holds a slot, only a row.</li>
+        <li>A waiting worker is never held in a blocking call. It ends its turn, and the daemon wakes it with a steer when the slot is granted.</li>
+        <li>Grant order is "drain before fill": stages closer to shipping first, then project priority, then age. With the caps above, about 15 workers build while 5 validate, and QA never exceeds 5 Docker environments.</li>
+        <li>Docker evidence: the worker labels containers <code>flowryn.run=&lt;id&gt;</code>. The reconciler counts them with <code>docker ps --filter label=…</code>. Running more than the lease allows is a divergence.</li>
+      </ul>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Autonomy: phases continue by themselves</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>A phased feature is a plan, filed as tasks chained with <code>blocked-by</code> (<code>flowryn plan &lt;project&gt; --body-file plan.md</code>). A plan is usually the output of a design stage, so approving the design approves the plan.</li>
+        <li>When a task lands (merge proven and cleanup done), the scheduler re-evaluates immediately, in code, with no leader turn. Every queued task from an approved plan whose blockers have all landed starts as soon as capacity allows. You get one informational line: "phase 2 of checkout started".</li>
+        <li>A phase starts only after its blockers have <em>landed</em>, never on an open PR, so no phase builds on unreviewed code (decided in review). Stacking on an open PR may become a per-plan option after v1.</li>
+        <li>Tasks you dispatch ad hoc stay <code>manual</code> unless you pass <code>--auto</code>.</li>
+        <li>Autonomy never skips a gate, never merges without the merge rules, and pauses while a Claude usage limit is active.</li>
+      </ul>
+    </div></div>
+  </div>
+
+  <div class="card card-border border-primary/40"><div class="card-body py-4 text-sm space-y-2">
+    <h3 class="card-title text-base">Terse by default: output tokens are spent on outcomes</h3>
+    <p class="opacity-85">Flowryn already keeps input small with pointers, capped digests and <code>show</code> on demand. For output, <code>flowryn lead</code> appends a short style block to the leader's system prompt. That is Claude Code's <code>--append-system-prompt</code> and Pi's equivalent <span class="m0">M0</span>. The same block leads every worker's instructions. It is stable text, so prompt caching still holds. It is configurable in <code>[style]</code> and can be turned off, so your global <code>AGENTS.md</code> stays optional.</p>
+<pre class="code"><code>Reply in the fewest words that carry the outcome. No preamble, no recap of
+tool output, no restating the request. Prefer a short list. At most 5 lines
+unless asked for detail; offer "flowryn show &lt;id&gt;" instead of pasting.</code></pre>
+  </div></div>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Lives in Flowryn (code, durable state)</th><th>Lives in skills (worker know-how)</th></tr></thead>
+    <tbody>
+      <tr><td>Stage order, gates, who may pass a gate</td><td><code>flowryn-design</code>: turning an ask into a reviewable Lavish design and a phase plan</td></tr>
+      <tr><td>Capacity pools, host check, grant order</td><td><code>flowryn-build-test</code>: a generic test approach per layer (front end, back end, database) and tests that check the design's assumptions</td></tr>
+      <tr><td>Auto-dispatch of unblocked phases</td><td><code>flowryn-visual-qa</code>: starting the environments, walking flows with <code>chrome-devtools-axi</code>, capturing screenshots and logs, building the Lavish evidence page</td></tr>
+      <tr><td>Evidence: gate records, pool leases, Docker labels</td><td>Your project conventions, in the project's own <code>AGENTS.md</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ CLI ============ -->
+<section class="space-y-5" id="cli">
+  <h2 class="text-2xl font-bold">12 · The CLI design</h2>
+  <p class="opacity-80 max-w-3xl">One command registry serves every surface: you, the leader, workers, hooks, bridges and the board. It works on any harness with a shell, carries identity through the environment, can spool when the daemon is down, and lets anyone reproduce any call by hand. The optional MCP wrapper, if ever built, is generated from the same registry and gets no extra capability.</p>
+
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Role (from the token)</th><th>Verbs</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Leader</strong><br><span class="text-xs opacity-70">mutations need the lease</span></td><td><code>dispatch</code> · <code>plan</code> · <code>promote</code> · <code>steer</code> · <code>answer</code> · <code>dismiss</code> · <code>merge</code> · <code>decline</code> · <code>gate pass|changes</code> · <code>cleanup</code> · <code>fleet</code> · <code>show</code> · <code>brief</code> · <code>todo add|list|done|due</code> · <code>project add|set|list</code> · <code>divergence resolve</code> · <code>leader status|claim</code></td></tr>
+      <tr><td><strong>Worker</strong><br><span class="text-xs opacity-70">bound to one run</span></td><td><code>report</code> · <code>ask</code> · <code>inbox</code> · <code>ack</code> · <code>stage done</code> · <code>deliver</code> · <code>fail</code></td></tr>
+      <tr><td><strong>Hook</strong><br><span class="text-xs opacity-70">called only by hooks and the extension</span></td><td><code>hook session-start|prompt|pre-tool|post-tool|stop|stop-failure|session-end|notify|wait-p0|worker-start|wait-steer</code></td></tr>
+      <tr><td><strong>Human</strong><br><span class="text-xs opacity-70">no token, a TTY</span></td><td><code>approve [--gate]</code> · <code>board</code> · <code>init</code> · <code>doctor</code> · <code>daemon start|stop|status</code> · <code>lead [--pi]</code> · <code>leader claim --session</code> · <code>config</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="grid lg:grid-cols-2 gap-4">
+<pre class="code"><code>$ flowryn fleet
+fleet[4]{id,kind,project,state,age,needs}:
+  web-auth-fix-k2,ship,web,ready,2h,merge
+  api-flaky-p7,scout,api,ready,40m,read
+  billing-mig-q4,ship,billing,blocked,5m,answer
+  web-docs-z1,ship,web,running,12m,-
+open: P0 1 · P1 2
+hints[2]:
+  flowryn show &lt;id&gt;
+  flowryn answer &lt;item&gt; &lt;choice&gt;</code></pre>
+<pre class="code"><code>$ flowryn merge web-auth-fix-k2
+error: merge refused: no approval for head 3f2a91c
+code: approval_required
+help: approve in your shell:
+  flowryn approve web-auth-fix-k2
+
+$ flowryn dispatch web --kind ship --body-file - &lt;&lt;'EOF'
+Fix the login redirect loop after SSO.
+EOF
+task: web-login-loop-q4
+run: r01J8Z… harness: claude mode: no-mistakes yolo: off</code></pre>
+  </div>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Output format</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>TOON by default, in axi house style; <code>--json</code> for hooks, bridges and scripts.</li>
+        <li>Every response ends with at most two next-step hints.</li>
+        <li>Errors print <code>error:</code>, <code>code:</code> and <code>help:</code> lines, with a stable machine code.</li>
+        <li>Free text goes in through <code>--body-file -</code> (stdin), never through shell quoting.</li>
+      </ul>
+      <div class="overflow-x-auto"><table class="table table-xs">
+        <thead><tr><th>Exit</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>ok (also a read served read-only while the daemon is down, with a banner)</td></tr>
+          <tr><td>2</td><td>policy refusal (<code>approval_required</code>, <code>red_checks</code>, <code>not_landed</code>)</td></tr>
+          <tr><td>3</td><td>validation error</td></tr>
+          <tr><td>4</td><td>not found</td></tr>
+          <tr><td>69</td><td>daemon unavailable, and this verb cannot spool</td></tr>
+          <tr><td>75</td><td>spooled; will be delivered</td></tr>
+          <tr><td>76</td><td>protocol mismatch between CLI and daemon</td></tr>
+          <tr><td>77</td><td>role refused (<code>not_leader</code>, <code>worker_token</code>, <code>human_only</code>)</td></tr>
+        </tbody>
+      </table></div>
+    </div></div>
+    <div class="card card-border"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-base">Token budget</h3>
+      <div class="overflow-x-auto"><table class="table table-xs">
+        <thead><tr><th>Surface</th><th>Cap</th></tr></thead>
+        <tbody>
+          <tr><td>Skill description, always loaded</td><td>≤ 60 tokens</td></tr>
+          <tr><td>Skill body, on demand</td><td>≤ 1.5k tokens</td></tr>
+          <tr><td>Worker contract block</td><td>~10 lines, ~150 tokens</td></tr>
+          <tr><td>SessionStart briefing</td><td>≤ 1.5k tokens and under 10,000 characters (Claude moves longer hook output to a file with a 2,000-character preview)</td></tr>
+          <tr><td>P1 digest</td><td>≤ 5 lines, &lt; 2,000 characters</td></tr>
+          <tr><td>P0 line</td><td>1 line, ≤ 200 characters</td></tr>
+          <tr><td><code>fleet</code></td><td>≤ 20 rows, ~400 tokens worst case (~20 tokens per TOON row, measured on <code>tasks-axi list</code>)</td></tr>
+          <tr><td><code>show</code></td><td>≤ 40 lines unless <code>--full</code></td></tr>
+          <tr><td>Worker text in any digest</td><td>≤ 200 characters, sanitized, quoted</td></tr>
+        </tbody>
+      </table></div>
+    </div></div>
+  </div>
+
+  <div class="grid md:grid-cols-2 gap-4 text-sm">
+    <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-sm">Identity and transport</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li>At launch, the daemon sets <code>FLOWRYN_RUN</code>, <code>FLOWRYN_TOKEN</code> (a per-run capability), <code>FLOWRYN_BIN</code> (absolute path, so workers never depend on <code>PATH</code>), <code>FLOWRYN_SOCK</code> and <code>FLOWRYN_PROTO</code> on the Herdr <code>pane.split</code> call.</li>
+        <li>The leader token comes from the lease (<a class="link" href="#adapters">section 5</a>). Tokens are stored only as hashes.</li>
+        <li>Commands never infer a task from the working directory.</li>
+        <li>JSON over a local socket. On macOS: a Unix socket at <code>~/.flowryn/run/flowrynd.sock</code> in a mode-0700 directory; the path is fixed and short because macOS limits socket paths to 104 bytes. All socket code sits behind <code>src/transport/</code> (see Portability below).</li>
+        <li>Envelope <code>{proto, ulid, verb, token, args}</code>; reply <code>{ok, data | error{code, message, help}, hints}</code>. Every call starts with a protocol check.</li>
+        <li>Every mutation carries a client-generated ULID. The daemon keeps replies for 7 days, so a retry returns the original result.</li>
+      </ul>
+    </div></div>
+    <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
+      <h3 class="card-title text-sm">When the daemon is down</h3>
+      <ul class="list-disc ml-5 space-y-1 opacity-90">
+        <li><strong>Worker verbs</strong> (<code>report</code>, <code>ask</code>, <code>deliver</code>, <code>fail</code>) try the socket with a 300 ms connect and 2 s reply timeout, then write <code>&lt;data&gt;/spool/&lt;run&gt;/&lt;ulid&gt;.json</code> atomically, print <code>spooled: &lt;ulid&gt;</code>, and exit 75. One writer per file. The daemon ingests at startup and on every pass, deduplicated by ULID.</li>
+        <li><strong><code>ask</code></strong> never holds a call open. It returns a decision id (or <code>spooled</code>); the worker ends its turn; the answer arrives as a steer.</li>
+        <li><strong>Hooks</strong> use a 300 ms connect timeout and step aside silently: exit 0, no output. A slow daemon never stalls your prompt.</li>
+        <li><strong>Reads</strong> (<code>fleet</code>, <code>show</code>, <code>board</code>) open SQLite read-only (WAL allows concurrent readers) with a "daemon down" banner.</li>
+        <li><strong>Leader mutations</strong> exit 69 with <code>help: flowryn daemon status</code>.</li>
+      </ul>
+    </div></div>
+  </div>
+
+  <div class="alert alert-soft text-sm"><span><strong>Portability.</strong> A Unix socket does not suit native Windows, so transport is an interface, not a path. <strong>macOS</strong> (v1): Unix socket, launchd. <strong>Linux</strong> (after v1): the same Unix socket, with a systemd user unit instead of launchd. <strong>Windows</strong>: the supported path is WSL2, where Unix sockets, git and the terminal runtime behave as on Linux. A native Windows build would use a named pipe (<code>\\.\pipe\flowryn-&lt;user&gt;</code>) restricted to your account, a scheduled task instead of launchd, and the console device instead of <code>/dev/tty</code> for the approval code. It would also need a runtime, because Herdr on native Windows is unverified. Every surface calls the same verbs, so none of this reaches the command registry.</span></div>
+
+  <h3 class="text-lg font-semibold">Teaching the agents</h3>
+  <div class="grid lg:grid-cols-2 gap-4">
+<pre class="code"><code># Worker contract: embedded in every worker's
+# instructions (not a skill it might not load)
+You are a Flowryn worker. Call $FLOWRYN_BIN only.
+Be terse: outcomes only, no recaps.
+- Report only changes a supervisor would act on:
+  $FLOWRYN_BIN report blocked --body-file -
+- Need a decision: $FLOWRYN_BIN ask --options a,b
+  [--blocking]. It returns at once; end your turn.
+  The answer arrives as a steer.
+- When told a steer is waiting: $FLOWRYN_BIN inbox,
+  act on it, then $FLOWRYN_BIN ack &lt;id&gt;.
+- Stage finished: $FLOWRYN_BIN stage done
+  [--review &lt;lavish url&gt;]; then wait for a steer.
+- Finished: $FLOWRYN_BIN deliver --pr &lt;url&gt; (ship)
+  or --report &lt;path&gt; (scout). It is verified.
+- Cannot finish: $FLOWRYN_BIN fail --body-file -
+- Exit 75 means spooled. Do not retry in a loop.
+- Never merge, clean up, or approve anything.</code></pre>
+<pre class="code"><code>// Leader settings, passed by `flowryn lead`
+// with --settings (never your global settings)
+{
+  "permissions": {
+    "allow": ["Bash(flowryn *)"],
+    "ask":   ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)",
+              "Bash(flowryn cleanup * --discard*)"],
+    "deny":  ["Bash(flowryn approve*)",
+              "Bash(flowryn hook *)"]
+  },
+  "hooks": {
+    "SessionStart":     "flowryn hook session-start",
+    "UserPromptSubmit": "flowryn hook prompt",
+    "PreToolUse":       "flowryn hook pre-tool",
+    "PostToolUse":      "flowryn hook post-tool",
+    "Stop": ["flowryn hook stop",
+      {"cmd": "flowryn hook wait-p0",
+       "asyncRewake": true, "timeout": 28800}],
+    "StopFailure":  "flowryn hook stop-failure",
+    "SessionEnd":   "flowryn hook session-end",
+    "Notification": "flowryn hook notify"
+  }
+}  // shape abbreviated; exact schema per hooks docs</code></pre>
+  </div>
+  <p class="text-sm opacity-80">The leader gets one <code>flowryn</code> skill: a short description loaded always, the body on demand. The briefing names the three commands it needs most. The narrow allow rule survives auto mode, which drops only blanket interpreter rules. Deny beats ask beats allow, so the leader can never run <code>approve</code> or a <code>hook</code> verb through its shell.</p>
+</section>
+
+<!-- ============ SCHEMA ============ -->
+<section class="space-y-4" id="schema">
+  <h2 class="text-2xl font-bold">13 · The SQLite schema</h2>
+  <p class="opacity-80 max-w-3xl"><code>&lt;state_dir&gt;/flowryn.db</code>, WAL mode, foreign keys on, <code>busy_timeout</code> 5 s. Every mutation is one transaction that also appends to <code>events</code>. Migrations are numbered, forward-only and transactional. A nightly <code>VACUUM INTO</code> keeps 7 dated backups. There is no retention compaction in v1. Times are Unix milliseconds; JSON columns are TEXT.</p>
+<pre class="code"><code>CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);  -- schema_version, instance_id
+
+CREATE TABLE events (                 -- append-only: code never updates or deletes
+  seq INTEGER PRIMARY KEY, ulid TEXT UNIQUE NOT NULL, ts INTEGER NOT NULL,
+  source TEXT NOT NULL,               -- cli|hook|herdr|github|nomistakes|backlog|reconciler|daemon
+  run_id TEXT, task_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE INDEX events_run ON events(run_id, seq);
+
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY, repo_url TEXT NOT NULL, path TEXT NOT NULL, default_branch TEXT NOT NULL,
+  delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('no-mistakes','direct-PR','local-only')),
+  yolo INTEGER NOT NULL DEFAULT 0, priority INTEGER NOT NULL DEFAULT 2,
+  harness TEXT NOT NULL DEFAULT 'claude' CHECK (harness IN ('claude','pi')),
+  workflow TEXT NOT NULL DEFAULT 'fix', autonomy TEXT NOT NULL DEFAULT 'plan');
+
+CREATE TABLE task_policy (            -- task identity itself lives in tasks-axi
+  task_id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+  kind TEXT NOT NULL CHECK (kind IN ('ship','scout')),
+  delivery_mode TEXT NOT NULL, yolo INTEGER NOT NULL, sensitive INTEGER NOT NULL DEFAULT 0,
+  workflow TEXT NOT NULL, auto INTEGER NOT NULL DEFAULT 0,   -- auto: from an approved plan
+  reason TEXT, created_at INTEGER NOT NULL);
+
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task_policy(task_id),
+  harness TEXT NOT NULL, harness_version TEXT NOT NULL, model TEXT, effort TEXT,
+  state TEXT NOT NULL,     -- launching|running|validating|ready|merging|landed|cleaned|failed|cancelled
+  liveness TEXT NOT NULL,  -- starting|busy|idle|blocked_dialog|dead|orphaned|unknown
+  workflow TEXT NOT NULL, stage TEXT NOT NULL,   -- current workflow stage id
+  herdr_session TEXT, pane_id TEXT, agent_session TEXT,
+  worktree_path TEXT NOT NULL, branch TEXT NOT NULL, base_sha TEXT NOT NULL,
+  proc_pid INTEGER, proc_start INTEGER, proc_exe TEXT,
+  token_hash TEXT NOT NULL, resume_count INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER NOT NULL, ended_at INTEGER, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX one_open_run_per_task ON runs(task_id)
+  WHERE state NOT IN ('cleaned','failed','cancelled');
+
+CREATE TABLE run_evidence (           -- latest observation per source
+  run_id TEXT NOT NULL REFERENCES runs(id), source TEXT NOT NULL, rank INTEGER NOT NULL,
+  value TEXT NOT NULL, observed_at INTEGER NOT NULL, PRIMARY KEY (run_id, source));
+
+CREATE TABLE divergences (
+  id TEXT PRIMARY KEY, run_id TEXT, task_id TEXT, higher TEXT NOT NULL, lower TEXT NOT NULL,
+  summary TEXT NOT NULL, opened_at INTEGER NOT NULL, resolved_at INTEGER, resolution TEXT);
+
+CREATE TABLE decisions (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, run_id TEXT, question TEXT NOT NULL,
+  options TEXT NOT NULL, blocking INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('open','answered','dismissed')),
+  answer TEXT, answered_via TEXT, answered_at INTEGER);
+
+CREATE TABLE items (
+  id TEXT PRIMARY KEY,                -- short pointer id, e.g. i41
+  event_seq INTEGER NOT NULL REFERENCES events(seq),
+  class TEXT NOT NULL CHECK (class IN ('actionable','info')),
+  lane TEXT NOT NULL CHECK (lane IN ('P0','P1','P2')),
+  kind TEXT NOT NULL, task_id TEXT, run_id TEXT, decision_id TEXT,
+  line TEXT NOT NULL,                 -- sanitized, ≤ 200 chars
+  state TEXT NOT NULL DEFAULT 'open', -- open|presented|resolved|dismissed|dropped
+  resolved_by TEXT, opened_at INTEGER NOT NULL, resolved_at INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0, last_notified_at INTEGER);
+CREATE INDEX items_open ON items(lane, state) WHERE state IN ('open','presented');
+
+CREATE TABLE presentations (
+  item_id TEXT NOT NULL REFERENCES items(id), session_id TEXT NOT NULL, turn_no INTEGER NOT NULL,
+  path TEXT NOT NULL,                 -- briefing|digest|continuation|waiter|trigger
+  state TEXT NOT NULL,                -- carried|presented|lost
+  carried_at INTEGER NOT NULL, confirmed_at INTEGER,
+  PRIMARY KEY (item_id, session_id, turn_no));
+CREATE UNIQUE INDEX one_p0_path ON presentations(item_id)
+  WHERE state = 'carried' AND path IN ('continuation','waiter','trigger');
+
+CREATE TABLE leader_sessions (
+  session_id TEXT PRIMARY KEY, harness TEXT NOT NULL, pane_id TEXT, turn_no INTEGER NOT NULL DEFAULT 0,
+  busy INTEGER NOT NULL DEFAULT 0, busy_until INTEGER, user_inactive_since INTEGER,
+  waiter_id TEXT, triggered_turns_hour INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER);
+
+CREATE TABLE leader_lease (
+  id INTEGER PRIMARY KEY CHECK (id = 1), session_id TEXT, harness TEXT, pane_id TEXT,
+  epoch INTEGER NOT NULL, token_hash TEXT, approval_key_hash TEXT,
+  claimed_at INTEGER, heartbeat_at INTEGER);
+
+CREATE TABLE messages (               -- steers to workers
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), body TEXT NOT NULL,
+  created_at INTEGER NOT NULL, rings INTEGER NOT NULL DEFAULT 0, last_rung_at INTEGER,
+  carried_at INTEGER, acked_at INTEGER);
+
+CREATE TABLE approval_attempts (      -- Claude PreToolUse records
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, tool_use_id TEXT NOT NULL,
+  args_hash TEXT NOT NULL, permission_mode TEXT NOT NULL,
+  created_at INTEGER NOT NULL, matched_at INTEGER);
+
+CREATE TABLE approvals (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('claude-ask','pi-confirm','cli-tty','board','yolo')),
+  actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',   -- merge|gate|discard|remove-project
+  allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed_at INTEGER);
+
+CREATE TABLE merges (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  approval_id TEXT NOT NULL REFERENCES approvals(id), requested_at INTEGER NOT NULL,
+  state TEXT NOT NULL,                -- requested|merged|unproven|refused
+  merge_sha TEXT, proven_at INTEGER);
+
+CREATE TABLE gates (                  -- review and merge gates per run stage
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), stage TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('review','merge')), review_url TEXT,
+  state TEXT NOT NULL CHECK (state IN ('open','passed','changes')),
+  approval_id TEXT REFERENCES approvals(id), feedback TEXT,
+  opened_at INTEGER NOT NULL, closed_at INTEGER);
+
+CREATE TABLE pool_leases (            -- capacity slots; a row, never a process
+  pool TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id), stage TEXT NOT NULL,
+  granted_at INTEGER NOT NULL, released_at INTEGER,
+  PRIMARY KEY (pool, run_id, stage));
+CREATE INDEX pool_live ON pool_leases(pool) WHERE released_at IS NULL;
+
+CREATE TABLE intents (
+  id TEXT PRIMARY KEY, seq INTEGER UNIQUE NOT NULL, file TEXT NOT NULL,  -- backlog|todos
+  verb TEXT NOT NULL, args TEXT NOT NULL, task_id TEXT,
+  state TEXT NOT NULL CHECK (state IN ('pending','applied','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+  created_at INTEGER NOT NULL, applied_at INTEGER);
+
+CREATE TABLE backlog_snapshot (file TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+  parsed TEXT NOT NULL, read_at INTEGER NOT NULL);
+CREATE TABLE artifacts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('pr','report','file')), ref TEXT NOT NULL,
+  head_sha TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE idempotency (ulid TEXT PRIMARY KEY, verb TEXT NOT NULL,
+  reply TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE spool_ingested (ulid TEXT PRIMARY KEY, run_id TEXT, ingested_at INTEGER NOT NULL);
+CREATE TABLE notifications (id TEXT PRIMARY KEY, item_ids TEXT NOT NULL,
+  channel TEXT NOT NULL, sent_at INTEGER NOT NULL);
+CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
+  passed_at INTEGER NOT NULL, report_path TEXT, PRIMARY KEY (harness, version));</code></pre>
+</section>
+
+<!-- ============ SAFEGUARDS ============ -->
+<section class="space-y-5" id="safeguards">
+  <h2 class="text-2xl font-bold">14 · Safeguards carried over from Firstmate</h2>
+  <p class="opacity-80 max-w-3xl">These took Firstmate the longest to get right. Each has a named invariant, one owning module, and tests ported from Firstmate before the module is written.</p>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Safeguard</th><th>Invariant</th><th>Owner</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Unlanded-work guard</strong></td><td>Cleanup removes a worktree only when its work is landed: reachable from a remote-tracking branch (a fork counts); or its PR is merged and the PR head contains the local work; or its content is already in an up-to-date default branch (squash-merge, then branch deleted). Uncommitted changes never count. Unreachable forge plus absent content refuses. Discarding needs a human-channel approval with action <code>discard</code>.</td><td class="own">policy/cleanup-guard</td></tr>
+      <tr><td><strong>Cleanup order</strong></td><td>Abort the run's own parked no-mistakes run (only when proven its own, never another branch's), then reap leaked processes by identity (never a reused pid), then remove the worktree. Never delete a live git <code>index.lock</code>.</td><td class="own">policy/cleanup-guard</td></tr>
+      <tr><td><strong>Merge authority</strong></td><td>A merge needs yolo or a human approval record bound to the PR head; sensitive work needs a human record even under yolo.</td><td class="own">policy/merge</td></tr>
+      <tr><td><strong>Red-merge refusal</strong></td><td>Never merge red. One named check may be waived, only by a human channel, with every other check green.</td><td class="own">policy/merge</td></tr>
+      <tr><td><strong>Unproved merge is not landed</strong></td><td>A task is landed only when the PR reads merged with a merge SHA, or local-only work is on the local default branch.</td><td class="own">policy/merge + reconciler</td></tr>
+      <tr><td><strong>Named-head gate</strong></td><td><code>deliver --pr</code> is accepted only if the PR exists, is not a draft, and its head SHA is on the remote and equals the worker's HEAD.</td><td class="own">lifecycle/deliver</td></tr>
+      <tr><td><strong>Isolation assertion</strong></td><td>The worker-start report must show cwd inside the run's worktree, the project's git common dir, a top-level that is not the primary checkout, and the run's branch. Otherwise interrupt, exit, fail.</td><td class="own">lifecycle/dispatch</td></tr>
+      <tr><td><strong>Primary checkout tangle</strong></td><td>Dispatch refuses when a project's primary checkout is off its default branch; a P1 names it. Nothing is changed automatically.</td><td class="own">lifecycle/dispatch</td></tr>
+      <tr><td><strong>Validation gate boundary</strong></td><td>Processes inside the no-mistakes gate carry no Flowryn token, so they cannot reach fleet verbs <span class="m0">M0</span>.</td><td class="own">api/auth</td></tr>
+      <tr><td><strong>no-mistakes run ownership</strong></td><td>The worker that starts a run owns every <code>axi run</code> and <code>axi respond</code>. flowrynd only reads status. Ask-user findings become decisions, answered as steers to the same worker. Supersession: abort, settle branch custody, rebuild from the correct base, validate once.</td><td class="own">worker contract; watch/nomistakes (read-only)</td></tr>
+      <tr><td><strong>Single writer</strong></td><td>Exclusive flock on the state directory and an exclusive socket bind at startup; a second daemon exits with a message.</td><td class="own">daemon main</td></tr>
+      <tr><td><strong>Single leader</strong></td><td>One lease holder receives pushes and runs leader mutations.</td><td class="own">lease</td></tr>
+      <tr><td><strong>Restart is a non-event</strong></td><td>Journal replay, spool ingest and reconcile on every start; an item is closed only by its resolution, never by delivery.</td><td class="own">reconcile, journal, attention</td></tr>
+      <tr><td><strong>Never adopt by label</strong></td><td>Reattach needs pane, worktree and process identity to all match.</td><td class="own">reconcile</td></tr>
+      <tr><td><strong>Forced removal gated</strong></td><td>Herdr <code>worktree.remove</code> with <code>force</code> only after the guard allowed a discard.</td><td class="own">runtime/herdr + policy</td></tr>
+      <tr><td><strong>Human-bound gates</strong></td><td>A review gate passes only with an approval record (action <code>gate</code>) from a human channel; a worker's claim is never a pass.</td><td class="own">policy/merge + lifecycle</td></tr>
+      <tr><td><strong>Capacity caps</strong></td><td>Live pool leases never exceed a pool's cap. A stage starts only after its grant. The reconciler releases the leases of dead runs and flags containers beyond a run's lease.</td><td class="own">sched + reconcile</td></tr>
+      <tr><td><strong>Untrusted worker text</strong></td><td>Sanitized, truncated and quoted before any digest.</td><td class="own">attention</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3 class="text-lg font-semibold">Cleanup-guard fixtures, ported from <code>tests/fm-teardown.test.sh</code></h3>
+  <p class="text-sm opacity-80 max-w-3xl">Each case becomes a language-neutral fixture: a JSON manifest (delivery mode, forge answers, expected verdict) plus a shell script that builds the git state with a bare "origin", optionally a fork remote, and a fake forge. Flowryn's TypeScript guard must pass all of them before it is used. Names are kept from Firstmate so the two can be compared.</p>
+  <div class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>local_only_fork_remote</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>local_only_truly_unpushed</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>local_only_merged_to_local_main</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>no_mistakes_origin_remote</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>no_mistakes_truly_unpushed</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>squash_merged_branch_deleted</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>squash_merged_pr_when_head_ancestor_of_pr_head</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>no_pr_recorded_discovers_merged_pr_by_branch</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>squash_merged_pr_replayed_unpushed_patch</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>merged_pr_with_later_local_commit</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>squash_merged_rebased_branch</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>squash_merged_same_file_different_content</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>squash_merged_rebased_local_with_unlanded_commit</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>squash_merged_stale_local_when_forge_unreachable</code></div>
+    <div><span class="badge badge-ghost badge-xs">record</span> <code>pr_check_does_not_refresh_stale_pr_head</code></div>
+    <div><span class="badge badge-ghost badge-xs">record</span> <code>pr_check_records_remote_head_when_local_lags</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>content_in_default_fallback</code></div>
+    <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>content_fallback_refreshes_stale_origin_ref</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>dirty_worktree</code></div>
+    <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>gh_error_and_content_absent</code></div>
+    <div><span class="badge badge-warning badge-soft badge-xs">discard</span> <code>local_only_force_overrides_unpushed</code> → only with a human <code>discard</code> approval</div>
+  </div>
+  <p class="text-sm opacity-75">A second fixture set, for M4, ports the index-lock cases (stale lock cleared, live lock never removed, lookup errors refuse) and the process-reap and parked-run-abort ordering cases. Firstmate's legacy-record, secondmate and Herdr-projection cases have no Flowryn counterpart and are not ported.</p>
+</section>
+
+<!-- ============ SETUP ============ -->
+<section class="space-y-5" id="setup">
+  <h2 class="text-2xl font-bold">15 · Setup and init</h2>
+  <p class="opacity-80 max-w-3xl"><code>flowryn init</code> is interactive and runs only in your own terminal. It detects first, asks, and writes nothing until you confirm. It can be re-run to change any answer.</p>
+  <ul class="steps steps-vertical">
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Preflight.</strong> macOS; Herdr at or above the pinned minimum with protocol 17; Claude Code and/or Pi versions; git; <code>gh</code> authenticated; tasks-axi at the pinned version; no-mistakes (optional). Missing tools are listed with their install command; nothing is installed without your yes.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Data (artifacts) directory.</strong> Where reports, spool and large artifacts go. Default <code>~/.flowryn/data</code>. Any path is allowed; a path under Documents, Desktop or iCloud gets a warning about macOS privacy prompts for a background binary.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>State directory.</strong> Holds <code>flowryn.db</code>, its lock and logs. Default <code>~/.flowryn/state</code>. Refused under iCloud, Dropbox, Documents or other synced folders, because SQLite WAL on a synced folder risks corruption. The socket always lives in <code>~/.flowryn/run/</code>.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>tasks-axi location.</strong> Paths for <code>backlog.md</code> and <code>todos.md</code> (default in the data directory; an existing backlog may be adopted). init runs <code>tasks-axi list --file … --json</code> on each to prove it can read and write them.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Tool paths.</strong> Records absolute paths for tasks-axi, node, git, gh, herdr, claude, pi and no-mistakes, resolving symlinks. tasks-axi under an nvm directory is flagged, because it breaks on the next Node upgrade. The daemon checks every path at startup.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Leaders.</strong> Claude Code, Pi, or both. Writes the leader settings file and the Pi extension into <code>~/.flowryn/leader/</code>, and installs the <code>flowryn</code> skill there. You start a leader with <code>flowryn lead</code> or <code>flowryn lead --pi</code>; your global harness settings are never edited.</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Workers.</strong> One static profile per harness (model, effort, permission mode). Capacity pools and the host check (defaults: 20 workers, 5 validation, 5 Docker environments, 5 browsers). Workflows (feature, fix, scout) and the default autonomy. The terse style block. Morning-briefing hour (default 05:00).</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Projects.</strong> <code>flowryn project add &lt;repo&gt;</code> for each, with default delivery mode and yolo posture (default <code>no-mistakes</code>, yolo off).</div></li>
+    <li class="step step-primary"><div class="text-left py-1 text-sm"><strong>Service.</strong> Writes a launchd agent with absolute paths, an explicit <code>PATH</code>, <code>KeepAlive</code> and log paths (Flowryn rotates its own logs), starts the daemon, then runs <code>flowryn doctor --contracts</code>.</div></li>
+  </ul>
+<pre class="code"><code># ~/.flowryn/config.toml (written by init; editable; SIGHUP reloads)
+data_dir  = "~/.flowryn/data"
+state_dir = "~/.flowryn/state"
+morning_hour = 5
+
+[tasks]
+backlog = "~/.flowryn/data/backlog.md"
+todos   = "~/.flowryn/data/todos.md"
+
+[tools]
+tasks_axi = "/Users/me/.nvm/versions/node/v22.16.0/bin/tasks-axi"
+herdr = "/opt/homebrew/bin/herdr"   # … one line per tool
+
+[workers.claude]
+model = "opus"
+effort = "high"
+permission_mode = "bypass"   # default; "auto" per project (decided in review)
+[workers.pi]
+model = "…"
+effort = "medium"
+
+[style]
+terse = true   # appended to leader system prompt and worker instructions
+
+# [capacity], [capacity.host], [autonomy], [workflows.*]: see section 11
+
+[notify]
+min_interval_min = 30
+p0_coalesce_s = 60
+max_triggered_turns_per_hour = 3</code></pre>
+</section>
+
+<!-- ============ FAILURES ============ -->
+<section class="space-y-4" id="failures">
+  <h2 class="text-2xl font-bold">16 · Failure modes and recovery</h2>
+  <div class="overflow-x-auto rounded-box border border-base-content/10">
+  <table class="table table-sm">
+    <thead><tr><th>Failure</th><th>Detected by</th><th>Recovery</th><th>You hear</th></tr></thead>
+    <tbody>
+      <tr><td>flowrynd crashes</td><td>launchd</td><td><code>KeepAlive</code> restarts it. Meanwhile workers spool, hooks step aside, reads go read-only. On start: lock, migrate, replay intents, ingest spool, reconcile.</td><td>Nothing, unless recovery finds something</td></tr>
+      <tr><td>A second flowrynd starts</td><td>flock</td><td>The second exits with a message</td><td>Only if you started it by hand</td></tr>
+      <tr><td>Herdr server restarts; workers die</td><td>Husks at startup or reconnect</td><td>Resume each run once from its stored session</td><td>P1 per resume; P0 if a resume fails</td></tr>
+      <tr><td>Herdr unreachable</td><td>Socket errors</td><td>Dispatch refused; liveness <code>unknown</code>; retry with backoff</td><td>P1 once</td></tr>
+      <tr><td>A worker dies mid-turn</td><td>Process identity gone</td><td>Resume once</td><td>P0 on second death</td></tr>
+      <tr><td>A worker never reports</td><td>Harness idle 15 min, no outcome</td><td>None (judgment)</td><td>P1 pointer</td></tr>
+      <tr><td>A worker wedged on a trust dialog</td><td>No worker-start within 30 s</td><td>None; never keystrokes</td><td>P1 pointer</td></tr>
+      <tr><td>Leader interrupted; busy stuck</td><td>Busy lease expiry, <code>idle_prompt</code></td><td>Marked idle; carried items re-carried</td><td>Nothing</td></tr>
+      <tr><td>Digest hook timed out</td><td>No turn end for that turn</td><td>Carried again, deduplicated</td><td>The item, once</td></tr>
+      <tr><td>Leader context compacted</td><td><code>SessionStart</code> source <code>compact</code></td><td>Briefing re-lists open actionable items</td><td>The briefing</td></tr>
+      <tr><td>tasks-axi fails or lock times out</td><td>Intent exit code</td><td>Intent stays pending; backoff retries</td><td>P1 after 5 failures</td></tr>
+      <tr><td>You hand-edit against a live run</td><td>Backlog watcher</td><td>Divergence; run untouched</td><td>P1</td></tr>
+      <tr><td>GitHub unavailable or rate-limited</td><td>HTTP status</td><td>Watchers back off (ETags keep polling cheap); merges refuse, since landing cannot be proven</td><td>P1 only if a merge is waiting</td></tr>
+      <tr><td>Merge request sent, result unknown</td><td>No merged state and SHA</td><td><code>merges.state = unproven</code>; reconciler keeps checking; task not landed</td><td>P1</td></tr>
+      <tr><td>no-mistakes daemon down</td><td>Worker <code>fail</code> or status read</td><td>flowrynd never restarts it</td><td>P1</td></tr>
+      <tr><td>Claude usage limit reached</td><td><code>quota_auto_resume</code> notifications</td><td>Scheduler pauses Claude dispatch until resume</td><td>P1 once</td></tr>
+      <tr><td>Harness updated to an untested version</td><td>Version check before launch</td><td>Dispatch on that harness refused until contracts pass</td><td>P1 with the doctor command</td></tr>
+      <tr><td>Old CLI in an old worker</td><td>Protocol check</td><td>Exit 76 with the path to use</td><td>Nothing</td></tr>
+      <tr><td>Database corrupt</td><td>Integrity check at startup</td><td>Daemon refuses to start; <code>flowryn doctor --restore</code> from the nightly backup</td><td>A launchd log line and a notification</td></tr>
+      <tr><td>Host under memory or CPU pressure</td><td>Host check before each grant</td><td>No new slots granted; running work continues</td><td>P1 if work waits over 30 min</td></tr>
+      <tr><td>Docker environments left by a dead run</td><td>Labeled containers with no live lease</td><td>Leases released; containers listed, never removed automatically</td><td>P1 with the list</td></tr>
+      <tr><td>Laptop sleeps</td><td>Heartbeat gap</td><td>Lease not taken over while the holder process lives; waiters re-arm</td><td>Nothing</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ MILESTONES ============ -->
+<section class="space-y-5" id="milestones">
+  <h2 class="text-2xl font-bold">17 · Milestones</h2>
+  <p class="opacity-80 max-w-3xl">v1 is M1 through M5. M0 comes first, because the bridge spikes are the two places where the platform could invalidate this design. Everything else is ordinary engineering. Each milestone has an exit test.</p>
+
+  <div class="card card-border border-warning/60"><div class="card-body py-4 space-y-3">
+    <h3 class="card-title">M0 · Contract spikes and fixtures <span class="badge badge-warning badge-soft badge-sm">before any product code</span></h3>
+    <p class="text-sm opacity-85">Throwaway harnesses in a scratch Herdr session named <code>flowryn-contract</code>. Each spike ends with a recorded verdict and the exact version tested. A failed spike changes this document before M1 starts.</p>
+    <div class="grid md:grid-cols-2 gap-4 text-sm">
+      <div>
+        <h4 class="font-semibold">Claude bridge (Claude Code 2.1.281)</h4>
+        <ol class="list-decimal ml-5 space-y-1 opacity-90">
+          <li><strong><code>asyncRewake</code> waiter:</strong> exit 2 wakes an idle session and stderr reaches the model; what happens when it fires while busy; older waiters exiting 0 cause no wake; arming from <code>SessionStart</code>; 8 h timeout and re-arm on every Stop.</li>
+          <li><strong><code>UserPromptSubmit</code> digest:</strong> <code>additionalContext</code> arrives; a timed-out hook's context is dropped; a factual digest does not trip prompt-injection defenses; latency under 300 ms.</li>
+          <li><strong><code>idle_prompt</code> in a Herdr pane:</strong> fires about 60 s after the turn with no typing; does not fire while you type; fires after an interrupt.</li>
+          <li><strong>Interrupt behavior:</strong> which hooks fire (Stop should not); Escape through Herdr interrupts a worker; the busy-lease rule recovers.</li>
+          <li>Also: <code>--append-system-prompt</code> for the style block; Stop continuation through <code>hookSpecificOutput.additionalContext</code>; <code>PostToolUse</code> steer to a worker mid-turn; ask rule and <code>PreToolUse</code> ask prompt in auto mode; <code>permission_mode</code> in hook input; <code>CLAUDE_ENV_FILE</code> carrying the token; <code>--settings</code> scoping hooks to one session.</li>
+        </ol>
+      </div>
+      <div>
+        <h4 class="font-semibold">Pi bridge</h4>
+        <ol class="list-decimal ml-5 space-y-1 opacity-90">
+          <li><strong><code>nextTurn</code>:</strong> rides with your next prompt; never delivers while idle.</li>
+          <li><strong><code>followUp</code>:</strong> delivered after the current run; accepted while busy.</li>
+          <li><strong><code>triggerTurn</code>:</strong> opens a turn when idle; interaction with a half-typed composer.</li>
+          <li><strong><code>agent_settled</code>:</strong> fires once per run, including abort, retry, error and compaction.</li>
+          <li>Also: the system-prompt append flag; briefing at <code>session_start</code> and after compaction; <code>ctx.ui.confirm</code>; blocking a shell tool call from the extension; reading composer state; session id capture and resume; per-path trust pre-registration; the extension load flag.</li>
+        </ol>
+        <h4 class="font-semibold mt-3">Herdr and tasks-axi</h4>
+        <ul class="list-disc ml-5 space-y-1 opacity-90">
+          <li>Snapshot fields <code>revision</code> and <code>state_change_seq</code>; <code>pane.process_info</code> identity; <code>agent_session</code>; metadata with no TTL; <code>pane.split</code> env reaching the harness.</li>
+          <li>Idempotency of <code>done</code>, <code>unhold</code>, <code>update</code>, <code>mv</code>; the verb that returns a task to Queued; lock-timeout exit behavior.</li>
+          <li>no-mistakes gate processes do not inherit the worker's environment.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="text-sm"><strong>Fixtures:</strong> port the 21 landed-work cases from Firstmate's <code>tests/fm-teardown.test.sh</code> as cleanup-guard fixtures (<a class="link" href="#safeguards">section 14</a>), with expected verdicts, runnable against any implementation.</div>
+    <div class="text-sm opacity-80"><strong>Exit:</strong> every spike has a verdict; every <span class="m0">M0</span> mark in this document is either confirmed or replaced.</div>
+  </div></div>
+
+  <ul class="steps steps-vertical">
+    <li class="step step-primary"><div class="text-left py-2"><strong>M1 · Core.</strong> <span class="opacity-80 text-sm">Single binary with signing; flock and socket; handshake, tokens, idempotency; schema and migrations; event log; intent journal and backlog watcher; CLI registry with TOON/JSON, exit codes and spool; <code>init</code>, <code>doctor</code>, launchd; <code>todo</code> and <code>project</code> verbs. Exit: fake-event tests, and <code>kill -9</code> of the daemon mid-journal loses nothing.</span></div></li>
+    <li class="step step-primary"><div class="text-left py-2"><strong>M2 · Runtime, workers, reconciler.</strong> <span class="opacity-80 text-sm">Herdr runtime; Claude and Pi worker adapters with contract suites; isolation assertion; worker verbs; steer push and re-ring; reconciler with evidence ranking, reattach, husks and resume-once. Exit: a real scout end to end on each harness; killing a worker and the daemon mid-run both recover.</span></div></li>
+    <li class="step step-primary"><div class="text-left py-2"><strong>M3 · Leaders and attention.</strong> <span class="opacity-80 text-sm">M3a Claude bridge, M3b Pi bridge, both passing one shared bridge contract suite. Lane table, items, presentations, notifications; briefing with the morning section and to-dos; lease and handover; read-only <code>flowryn board</code>. Exit: the nine races in section 9 each have a passing test.</span></div></li>
+    <li class="step step-primary"><div class="text-left py-2"><strong>M4 · Delivery and policy.</strong> <span class="opacity-80 text-sm">no-mistakes, direct-PR, local-only; GitHub watcher; named-head gate; approval channel (all four channels); merge gate with red refusal and proof; cleanup guard with both fixture sets green; board approve. Exit: a ship goes from dispatch to merged and cleaned on each leader, with approval from each channel.</span></div></li>
+    <li class="step step-primary"><div class="text-left py-2"><strong>M5 · Workflows, capacity, autonomy. v1.</strong> <span class="opacity-80 text-sm">Workflow stages and review gates; capacity pools with the host check and Docker label evidence; <code>plan</code> and auto-dispatch on landing; the terse style block; the three stage skills (<code>flowryn-design</code>, <code>flowryn-build-test</code>, <code>flowryn-visual-qa</code>). Exit: a two-phase feature runs design, review, build, visual QA, review, ship and merge, and phase 2 starts by itself, with 20 workers under the caps on a real machine.</span></div></li>
+    <li class="step"><div class="text-left py-2"><strong>After v1.</strong> <span class="opacity-80 text-sm">The headless triage runner first. Then side-by-side running with Firstmate (split by project, in a separate named Herdr session) and backlog import; the Obsidian plugin, status out first; a Herdr plugin-pane board; more harnesses, each through the adapter and its contract suite; Claude channels or plugin monitors once they leave preview.</span></div></li>
+  </ul>
+</section>
+
+<!-- ============ QUESTIONS ============ -->
+<section class="space-y-4" id="questions">
+  <h2 class="text-2xl font-bold">18 · Open questions</h2>
+  <p class="opacity-80 max-w-3xl">None remain. Everything v2 asked is answered by the standing decisions. The three questions v3 raised were decided in review, taking the recommendation each time, and are now part of the design:</p>
+  <ol class="list-decimal ml-6 space-y-2 text-sm">
+    <li><strong>Claude workers run in <code>bypass</code></strong> by default, with <code>auto</code> available per project. The leader always runs in <code>auto</code>, because the approval channel needs it (<a class="link" href="#adapters">section 5</a>).</li>
+    <li><strong>On Pi, a P0 starts a turn only if M0 proves the extension can read the composer.</strong> Otherwise it notifies and waits for your next message (<a class="link" href="#delivery">section 9</a>).</li>
+    <li><strong>The next phase starts only after the previous one has landed</strong>, not when its PR opens. Stacking may become a per-plan option after v1 (<a class="link" href="#workflows">section 11</a>).</li>
+  </ol>
+  <p class="text-sm opacity-75">The <span class="m0">M0</span> marks are verification tasks, not open questions. If a spike fails, this document changes before M1 starts.</p>
+</section>
+
+<footer class="text-xs opacity-60 pt-6 border-t border-base-content/10 space-y-2">
+  <p>Evidence base: the v2 design and its principal-engineer review (2026-09-23), both in this task's data directory. That review checked Firstmate at <code>fdd36879</code> (AGENTS.md 634 lines; 739 commits), Claude Code 2.1.281 and its official hooks, permission, channels and plugin docs, Pi's README and extension docs plus Firstmate's live Pi extensions, Herdr 0.7.5 / protocol 17 through <code>herdr api schema --json</code>, tasks-axi 0.2.5, and a Bun 1.3.8 compile experiment.</p>
+  <p>Rechecked for v3: tasks-axi 0.2.5 help (caller-supplied ids on <code>add</code>, per-command <code>--file</code>, <code>hold --until</code> and <code>--kind</code>, priority 0–4, no due-date field); the Herdr schema (<code>AgentStartParams</code> has <code>args</code>, <code>kind</code>, <code>name</code>, <code>pane_id</code>, <code>timeout_ms</code> and no env; <code>PaneSplitParams</code> has <code>env</code>; <code>revision</code>, <code>state_change_seq</code> and <code>agent_session</code> present; no replay or cursor field); the cleanup cases in <code>tests/fm-teardown.test.sh</code>.</p>
+</footer>
+</main>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var KEY = "flowryn-v3-theme";
+    function apply(t) { root.setAttribute("data-theme", t); }
+    try { var saved = localStorage.getItem(KEY); if (saved) apply(saved); } catch (e) { /* storage unavailable: keep default */ }
+    var btn = document.getElementById("themeBtn");
+    if (btn) btn.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "luxury" ? "light" : "luxury";
+      apply(next);
+      try { localStorage.setItem(KEY, next); } catch (e) { /* storage unavailable: theme resets on reload */ }
+    });
+  })();
+</script>
+</body>
+</html>
