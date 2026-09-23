@@ -1,0 +1,41 @@
+{
+  "name": "gh_error_and_content_absent",
+  "ported_from": "tests/fm-teardown.test.sh:test_gh_error_and_content_absent_refuses",
+  "firstmate_matrix_row": "j",
+  "description": "A PR URL is recorded and real content (feature.txt) is unpushed, but every forge call fails and origin/main never gained the content. A transient forge failure must not allow cleanup: refused (fail-safe).",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": "https://github.com/example/repo/pull/7",
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": false,
+    "error": "unreachable",
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "forge_unreachable_content_absent"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "name": "no_mistakes_origin_remote",
+  "ported_from": "tests/fm-teardown.test.sh:test_no_mistakes_origin_remote_allows",
+  "firstmate_matrix_row": "d",
+  "description": "no-mistakes task whose task branch was pushed to origin and fetched, so the worktree HEAD is reachable from refs/remotes/origin/fm/task-x1. Cleanup is allowed without consulting the forge.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "allow",
+    "reason_class": "on_remote_tracking_branch"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": true
+    },
+    {
+      "check": "remote_branch",
+      "remote": "origin",
+      "branch": "fm/task-x1",
+      "expect": true
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

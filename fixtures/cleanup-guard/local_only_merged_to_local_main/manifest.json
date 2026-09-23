@@ -1,0 +1,47 @@
+{
+  "name": "local_only_merged_to_local_main",
+  "ported_from": "tests/fm-teardown.test.sh:test_local_only_merged_to_local_main_allows",
+  "firstmate_matrix_row": "c",
+  "description": "Local-only task whose commit was fast-forwarded into the primary checkout's local main (update-ref), with no remote involvement. Local-only work lands on the local default branch, so cleanup is allowed.",
+  "delivery_mode": "local-only",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "allow",
+    "reason_class": "merged_to_local_default"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "primary_main",
+      "expect": true
+    },
+    {
+      "check": "same",
+      "a": "local_head",
+      "b": "primary_main",
+      "expect": true
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

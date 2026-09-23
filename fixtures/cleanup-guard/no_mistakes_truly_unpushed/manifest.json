@@ -1,0 +1,46 @@
+{
+  "name": "no_mistakes_truly_unpushed",
+  "ported_from": "tests/fm-teardown.test.sh:test_no_mistakes_truly_unpushed_refuses",
+  "firstmate_matrix_row": "e",
+  "description": "no-mistakes task with real content (feature.txt) that is not pushed, has no PR (the forge knows no PR for the branch), and never landed on origin/main. Genuinely unlanded work: refused.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "unlanded"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "remote_branch",
+      "remote": "origin",
+      "branch": "fm/task-x1",
+      "expect": false
+    },
+    {
+      "check": "content_in",
+      "ref": "origin_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}
