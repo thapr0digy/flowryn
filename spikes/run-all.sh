@@ -16,10 +16,20 @@ SELECTED=("$@")
 
 wants() { local g; for g in "${SELECTED[@]}"; do [ "$g" = "$1" ] && return 0; done; return 1; }
 
+spike_id() { basename "$1" .sh; }
+
+ran=()
+wants tasks-axi && ran+=(tasks-axi/t*.sh)
+wants no-mistakes && ran+=(no-mistakes/n*.sh)
+wants pi && ran+=(pi/p[0-9][0-9]-*.sh)
+wants herdr && ran+=(herdr/h*.sh)
+wants claude && ran+=(claude/c*.sh)
+for s in "${ran[@]}"; do rm -f "$SPIKES_RUNS/results/$(spike_id "$s").json"; done
+
 run_serial() { # <scripts...>
   local s
   for s in "$@"; do
-    bash "$s" > "$SPIKES_RUNS/$(basename "$s" .sh).log" 2>&1 || echo "spike exited non-zero: $s" >&2
+    bash "$s" > "$SPIKES_RUNS/$(spike_id "$s").log" 2>&1 || echo "spike exited non-zero: $s" >&2
   done
 }
 
@@ -27,7 +37,7 @@ run_parallel() { # <scripts...>
   local s
   for s in "$@"; do
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 2; done
-    bash "$s" > "$SPIKES_RUNS/$(basename "$s" .sh).log" 2>&1 &
+    bash "$s" > "$SPIKES_RUNS/$(spike_id "$s").log" 2>&1 &
     sleep 3
   done
   wait
@@ -45,6 +55,11 @@ if wants herdr || wants claude; then
   run_parallel "${scripts[@]}"
 fi
 
-for f in "$SPIKES_RUNS"/results/*.json; do
-  jq -r '"\(.id)\t\(.verdict)\t\(.version)"' "$f"
+for s in "${ran[@]}"; do
+  f="$SPIKES_RUNS/results/$(spike_id "$s").json"
+  if [ -s "$f" ]; then
+    jq -r '"\(.id)\t\(.verdict)\t\(.version)"' "$f"
+  else
+    printf '%s\tno verdict (spike failed before recording)\t-\n' "$(spike_id "$s")"
+  fi
 done | sort | column -t -s $'\t'

@@ -13,7 +13,7 @@
 SPIKES_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export SPIKES_ROOT
 export SPIKES_RUNS="${SPIKES_RUNS:-$SPIKES_ROOT/.runs}"
-export HERDR_LAB_HELPER="${HERDR_LAB_HELPER:-/Users/pr0digy/projects/firstmate/bin/fm-herdr-lab.sh}"
+export HERDR_LAB_HELPER="${HERDR_LAB_HELPER:-${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh}"
 # Pin the helper's tripwire directory so sandboxed and unsandboxed shells agree.
 export FM_HERDR_LAB_STATE_DIR="${FM_HERDR_LAB_STATE_DIR:-$SPIKES_RUNS/lab-state}"
 mkdir -p "$SPIKES_RUNS/results" "$FM_HERDR_LAB_STATE_DIR"

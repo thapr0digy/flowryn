@@ -16,7 +16,7 @@ M0 contract spikes have run for Claude Code, Herdr, tasks-axi and no-mistakes. T
 
 The spikes are throwaway shell scripts under [`spikes/`](spikes), grouped as `claude/`, `herdr/`, `tasks-axi/`, `no-mistakes/` and `pi/`. Each script prints one `VERDICT <id>: <verdict>` line and writes `spikes/.runs/results/<id>.json`. `spikes/.runs/` is gitignored and holds every log, probe event and transcript pointer.
 
-Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; `pi` for the Pi group). Herdr and Claude spikes need Firstmate's lab helper at `/Users/pr0digy/projects/firstmate/bin/fm-herdr-lab.sh`; set `HERDR_LAB_HELPER` to point elsewhere.
+Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; `pi` for the Pi group). Herdr and Claude spikes need Firstmate's lab helper at `${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh`; set `FIRSTMATE_REPO` or `HERDR_LAB_HELPER` to point elsewhere.
 
 ```bash
 spikes/run-all.sh                    # every group; provisions and tears down one lab session

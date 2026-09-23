@@ -61,7 +61,7 @@ Every tasks-axi spike uses a scratch backlog under `spikes/.runs/<id>/`. None to
 
 ## Pi bridge
 
-Pi is not installed on this machine, and M0 did not install it. All 14 Pi spikes are written and runnable ([`spikes/pi/`](../spikes/pi), with one probe extension). On this machine each one records **not run: pi not installed** before touching Herdr. Their design marks stay unverified and read "M0 · not run". [`spikes/pi/NOTES.md`](../spikes/pi/NOTES.md) holds the method and a desk-check from the Pi 0.87.1 docs and source for each one. The desk-checks are predictions, not verdicts.
+Pi is not installed on this machine, and M0 did not install it. All 14 Pi spikes are written and runnable ([`spikes/pi/`](../spikes/pi), with one probe extension). On this machine each one records **not run: pi not installed** before touching Herdr. Their design marks stay unverified and read "M0 · not run". [`spikes/pi/NOTES.md`](../spikes/pi/NOTES.md) holds the method and a desk-check from the Pi 0.87.1 docs and source for each one. The desk-checks are predictions, not verdicts. The Pi spikes gate M3b (the Pi bridge), not M1: they must run live before M3b starts.
 
 | Spike | Claim | Verdict | Desk-check prediction (docs, not live) |
 |---|---|---|---|

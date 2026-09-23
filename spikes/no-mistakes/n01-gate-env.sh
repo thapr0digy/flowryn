@@ -47,8 +47,10 @@ if [ "$WATCH" -gt 0 ] && [ -n "$pid" ]; then
       ps -o command= -p "$p" 2>/dev/null | grep -q 'daemon log-sink' && continue
       case " $seen_pids " in *" $p "*) continue ;; esac
       seen_pids="$seen_pids $p"
+      env_names=$(names "$p")
+      [ -n "$env_names" ] || continue
       scanned=$((scanned + 1))
-      hit=$(names "$p" | tr ' ' '\n' | grep -E '^(FLOWRYN_|FM_|HERDR_PANE_ID|CLAUDE_CODE_SESSION_ID)' | tr '\n' ' ')
+      hit=$(printf '%s' "$env_names" | tr ' ' '\n' | grep -E '^(FLOWRYN_|FM_|HERDR_PANE_ID|CLAUDE_CODE_SESSION_ID)' | tr '\n' ' ')
       [ -n "$hit" ] && leaks="$leaks pid $p: $hit;"
     done
     sleep 5
