@@ -38,10 +38,15 @@ plist_env="?"
 
 leaks=""
 scanned=0
+seen_pids=""
 if [ "$WATCH" -gt 0 ] && [ -n "$pid" ]; then
   end=$(( $(date +%s) + WATCH ))
   while [ "$(date +%s)" -lt "$end" ]; do
     for p in $(pgrep -P "$pid"; for c in $(pgrep -P "$pid"); do pgrep -P "$c"; done); do
+      # The daemon's permanent log-sink child is not a pipeline process.
+      ps -o command= -p "$p" 2>/dev/null | grep -q 'daemon log-sink' && continue
+      case " $seen_pids " in *" $p "*) continue ;; esac
+      seen_pids="$seen_pids $p"
       scanned=$((scanned + 1))
       hit=$(names "$p" | tr ' ' '\n' | grep -E '^(FLOWRYN_|FM_|HERDR_PANE_ID|CLAUDE_CODE_SESSION_ID)' | tr '\n' ' ')
       [ -n "$hit" ] && leaks="$leaks pid $p: $hit;"
@@ -50,7 +55,7 @@ if [ "$WATCH" -gt 0 ] && [ -n "$pid" ]; then
   done
 fi
 
-evidence="gate hooks call: ${hook_args}; daemon pid ${pid:-?} parent ${ppid:-?} ($( [ "$ppid" = 1 ] && echo launchd || echo not-launchd )); daemon env names: ${daemon_env:-?}; plist EnvironmentVariables: $plist_env; binary resolves a login-shell environment for agents and sets NO_MISTAKES_GATE=1 (strings: 'apply login shell environment', 'NO_MISTAKES_GATE=1'); watch: ${WATCH}s, ${scanned} pipeline processes scanned, worker vars found: ${leaks:-none}"
+evidence="gate hooks call: ${hook_args}; daemon pid ${pid:-?} parent ${ppid:-?} ($( [ "$ppid" = 1 ] && echo launchd || echo not-launchd )); daemon env names: ${daemon_env:-?}; plist EnvironmentVariables: $plist_env; binary resolves a login-shell environment for agents and sets NO_MISTAKES_GATE=1 (strings: 'apply login shell environment', 'NO_MISTAKES_GATE=1'); watch: ${WATCH}s, ${scanned} distinct pipeline processes scanned, worker vars found: ${leaks:-none}"
 if [ -n "$leaks" ]; then verdict=refuted
 elif [ "$scanned" -gt 0 ] && [ "$ppid" = 1 ]; then verdict=confirmed
 elif [ "$ppid" = 1 ]; then verdict=partial
