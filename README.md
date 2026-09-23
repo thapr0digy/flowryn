@@ -43,6 +43,6 @@ Safety rules the scripts follow:
 - `spikes/no-mistakes/n01-gate-env.sh` is read-only; `--watch <seconds>` scans a live gate run's processes for worker-only variable names.
 - The Herdr and Claude spikes need access to Herdr's sockets, so run them outside any command sandbox.
 
-Claude spikes use Haiku by default (`CLAUDE_SPIKE_MODEL`). The ask-prompt and steer spikes default to Sonnet, because their outcome depends on the model. A full run makes real model calls: about two dozen short sessions.
+Claude spikes use Haiku by default (`CLAUDE_SPIKE_MODEL`). The ask-prompt and steer spikes, and the auto-mode run in `c09`, default to Sonnet, because their outcome depends on the model. A full run makes real model calls: about two dozen short sessions.
 
 The cleanup-guard fixtures are separate: `fixtures/cleanup-guard/run.sh` builds and checks all 21 cases, and `run.sh --impl <cmd>` runs a guard implementation against them. See [`fixtures/cleanup-guard/README.md`](fixtures/cleanup-guard/README.md).
