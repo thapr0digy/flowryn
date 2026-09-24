@@ -13,6 +13,7 @@ import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
+import { deliveryStages, recordStageDelivered } from "./stages.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -234,6 +235,8 @@ const deliver: VerbSpec = {
   replyMs: 60_000,
   async prepare(ctx, args) {
     const run = activeRun(ctx);
+    // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate.
+    if (run.state !== "ready") deliveryStages(ctx.db, run);
     const pr = stringArg(args, "pr");
     const path = stringArg(args, "report");
     const local = boolArg(args, "local");
@@ -261,12 +264,18 @@ const deliver: VerbSpec = {
     const run = activeRun(ctx);
     const now = ctx.now();
     const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal };
-    if (outcome.ship) return { data: recordDelivery(ctx.db, run, outcome.ship, ctx.via, now), hints: ["end your turn"] };
+    const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
+    if (outcome.ship) {
+      const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now);
+      if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
+      return { data, hints: ["end your turn"] };
+    }
     const delivered = outcome.report!;
     if (run.state === "ready") {
       const existing = ctx.db.query("SELECT id FROM artifacts WHERE task_id = ?1 AND kind = 'report' AND ref = ?2").get(run.task_id, delivered.artifact);
       if (existing) return { data: { run: run.id, state: run.state, report: delivered.artifact, already: true } };
     }
+    if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
     const artifactId = `a${now.toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
     ctx.db.query("INSERT INTO artifacts (id, task_id, kind, ref, created_at) VALUES (?1, ?2, 'report', ?3, ?4)").run(artifactId, run.task_id, delivered.artifact, now);
     ctx.db.query("UPDATE runs SET state = 'ready', updated_at = ?2 WHERE id = ?1").run(run.id, now);
@@ -292,6 +301,7 @@ const deliver: VerbSpec = {
   },
   async settle(ctx, result) {
     if (result.data.pr) ctx.delivery.watch(String(result.data.run));
+    ctx.sched.kick();
     return result;
   },
 };

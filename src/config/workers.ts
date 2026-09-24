@@ -3,6 +3,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { FlowrynConfig } from "./config.ts";
 import { leaderTiming, notifyConfig } from "./leader.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
+import { workflowConfigProblems } from "./workflows.ts";
 import { toAbsolute } from "./paths.ts";
 
 /**
@@ -155,7 +156,7 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
   };
 }
 
-/** Validate every section M2, M3 and M4 own at once; returns the problems (empty when sound). */
+/** Validate every section M2 to M5 own at once; returns the problems (empty when sound). */
 export function workerConfigProblems(config: FlowrynConfig): string[] {
   const problems: string[] = [];
   for (const check of [() => herdrConfig(config), () => workersConfig(config), () => timingConfig(config), () => leaderTiming(config), () => notifyConfig(config), () => githubConfig(config), () => cleanupConfig(config)]) {
@@ -165,7 +166,7 @@ export function workerConfigProblems(config: FlowrynConfig): string[] {
       problems.push((error as Error).message);
     }
   }
-  return problems;
+  return [...problems, ...workflowConfigProblems(config)];
 }
 
 /**

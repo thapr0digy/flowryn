@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Reply } from "../../src/api/envelope.ts";
+import { STYLE_BLOCK } from "../../src/harness/contract-text.ts";
 import { writeLeaderFiles, type LeaderFiles } from "../../src/bridges/files.ts";
 import { leaderEnv } from "../../src/cli/commands/lead.ts";
 import type { BridgeDriver, BridgeEnv, LeaderHarness, PresentationView } from "../../src/contracts/bridge-suite.ts";
@@ -82,7 +83,7 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
     db.close();
   }
   const daemon = await startDaemon(h);
-  const files = await writeLeaderFiles({ home: h.home, socket: join(h.home, "run", "flowrynd.sock"), command: ["bun", join(REPO_ROOT, "src/main.ts")], terse: true });
+  const files = await writeLeaderFiles({ home: h.home, socket: join(h.home, "run", "flowrynd.sock"), command: ["bun", join(REPO_ROOT, "src/main.ts")], style: STYLE_BLOCK });
   const fakes: { kill(): void }[] = [];
   const cwd = join(h.home, "leader-cwd");
   mkdirSync(cwd, { recursive: true });

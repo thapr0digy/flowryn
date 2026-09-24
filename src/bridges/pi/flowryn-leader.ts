@@ -23,12 +23,13 @@
 //     followUp, while idle and you inactive as a followUp with triggerTurn
 //     (a half-typed draft stays untouched, M0 p03); it re-checks what it sees
 //     first and declines otherwise, and always passes deliverAs (M0 finding 14);
-//   - blocks shell calls to flowryn merge, approve and hook (M0 p08);
+//   - blocks shell calls to flowryn merge, gate pass, approve and hook (M0 p08);
 //   - registers the flowryn_merge tool, the Pi leader's human-confirmation
 //     channel (design section 7): it shows the PR, head and checks with
 //     ctx.ui.confirm() (M0 p07) and, on yes, merges with the approval key the
 //     daemon handed this extension at lease claim (or a fresh one from
-//     `hook approval-key`), passed on stdin, never in an environment.
+//     `hook approval-key`), passed on stdin, never in an environment;
+//   - registers the flowryn_gate_pass tool the same way, for review gates (M5).
 // The hook calls that report state go through one queue, so the daemon sees
 // them in the order Pi emitted them.
 import { spawn } from "node:child_process";
@@ -39,7 +40,7 @@ const BIN = process.env.FLOWRYN_BIN ?? "";
 const INACTIVE_MS = Number(process.env.FLOWRYN_LEADER_INACTIVE_MS ?? "60000") || 60_000;
 const TOOL_PING_MS = 60_000;
 const EXIT_BACKOFF_MS = 10_000;
-const SHELL_GATE = /\bflowryn\s+(merge|approve|hook)\b/;
+const SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass)\b/;
 
 function runHook(name: string, input: Json): Promise<Json | null> {
   return new Promise((resolve) => {
@@ -267,7 +268,7 @@ export default function flowrynLeader(pi: any): void {
     const name = String(event?.toolName ?? "");
     const command = name === "bash" ? String(event?.input?.command ?? "") : "";
     if (command !== "" && SHELL_GATE.test(command)) {
-      return { block: true, reason: "flowryn: merge and approve need the user, and hook verbs belong to the harness; this session cannot run them from the shell" };
+      return { block: true, reason: "flowryn: merge, gate pass and approve need the user (use the flowryn_merge and flowryn_gate_pass tools), and hook verbs belong to the harness; this session cannot run them from the shell" };
     }
     return undefined;
   });
@@ -323,6 +324,54 @@ export default function flowrynLeader(pi: any): void {
       if (!reply) return text(`Flowryn did not answer; ${task} may not be merged. Check: flowryn show ${task}`);
       if (reply.ok) return text(`Merged ${task}: ${reply.data?.state ?? "merged"} at ${String(reply.data?.sha ?? "?").slice(0, 12)} (approved in this confirm; cleanup follows).`);
       return text(`Merge of ${task} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}${reply.error?.help ? ` Help: ${reply.error.help}` : ""}`);
+    },
+  });
+
+  /**
+   * flowryn_gate_pass: the one way this leader passes a review gate (design
+   * section 11). You see the stage and its review page and say yes or no; on
+   * yes the gate passes with this confirm as your word, bound to the gate.
+   */
+  pi.registerTool({
+    name: "flowryn_gate_pass",
+    label: "Flowryn gate pass",
+    description:
+      "Pass a Flowryn task's open review gate (a design or visual QA review) after the user reviewed it. The user confirms it here first; the next stage then starts. Never run `flowryn gate pass` in the shell.",
+    promptSnippet: "flowryn_gate_pass: pass a Flowryn review gate after the user confirms it.",
+    parameters: { type: "object", properties: { task: { type: "string", description: "the Flowryn task id" } }, required: ["task"] },
+    async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, c: any) {
+      remember(c);
+      const task = String(params?.task ?? "").trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(task)) return text("flowryn_gate_pass needs a task id.");
+      const summary = await runHook("gate-summary", { task });
+      if (!summary) return text("Flowryn is not reachable; nothing was passed.");
+      if (typeof summary.error === "string") return text(`Cannot pass a gate of ${task}: ${summary.error}`);
+      const lines = [`${summary.title ?? task} (${summary.project ?? "?"})`, `review: ${summary.review ?? "-"}`, `gate ${summary.gate ?? "?"}; the next stage starts at once`];
+      let yes = false;
+      try {
+        yes = Boolean(await ctx?.ui?.confirm?.(`Pass the ${summary.stage ?? "?"} review of ${task}?`, lines.join("\n")));
+      } catch {
+        yes = false;
+      }
+      if (!yes) return text(`The user declined; the ${summary.stage ?? ""} review of ${task} stays open.`);
+      let key = approvalKey;
+      if (!key) {
+        const fresh = await runHook("approval-key", {});
+        key = typeof fresh?.key === "string" ? fresh.key : null;
+        approvalKey = key;
+      }
+      if (!key) return text("This session does not hold the leader lease, so it cannot pass a gate.");
+      let reply = await runFlowryn(["gate", "pass", task, "--stage", String(summary.stage ?? ""), "--key-file", "-", "--json"], key);
+      if (reply?.ok === false && reply.error?.code === "approval_required" && String(reply.error?.message ?? "").includes("key")) {
+        const fresh = await runHook("approval-key", {});
+        if (typeof fresh?.key === "string") {
+          approvalKey = fresh.key;
+          reply = await runFlowryn(["gate", "pass", task, "--stage", String(summary.stage ?? ""), "--key-file", "-", "--json"], fresh.key);
+        }
+      }
+      if (!reply) return text(`Flowryn did not answer; the gate of ${task} may still be open. Check: flowryn show ${task}`);
+      if (reply.ok) return text(`Passed the ${reply.data?.stage ?? ""} review of ${task}; stage ${reply.data?.next ?? "?"} starts.`);
+      return text(`Gate pass of ${task} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}${reply.error?.help ? ` Help: ${reply.error.help}` : ""}`);
     },
   });
 

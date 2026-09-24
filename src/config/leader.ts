@@ -96,9 +96,3 @@ export function notifyConfig(config: FlowrynConfig): NotifyConfig {
   }
   return out;
 }
-
-/** The terse style block is on unless [style] terse = false (design section 11). */
-export function isTerse(config: FlowrynConfig): boolean {
-  const style = config.extra.style as Record<string, unknown> | undefined;
-  return style?.terse !== false;
-}

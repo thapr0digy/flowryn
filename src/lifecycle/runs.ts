@@ -5,6 +5,7 @@ import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { normalizedTitle } from "../journal/diff.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
+import { releaseLeases } from "../sched/pools.ts";
 
 /** Design section 13: runs.state, owned by the lifecycle engine. */
 export const RUN_STATES = ["launching", "running", "validating", "ready", "merging", "landed", "cleaned", "failed", "cancelled"] as const;
@@ -50,7 +51,19 @@ export interface RunRow {
   /** M4: the worktree's cleanup after landing or cancel: null, refused or done. */
   cleanup: string | null;
   cleanup_detail: string | null;
+  /** M5: the stage's state: waiting for a grant, active, review (a gate is open) or done (delivered). */
+  stage_state: StageState;
+  stage_started_at: number | null;
+  waiting_since: number | null;
+  /** M5: the launch a capacity grant must start: fresh, resume, or a fresh worker for a new stage. */
+  pending_launch: PendingLaunch | null;
+  /** M5: the steer the next stage start carries. */
+  stage_note: string | null;
 }
+
+export const STAGE_STATES = ["waiting", "active", "review", "done"] as const;
+export type StageState = (typeof STAGE_STATES)[number];
+export type PendingLaunch = "fresh" | "resume" | "stage";
 
 export interface RunWithPolicy extends RunRow {
   project_id: string;
@@ -140,8 +153,9 @@ export function openRunItemOnce(db: Db, kind: ItemKind, run: RunRow, eventSeq: n
  */
 export function failRun(db: Db, run: RunRow, reason: string, source: EventSource, now: number): void {
   if (isTerminal(run.state)) return;
-  db.query("UPDATE runs SET state = 'failed', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL WHERE id = ?1").run(run.id, now);
+  db.query("UPDATE runs SET state = 'failed', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL, pending_launch = NULL WHERE id = ?1").run(run.id, now);
   parkTask(db, run.task_id, `failed: ${reason}`, now);
+  releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.failed", now);
   const event = appendEvent(db, { source, kind: "run.failed", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "steer_unacked"], "run.failed", now);
   openRunItemOnce(db, "failure_needs_you", run, event.seq, `Run failed for ${taskTitle(db, run.task_id)}: ${reason}`, now);
@@ -152,8 +166,9 @@ export function failRun(db: Db, run: RunRow, reason: string, source: EventSource
 /** Cancelled with your consent (design section 8). Call inside a transaction. */
 export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSource, now: number): void {
   if (isTerminal(run.state)) return;
-  db.query("UPDATE runs SET state = 'cancelled', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL WHERE id = ?1").run(run.id, now);
+  db.query("UPDATE runs SET state = 'cancelled', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL, pending_launch = NULL WHERE id = ?1").run(run.id, now);
   parkTask(db, run.task_id, `cancelled: ${reason}`, now);
+  releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.cancelled", now);
   appendEvent(db, { source, kind: "run.cancelled", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, null, "run.cancelled", now);
   run.state = "cancelled";

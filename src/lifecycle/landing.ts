@@ -13,6 +13,8 @@ import { psRunner, type PsRunner } from "../runtime/proc.ts";
 import { deliveredOf, projectRepo } from "./delivery.ts";
 import { getProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { releaseLeases } from "../sched/pools.ts";
+import { closeMergeGate } from "./stages.ts";
 
 /**
  * Landing and cleanup (design sections 8 and 14). A task is landed only when
@@ -31,6 +33,9 @@ export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; h
   if (run.state === "landed" || isTerminal(run.state)) return;
   db.query("UPDATE runs SET state = 'landed', updated_at = ?2 WHERE id = ?1").run(run.id, now);
   resolveRunItems(db, run.id, [...SETTLED_BY_LANDING], `run.landed ${proof.mergeSha.slice(0, 8)}`, now);
+  const merge = proof.mergeId ? (db.query("SELECT approval_id FROM merges WHERE id = ?1").get(proof.mergeId) as { approval_id: string } | null) : null;
+  closeMergeGate(db, run, { passed: true, approvalId: merge?.approval_id ?? null }, now);
+  releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   appendEvent(db, { source: proof.how === "merge" ? "daemon" : "github", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { merge_sha: proof.mergeSha, how: proof.how, merge: proof.mergeId ?? null }, ts: now });
   run.state = "landed";
 }
@@ -143,7 +148,8 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
     appendEvent(db, { source: "daemon", kind: "cleanup.done", runId: run.id, taskId: run.task_id, payload, ts: now });
     resolveRunItems(db, run.id, ["cleanup_refused"], "cleanup.done", now);
     if (current.state === "landed") {
-      db.query("UPDATE runs SET state = 'cleaned', ended_at = ?2, updated_at = ?2 WHERE id = ?1").run(run.id, now);
+      db.query("UPDATE runs SET state = 'cleaned', ended_at = ?2, updated_at = ?2, pending_launch = NULL WHERE id = ?1").run(run.id, now);
+      releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.cleaned", now);
       const merge = db.query("SELECT merge_sha FROM merges WHERE task_id = ?1 AND state = 'merged' ORDER BY proven_at DESC LIMIT 1").get(run.task_id) as { merge_sha: string | null } | null;
       const flags: Record<string, string> = delivered?.kind === "pr" ? { pr: delivered.ref } : { note: `merged into local ${project.default_branch}${merge?.merge_sha ? ` at ${merge.merge_sha.slice(0, 8)}` : ""}` };
       recordIntent(db, { file: "backlog", verb: "done", taskId: run.task_id, positional: [run.task_id], flags, now });

@@ -5,6 +5,8 @@ import { appendEvent } from "../db/events.ts";
 import type { Db } from "../db/db.ts";
 import { boolArg, intArg, stringArg, type Args, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import { slugify } from "./ids.ts";
+import { defaultAutonomy, workflowFor } from "../config/workflows.ts";
+import type { FlowrynConfig } from "../config/config.ts";
 
 export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as const;
 export const HARNESSES = ["claude", "pi"] as const;
@@ -40,9 +42,16 @@ function priorityArg(args: Args): number | undefined {
   return value;
 }
 
-function workflowArg(args: Args): string | undefined {
+/** A project's workflow is what its ships run: one that exists and ends in the merge gate. */
+function workflowArg(args: Args, config: FlowrynConfig): string | undefined {
   const value = stringArg(args, "workflow");
-  if (value !== undefined && !WORKFLOW_ID.test(value)) throw new FlowrynError("invalid_project", "--workflow must be a workflow id such as fix, feature or scout");
+  if (value === undefined) return undefined;
+  if (!WORKFLOW_ID.test(value)) throw new FlowrynError("invalid_project", "--workflow must be a workflow id such as fix or feature");
+  try {
+    workflowFor(config, value, "ship");
+  } catch (error) {
+    throw new FlowrynError("invalid_project", `--workflow: ${(error as Error).message}`);
+  }
   return value;
 }
 
@@ -115,8 +124,8 @@ const projectAdd: VerbSpec = {
     yolo: { type: "boolean", help: "merge green, non-sensitive work without a human record" },
     priority: { type: "int", help: "0 (highest) to 4; default 2", placeholder: "n" },
     harness: { type: "string", help: "worker harness: claude or pi", placeholder: "harness" },
-    workflow: { type: "string", help: "default workflow: fix, feature, scout", placeholder: "workflow" },
-    autonomy: { type: "string", help: "plan or manual", placeholder: "mode" },
+    workflow: { type: "string", help: "its ships' workflow: fix (default), feature, or one from [workflows]", placeholder: "workflow" },
+    autonomy: { type: "string", help: "plan (phases start by themselves once their blockers land) or manual; default [autonomy]", placeholder: "mode" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -144,8 +153,8 @@ const projectAdd: VerbSpec = {
       yolo: boolArg(args, "yolo") ? 1 : 0,
       priority: priorityArg(args) ?? 2,
       harness: oneOf(stringArg(args, "harness"), HARNESSES, "harness") ?? "claude",
-      workflow: workflowArg(args) ?? "fix",
-      autonomy: oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy") ?? "plan",
+      workflow: workflowArg(args, ctx.config()) ?? "fix",
+      autonomy: oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy") ?? defaultAutonomy(ctx.config()),
     };
     ctx.db
       .query(
@@ -178,7 +187,7 @@ const projectSet: VerbSpec = {
     yolo: { type: "string", help: "on or off", placeholder: "on|off" },
     priority: { type: "int", help: "0 (highest) to 4", placeholder: "n" },
     harness: { type: "string", help: "claude or pi", placeholder: "harness" },
-    workflow: { type: "string", help: "fix, feature, scout", placeholder: "workflow" },
+    workflow: { type: "string", help: "its ships' workflow: fix, feature, or one from [workflows]", placeholder: "workflow" },
     autonomy: { type: "string", help: "plan or manual", placeholder: "mode" },
     "default-branch": { type: "string", help: "default branch", placeholder: "branch" },
     "repo-url": { type: "string", help: "remote URL", placeholder: "url" },
@@ -198,7 +207,7 @@ const projectSet: VerbSpec = {
     if (priority !== undefined) updates.priority = priority;
     const harness = oneOf(stringArg(args, "harness"), HARNESSES, "harness");
     if (harness) updates.harness = harness;
-    const workflow = workflowArg(args);
+    const workflow = workflowArg(args, ctx.config());
     if (workflow) updates.workflow = workflow;
     const autonomy = oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy");
     if (autonomy) updates.autonomy = autonomy;

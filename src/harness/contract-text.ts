@@ -22,7 +22,7 @@ export interface ContractDelivery {
 }
 
 /** The "finished" lines: how this worker delivers, and that it is verified. */
-function deliveryLines(d: ContractDelivery): string[] {
+export function deliveryLines(d: ContractDelivery): string[] {
   if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
   if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", "  Finished: $FLOWRYN_BIN deliver --local. It is verified."];
   if (d.mode === "direct-PR") {
@@ -40,14 +40,19 @@ function deliveryLines(d: ContractDelivery): string[] {
  * The worker contract (design section 12), appended to the harness system
  * prompt rather than left to a skill the worker might not load. M0 c07: without
  * the line naming the mid-turn channel, Sonnet 5 took a steer for prompt
- * injection and ignored it. The delivery lines follow the task's kind and the
- * project's delivery mode (M4). `stage done` arrives with workflows in M5.
+ * injection and ignored it. The style block leads it (design section 11: the
+ * same stable text leads every worker's instructions, so prompt caching
+ * holds). The delivery lines follow the task's kind and the project's delivery
+ * mode (M4); the stage lines explain the workflow (M5).
  */
-export function workerContract(harness: HarnessId, terse: boolean, delivery: ContractDelivery = { kind: "scout", mode: "local-only", defaultBranch: "main" }): string {
+export function workerContract(harness: HarnessId, style: string | null, delivery: ContractDelivery = { kind: "scout", mode: "local-only", defaultBranch: "main" }): string {
   const channel = harness === "claude" ? "hook context" : "a message";
   const lines = [
     "You are a Flowryn worker. Call $FLOWRYN_BIN only.",
-    ...(terse ? ["Be terse: outcomes only, no recaps."] : []),
+    ...(style ? ["Be terse: outcomes only, no recaps."] : []),
+    "- Your task runs in stages; your task file names the current one and its skill.",
+    "  Stage finished: $FLOWRYN_BIN stage done [--review <lavish url>]; then end your",
+    "  turn and wait: a steer starts the next stage or brings the review verdict.",
     "- Report only changes a supervisor would act on:",
     "  $FLOWRYN_BIN report blocked --body-file -",
     "- Need a decision: $FLOWRYN_BIN ask --options a,b [--blocking] --body-file -",
@@ -60,7 +65,7 @@ export function workerContract(harness: HarnessId, terse: boolean, delivery: Con
     "- Exit 75 means spooled. Do not retry in a loop.",
     "- Never merge, clean up, or approve anything.",
   ];
-  return [...lines, ...(terse ? ["", STYLE_BLOCK] : [])].join("\n") + "\n";
+  return [...(style ? [style, ""] : []), ...lines].join("\n") + "\n";
 }
 
 /**

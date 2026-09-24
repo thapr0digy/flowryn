@@ -79,8 +79,10 @@ export class FakeClaudeLeader implements BridgeDriver {
     return JSON.stringify({ session_id: this.sessionId, transcript_path: this.transcript, cwd: this.opts.cwd, permission_mode: this.permissionMode, hook_event_name: event, ...extra });
   }
 
+  /** A matcher is a regular expression over the whole value, as Claude's are (`Edit|Write`, `idle_prompt|quota_...`). */
   private groups(event: string, matcher?: string): HookCommand[] {
-    return (this.settings.hooks[event] ?? []).filter((g) => !g.matcher || g.matcher === "*" || g.matcher === matcher).flatMap((g) => g.hooks);
+    const matches = (pattern: string) => pattern === "*" || (matcher !== undefined && new RegExp(`^(?:${pattern})$`).test(matcher));
+    return (this.settings.hooks[event] ?? []).filter((g) => !g.matcher || matches(g.matcher)).flatMap((g) => g.hooks);
   }
 
   /** Run the event's hooks the way Claude does; returns the additionalContext each synchronous hook printed. */

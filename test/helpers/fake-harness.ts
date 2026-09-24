@@ -23,6 +23,14 @@
  *   FAKE: deliver-pr                 deliver --pr <the PR it opened>; the reply goes to fake-replies.jsonl
  *   FAKE: deliver-local              deliver --local; the reply goes to fake-replies.jsonl
  *   FAKE: wait-file <name>           wait until $FLOWRYN_REPORT_DIR/<name> exists (the test sequences a step)
+ *   FAKE: stage-done [args...]       flowryn stage done <args> ($FLOWRYN_REPORT_DIR expands); the reply goes to
+ *                                    fake-replies.jsonl; on success the turn ends and the steps after it run
+ *                                    when the next steer arrives (the stage start, or the review's verdict)
+ *   FAKE: plan-phase <title...>      append a "## <title>" phase (workflow fix) to $FLOWRYN_REPORT_DIR/plan.md
+ *   FAKE: docker-up <name> [project] a running container labelled flowryn.run=$FLOWRYN_RUN, in the fake
+ *                                    docker's list ($FLOWRYN_HOME/docker-ps.txt), in a compose project if named
+ *   FAKE: docker-down <name>         that container stops
+ *   FAKE: usage-limit                the turn ends in StopFailure with error rate_limit (a claude.ai usage limit)
  *
  * Steps run once per session: a resumed session continues after the last step
  * it finished (state kept next to the task file).
@@ -107,9 +115,19 @@ async function onSteer(text: string): Promise<void> {
     log(`ack ${id} -> ${result.code}`);
     if (result.code === 0) acked.add(id);
   }
+  if (awaitingStage && ids.size > 0) {
+    woken = true;
+    wake?.();
+  }
 }
 
 let interrupted = false;
+/** The step to continue from once a steer wakes the worker after a stage done; null when not waiting. */
+let resumeAt: number | null = null;
+/** A stage done succeeded: the next steer (even one beside its own tool result) starts the next stage. */
+let awaitingStage = false;
+let wake: (() => void) | null = null;
+let woken = false;
 let abortSleep: (() => void) | null = null;
 
 process.on("SIGINT", () => {
@@ -157,7 +175,16 @@ function recordReply(called: string[], result: { code: number; stdout: string })
   appendFileSync(join(dir, "fake-replies.jsonl"), JSON.stringify({ args: called, code: result.code, reply: result.stdout.trim() }) + "\n");
 }
 
-async function runStep(step: string): Promise<"continue" | "end-turn"> {
+function slug(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "phase";
+}
+
+/** The fake docker's container list: one line per running container, id, name, run and compose project. */
+function dockerFile(): string {
+  return join(env.FLOWRYN_HOME ?? ".", "docker-ps.txt");
+}
+
+async function runStep(step: string): Promise<"continue" | "end-turn" | "await-steer"> {
   const [verb = "", ...rest] = step.split(/\s+/);
   switch (verb) {
     case "sleep":
@@ -255,6 +282,40 @@ async function runStep(step: string): Promise<"continue" | "end-turn"> {
         recordReply(called, await flowryn([...called, "--json"]));
       });
       return "continue";
+    case "stage-done": {
+      const expanded = rest.map((a) => a.replaceAll("$FLOWRYN_REPORT_DIR", env.FLOWRYN_REPORT_DIR ?? "."));
+      let ok = false;
+      woken = false;
+      await tool(async () => {
+        const called = ["stage", "done", ...expanded];
+        const result = await flowryn([...called, "--json"]);
+        recordReply(called, result);
+        log(`stage done -> ${result.code} ${result.stdout.trim()}`);
+        ok = result.code === 0;
+        awaitingStage = ok;
+      });
+      return ok ? "await-steer" : "continue";
+    }
+    case "plan-phase": {
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, "plan.md"), `## ${rest.join(" ") || "next phase"}\nworkflow: fix\nFAKE: commit ${slug(rest.join(" "))}.txt ${rest.join(" ")}\nFAKE: deliver-local\nFAKE: sleep 120000\n\n`);
+      return "continue";
+    }
+    case "docker-up": {
+      const [name = "app", project = ""] = rest;
+      appendFileSync(dockerFile(), `c${Math.random().toString(16).slice(2, 10)}\t${name}\t${env.FLOWRYN_RUN ?? ""}\t${project}\n`);
+      return "continue";
+    }
+    case "docker-down": {
+      const name = rest[0] ?? "app";
+      const lines = existsSync(dockerFile()) ? readFileSync(dockerFile(), "utf8").split("\n").filter((l) => l && l.split("\t")[1] !== name) : [];
+      writeFileSync(dockerFile(), lines.map((l) => `${l}\n`).join(""));
+      return "continue";
+    }
+    case "usage-limit":
+      await hook("stop-failure", { error: "rate_limit", error_details: "429 Too Many Requests" });
+      return "continue";
     case "crash":
       log("crash");
       process.exit(1);
@@ -307,6 +368,40 @@ async function piLoop(): Promise<void> {
   }
 }
 
+/** Run the steps from `from`; returns where a stage done paused them, or null when they ended (or a turn ended for good). */
+async function runSteps(from: number): Promise<number | null> {
+  for (let i = from; i < steps.length; i++) {
+    log(`step ${i + 1}/${steps.length}: ${steps[i]}`);
+    if (steps[i] === "crash") markDone(i + 1);
+    const outcome = await runStep(steps[i]!);
+    markDone(i + 1);
+    if (outcome === "await-steer") return i + 1;
+    if (outcome === "end-turn") return null;
+  }
+  return null;
+}
+
+/** Idle after a stage done until a steer wakes the worker: Claude's asyncRewake waiter, or Pi's long poll. */
+async function awaitWake(): Promise<void> {
+  log(`waiting for a steer to continue at step ${(resumeAt ?? 0) + 1}`);
+  if (woken) return;
+  if (harness === "pi") {
+    await new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    wake = null;
+    return;
+  }
+  while (!woken) {
+    const waiter = await hook("wait-steer");
+    if (waiter.code === 2) {
+      await hook("prompt");
+      await onSteer(waiter.stderr);
+      if (!woken) await endTurn();
+    } else await Bun.sleep(200);
+  }
+}
+
 async function main(): Promise<void> {
   if (steps.includes("no-start")) {
     log("no-start: waiting forever");
@@ -315,11 +410,19 @@ async function main(): Promise<void> {
   await hook("worker-start", { session_id: session, cwd: cwdOverride ?? process.cwd(), transcript_path: transcript, source: flag("--resume") ? "resume" : "startup" });
   if (harness === "pi") void piLoop();
   await hook("prompt");
-  for (let i = done(); i < steps.length; i++) {
-    if (steps[i] === "crash") markDone(i + 1);
-    const outcome = await runStep(steps[i]!);
-    markDone(i + 1);
-    if (outcome === "end-turn") break;
+  let from: number | null = done();
+  while (from !== null) {
+    const paused = await runSteps(from);
+    if (paused === null) break;
+    // A stage done: end the turn; a steer (often the Stop continuation itself) starts the next stage.
+    resumeAt = paused;
+    await endTurn();
+    await awaitWake();
+    from = resumeAt;
+    resumeAt = null;
+    awaitingStage = false;
+    woken = false;
+    if (harness === "claude") await hook("prompt");
   }
   // Pi's abort still ends in agent_settled (M0 p14); Claude's interrupt fires no hook at all (M0 c04).
   if (!interrupted || harness === "pi") await endTurn();

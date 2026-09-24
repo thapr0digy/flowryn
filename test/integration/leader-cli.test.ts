@@ -29,7 +29,7 @@ describe("flowryn lead", () => {
       expect(waiter).toMatchObject({ asyncRewake: true, timeout: 28_800 });
       expect(waiter.command).toContain("hook wait-p0 --harness claude");
     }
-    expect(settings.hooks.Notification[0].matcher).toBe("idle_prompt");
+    expect(settings.hooks.Notification[0].matcher).toBe("idle_prompt|quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled");
     expect(settings.sandbox.network.allowUnixSockets).toEqual([join(env.h.home, "run", "flowrynd.sock")]);
     expect(readFileSync(join(files.claudePlugin, ".claude-plugin", "plugin.json"), "utf8")).toContain('"name": "flowryn-leader"');
     expect(readFileSync(join(files.skillDir, "SKILL.md"), "utf8")).toStartWith("---\nname: flowryn\n");

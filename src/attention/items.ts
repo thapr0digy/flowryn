@@ -10,8 +10,10 @@ export type ItemClass = "actionable" | "info";
  * Nothing scores items; project priority and due date only order within a lane.
  * M1 opened the backlog kinds, M2 the worker and run kinds, M3 the overdue
  * to-dos, M4 the delivery kinds (PR checks red, PR closed, cleanup refused,
- * no-mistakes unreachable). The rest are listed so later milestones extend
- * data, not code.
+ * no-mistakes unreachable), M5 the workflow kinds (a review gate ready, work
+ * waiting over 30 min for capacity, Docker containers left without a lease, a
+ * ready phase that cannot start, the Claude usage limit, a phase started by
+ * itself).
  * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
  */
 export const LANE_TABLE = {
@@ -34,6 +36,10 @@ export const LANE_TABLE = {
   pr_closed: { lane: "P1", class: "actionable" },
   cleanup_refused: { lane: "P1", class: "actionable" },
   nomistakes_down: { lane: "P1", class: "actionable" },
+  capacity_wait: { lane: "P1", class: "actionable" },
+  docker_leftover: { lane: "P1", class: "actionable" },
+  phase_blocked: { lane: "P1", class: "actionable" },
+  usage_limit: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },

@@ -5,7 +5,8 @@ import { EXIT } from "../../api/errors.ts";
 import { boolArg, type CliIo, type VerbSpec } from "../../api/verbs.ts";
 import { writeLeaderFiles, type LeaderFiles } from "../../bridges/files.ts";
 import { loadConfig, resolveTool } from "../../config/config.ts";
-import { isTerse, leaderTiming } from "../../config/leader.ts";
+import { leaderTiming } from "../../config/leader.ts";
+import { styleBlock } from "../../config/workflows.ts";
 import { flowrynHome, socketPath } from "../../config/paths.ts";
 import { BLANKED_ENV } from "../../lifecycle/launcher.ts";
 import { selfCommand } from "../../service/launchd.ts";
@@ -109,7 +110,7 @@ const lead: VerbSpec = {
     if (!opened.ok) return print(io, opened);
     const { session, token } = opened.data as { session: string; token: string };
 
-    const files = await writeLeaderFiles({ home, socket: socketPath(home, io.env), command: selfCommand(), terse: isTerse(config) });
+    const files = await writeLeaderFiles({ home, socket: socketPath(home, io.env), command: selfCommand(), style: styleBlock(config) });
     const launchArgs = harness === "claude" ? claudeLeaderArgs(files, passthrough) : piLeaderArgs(files, passthrough);
     const env = leaderEnv(io.env, { token, session, files, inactiveMs: leaderTiming(config).inactive_ms });
     io.stderr(`flowryn: leader session ${session} (${harness}); ${basename(binary)} starting\n`);

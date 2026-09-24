@@ -94,6 +94,8 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   ];
   // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.
   if (!extraConfig.includes("[github]")) lines.push("[github]", 'api_url = "http://127.0.0.1:9"');
+  // Nor this machine's memory and load: the host check passes unless a test sets its own (a probe, or limits).
+  if (!extraConfig.includes("[capacity.host]")) lines.push("[capacity.host]", "min_free_mem_gb = 0", "max_load_per_core = 1000");
   // Tests never reach a real Herdr: without a socket of their own they get one that does not exist.
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });

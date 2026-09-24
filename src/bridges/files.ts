@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { STYLE_BLOCK } from "../harness/contract-text.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { VERSION } from "../version.ts";
 import { leaderSettings } from "./claude/settings.ts";
@@ -36,7 +35,8 @@ export interface LeaderFilesInput {
   socket: string;
   /** How to run this flowryn: the compiled binary, or bun plus the entry script. */
   command: string[];
-  terse: boolean;
+  /** The style block ([style], design section 11), or null when it is off. */
+  style: string | null;
 }
 
 let extensionSource: string | null = null;
@@ -85,8 +85,8 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
 
   const stylePath = join(dir, "style.md");
   let style: string | null = null;
-  if (input.terse) {
-    writeIfChanged(stylePath, STYLE_BLOCK + "\n");
+  if (input.style) {
+    writeIfChanged(stylePath, input.style + "\n");
     style = stylePath;
   } else if (existsSync(stylePath)) rmSync(stylePath, { force: true });
 

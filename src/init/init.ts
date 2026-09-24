@@ -16,6 +16,7 @@ export const INSTALL_HINTS: Record<ToolName, string> = {
   claude: "npm install -g @anthropic-ai/claude-code",
   pi: "npm install -g @earendil-works/pi-coding-agent (or the signed Pi Launcher, found as pi-signed)",
   no_mistakes: "install no-mistakes (optional; the no-mistakes delivery mode needs it)",
+  docker: "install Docker Desktop (optional; visual QA runs the app's environments in it, and the capacity check counts them)",
 };
 
 /** Defaults for the sections later milestones read; written once so they are there to edit. */

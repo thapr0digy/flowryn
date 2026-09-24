@@ -240,11 +240,54 @@ CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 CREATE INDEX merges_open ON merges(state) WHERE state IN ('requested','unproven');
 `;
 
+/**
+ * M5: workflows, capacity and autonomy (design section 11). A run's stage
+ * gains its state: waiting (for a capacity grant), active, review (a review
+ * gate is open) or done (the last stage delivered); waiting_since orders the
+ * queue and times its alert; pending_launch is the launch a grant must start
+ * (fresh, resume or a fresh stage worker); stage_note is the steer the stage
+ * start carries. pool_leases is rebuilt with its own id, so a stage granted
+ * again after a release (changes requested, a declined delivery) gets a new
+ * row; one live lease per pool and run. Every open run already has a live
+ * worker, so each gets its worker lease. plans and plan_phases hold a phased
+ * feature (design section 11): the phases reach the backlog only once the plan
+ * is approved.
+ */
+const WORKFLOW_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN stage_state TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE runs ADD COLUMN stage_started_at INTEGER;
+ALTER TABLE runs ADD COLUMN waiting_since INTEGER;
+ALTER TABLE runs ADD COLUMN pending_launch TEXT;
+ALTER TABLE runs ADD COLUMN stage_note TEXT;
+CREATE TABLE pool_leases_m5 (
+  id INTEGER PRIMARY KEY, pool TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id), stage TEXT NOT NULL,
+  granted_at INTEGER NOT NULL, released_at INTEGER, released_by TEXT);
+INSERT INTO pool_leases_m5 (pool, run_id, stage, granted_at, released_at) SELECT pool, run_id, stage, granted_at, released_at FROM pool_leases;
+DROP TABLE pool_leases;
+ALTER TABLE pool_leases_m5 RENAME TO pool_leases;
+CREATE UNIQUE INDEX pool_one_live ON pool_leases(pool, run_id) WHERE released_at IS NULL;
+CREATE INDEX pool_live ON pool_leases(pool) WHERE released_at IS NULL;
+INSERT INTO pool_leases (pool, run_id, stage, granted_at)
+  SELECT 'worker', id, stage, CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM runs WHERE state NOT IN ('cleaned','failed','cancelled');
+CREATE INDEX runs_waiting ON runs(waiting_since) WHERE stage_state = 'waiting' OR pending_launch IS NOT NULL;
+CREATE INDEX gates_open ON gates(run_id) WHERE state = 'open';
+CREATE TABLE plans (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','approved','discarded')),
+  source_task TEXT, gate_id TEXT, filed_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  approved_at INTEGER, approved_via TEXT);
+CREATE TABLE plan_phases (
+  plan_id TEXT NOT NULL REFERENCES plans(id), phase_no INTEGER NOT NULL, task_id TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL, body TEXT NOT NULL, workflow TEXT NOT NULL, harness TEXT, blocked_by TEXT NOT NULL,
+  PRIMARY KEY (plan_id, phase_no));
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
   { version: 3, name: "leader", sql: LEADER_SQL },
   { version: 4, name: "delivery", sql: DELIVERY_SQL },
+  { version: 5, name: "workflows", sql: WORKFLOW_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

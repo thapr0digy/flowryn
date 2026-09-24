@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
-import { isTerse } from "../config/leader.ts";
+import { styleBlock } from "../config/workflows.ts";
 import { timingConfig, workersConfig } from "../config/workers.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
@@ -18,10 +18,13 @@ import { terminate } from "../runtime/proc.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
 import { PROTO } from "../version.ts";
+import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
+import { positionOf, stageInstructions } from "./stages.ts";
 
-export type LaunchMode = "fresh" | "resume";
+/** fresh: the run's first launch; resume: its stored session again; stage: a new session for a stage with fresh = true. */
+export type LaunchMode = "fresh" | "resume" | "stage";
 
 export interface GitResult {
   exitCode: number;
@@ -148,7 +151,9 @@ export class Launcher {
     const run = getRunWithPolicy(db, runId);
     if (!run || isTerminal(run.state)) return false;
     // A fresh launch happens once; a replayed dispatch or a second kick must not start another worker.
-    if (mode === "fresh" && (run.state !== "launching" || run.proc_pid !== null)) return false;
+    if (mode === "fresh" && (run.state !== "launching" || run.proc_pid !== null || run.pending_launch === "fresh")) return false;
+    // A fresh stage worker starts only once the scheduler stopped the old one.
+    if (mode === "stage" && (run.pending_launch !== "stage" || run.proc_pid !== null)) return false;
     const project = getProject(db, run.project_id);
     if (!project) throw new Error(`project ${run.project_id} is gone`);
     const config = this.deps.config();
@@ -173,10 +178,11 @@ export class Launcher {
     ensureDir(spool, 0o700);
     const instructionsFile = join(runDir, "task.md");
     const contractFile = join(runDir, "contract.md");
-    const body = dispatchedBody(db, run.id);
-    writeFileAtomic(instructionsFile, body.endsWith("\n") ? body : `${body}\n`, 0o600);
     const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
-    writeFileAtomic(contractFile, workerContract(run.harness, isTerse(config), { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch }), 0o600);
+    const delivery = { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch };
+    writeFileAtomic(instructionsFile, this.taskFile(run, config, delivery, mode), 0o600);
+    writeFileAtomic(contractFile, workerContract(run.harness, styleBlock(config), delivery), 0o600);
+    const skills = writeStageSkills(config.state_dir);
     if (run.harness === "pi") await loadExtensionSource();
 
     const flowrynBin = await this.deps.flowrynBin();
@@ -197,6 +203,7 @@ export class Launcher {
       daemonSocket: this.deps.socketPath,
       writable: [spool, reportDir, ...gitAccess.writable],
       readOnly: gitAccess.readOnly,
+      stagePlugin: skills.claudePlugin,
     };
     if (!context.sessionId) throw new Error("the run has no agent session id");
     const trust = await adapter.preTrust(context, workers);
@@ -239,8 +246,10 @@ export class Launcher {
       const current = getRunWithPolicy(db, run.id);
       if (!current) return true;
       db.query(
-        `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END, updated_at = ?5 WHERE id = ?1`,
-      ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now());
+        `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END,
+           pending_launch = CASE WHEN pending_launch = 'stage' THEN NULL ELSE pending_launch END,
+           stage_note = CASE WHEN ?6 = 1 THEN NULL ELSE stage_note END, updated_at = ?5 WHERE id = ?1`,
+      ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now(), mode === "resume" ? 0 : 1);
       appendEvent(db, {
         source: "daemon",
         kind: "run.launched",
@@ -255,6 +264,20 @@ export class Launcher {
       return false;
     }
     return true;
+  }
+
+  /**
+   * The task file: the current stage (where it sits in the workflow, its
+   * skill, what ends it), the note a fresh stage worker starts with, then the
+   * task as dispatched. Rewritten on every launch, so a resumed or fresh
+   * worker reads where the run is now.
+   */
+  private taskFile(run: RunWithPolicy, config: FlowrynConfig, delivery: { kind: "ship" | "scout"; mode: "no-mistakes" | "direct-PR" | "local-only"; defaultBranch: string }, mode: LaunchMode): string {
+    const body = dispatchedBody(this.deps.db, run.id).trim();
+    const pos = positionOf(this.deps.db, run, run.kind);
+    const header = stageInstructions(pos, { stateDir: config.state_dir, delivery });
+    const note = mode !== "resume" && run.stage_note ? `\n\n${run.stage_note}` : "";
+    return `${header}${note}\n\n---\n\n${body}\n`;
   }
 
   /** git is the ground truth for worktrees; a relaunch reuses the run's own worktree. */

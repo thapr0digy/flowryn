@@ -24,7 +24,7 @@ export const ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 
 export type Channel = "claude-ask" | "pi-confirm" | "cli-tty" | "board" | "yolo";
-export type ApprovalAction = "merge" | "discard";
+export type ApprovalAction = "merge" | "discard" | "gate";
 export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "pi-confirm", "cli-tty", "board"];
 
 export interface ApprovalRow {

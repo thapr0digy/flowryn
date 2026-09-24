@@ -67,17 +67,26 @@ export interface ApprovalFlow {
   task: string;
   allowRed?: string;
   discard?: boolean;
+  /** Pass the open review gate of this stage ("" for whichever is open). */
+  gate?: string;
   channel: "cli-tty" | "board";
   actor: string;
 }
 
 /** Show what would be approved, read the code back, record the approval. The reply is the daemon's. */
 export async function runApprovalFlow(env: NodeJS.ProcessEnv, tty: Tty, flow: ApprovalFlow): Promise<Reply> {
-  const begun = await daemonCall(env, "approve.begin", { task: flow.task, "allow-red": flow.allowRed, discard: flow.discard || undefined, channel: flow.channel });
+  const begun = await daemonCall(env, "approve.begin", { task: flow.task, "allow-red": flow.allowRed, discard: flow.discard || undefined, gate: flow.gate, channel: flow.channel });
   if (!begun.ok) return begun;
   const d = begun.data as Record<string, unknown>;
   const lines =
-    d.action === "discard"
+    d.action === "gate"
+      ? [
+          `Pass the ${d.stage} review of ${d.task}: ${d.title} (${d.project})`,
+          `  review ${d.review}`,
+          `  gate ${d.gate}, worktree at ${String(d.head).slice(0, 12)}`,
+          "  The next stage starts at once; a plan filed with this design is approved with it.",
+        ]
+      : d.action === "discard"
       ? [
           `Discard the unlanded work of ${d.task}: ${d.title}`,
           `  worktree ${d.worktree}`,
@@ -108,12 +117,12 @@ function print(io: CliIo, reply: Reply): number {
 
 const approve: VerbSpec = {
   name: "approve",
-  summary: "Approve a merge (or a discard) in your own terminal: shows the PR, head and checks, reads a code from /dev/tty",
+  summary: "Approve a merge, a discard or a review gate in your own terminal: shows what you approve, reads a code from /dev/tty",
   positionals: [{ name: "task", required: true, help: "task or run id" }],
   flags: {
     "allow-red": { type: "string", help: "waive exactly one failing check; every other check must be green", placeholder: "check" },
     discard: { type: "boolean", help: "approve discarding the task's unlanded work (flowryn cleanup --discard)" },
-    gate: { type: "string", help: "review gates arrive with workflows in M5", placeholder: "stage" },
+    gate: { type: "string", help: "pass the task's open review gate of this stage (design, qa, ...)", placeholder: "stage" },
   },
   kind: "local",
   roles: ["human"],
@@ -122,7 +131,6 @@ const approve: VerbSpec = {
     if (reason || !io.stdinIsTty || !io.stdoutIsTty) {
       return print(io, errorReply({ code: "human_only", message: `approve runs only in your own terminal: ${reason ?? "stdin and stdout must both be a terminal"}` }));
     }
-    if (stringArg(args, "gate")) return print(io, errorReply({ code: "not_supported", message: "review gates arrive with workflows in M5" }));
     let tty: Tty;
     try {
       tty = openDevTty();
@@ -134,6 +142,7 @@ const approve: VerbSpec = {
         task: stringArg(args, "task")!,
         allowRed: stringArg(args, "allow-red"),
         discard: boolArg(args, "discard"),
+        gate: stringArg(args, "gate"),
         channel: "cli-tty",
         actor: io.env.USER || io.env.LOGNAME || "you",
       });

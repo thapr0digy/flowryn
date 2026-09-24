@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Reply } from "../../src/api/envelope.ts";
 import { writeLeaderFiles, type LeaderFiles } from "../../src/bridges/files.ts";
+import { STYLE_BLOCK } from "../../src/harness/contract-text.ts";
 import { leaderEnv } from "../../src/cli/commands/lead.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
@@ -48,7 +49,7 @@ export interface ShipEnv {
   /** A daemon call as your own terminal (channel tty), the way `flowryn approve` makes it. */
   call(verb: string, args: Record<string, unknown>, token?: string | null): Promise<Reply>;
   /** Approve in your shell or on the board: begin, then confirm with the code it showed. */
-  approve(task: string, opts?: { allowRed?: string; discard?: boolean; channel?: "cli-tty" | "board" }): Promise<Reply>;
+  approve(task: string, opts?: { allowRed?: string; discard?: boolean; gate?: string; channel?: "cli-tty" | "board" }): Promise<Reply>;
   /** The worker verb replies the fake worker recorded, once there are `count`. */
   replies(task: string, count: number): Promise<{ args: string[]; code: number; reply: Record<string, unknown> }[]>;
   cleanup(): Promise<void>;
@@ -59,7 +60,7 @@ export async function makeShipEnv(options: FleetOptions = {}): Promise<ShipEnv> 
   const fleet = await makeFleetEnv({ origin: true, ...options, extraConfig: `${SHIP_TEST_CONFIG(github.apiUrl)}\n${options.extraConfig ?? ""}` });
   github.addRepo("acme", "web", { bare: fleet.origin });
   const sock = join(fleet.h.home, "run", "flowrynd.sock");
-  const files = await writeLeaderFiles({ home: fleet.h.home, socket: sock, command: ["bun", join(REPO_ROOT, "src/main.ts")], terse: true });
+  const files = await writeLeaderFiles({ home: fleet.h.home, socket: sock, command: ["bun", join(REPO_ROOT, "src/main.ts")], style: STYLE_BLOCK });
   const cwd = join(fleet.h.home, "leader-cwd");
   mkdirSync(cwd, { recursive: true });
   const fakes: { kill(): void }[] = [];
@@ -101,7 +102,7 @@ export async function makeShipEnv(options: FleetOptions = {}): Promise<ShipEnv> 
       return fake;
     },
     async approve(task, opts = {}) {
-      const begun = await call("approve.begin", { task, "allow-red": opts.allowRed, discard: opts.discard || undefined, channel: opts.channel ?? "cli-tty" });
+      const begun = await call("approve.begin", { task, "allow-red": opts.allowRed, discard: opts.discard || undefined, gate: opts.gate, channel: opts.channel ?? "cli-tty" });
       if (!begun.ok) return begun;
       const data = begun.data as { challenge: string; code: string };
       return call("approve.confirm", { challenge: data.challenge, code: data.code, actor: "tester" });

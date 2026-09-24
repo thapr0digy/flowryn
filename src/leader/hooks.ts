@@ -10,6 +10,7 @@ import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.t
 import { hashToken, mintToken } from "../api/auth.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
+import { openGate } from "../lifecycle/stages.ts";
 import { recordAttempt, type ApprovalAction } from "../policy/approvals.ts";
 
 /**
@@ -47,8 +48,11 @@ export interface LeaderHookInput {
   tool_input?: { command?: unknown } | null;
   tool_use_id?: string;
   permission_mode?: string;
-  /** Pi merge-summary: the task the flowryn_merge tool was asked to merge. */
+  /** Pi merge-summary and gate-summary: the task the tool was asked about. */
   task?: string;
+  /** Claude StopFailure: the error type (rate_limit for a claude.ai usage limit) and its details. */
+  error?: string | null;
+  error_details?: string | null;
 }
 
 /** At most two consecutive Stop continuations, far below Claude's cap of 8 (design section 5). */
@@ -289,12 +293,14 @@ export interface GatedCommand {
 
 const MERGE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+merge\s+([A-Za-z0-9][\w.-]*)/g;
 const DISCARD_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+cleanup\s+([A-Za-z0-9][\w.-]*)[^;&|\n]*?--discard\b/g;
+const GATE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+gate\s+pass\s+([A-Za-z0-9][\w.-]*)/g;
 
-/** The Flowryn commands in a shell line that need your word: merges and discards. */
+/** The Flowryn commands in a shell line that need your word: merges, discards and review gate passes. */
 export function gatedCommands(command: string): GatedCommand[] {
   const found: GatedCommand[] = [];
   for (const match of command.matchAll(MERGE_COMMAND)) found.push({ action: "merge", task: match[1]! });
   for (const match of command.matchAll(DISCARD_COMMAND)) found.push({ action: "discard", task: match[1]! });
+  for (const match of command.matchAll(GATE_COMMAND)) found.push({ action: "gate", task: match[1]! });
   return found;
 }
 
@@ -304,6 +310,11 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand): { line: string; prUr
   if (!run) return { line: `${gated.action} ${gated.task}: no such task; it will be refused`, prUrl: null, head: null };
   const title = taskTitle(ctx.db, run.task_id);
   if (gated.action === "discard") return { line: `DISCARD the unlanded work of ${run.task_id} (${title}) in ${run.worktree_path}`, prUrl: null, head: null };
+  if (gated.action === "gate") {
+    const gate = openGate(ctx.db, run.id, "review");
+    if (!gate) return { line: `pass a review gate of ${run.task_id} (${title}): none is open; it will be refused`, prUrl: null, head: null };
+    return { line: `PASS the ${gate.stage} review of ${run.task_id} (${title}), review page ${gate.review_url ?? "none"}; the next stage starts at once`, prUrl: `gate:${gate.id}`, head: null };
+  }
   const shipped = deliveredOf(ctx.db, run.task_id);
   if (!shipped) return { line: `merge ${run.task_id} (${title}): nothing delivered yet; it will be refused`, prUrl: null, head: null };
   const evidence = shipped.kind === "pr" ? prEvidence(ctx.db, run.id) : null;

@@ -61,6 +61,18 @@ function versionScript(dir: string, name: string): string {
   return path;
 }
 
+/**
+ * A stand-in docker: `docker ps` prints the containers the fake workers
+ * started (`FAKE: docker-up`), one line each in the format the reconciler
+ * asks for. Nothing reaches a real Docker.
+ */
+function dockerScript(dir: string, home: string): string {
+  const path = join(dir, "docker");
+  writeFileSync(path, `#!/bin/sh\ncase "$1" in\n  ps) [ -f ${JSON.stringify(join(home, "docker-ps.txt"))} ] && cat ${JSON.stringify(join(home, "docker-ps.txt"))}; exit 0 ;;\nesac\nexit 1\n`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
 /** A bare "origin" with one commit on main, and a clone of it as the project's primary checkout. */
 export function makeOriginRepo(dir: string): { origin: string; repo: string } {
   const origin = join(dir, "origin.git");
@@ -95,6 +107,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
       return [
         `claude = ${JSON.stringify(versionScript(bin, "claude"))}`,
         `pi = ${JSON.stringify(versionScript(bin, "pi"))}`,
+        `docker = ${JSON.stringify(dockerScript(bin, home))}`,
         "[herdr]",
         `socket = ${JSON.stringify(join(home, "herdr.sock"))}`,
         "[workers]",

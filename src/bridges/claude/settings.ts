@@ -1,3 +1,5 @@
+import { USAGE_NOTIFICATIONS } from "../../harness/claude/adapter.ts";
+
 /**
  * The Claude leader bridge (design sections 5, 7 and 12): a hook set in a
  * leader-only settings file that `flowryn lead` passes with --settings, which
@@ -50,7 +52,8 @@ export function leaderSettings(input: LeaderSettingsInput): Record<string, unkno
       Stop: [{ hooks: [command("stop"), waiter] }],
       StopFailure: [{ hooks: [command("stop-failure")] }],
       SessionEnd: [{ hooks: [command("session-end")] }],
-      Notification: [{ matcher: "idle_prompt", hooks: [command("notify")] }],
+      // idle_prompt: you went inactive; the quota types: Claude continued after a usage limit reset (design section 16).
+      Notification: [{ matcher: `idle_prompt|${USAGE_NOTIFICATIONS}`, hooks: [command("notify")] }],
     },
     sandbox: { network: { allowUnixSockets: [input.socket] } },
   };

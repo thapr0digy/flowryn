@@ -5,6 +5,7 @@ import type { BacklogWatcher } from "../journal/watcher.ts";
 import type { FleetServices } from "../lifecycle/fleet-services.ts";
 import type { AttentionServices } from "../attention/services.ts";
 import type { DeliveryServices } from "../policy/services.ts";
+import type { SchedServices } from "../sched/services.ts";
 import { FlowrynError } from "./errors.ts";
 
 /**
@@ -76,6 +77,8 @@ export interface DaemonServices {
   attention: AttentionServices;
   /** The forge, approvals challenges, cleanup and the delivery watchers (M4). */
   delivery: DeliveryServices;
+  /** The scheduler: capacity grants and auto-dispatch (M5). */
+  sched: SchedServices;
 }
 
 export interface HandlerCtx extends DaemonServices {
