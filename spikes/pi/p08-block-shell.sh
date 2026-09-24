@@ -20,7 +20,7 @@ A=$PANE
 ask() { # <command>
   local t
   t=$(now_ms)
-  pane_prompt "$A" "Use the bash tool to run exactly this command, unchanged, and nothing else: $1"
+  pane_prompt "$A" "$(scripted "Run one bash command." "bash $1 ;; say done")"
   wait_settled_after a "$t" || true
   wait_quiet a 3 60 || true
 }
@@ -36,9 +36,12 @@ approve_file=$(state approve-ran)
 blocked_calls=$(log_count a '.ev == "tool_call" and .blocked == true')
 merge_seen=$(log_count a '.ev == "tool_call" and (.command | test("flowryn merge"))')
 approve_seen=$(log_count a '.ev == "tool_call" and (.command | test("flowryn approve"))')
-blocked_results=$(log_count a '.ev == "tool_result" and .isError == true and (.text | test("blocked"))')
+# A blocked call emits no tool_result event; the model sees the block reason in
+# the toolResult message, and tool_execution_end reports isError.
+blocked_results=$(log_count a '.ev == "message_end" and .role == "toolResult" and (.text | test("blocked"))')
+blocked_ends=$(log_count a '.ev == "tool_execution_end" and .isError == true')
 
-evidence="control file=$control_file; merge call seen=$merge_seen file=$merge_file; approve call seen=$approve_seen file=$approve_file; tool_call blocked=$blocked_calls; error results with block reason=$blocked_results"
+evidence="control file=$control_file; merge call seen=$merge_seen file=$merge_file; approve call seen=$approve_seen file=$approve_file; tool_call blocked=$blocked_calls; tool results carrying the block reason=$blocked_results, tool_execution_end isError=$blocked_ends"
 if [ "$merge_seen" = 0 ] || [ "$approve_seen" = 0 ] || [ "$control_file" = absent ]; then
   pi_verdict partial "inconclusive: the model did not issue every requested command; $evidence"
 elif [ "$merge_file" = absent ] && [ "$approve_file" = absent ] && [ "$blocked_calls" -ge 2 ]; then

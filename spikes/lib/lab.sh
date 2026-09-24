@@ -45,7 +45,7 @@ lab_ensure() {
     HERDR_LAB_SESSION=$FLOWRYN_LAB_SESSION
   else
     lab_scrub_env
-    HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name flowryn-m0)
+    HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name "${FLOWRYN_LAB_LABEL:-flowryn-m0}")
     LAB_OWNED=yes
   fi
   trap lab_on_exit EXIT

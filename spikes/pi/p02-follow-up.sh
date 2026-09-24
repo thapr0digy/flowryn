@@ -23,7 +23,7 @@ ctl a '{"op":"send","api":"message","deliverAs":"followUp","when":"tool_executio
 ctl a '{"op":"send","api":"user","deliverAs":"followUp","when":"tool_execution_start","text":"FLOWRYN-MARK-F2 reply with the single word noted."}'
 ctl a '{"op":"send","api":"user","when":"tool_execution_start","text":"FLOWRYN-MARK-F3 reply with the single word noted."}'
 ctl a '{"op":"send","api":"message","when":"tool_execution_start","text":"FLOWRYN-MARK-F4 Flowryn note (fact): nothing to do."}'
-pane_prompt "$A" "Use the bash tool to run exactly: sleep 8 . Then reply with the single word done."
+pane_prompt "$A" "$(scripted "Use the bash tool to run: sleep 8. Then reply with the single word done." "bash sleep 8 ;; say done")"
 
 log_wait a 60 '.ev == "tool_execution_start"' || { pi_verdict partial "inconclusive: model never ran the bash tool"; exit 0; }
 wait_settled_after a "$t0" || { pi_verdict partial "inconclusive: run never settled"; exit 0; }

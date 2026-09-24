@@ -4,7 +4,7 @@ Flowryn is a self-contained coordinator for a fleet of coding agents. You talk t
 
 ## Status
 
-M0 contract spikes have run for Claude Code, Herdr, tasks-axi and no-mistakes. There is no product code yet. The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every spike's verdict, the tool versions tested, and each edit the verdicts made to the design. The Pi spikes are written but have not run, because Pi is not installed on the test machine.
+M0 contract spikes have run for Claude Code, Herdr, tasks-axi, no-mistakes and Pi. There is no product code yet. The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every spike's verdict, the tool versions tested, and each edit the verdicts made to the design.
 
 ## Key choices
 
@@ -16,7 +16,7 @@ M0 contract spikes have run for Claude Code, Herdr, tasks-axi and no-mistakes. T
 
 The spikes are throwaway shell scripts under [`spikes/`](spikes), grouped as `claude/`, `herdr/`, `tasks-axi/`, `no-mistakes/` and `pi/`. Each script prints one `VERDICT <id>: <verdict>` line and writes `spikes/.runs/results/<id>.json`. `spikes/.runs/` is gitignored and holds every log, probe event and transcript pointer.
 
-Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; `pi` for the Pi group). Herdr and Claude spikes need Firstmate's lab helper at `${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh`; set `FIRSTMATE_REPO` or `HERDR_LAB_HELPER` to point elsewhere.
+Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; Pi for the Pi group, found as `PI_BIN`, then `/opt/homebrew/bin/pi-signed`, then `pi` on `PATH`). Herdr and Claude spikes need Firstmate's lab helper at `${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh`; set `FIRSTMATE_REPO` or `HERDR_LAB_HELPER` to point elsewhere.
 
 The Herdr and Claude spikes start Claude Code from the repo root, so the checkout must be a directory Claude Code already trusts. In an untrusted checkout (a fresh worktree, for example) Claude stops at its workspace-trust dialog before any hook runs, and the spike fails with `blocked: untrusted path <dir>`. The spikes never accept that dialog, because doing so edits `~/.claude.json`. `spikes/run-all.sh` exits non-zero when any spike exits non-zero or records no result.
 
@@ -42,6 +42,8 @@ Safety rules the scripts follow:
 - tasks-axi spikes use scratch backlogs under `spikes/.runs/`.
 - `spikes/no-mistakes/n01-gate-env.sh` is read-only; `--watch <seconds>` scans a live gate run's processes for worker-only variable names.
 - The Herdr and Claude spikes need access to Herdr's sockets, so run them outside any command sandbox.
+
+Pi spikes need no model account: every turn comes from an offline scripted provider (`spikes/pi/lib/scripted-provider.ts`), and each Pi process uses a scratch agent dir, so `~/.pi` is never read or written. [`spikes/pi/NOTES.md`](spikes/pi/NOTES.md) covers the method and an optional real-model smoke pass.
 
 Claude spikes use Haiku by default (`CLAUDE_SPIKE_MODEL`). The ask-prompt and steer spikes, and the auto-mode run in `c09`, default to Sonnet, because their outcome depends on the model. A full run makes real model calls: about two dozen short sessions.
 

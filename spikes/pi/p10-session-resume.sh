@@ -23,7 +23,7 @@ start_a=$(log_first a '.ev == "session_start"')
 id_a=$(printf '%s' "$start_a" | jq -r '.sessionId // empty')
 file_a=$(printf '%s' "$start_a" | jq -r '.sessionFile // empty')
 t=$(now_ms)
-pane_prompt "$A" "Remember this codeword for later: FLOWRYN-MARK-R10. Reply with the single word ok."
+pane_prompt "$A" "$(scripted "Remember this codeword for later: FLOWRYN-MARK-R10." "say ok")"
 wait_settled_after a "$t" || { pi_verdict partial "inconclusive: first run never settled"; exit 0; }
 pi_stop a "$A"
 [ -n "$file_a" ] && [ -e "$file_a" ] || { pi_verdict refuted "session file not captured or not on disk: id='$id_a' file='$file_a'"; exit 0; }
@@ -36,7 +36,7 @@ file_b=$(printf '%s' "$start_b" | jq -r '.sessionFile // empty')
 reason_b=$(printf '%s' "$start_b" | jq -r '.reason // empty')
 entries_b=$(printf '%s' "$start_b" | jq -r '.entryCount // 0')
 t=$(now_ms)
-pane_prompt "$B" "What codeword did I ask you to remember? Reply with only the codeword."
+pane_prompt "$B" "$(scripted "What codeword did I ask you to remember?" "say {markers}")"
 recalled=no
 if wait_settled_after b "$t"; then
   log_has b ".ev == \"message_end\" and .role == \"assistant\" and .t > $t and (.markers | index(\"FLOWRYN-MARK-R10\"))" && recalled=yes
@@ -48,7 +48,7 @@ pi_launch c -- --session-id "$FIXED"
 C=$PANE
 id_c=$(log_first c '.ev == "session_start"' | jq -r '.sessionId // empty')
 t=$(now_ms)
-pane_prompt "$C" "Reply with the single word ok."
+pane_prompt "$C" "$(scripted "Reply with the single word ok." "say ok")"
 wait_settled_after c "$t" || true
 pi_stop c "$C"
 pi_launch d -- --session-id "$FIXED"
