@@ -161,7 +161,7 @@ function guardedRoots(home: string): string[] {
  * forever on an invisible privacy prompt, and realpath opens the path.
  */
 function resolveTowardRoots(path: string, roots: readonly string[]): string {
-  let resolved = sep;
+  let resolved: string = sep;
   const pending = path.split(sep).filter(Boolean);
   let hops = 0;
   while (pending.length > 0) {
