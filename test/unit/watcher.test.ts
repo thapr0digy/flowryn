@@ -97,14 +97,16 @@ describe("backlog watcher (fake hand edits)", () => {
 
   test("deleting a just-added to-do by hand is your edit: it stays deleted", async () => {
     env = makeJournalEnv();
-    addTodo("renw-b1", "Renw passport");
-    await env.journal.drain();
     addTodo("a-a1", "keep me");
+    await env.journal.drain();
+    addTodo("renw-b1", "Renw passport");
     await env.journal.drain();
     deleteLines("renw-b1");
     const result = await env.watcher.check("todos", "test");
     expect(result.diff!.removed).toEqual(["renw-b1"]);
     expect(result.reapplied).toEqual([]);
+    expect(result.undone).toEqual(["renw-b1"]);
+    expect(lastEventPayload("intent.undone")).toMatchObject({ file: "todos", verb: "add" });
     await env.journal.drain();
     expect(readFileSync(env.files.todos, "utf8")).not.toContain("renw-b1");
     expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["a-a1"]);
@@ -127,7 +129,7 @@ describe("backlog watcher (fake hand edits)", () => {
     expect(tasks.map((t) => [t.id, t.state])).toEqual([["a-a1", "done"]]);
   });
 
-  test("restoring the exact bytes from before three adds re-applies all three", async () => {
+  test("restoring the exact bytes from before three adds is a hand deletion: all three stay deleted", async () => {
     env = makeJournalEnv();
     addTodo("x-x1", "already there");
     await env.journal.drain();
@@ -136,9 +138,11 @@ describe("backlog watcher (fake hand edits)", () => {
     await env.journal.drain();
     writeFileSync(env.files.todos, preAdd);
     const result = await env.watcher.check("todos", "test");
-    expect(result.reapplied!.length).toBe(3);
+    expect(result.reapplied).toEqual([]);
+    expect(result.undone!.toSorted()).toEqual(["a-a1", "b-b1", "c-c1"]);
+    expect(eventKinds(env.db).filter((k) => k === "intent.undone").length).toBe(3);
     await env.journal.drain();
-    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id).toSorted()).toEqual(["a-a1", "b-b1", "c-c1", "x-x1"]);
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["x-x1"]);
   });
 
   test("deleting three just-added to-dos by hand to new content keeps all three deleted", async () => {
@@ -162,14 +166,17 @@ describe("backlog watcher (fake hand edits)", () => {
     const preAdd = readFileSync(env.files.todos, "utf8");
     addTodo("renw-b1", "Renw passport");
     addTodo("a-a1", "keep me");
+    env.record({ file: "todos", verb: "done", taskId: "x-x1", positional: ["x-x1"] });
     await env.journal.drain();
     deleteLines("renw-b1");
     await env.watcher.check("todos", "test");
     writeFileSync(env.files.todos, preAdd);
     const result = await env.watcher.check("todos", "test");
-    expect(result.reapplied!.length).toBe(1);
+    expect(result.reapplied!.length).toBe(2);
+    expect(result.undone).toEqual([]);
     await env.journal.drain();
-    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id).toSorted()).toEqual(["a-a1", "x-x1"]);
+    const tasks = readSnapshot(env.db, "todos")!.tasks;
+    expect(tasks.map((t) => [t.id, t.state]).toSorted()).toEqual([["a-a1", "queued"], ["x-x1", "done"]]);
   });
 
   test("a whole-file revert to older content re-applies the journal", async () => {

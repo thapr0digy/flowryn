@@ -32,6 +32,8 @@ export interface CheckResult {
   outcome: CheckOutcome;
   diff?: BacklogDiff;
   reapplied?: string[];
+  /** Task ids of just-added tasks this read deleted, kept deleted and recorded as `intent.undone`. */
+  undone?: string[];
   divergences?: string[];
 }
 
@@ -184,7 +186,7 @@ export class BacklogWatcher {
     }
 
     const diff = diffTasks(snapshot.tasks, tasks);
-    const erased = this.erasedIntents(file, tasks, diff, contentHash, now);
+    const { erased, undone } = this.erasedIntents(file, tasks, diff, contentHash, now);
     const conflicts = file === "backlog" ? this.runConflicts(tasks) : [];
     const reapplied: string[] = [];
     const divergences: string[] = [];
@@ -193,9 +195,18 @@ export class BacklogWatcher {
       appendEvent(db, {
         source: "backlog",
         kind: "backlog.edited",
-        payload: { file, path, reason, ...diff, erased: erased.map((e) => e.intent) },
+        payload: { file, path, reason, ...diff, erased: erased.map((e) => e.intent), undone: undone.map((u) => u.intent) },
         ts: now,
       });
+      for (const add of undone) {
+        appendEvent(db, {
+          source: "backlog",
+          kind: "intent.undone",
+          taskId: add.taskId,
+          payload: { intent: add.intent, file, verb: add.verb, summary: `add of ${add.taskId} undone by edit; it stays deleted` },
+          ts: now,
+        });
+      }
       for (const applied of erased) {
         const copy = recordIntent(db, {
           file,
@@ -220,7 +231,7 @@ export class BacklogWatcher {
     });
     if (reapplied.length > 0) this.deps.journal.kick();
     if (!isEmptyDiff(diff)) this.deps.log?.(`watcher: ${file} edited by hand (${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} changed)`);
-    return { outcome: "edited", diff, reapplied, divergences };
+    return { outcome: "edited", diff, reapplied, undone: undone.map((u) => u.taskId), divergences };
   }
 
   /**
@@ -231,16 +242,25 @@ export class BacklogWatcher {
    * chain is considered once, through its latest application.
    *
    * The file reads as rolled back when its bytes match the content some
-   * intent in the window was written over: then that intent and every later
-   * one go back. It also reads as rolled back when another recent journal
-   * write, on a task still in the file, reads as erased.
+   * intent in the window was written over and the writes that match would
+   * undo include a non-add intent: then that intent and every later one go
+   * back. It also reads as rolled back when another recent journal write, on a
+   * task still in the file, reads as erased. Undoing only adds, even several,
+   * is hand deletion.
    *
    * A just-added task that is missing was deleted by hand, and stays deleted,
    * unless the file rolled back and this read is the one that removed it. A
-   * deletion an earlier read already accepted stays deleted even then. A task
-   * with a live run is never re-applied; a hand edit to it is a divergence.
+   * deletion an earlier read already accepted stays deleted even then. Adds
+   * this read deleted and kept deleted come back as `undone`. A task with a
+   * live run is never re-applied; a hand edit to it is a divergence.
    */
-  private erasedIntents(file: JournalFile, tasks: BacklogTask[], diff: BacklogDiff, contentHash: string, now: number): (AppliedPayload & { taskId: string })[] {
+  private erasedIntents(
+    file: JournalFile,
+    tasks: BacklogTask[],
+    diff: BacklogDiff,
+    contentHash: string,
+    now: number,
+  ): { erased: (AppliedPayload & { taskId: string })[]; undone: (AppliedPayload & { taskId: string })[] } {
     const since = now - (this.deps.eraseWindowMs ?? ERASE_WINDOW_MS);
     const rows = (this.deps.db.query("SELECT * FROM events WHERE kind = 'intent.applied' AND ts >= ?1 ORDER BY seq").all(since) as EventRow[])
       .map((row) => ({ row, applied: JSON.parse(row.payload) as AppliedPayload }))
@@ -248,17 +268,19 @@ export class BacklogWatcher {
     const latestInChain = new Map<string, number>();
     for (const { row, applied } of rows) latestInChain.set(chainRoot(applied), row.seq);
 
-    let rolledBackFrom: number | null = null;
-    for (const { row, applied } of rows) if (applied.preHash === contentHash) rolledBackFrom = row.seq;
+    let matchedFrom: number | null = null;
+    for (const { row, applied } of rows) if (applied.preHash === contentHash) matchedFrom = row.seq;
+    const rolledBackFrom = matchedFrom !== null && rows.some(({ row, applied }) => row.seq >= matchedFrom && applied.verb !== "add") ? matchedFrom : null;
 
     const byId = new Map(tasks.map((t) => [t.id, t]));
     const removedNow = new Set(diff.removed);
     const pendingTasks = new Set(pendingIntents(this.deps.db, file).map((i) => i.task_id));
     const liveRunTasks = new Set(file === "backlog" ? this.liveRuns().map((r) => r.task_id) : []);
-    const candidates = rows
+    const latest = rows
       .filter(({ row, applied }) => latestInChain.get(chainRoot(applied)) === row.seq)
       .map(({ row, applied }) => ({ seq: row.seq, taskId: row.task_id!, applied }))
-      .filter(({ taskId, applied }) => !pendingTasks.has(taskId) && !liveRunTasks.has(taskId) && (applied.args.reapplyDepth ?? 0) < MAX_REAPPLY_DEPTH);
+      .filter(({ taskId }) => !pendingTasks.has(taskId) && !liveRunTasks.has(taskId));
+    const candidates = latest.filter(({ applied }) => (applied.args.reapplyDepth ?? 0) < MAX_REAPPLY_DEPTH);
     const fileRolledBack = rolledBackFrom !== null || candidates.some(({ taskId, applied }) => applied.verb !== "add" && intentErased(applied, byId.get(taskId)));
 
     const rewinding = new Set<string>();
@@ -275,7 +297,10 @@ export class BacklogWatcher {
       rewinding.add(taskId);
       erased.push({ ...applied, taskId });
     }
-    return erased;
+    const undone = latest
+      .filter(({ taskId, applied }) => applied.verb === "add" && removedNow.has(taskId) && !rewinding.has(taskId))
+      .map(({ taskId, applied }) => ({ ...applied, taskId }));
+    return { erased, undone };
   }
 
   private liveRuns(): OpenRun[] {
