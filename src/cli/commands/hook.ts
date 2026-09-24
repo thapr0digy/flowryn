@@ -88,8 +88,6 @@ function signalHook(name: string, summary: string): VerbSpec {
       const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart() }, HOOK_TIMEOUTS).catch(() => null);
       if (!reply || !reply.ok) return 0;
       const data = (reply.data ?? {}) as Record<string, unknown>;
-      // Past the digest's deadline the daemon has not counted it as carried; showing it now would duplicate it.
-      if (typeof data.deadline === "number" && Date.now() > data.deadline) return 0;
       if (io.json) {
         io.stdout(JSON.stringify(data) + "\n");
         return 0;
@@ -162,7 +160,7 @@ const waitSteer: VerbSpec = {
  * The leader's P0 waiter. Claude: an asyncRewake hook at SessionStart and
  * every Stop; exit 2 with the one P0 line on stderr wakes an idle session
  * (M0 c01). Pi: the leader extension's long poll; one JSON line on stdout.
- * Exits 0 silently when superseded, when the session ends or loses the lease.
+ * Exits 0 silently when superseded, when the session ends or another session holds the lease.
  */
 const waitP0: VerbSpec = {
   name: "hook wait-p0",

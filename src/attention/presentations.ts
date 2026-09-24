@@ -31,15 +31,30 @@ export interface Carry {
 }
 
 /**
+ * Record a presentation row in `state` for the carry's turn. A row the same
+ * session lost for that same turn (a /clear or a lease change before the turn
+ * started) is reused; a live row for it, or a P0 already leased to another
+ * push path (one_p0_path, one_p0_offer), refuses it.
+ */
+function record(db: Db, c: Carry, state: "carried" | "offered"): boolean {
+  const revived = db
+    .query("UPDATE OR IGNORE presentations SET path = ?4, state = ?5, carried_at = ?6, confirmed_at = NULL WHERE item_id = ?1 AND session_id = ?2 AND turn_no = ?3 AND state = 'lost'")
+    .run(c.itemId, c.session, c.turn, c.path, state, c.now).changes;
+  if (revived > 0) return true;
+  return (
+    db
+      .query("INSERT OR IGNORE INTO presentations (item_id, session_id, turn_no, path, state, carried_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+      .run(c.itemId, c.session, c.turn, c.path, state, c.now).changes > 0
+  );
+}
+
+/**
  * Record a carry. Call inside a transaction. False when the item already
  * rides in this turn, or when it is a P0 already leased to another push path,
  * which is what keeps a P0 from being delivered twice.
  */
 export function carry(db: Db, c: Carry): boolean {
-  const inserted = db
-    .query("INSERT OR IGNORE INTO presentations (item_id, session_id, turn_no, path, state, carried_at) VALUES (?1, ?2, ?3, ?4, 'carried', ?5)")
-    .run(c.itemId, c.session, c.turn, c.path, c.now).changes;
-  if (inserted === 0) return false;
+  if (!record(db, c, "carried")) return false;
   db.query("UPDATE items SET attempts = attempts + 1 WHERE id = ?1").run(c.itemId);
   return true;
 }
@@ -51,11 +66,7 @@ export function carry(db: Db, c: Carry): boolean {
  * reports whether and how it delivered. False when the lease is taken.
  */
 export function offer(db: Db, c: Carry): boolean {
-  return (
-    db
-      .query("INSERT OR IGNORE INTO presentations (item_id, session_id, turn_no, path, state, carried_at) VALUES (?1, ?2, ?3, ?4, 'offered', ?5)")
-      .run(c.itemId, c.session, c.turn, c.path, c.now).changes > 0
-  );
+  return record(db, c, "offered");
 }
 
 /** The extension delivered an offered P0 by `path`: it is carried for `turn` from now on. */

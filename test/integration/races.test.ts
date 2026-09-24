@@ -281,4 +281,42 @@ describe("design section 9 races", () => {
     },
     T,
   );
+
+  test(
+    "10. /clear before the first prompt: the new briefing carries the P0 again, so no waiter pushes it twice",
+    async () => {
+      env = await makeLeaderEnv();
+      const opened = await env.openSession("claude");
+      const item = await env.openP0("FLOWRYN-MARK-R10 read me");
+      expect(String((await hook(env, opened.token, "session-start", { source: "startup" })).context)).toContain("FLOWRYN-MARK-R10");
+      expect(String((await hook(env, opened.token, "session-start", { source: "clear" })).context)).toContain("FLOWRYN-MARK-R10");
+      expect(presentations(env, item).map((p) => `${p.path}:${p.state}`)).toEqual(["briefing:carried"]);
+      await hook(env, opened.token, "notify", { notification_type: "idle_prompt" });
+      const waited = await env.call("hook.wait-p0", { harness: "claude", waiter: "01ZZZZZZZZZZZZZZZZZZZZZZZZ" }, opened.token);
+      expect(waited.data).toEqual({ wait: true });
+      await hook(env, opened.token, "prompt", { prompt: "hi" });
+      await hook(env, opened.token, "stop");
+      expect(presentations(env, item).map((p) => `${p.path}:${p.state}`)).toEqual(["briefing:presented"]);
+    },
+    T,
+  );
+
+  test(
+    "11. the SessionStart waiter racing session-start: it waits out the vacant lease, and exits only for another holder",
+    async () => {
+      env = await makeLeaderEnv();
+      const opened = await env.openSession("claude");
+      const waiting = env.call("hook.wait-p0", { harness: "claude", waiter: "01ZZZZZZZZZZZZZZZZZZZZZZZZ" }, opened.token);
+      await Bun.sleep(200);
+      await hook(env, opened.token, "session-start", { source: "startup" });
+      await hook(env, opened.token, "notify", { notification_type: "idle_prompt" });
+      const item = await env.openP0("FLOWRYN-MARK-R11 wake the new holder");
+      expect(((await waiting).data as { fire?: { id: string } }).fire?.id).toBe(item);
+      const reader = await env.openSession("claude");
+      await hook(env, reader.token, "session-start", { source: "startup" });
+      const exited = await env.call("hook.wait-p0", { harness: "claude", waiter: "01ZZZZZZZZZZZZZZZZZZZZZZZY" }, reader.token);
+      expect(exited.data).toEqual({ exit: true });
+    },
+    T,
+  );
 });

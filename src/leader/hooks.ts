@@ -208,9 +208,10 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
 
 /**
  * The digest's hand-over deadline: the hook process start plus the budget.
- * The daemon carries nothing past it, and the CLI prints nothing it receives
- * past it, so a hook that ran too slow for Claude to use (a timed-out hook's
- * context is dropped) never counts as carried. Null when the start is unknown.
+ * The daemon alone decides: it carries nothing it applies past the deadline,
+ * so a hook that ran too slow for Claude to use never counts as carried, and
+ * the CLI prints whatever context it is handed (Claude's hook timeout is far
+ * longer than the budget). Null when the start is unknown.
  */
 export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): number | null {
   return startedAt === undefined ? null : startedAt + ctx.attention.timing().digest_budget_ms;
@@ -348,8 +349,10 @@ export interface WaitOutcome {
 /**
  * `hook wait-p0`: the Claude asyncRewake waiter (armed at SessionStart and
  * every Stop, 8 h timeout) and the Pi extension's long poll. It holds for at
- * most wait_poll_ms; a newer waiter for the session supersedes it, and a
- * session that does not hold the lease gets no pushes, so its waiter exits.
+ * most wait_poll_ms; a newer waiter for the session supersedes it. A session
+ * that does not hold the lease gets no pushes: its waiter keeps waiting while
+ * the lease is vacant (its own session-start may be about to claim it, racing
+ * this waiter), and exits once another open session holds it.
  */
 export async function waitForP0(ctx: HandlerCtx, waiter: string): Promise<WaitOutcome> {
   const sessionId = ctx.caller.session ?? "";
@@ -360,7 +363,7 @@ export async function waitForP0(ctx: HandlerCtx, waiter: string): Promise<WaitOu
   for (;;) {
     if (bus.closed) return { wait: true };
     const s = getSession(ctx.db, sessionId);
-    if (!s || s.ended_at !== null || !bus.isCurrent(sessionId, waiter) || !isHolder(ctx.db, sessionId)) return { exit: true };
+    if (!s || s.ended_at !== null || !bus.isCurrent(sessionId, waiter) || heldByAnother(ctx.db, sessionId)) return { exit: true };
     const now = ctx.now();
     const push = tx(ctx.db, () => {
       if (beat) heartbeat(ctx.db, sessionId, now);
@@ -381,6 +384,13 @@ export async function waitForP0(ctx: HandlerCtx, waiter: string): Promise<WaitOu
     const outcome = await bus.wait(sessionId, waiter, remaining);
     if (outcome === "superseded") return { exit: true };
   }
+}
+
+function heldByAnother(db: Db, sessionId: string): boolean {
+  const holder = getLease(db).session_id;
+  if (!holder || holder === sessionId) return false;
+  const row = getSession(db, holder);
+  return row !== null && row.ended_at === null;
 }
 
 /** Record the push the waiter found, re-checked inside the transaction; the per-item lease keeps it single. */

@@ -129,6 +129,25 @@ describe("presentations (design section 9)", () => {
     expect(p0Candidate(db, "L2", Date.now(), AGE)?.id).toBe(id);
   });
 
+  test("a carry or offer lost before its turn started is recorded again for that turn, keeping the push lease", () => {
+    const id = open("failure_needs_you", "p0");
+    // /clear before the first prompt: the startup briefing's carry for turn 1 is lost and the new briefing carries it for turn 1 again.
+    expect(tx(db, () => carry(db, { itemId: id, session: "L1", turn: 1, path: "briefing", now: 1 }))).toBe(true);
+    tx(db, () => loseCarried(db, "L1", null, 2));
+    expect(tx(db, () => carry(db, { itemId: id, session: "L1", turn: 1, path: "briefing", now: 3 }))).toBe(true);
+    expect(db.query("SELECT path, state, carried_at FROM presentations WHERE item_id = ?1").all(id)).toEqual([{ path: "briefing", state: "carried", carried_at: 3 }]);
+    expect(p0Candidate(db, "L1", Date.now(), AGE)).toBeNull();
+    expect(tx(db, () => carry(db, { itemId: id, session: "L1", turn: 1, path: "waiter", now: 4 }))).toBe(false);
+    // A Pi offer lost to a session switch is offered again, unless another session holds the item's push lease.
+    tx(db, () => offer(db, { itemId: id, session: "L2", turn: 1, path: "trigger", now: 5 }));
+    tx(db, () => loseCarried(db, "L2", null, 6));
+    expect(tx(db, () => carry(db, { itemId: id, session: "L3", turn: 1, path: "waiter", now: 7 }))).toBe(true);
+    expect(tx(db, () => offer(db, { itemId: id, session: "L2", turn: 1, path: "trigger", now: 8 }))).toBe(false);
+    tx(db, () => confirmTurn(db, "L3", 1, 9));
+    expect(tx(db, () => offer(db, { itemId: id, session: "L2", turn: 1, path: "trigger", now: 10 }))).toBe(true);
+    expect(db.query("SELECT state FROM presentations WHERE item_id = ?1 AND session_id = 'L2'").get(id)).toEqual({ state: "offered" });
+  });
+
   test("an offer holds the lease, is never confirmed by a turn end, and is accepted or released by the extension", () => {
     const id = open("failure_needs_you", "p0");
     tx(db, () => offer(db, { itemId: id, session: "L1", turn: 4, path: "continuation", now: 1 }));
