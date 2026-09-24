@@ -13,6 +13,7 @@ import { discardRef, findAttempt, findHumanApproval, insertApproval, voidApprova
 import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
 import { closeMergeGate, positionOf, requestStage } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
+import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { WORKER_POOL } from "../config/workflows.ts";
 import {
   checkGate,
@@ -291,7 +292,7 @@ const approveBegin: VerbSpec = {
       const challenge = ctx.delivery.challenges.create({ task: run.task_id, action: "gate", ref: gateRef(gate), head, allowRed: null, channel }, now);
       return {
         challenge: { id: challenge.id, code: challenge.code },
-        summary: { action: "gate", task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", head },
+        summary: { action: "gate", task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", head, plan: pendingPlanLine(ctx.db, gate.id) ?? "-" },
       };
     }
     if (boolArg(args, "discard")) {

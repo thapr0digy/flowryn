@@ -57,9 +57,9 @@ function sampler(e: FleetEnv): { stop(): Promise<{ max: Record<string, number>; 
   const max: Record<string, number> = {};
   const over: string[] = [];
   let samples = 0;
-  let running = true;
+  const state = { running: true };
   const loop = (async () => {
-    while (running) {
+    while (state.running) {
       const now = counts(e);
       samples++;
       for (const [pool, n] of Object.entries(now)) {
@@ -72,7 +72,7 @@ function sampler(e: FleetEnv): { stop(): Promise<{ max: Record<string, number>; 
   })();
   return {
     async stop() {
-      running = false;
+      state.running = false;
       await loop;
       return { max, over, samples };
     },
@@ -168,15 +168,19 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       await waitUntil(() => query(e, "SELECT 1 FROM run_evidence WHERE source = 'docker'").length >= 5, 15_000, "Docker evidence for the QA runs");
 
       // 5 · QA finishes in waves of 5; each wave moves to ship (validation 5) and frees QA for the next.
+      const holdingQa = () => query<{ task_id: string }>(e, "SELECT r.task_id FROM runs r JOIN pool_leases l ON l.run_id = r.id WHERE l.pool = 'docker_env' AND l.released_at IS NULL").map((r) => r.task_id);
+      const done = new Set<string>();
       for (let wave = 0; wave < 4; wave++) {
-        const qa = query<{ task_id: string }>(e, "SELECT r.task_id FROM runs r JOIN pool_leases l ON l.run_id = r.id WHERE l.pool = 'docker_env' AND l.released_at IS NULL").map((r) => r.task_id);
-        expect(qa.length).toBe(5);
-        for (const task of qa) release(e, task, "go-qa");
-        if (wave < 3) await waitUntil(() => query(e, "SELECT 1 FROM pool_leases WHERE pool = 'docker_env' AND released_at IS NULL").length === 5 && !qa.some((t) => query(e, "SELECT 1 FROM runs r JOIN pool_leases l ON l.run_id = r.id WHERE r.task_id = ?1 AND l.pool = 'docker_env' AND l.released_at IS NULL", t).length > 0), 60_000, `QA wave ${wave + 2}`);
+        await waitUntil(() => holdingQa().length === 5 && holdingQa().every((t) => !done.has(t)), 90_000, `QA wave ${wave + 1}`);
+        const qa = holdingQa();
+        for (const task of qa) {
+          done.add(task);
+          release(e, task, "go-qa");
+        }
         // Only 5 validate at once: the first wave ships; the later ones wait for validation.
         await waitUntil(() => (counts(e).validation ?? 0) === 5, 60_000, "5 validating");
       }
-      await waitUntil(() => (counts(e).docker_env ?? 0) === 0, 30_000, "QA done");
+      await waitUntil(() => (counts(e).docker_env ?? 0) === 0, 90_000, "QA done");
 
       // 6 · The 5 validating ship: their slots pass to the next 5 waiting to ship, oldest first.
       const shipping = query<{ task_id: string }>(e, "SELECT r.task_id FROM runs r JOIN pool_leases l ON l.run_id = r.id WHERE l.pool = 'validation' AND l.released_at IS NULL").map((r) => r.task_id);

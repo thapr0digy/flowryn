@@ -12,6 +12,7 @@ import { gatherFacts } from "../policy/merge.ts";
 import { mergeContext, mergeSummary, runAndProject } from "../policy/verbs.ts";
 import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { openReviewGate } from "../policy/gates.ts";
+import { pendingPlanLine } from "./plans.ts";
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 
@@ -472,7 +473,7 @@ const gateSummaryHook = leaderVerb(
     const input = parseInput(args) as leader.LeaderHookInput;
     try {
       const { run, gate } = openReviewGate(ctx.db, String(input.task ?? ""));
-      return { task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-" };
+      return { task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", plan: pendingPlanLine(ctx.db, gate.id) ?? "-" };
     } catch (error) {
       return { error: (error as Error).message };
     }

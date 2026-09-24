@@ -11,6 +11,7 @@ import { hashToken, mintToken } from "../api/auth.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
+import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { recordAttempt, type ApprovalAction } from "../policy/approvals.ts";
 
 /**
@@ -313,7 +314,8 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand): { line: string; prUr
   if (gated.action === "gate") {
     const gate = openGate(ctx.db, run.id, "review");
     if (!gate) return { line: `pass a review gate of ${run.task_id} (${title}): none is open; it will be refused`, prUrl: null, head: null };
-    return { line: `PASS the ${gate.stage} review of ${run.task_id} (${title}), review page ${gate.review_url ?? "none"}; the next stage starts at once`, prUrl: `gate:${gate.id}`, head: null };
+    const plan = pendingPlanLine(ctx.db, gate.id);
+    return { line: `PASS the ${gate.stage} review of ${run.task_id} (${title}), review page ${gate.review_url ?? "none"}${plan ? `; it also approves ${plan}` : ""}; the next stage starts at once`, prUrl: `gate:${gate.id}`, head: null };
   }
   const shipped = deliveredOf(ctx.db, run.task_id);
   if (!shipped) return { line: `merge ${run.task_id} (${title}): nothing delivered yet; it will be refused`, prUrl: null, head: null };

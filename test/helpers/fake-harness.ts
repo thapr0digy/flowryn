@@ -291,7 +291,8 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
         const result = await flowryn([...called, "--json"]);
         recordReply(called, result);
         log(`stage done -> ${result.code} ${result.stdout.trim()}`);
-        ok = result.code === 0;
+        // Exit 75 is spooled: the contract says end the turn and wait all the same; the steer comes once it is ingested.
+        ok = result.code === 0 || result.code === 75;
         awaitingStage = ok;
       });
       return ok ? "await-steer" : "continue";

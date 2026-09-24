@@ -97,6 +97,8 @@ describe("M5 exit: a two-phase feature, phase 2 by itself", () => {
 
       const pass = await leader.runBash(`flowryn gate pass ${task} --json`, { approve: true });
       expect(pass).toMatchObject({ prompted: true, ran: true, code: 0 });
+      // Approving the design approves the plan it carries: the prompt says so.
+      expect(leader.prompts.at(-1)).toContain(`it also approves plan ${plan}, 1 phase`);
       expect(JSON.parse(pass.stdout).data).toMatchObject({ stage: "design", channel: "claude-ask", plan });
       const phase2 = await phaseTwoQueued(e, plan, task);
 
@@ -121,6 +123,7 @@ describe("M5 exit: a two-phase feature, phase 2 by itself", () => {
       await waitUntil(() => query(e, "SELECT 1 FROM runs WHERE task_id = ?1", phase2).length === 1, 20_000, "phase 2 to start by itself");
       const started = query<{ line: string; class: string }>(e, "SELECT line, class FROM items WHERE kind = 'phase_started' AND task_id = ?1", phase2)[0]!;
       expect(started.class).toBe("info");
+      expect(started.line).toContain(`Phase 2 of 2 in "`);
       expect(started.line).toContain("started by itself");
       const run2 = query<{ id: string; workflow: string }>(e, "SELECT id, workflow FROM runs WHERE task_id = ?1", phase2)[0]!;
       expect(run2.workflow).toBe("fix");
@@ -149,6 +152,7 @@ describe("M5 exit: a two-phase feature, phase 2 by itself", () => {
       const no = await leader.callTool("flowryn_gate_pass", { task }, false);
       expect(no).toContain("declined");
       expect(leader.confirms.at(-1)!.message).toContain("https://lavish.test/beta/design");
+      expect(leader.confirms.at(-1)!.message).toContain(`also approves plan ${plan}, 1 phase`);
       expect(e.fleet.run(run).stage_state).toBe("review");
       const yes = await leader.callTool("flowryn_gate_pass", { task }, true);
       expect(yes).toContain(`Passed the design review of ${task}`);

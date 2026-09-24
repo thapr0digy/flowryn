@@ -346,7 +346,9 @@ export default function flowrynLeader(pi: any): void {
       const summary = await runHook("gate-summary", { task });
       if (!summary) return text("Flowryn is not reachable; nothing was passed.");
       if (typeof summary.error === "string") return text(`Cannot pass a gate of ${task}: ${summary.error}`);
-      const lines = [`${summary.title ?? task} (${summary.project ?? "?"})`, `review: ${summary.review ?? "-"}`, `gate ${summary.gate ?? "?"}; the next stage starts at once`];
+      const lines = [`${summary.title ?? task} (${summary.project ?? "?"})`, `review: ${summary.review ?? "-"}`];
+      if (typeof summary.plan === "string" && summary.plan !== "-") lines.push(`also approves ${summary.plan}`);
+      lines.push(`gate ${summary.gate ?? "?"}; the next stage starts at once`);
       let yes = false;
       try {
         yes = Boolean(await ctx?.ui?.confirm?.(`Pass the ${summary.stage ?? "?"} review of ${task}?`, lines.join("\n")));

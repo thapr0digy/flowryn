@@ -256,6 +256,19 @@ export function phaseOfTask(db: Db, taskId: string): (PhaseRow & { plan_title: s
     .get(taskId) as (PhaseRow & { plan_title: string; plan_state: string; project_id: string; phases: number }) | null;
 }
 
+/**
+ * What passing a gate would approve besides the stage: the pending plan it
+ * carries, in one line ("plan p3, 2 phases: Cart API; Cart page"), or null.
+ * Every gate prompt shows it, since approving the design approves the plan.
+ */
+export function pendingPlanLine(db: Db, gateId: string): string | null {
+  const plan = db.query("SELECT id FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gateId) as { id: string } | null;
+  if (!plan) return null;
+  const phases = phasesOf(db, plan.id);
+  const titles = phases.map((p) => p.title).join("; ");
+  return `plan ${plan.id}, ${phases.length} phase${phases.length === 1 ? "" : "s"} that start by themselves once this task lands: ${titles.length > 160 ? `${titles.slice(0, 159)}…` : titles}`;
+}
+
 export function getPlan(db: Db, id: string): PlanRow | null {
   return db.query("SELECT * FROM plans WHERE id = ?1").get(id) as PlanRow | null;
 }

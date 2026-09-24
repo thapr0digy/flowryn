@@ -242,12 +242,12 @@ export class Scheduler {
     const paused = usageLimitSince(db) !== null;
     const phases = db
       .query(
-        `SELECT ph.*, pl.title AS plan_title, pl.project_id, (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
+        `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
          FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id JOIN task_policy tp ON tp.task_id = ph.task_id
          WHERE pl.state = 'approved' AND tp.auto = 1 AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ph.task_id)
          ORDER BY pl.created_at, ph.phase_no`,
       )
-      .all() as (PhaseRow & { plan_title: string; project_id: string; phases: number })[];
+      .all() as (PhaseRow & { plan_title: string; project_id: string; source_task: string | null; phases: number })[];
     if (phases.length === 0) return 0;
     const backlog = readSnapshot(db, "backlog")?.tasks ?? null;
     let started = 0;
@@ -275,8 +275,11 @@ export class Scheduler {
         if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
         const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", harness, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", now: t });
         resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
-        const event = appendEvent(db, { source: "daemon", kind: "phase.started", runId, taskId: phase.task_id, payload: { plan: phase.plan_id, phase: phase.phase_no, of: phase.phases }, ts: t });
-        const where = phase.phases > 1 ? `Phase ${phase.phase_no} of ${phase.phases} in "${phase.plan_title}"` : `Queued task "${phase.title}"`;
+        // A plan a design handed in holds the phases after the design's own task, which is phase 1.
+        const offset = phase.source_task ? 1 : 0;
+        const [n, of] = [phase.phase_no + offset, phase.phases + offset];
+        const event = appendEvent(db, { source: "daemon", kind: "phase.started", runId, taskId: phase.task_id, payload: { plan: phase.plan_id, phase: n, of }, ts: t });
+        const where = of > 1 ? `Phase ${n} of ${of} in "${phase.plan_title}"` : `Queued task "${phase.title}"`;
         openItem(db, { kind: "phase_started", eventSeq: event.seq, taskId: phase.task_id, runId, line: `${where} started by itself: ${phase.title} (${project.id}); its blockers landed`, now: t });
         return runId;
       });

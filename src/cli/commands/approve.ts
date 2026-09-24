@@ -84,7 +84,8 @@ export async function runApprovalFlow(env: NodeJS.ProcessEnv, tty: Tty, flow: Ap
           `Pass the ${d.stage} review of ${d.task}: ${d.title} (${d.project})`,
           `  review ${d.review}`,
           `  gate ${d.gate}, worktree at ${String(d.head).slice(0, 12)}`,
-          "  The next stage starts at once; a plan filed with this design is approved with it.",
+          ...(d.plan && d.plan !== "-" ? [`  approves ${d.plan}`] : []),
+          "  The next stage starts at once.",
         ]
       : d.action === "discard"
       ? [
