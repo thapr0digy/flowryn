@@ -1,3 +1,5 @@
 [test]
 # Integration tests start daemons and run the real tasks-axi; CI runners are slower than laptops.
 timeout = 30000
+# No test posts a real notification: osascript is refused in-process, and harness daemons deliver none.
+preload = ["./test/helpers/no-notifications.ts"]

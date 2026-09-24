@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import type { FlowrynConfig } from "../config/config.ts";
 import { leaderTiming, notifyConfig } from "../config/leader.ts";
 import type { Db } from "../db/db.ts";
@@ -23,6 +24,8 @@ export interface NotifyDeps {
   log(message: string): void;
   /** macOS delivery; tests replace it. */
   macos?: MacNotify;
+  /** The FLOWRYN_NOTIFY=off override: decisions are still recorded, nothing is delivered. */
+  off?(): boolean;
 }
 
 interface Pending {
@@ -44,6 +47,13 @@ export const osascriptNotify: MacNotify = async (title, body) => {
   clearTimeout(timer);
   if (code !== 0) throw new Error(`osascript exited ${code}: ${stderr.trim().slice(0, 200)}`);
 };
+
+/** A macOS channel that appends to a file instead of notifying (FLOWRYN_NOTIFIER=record:<path>, the tests' seam). */
+export function recordingNotify(path: string): MacNotify {
+  return async (title, body) => {
+    appendFileSync(path, `${JSON.stringify({ title, body, at: Date.now() })}\n`);
+  };
+}
 
 function nextNotificationId(db: Db): string {
   const next = Number(getMeta(db, "next_notification_no") ?? "1");
@@ -128,6 +138,7 @@ export class NotifyPump {
   }
 
   private async deliver(channels: string[], title: string, text: string): Promise<void> {
+    if (this.deps.off?.()) return;
     for (const channel of channels) {
       try {
         if (channel === "macos") await (this.deps.macos ?? osascriptNotify)(title, text);

@@ -30,9 +30,9 @@ import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
-import { leaderTiming, notifyConfig } from "../config/leader.ts";
+import { leaderTiming, notificationsOff, notifyConfig, recordingNotifierPath } from "../config/leader.ts";
 import type { AttentionServices } from "../attention/services.ts";
-import { NotifyPump } from "../attention/notify.ts";
+import { NotifyPump, recordingNotify } from "../attention/notify.ts";
 import { lastItemNo } from "../attention/items.ts";
 import { syncOverdueTodos } from "../attention/todos-due.ts";
 import { cleanupConfig, githubConfig, type GitHubConfig } from "../config/delivery.ts";
@@ -242,7 +242,18 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     });
 
     // M3: leader waiters, the leader clocks and notifications (design sections 9 and 10).
-    const notifyPump = new NotifyPump({ db: database, config: () => config, runtime: () => runtime, now: Date.now, log });
+    const recorder = recordingNotifierPath(env);
+    const notifyPump = new NotifyPump({
+      db: database,
+      config: () => config,
+      runtime: () => runtime,
+      now: Date.now,
+      log,
+      off: () => notificationsOff(env),
+      ...(recorder ? { macos: recordingNotify(recorder) } : {}),
+    });
+    if (notificationsOff(env)) log("notify: off (FLOWRYN_NOTIFY=off or FLOWRYN_NOTIFIER=null): notifications are recorded, none is delivered");
+    else if (recorder) log(`notify: the macOS channel records to ${recorder} (FLOWRYN_NOTIFIER)`);
     const attention: AttentionServices = {
       bus: new SteerBus(),
       timing: () => leaderTiming(config),

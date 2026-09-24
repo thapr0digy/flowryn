@@ -100,7 +100,9 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
-  const env = { ...cleanEnv(), FLOWRYN_HOME: home };
+  // No daemon the tests start ever delivers a notification (FLOWRYN_NOTIFY=off); a test that clears the
+  // override still only reaches a recording macOS channel, never osascript.
+  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}` };
   return {
     home,
     stateDir,

@@ -28,7 +28,8 @@ export const LATER_SECTION_DEFAULTS: Record<string, unknown> = {
   style: { terse: true },
   capacity: { worker: 20, validation: 5, docker_env: 5, browser: 5, host: { min_free_mem_gb: 8, max_load_per_core: 1.5 } },
   autonomy: { default: "plan" },
-  notify: { min_interval_min: 30, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 },
+  // Your own setup turns the macOS channel on; it is never a default, so nothing else posts to your Mac.
+  notify: { macos: true, herdr: true, min_interval_min: 30, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 },
 };
 
 export interface InitIo {

@@ -168,6 +168,8 @@ mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
 const env: Record<string, string> = {};
 for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FLOWRYN_") && k !== "CLAUDECODE" && !k.startsWith("CLAUDE_CODE_")) env[k] = v;
 env.FLOWRYN_HOME = home;
+// A live run never posts to your Mac: its scratch daemon records notifications and delivers none.
+env.FLOWRYN_NOTIFY = "off";
 
 let daemon: ReturnType<typeof Bun.spawn> | null = null;
 async function startDaemon(): Promise<void> {
