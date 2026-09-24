@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, writeSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, renameSync, statSync, writeSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -21,6 +21,22 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, mode = 
     closeSync(fd);
   }
   renameSync(tmp, path);
+}
+
+/** Can `path` be written, or created: is its nearest existing ancestor writable? */
+export function canCreateOrWrite(path: string): boolean {
+  let probe = path;
+  while (!existsSync(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe) return false;
+    probe = parent;
+  }
+  try {
+    accessSync(probe, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isMissing(error: unknown): boolean {

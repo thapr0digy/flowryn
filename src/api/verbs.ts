@@ -115,8 +115,6 @@ export interface CliIo {
   env: NodeJS.ProcessEnv;
   stdinIsTty: boolean;
   stdoutIsTty: boolean;
-  /** Ask a question on the terminal; resolves with the answer, or the default on empty input. */
-  prompt(question: string, fallback?: string): Promise<string>;
 }
 
 function coerce(name: string, spec: FlagSpec, value: unknown): ArgValue {

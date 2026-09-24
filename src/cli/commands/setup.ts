@@ -1,4 +1,3 @@
-import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../../config/config.ts";
 import { flowrynHome } from "../../config/paths.ts";
 import { errorReply, okReply, type Reply } from "../../api/envelope.ts";
@@ -12,6 +11,7 @@ import { installService, plistPath, plistSpecFor } from "../../service/launchd.t
 import { PROTO, VERSION } from "../../version.ts";
 import { runServerVerb } from "../client.ts";
 import { agentIdentity, notHumanReason } from "../human.ts";
+import { LineReader } from "../line-reader.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 import { ping } from "./daemon.ts";
 
@@ -52,17 +52,23 @@ const init: VerbSpec = {
     if (reason || !io.stdinIsTty) {
       return print(io, errorReply({ code: "human_only", message: `init is interactive and runs only in your own terminal: ${reason ?? "stdin is not a terminal"}` }));
     }
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const input = new LineReader(process.stdin);
+    const answer = async (prompt: string): Promise<string> => {
+      io.stdout(prompt);
+      const line = await input.next();
+      if (line === null) throw new Error("input ended before init finished; nothing more was written");
+      return line.trim();
+    };
     try {
       return await runInit({
         env: io.env,
         platform: process.platform,
         io: {
           print: (line) => io.stdout(line + "\n"),
-          ask: async (question, fallback) => (await rl.question(`${question} [${fallback}]: `)).trim() || fallback,
+          ask: async (question, fallback) => (await answer(`${question} [${fallback}]: `)) || fallback,
           confirm: async (question, fallback) => {
-            const answer = (await rl.question(`${question} [${fallback ? "Y/n" : "y/N"}]: `)).trim().toLowerCase();
-            return answer === "" ? fallback : answer.startsWith("y");
+            const reply = (await answer(`${question} [${fallback ? "Y/n" : "y/N"}]: `)).toLowerCase();
+            return reply === "" ? fallback : reply.startsWith("y");
           },
         },
         which: (binary) => Bun.which(binary),
@@ -83,8 +89,10 @@ const init: VerbSpec = {
           return renderReply(okReply({ checks }), { json: false }).trimEnd();
         },
       });
+    } catch (error) {
+      return print(io, errorReply({ code: "bad_args", message: (error as Error).message }));
     } finally {
-      rl.close();
+      input.close();
     }
   },
 };

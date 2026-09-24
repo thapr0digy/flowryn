@@ -58,11 +58,12 @@ async function socketAnswers(path: string): Promise<boolean> {
   }
 }
 
+/** The database's instance id, minted on first start; call inside the daemon.started transaction. */
 function ensureInstanceId(db: Db): string {
   const existing = getMeta(db, "instance_id");
   if (existing) return existing;
   const id = randomBytes(8).toString("hex");
-  tx(db, () => setMeta(db, "instance_id", id));
+  setMeta(db, "instance_id", id);
   return id;
 }
 
@@ -111,9 +112,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       throw new StartupRefused(`flowryn.db failed its integrity check (${problems[0]}); restore it with: flowryn doctor --restore`);
     }
     const migrated = migrate(db);
-    const instance = ensureInstanceId(db);
-    const startedAt = Date.now();
     const database = db;
+    const instance = tx(database, () => {
+      const id = ensureInstanceId(database);
+      appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, migrated, instance: id } });
+      return id;
+    });
+    const startedAt = Date.now();
 
     const journalFiles = (): Record<JournalFile, string> => ({ backlog: config.tasks.backlog, todos: config.tasks.todos });
     const runner = (): TasksAxiRunner | null => {
@@ -147,9 +152,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     listener = await listen(sock, (message) => gateway.handle(message), (error) => log(`socket: ${error.message}`));
     boundSocket = true;
-    tx(database, () =>
-      appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, migrated } }),
-    );
     log(`started pid=${process.pid} version=${VERSION} proto=${PROTO} socket=${sock} state=${config.state_dir}`);
     const missing = missingTools(config);
     if (missing.length > 0) log(`configured tools missing: ${missing.join(", ")}`);

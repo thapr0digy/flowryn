@@ -1,5 +1,5 @@
 import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename } from "node:path";
 import { configProblems, loadConfig, resolveTool, TOOL_BINARIES, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
 import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion } from "../db/db.ts";
@@ -7,6 +7,7 @@ import { listBackups } from "../db/backup.ts";
 import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.ts";
 import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
 import { isLockHeld } from "../util/flock.ts";
+import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
 
@@ -71,8 +72,9 @@ async function tasksChecks(config: FlowrynConfig): Promise<Check[]> {
   for (const [label, file] of [["backlog", config.tasks.backlog], ["todos", config.tasks.todos]] as const) {
     try {
       const tasks = await listTasks(runner, file);
-      accessSync(existsSync(file) ? file : dirname(file), constants.W_OK);
-      checks.push({ check: `${label} file`, status: "ok", detail: `${file} (${tasks.length} tasks, writable)` });
+      if (!canCreateOrWrite(file)) throw new Error("not writable");
+      const note = existsSync(file) ? `${tasks.length} tasks, writable` : "created on first write";
+      checks.push({ check: `${label} file`, status: "ok", detail: `${file} (${note})` });
     } catch (error) {
       checks.push({ check: `${label} file`, status: "fail", detail: `${file}: ${(error as Error).message}` });
     }

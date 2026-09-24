@@ -115,7 +115,7 @@ async function settleIntent(ctx: HandlerCtx, result: HandlerResult): Promise<Han
 
 /** Refresh the to-do snapshot first, so a read-modify-write never starts from a stale body. */
 async function freshTodos(ctx: HandlerCtx): Promise<void> {
-  await ctx.watcher.check("todos", "verb");
+  await ctx.watcher.refreshIfIdle("todos");
 }
 
 const todoAdd: VerbSpec = {

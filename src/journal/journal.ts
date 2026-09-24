@@ -144,6 +144,12 @@ export class Journal {
   private readonly backoff: readonly number[];
   private readonly nextAttemptAt = new Map<string, number>();
   private readonly waiters = new Map<string, Set<(row: IntentRow) => void>>();
+  /**
+   * Set by the backlog watcher: diffs a hand edit the journal is about to
+   * write over, so the edit is recorded (and checked against live runs) rather
+   * than silently absorbed by the post-write read. Runs under the file lock.
+   */
+  beforeWrite: ((file: JournalFile) => Promise<void>) | null = null;
   private draining: Promise<void> | null = null;
   private drainAgain = false;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -193,8 +199,8 @@ export class Journal {
             await this.applyOne(next);
           } catch (error) {
             // An unexpected failure (disk, database) must not wedge the loop; the intent stays pending.
-            const attempts = getIntent(this.db, next.id)?.attempts ?? 1;
-            this.nextAttemptAt.set(next.id, this.now() + this.backoff[Math.min(Math.max(attempts, 1) - 1, this.backoff.length - 1)]!);
+            const attempts = (getIntent(this.db, next.id)?.attempts ?? 0) + 1;
+            this.nextAttemptAt.set(next.id, this.now() + this.backoff[Math.min(attempts - 1, this.backoff.length - 1)]!);
             this.deps.log?.(`journal: applying ${next.verb} ${next.task_id} threw: ${(error as Error).stack ?? String(error)}`);
           }
         }
@@ -254,11 +260,11 @@ export class Journal {
       const fresh = getIntent(this.db, intent.id);
       if (!fresh || fresh.state !== "pending") return;
       const filePath = this.deps.files()[fresh.file];
-      tx(this.db, () => {
-        this.db.query("UPDATE intents SET attempts = attempts + 1 WHERE id = ?1").run(fresh.id);
-      });
+      // Counted in the outcome's transaction, with its event: an attempt cut short by a crash does not count.
       const attempts = fresh.attempts + 1;
       const runner = this.deps.runner();
+      const snapshot = readSnapshot(this.db, fresh.file);
+      if (runner && this.beforeWrite && snapshot && snapshot.contentHash !== hashFile(filePath)) await this.beforeWrite(fresh.file);
       const pre = readSnapshot(this.db, fresh.file)?.tasks.find((t) => t.id === fresh.task_id) ?? null;
       let outcome: TasksAxiOutcome;
       if (!runner) {
@@ -299,7 +305,7 @@ export class Journal {
     }
     const post = json.task && typeof json.task === "object" ? taskFromJson(json.task as Record<string, unknown>) : (tasks?.find((t) => t.id === intent.task_id) ?? null);
     tx(this.db, () => {
-      this.db.query("UPDATE intents SET state = 'applied', applied_at = ?2, last_error = NULL WHERE id = ?1").run(intent.id, now);
+      this.db.query("UPDATE intents SET state = 'applied', applied_at = ?2, last_error = NULL, attempts = attempts + 1 WHERE id = ?1").run(intent.id, now);
       const previous = readSnapshot(this.db, intent.file)?.tasks ?? [];
       const nextTasks = tasks ?? (post ? patchTasks(previous, post) : previous);
       writeSnapshot(this.db, intent.file, contentHash, nextTasks, now);
@@ -323,7 +329,7 @@ export class Journal {
     const delay = this.backoff[Math.min(attempts - 1, this.backoff.length - 1)]!;
     this.nextAttemptAt.set(intent.id, now + delay);
     tx(this.db, () => {
-      this.db.query("UPDATE intents SET last_error = ?2 WHERE id = ?1").run(intent.id, `${outcome.code}: ${outcome.message}`);
+      this.db.query("UPDATE intents SET last_error = ?2, attempts = attempts + 1 WHERE id = ?1").run(intent.id, `${outcome.code}: ${outcome.message}`);
       const event = appendEvent(this.db, {
         source: "daemon",
         kind: "intent.retry",
@@ -348,7 +354,7 @@ export class Journal {
     const now = this.now();
     this.nextAttemptAt.delete(intent.id);
     tx(this.db, () => {
-      this.db.query("UPDATE intents SET state = 'failed', last_error = ?2 WHERE id = ?1").run(intent.id, `${outcome.code}: ${outcome.message}`);
+      this.db.query("UPDATE intents SET state = 'failed', last_error = ?2, attempts = attempts + 1 WHERE id = ?1").run(intent.id, `${outcome.code}: ${outcome.message}`);
       const event = appendEvent(this.db, {
         source: "daemon",
         kind: "intent.failed",

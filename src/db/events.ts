@@ -36,7 +36,3 @@ export function appendEvent(db: Db, event: NewEvent): { seq: number; ulid: strin
     .run(id, event.ts ?? Date.now(), event.source, event.runId ?? null, event.taskId ?? null, event.kind, JSON.stringify(event.payload ?? {}));
   return { seq: Number(result.lastInsertRowid), ulid: id };
 }
-
-export function eventsOfKind(db: Db, kind: string, sinceTs = 0): EventRow[] {
-  return db.query("SELECT * FROM events WHERE kind = ?1 AND ts >= ?2 ORDER BY seq").all(kind, sinceTs) as EventRow[];
-}

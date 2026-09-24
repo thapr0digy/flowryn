@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Db } from "../db/db.ts";
 import { sha256Hex } from "../util/hash.ts";
 import { FlowrynError } from "./errors.ts";
-import type { Caller, Role, VerbSpec } from "./verbs.ts";
+import type { Caller, VerbSpec } from "./verbs.ts";
 
 /** Tokens are stored only as hashes (design section 12). */
 export function hashToken(token: string): string {
@@ -44,9 +44,4 @@ export function authorize(spec: VerbSpec, caller: Caller): void {
     throw new FlowrynError("role_refused", `${spec.name} needs a ${who}`, "run it in your own terminal, or ask the leader");
   }
   throw new FlowrynError("role_refused", `${spec.name} needs a ${who}; this caller is ${caller.role}`);
-}
-
-/** Roles a verb accepts, for help text. */
-export function describeRoles(roles: Role[]): string {
-  return roles.join(", ");
 }

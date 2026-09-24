@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { configProblems, defaultConfig, parseConfig, privacyFolderOf, syncedFolderOf } from "../../src/config/config.ts";
 import { renderConfig, renderToml } from "../../src/config/toml.ts";
@@ -87,7 +88,21 @@ describe("paths", () => {
     expect(() => assertSocketPathFits(join(homedir(), ".flowryn/run/flowrynd.sock"))).not.toThrow();
   });
 
-  test("init keeps Homebrew's stable link rather than a versioned Cellar path", () => {
-    expect(recordedToolPath("/definitely/not/here")).toBe("/definitely/not/here");
+  test("init resolves tool symlinks but keeps a stable link into a versioned directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fw-tools-"));
+    try {
+      mkdirSync(join(dir, "Cellar", "gh", "2.93.0", "bin"), { recursive: true });
+      mkdirSync(join(dir, "bin"));
+      mkdirSync(join(dir, "real"));
+      writeFileSync(join(dir, "Cellar", "gh", "2.93.0", "bin", "gh"), "");
+      writeFileSync(join(dir, "real", "git"), "");
+      symlinkSync(join(dir, "Cellar", "gh", "2.93.0", "bin", "gh"), join(dir, "bin", "gh"));
+      symlinkSync(join(dir, "real", "git"), join(dir, "bin", "git"));
+      expect(recordedToolPath(join(dir, "bin", "gh"))).toBe(join(dir, "bin", "gh"));
+      expect(recordedToolPath(join(dir, "bin", "git"))).toBe(realpathSync(join(dir, "real", "git")));
+      expect(recordedToolPath("/definitely/not/here")).toBe("/definitely/not/here");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

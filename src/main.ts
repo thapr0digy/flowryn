@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 import { basename } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { cliMain } from "./cli/main.ts";
 import type { CliIo } from "./api/verbs.ts";
 
@@ -19,14 +18,6 @@ async function main(): Promise<number> {
     env: process.env,
     stdinIsTty: Boolean(process.stdin.isTTY),
     stdoutIsTty: Boolean(process.stdout.isTTY),
-    prompt: async (question, fallback = "") => {
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
-      try {
-        return (await rl.question(`${question} `)).trim() || fallback;
-      } finally {
-        rl.close();
-      }
-    },
   };
   io.json = args.includes("--json");
   return cliMain(args, io, () => Bun.stdin.text());

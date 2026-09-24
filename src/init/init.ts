@@ -1,9 +1,9 @@
-import { accessSync, constants, existsSync, realpathSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 import { configProblems, defaultConfig, loadConfig, TOOL_BINARIES, TOOL_NAMES, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { configPath, flowrynHome, runDir, toAbsolute } from "../config/paths.ts";
 import { renderConfig } from "../config/toml.ts";
-import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
+import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI } from "../version.ts";
 
 /** How to install each tool; init prints these and installs nothing itself. */
@@ -51,28 +51,25 @@ export interface InitDeps {
   platform: NodeJS.Platform;
 }
 
+const VERSION_SEGMENT = /^v?\d+(\.\d+)+/;
+
+function versionSegments(path: string): string[] {
+  return path.split(sep).filter((segment) => VERSION_SEGMENT.test(segment));
+}
+
 /**
- * Resolve a tool's symlinks, as section 15 asks, except into a versioned
- * Homebrew Cellar: that path breaks on the next `brew upgrade`, so the stable
- * link in the Homebrew bin directory is kept instead.
+ * Resolve a tool's symlinks, as section 15 asks, unless resolving adds a
+ * version-numbered directory (a Homebrew Cellar, Claude Code's versions/):
+ * that path breaks on the tool's next update, so the stable link is kept.
+ * A path that is versioned either way (nvm) is resolved and flagged elsewhere.
  */
 export function recordedToolPath(found: string): string {
   try {
     const real = realpathSync(found);
-    return real.includes(`${sep}Cellar${sep}`) ? found : real;
+    const before = new Set(versionSegments(found));
+    return versionSegments(real).some((segment) => !before.has(segment)) ? found : real;
   } catch {
     return found;
-  }
-}
-
-function writableTarget(path: string): boolean {
-  let probe = existsSync(path) ? path : dirname(path);
-  while (!existsSync(probe)) probe = dirname(probe);
-  try {
-    accessSync(probe, constants.W_OK);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -141,7 +138,7 @@ export async function runInit(deps: InitDeps): Promise<number> {
   const backlog = await askPath(io, "Backlog file (tasks)", sameDataDir ? current.tasks.backlog : join(dataDir, "backlog.md"), home);
   const todos = await askPath(io, "To-do file (personal to-dos)", sameDataDir ? current.tasks.todos : join(dataDir, "todos.md"), home);
   for (const [label, file] of [["backlog", backlog], ["todos", todos]] as const) {
-    if (!writableTarget(file)) {
+    if (!canCreateOrWrite(file)) {
       io.print(`refused: ${label} file ${file} is not writable; nothing was written`);
       return 1;
     }

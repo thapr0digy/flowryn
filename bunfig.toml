@@ -1,0 +1,3 @@
+[test]
+# Integration tests start daemons and run the real tasks-axi; CI runners are slower than laptops.
+timeout = 30000

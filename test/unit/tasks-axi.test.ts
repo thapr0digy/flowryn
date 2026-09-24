@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { classifyMutation, listTasks, parseListOutput, processRunner, taskFromJson, tasksAxiVersion } from "../../src/journal/tasks-axi.ts";
 import { diffTasks, intentErased, normalizedTitle } from "../../src/journal/diff.ts";
 import type { AppliedPayload } from "../../src/journal/journal.ts";
+import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { realTasksAxi } from "../helpers/harness.ts";
 
 const LIST_OUTPUT = `count: 3
@@ -59,8 +60,11 @@ describe("reading tasks-axi", () => {
   });
 });
 
+function ok(stdout: string) {
+  return { exitCode: 0, stdout, stderr: "", timedOut: false };
+}
+
 describe("classifying tasks-axi results", () => {
-  const ok = (stdout: string) => ({ exitCode: 0, stdout, stderr: "", timedOut: false });
   test("success needs exit 0 and an ok JSON result", () => {
     expect(classifyMutation(ok('{"ok":true,"task":{}}')).ok).toBe(true);
     expect(classifyMutation(ok("not json"))).toMatchObject({ ok: false, kind: "transient", code: "BAD_OUTPUT" });
@@ -79,17 +83,12 @@ describe("classifying tasks-axi results", () => {
   });
 });
 
+function applied(verb: AppliedPayload["verb"], pre: BacklogTask | null, post: BacklogTask | null, flags: Record<string, string> = {}): AppliedPayload {
+  return { intent: "I", file: "todos", verb, args: { positional: ["t"], flags }, already: false, pre, post };
+}
+
 describe("erased-intent detection", () => {
-  const base = { id: "t", title: "t", state: "queued" as const, kind: "todo", repo: null, priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] };
-  const applied = (verb: AppliedPayload["verb"], pre: typeof base | null, post: typeof base | null, flags: Record<string, string> = {}): AppliedPayload => ({
-    intent: "I",
-    file: "todos",
-    verb,
-    args: { positional: ["t"], flags },
-    already: false,
-    pre,
-    post,
-  });
+  const base: BacklogTask = { id: "t", title: "t", state: "queued", kind: "todo", repo: null, priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] };
 
   test("an add is erased when the task is gone", () => {
     expect(intentErased(applied("add", null, base), undefined)).toBe(true);
@@ -97,7 +96,7 @@ describe("erased-intent detection", () => {
   });
 
   test("a done is erased when the task reads exactly as before it", () => {
-    const done = { ...base, state: "done" as const };
+    const done: BacklogTask = { ...base, state: "done" };
     expect(intentErased(applied("done", base, done), base)).toBe(true);
     expect(intentErased(applied("done", base, done), done)).toBe(false);
     // Your own different edit wins: in flight is neither before nor after.

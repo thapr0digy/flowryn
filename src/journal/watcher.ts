@@ -68,6 +68,9 @@ export class BacklogWatcher {
   constructor(deps: WatcherDeps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
+    deps.journal.beforeWrite = async (file) => {
+      await this.checkLocked(file, "before-write");
+    };
   }
 
   async start(): Promise<void> {
@@ -138,6 +141,17 @@ export class BacklogWatcher {
         void this.check(file, "fs-event").catch((error) => this.deps.log?.(`watcher: ${file}: ${(error as Error).message}`));
       }, DEBOUNCE_MS),
     );
+  }
+
+  /**
+   * A best-effort freshness check for verbs that read before they write. It
+   * never waits behind the journal: while an intent is being applied, the
+   * snapshot is about to be rewritten anyway, and the periodic check still
+   * catches a hand edit.
+   */
+  async refreshIfIdle(file: JournalFile): Promise<void> {
+    if (this.deps.journal.locks.isHeld(file)) return;
+    await this.check(file, "verb");
   }
 
   /** Compare the file with the last applied hash; on a change, re-read, diff and reconcile. */

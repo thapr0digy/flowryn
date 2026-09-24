@@ -4,7 +4,45 @@ Flowryn is a self-contained coordinator for a fleet of coding agents. You talk t
 
 ## Status
 
-M0 contract spikes have run for Claude Code, Herdr, tasks-axi, no-mistakes and Pi. There is no product code yet. The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every spike's verdict, the tool versions tested, and each edit the verdicts made to the design.
+M1 (core) is built: one signed binary that is both `flowryn` and `flowrynd`, the SQLite schema and event log, the tasks-axi intent journal and backlog watcher, and the CLI with to-do and project verbs, `init`, `doctor` and the launchd agent. The Herdr runtime, workers, reconciler, leader bridges and merge policy come in M2 to M4.
+
+The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every M0 spike's verdict (Claude Code, Herdr, tasks-axi, no-mistakes and Pi), the tool versions tested, and each edit the verdicts made to the design. [`docs/m1-notes.md`](docs/m1-notes.md) lists the choices M1 made where the design leaves room.
+
+## Development
+
+Requirements: macOS, [Bun](https://bun.sh) 1.3.8, Node with `tasks-axi` 0.2.5 on PATH (`npm install -g tasks-axi@0.2.5`), `git`, and `jq` for the fixtures.
+
+```bash
+bun install                      # dependencies
+bun run typecheck                # tsc --noEmit
+bunx oxlint                      # lint (.oxlintrc.json); `bun run lint` runs the same
+bun test                         # unit and integration tests, including the kill -9 exit test
+bun run build                    # dist/flowryn plus the dist/flowrynd link, re-signed on macOS
+fixtures/cleanup-guard/run.sh    # the 21 cleanup-guard fixtures
+```
+
+The tests start real daemons on Unix sockets, watch files with FSEvents and run the real tasks-axi, so run them outside any command sandbox. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the above on every pull request and on pushes to `main`.
+
+The source layout follows the component table in section 4 of the design: `src/api` (gateway, tokens, idempotency, spool), `src/journal` (intent journal, backlog watcher), `src/lifecycle` (to-do, project and worker verbs), `src/daemon`, `src/cli`, `src/db` (schema, migrations, events, backups), `src/transport`, `src/service` (launchd), `src/init` and `src/doctor`.
+
+## Using flowryn (M1)
+
+```bash
+flowryn init                        # interactive: tools, data and state directories, tasks-axi files, launchd agent
+flowryn doctor                      # checks config, tools, tasks-axi files, database, daemon and service
+flowryn daemon status               # start | stop | install | uninstall | run (foreground)
+flowryn todo add "renew passport" --due 2026-10-01
+flowryn todo list                   # --all, --due today|overdue
+flowryn todo due <id> tomorrow      # YYYY-MM-DD, today, tomorrow, +Nd or none
+flowryn todo done <id>
+flowryn project add ~/code/web      # reads origin and the default branch
+flowryn project set web --mode direct-PR --yolo on
+flowryn help                        # every verb; `flowryn <verb> --help` for one
+```
+
+Output is TOON by default and JSON with `--json`. Errors print `error`, `code` and `help`, and the exit code says what happened: 0 ok, 2 policy refusal, 3 validation, 4 not found, 69 daemon down, 75 spooled, 76 protocol mismatch, 77 role refused. When the daemon is down, reads come from the database read-only with a banner, worker verbs spool to disk and are delivered at the next start, and leader mutations exit 69.
+
+Configuration lives in `~/.flowryn/config.toml` (`FLOWRYN_HOME` moves the whole home, which tests use). The daemon reloads it on `SIGHUP`.
 
 ## Key choices
 

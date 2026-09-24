@@ -157,3 +157,19 @@ describe("backlog watcher (fake hand edits)", () => {
     expect(eventKinds(env.db)).toContain("backlog.edited");
   });
 });
+
+describe("hand edits the journal is about to write over", () => {
+  test("are diffed first, so a divergence still opens and the edit is recorded", async () => {
+    env = makeJournalEnv({ eraseWindowMs: 0 });
+    addTodo("a-a1", "first");
+    await env.journal.drain();
+    // A hand edit lands, then a CLI write to the same file before any watch event is handled.
+    writeFileSync(env.files.todos, readFileSync(env.files.todos, "utf8").replace("first", "first, edited by hand"));
+    addTodo("b-b1", "second");
+    await env.journal.drain();
+    const edited = lastEventPayload("backlog.edited");
+    expect(edited).toMatchObject({ reason: "before-write", changed: [{ id: "a-a1", fields: ["title"] }] });
+    const tasks = readSnapshot(env.db, "todos")!.tasks;
+    expect(tasks.map((t) => t.title)).toEqual(["first, edited by hand", "second"]);
+  });
+});
