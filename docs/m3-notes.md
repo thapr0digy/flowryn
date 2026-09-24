@@ -68,3 +68,19 @@ M3 builds section 17's "M3 · Leaders and attention" of [`design-v3.html`](desig
 ## Live runs
 
 `scripts/lab/m3-live.sh [--claude-project <checkout>] [claude] [pi]` runs the same suite against real leaders started with `flowryn lead` in panes of a Firstmate lab session (`fm-herdr-lab.sh`). A seeded worker run (no process) raises the P0s and P1s. Claude leads from a linked worktree of a checkout it already trusts, on a `flowryn/contract-<runid>-leader` branch removed with its worktree by exact name; no dialog is ever answered. Pi leads from a scratch directory with a scratch agent dir and the offline scripted provider. What reached the model is read from Claude's transcript (hook-context attachments and wakes, never a compaction summary or the model's own words) and from Pi's session files (custom and user messages, never an assistant reply). The live typing into a leader's composer uses `pane.send_text`, a method only lab tooling may add to the Herdr client; the daemon never can.
+
+Latest run, 2026-09-24, 18/18 passed: Herdr 0.7.5 (protocol 17), Claude Code 2.1.281 with Haiku 4.5 as the leader model, Pi 0.87.1 with the offline scripted provider, in lab session `fm-lab-flowryn-m3-42537-17099`.
+
+| Step | Claude Code 2.1.281 | Pi 0.87.1 |
+|---|---|---|
+| Session start claims the vacant lease and briefs | lease 1; the briefing's item presented at the first turn end | lease 3; the briefing rode with the first prompt as `nextTurn` |
+| A P1 rides with your next message | carried by `UserPromptSubmit`, presented at `Stop` | carried by `nextTurn` from `before_agent_start`, presented at `agent_settled` |
+| A P0 while busy | `Stop` continued the turn with the P0 line, once | the extension queued a `followUp` during the 20 s tool call |
+| A P0 while idle and you active | notified, not pushed for 20 s, then top of the next digest | notified, not pushed for 12 s with a draft in the composer, then top of the next digest |
+| A P0 while idle and you inactive | `idle_prompt` after 60 s; the asyncRewake waiter woke the session | 5 s idle with an empty composer; a `followUp` with `triggerTurn` started a turn |
+| An interrupt leaves no stuck busy | busy cleared 2 s after Escape, from the transcript marker; no hook fired | busy cleared 1 s after Escape, by `agent_settled` |
+| Compaction re-briefs | `SessionStart` source `compact` re-listed the open item | `session_compact` re-brief rode with the next prompt |
+| A second leader is read-only until it claims | read-only banner; after the claim (epoch 1 → 2) the old leader got the banner and no digest | same (epoch 3 → 4) |
+| Quitting the holder releases the lease | `/exit`: lease vacant, both sessions ended | `/quit`: same |
+
+The first live attempts found three problems the fakes had not shown, all fixed and covered above: Pi refuses `/compact` on a short session ("Nothing to compact"), so the lab's scratch agent dir keeps one recent token, as M0 p06 did; Haiku read a step label in the prompt ("to interrupt: …") as a condition and ran nothing, so live prompts carry no label; and a Pi push confirmed by a turn end before the extension declined it, which led to the `offered` state. Test runs also showed that Bun reads `process.ppid` once, so an orphaned waiter never noticed its parent was gone; waiters now check that their original parent still exists.
