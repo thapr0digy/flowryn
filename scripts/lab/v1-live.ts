@@ -102,6 +102,8 @@ const config = renderToml(
       },
     },
     reconcile: { pass_ms: 2_000, wait_poll_ms: 10_000 },
+    // At most two live workers at once here; the host check stays on, at what a busy laptop still has free.
+    capacity: { host: { min_free_mem_gb: 2, max_load_per_core: 4 } },
     github: { api_url: "http://127.0.0.1:9" },
   },
   "Scratch home for the v1 completion live run",
@@ -217,7 +219,12 @@ const SHIP = `bash printf 'promoted\\n' > promoted.txt && git add promoted.txt &
 
 // --- phases ---------------------------------------------------------------------------------------
 async function harness(): Promise<void> {
-  const checked = query<{ payload: string }>("SELECT payload FROM events WHERE kind = 'harness.checked' ORDER BY seq").map((e) => JSON.parse(e.payload) as { harness: string; state: string; version?: string });
+  // The check runs right after startup; the Pi Launcher takes a few seconds to answer --version.
+  const readChecks = () => query<{ payload: string }>("SELECT payload FROM events WHERE kind = 'harness.checked' ORDER BY seq").map((e) => JSON.parse(e.payload) as { harness: string; state: string; version?: string });
+  const checked = await waitFor("the startup check of both harnesses", 60_000, () => {
+    const all = readChecks();
+    return all.some((c) => c.harness === "claude") && all.some((c) => c.harness === "pi") ? all : null;
+  }).catch(() => readChecks());
   for (const h of ["claude", "pi"]) {
     const found = checked.find((c) => c.harness === h);
     record("harness", `startup check ${h}`, found?.state === "unverified", found ? `${h} ${found.version ?? "?"} ${found.state}` : "not checked");

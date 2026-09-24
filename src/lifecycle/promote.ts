@@ -16,7 +16,8 @@ import { checkStart, createRun, startDepsOf } from "./dispatch.ts";
 import { dispatchedTask, reportDirFor } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
-import { flowLine, requestStage } from "./stages.ts";
+import { discardPlansOfGate } from "./plans.ts";
+import { flowLine, openGate, requestStage } from "./stages.ts";
 
 /**
  * `flowryn promote <task>` (design sections 4 and 12): a scout promoted to a
@@ -102,12 +103,19 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
   becomeShip(db, run.task_id, project, workflow, boolArg(args as never, "sensitive"), now);
   db.query("UPDATE runs SET workflow = ?2, workflow_def = ?3, updated_at = ?4 WHERE id = ?1").run(run.id, workflow.id, JSON.stringify(workflow), now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "promoted to a ship", now);
+  // A review the scout's own workflow had open is moot: the ship's workflow starts over.
+  const open = openGate(db, run.id, "review");
+  if (open) {
+    db.query("UPDATE gates SET state = 'changes', feedback = 'promoted to a ship', closed_at = ?2 WHERE id = ?1").run(open.id, now);
+    discardPlansOfGate(db, open.id, now);
+    resolveRunItems(db, run.id, ["gate_ready"], "run.promoted", now);
+  }
   // A worker that runs is stopped and its session resumed under the ship contract; one not launched yet starts as a ship.
   if (run.pending_launch !== "fresh" && run.pending_launch !== "resume") run.pending_launch = "relaunch";
   run.kind = "ship";
   requestStage(db, run, workflow, 0, promotionNote(project, run, workflow, words, null), now);
   resolveRunItems(db, run.id, ["worker_idle"], "run.promoted", now);
-  appendEvent(db, { source: "cli", kind: "run.promoted", runId: run.id, taskId: run.task_id, payload: { from: "scout", workflow: workflow.id, mode: project.delivery_mode, in_place: "run", by: ctx.caller.role }, ts: now });
+  appendEvent(db, { source: "cli", kind: "run.promoted", runId: run.id, taskId: run.task_id, payload: { from: "scout", workflow: workflow.id, mode: project.delivery_mode, in_place: "run", closed_gate: open?.id ?? null, by: ctx.caller.role }, ts: now });
   return {
     data: { task: run.task_id, run: run.id, kind: "ship", workflow: workflow.id, stage: workflow.stages[0]!.id, mode: project.delivery_mode, promoted: "in place: same worker, worktree and branch" },
     hints: [`flowryn show ${run.task_id}`],

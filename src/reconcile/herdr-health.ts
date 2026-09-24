@@ -75,13 +75,14 @@ export function alertHerdrIfDue(db: Db, alertMs: number, now: number): string | 
   const heldUp = Number.isFinite(neededAt) && neededAt >= episode.since;
   if (openRuns === 0 && !heldUp) return null;
   setMeta(db, ALERTED, String(episode.since));
-  const minutes = Math.max(1, Math.round((now - episode.since) / 60_000));
+  const seconds = Math.round((now - episode.since) / 1000);
+  const lasted = seconds < 90 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
   const event = appendEvent(db, { source: "reconciler", kind: "herdr.unreachable_alert", payload: { since: episode.since, detail: episode.detail, open_runs: openRuns }, ts: now });
   const runs = openRuns > 0 ? `, ${openRuns} open run(s) read liveness unknown` : "";
   return openItem(db, {
     kind: "herdr_unreachable",
     eventSeq: event.seq,
-    line: `Herdr is unreachable for ${minutes}m (${episode.detail}): dispatch is refused${runs}; flowrynd retries with backoff. Check: herdr session list`,
+    line: `Herdr is unreachable for ${lasted} (${episode.detail}): dispatch is refused${runs}; flowrynd retries with backoff. Check: herdr session list`,
     now,
   });
 }

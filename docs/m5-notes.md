@@ -158,6 +158,10 @@ After M5, one pass built every v1 item [`v1-status.md`](v1-status.md) still list
 
 - `src/reconcile/forge-health.ts`: a failed read of the kinds that mean GitHub cannot be asked (unreachable or a 5xx, rate-limited, a refused token, nonsense answers) starts an outage; its one P1 `forge_unavailable` opens only while a merge waits on GitHub (a delivered PR at the merge gate, `ready`, or a merge waiting for its proof, `merging`), and names them. The delivery watcher's poll only runs over such ships, and a `flowryn merge` refused for the outage records it too. It resolves when GitHub answers again, or when no merge waits any more (then a merge that comes to wait in the same outage raises it again).
 
+### The contract suite's host check
+
+Found live in this pass: `flowryn doctor --contracts` could not pass on a busy laptop. Its scratch daemon took M5's default host check (8 GB free), so on a machine with 7.5 GB available the scheduler never granted the suite's one worker and the suite timed out at its first step. The suite launches exactly the worker you asked for, so its scratch home now caps the worker pool at 1 and refuses only when the machine is truly out of room (1 GB free, a load of 8 per core) (`src/contracts/runner.ts`). M5's live run had seeded its contract records instead of running the suite.
+
 ### Protocol and version
 
 `PROTO` is 4 (new verbs: `divergence resolve`, `promote`), so an older CLI in a running worker gets exit 76. The version is 0.5.0.
@@ -170,3 +174,19 @@ After M5, one pass built every v1 item [`v1-status.md`](v1-status.md) still list
 - `test/integration/promote.test.ts`: a scout at work promoted in place (the same session relaunched with `--resume`, a ship's contract and task file), then building, delivering and merging; a cleaned scout promoted as a task (a new run naming the report); the refusals.
 - `test/integration/outages.test.ts`: Herdr stopped with a run open (one P1 over many retries, dispatch refused, resolved on reconnect, a second outage a second P1) and with nothing open (no P1 until a refused dispatch); GitHub down while a PR waits (one P1, merge refused, resolved when it answers), rate-limited then no merge waiting (resolved), and down with no merge waiting (nothing).
 - Test homes now get stand-in `claude` and `pi` binaries that answer no version unless a test brings its own, so the startup check never runs a real harness from PATH; and `seedRun` adds its task to the backlog In flight, so a seeded run satisfies the invariant.
+
+### Live run
+
+`scripts/lab/v1-live.sh [--keep] [phase ...]` (phases `harness`, `scout`, `promote`, `divergence`, `herdr`) runs in a Firstmate lab session (`fm-herdr-lab.sh`) with Pi on the offline scripted provider and a scratch agent dir; no Claude model is called (the harness phase reads `claude --version` only). The projects are fresh clones in a scratch home that the run removes. The `herdr` phase comes last because it stops its own lab session through the helper, which then tears it down and checks the default session unchanged.
+
+Latest run, 2026-09-24, **24/24 passed**: Herdr 0.7.5 (protocol 17), Pi 0.87.1, Claude Code 2.1.281 (version only), lab session `fm-lab-flowryn-v1-gaps-90352-1207`.
+
+| Phase | Result |
+|---|---|
+| harness | The startup check read Claude Code 2.1.281 and Pi 0.87.1, both untested in the scratch database, and opened one P1 each naming the doctor command; a dispatch on Claude was refused `contract_unverified`; Pi's contract suite passed (all steps, 37 s) and its record resolved Pi's P1. |
+| scout | A Pi scout delivered its report, landed, and was cleaned up through the guard (worktree removed, worker stopped) 5 s later; the task was Done with its report link, and `report_ready` stayed open. |
+| promote | A Pi scout promoted in place during its first tool call: the worker stopped, and its session (the same id) resumed as a ship under the ship contract, went on with its next step, committed, delivered locally, merged under yolo and was cleaned; the task read Done, kind ship. |
+| divergence | A hand move to Done against a live run opened `d1`; keep-run wrote `start` back and the task was In flight again. A task put In flight by hand was raised by the invariant pass (`d2`); accept-edit kept it, and it was not raised again. |
+| herdr | The lab session stopped under two open runs: one P1 8 s later ("Herdr closed the event subscription"), dispatch refused `herdr_unavailable`, and after 40 s of retries still one P1 and one episode. |
+
+The first attempts found the contract suite's host check above, and a timing slip in the script (the Pi Launcher answers `--version` a few seconds after the daemon is up, so the run now waits for both startup checks).

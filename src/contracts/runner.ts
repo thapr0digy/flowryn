@@ -56,6 +56,14 @@ export interface ContractResult {
 /** Contract runs are slower than the design's clock needs to be, but never re-ring a steer mid-suite. */
 const CONTRACT_TIMING = { pass_ms: 1_000, ring_interval_ms: 600_000, wait_poll_ms: 5_000, launch_timeout_ms: 30_000 };
 
+/**
+ * The suite launches the one worker you asked for, so the host check that
+ * guards autonomous capacity (design section 11) refuses it only when the
+ * machine is truly out of room; with the defaults (8 GB free) a busy laptop
+ * never granted the launch, and the suite timed out at its first step.
+ */
+const CONTRACT_CAPACITY = { worker: 1, host: { min_free_mem_gb: 1, max_load_per_core: 8 } };
+
 function git(args: string[], cwd: string): { code: number; out: string } {
   const result = Bun.spawnSync(["git", ...args], {
     cwd,
@@ -88,6 +96,7 @@ function scratchConfig(options: ContractOptions, home: string, branchPrefix: str
     herdr: { socket: options.herdrSocket },
     workers,
     reconcile: CONTRACT_TIMING,
+    capacity: CONTRACT_CAPACITY,
   };
   if (real.extra.style) data.style = real.extra.style;
   return renderToml(data, "Scratch home for a Flowryn harness contract run");
