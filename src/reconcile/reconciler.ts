@@ -160,7 +160,7 @@ export class Reconciler {
   }
 
   async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown"> {
-    const { db, now, timing } = this.deps;
+    const { db, now } = this.deps;
     if (this.deps.isLaunching(run.id)) return "launching";
     const runtime = this.deps.runtime();
     if (!runtime) {

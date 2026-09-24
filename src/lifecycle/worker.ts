@@ -228,14 +228,14 @@ const deliver: VerbSpec = {
   },
   apply(ctx, _args, prepared) {
     const run = activeRun(ctx);
-    const report = prepared as DeliveredReport;
+    const delivered = prepared as DeliveredReport;
     const now = ctx.now();
     if (run.state === "ready") {
-      const existing = ctx.db.query("SELECT id FROM artifacts WHERE task_id = ?1 AND kind = 'report' AND ref = ?2").get(run.task_id, report.artifact);
-      if (existing) return { data: { run: run.id, state: run.state, report: report.artifact, already: true } };
+      const existing = ctx.db.query("SELECT id FROM artifacts WHERE task_id = ?1 AND kind = 'report' AND ref = ?2").get(run.task_id, delivered.artifact);
+      if (existing) return { data: { run: run.id, state: run.state, report: delivered.artifact, already: true } };
     }
     const artifactId = `a${now.toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
-    ctx.db.query("INSERT INTO artifacts (id, task_id, kind, ref, created_at) VALUES (?1, ?2, 'report', ?3, ?4)").run(artifactId, run.task_id, report.artifact, now);
+    ctx.db.query("INSERT INTO artifacts (id, task_id, kind, ref, created_at) VALUES (?1, ?2, 'report', ?3, ?4)").run(artifactId, run.task_id, delivered.artifact, now);
     ctx.db.query("UPDATE runs SET state = 'ready', updated_at = ?2 WHERE id = ?1").run(run.id, now);
     recordIntent(ctx.db, { file: "backlog", verb: "update", taskId: run.task_id, positional: [run.task_id], flags: { report: reportLink(run.task_id) }, now });
     const event = appendEvent(ctx.db, {
@@ -243,7 +243,7 @@ const deliver: VerbSpec = {
       kind: "run.delivered",
       runId: run.id,
       taskId: run.task_id,
-      payload: { outcome: "report", report: report.artifact, source: report.source, bytes: report.bytes, verified: "file", via: ctx.via },
+      payload: { outcome: "report", report: delivered.artifact, source: delivered.source, bytes: delivered.bytes, verified: "file", via: ctx.via },
       ts: now,
     });
     resolveRunItems(ctx.db, run.id, ["worker_idle"], "run.delivered", now);
@@ -255,7 +255,7 @@ const deliver: VerbSpec = {
       line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id})`,
       now,
     });
-    return { data: { run: run.id, state: "ready", report: report.artifact }, hints: ["end your turn"] };
+    return { data: { run: run.id, state: "ready", report: delivered.artifact }, hints: ["end your turn"] };
   },
 };
 

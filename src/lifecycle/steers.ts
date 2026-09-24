@@ -179,7 +179,7 @@ export class SteerBus {
 
   /** Something changed for the run: every waiter re-checks the database. */
   notify(runId: string): void {
-    for (const waiter of [...(this.waiters.get(runId) ?? [])]) waiter.resolve("wake");
+    for (const waiter of this.waiters.get(runId) ?? []) waiter.resolve("wake");
   }
 
   notifyAll(): void {
@@ -188,7 +188,7 @@ export class SteerBus {
 
   close(): void {
     this.closed = true;
-    for (const set of this.waiters.values()) for (const waiter of [...set]) waiter.resolve("timeout");
+    for (const set of this.waiters.values()) for (const waiter of set) waiter.resolve("timeout");
   }
 
   /** Queue a control command for an extension waiter (Pi interrupt) and wake it. */
@@ -208,7 +208,7 @@ export class SteerBus {
   }
 
   forget(runId: string): void {
-    for (const waiter of [...(this.waiters.get(runId) ?? [])]) waiter.resolve("superseded");
+    for (const waiter of this.waiters.get(runId) ?? []) waiter.resolve("superseded");
     this.waiters.delete(runId);
     this.latest.delete(runId);
     this.commands.delete(runId);

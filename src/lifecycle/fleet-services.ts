@@ -23,7 +23,7 @@ export interface FleetServices {
   flowrynBin(): Promise<string>;
   harnessVersion(harness: HarnessId, binary: string): Promise<string | null>;
   exitRun(runId: string): Promise<Verified>;
-  interruptRun(runId: string): Promise<Verified>;
+  interruptRun(runId: string, waitMs?: number): Promise<Verified>;
   /** Ask the reconciler to look at one run, or at every run, soon. */
   reconcile(runId?: string): void;
   /** Consecutive Stop continuations per run (design section 5: at most two). */

@@ -135,7 +135,7 @@ export async function makeFleetEnv(options: { timing?: Partial<Timing>; contract
           return last !== null && predicate(last);
         }, timeoutMs, what);
       } catch (error) {
-        throw new Error(`${(error as Error).message}; run: ${JSON.stringify(last)}; events: ${fleet.events(runId).join(",")}`);
+        throw new Error(`${(error as Error).message}; run: ${JSON.stringify(last)}; events: ${fleet.events(runId).join(",")}`, { cause: error });
       }
       return last!;
     },
@@ -145,7 +145,8 @@ export async function makeFleetEnv(options: { timing?: Partial<Timing>; contract
     async cleanup() {
       await daemon.kill9().catch(() => {});
       await herdr.stop().catch(() => {});
-      h.cleanup();
+      if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
+      else h.cleanup();
     },
   };
   return fleet;

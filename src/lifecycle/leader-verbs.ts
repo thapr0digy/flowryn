@@ -272,7 +272,7 @@ const show: VerbSpec = {
       (a) => `${a.kind}: ${a.ref}`,
     );
     const events = (ctx.db.query("SELECT ts, kind FROM events WHERE run_id = ?1 ORDER BY seq DESC LIMIT 8").all(run.id) as { ts: number; kind: string }[])
-      .reverse()
+      .toReversed()
       .map((e) => `${age(ctx.now, e.ts)} ago ${e.kind}`);
     return {
       data: {

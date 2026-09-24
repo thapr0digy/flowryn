@@ -97,7 +97,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   let db: Db | null = null;
   let listener: Listener | null = null;
   let boundSocket = false;
-  let removeSignals = () => {};
+  let removeSignals: (() => void) | null = null;
   const sock = socketPath(home, env);
 
   try {
@@ -192,7 +192,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       flowrynBin: async () => workerBinary(config.state_dir),
       harnessVersion,
       exitRun: (runId) => exitRun(control, runId),
-      interruptRun: (runId) => interruptRun(control, runId),
+      interruptRun: (runId, waitMs) => interruptRun(control, runId, waitMs),
       reconcile: (runId) => reconciler?.schedule(runId),
       continuations: new Map(),
     };
@@ -290,7 +290,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     reconciler.stop();
     herdrWatcher.stop();
     bus.close();
-    removeSignals();
+    removeSignals?.();
     process.off("SIGHUP", onHup);
     watcher.stop();
     const closing = listener.close();
@@ -306,7 +306,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     say(`failed: ${(error as Error).stack ?? String(error)}`);
     return 1;
   } finally {
-    removeSignals();
+    removeSignals?.();
     if (listener) await Promise.race([listener.close(), Bun.sleep(1_000)]);
     if (db) db.close();
     if (boundSocket) {

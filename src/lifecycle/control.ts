@@ -92,7 +92,9 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
     if (!runtime || !run.pane_id) return { ok: false, evidence: "timeout", detail: "Herdr is not reachable" };
     const before = transcriptSize(run.transcript_path);
     await runtime.sendInterrupt(run.pane_id);
-    while (deps.now() < deadline) {
+    // Without a transcript (no worker-start yet) there is nothing to verify against; do not wait long.
+    const until = run.transcript_path ? deadline : Math.min(deadline, started + 1_000);
+    while (deps.now() < until) {
       await Bun.sleep(200);
       if (run.transcript_path && transcriptShowsInterrupt(run.transcript_path, before)) {
         verified = { ok: true, evidence: "transcript" };

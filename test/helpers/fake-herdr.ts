@@ -236,7 +236,7 @@ export class FakeHerdr {
       case "workspace.close": {
         const ws = this.workspaces.get(String(params.workspace_id));
         if (!ws) throw Object.assign(new Error("workspace not found"), { code: "workspace_not_found" });
-        for (const id of [...ws.panes]) this.closePane(this.panes.get(id)!);
+        for (const id of ws.panes) this.closePane(this.panes.get(id)!);
         this.workspaces.delete(ws.workspaceId);
         return { type: "ok" };
       }
@@ -250,6 +250,7 @@ export class FakeHerdr {
         const pane = this.need(params.pane_id);
         if (this.harnessPid(pane.paneId) !== null) throw Object.assign(new Error(`agent target pane ${pane.paneId} is not an available shell`), { code: "agent_pane_busy" });
         const args = (params.args as string[]) ?? [];
+        // oxlint-disable-next-line no-control-regex -- Herdr refuses control characters in agent arguments
         if (args.some((a) => /[\u0000-\u001f]/.test(a))) throw Object.assign(new Error("agent arguments cannot be encoded safely"), { code: "invalid_agent_argument" });
         this.startHarness(pane, String(params.kind), args);
         return { type: "agent_started", agent: { pane_id: pane.paneId, launch_pending: true } };
@@ -279,7 +280,7 @@ export class FakeHerdr {
       }
       case "pane.report_metadata": {
         const pane = this.need(params.pane_id);
-        pane.tokens = { ...pane.tokens, ...((params.tokens as Record<string, string>) ?? {}) };
+        pane.tokens = { ...pane.tokens, ...(params.tokens as Record<string, string> | undefined) };
         if (typeof params.title === "string") pane.title = params.title;
         return { type: "ok" };
       }

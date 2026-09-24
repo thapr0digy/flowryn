@@ -200,7 +200,7 @@ const workerStart: VerbSpec = {
     if (result.data.isolation === "failed" && runId) {
       // Design section 14: otherwise interrupt, exit, fail. The run is already failed; the process goes now.
       void (async () => {
-        await ctx.fleet.interruptRun(runId).catch(() => null);
+        await ctx.fleet.interruptRun(runId, 2_000).catch(() => null);
         await ctx.fleet.exitRun(runId).catch(() => null);
       })();
     }

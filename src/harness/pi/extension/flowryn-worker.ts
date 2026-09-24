@@ -119,7 +119,8 @@ export default function flowrynWorker(pi: any): void {
     if (looping) return;
     looping = true;
     try {
-      while (!stopped) {
+      for (;;) {
+        if (stopped) break;
         const reply = await runHook("wait-steer", {}, ["--json"]);
         if (stopped) break;
         let message: Json;

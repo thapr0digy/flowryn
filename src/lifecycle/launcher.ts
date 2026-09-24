@@ -12,6 +12,7 @@ import { adapterFor } from "../harness/registry.ts";
 import type { RunContext } from "../harness/types.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import { terminate } from "../runtime/proc.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PROTO } from "../version.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
@@ -193,6 +194,7 @@ export class Launcher {
       FLOWRYN_HOME: this.deps.home,
       FLOWRYN_WORKTREE: worktree,
       FLOWRYN_REPORT_DIR: reportDir,
+      FLOWRYN_TASK_FILE: instructionsFile,
       PATH: `${this.shimDir(config, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     };
 
@@ -204,9 +206,11 @@ export class Launcher {
     await runtime.startAgent(paneId, { kind: plan.kind, name: `flowryn-${run.id.slice(-8).toLowerCase()}-${now().toString(36)}`, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
     if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms`);
-    tx(db, () => {
+    // Recorded even when the run ended meanwhile (an isolation failure at worker-start races this),
+    // so the process can still be found and stopped by its identity.
+    const endedMeanwhile = tx(db, () => {
       const current = getRunWithPolicy(db, run.id);
-      if (!current || isTerminal(current.state)) return;
+      if (!current) return true;
       db.query(
         `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END, updated_at = ?5 WHERE id = ?1`,
       ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now());
@@ -217,7 +221,12 @@ export class Launcher {
         taskId: run.task_id,
         payload: { mode, pane: paneId, pid: harness.identity.pid, exe: harness.identity.exe, argv0: harness.process.argv0 },
       });
+      return isTerminal(current.state);
     });
+    if (endedMeanwhile) {
+      await terminate(harness.identity, { graceMs: timing.exit_grace_ms, group: true });
+      return false;
+    }
     return true;
   }
 
