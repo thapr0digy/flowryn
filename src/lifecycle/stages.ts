@@ -301,6 +301,15 @@ function beginWaiting(stage: StageDef): FlowrynError {
 }
 
 /**
+ * Must this run hold its last stage before its no-mistakes pipeline runs? A
+ * no-mistakes ship does, except one open before M5 (legacy_m4): its worker
+ * was given M4's contract, so its slot is granted at delivery time instead.
+ */
+export function pipelineNeedsLastStage(db: Db, run: RunWithPolicy): boolean {
+  return run.kind === "ship" && run.delivery_mode === "no-mistakes" && runWorkflow(db, run, run.kind).legacy_m4 !== true;
+}
+
+/**
  * A no-mistakes ship runs its pipeline under its last stage's slots, so it
  * delivers only once that stage was active before the call (`stage begin`
  * starts it). The pipeline start itself is the worker's contract; this is the

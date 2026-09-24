@@ -13,7 +13,7 @@ import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
-import { deliveryStages, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
+import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -238,11 +238,6 @@ function deliveryAsked(ctx: HandlerCtx, run: RunWithPolicy, args: Record<string,
   return { kind: "pr", url: pr };
 }
 
-/** A no-mistakes ship: its pipeline runs under its last stage's slots. */
-function usesPipeline(run: RunWithPolicy): boolean {
-  return run.kind === "ship" && run.delivery_mode === "no-mistakes";
-}
-
 /**
  * `flowryn deliver`: the worker's outcome, verified before the run is ready.
  * The task kind decides it: a scout delivers `--report <path>`; a ship
@@ -269,7 +264,7 @@ const deliver: VerbSpec = {
     // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate.
     const before = activeRun(ctx);
     if (before.state !== "ready") {
-      if (usesPipeline(before)) requireLastStageStarted(ctx.db, before);
+      if (pipelineNeedsLastStage(ctx.db, before)) requireLastStageStarted(ctx.db, before);
       else await startPooledStages(ctx, before.id);
     }
     const run = activeRun(ctx);
@@ -284,7 +279,7 @@ const deliver: VerbSpec = {
     const run = activeRun(ctx);
     const now = ctx.now();
     const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal };
-    if (run.state !== "ready" && usesPipeline(run)) requireLastStageStarted(ctx.db, run);
+    if (run.state !== "ready" && pipelineNeedsLastStage(ctx.db, run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {
       const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now);

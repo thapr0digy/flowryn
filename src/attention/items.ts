@@ -13,7 +13,7 @@ export type ItemClass = "actionable" | "info";
  * no-mistakes unreachable), M5 the workflow kinds (a review gate ready, work
  * waiting over 30 min for capacity, Docker containers left without a lease, a
  * ready phase that cannot start, the Claude usage limit, a phase started by
- * itself).
+ * itself, a no-mistakes pipeline started outside its validation slot).
  * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
  */
 export const LANE_TABLE = {
@@ -40,6 +40,7 @@ export const LANE_TABLE = {
   docker_leftover: { lane: "P1", class: "actionable" },
   phase_blocked: { lane: "P1", class: "actionable" },
   usage_limit: { lane: "P1", class: "actionable" },
+  validation_outside_cap: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },

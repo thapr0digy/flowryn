@@ -5,6 +5,8 @@ import type { ChecksSummary, PullRequest } from "../forge/types.ts";
 import { prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { recordEvidence, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
+import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
 import { isActive, type NmRun } from "../policy/nomistakes.ts";
 import { openDivergence } from "./divergence.ts";
@@ -84,6 +86,29 @@ export function applyPrObservation(db: Db, run: RunWithPolicy, delivered: Delive
   return { landed: false };
 }
 
+/**
+ * The pipeline's start is the worker's contract (stage begin first); it is
+ * observed here and flagged, never blocked: a pipeline gone active while the
+ * run's last stage is not active and it holds no validation slot is a P1.
+ * Runs open before M5 (legacy_m4) deliver under M4's contract and are exempt.
+ */
+function flagOutsideCap(db: Db, run: RunWithPolicy, nm: NmRun, now: number): void {
+  if (!pipelineNeedsLastStage(db, run)) return;
+  const pos = positionOf(db, run, run.kind);
+  if ((pos.last && run.stage_state === "active") || holdsLease(db, run.id, "validation")) return;
+  if (findOpenRunItem(db, "validation_outside_cap", run.id)) return;
+  const last = pos.def.stages[pos.def.stages.length - 1]!;
+  const event = appendEvent(db, { source: "nomistakes", kind: "run.validation_outside_cap", runId: run.id, taskId: run.task_id, payload: { nm_run: nm.id, stage: run.stage, stage_state: run.stage_state }, ts: now });
+  openItem(db, {
+    kind: "validation_outside_cap",
+    eventSeq: event.seq,
+    taskId: run.task_id,
+    runId: run.id,
+    line: `Validation started outside the cap: ${taskTitle(db, run.task_id)} (${run.project_id}) runs no-mistakes in stage ${run.stage} (${run.stage_state}), before stage ${last.id} holds its slot; flowryn show ${run.task_id}`,
+    now,
+  });
+}
+
 /** Apply one no-mistakes status read for a run's worktree (read-only: flowrynd never drives the pipeline). Call inside a transaction. */
 export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, now: number): void {
   recordEvidence(db, run.id, "nomistakes", 1, nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr } : { run: null }, now);
@@ -91,6 +116,7 @@ export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null,
   if (active && run.state === "running") {
     db.query("UPDATE runs SET state = 'validating', updated_at = ?2 WHERE id = ?1").run(run.id, now);
     appendEvent(db, { source: "nomistakes", kind: "run.validating", runId: run.id, taskId: run.task_id, payload: { nm_run: nm.id, status: nm.status }, ts: now });
+    flagOutsideCap(db, run, nm, now);
   } else if (!active && run.state === "validating") {
     db.query("UPDATE runs SET state = 'running', updated_at = ?2 WHERE id = ?1").run(run.id, now);
     appendEvent(db, { source: "nomistakes", kind: "run.validated", runId: run.id, taskId: run.task_id, payload: { nm_run: nm?.id ?? null, outcome: nm?.outcome ?? null, pr: nm?.pr ?? null }, ts: now });

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { M4_SHIP_WORKFLOW } from "../../src/db/schema.ts";
 
 /**
  * Workflows, review gates, capacity grants and the usage-limit pause (design
@@ -241,6 +242,52 @@ describe("capacity is the contract for a delivery", () => {
   );
 
   test(
+    "no-mistakes: a pipeline that goes active before the ship stage holds its slot is observed and flagged as a P1",
+    async () => {
+      ship = await makeShipEnv({ mode: "no-mistakes" });
+      const e = ship;
+      const f = e.fleet;
+      const { run } = await f.dispatch(["Runs the pipeline early", "FAKE: commit b.txt b", "FAKE: sleep 600000"].join("\n"), { kind: "ship" });
+      const building = await f.waitRun(run, (r) => r.stage === "build" && r.stage_state === "active" && r.worker_started_at !== null, "the build stage");
+      writeFileSync(join(f.h.home, "nm-status"), `run:\n  id: "01NM"\n  branch: ${building.branch}\n  status: running\n  head: "abc"\n  pr: ""\n`);
+      await f.waitRun(run, (r) => r.state === "validating", "validating", 10_000);
+      const item = one<{ lane: string; line: string }>(f, "SELECT lane, line FROM items WHERE kind = 'validation_outside_cap' AND run_id = ?1", run)!;
+      expect(item.lane).toBe("P1");
+      expect(item.line).toContain("Validation started outside the cap");
+      expect(item.line).toContain("before stage ship holds its slot");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a no-mistakes run open across the upgrade (frozen by migration 5) delivers without stage begin, under M4's contract",
+    async () => {
+      ship = await makeShipEnv({ mode: "no-mistakes" });
+      const e = ship;
+      const f = e.fleet;
+      const steps = ["M4 contract", "FAKE: commit m4.txt m4", "FAKE: wait-file go", "FAKE: push", `FAKE: pr ${e.github.apiUrl} acme/web`, "FAKE: deliver-pr", "FAKE: sleep 600000"].join("\n");
+      const { task, run } = await f.dispatch(steps, { kind: "ship" });
+      const building = await f.waitRun(run, (r) => r.stage === "build" && r.stage_state === "active" && r.worker_started_at !== null, "the build stage");
+      const db = f.h.db();
+      try {
+        db.query("UPDATE runs SET workflow_def = ?2 WHERE id = ?1").run(run, M4_SHIP_WORKFLOW);
+      } finally {
+        db.close();
+      }
+      const statusFile = join(f.h.home, "nm-status");
+      writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${building.branch}\n  status: running\n  head: "abc"\n  pr: ""\n`);
+      await f.waitRun(run, (r) => r.state === "validating", "validating", 10_000);
+      writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${building.branch}\n  status: completed\n  head: "abc"\n  pr: ""\noutcome: passed\n`);
+      await f.waitRun(run, (r) => r.state === "running", "running again", 10_000);
+      writeFileSync(join(f.h.dataDir, task, "go"), "");
+      await f.waitRun(run, (r) => r.state === "ready" && r.stage === "ship" && r.stage_state === "done", "the delivery");
+      expect(one<{ released_by: string }>(f, "SELECT released_by FROM pool_leases WHERE run_id = ?1 AND pool = 'validation'", run)!.released_by).toBe("stage ship delivered");
+      expect(rows(f, "SELECT 1 FROM items WHERE kind = 'validation_outside_cap' AND run_id = ?1", run)).toEqual([]);
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
     "no-mistakes: stage begin waits while the validation cap is full, then holds the slot across the pipeline until the delivery",
     async () => {
       ship = await makeShipEnv({ mode: "no-mistakes", extraConfig: "[capacity]\nvalidation = 1" });
@@ -278,6 +325,7 @@ describe("capacity is the contract for a delivery", () => {
       writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${started.branch}\n  status: running\n  head: "abc"\n  pr: ""\n`);
       await f.waitRun(run, (r) => r.state === "validating", "validating", 10_000);
       expect(validation()).toEqual([run]);
+      expect(rows(f, "SELECT 1 FROM items WHERE kind = 'validation_outside_cap'")).toEqual([]);
       writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${started.branch}\n  status: completed\n  head: "abc"\n  pr: ""\noutcome: passed\n`);
       await f.waitRun(run, (r) => r.state === "running", "running again", 10_000);
       expect(validation()).toEqual([run]);

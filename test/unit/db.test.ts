@@ -120,6 +120,7 @@ describe("migrations", () => {
 
     const shape = (id: string, workflow: string) => runWorkflow(db, { id, workflow }).stages.map((s) => `${s.id}:${s.gate}:${s.pools.join("+")}`);
     expect(shape("r1", "feature")).toEqual(["build:none:", "ship:merge:validation"]);
+    expect(runWorkflow(db, { id: "r1", workflow: "feature" }).legacy_m4).toBe(true);
     const pos = positionOf(db, { id: "r1", workflow: "feature", stage: "build" }, "ship");
     expect([pos.index, pos.last]).toEqual([0, false]);
     expect(shape("r2", "scout")).toEqual(["investigate:none:"]);

@@ -29,6 +29,12 @@ export interface StageDef {
 export interface WorkflowDef {
   id: string;
   stages: StageDef[];
+  /**
+   * Frozen by migration 5 for a run already open before M5: its worker has
+   * M4's contract (pipeline, then deliver), so its ship slot is granted at
+   * delivery time, never required before the pipeline.
+   */
+  legacy_m4?: boolean;
 }
 
 function stage(id: string, extra: Partial<StageDef> = {}): StageDef {

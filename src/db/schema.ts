@@ -254,14 +254,28 @@ CREATE INDEX merges_open ON merges(state) WHERE state IN ('requested','unproven'
  * is approved. runs.workflow_def freezes the workflow a run already open
  * before M5 finishes under, the contract its worker was given: a ship builds
  * then ships (the ship stage holds a validation slot and ends at the merge
- * gate) and a scout investigates, whatever its workflow id names today.
+ * gate) and a scout investigates, whatever its workflow id names today. Both
+ * are marked legacy_m4: such a ship's slot is granted at delivery time.
  */
+/** The workflow migration 5 freezes for a ship already open before M5 (marked legacy_m4). */
+export const M4_SHIP_WORKFLOW = JSON.stringify({
+  id: "fix",
+  stages: [
+    { id: "build", skill: null, gate: "none", pools: [], fresh: false },
+    { id: "ship", skill: null, gate: "merge", pools: ["validation"], fresh: false },
+  ],
+  legacy_m4: true,
+});
+
+/** The workflow migration 5 freezes for a scout already open before M5. */
+const M4_SCOUT_WORKFLOW = JSON.stringify({ id: "scout", stages: [{ id: "investigate", skill: null, gate: "none", pools: [], fresh: false }], legacy_m4: true });
+
 const WORKFLOW_SQL = /* sql */ `
 ALTER TABLE runs ADD COLUMN workflow_def TEXT;
 UPDATE runs SET workflow_def = CASE
     WHEN (SELECT kind FROM task_policy tp WHERE tp.task_id = runs.task_id) = 'scout'
-      THEN '{"id":"scout","stages":[{"id":"investigate","skill":null,"gate":"none","pools":[],"fresh":false}]}'
-    ELSE '{"id":"fix","stages":[{"id":"build","skill":null,"gate":"none","pools":[],"fresh":false},{"id":"ship","skill":null,"gate":"merge","pools":["validation"],"fresh":false}]}'
+      THEN '${M4_SCOUT_WORKFLOW}'
+    ELSE '${M4_SHIP_WORKFLOW}'
   END
   WHERE state NOT IN ('cleaned','failed','cancelled');
 ALTER TABLE runs ADD COLUMN stage_state TEXT NOT NULL DEFAULT 'active';
