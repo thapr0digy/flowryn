@@ -4,7 +4,7 @@ import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { styleBlock } from "../config/workflows.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
-import { alertHerdrIfDue, noteHerdrNeeded } from "../reconcile/herdr-health.ts";
+import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -268,6 +268,7 @@ export class Launcher {
     };
 
     const paneId = await this.ensurePane(runtime, run, worktree, env);
+    tx(db, () => noteHerdrUp(db, "daemon", now()));
     tx(db, () => {
       db.query("UPDATE runs SET launched_at = ?2, liveness = 'starting', busy_until = NULL, idle_since = NULL, updated_at = ?2 WHERE id = ?1").run(run.id, now());
       appendEvent(db, { source: "daemon", kind: "run.launching", runId: run.id, taskId: run.task_id, payload: { mode, pane: paneId, trust: trust.detail, args: plan.args.length } });

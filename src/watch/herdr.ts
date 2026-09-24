@@ -80,10 +80,14 @@ export class HerdrWatcher {
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
     if (this.attempt === 0) this.deps.log(`herdr: event subscription down (${reason}); retrying`);
     this.attempt++;
-    this.deps.onDown?.(reason);
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.connect();
     }, delay);
+    try {
+      this.deps.onDown?.(reason);
+    } catch (error) {
+      this.deps.log(`herdr: recording the outage failed: ${(error as Error).stack ?? String(error)}`);
+    }
   }
 }

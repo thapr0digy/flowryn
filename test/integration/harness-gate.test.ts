@@ -130,7 +130,7 @@ describe("the harness version gate", () => {
       // The contract passes: the scheduler launches the one resume, in the same session.
       await recordContract(env, "claude", "9.9.11");
       const done = await env.waitRun(run, (r) => r.state !== "running" && r.state !== "launching", "the resumed run to deliver", 30_000);
-      expect(["landed", "cleaned", "ready"]).toContain(done.state);
+      expect(["landed", "cleaned"]).toContain(done.state);
       expect(done.resume_count).toBe(1);
       const start = env.herdr.calls.filter((c) => c.method === "agent.start").at(-1)!;
       expect(start.params.args as string[]).toContain("--resume");

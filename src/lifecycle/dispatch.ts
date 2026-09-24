@@ -7,7 +7,7 @@ import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec 
 import { findOpenItem, openItem } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { herdrConfig, workersConfig } from "../config/workers.ts";
-import { alertHerdrIfDue, noteHerdrNeeded } from "../reconcile/herdr-health.ts";
+import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -115,6 +115,7 @@ export async function checkStart(deps: StartDeps, project: ProjectRow, harness: 
   } catch (error) {
     throw herdrRefusal(deps, `Herdr is not reachable (${(error as Error).message}), so no worker can start`, (error as Error).message);
   }
+  tx(deps.db, () => noteHerdrUp(deps.db, "cli", deps.now()));
   // The installed version, checked at every dispatch; an untested one refuses and opens its P1 (sections 5 and 16).
   const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
   if (check.state !== "verified") throw harnessRefusal(check);

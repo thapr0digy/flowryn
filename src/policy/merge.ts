@@ -25,7 +25,7 @@ import {
   type Channel,
 } from "./approvals.ts";
 import type { GitRunner } from "./landed.ts";
-import { isForgeOutage, noteForgeDown } from "../reconcile/forge-health.ts";
+import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-health.ts";
 
 /**
  * The merge gate (design section 7, policy/merge), in order: the canonical PR
@@ -100,6 +100,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
         throw new FlowrynError("forge_unavailable", `cannot read the checks of ${delivered.ref} (${(error as Error).message})`, "try again later");
       }
     }
+    tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
     return { ...base, head: pr.headSha, pr, checks, remote };
   }
