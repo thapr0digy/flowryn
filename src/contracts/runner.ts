@@ -17,6 +17,7 @@ import type { MessageRow } from "../lifecycle/steers.ts";
 import { isAlive, terminate } from "../runtime/proc.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "./cleanup.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
@@ -72,10 +73,11 @@ function scratchRepo(dir: string): string {
   return dir;
 }
 
-function scratchConfig(options: ContractOptions, home: string): string {
+function scratchConfig(options: ContractOptions, home: string, branchPrefix: string): string {
   const real = options.config;
   const workers: Record<string, unknown> = { ...(real.extra.workers as Record<string, unknown> | undefined) };
   workers.worktree_root = join(home, "wt");
+  workers.branch_prefix = branchPrefix;
   if (options.model) workers[options.harness] = { ...(workers[options.harness] as Record<string, unknown> | undefined), model: options.model };
   const data: Record<string, unknown> = {
     data_dir: join(home, "data"),
@@ -103,7 +105,8 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   const version = await harnessVersion(options.harness, binary);
   if (!version) throw new Error(`cannot read the ${options.harness} version from ${binary} --version`);
   const home = realpathSync(mkdtempSync(join(tmpdir(), "fwc-")));
-  writeFileSync(join(home, "config.toml"), scratchConfig(options, home));
+  const { prefix } = contractPrefix();
+  writeFileSync(join(home, "config.toml"), scratchConfig(options, home, prefix));
   const stateDir = join(home, "state");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
@@ -132,6 +135,27 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   const steps: StepResult[] = [];
   let project: string | null = null;
   let state: ContractState | null = null;
+  let cleaning: Promise<void> | null = null;
+  // Runs once, from the finally block or from a signal: nothing this run created outlives it.
+  const cleanup = () =>
+    (cleaning ??= (async () => {
+      db?.close();
+      db = null;
+      const workspaces = createdWorkspaces(stateDir);
+      await teardown(call, state, daemon);
+      // A run that failed is not cancellable, so its workspace may still be open; close it by id.
+      const runtime = new HerdrRuntime(new HerdrClient(options.herdrSocket));
+      for (const ws of workspaces) await runtime.closeWorkspace(ws).catch(() => undefined);
+      // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
+      if (options.project && project) removeOwnWorktrees(project, createdWorktrees(stateFiles(stateDir).db), prefix, join(home, "wt"), git, options.log);
+      if (!options.keep) rmSync(home, { recursive: true, force: true });
+    })());
+  const onSignal = (signal: NodeJS.Signals) => {
+    options.log(`${signal}: cleaning up before exit`);
+    void cleanup().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
     const deadline = Date.now() + 20_000;
     for (;;) {
@@ -198,53 +222,35 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       }
     }
   } finally {
-    db?.close();
-    const workspace = state ? readWorkspace(stateDir, state.run) : null;
-    await teardown(call, state, project, daemon, options.log, options.project !== null);
-    // A run that failed is not cancellable, so its workspace may still be open; close it by id.
-    if (workspace) await new HerdrRuntime(new HerdrClient(options.herdrSocket)).closeWorkspace(workspace).catch(() => undefined);
-    if (!options.keep) rmSync(home, { recursive: true, force: true });
+    await cleanup();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
   return { harness: options.harness, version, passed, steps, scratch: home };
 }
 
-function readWorkspace(stateDir: string, runId: string): string | null {
-  const db = openDb(stateFiles(stateDir).db, { readonly: true });
+function createdWorkspaces(stateDir: string): string[] {
+  const path = stateFiles(stateDir).db;
+  if (!existsSync(path)) return [];
+  const db = openDb(path, { readonly: true });
   try {
-    return (db.query("SELECT workspace_id FROM runs WHERE id = ?1").get(runId) as { workspace_id: string | null } | null)?.workspace_id ?? null;
+    return (db.query("SELECT workspace_id FROM runs WHERE workspace_id IS NOT NULL").all() as { workspace_id: string }[]).map((r) => r.workspace_id);
   } finally {
     db.close();
   }
 }
 
-/** Stop the worker and close its workspace, stop the scratch daemon, and remove the run's own worktree and branch. */
+/** Stop the worker (cancel exits it and closes its workspace), then stop the scratch daemon. */
 async function teardown(
   call: (verb: string, args: Record<string, unknown>) => Promise<{ ok: boolean }>,
   state: ContractState | null,
-  project: string | null,
   daemon: { exitCode: number | null; kill(signal?: number | NodeJS.Signals): void; exited: Promise<number> },
-  log: (line: string) => void,
-  ownCheckout: boolean,
 ): Promise<void> {
   if (state) await call("cancel", { target: state.task, reason: "contract run finished" }).catch(() => ({ ok: false }));
   if (daemon.exitCode === null) {
     daemon.kill("SIGTERM");
     await Promise.race([daemon.exited, Bun.sleep(15_000)]);
     if (daemon.exitCode === null) daemon.kill("SIGKILL");
-  }
-  // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
-  if (state && project && ownCheckout) {
-    const branch = `flowryn/${state.task}`;
-    const listed = git(["worktree", "list", "--porcelain"], project).out;
-    for (const block of listed.split("\n\n")) {
-      if (!block.includes(`branch refs/heads/${branch}`)) continue;
-      const path = /^worktree (.+)$/m.exec(block)?.[1];
-      if (path && existsSync(path)) {
-        const removed = git(["worktree", "remove", "--force", path], project);
-        log(removed.code === 0 ? `removed worktree ${path}` : `could not remove worktree ${path}`);
-      }
-    }
-    if (git(["branch", "-D", branch], project).code === 0) log(`deleted branch ${branch}`);
   }
 }

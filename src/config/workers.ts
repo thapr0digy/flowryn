@@ -55,6 +55,8 @@ export interface PiWorkerConfig {
 
 export interface WorkersConfig {
   worktree_root: string;
+  /** Run branches are `<branch_prefix><task>`; contract and lab runs set a unique prefix so they can clean up by name. */
+  branch_prefix: string;
   claude: ClaudeWorkerConfig;
   pi: PiWorkerConfig;
 }
@@ -104,6 +106,15 @@ function absPath(value: string | null, home: string): string | null {
   return value === null ? null : toAbsolute(value, home);
 }
 
+const BRANCH_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._/-]*[/-]$/;
+
+function branchPrefix(value: string): string {
+  if (!BRANCH_PREFIX.test(value) || value.includes("..") || value.includes("//")) {
+    throw new FlowrynError("config_invalid", "[workers] branch_prefix must be a git ref prefix ending in / or -, such as flowryn/");
+  }
+  return value;
+}
+
 export function herdrConfig(config: FlowrynConfig): HerdrConfig {
   const raw = table(config.extra.herdr, "[herdr]");
   return {
@@ -118,6 +129,7 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
   const pi = table(raw.pi, "[workers.pi]");
   return {
     worktree_root: absPath(optString(raw.worktree_root, "[workers] worktree_root"), config.home) ?? join(config.data_dir, "worktrees"),
+    branch_prefix: branchPrefix(optString(raw.branch_prefix, "[workers] branch_prefix") ?? "flowryn/"),
     claude: {
       model: optString(claude.model, "[workers.claude] model"),
       effort: optString(claude.effort, "[workers.claude] effort"),

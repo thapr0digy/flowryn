@@ -164,7 +164,7 @@ export const dispatchVerb: VerbSpec = {
            agent_session, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'launching', 'starting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)`,
       )
-      .run(runId, taskId, harness, version, model, effort, workflow, firstStage(kind), randomUUID(), worktree, `flowryn/${taskId}`, base, hashToken(mintToken("run")), now);
+      .run(runId, taskId, harness, version, model, effort, workflow, firstStage(kind), randomUUID(), worktree, `${workers.branch_prefix}${taskId}`, base, hashToken(mintToken("run")), now);
     const flags: Record<string, string | true> = { kind, repo: project.id, body: body.slice(0, MAX_BACKLOG_BODY), start: true };
     const intent = recordIntent(ctx.db, { file: "backlog", verb: "add", taskId, positional: [taskId, title], flags, now });
     appendEvent(ctx.db, {

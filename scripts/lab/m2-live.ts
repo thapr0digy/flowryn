@@ -26,6 +26,7 @@ import { renderToml } from "../../src/config/toml.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { terminate } from "../../src/runtime/proc.ts";
+import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "../../src/contracts/cleanup.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
 import { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
 import { request } from "../../src/transport/unix.ts";
@@ -54,6 +55,7 @@ const which = (name: string) => Bun.which(name) ?? "";
 const PI_BIN = process.env.PI_BIN ?? (existsSync("/opt/homebrew/bin/pi-signed") ? "/opt/homebrew/bin/pi-signed" : which("pi"));
 
 const home = realpathSync(mkdtempSync(join(tmpdir(), "fw2-")));
+const { prefix: runPrefix } = contractPrefix();
 const piAgent = process.env.M2_PI_AGENT_DIR ?? join(home, "pi-agent");
 mkdirSync(piAgent, { recursive: true });
 /** A fresh clone of this repository in the scratch home: the Pi project. */
@@ -87,6 +89,8 @@ const config = renderToml(
     herdr: { socket: herdrSocket },
     workers: {
       worktree_root: join(home, "wt"),
+      // Every branch this run creates carries its own prefix, so cleanup can go by exact name.
+      branch_prefix: runPrefix,
       claude: { model: CLAUDE_MODEL, effort: "low", pretrust: "check" },
       pi: {
         model: PI_MODEL,
@@ -321,13 +325,29 @@ async function cleanup(): Promise<void> {
   const runtime = new HerdrRuntime(new HerdrClient(herdrSocket!));
   for (const ws of workspaces) await runtime.closeWorkspace(ws).catch(() => undefined);
   await killDaemon();
-  // Scratch-clone worktrees go with the scratch home. Only runs in the trusted checkout left git state outside it.
-  for (const { task } of dispatched.filter((d) => d.project === "claude-trusted")) {
-    const path = join(home, "wt", "claude-trusted", task);
-    if (existsSync(path)) Bun.spawnSync(["git", "-C", claudeProject!, "worktree", "remove", "--force", path]);
-    Bun.spawnSync(["git", "-C", claudeProject!, "branch", "-D", `flowryn/${task}`]);
+  // Scratch-clone worktrees go with the scratch home. Only runs in the trusted checkout left git state
+  // outside it: exactly the branches and worktrees this run's database recorded, under this run's prefix.
+  if (claudeProject) {
+    const created = createdWorktrees(join(home, "state", "flowryn.db")).filter((c) => c.worktree.startsWith(join(home, "wt", "claude-trusted")));
+    removeOwnWorktrees(claudeProject, created, runPrefix, join(home, "wt"), gitIn, log);
   }
-  if (claudeProject) Bun.spawnSync(["git", "-C", claudeProject, "worktree", "prune"]);
+}
+
+function gitIn(args: string[], cwd: string): { code: number; out: string } {
+  const result = Bun.spawnSync(["git", ...args], { cwd, stdin: "ignore" });
+  return { code: result.exitCode, out: result.stdout.toString().trim() };
+}
+
+let cleaning: Promise<void> | null = null;
+const cleanupOnce = () => (cleaning ??= cleanup());
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    log(`${signal}: cleaning up before exit`);
+    void cleanupOnce().finally(() => {
+      if (!values.keep) rmSync(home, { recursive: true, force: true });
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    });
+  });
 }
 
 let code = 1;
@@ -336,7 +356,7 @@ try {
 } catch (error) {
   log(`aborted: ${(error as Error).stack ?? String(error)}`);
 } finally {
-  await cleanup();
+  await cleanupOnce();
   const resultsPath = process.env.M2_RESULTS ?? join(home, "results.json");
   writeFileSync(resultsPath, JSON.stringify({ home, claudeProject, piModel: PI_MODEL, claudeModel: CLAUDE_MODEL, results }, null, 2));
   log(`results: ${results.filter((r) => r.ok).length}/${results.length} passed; ${resultsPath}`);
