@@ -16,6 +16,10 @@ import type { BridgeDriver } from "../../src/contracts/bridge-suite.ts";
  *   - Notification idle_prompt fires only when you stop typing after a normal
  *     turn end (c03); an interrupt fires no hook at all and writes the marker
  *     to the transcript (c04, finding 6).
+ *   - A Bash tool call obeys the settings' permissions (deny beats ask beats
+ *     allow) and a PreToolUse hook's permissionDecision; "ask" puts a prompt
+ *     in front of you, in auto mode and under bypass alike (c08), and the
+ *     command runs only if you say yes.
  */
 
 interface HookCommand {
@@ -45,7 +49,11 @@ const MAX_CONTINUATIONS = 8;
 export class FakeClaudeLeader implements BridgeDriver {
   readonly harness = "claude" as const;
   readonly seen: { text: string; via: string }[] = [];
-  private readonly settings: { hooks: Record<string, HookGroup[]> };
+  private readonly settings: { hooks: Record<string, HookGroup[]>; permissions?: { allow?: string[]; ask?: string[]; deny?: string[] } };
+  /** Every permission prompt Claude showed you, with the hook's reason when it gave one. */
+  readonly prompts: string[] = [];
+  /** The session's permission mode, as its hooks see it (M0 c09). */
+  permissionMode = "auto";
   private readonly opts: FakeClaudeOptions;
   private readonly transcript: string;
   private readonly sessionId = crypto.randomUUID();
@@ -68,7 +76,7 @@ export class FakeClaudeLeader implements BridgeDriver {
   }
 
   private input(event: string, extra: Record<string, unknown>): string {
-    return JSON.stringify({ session_id: this.sessionId, transcript_path: this.transcript, cwd: this.opts.cwd, permission_mode: "auto", hook_event_name: event, ...extra });
+    return JSON.stringify({ session_id: this.sessionId, transcript_path: this.transcript, cwd: this.opts.cwd, permission_mode: this.permissionMode, hook_event_name: event, ...extra });
   }
 
   private groups(event: string, matcher?: string): HookCommand[] {
@@ -196,6 +204,53 @@ export class FakeClaudeLeader implements BridgeDriver {
 
   async saw(marker: string): Promise<number> {
     return this.seen.filter((s) => s.text.includes(marker)).length;
+  }
+
+  /** `Bash(pattern)` rules: * matches anything, the rest literally, over the whole command. */
+  private matches(rules: string[] | undefined, command: string): boolean {
+    return (rules ?? []).some((rule) => {
+      const inner = /^Bash\((.*)\)$/.exec(rule)?.[1];
+      if (inner === undefined) return false;
+      const pattern = new RegExp(`^${inner.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+      return pattern.test(command);
+    });
+  }
+
+  /**
+   * The model runs a Bash command. PreToolUse runs first; a deny rule blocks
+   * it; a hook "ask" or an ask rule prompts you (`approve` is your answer);
+   * otherwise it runs. Returns what happened and the command's output.
+   */
+  async runBash(command: string, answer: { approve: boolean }): Promise<{ denied: boolean; prompted: boolean; ran: boolean; code: number; stdout: string; stderr: string }> {
+    const toolInput = { command };
+    const toolUseId = `toolu_${crypto.randomUUID().slice(0, 12)}`;
+    const input = this.input("PreToolUse", { tool_name: "Bash", tool_input: toolInput, tool_use_id: toolUseId });
+    let decision: string | null = null;
+    let reason = "";
+    for (const hook of this.groups("PreToolUse", "Bash")) {
+      const proc = Bun.spawn(["sh", "-c", hook.command], { env: this.opts.env, cwd: this.opts.cwd, stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" });
+      const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      try {
+        const parsed = JSON.parse(out.trim().split("\n").pop() ?? "") as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+        if (parsed.hookSpecificOutput?.permissionDecision) {
+          decision = parsed.hookSpecificOutput.permissionDecision;
+          reason = parsed.hookSpecificOutput.permissionDecisionReason ?? "";
+        }
+      } catch {
+        // no decision
+      }
+    }
+    const perms = this.settings.permissions ?? {};
+    if (decision === "deny" || this.matches(perms.deny, command)) return { denied: true, prompted: false, ran: false, code: -1, stdout: "", stderr: "" };
+    const ask = decision === "ask" || this.matches(perms.ask, command) || (!this.matches(perms.allow, command) && decision !== "allow");
+    if (ask) {
+      this.prompts.push(reason || `Bash(${command})`);
+      if (!answer.approve) return { denied: false, prompted: true, ran: false, code: -1, stdout: "", stderr: "" };
+    }
+    const proc = Bun.spawn(["sh", "-c", command], { env: this.opts.env, cwd: this.opts.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    await this.fire("PostToolUse", { tool_name: "Bash", tool_input: toolInput, tool_use_id: toolUseId }, "Bash");
+    return { denied: false, prompted: ask, ran: true, code, stdout, stderr };
   }
 
   /** Run a hook event directly, for race tests that need a precise order. */

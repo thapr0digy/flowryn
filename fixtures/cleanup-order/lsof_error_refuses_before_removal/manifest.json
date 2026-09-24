@@ -1,0 +1,25 @@
+{
+  "name": "lsof_error_refuses_before_removal",
+  "ported_from": "tests/fm-teardown.test.sh:test_lsof_error_refuses_before_removal",
+  "description": "The cwd scan (lsof) fails. Leaked processes cannot be ruled out, so the cleanup refuses before removing anything.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "refused",
+    "reason_class": "lsof_failed",
+    "lock": null,
+    "abort": false
+  }
+}

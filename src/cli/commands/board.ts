@@ -12,11 +12,15 @@ import { todoViews } from "../../lifecycle/todos.ts";
 import { agentIdentity } from "../human.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 import { ping } from "./daemon.ts";
+import { taskTitle } from "../../lifecycle/runs.ts";
+import { runApprovalFlow, type Tty } from "./approve.ts";
 
 /**
  * `flowryn board` (design section 4): a zero-token live view for your own
  * terminal. It reads flowryn.db read-only, like any reader while WAL is on,
- * and never writes; it never runs inside an agent pane. `--once` prints one
+ * and never writes; it never runs inside an agent pane. Its approve key (a)
+ * records your approval through the socket, behind the same typed code as
+ * `flowryn approve` (design section 7, channel board). `--once` prints one
  * frame and exits.
  */
 
@@ -122,7 +126,7 @@ async function daemonFacts(io: CliIo): Promise<string> {
 
 const board: VerbSpec = {
   name: "board",
-  summary: "A live, read-only view in your terminal: what needs you, the fleet, updates, to-dos",
+  summary: "A live view in your terminal: what needs you, the fleet, updates, to-dos; a approves a merge",
   positionals: [],
   flags: { once: { type: "boolean", help: "print one frame and exit" } },
   kind: "local",
@@ -160,21 +164,123 @@ const board: VerbSpec = {
   },
 };
 
-/** The live view: alternate screen, a frame every 2 s or on r, q or Ctrl+C to leave. */
+/** Ships that wait for a merge approval: delivered (ready), or merging with a merge that was not proven. */
+export function approvable(db: Db): { task: string; title: string; project: string; state: string }[] {
+  const rows = db
+    .query(
+      `SELECT r.task_id, p.project_id, r.state FROM runs r JOIN task_policy p ON p.task_id = r.task_id
+       WHERE p.kind = 'ship' AND r.state IN ('ready','merging') ORDER BY r.updated_at`,
+    )
+    .all() as { task_id: string; project_id: string; state: string }[];
+  return rows.map((r) => ({ task: r.task_id, title: taskTitle(db, r.task_id), project: r.project_id, state: r.state }));
+}
+
+/**
+ * The board's keys as a line-oriented terminal for the approve flow: what you
+ * type is echoed, Enter ends a line, Escape or Ctrl+C cancels it. The keys
+ * come from the board's own raw terminal, never from a pipe.
+ */
+class KeyTty implements Tty {
+  private buffer = "";
+  private waiter: ((line: string | null) => void) | null = null;
+
+  write(text: string): void {
+    out(text.replace(/\n/g, "\r\n"));
+  }
+
+  feed(key: string): void {
+    if (!this.waiter) return;
+    for (const ch of key) {
+      if (ch === "\r" || ch === "\n") return this.finish(this.buffer);
+      if (ch === "\u0003" || ch === "\u001b") return this.finish(null);
+      if (ch === "\u007f" || ch === "\b") {
+        if (this.buffer.length > 0) {
+          this.buffer = this.buffer.slice(0, -1);
+          out("\b \b");
+        }
+        continue;
+      }
+      if (ch >= " " && ch <= "~") {
+        this.buffer += ch;
+        out(ch);
+      }
+    }
+  }
+
+  private finish(line: string | null): void {
+    const waiter = this.waiter;
+    this.waiter = null;
+    this.buffer = "";
+    waiter?.(line);
+  }
+
+  readLine(timeoutMs: number): Promise<string | null> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => this.finish(null), timeoutMs);
+      this.waiter = (line) => {
+        clearTimeout(timer);
+        resolve(line);
+      };
+    });
+  }
+
+  close(): void {
+    this.finish(null);
+  }
+}
+
+/** The approve key: pick a waiting ship, see what would land, type the code back (design section 7, channel board). */
+async function approveFromBoard(io: CliIo, db: Db, tty: KeyTty): Promise<void> {
+  out("\u001b[H\u001b[2J");
+  const list = approvable(db);
+  if (list.length === 0) {
+    tty.write("Nothing waits for a merge approval.\n\nPress Enter to go back. ");
+    await tty.readLine(60_000);
+    return;
+  }
+  tty.write("APPROVE A MERGE\n\n");
+  list.forEach((row, i) => tty.write(`  ${i + 1}. ${pad(row.task, 28)} ${pad(row.project, 12)} ${row.state === "merging" ? "(merge not proven) " : ""}${row.title}\n`));
+  tty.write("\nNumber, then Enter (Escape cancels): ");
+  const pick = await tty.readLine(120_000);
+  const chosen = pick === null ? undefined : list[Number(pick.trim()) - 1];
+  if (!chosen) return;
+  const reply = await runApprovalFlow(io.env, tty, { task: chosen.task, channel: "board", actor: io.env.USER || io.env.LOGNAME || "you" });
+  tty.write(reply.ok ? `\nApproved ${chosen.task} (${(reply.data as { approval?: string }).approval}). The leader can merge it now.\n` : `\nNot approved: ${reply.error?.message ?? "error"}\n`);
+  tty.write("\nPress Enter to go back. ");
+  await tty.readLine(60_000);
+}
+
+/** The live view: alternate screen, a frame every 2 s or on r, a to approve a merge, q or Ctrl+C to leave. */
 async function live(io: CliIo, db: Db, ageMs: number): Promise<number> {
   let finish!: () => void;
   const done = new Promise<void>((resolve) => {
     finish = resolve;
   });
+  // An object, so the key handler and the finally block see the same approve flow.
+  const view: { approving: KeyTty | null } = { approving: null };
   const draw = async () => {
+    if (view.approving) return;
     const lines = boardFrame(db, { now: Date.now(), daemon: await daemonFacts(io) }, ageMs);
-    lines.push("", "q quit · r refresh · every 2s");
+    lines.push("", "q quit · r refresh · a approve a merge · every 2s");
+    if (view.approving) return;
     out(`\u001b[H\u001b[2J${fit(lines, process.stdout.columns || 120)}`);
   };
   const onKey = (data: Buffer) => {
     const key = data.toString("utf8");
+    if (view.approving) {
+      view.approving.feed(key);
+      return;
+    }
     if (key === "q" || key === "\u0003") finish();
     else if (key === "r") void draw();
+    else if (key === "a") {
+      const tty = new KeyTty();
+      view.approving = tty;
+      void approveFromBoard(io, db, tty).finally(() => {
+        view.approving = null;
+        void draw();
+      });
+    }
   };
   out("\u001b[?1049h\u001b[?25l");
   process.stdin.setRawMode?.(true);
@@ -186,6 +292,7 @@ async function live(io: CliIo, db: Db, ageMs: number): Promise<number> {
     await done;
   } finally {
     clearInterval(timer);
+    view.approving?.close();
     process.stdin.off("data", onKey);
     process.stdin.setRawMode?.(false);
     process.stdin.pause();

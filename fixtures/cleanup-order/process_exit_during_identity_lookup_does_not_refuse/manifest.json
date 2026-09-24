@@ -1,0 +1,25 @@
+{
+  "name": "process_exit_during_identity_lookup_does_not_refuse",
+  "ported_from": "tests/fm-teardown.test.sh:test_process_exit_during_identity_lookup_does_not_refuse",
+  "description": "lsof reports pid 99999998 once; by the time its identity is read (ps finds nothing) it is gone, and the rescan no longer lists it. A process that exits on its own is not a refusal.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": false
+  }
+}

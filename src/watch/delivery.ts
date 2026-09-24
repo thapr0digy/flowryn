@@ -1,0 +1,197 @@
+import { existsSync } from "node:fs";
+import type { Db } from "../db/db.ts";
+import { tx } from "../db/db.ts";
+import { parsePrUrl } from "../forge/github.ts";
+import { ForgeError, type Forge } from "../forge/types.ts";
+import { deliveredOf } from "../lifecycle/delivery.ts";
+import { getProject } from "../lifecycle/projects.ts";
+import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
+import type { GitRunner } from "../policy/landed.ts";
+import { parseNmStatus, readNmStatus } from "../policy/nomistakes.ts";
+import { applyNmObservation, applyPrObservation, noteNmOutage } from "../reconcile/delivery.ts";
+
+/**
+ * The delivery watchers (design section 4, src/watch): GitHub PR state, head
+ * and checks for every delivered ship (conditional requests with ETags, so a
+ * quiet poll costs nothing), the proof of a merge still unproven, local-only
+ * merges, the read-only no-mistakes status of validating runs, and landed
+ * runs whose cleanup never ran (the daemon stopped in between). They observe;
+ * src/reconcile/delivery.ts applies. A failing forge backs off, it is never
+ * retried in a tight loop.
+ */
+
+export interface DeliveryWatcherDeps {
+  db: Db;
+  forge(): Forge;
+  webUrl(): string;
+  git: GitRunner;
+  noMistakes(): string | null;
+  nmTimeoutMs(): number;
+  pollMs(): number;
+  inFlight: ReadonlySet<string>;
+  /** Clean up a run that landed (the daemon's own cleanup after a proven merge). */
+  cleanup(runId: string): void;
+  log(line: string): void;
+  now(): number;
+}
+
+const MAX_BACKOFF_MS = 10 * 60_000;
+/** Consecutive failed status reads before no-mistakes counts as down. */
+const NM_DOWN_AFTER = 3;
+
+export class DeliveryWatcher {
+  private readonly deps: DeliveryWatcherDeps;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private running: Promise<void> | null = null;
+  private stopped = false;
+  private again = false;
+  private backoffMs = 0;
+  private forgeQuietUntil = 0;
+  private nmFailures = 0;
+
+  constructor(deps: DeliveryWatcherDeps) {
+    this.deps = deps;
+  }
+
+  start(): void {
+    this.schedule(0);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** Look now (debounced); a pass in progress is followed by another. */
+  kick(): void {
+    if (this.running) {
+      this.again = true;
+      return;
+    }
+    this.schedule(50);
+  }
+
+  private schedule(ms: number): void {
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.running = this.pass().finally(() => {
+        this.running = null;
+        if (this.again) {
+          this.again = false;
+          this.schedule(50);
+        } else this.schedule(this.deps.pollMs());
+      });
+    }, ms);
+  }
+
+  /** One pass over everything the watchers follow. Exposed for tests. */
+  async pass(): Promise<void> {
+    try {
+      await this.watchPrs();
+      await this.watchLocalMerges();
+      await this.watchNoMistakes();
+      this.resumeCleanups();
+    } catch (error) {
+      this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
+    }
+  }
+
+  private runs(sql: string): RunWithPolicy[] {
+    const ids = this.deps.db.query(sql).all() as { id: string }[];
+    return ids.map((r) => getRunWithPolicy(this.deps.db, r.id)).filter((r): r is RunWithPolicy => r !== null);
+  }
+
+  private async watchPrs(): Promise<void> {
+    const { db, now } = this.deps;
+    if (now() < this.forgeQuietUntil) return;
+    const runs = this.runs(
+      `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id
+       WHERE p.kind = 'ship' AND p.delivery_mode != 'local-only' AND r.state IN ('ready','merging') ORDER BY r.updated_at`,
+    );
+    const forge = this.deps.forge();
+    for (const run of runs) {
+      if (this.stopped) return;
+      const delivered = deliveredOf(db, run.task_id);
+      if (!delivered || delivered.kind !== "pr") continue;
+      const ref = parsePrUrl(delivered.ref, this.deps.webUrl());
+      if (!ref) continue;
+      try {
+        const pr = await forge.pull(ref);
+        const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
+        const applied = tx(db, () => {
+          const current = getRunWithPolicy(db, run.id);
+          return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now()) : { landed: false };
+        });
+        this.backoffMs = 0;
+        if (applied.landed) this.deps.cleanup(run.id);
+      } catch (error) {
+        if (error instanceof ForgeError && error.kind === "not_found") {
+          this.deps.log(`delivery watcher: ${delivered.ref} is not found on GitHub`);
+          continue;
+        }
+        this.backoffMs = Math.min(MAX_BACKOFF_MS, this.backoffMs === 0 ? this.deps.pollMs() : this.backoffMs * 2);
+        const retryAt = error instanceof ForgeError && error.retryAt ? error.retryAt : now() + this.backoffMs;
+        this.forgeQuietUntil = retryAt;
+        this.deps.log(`delivery watcher: GitHub failed (${(error as Error).message}); quiet until ${new Date(retryAt).toISOString()}`);
+        return;
+      }
+    }
+  }
+
+  /** A local-only merge whose proof was not seen (the daemon stopped mid-merge): look at the local default branch. */
+  private async watchLocalMerges(): Promise<void> {
+    const { db, now } = this.deps;
+    const runs = this.runs(
+      `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id WHERE p.kind = 'ship' AND p.delivery_mode = 'local-only' AND r.state = 'merging'`,
+    );
+    for (const run of runs) {
+      const merge = latestMerge(db, run.task_id);
+      const project = getProject(db, run.project_id);
+      if (!merge || !project || (merge.state !== "requested" && merge.state !== "unproven") || this.deps.inFlight.has(merge.id)) continue;
+      const proof = await proveLocal(this.deps.git, project, merge.head_sha);
+      const landed = tx(db, () => {
+        const current = getRunWithPolicy(db, run.id);
+        if (!current) return false;
+        recordMergeResult(db, current, merge.id, proof.state === "merged" ? proof : { state: "unproven", detail: `${proof.detail}; the daemon stopped before the merge's result was known` }, now());
+        return proof.state === "merged";
+      });
+      if (landed) this.deps.cleanup(run.id);
+    }
+  }
+
+  private async watchNoMistakes(): Promise<void> {
+    const { db, now } = this.deps;
+    const noMistakes = this.deps.noMistakes();
+    if (!noMistakes) return;
+    const runs = this.runs(
+      `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id
+       WHERE p.kind = 'ship' AND p.delivery_mode = 'no-mistakes' AND r.state IN ('running','validating')`,
+    );
+    for (const run of runs) {
+      if (this.stopped || !existsSync(run.worktree_path)) continue;
+      const status = await readNmStatus(noMistakes, run.worktree_path, this.deps.nmTimeoutMs());
+      if (status.code !== 0) {
+        this.nmFailures++;
+        if (this.nmFailures >= NM_DOWN_AFTER) tx(db, () => noteNmOutage(db, true, status.text.trim().split("\n")[0]?.slice(0, 120) || `exit ${status.code}`, now()));
+        continue;
+      }
+      if (this.nmFailures > 0) tx(db, () => noteNmOutage(db, false, "", now()));
+      this.nmFailures = 0;
+      const nm = parseNmStatus(status.text);
+      tx(db, () => {
+        const current = getRunWithPolicy(db, run.id);
+        if (current) applyNmObservation(db, current, nm, now());
+      });
+    }
+  }
+
+  /** A landed run whose cleanup never ran: run it now (restart is a non-event). */
+  private resumeCleanups(): void {
+    const rows = this.deps.db.query("SELECT id FROM runs WHERE state = 'landed' AND cleanup IS NULL").all() as { id: string }[];
+    for (const row of rows) this.deps.cleanup(row.id);
+  }
+}

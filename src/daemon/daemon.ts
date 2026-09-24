@@ -35,6 +35,14 @@ import type { AttentionServices } from "../attention/services.ts";
 import { NotifyPump } from "../attention/notify.ts";
 import { lastItemNo } from "../attention/items.ts";
 import { syncOverdueTodos } from "../attention/todos-due.ts";
+import { cleanupConfig, githubConfig, type GitHubConfig } from "../config/delivery.ts";
+import { GitHubForge, tokenSource } from "../forge/github.ts";
+import { cleanupRun, type CleanupReport, type LandingDeps } from "../lifecycle/landing.ts";
+import { getRun } from "../lifecycle/runs.ts";
+import { ChallengeStore } from "../policy/approvals.ts";
+import { gitRunner } from "../policy/git.ts";
+import type { DeliveryServices } from "../policy/services.ts";
+import { DeliveryWatcher } from "../watch/delivery.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -82,6 +90,11 @@ function ensureInstanceId(db: Db): string {
   const id = randomBytes(8).toString("hex");
   setMeta(db, "instance_id", id);
   return id;
+}
+
+/** lsof for the cleanup guard; launchd's PATH may not reach /usr/sbin. */
+function lsofPath(): string | null {
+  return Bun.which("lsof") ?? (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : null);
 }
 
 function missingTools(config: FlowrynConfig): string[] {
@@ -230,6 +243,71 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       turnOffsets: new Map(),
     };
 
+    // M4: the forge, cleanup and the delivery watchers (design sections 4, 7 and 14).
+    const github = (): GitHubConfig => githubConfig(config);
+    let forgeCache: { key: string; forge: GitHubForge } | null = null;
+    const forge = (): GitHubForge => {
+      const g = github();
+      const key = `${g.api_url} ${g.web_url} ${g.timeout_ms} ${g.token_env.join(",")}`;
+      if (!forgeCache || forgeCache.key !== key) {
+        const token = tokenSource(env, g.token_env, resolveTool(config, "gh"), g.api_url, g.web_url);
+        forgeCache = { key, forge: new GitHubForge({ apiUrl: g.api_url, webUrl: g.web_url, token, timeoutMs: g.timeout_ms }) };
+      }
+      return forgeCache.forge;
+    };
+    const deliveryGit = gitRunner(resolveTool(config, "git") ?? "git", 120_000);
+    const landingDeps: LandingDeps = {
+      db: database,
+      forge,
+      github,
+      cleanupConfig: () => cleanupConfig(config),
+      git: deliveryGit,
+      lsof: lsofPath,
+      noMistakes: () => resolveTool(config, "no_mistakes"),
+      exitWorker: async (runId) => {
+        const exited = await exitRun(control, runId);
+        return { ok: exited.ok, detail: exited.detail ?? exited.evidence };
+      },
+      closeWorkspace: async (runId) => {
+        const run = getRun(database, runId);
+        if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id);
+      },
+      kickJournal: () => journal.kick(),
+      log,
+      now: Date.now,
+    };
+    const cleanups = new Map<string, Promise<CleanupReport>>();
+    let deliveryWatcher: DeliveryWatcher | null = null;
+    const delivery: DeliveryServices = {
+      forge,
+      github,
+      git: deliveryGit,
+      challenges: new ChallengeStore(),
+      inFlight: new Set(),
+      cleanup: (runId, opts) => {
+        const running = cleanups.get(runId);
+        if (running) return running;
+        const attempt = cleanupRun(landingDeps, runId, opts).finally(() => cleanups.delete(runId));
+        cleanups.set(runId, attempt);
+        return attempt;
+      },
+      watch: () => deliveryWatcher?.kick(),
+    };
+    deliveryWatcher = new DeliveryWatcher({
+      db: database,
+      forge,
+      webUrl: () => github().web_url,
+      git: deliveryGit,
+      noMistakes: () => resolveTool(config, "no_mistakes"),
+      nmTimeoutMs: () => cleanupConfig(config).nomistakes_timeout_ms,
+      pollMs: () => github().poll_ms,
+      inFlight: delivery.inFlight,
+      cleanup: (runId) =>
+        void delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => log(`cleanup ${runId}: ${(error as Error).stack ?? String(error)}`)),
+      log,
+      now: Date.now,
+    });
+
     const services: DaemonServices = {
       db: database,
       config: () => config,
@@ -242,6 +320,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       runTool: (_tool, args, cwd) => git(args, cwd),
       fleet,
       attention,
+      delivery,
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
@@ -276,6 +355,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     // then reconcile every open run; afterwards every event plus a steady pass.
     if (runtime) await herdrWatcher.start();
     await reconciler.passNow("startup");
+    deliveryWatcher.start();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
     const attentionTick = setInterval(() => {
@@ -328,6 +408,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(steady);
     clearInterval(attentionTick);
     reconciler.stop();
+    deliveryWatcher.stop();
     herdrWatcher.stop();
     bus.close();
     attention.bus.close();

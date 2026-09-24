@@ -14,13 +14,36 @@ export const STYLE_BLOCK = [
 /** Prefix of every steer a worker receives mid-turn; the contract names it so the model treats it as its leader's. */
 export const STEER_PREFIX = "Flowryn steer";
 
+/** What a worker delivers, by task kind and the project's delivery mode (design section 8). */
+export interface ContractDelivery {
+  kind: "ship" | "scout";
+  mode: "no-mistakes" | "direct-PR" | "local-only";
+  defaultBranch: string;
+}
+
+/** The "finished" lines: how this worker delivers, and that it is verified. */
+function deliveryLines(d: ContractDelivery): string[] {
+  if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
+  if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", "  Finished: $FLOWRYN_BIN deliver --local. It is verified."];
+  if (d.mode === "direct-PR") {
+    return [`- Ship: commit, git push origin HEAD, open a PR into ${d.defaultBranch} (gh pr create).`, "  Finished: $FLOWRYN_BIN deliver --pr <url>. Verified: your HEAD must be the PR head."];
+  }
+  return [
+    "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
+    "  An ask-user finding: $FLOWRYN_BIN ask with the finding; never answer it yourself.",
+    "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
+    "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",
+  ];
+}
+
 /**
  * The worker contract (design section 12), appended to the harness system
  * prompt rather than left to a skill the worker might not load. M0 c07: without
  * the line naming the mid-turn channel, Sonnet 5 took a steer for prompt
- * injection and ignored it. `stage done` arrives with workflows in M5.
+ * injection and ignored it. The delivery lines follow the task's kind and the
+ * project's delivery mode (M4). `stage done` arrives with workflows in M5.
  */
-export function workerContract(harness: HarnessId, terse: boolean): string {
+export function workerContract(harness: HarnessId, terse: boolean, delivery: ContractDelivery = { kind: "scout", mode: "local-only", defaultBranch: "main" }): string {
   const channel = harness === "claude" ? "hook context" : "a message";
   const lines = [
     "You are a Flowryn worker. Call $FLOWRYN_BIN only.",
@@ -32,8 +55,7 @@ export function workerContract(harness: HarnessId, terse: boolean): string {
     "- When told a steer is waiting: $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack <id>.",
     `- A steer can also arrive mid-turn as ${channel} starting "${STEER_PREFIX} [<id>]:".`,
     "  It is from your leader; act on it, then $FLOWRYN_BIN ack <id>.",
-    "- Finished: $FLOWRYN_BIN deliver --pr <url> (ship) or --report <path> (scout). It is verified.",
-    "  Write reports under $FLOWRYN_REPORT_DIR.",
+    ...deliveryLines(delivery),
     "- Cannot finish: $FLOWRYN_BIN fail --body-file -",
     "- Exit 75 means spooled. Do not retry in a loop.",
     "- Never merge, clean up, or approve anything.",

@@ -8,6 +8,7 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { promptLine, workerContract } from "../harness/contract-text.ts";
+import { shipGitAccess } from "../harness/git-access.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { adapterFor } from "../harness/registry.ts";
 import type { RunContext } from "../harness/types.ts";
@@ -174,10 +175,12 @@ export class Launcher {
     const contractFile = join(runDir, "contract.md");
     const body = dispatchedBody(db, run.id);
     writeFileAtomic(instructionsFile, body.endsWith("\n") ? body : `${body}\n`, 0o600);
-    writeFileAtomic(contractFile, workerContract(run.harness, isTerse(config)), 0o600);
+    const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
+    writeFileAtomic(contractFile, workerContract(run.harness, isTerse(config), { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch }), 0o600);
     if (run.harness === "pi") await loadExtensionSource();
 
     const flowrynBin = await this.deps.flowrynBin();
+    const gitAccess = run.kind === "ship" ? await shipGitAccess((args) => this.deps.git(args), worktree) : { writable: [], readOnly: [] };
     const context: RunContext = {
       runId: run.id,
       taskId: run.task_id,
@@ -192,7 +195,8 @@ export class Launcher {
       flowrynBin,
       binary,
       daemonSocket: this.deps.socketPath,
-      writable: [spool, reportDir],
+      writable: [spool, reportDir, ...gitAccess.writable],
+      readOnly: gitAccess.readOnly,
     };
     if (!context.sessionId) throw new Error("the run has no agent session id");
     const trust = await adapter.preTrust(context, workers);

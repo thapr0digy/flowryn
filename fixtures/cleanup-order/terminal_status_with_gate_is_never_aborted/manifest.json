@@ -1,0 +1,25 @@
+{
+  "name": "terminal_status_with_gate_is_never_aborted",
+  "ported_from": "tests/fm-teardown.test.sh:test_terminal_status_with_gate_never_queries_or_aborts_ledger_fallback",
+  "description": "The run reads completed but still prints a stale gate line. A finished run is history: it is never aborted.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": false
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "not_found_status_after_abort_confirms_completion",
+  "ported_from": "tests/fm-teardown.test.sh:test_not_found_status_after_abort_confirms_completion",
+  "description": "After the abort, the targeted status read fails with the CLI's exact `run \"<id>\" not found`. That confirms the run is gone: the cleanup proceeds.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": true
+  }
+}

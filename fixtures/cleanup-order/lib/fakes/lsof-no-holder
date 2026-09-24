@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fake lsof: nothing holds any file open, and no process has a cwd anywhere.
+case " $* " in *" -d cwd "*) exit 0 ;; esac
+exit 1

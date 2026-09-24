@@ -1,0 +1,26 @@
+{
+  "name": "stale_index_lock_cleanup_rechecks_dirty_worktree",
+  "ported_from": "tests/fm-teardown.test.sh:test_stale_index_lock_cleanup_rechecks_dirty_worktree",
+  "firstmate_matrix_row": "u",
+  "description": "The worktree has an uncommitted edit, and a git wrapper makes `git status --porcelain` fail while the stale index.lock exists (as a crashed git can). The implementation must clear the provably stale lock, inspect the worktree again, and refuse the now-visible dirty work.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "refused",
+    "reason_class": "dirty",
+    "lock": "absent",
+    "abort": false
+  }
+}

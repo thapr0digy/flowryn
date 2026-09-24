@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Fake lsof: every call exits 1 with no output (the cwd scan cannot be trusted).
+exit 1

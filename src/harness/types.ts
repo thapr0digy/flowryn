@@ -32,6 +32,8 @@ export interface RunContext {
   daemonSocket: string;
   /** Directories the worker's CLI and reports write outside the worktree (its spool, its report directory). */
   writable: string[];
+  /** Paths the worker's sandbox must never write, even inside a writable one (the project's git hooks and config). */
+  readOnly: string[];
 }
 
 export interface PlanFile {

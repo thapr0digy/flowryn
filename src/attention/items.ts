@@ -9,7 +9,9 @@ export type ItemClass = "actionable" | "info";
  * The lane table (design section 9): an event kind decides lane and class.
  * Nothing scores items; project priority and due date only order within a lane.
  * M1 opened the backlog kinds, M2 the worker and run kinds, M3 the overdue
- * to-dos. The rest are listed so later milestones extend data, not code.
+ * to-dos, M4 the delivery kinds (PR checks red, PR closed, cleanup refused,
+ * no-mistakes unreachable). The rest are listed so later milestones extend
+ * data, not code.
  * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
  */
 export const LANE_TABLE = {
@@ -28,6 +30,10 @@ export const LANE_TABLE = {
   overdue_todo: { lane: "P1", class: "actionable" },
   steer_unacked: { lane: "P1", class: "actionable" },
   checkout_tangle: { lane: "P1", class: "actionable" },
+  checks_red: { lane: "P1", class: "actionable" },
+  pr_closed: { lane: "P1", class: "actionable" },
+  cleanup_refused: { lane: "P1", class: "actionable" },
+  nomistakes_down: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },

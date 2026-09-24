@@ -24,6 +24,19 @@ export const ERROR_CODES = {
   not_landed: EXIT.policy,
   contract_unverified: EXIT.policy,
   primary_checkout_tangle: EXIT.policy,
+  // M4: delivery, the merge gate and cleanup
+  delivery_refused: EXIT.policy,
+  head_moved: EXIT.policy,
+  head_mismatch: EXIT.policy,
+  checks_pending: EXIT.policy,
+  pr_draft: EXIT.policy,
+  pr_closed: EXIT.policy,
+  head_not_on_remote: EXIT.policy,
+  not_fast_forward: EXIT.policy,
+  merge_refused: EXIT.policy,
+  merge_in_flight: EXIT.policy,
+  cleanup_refused: EXIT.policy,
+  not_ready: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,
@@ -52,6 +65,8 @@ export const ERROR_CODES = {
   already_running: EXIT.failure,
   tool_missing: EXIT.failure,
   herdr_unavailable: EXIT.failure,
+  forge_unavailable: EXIT.failure,
+  challenge_failed: EXIT.validation,
 } as const satisfies Record<string, ExitCode>;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

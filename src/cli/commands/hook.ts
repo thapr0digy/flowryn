@@ -74,6 +74,9 @@ function harnessOf(value: string | undefined): Harness {
   return value === "pi" ? "pi" : "claude";
 }
 
+/** Hooks that read GitHub before they answer (the Pi merge confirm) wait longer than a busy-signal hook. */
+const SLOW_HOOKS: Record<string, { connectMs: number; replyMs: number }> = { "merge-summary": { connectMs: 300, replyMs: 60_000 } };
+
 function signalHook(name: string, summary: string): VerbSpec {
   return {
     name: `hook ${name}`,
@@ -85,11 +88,16 @@ function signalHook(name: string, summary: string): VerbSpec {
     async local(args, io) {
       const harness = harnessOf(stringArg(args, "harness"));
       const input = await readInput(io);
-      const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart() }, HOOK_TIMEOUTS).catch(() => null);
+      const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart() }, SLOW_HOOKS[name] ?? HOOK_TIMEOUTS).catch(() => null);
       if (!reply || !reply.ok) return 0;
       const data = (reply.data ?? {}) as Record<string, unknown>;
       if (io.json) {
         io.stdout(JSON.stringify(data) + "\n");
+        return 0;
+      }
+      // A leader's merge or discard: Claude asks you before it runs (design section 7, M0 c08).
+      if (harness === "claude" && name === "pre-tool" && typeof data.permission === "string") {
+        io.stdout(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: data.permission, permissionDecisionReason: String(data.reason ?? "") } }) + "\n");
         return 0;
       }
       const event = HOOK_EVENT[name];
@@ -220,5 +228,7 @@ export const HOOK_CLI_VERBS: VerbSpec[] = [
   signalHook("session-start", "Leader hook: session start or compaction; prints the briefing"),
   signalHook("notify", "Leader hook: you went inactive (Claude idle_prompt) or came back (Pi)"),
   signalHook("delivered", "Leader hook (Pi): a pushed P0 was delivered or declined"),
+  signalHook("merge-summary", "Leader hook (Pi): what a merge would land, for the flowryn_merge confirm"),
+  signalHook("approval-key", "Leader hook (Pi): a fresh approval key for the lease holder's extension"),
   waitP0,
 ];

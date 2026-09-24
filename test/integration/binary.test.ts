@@ -1,3 +1,4 @@
+import { PROTO, VERSION } from "../../src/version.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { decode } from "@toon-format/toon";
@@ -35,7 +36,7 @@ describe("compiled binary", () => {
   });
 
   test("runs as flowryn and, through the flowrynd link, as the daemon", async () => {
-    expect(decode(run(bin, ["version"]).stdout)).toMatchObject({ flowryn: "0.2.0", proto: 1 });
+    expect(decode(run(bin, ["version"]).stdout)).toMatchObject({ flowryn: VERSION, proto: PROTO });
     const token = seedLeader(h);
     const daemon = Bun.spawn([join(h.home, "bin", "flowrynd")], { env: h.env, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
     try {
@@ -44,7 +45,7 @@ describe("compiled binary", () => {
       expect(added.code).toBe(0);
       expect(readText(h.todos)).toContain("from the binary");
       const status = decode(run(bin, ["daemon", "status"]).stdout) as { daemon: string; version: string };
-      expect(status).toMatchObject({ daemon: "up", version: "0.2.0" });
+      expect(status).toMatchObject({ daemon: "up", version: VERSION });
     } finally {
       daemon.kill("SIGTERM");
       expect(await daemon.exited).toBe(0);

@@ -42,17 +42,22 @@ export function parsePsLine(line: string): ProcIdentity | null {
 
 export type PsRunner = (pids: number[]) => Promise<string>;
 
-/** The real process table. LC_ALL=C keeps lstart parseable. */
-export const psRunner: PsRunner = async (pids) => {
-  const proc = Bun.spawn(["/bin/ps", "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], {
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "ignore",
-    env: { ...process.env, LC_ALL: "C" },
-  });
-  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  return out;
-};
+/** A process table read through the given ps. LC_ALL=C keeps lstart parseable. */
+export function psRunnerAt(ps: string): PsRunner {
+  return async (pids) => {
+    const proc = Bun.spawn([ps, "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      env: { ...process.env, LC_ALL: "C" },
+    });
+    const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    return out;
+  };
+}
+
+/** The real process table. */
+export const psRunner: PsRunner = psRunnerAt("/bin/ps");
 
 /** Identities of the given pids that are alive now (missing pids are simply absent). */
 export async function readIdentities(pids: number[], ps: PsRunner = psRunner): Promise<Map<number, ProcIdentity>> {

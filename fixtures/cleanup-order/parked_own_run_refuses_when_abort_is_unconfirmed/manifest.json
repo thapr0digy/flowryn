@@ -1,0 +1,26 @@
+{
+  "name": "parked_own_run_refuses_when_abort_is_unconfirmed",
+  "ported_from": "tests/fm-teardown.test.sh:test_parked_own_run_refuses_when_abort_is_unconfirmed",
+  "description": "The task's own parked run is aborted, but reading it back still shows it parked. The cleanup refuses before any reap or removal: a process running in the worktree is still alive afterwards, and the worktree is intact.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "refused",
+    "reason_class": "nomistakes_unconfirmed",
+    "lock": null,
+    "abort": true,
+    "processes": "alive"
+  }
+}

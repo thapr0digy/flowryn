@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../../src/config/config.ts";
@@ -7,6 +7,7 @@ import { DEFAULT_TIMING, timingConfig, workerConfigProblems, workersConfig } fro
 import { claudeAdapter, workerSettings } from "../../src/harness/claude/adapter.ts";
 import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude/trust.ts";
 import { promptLine, steerLine, steerPointer, workerContract } from "../../src/harness/contract-text.ts";
+import { shipGitAccess } from "../../src/harness/git-access.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
 import type { RunContext } from "../../src/harness/types.ts";
 import { MAX_TYPED_COMMAND, typedLength } from "../../src/lifecycle/launcher.ts";
@@ -59,6 +60,7 @@ function context(overrides: Partial<RunContext> = {}): RunContext {
     binary: "/usr/local/bin/claude",
     daemonSocket: "/h/run/flowrynd.sock",
     writable: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"],
+    readOnly: [],
     ...overrides,
   };
 }
@@ -78,7 +80,7 @@ describe("claude adapter", () => {
     // Claude's Bash sandbox, when the user runs it, must let the worker's CLI reach the daemon and its spool.
     expect(JSON.parse(plan.files[0]!.content).sandbox).toEqual({
       network: { allowUnixSockets: ["/h/run/flowrynd.sock"] },
-      filesystem: { allowWrite: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"] },
+      filesystem: { allowWrite: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"], denyWrite: [] },
     });
   });
 
@@ -213,5 +215,73 @@ describe("claude trust", () => {
     const result = await checkOrRegisterTrust({ worktree, project, storeDir: store, mode: "register" });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("declined external CLAUDE.md imports");
+  });
+});
+
+describe("a ship worker's git access under Claude's Bash sandbox", () => {
+  const gitRun = async (args: string[]) => {
+    const r = Bun.spawnSync(["git", ...args], { stdin: "ignore" });
+    return { exitCode: r.exitCode, stdout: r.stdout.toString() };
+  };
+  const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+  const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+  const canSandbox = process.platform === "darwin" && existsSync(SANDBOX_EXEC) && Bun.spawnSync([SANDBOX_EXEC, "-p", "(version 1)(allow default)", "/usr/bin/true"]).exitCode === 0;
+
+  async function shipSandbox(worktree: string): Promise<{ allowWrite: string[]; denyWrite: string[] }> {
+    const access = await shipGitAccess(gitRun, worktree);
+    const settings = workerSettings("/opt/flowryn/bin/flowryn", { socket: "/h/run/flowrynd.sock", writable: ["/h/data/spool/r01X", ...access.writable], readOnly: access.readOnly }) as {
+      sandbox: { filesystem: { allowWrite: string[]; denyWrite: string[] } };
+    };
+    return settings.sandbox.filesystem;
+  }
+
+  const within = (path: string, dir: string) => path === dir || path.startsWith(`${dir}/`);
+
+  test("the settings let a ship write what a commit needs, never the project's git hooks or config", async () => {
+    const { project, worktree } = repoWithWorktree();
+    const common = join(project, ".git");
+    const fs = await shipSandbox(worktree);
+    expect(fs.allowWrite).toEqual(expect.arrayContaining([join(common, "objects"), join(common, "refs"), join(common, "logs"), join(common, "packed-refs"), join(common, "worktrees", "wt")]));
+    expect(fs.allowWrite).not.toContain(common);
+    for (const denied of [join(common, "hooks"), join(common, "config")]) {
+      expect(fs.denyWrite).toContain(denied);
+      expect(fs.allowWrite.some((allowed) => within(denied, allowed))).toBe(false);
+    }
+  });
+
+  test.skipIf(!canSandbox)("under that profile a worker commits and pushes from its linked worktree, and cannot touch the hooks or config", async () => {
+    const { project, worktree, base } = repoWithWorktree();
+    const origin = join(base, "origin.git");
+    git(base, ["init", "-q", "--bare", origin]);
+    git(project, ["remote", "add", "origin", origin]);
+    const common = join(project, ".git");
+    const fs = await shipSandbox(worktree);
+    const quote = (p: string) => JSON.stringify(p);
+    // Claude's sandbox lets the shell write its working directory; the bare origin stands in for the network remote.
+    const profile = [
+      "(version 1)",
+      "(allow default)",
+      "(deny file-write*)",
+      `(allow file-write* (subpath "/dev") (subpath ${quote(worktree)}) (subpath ${quote(origin)}) ${fs.allowWrite.map((p) => `(subpath ${quote(p)})`).join(" ")})`,
+      `(deny file-write* ${fs.denyWrite.map((p) => `(subpath ${quote(p)})`).join(" ")})`,
+    ].join("\n");
+    const sandboxed = (argv: string[]) => Bun.spawnSync([SANDBOX_EXEC, "-p", profile, ...argv], { cwd: worktree, stdin: "ignore", env: gitEnv });
+    const config = readFileSync(join(common, "config"), "utf8");
+
+    writeFileSync(join(worktree, "fix.txt"), "fixed\n");
+    expect(sandboxed(["git", "add", "fix.txt"]).exitCode).toBe(0);
+    const commit = sandboxed(["git", "commit", "-q", "-m", "fix"]);
+    expect(commit.stderr.toString()).toBe("");
+    expect(commit.exitCode).toBe(0);
+    const push = sandboxed(["git", "push", "-q", "origin", "HEAD"]);
+    expect(push.stderr.toString()).toBe("");
+    expect(push.exitCode).toBe(0);
+    expect(Bun.spawnSync(["git", "-C", origin, "log", "-1", "--format=%s", "flowryn/t1"]).stdout.toString().trim()).toBe("fix");
+
+    expect(sandboxed(["/bin/sh", "-c", `echo 'echo owned' > ${quote(join(common, "hooks", "post-checkout"))}`]).exitCode).not.toBe(0);
+    expect(existsSync(join(common, "hooks", "post-checkout"))).toBe(false);
+    expect(sandboxed(["git", "config", "core.fsmonitor", "/tmp/owned"]).exitCode).not.toBe(0);
+    expect(sandboxed(["git", "push", "-q", "-u", "origin", "HEAD"]).stderr.toString()).toContain("Operation not permitted");
+    expect(readFileSync(join(common, "config"), "utf8")).toBe(config);
   });
 });

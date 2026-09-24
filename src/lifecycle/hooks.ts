@@ -8,6 +8,8 @@ import { appendEvent } from "../db/events.ts";
 import { steerLine, steerPointer } from "../harness/contract-text.ts";
 import { HOOK_SIGNALS, type HookName } from "../harness/types.ts";
 import { getProject } from "./projects.ts";
+import { gatherFacts } from "../policy/merge.ts";
+import { mergeContext, mergeSummary, runAndProject } from "../policy/verbs.ts";
 import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, type RunWithPolicy } from "./runs.ts";
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
 
@@ -306,12 +308,12 @@ const prompt = signalVerb(
 
 const preTool = signalVerb(
   "pre-tool",
-  "Hook: a tool is about to run (busy lease)",
+  "Hook: a tool is about to run (busy lease); a leader's merge or discard asks you first",
   (ctx, run) => {
     markBusy(ctx, run, HOOK_SIGNALS["pre-tool"]);
     return { data: { run: run.id } };
   },
-  (ctx) => leader.toolActivity(ctx),
+  (ctx, input) => leader.preToolUse(ctx, input),
 );
 
 /** PostToolUse carries a pending steer beside the next tool result, the documented mid-turn channel (M0 c07). */
@@ -400,6 +402,24 @@ const waitP0 = leaderVerb(
   (ctx, args) => leader.waitForP0(ctx, stringArg(args, "waiter") ?? ""),
 );
 
+/** Pi's flowryn_merge tool: what the merge would land, read fresh, for its confirm. */
+const mergeSummaryHook = leaderVerb(
+  "merge-summary",
+  "Leader hook (Pi): what a merge of a task would land (PR, head, checks), for the confirm",
+  (_ctx, _input, _args, prepared) => ({ data: prepared as Record<string, unknown> }),
+  async (ctx, args) => {
+    const input = parseInput(args) as leader.LeaderHookInput;
+    try {
+      const { run, project } = runAndProject(ctx.db, String(input.task ?? ""));
+      return mergeSummary(await gatherFacts(mergeContext(ctx), run, project));
+    } catch (error) {
+      return { error: (error as Error).message };
+    }
+  },
+);
+
+const approvalKeyHook = leaderVerb("approval-key", "Leader hook (Pi): a fresh approval key for the lease holder's extension", (ctx) => leader.approvalKey(ctx));
+
 const delivered = leaderVerb("delivered", "Leader hook (Pi): the extension delivered a pushed P0, or declined it", (ctx, input) => leader.delivered(ctx, input));
 
 // --- the waiter -------------------------------------------------------------------------------
@@ -471,4 +491,4 @@ const waitSteer: VerbSpec = {
   },
 };
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, sessionStart, notify, waitP0, delivered];
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, sessionStart, notify, waitP0, delivered, mergeSummaryHook, approvalKeyHook];

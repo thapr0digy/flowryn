@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fake no-mistakes for the cleanup-order fixtures: the real one must never be
+# reached. Answers come from <scenario>/nm/ (this script lives in <scenario>/bin):
+#   nm/status        what `axi status` prints (empty: no run)
+#   nm/after-abort   how the run reads after `axi abort --run <id>`:
+#                    cancelled (default) | noop | empty | not_found | other:<id>
+#   nm/abort.log     one line per `axi abort` call
+set -uo pipefail
+nm="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/nm"
+[ "${1:-}" = axi ] || exit 0
+shift
+case "${1:-}" in
+  status)
+    shift
+    run_id=""
+    [ "${1:-}" != --run ] || run_id=${2:-}
+    if [ -n "$run_id" ] && grep -Fxq "abort --run $run_id" "$nm/abort.log" 2>/dev/null; then
+      mode=$(cat "$nm/after-abort" 2>/dev/null || echo cancelled)
+      case "$mode" in
+        noop) cat "$nm/status" ;;
+        empty) exit 0 ;;
+        not_found) printf 'error: "run \\"%s\\" not found"\n' "$run_id" >&2; exit 1 ;;
+        other:*) sed "s/\"$run_id\"/\"${mode#other:}\"/" "$nm/status" ;;
+        *) printf 'run:\n  id: "%s"\n  status: cancelled\noutcome: cancelled\n' "$run_id" ;;
+      esac
+      exit 0
+    fi
+    cat "$nm/status" 2>/dev/null
+    ;;
+  abort)
+    shift
+    printf 'abort %s\n' "$*" >> "$nm/abort.log"
+    ;;
+esac
+exit 0
