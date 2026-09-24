@@ -71,7 +71,7 @@ The milestone lists name the main work. These are the other v1 items in sections
 | 9 | Delivery classes, lanes, ordering, aging, limits and the listed races | Done (M3 #5) |
 | 10 | Lease, claim, handover, read-only sessions | Done (M3 #5) |
 | 11 | Workflows, gates, capacity, autonomy, the style block, the skills | Done (M5) |
-| 11, 16 | Pause while a Claude usage limit is active; P1 once | Done (M5): from Claude's `StopFailure` `rate_limit` and `quota_auto_resume_fired` hook signals |
+| 11, 16 | Pause while a Claude usage limit is active; P1 once | Done (M5): from Claude's `StopFailure` `rate_limit` and `quota_auto_resume_fired` hook signals; the pause also expires after a backoff with one probe run, and `flowryn capacity resume --harness claude` lifts it (docs/m5-notes.md) |
 | 12 | Leader verbs: dispatch, plan, steer, answer, dismiss, merge, decline, gate pass/changes, cleanup, fleet, show, brief, todo, project, leader status/claim | Done (M1 to M5) |
 | 12 | `flowryn promote` (a scout promoted to a ship) | Not built: no milestone list names it. Dispatch a ship that names the scout's report meanwhile. A follow-up. |
 | 12 | Worker verbs: report, ask, inbox, ack, stage done, deliver, fail | Done (M1 to M5) |
