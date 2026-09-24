@@ -51,6 +51,9 @@ export class FakeHerdr {
   readonly failNext = new Map<string, string[]>();
   /** Agent statuses to report for panes regardless of their process: Herdr's own inference, which can be stale. */
   readonly statusOverride = new Map<string, string>();
+  /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
+  holdStarts = false;
+  private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
   private readonly subscribers = new Set<net.Socket>();
   private readonly server: net.Server;
   private readonly options: FakeHerdrOptions;
@@ -166,6 +169,12 @@ export class FakeHerdr {
     });
   }
 
+  /** Spawn the harnesses `holdStarts` kept back, and stop holding. */
+  releaseStarts(): void {
+    this.holdStarts = false;
+    for (const held of this.heldStarts.splice(0)) this.startHarness(held.pane, held.kind, held.args);
+  }
+
   private emit(event: string, data: Record<string, unknown>): void {
     const line = JSON.stringify({ event, data }) + "\n";
     for (const sub of this.subscribers) sub.write(line);
@@ -262,7 +271,8 @@ export class FakeHerdr {
         const args = (params.args as string[]) ?? [];
         // oxlint-disable-next-line no-control-regex -- Herdr refuses control characters in agent arguments
         if (args.some((a) => /[\u0000-\u001f]/.test(a))) throw Object.assign(new Error("agent arguments cannot be encoded safely"), { code: "invalid_agent_argument" });
-        this.startHarness(pane, String(params.kind), args);
+        if (this.holdStarts) this.heldStarts.push({ pane, kind: String(params.kind), args });
+        else this.startHarness(pane, String(params.kind), args);
         return { type: "agent_started", agent: { pane_id: pane.paneId, launch_pending: true } };
       }
       case "pane.process_info": {

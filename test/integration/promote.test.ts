@@ -79,6 +79,28 @@ describe("a scout at work", () => {
     },
     { timeout: 90_000 },
   );
+  test(
+    "is refused while its worker is still launching, and promoted once it runs",
+    async () => {
+      const env = await fleet();
+      env.herdr.holdStarts = true;
+      const { task, run } = await env.dispatch("Scout the login bug\nFAKE: sleep 60000");
+      await waitUntil(() => env.herdr.calls.some((c) => c.method === "agent.start"), 10_000, "the scout's agent.start");
+      const early = await env.json(["promote", task]);
+      expect(early.code).toBe(2);
+      expect(early.reply.error).toMatchObject({ code: "not_ready" });
+      expect(policy(env, task).kind).toBe("scout");
+
+      env.herdr.releaseStarts();
+      const scouting = await env.waitRun(run, (r) => r.proc_pid !== null && r.state === "running", "the scout running");
+      expect(scouting).toMatchObject({ pending_launch: null, stage_note: null });
+      const promoted = await env.json(["promote", task]);
+      expect(promoted.code).toBe(0);
+      await env.waitRun(run, (r) => r.proc_pid !== null && r.proc_pid !== scouting.proc_pid && r.pending_launch === null, "the relaunched worker", 20_000);
+      expect(readFileSync(join(runDir(env, run), "task.md"), "utf8")).toContain("Your leader promoted this scout to a ship");
+    },
+    { timeout: 60_000 },
+  );
 });
 
 describe("a scout whose run is over", () => {

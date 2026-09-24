@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
-import { migrate, openDb, type Db } from "../../src/db/db.ts";
+import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { SteerBus } from "../../src/lifecycle/steers.ts";
+import { herdrEpisode, noteHerdrDown } from "../../src/reconcile/herdr-health.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
 import type { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
 
@@ -64,5 +65,32 @@ describe("reconciler", () => {
     expect(launches).toEqual(["r1:resume"]);
     expect((db.query("SELECT resume_count FROM runs WHERE id = 'r1'").get() as { resume_count: number }).resume_count).toBe(1);
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE run_id = 'r1' AND kind = 'auto_resumed'").get()).toEqual({ n: 1 });
+  });
+
+  test("a Herdr read that answers ends a Herdr outage episode", async () => {
+    const db = deadRunDb();
+    tx(db, () => noteHerdrDown(db, "ping timed out", "cli", Date.now() - 120_000));
+    const runtime = {
+      processes: (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: 1, processes: [] }),
+      snapshotPanes: () => Promise.resolve([]),
+      agentStatus: () => Promise.resolve(null),
+    } as unknown as HerdrRuntime;
+    const reconciler = new Reconciler({
+      db,
+      runtime: () => runtime,
+      launch: () => {},
+      isLaunching: () => false,
+      bus: { notify() {} } as unknown as SteerBus,
+      timing: () => DEFAULT_TIMING,
+      log: () => {},
+      now: Date.now,
+      ps: () => Promise.resolve(""),
+    });
+
+    await reconciler.passNow("steady");
+    reconciler.stop();
+
+    expect(herdrEpisode(db)).toBeNull();
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'herdr.reachable'").get()).toEqual({ n: 1 });
   });
 });

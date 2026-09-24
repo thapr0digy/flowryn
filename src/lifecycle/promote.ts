@@ -95,6 +95,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
   const { db } = ctx;
   const run = getRunWithPolicy(db, runId);
   if (!run || run.kind !== "scout" || isTerminal(run.state) || run.state === "landed") throw new FlowrynError("not_ready", `${runId} changed meanwhile`, "flowryn promote again");
+  if (ctx.fleet.isLaunching(run.id)) throw new FlowrynError("not_ready", `${run.task_id}'s worker is still launching`, "flowryn promote again once it runs");
   const project = projectOf(db, run);
   const config = ctx.config();
   const workflow = workflowFor(config, stringArg(args as never, "workflow") ?? project.workflow, "ship");

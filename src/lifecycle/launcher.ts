@@ -283,9 +283,9 @@ export class Launcher {
       if (!current) return true;
       db.query(
         `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END,
-           pending_launch = CASE WHEN pending_launch IN ('stage','relaunch') THEN NULL ELSE pending_launch END,
-           stage_note = CASE WHEN ?6 = 1 THEN NULL ELSE stage_note END, updated_at = ?5 WHERE id = ?1`,
-      ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now(), mode === "resume" ? 0 : 1);
+           pending_launch = CASE WHEN pending_launch = ?7 THEN NULL ELSE pending_launch END,
+           stage_note = CASE WHEN ?6 = 1 AND (pending_launch IS NULL OR pending_launch = ?7) THEN NULL ELSE stage_note END, updated_at = ?5 WHERE id = ?1`,
+      ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now(), mode === "resume" ? 0 : 1, mode);
       appendEvent(db, {
         source: "daemon",
         kind: "run.launched",

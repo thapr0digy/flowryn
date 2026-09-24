@@ -11,6 +11,7 @@ import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
 import { isAlive, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
+import { noteHerdrUp } from "./herdr-health.ts";
 import { applyDocker, listLabelled } from "./docker.ts";
 import { checkInvariant } from "./invariant.ts";
 import { releaseLeases } from "../sched/pools.ts";
@@ -225,7 +226,10 @@ export class Reconciler {
     const inPane = Boolean(panes && identity && (leader || panes.foregroundGroup === identity.pid));
     const cwdMatches = !leader || leader.cwd === "" || realOrSelf(leader.cwd) === realOrSelf(run.worktree_path);
     const t = now();
-    tx(db, () => recordEvidence(db, run.id, "process", 2, { pid: identity?.pid ?? null, alive, in_pane: inPane, pane: run.pane_id, pane_exists: panes !== null }, t));
+    tx(db, () => {
+      if (run.pane_id) noteHerdrUp(db, "reconciler", t);
+      recordEvidence(db, run.id, "process", 2, { pid: identity?.pid ?? null, alive, in_pane: inPane, pane: run.pane_id, pane_exists: panes !== null }, t);
+    });
 
     if (alive && inPane && cwdMatches) {
       let outcome: "alive" | "reattached" = "alive";
