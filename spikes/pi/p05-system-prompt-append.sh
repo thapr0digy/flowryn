@@ -25,7 +25,7 @@ start_a=$(log_first a '.ev == "session_start"' | jq -r '.systemPromptMarkersFoun
 start_b=$(log_first b '.ev == "session_start"' | jq -r '.systemPromptMarkersFound | join(",")')
 
 t=$(now_ms)
-pane_prompt "$A" "Reply with the single word ok."
+pane_prompt "$A" "$(scripted "Reply with the single word ok." "say ok")"
 run_a=none
 if wait_settled_after a "$t"; then
   run_a=$(log_first a ".ev == \"before_agent_start\" and .t > $t" | jq -r '.systemPromptMarkersFound | join(",")')

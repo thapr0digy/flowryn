@@ -19,7 +19,7 @@ A=$PANE
 round() { # <task> <key> -> prints "prompt=<yes|no> answer=<value>"
   local task=$1 key=$2 t
   t=$(now_ms)
-  pane_prompt "$A" "Call the flowryn_merge tool with task \"$task\". Do not call any other tool. Then reply with the tool's result."
+  pane_prompt "$A" "$(scripted "Call flowryn_merge for $task." "tool flowryn_merge {\"task\":\"$task\"} ;; say merge round finished")"
   if ! log_wait a 120 ".ev == \"ui_prompt_start\" and .kind == \"confirm\" and .t > $t"; then
     echo "prompt=no answer=none tool-called=$(log_count a ".ev == \"merge_confirm_request\" and .t > $t")"
     return

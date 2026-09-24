@@ -19,13 +19,15 @@
 //     FLOWRYN_PROBE_INSTANCE            label copied into every line
 //     FLOWRYN_PROBE_BRIEFING            text attached at session_start
 //     FLOWRYN_PROBE_BRIEF_DELIVER       deliverAs for the briefing (default nextTurn)
-//     FLOWRYN_PROBE_REBRIEFING          text attached after session_compact
-//     FLOWRYN_PROBE_REBRIEF_DELIVER     deliverAs for the re-brief (default nextTurn)
+//     FLOWRYN_PROBE_REBRIEFING          text attached after session_compact; "{n}" becomes
+//                                       the compaction count (1, 2, ...)
+//     FLOWRYN_PROBE_REBRIEF_DELIVER     deliverAs for the re-brief (default nextTurn); "auto"
+//                                       steers when willRetry is set or the agent is busy,
+//                                       else nextTurn
 //     FLOWRYN_PROBE_BLOCK_SHELL         "0" disables the flowryn merge/approve shell block
 //     FLOWRYN_PROBE_CONFIRM_TIMEOUT_MS  optional ctx.ui.confirm timeout
 //     FLOWRYN_PROBE_SYSPROMPT_MARKERS   comma list looked for in the system prompt
 //     FLOWRYN_PROBE_TRUST               project_trust answer: yes | no | undecided (default)
-//     FLOWRYN_PROBE_PROVIDER_BASEURL    overrides the active provider's baseUrl (error spike)
 //     FLOWRYN_PROBE_EDITOR_WATCH        "1" logs every composer text change (poll)
 //   Command file ($FLOWRYN_PROBE_CTL), one JSON object per line, executed once each:
 //     {"id":"c1","op":"send","api":"message"|"user","text":"...",
@@ -174,7 +176,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
   let lastEditorSeen: string | null = null;
   const pending: Record<string, Command[]> = {};
   const idleQueue: Command[] = [];
-  const counters = { agentStart: 0, agentSettled: 0, turnStart: 0, contextCalls: 0 };
+  const counters = { agentStart: 0, agentSettled: 0, turnStart: 0, contextCalls: 0, compactions: 0 };
 
   log("probe_loaded", {
     piVersion: (PiCodingAgent as any).VERSION ?? null,
@@ -427,14 +429,6 @@ export default function flowrynProbe(pi: ExtensionAPI) {
       ...sysPromptMarkers(prompt),
     });
     startSessionResources(ctx);
-    const baseUrl = env.FLOWRYN_PROBE_PROVIDER_BASEURL;
-    const provider = (ctx as any).model?.provider;
-    if (baseUrl && provider) {
-      // registerProvider(name, {baseUrl}) "overrides the URL for existing models" (types.d.ts
-      // JSDoc example). Error spike only: makes every request fail to connect.
-      safe("registerProvider", () => (pi as any).registerProvider(provider, { baseUrl }));
-      log("provider_overridden", { provider, baseUrl });
-    }
     if (env.FLOWRYN_PROBE_BRIEFING) {
       deliver("briefing", env.FLOWRYN_PROBE_BRIEFING, env.FLOWRYN_PROBE_BRIEF_DELIVER ?? "nextTurn", String(event?.reason ?? "startup"));
     }
@@ -452,9 +446,14 @@ export default function flowrynProbe(pi: ExtensionAPI) {
 
   pi.on("session_compact", async (event: any, ctx) => {
     remember(ctx);
-    log("session_compact", { reason: event?.reason ?? null, willRetry: event?.willRetry ?? null, fromExtension: event?.fromExtension ?? null, isIdle: safe("isIdle", () => ctx.isIdle()) ?? null });
+    counters.compactions += 1;
+    const isIdle = safe("isIdle", () => ctx.isIdle()) ?? null;
+    log("session_compact", { n: counters.compactions, reason: event?.reason ?? null, willRetry: event?.willRetry ?? null, fromExtension: event?.fromExtension ?? null, isIdle });
     if (env.FLOWRYN_PROBE_REBRIEFING) {
-      deliver("rebriefing", env.FLOWRYN_PROBE_REBRIEFING, env.FLOWRYN_PROBE_REBRIEF_DELIVER ?? "nextTurn", "compact");
+      const configured = env.FLOWRYN_PROBE_REBRIEF_DELIVER ?? "nextTurn";
+      const deliverAs = configured === "auto" ? (event?.willRetry === true || isIdle === false ? "steer" : "nextTurn") : configured;
+      const text = env.FLOWRYN_PROBE_REBRIEFING.replaceAll("{n}", String(counters.compactions));
+      deliver("rebriefing", text, deliverAs, `compact:${event?.reason ?? "unknown"}`);
     }
     await runPending("session_compact", ctx);
   });
@@ -515,6 +514,9 @@ export default function flowrynProbe(pi: ExtensionAPI) {
     log("message_end", {
       role: message?.role ?? null,
       customType: message?.customType ?? null,
+      provider: message?.provider ?? null,
+      model: message?.model ?? null,
+      responseModel: message?.responseModel ?? null,
       stopReason: message?.stopReason ?? null,
       toolCalls: toolCallCount(message),
       text: truncate(messageText(message)),

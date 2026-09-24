@@ -23,10 +23,15 @@ set -u
 pi_require p11-trust
 pi_setup
 
-AGENT_DIR="${FLOWRYN_PI_AGENT_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}}"
+# Every pi here uses the spike's scratch agent dir (pi-spike.sh), so its
+# trust.json is the record under test; the real one is hashed only to prove
+# the spike never touched it.
 TRUST_FILE="$AGENT_DIR/trust.json"
-trust_hash() { [ -e "$TRUST_FILE" ] && shasum -a 256 "$TRUST_FILE" | cut -d' ' -f1 || echo absent; }
+REAL_TRUST_FILE="$HOME/.pi/agent/trust.json"
+file_hash() { [ -e "$1" ] && shasum -a 256 "$1" | cut -d' ' -f1 || echo absent; }
+trust_hash() { file_hash "$TRUST_FILE"; }
 hash_before=$(trust_hash)
+real_before=$(file_hash "$REAL_TRUST_FILE")
 
 PROJ="$WORK/cwd-project"
 mkdir -p "$PROJ/.pi"
@@ -66,12 +71,13 @@ lab_pane_close "$PANE"
 
 hash_after=$(trust_hash)
 unchanged=$([ "$hash_before" = "$hash_after" ] && echo yes || echo no)
+real_unchanged=$([ "$real_before" = "$(file_hash "$REAL_TRUST_FILE")" ] && echo yes || echo no)
 default_trust=$(jq -r '.defaultProjectTrust // "ask (default)"' "$AGENT_DIR/settings.json" 2>/dev/null || echo "ask (no settings.json)")
-evidence="trust record: $TRUST_FILE (before=$hash_before, unchanged=$unchanged); defaultProjectTrust=$default_trust; $a_line; $b_line; $c_line; $d_line"
+evidence="trust record: <agent-dir>/trust.json (scratch before=$hash_before, unchanged=$unchanged; real ~/.pi/agent/trust.json unchanged=$real_unchanged); defaultProjectTrust=$default_trust; $a_line; $b_line; $c_line; $d_line"
 
 a_gate=$(trust_events a)
 b_events=$(trust_events b)
-if [ "$unchanged" = no ]; then
+if [ "$unchanged" = no ] || [ "$real_unchanged" = no ]; then
   pi_verdict refuted "a spike run changed the global trust record; $evidence"
 elif [ "$b_events" = 0 ] && [ "$b_started" = yes ]; then
   pi_verdict refuted "no trust prompt at all: Pi started in a cwd with .pi/settings.json without any trust decision; $evidence"

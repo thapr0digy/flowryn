@@ -10,45 +10,67 @@
 #   ...drive with pane_prompt / pane_type / pane_key / ctl, poll with log_wait...
 #   pi_verdict <verdict> <evidence>
 #
-# Pi isolation: everything is per invocation. The probe loads with -e (Pi's
-# extension flag, docs/cli.md 0.87.1), sessions go to --session-dir inside the
-# scratch dir, and no spike writes ~/.pi. Pi itself still reads the user's
-# agent dir (auth, settings, global extensions) because a spike needs a working
-# model; Pi may create its own files there (for example the proper-lockfile
-# lock it takes while reading trust.json). Set FLOWRYN_PI_AGENT_DIR to point
-# PI_CODING_AGENT_DIR at a prepared scratch agent dir to avoid even that.
+# Pi isolation: everything is per invocation. The probe and the scripted
+# provider load with -e (Pi's extension flag, docs/cli.md 0.87.1), sessions go
+# to --session-dir inside the scratch dir, and PI_CODING_AGENT_DIR points at a
+# scratch agent dir, so no spike reads or writes ~/.pi. Every model turn comes
+# from lib/scripted-provider.ts (model flowryn-scripted/scripted): offline,
+# deterministic, no credentials. Prompts carry their script after
+# "FLOWRYN-SCRIPT:" (see that file).
 #
 # Optional environment:
-#   FLOWRYN_PI_AGENT_DIR  exported as PI_CODING_AGENT_DIR for every spike pi
-#   FLOWRYN_PI_MODEL   passed as --model (pick a cheap model; spikes send short prompts)
-#   FLOWRYN_PI_ARGS    extra pi arguments, word-split (for example "--thinking off")
-#   FLOWRYN_PI_TIMEOUT seconds to wait for a model run to settle (default 180)
+#   PI_BIN                the pi binary (default /opt/homebrew/bin/pi-signed when
+#                         present, else pi on PATH)
+#   FLOWRYN_PI_AGENT_DIR  a prepared agent dir to use instead of the per-spike scratch one
+#   FLOWRYN_PI_MODEL      opt-in real-model smoke pass: an explicit provider/model
+#                         (for example openrouter/openrouter/free) replaces the
+#                         scripted provider, and prompts drop their script. It
+#                         needs FLOWRYN_PI_AGENT_DIR with that provider's auth;
+#                         run it with SPIKES_RUNS set to a separate directory.
+#   FLOWRYN_PI_ARGS       extra pi arguments, word-split
+#   FLOWRYN_PI_TIMEOUT    seconds to wait for a run to settle (default 180)
 
 PI_SPIKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../../lib/lab.sh
 . "$PI_SPIKE_DIR/../lib/lab.sh"
 PROBE_EXTENSION="$PI_SPIKE_DIR/extension/flowryn-probe.ts"
+SCRIPTED_PROVIDER="$PI_SPIKE_DIR/lib/scripted-provider.ts"
+SCRIPTED_MODEL="flowryn-scripted/scripted"
+FLOWRYN_LAB_LABEL="${FLOWRYN_LAB_LABEL:-flowryn-m0-pi}"
 PI_VERSION_LABEL="pi: not installed"
 PI_RUN_TIMEOUT="${FLOWRYN_PI_TIMEOUT:-180}"
 SPIKE_ID=""
 WORK=""
 CWD=""
 SESSIONS=""
+AGENT_DIR=""
 PANE=""
 PANES=()
 CTL_SEQ=0
 
+# Prints the pi binary to use, or nothing when none is installed.
+pi_resolve_bin() {
+  if [ -n "${PI_BIN:-}" ]; then
+    [ -x "$PI_BIN" ] && printf '%s\n' "$PI_BIN"
+  elif [ -x /opt/homebrew/bin/pi-signed ]; then
+    printf '%s\n' /opt/homebrew/bin/pi-signed
+  else
+    command -v pi 2>/dev/null
+  fi
+}
+
 # Must be the first call: a machine without pi records "not run" and exits 0
-# before any Herdr lab is provisioned.
+# before any Herdr lab is provisioned (pi/run-all.sh counts "not run" as a failure).
 pi_require() { # <spike-id>
   SPIKE_ID=$1
-  if ! command -v pi >/dev/null 2>&1; then
+  PI_BIN=$(pi_resolve_bin)
+  if [ -z "$PI_BIN" ]; then
     spike_verdict "$SPIKE_ID" "not run" "pi: not installed" "pi not installed on this machine"
     exit 0
   fi
   local version
-  version=$(pi --version 2>/dev/null | head -n 1 | tr -d '\r')
-  PI_VERSION_LABEL="pi ${version:-unknown}"
+  version=$("$PI_BIN" --version 2>/dev/null | head -n 1 | tr -d '\r')
+  PI_VERSION_LABEL="pi ${version:-unknown}, model ${FLOWRYN_PI_MODEL:-$SCRIPTED_MODEL}"
   command -v jq >/dev/null 2>&1 || lab_die "jq is required"
 }
 
@@ -56,7 +78,8 @@ pi_setup() {
   WORK=$(spike_workdir "$SPIKE_ID")
   CWD="$WORK/cwd"
   SESSIONS="$WORK/sessions"
-  mkdir -p "$CWD" "$SESSIONS"
+  AGENT_DIR="${FLOWRYN_PI_AGENT_DIR:-$WORK/agent}"
+  mkdir -p "$CWD" "$SESSIONS" "$AGENT_DIR"
   lab_ensure
 }
 
@@ -68,6 +91,19 @@ pctl() { # <instance>
   printf '%s/%s.ctl.jsonl\n' "$WORK" "$1"
 }
 
+provlog() { # <instance>
+  printf '%s/%s.provider.jsonl\n' "$WORK" "$1"
+}
+
+# Prompt text for a scripted turn: <human-readable prompt> <steps separated by " ;; ">.
+scripted() { # <prompt> <steps>
+  if [ -n "${FLOWRYN_PI_MODEL:-}" ]; then
+    printf '%s' "$1"
+  else
+    printf '%s FLOWRYN-SCRIPT: %s' "$1" "$2"
+  fi
+}
+
 # Builds the pane command line. Arguments: <instance> <cwd> <probe:0|1>
 # [VAR=value ...] -- [pi arguments ...]
 pi_command() {
@@ -77,16 +113,21 @@ pi_command() {
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ "${1:-}" = "--" ] && shift
   args=("$@")
-  cmd="cd $(printf %q "$dir") && env PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0"
+  cmd="cd $(printf %q "$dir") && env PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 PI_OFFLINE=1"
+  cmd+=" PI_CODING_AGENT_DIR=$(printf %q "$AGENT_DIR")"
   cmd+=" FLOWRYN_PROBE_INSTANCE=$(printf %q "$name")"
   cmd+=" FLOWRYN_PROBE_LOG=$(printf %q "$(plog "$name")")"
   cmd+=" FLOWRYN_PROBE_CTL=$(printf %q "$(pctl "$name")")"
-  [ -n "${FLOWRYN_PI_AGENT_DIR:-}" ] && cmd+=" PI_CODING_AGENT_DIR=$(printf %q "$FLOWRYN_PI_AGENT_DIR")"
+  cmd+=" FLOWRYN_PROVIDER_LOG=$(printf %q "$(provlog "$name")")"
   for item in ${envs[@]+"${envs[@]}"}; do cmd+=" $(printf %q "$item")"; done
-  cmd+=" pi"
+  cmd+=" $(printf %q "$PI_BIN")"
   [ "$with_probe" = 1 ] && cmd+=" -e $(printf %q "$PROBE_EXTENSION")"
+  if [ -n "${FLOWRYN_PI_MODEL:-}" ]; then
+    cmd+=" --model $(printf %q "$FLOWRYN_PI_MODEL")"
+  else
+    cmd+=" -e $(printf %q "$SCRIPTED_PROVIDER") --model $SCRIPTED_MODEL"
+  fi
   cmd+=" --session-dir $(printf %q "$SESSIONS")"
-  [ -n "${FLOWRYN_PI_MODEL:-}" ] && cmd+=" --model $(printf %q "$FLOWRYN_PI_MODEL")"
   # shellcheck disable=SC2086
   [ -n "${FLOWRYN_PI_ARGS:-}" ] && for item in $FLOWRYN_PI_ARGS; do cmd+=" $(printf %q "$item")"; done
   for item in ${args[@]+"${args[@]}"}; do cmd+=" $(printf %q "$item")"; done
@@ -111,12 +152,14 @@ pi_launch() {
   : > "$(pctl "$name")"
   local cmd pane
   cmd=$(pi_command "$name" "$dir" "$with_probe" "$@")
-  printf '%s\n' "$cmd" > "$WORK/$name.command.txt"
+  # The full command overflows the line Herdr types into the pane shell, so the
+  # pane runs a short launcher script instead.
+  printf '%s\n' "$cmd" > "$WORK/$name.command.sh"
   pane=$(lab_new_pane "$dir" "$SPIKE_ID-$name") || lab_die "workspace create failed for $name"
   [ -n "$pane" ] || lab_die "workspace create returned no pane id for $name"
   PANES+=("$pane")
   PANE=$pane
-  lab_pane_run "$pane" "$cmd" || lab_die "pane run failed for $name"
+  lab_pane_run "$pane" "bash $(printf %q "$WORK/$name.command.sh")" || lab_die "pane run failed for $name"
   if [ "$wait" = 1 ] && [ "$with_probe" = 1 ]; then
     log_wait "$name" 90 '.ev == "session_start"' || {
       pane_snapshot "$pane" "$WORK/$name.start-failure.txt"
@@ -127,12 +170,18 @@ pi_launch() {
 }
 
 # --- probe log queries (jq filters over the instance's JSONL) --------------------
+# The probe appends while these run, so each line is parsed on its own and a
+# half-written last line is skipped instead of failing the whole query.
 
-log_count() { # <instance> <jq-select-expression>
+log_lines() { # <instance> -> the JSON array of complete log lines
   local file
   file=$(plog "$1")
-  [ -s "$file" ] || { echo 0; return 0; }
-  jq -s "[.[] | select($2)] | length" "$file" 2>/dev/null || echo 0
+  [ -s "$file" ] || { echo '[]'; return 0; }
+  jq -Rn '[inputs | fromjson? | select(type == "object")]' "$file"
+}
+
+log_count() { # <instance> <jq-select-expression>
+  log_lines "$1" | jq "[.[] | select($2)] | length" 2>/dev/null || echo 0
 }
 
 log_has() { # <instance> <jq-select-expression>
@@ -144,17 +193,11 @@ log_wait() { # <instance> <timeout-s> <jq-select-expression>
 }
 
 log_first() { # <instance> <jq-select-expression>
-  local file
-  file=$(plog "$1")
-  [ -s "$file" ] || return 0
-  jq -cs "[.[] | select($2)] | first // empty" "$file" 2>/dev/null
+  log_lines "$1" | jq -c "[.[] | select($2)] | first // empty" 2>/dev/null
 }
 
 log_last() { # <instance> <jq-select-expression>
-  local file
-  file=$(plog "$1")
-  [ -s "$file" ] || return 0
-  jq -cs "[.[] | select($2)] | last // empty" "$file" 2>/dev/null
+  log_lines "$1" | jq -c "[.[] | select($2)] | last // empty" 2>/dev/null
 }
 
 # Epoch milliseconds of the first/last matching line, or empty.
@@ -193,10 +236,11 @@ ctl() { # <instance> <json-object>; an "id" is added when missing
 }
 
 # Runs a probe op now and waits for its ctl_exec line; prints that line.
+# Callers use it inside $(...), where a CTL_SEQ increment would be lost, so the
+# id comes from the clock and $RANDOM instead.
 ctl_now() { # <instance> <op-json>
   local id
-  CTL_SEQ=$((CTL_SEQ + 1))
-  id="n$CTL_SEQ"
+  id="n$(now_ms)-$RANDOM"
   printf '%s\n' "$2" | jq -c --arg id "$id" '. + {id: $id}' >> "$(pctl "$1")"
   log_wait "$1" 15 ".ev == \"ctl_exec\" and .id == \"$id\"" || return 1
   log_first "$1" ".ev == \"ctl_exec\" and .id == \"$id\""

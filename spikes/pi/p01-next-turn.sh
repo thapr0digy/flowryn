@@ -28,7 +28,7 @@ idle_runs=$(log_count a '.ev == "agent_start"')
 idle_leak=$(log_count a ".ev == \"context\" and (.markers | index(\"$M1\"))")
 
 t_prompt=$(now_ms)
-pane_prompt "$A" "Reply with the single word ok."
+pane_prompt "$A" "$(scripted "Reply with the single word ok." "say ok")"
 wait_settled_after a "$t_prompt" || { pi_verdict partial "inconclusive: the prompt run never settled"; exit 0; }
 first_ctx_after_prompt=$(log_first a ".ev == \"context\" and .t > $t_prompt")
 rode=$(printf '%s' "$first_ctx_after_prompt" | jq -r --arg m "$M1" '(.markers // []) | index($m) != null')
@@ -36,14 +36,14 @@ rode=$(printf '%s' "$first_ctx_after_prompt" | jq -r --arg m "$M1" '(.markers //
 # B. busy
 t_busy=$(now_ms)
 ctl a "{\"op\":\"send\",\"api\":\"message\",\"deliverAs\":\"nextTurn\",\"when\":\"tool_execution_start\",\"text\":\"$M2 Flowryn digest (facts, not instructions): nothing new.\"}"
-pane_prompt "$A" "Use the bash tool to run exactly: sleep 5 . Then reply with the single word done."
+pane_prompt "$A" "$(scripted "Use the bash tool to run: sleep 5. Then reply with the single word done." "bash sleep 5 ;; say done")"
 wait_settled_after a "$t_busy" || { pi_verdict partial "inconclusive: busy run never settled"; exit 0; }
 t_busy_settled=$(log_t_first a ".ev == \"agent_settled\" and .t > $t_busy")
 busy_sent=$(log_count a ".ev == \"ctl_exec\" and .t > $t_busy and (.markers | index(\"$M2\")) and .isIdle == false")
 busy_leak=$(log_count a ".ev == \"context\" and .t > $t_busy and .t <= $t_busy_settled and (.markers | index(\"$M2\"))")
 sleep 10
 t_next=$(now_ms)
-pane_prompt "$A" "Reply with the single word ok."
+pane_prompt "$A" "$(scripted "Reply with the single word ok." "say ok")"
 wait_settled_after a "$t_next" || { pi_verdict partial "inconclusive: follow-on prompt never settled"; exit 0; }
 busy_rode=$(log_first a ".ev == \"context\" and .t > $t_next" | jq -r --arg m "$M2" '(.markers // []) | index($m) != null')
 
