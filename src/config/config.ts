@@ -7,17 +7,30 @@ import { FlowrynError } from "../api/errors.ts";
 export const TOOL_NAMES = ["tasks_axi", "node", "git", "gh", "herdr", "claude", "pi", "no_mistakes"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-/** Executable names on PATH for each tool key in [tools]. */
-export const TOOL_BINARIES: Record<ToolName, string> = {
-  tasks_axi: "tasks-axi",
-  node: "node",
-  git: "git",
-  gh: "gh",
-  herdr: "herdr",
-  claude: "claude",
-  pi: "pi",
-  no_mistakes: "no-mistakes",
+/**
+ * Executable names on PATH for each tool key in [tools], in lookup order. Pi
+ * also ships as `pi-signed` (the signed Pi Launcher build), which a shell alias
+ * usually maps to `pi`; aliases are invisible to a PATH lookup.
+ */
+export const TOOL_BINARIES: Record<ToolName, readonly string[]> = {
+  tasks_axi: ["tasks-axi"],
+  node: ["node"],
+  git: ["git"],
+  gh: ["gh"],
+  herdr: ["herdr"],
+  claude: ["claude"],
+  pi: ["pi", "pi-signed"],
+  no_mistakes: ["no-mistakes"],
 };
+
+/** First executable on PATH among a tool's names. */
+export function whichTool(name: ToolName, which: (binary: string) => string | null = Bun.which): string | null {
+  for (const binary of TOOL_BINARIES[name]) {
+    const found = which(binary);
+    if (found) return found;
+  }
+  return null;
+}
 
 export interface FlowrynConfig {
   home: string;
@@ -207,5 +220,5 @@ export function configProblems(config: FlowrynConfig, home: string = homedir()):
 export function resolveTool(config: FlowrynConfig, name: ToolName): string | null {
   const configured = config.tools[name];
   if (configured) return configured;
-  return Bun.which(TOOL_BINARIES[name]);
+  return whichTool(name);
 }

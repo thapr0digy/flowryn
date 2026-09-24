@@ -82,6 +82,11 @@ function initDeps(home: string, io: InitDeps["io"], overrides: Partial<InitDeps>
   };
 }
 
+function signedPiOnly(binary: string): string | null {
+  if (binary === "tasks-axi") return "/opt/bin/tasks-axi";
+  return binary === "pi-signed" ? "/nonexistent/bin/pi-signed" : null;
+}
+
 describe("init", () => {
   test("writes nothing when you decline", async () => {
     const home = tempDir();
@@ -123,6 +128,14 @@ describe("init", () => {
     expect(asked).toBe(2);
     expect(printed.some((l) => l.startsWith("refused: state_dir"))).toBe(true);
     expect(loadConfig(home).config.state_dir).toBe(join(home, "state-ok"));
+  });
+
+  test("finds Pi under its signed launcher name when there is no pi on PATH", async () => {
+    const home = tempDir();
+    const { io, printed } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(home, io, { which: signedPiOnly }))).toBe(0);
+    expect(loadConfig(home).config.tools.pi).toBe("/nonexistent/bin/pi-signed");
+    expect(printed.some((l) => l.startsWith("  pi: /nonexistent/bin/pi-signed"))).toBe(true);
   });
 
   test("stops when tasks-axi is missing, printing how to install it", async () => {

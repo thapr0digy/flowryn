@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
-import { configProblems, defaultConfig, loadConfig, TOOL_BINARIES, TOOL_NAMES, type FlowrynConfig, type ToolName } from "../config/config.ts";
+import { configProblems, defaultConfig, loadConfig, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { configPath, flowrynHome, runDir, toAbsolute } from "../config/paths.ts";
 import { renderConfig } from "../config/toml.ts";
 import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
@@ -14,7 +14,7 @@ export const INSTALL_HINTS: Record<ToolName, string> = {
   gh: "brew install gh, then gh auth login",
   herdr: "install Herdr 0.7.5 or newer (protocol 17); needed from M2",
   claude: "npm install -g @anthropic-ai/claude-code",
-  pi: "npm install -g @earendil-works/pi-coding-agent",
+  pi: "npm install -g @earendil-works/pi-coding-agent (or the signed Pi Launcher, found as pi-signed)",
   no_mistakes: "install no-mistakes (optional; the no-mistakes delivery mode needs it)",
 };
 
@@ -100,7 +100,7 @@ export async function runInit(deps: InitDeps): Promise<number> {
   const tools: Partial<Record<ToolName, string>> = {};
   io.print("Tools:");
   for (const name of TOOL_NAMES) {
-    const found = current.tools[name] && existsSync(current.tools[name]!) ? current.tools[name]! : deps.which(TOOL_BINARIES[name]);
+    const found = current.tools[name] && existsSync(current.tools[name]!) ? current.tools[name]! : whichTool(name, deps.which);
     if (!found) {
       io.print(`  ${name}: missing. Install: ${INSTALL_HINTS[name]}`);
       continue;

@@ -1,6 +1,6 @@
 import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { basename } from "node:path";
-import { configProblems, loadConfig, resolveTool, TOOL_BINARIES, type FlowrynConfig, type ToolName } from "../config/config.ts";
+import { configProblems, loadConfig, resolveTool, TOOL_NAMES, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
 import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
@@ -40,7 +40,7 @@ function executable(path: string): boolean {
 
 function toolChecks(config: FlowrynConfig): Check[] {
   const checks: Check[] = [];
-  for (const name of Object.keys(TOOL_BINARIES) as ToolName[]) {
+  for (const name of TOOL_NAMES) {
     const required = REQUIRED_TOOLS.includes(name);
     const configured = config.tools[name];
     const found = resolveTool(config, name);
