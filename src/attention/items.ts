@@ -1,0 +1,98 @@
+import type { Db } from "../db/db.ts";
+import { getMeta, setMeta } from "../db/db.ts";
+import { sanitizeLine } from "../util/sanitize.ts";
+
+export type Lane = "P0" | "P1" | "P2";
+export type ItemClass = "actionable" | "info";
+
+/**
+ * The lane table (design section 9): an event kind decides lane and class.
+ * Nothing scores items; project priority and due date only order within a lane.
+ * M1 opens only the backlog kinds; the rest are listed so later milestones
+ * extend data, not code.
+ */
+export const LANE_TABLE = {
+  worker_question_blocking: { lane: "P0", class: "actionable" },
+  failure_needs_you: { lane: "P0", class: "actionable" },
+  sensitive_action_waiting: { lane: "P0", class: "actionable" },
+  pr_ready: { lane: "P1", class: "actionable" },
+  gate_ready: { lane: "P1", class: "actionable" },
+  report_ready: { lane: "P1", class: "actionable" },
+  worker_question: { lane: "P1", class: "actionable" },
+  divergence: { lane: "P1", class: "actionable" },
+  worker_idle: { lane: "P1", class: "actionable" },
+  unproven_merge: { lane: "P1", class: "actionable" },
+  backlog_out_of_sync: { lane: "P1", class: "actionable" },
+  trust_dialog: { lane: "P1", class: "actionable" },
+  overdue_todo: { lane: "P1", class: "actionable" },
+  yolo_merged: { lane: "P1", class: "info" },
+  phase_started: { lane: "P1", class: "info" },
+  auto_resumed: { lane: "P1", class: "info" },
+  steer_acked: { lane: "P1", class: "info" },
+  progress: { lane: "P2", class: "info" },
+} as const satisfies Record<string, { lane: Lane; class: ItemClass }>;
+
+export type ItemKind = keyof typeof LANE_TABLE;
+
+export interface ItemRow {
+  id: string;
+  event_seq: number;
+  class: ItemClass;
+  lane: Lane;
+  kind: string;
+  task_id: string | null;
+  run_id: string | null;
+  decision_id: string | null;
+  line: string;
+  state: string;
+  resolved_by: string | null;
+  opened_at: number;
+  resolved_at: number | null;
+}
+
+function nextItemId(db: Db): string {
+  const next = Number(getMeta(db, "next_item_no") ?? "1");
+  setMeta(db, "next_item_no", String(next + 1));
+  return `i${next}`;
+}
+
+export interface OpenItem {
+  kind: ItemKind;
+  eventSeq: number;
+  line: string;
+  taskId?: string | null;
+  runId?: string | null;
+  now?: number;
+}
+
+/** Open an item for an event. Call inside the event's transaction. */
+export function openItem(db: Db, item: OpenItem): string {
+  const { lane, class: klass } = LANE_TABLE[item.kind];
+  const id = nextItemId(db);
+  db.query(
+    `INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, opened_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+  ).run(id, item.eventSeq, klass, lane, item.kind, item.taskId ?? null, item.runId ?? null, sanitizeLine(item.line), item.now ?? Date.now());
+  return id;
+}
+
+export function findOpenItem(db: Db, kind: ItemKind, taskId: string | null): ItemRow | null {
+  return db
+    .query("SELECT * FROM items WHERE kind = ?1 AND task_id IS ?2 AND state IN ('open','presented') ORDER BY opened_at LIMIT 1")
+    .get(kind, taskId) as ItemRow | null;
+}
+
+/** Resolve open items of a kind for a task; an item closes only by its resolution, never by delivery. */
+export function resolveItems(db: Db, kind: ItemKind, taskId: string | null, resolvedBy: string, now = Date.now()): number {
+  const result = db
+    .query(
+      `UPDATE items SET state = 'resolved', resolved_by = ?3, resolved_at = ?4
+       WHERE kind = ?1 AND task_id IS ?2 AND state IN ('open','presented')`,
+    )
+    .run(kind, taskId, resolvedBy, now);
+  return result.changes;
+}
+
+export function openItems(db: Db): ItemRow[] {
+  return db.query("SELECT * FROM items WHERE state IN ('open','presented') ORDER BY lane, opened_at").all() as ItemRow[];
+}

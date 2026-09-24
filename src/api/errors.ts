@@ -1,0 +1,83 @@
+/**
+ * Exit codes from design section 12. Every error code maps to exactly one of
+ * them, so scripts and agents can branch on the exit status alone.
+ */
+export const EXIT = {
+  ok: 0,
+  failure: 1,
+  policy: 2,
+  validation: 3,
+  notFound: 4,
+  unavailable: 69,
+  spooled: 75,
+  protocol: 76,
+  role: 77,
+} as const;
+
+export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
+
+/** Stable machine codes. Adding one is fine; renaming one breaks callers. */
+export const ERROR_CODES = {
+  // policy refusals
+  approval_required: EXIT.policy,
+  red_checks: EXIT.policy,
+  not_landed: EXIT.policy,
+  // validation
+  bad_args: EXIT.validation,
+  unknown_verb: EXIT.validation,
+  bad_envelope: EXIT.validation,
+  invalid_project: EXIT.validation,
+  invalid_todo: EXIT.validation,
+  already_exists: EXIT.validation,
+  rejected_by_tasks_axi: EXIT.validation,
+  // not found
+  not_found: EXIT.notFound,
+  // transport
+  daemon_unavailable: EXIT.unavailable,
+  protocol_mismatch: EXIT.protocol,
+  // roles
+  not_leader: EXIT.role,
+  worker_token: EXIT.role,
+  human_only: EXIT.role,
+  bad_token: EXIT.role,
+  role_refused: EXIT.role,
+  // everything else
+  internal: EXIT.failure,
+  config_invalid: EXIT.failure,
+  already_running: EXIT.failure,
+} as const satisfies Record<string, ExitCode>;
+
+export type ErrorCode = keyof typeof ERROR_CODES;
+
+export function exitCodeFor(code: string): ExitCode {
+  return (ERROR_CODES as Record<string, ExitCode>)[code] ?? EXIT.failure;
+}
+
+export interface ErrorBody {
+  code: ErrorCode;
+  message: string;
+  help?: string;
+}
+
+/** An expected, user-facing failure. Anything else thrown is reported as `internal`. */
+export class FlowrynError extends Error {
+  readonly code: ErrorCode;
+  readonly help: string | undefined;
+
+  constructor(code: ErrorCode, message: string, help?: string) {
+    super(message);
+    this.name = "FlowrynError";
+    this.code = code;
+    this.help = help;
+  }
+
+  toBody(): ErrorBody {
+    return this.help ? { code: this.code, message: this.message, help: this.help } : { code: this.code, message: this.message };
+  }
+}
+
+export function toErrorBody(error: unknown): ErrorBody {
+  if (error instanceof FlowrynError) return error.toBody();
+  const message = error instanceof Error ? error.message : String(error);
+  return { code: "internal", message };
+}
