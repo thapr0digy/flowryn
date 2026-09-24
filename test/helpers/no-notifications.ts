@@ -1,11 +1,15 @@
 /**
  * Loaded before every test file (bunfig.toml `[test] preload`): the suite
- * never posts a real notification. In this process, any spawn of osascript
- * throws and is counted; every daemon the harness starts gets
- * FLOWRYN_NOTIFY=off and a recording macOS channel (test/helpers/harness.ts),
- * so none reaches it either. test/unit/notify-guard.test.ts checks both.
+ * never posts a real notification. It sets FLOWRYN_NOTIFY=off for this
+ * process and anything it spawns; in this process, any spawn of osascript
+ * throws and is counted; every daemon the harness starts keeps
+ * FLOWRYN_NOTIFY=off (it refuses to start one without it) and a recording
+ * macOS channel (test/helpers/harness.ts). test/unit/notify-guard.test.ts
+ * checks all three.
  */
 import { afterAll } from "bun:test";
+
+process.env.FLOWRYN_NOTIFY = "off";
 
 export const OSASCRIPT = "/usr/bin/osascript";
 
@@ -43,7 +47,8 @@ export function refusedOsascriptSpawns(): readonly string[] {
   return guard.__flowrynOsascriptSpawns!;
 }
 
-// A notifier swallows a failing channel, so a refused spawn would not fail its own test: the suite fails here instead.
+// A notifier swallows a failing channel, so a refused spawn would not fail its own test: the run fails here instead.
 afterAll(() => {
-  if (guard.__flowrynOsascriptSpawns!.length > 0) throw new Error(`osascript was spawned ${guard.__flowrynOsascriptSpawns!.length} time(s) in this test file: ${guard.__flowrynOsascriptSpawns!.join("; ")}`);
+  const spawns = guard.__flowrynOsascriptSpawns!;
+  if (spawns.length > 0) throw new Error(`osascript spawn(s) refused in this test process so far: ${spawns.length} (${spawns.join("; ")})`);
 });

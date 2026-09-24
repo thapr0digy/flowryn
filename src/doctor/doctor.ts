@@ -223,6 +223,14 @@ async function contractChecks(config: FlowrynConfig): Promise<Check[]> {
   return checks;
 }
 
+/** A config that does not say whether macOS notifications are on gets them by default: say so, so it is a choice. */
+export function notifyMacosCheck(config: FlowrynConfig): Check | null {
+  const notify = config.extra.notify;
+  const table = typeof notify === "object" && notify !== null && !Array.isArray(notify) ? (notify as Record<string, unknown>) : {};
+  if ("macos" in table) return null;
+  return { check: "notify", status: "warn", detail: "[notify] has no macos key, so macOS notifications are on by default; set macos = true or false (flowryn init asks)" };
+}
+
 /** Every doctor check, in reading order. Never mutates anything. */
 export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const home = flowrynHome(env.env);
@@ -233,6 +241,10 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
     config = loaded.config;
     checks.push(loaded.exists ? { check: "config", status: "ok", detail: loaded.path } : { check: "config", status: "warn", detail: `${loaded.path} missing; using defaults (flowryn init)` });
     for (const problem of configProblems(config)) checks.push({ check: "config", status: problem.level === "error" ? "fail" : "warn", detail: problem.message });
+    if (loaded.exists) {
+      const notify = notifyMacosCheck(config);
+      if (notify) checks.push(notify);
+    }
   } catch (error) {
     return [{ check: "config", status: "fail", detail: (error as Error).message }];
   }

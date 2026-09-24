@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { hashToken, mintToken } from "../../src/api/auth.ts";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
@@ -124,6 +125,7 @@ const sock = join(home, "run", "flowrynd.sock");
 // --- the daemon ------------------------------------------------------------------------------
 let daemon: ReturnType<typeof Bun.spawn> | null = null;
 async function startDaemon(): Promise<void> {
+  requireNotificationsOff(env, "m2-live");
   const fd = openSync(join(home, "daemon.log"), "a");
   daemon = Bun.spawn(["bun", MAIN, "daemon", "run"], { env, stdin: "ignore", stdout: fd, stderr: fd });
   closeSync(fd);

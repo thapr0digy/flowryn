@@ -33,7 +33,7 @@ export const DEFAULT_LEADER_TIMING: LeaderTiming = {
 };
 
 export interface NotifyConfig {
-  /** macOS notifications through osascript: opt-in, written on by `flowryn init`, never a default. */
+  /** macOS notifications through osascript: on unless your config says `macos = false` (flowryn init asks). */
   macos: boolean;
   /** Herdr's notification.show, when a Herdr session is reachable. */
   herdr: boolean;
@@ -48,7 +48,7 @@ export interface NotifyConfig {
 }
 
 export const DEFAULT_NOTIFY: NotifyConfig = {
-  macos: false,
+  macos: true,
   herdr: true,
   min_interval_min: 30,
   p0_coalesce_s: 60,
@@ -109,10 +109,20 @@ export function notificationsOff(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
+ * Every launcher of a daemon for testing (the test harness, the live-exit
+ * scripts, the contract runner) calls this first: without FLOWRYN_NOTIFY=off
+ * the daemon would post real notifications, so it refuses to start one.
+ */
+export function requireNotificationsOff(env: NodeJS.ProcessEnv | Record<string, string>, launcher: string): void {
+  if (env.FLOWRYN_NOTIFY !== "off") {
+    throw new Error(`${launcher} starts no daemon without FLOWRYN_NOTIFY=off: it would post real notifications to your Mac`);
+  }
+}
+
+/**
  * FLOWRYN_NOTIFIER=record:<path>: the macOS channel appends each notification
  * to that file instead of running osascript. The test harness sets it beside
- * FLOWRYN_NOTIFY=off, so even a test that clears the override never reaches a
- * real notification.
+ * FLOWRYN_NOTIFY=off, a second guard between a test daemon and osascript.
  */
 export function recordingNotifierPath(env: NodeJS.ProcessEnv): string | null {
   const value = env.FLOWRYN_NOTIFIER;

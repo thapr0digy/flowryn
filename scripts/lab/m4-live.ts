@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Reply } from "../../src/api/envelope.ts";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
 import { contractPrefix, removeOwnWorktrees } from "../../src/contracts/cleanup.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
@@ -173,6 +174,7 @@ env.FLOWRYN_NOTIFY = "off";
 
 let daemon: ReturnType<typeof Bun.spawn> | null = null;
 async function startDaemon(): Promise<void> {
+  requireNotificationsOff(env, "m4-live");
   const fd = openSync(join(home, "daemon.log"), "a");
   daemon = Bun.spawn([BUN, MAIN, "daemon", "run"], { env, stdin: "ignore", stdout: fd, stderr: fd });
   closeSync(fd);

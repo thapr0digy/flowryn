@@ -28,9 +28,28 @@ export const LATER_SECTION_DEFAULTS: Record<string, unknown> = {
   style: { terse: true },
   capacity: { worker: 20, validation: 5, docker_env: 5, browser: 5, host: { min_free_mem_gb: 8, max_load_per_core: 1.5 } },
   autonomy: { default: "plan" },
-  // Your own setup turns the macOS channel on; it is never a default, so nothing else posts to your Mac.
   notify: { macos: true, herdr: true, min_interval_min: 30, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 },
 };
+
+function isTable(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The current config's sections, with every key they lack filled in from the defaults, at any depth; nothing current is replaced. */
+export function withMissingDefaults(current: Record<string, unknown>, defaults: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...current };
+  for (const [key, fallback] of Object.entries(defaults)) {
+    const value = current[key];
+    if (value === undefined) out[key] = fallback;
+    else if (isTable(value) && isTable(fallback)) out[key] = withMissingDefaults(value, fallback);
+  }
+  return out;
+}
+
+function currentMacosNotifications(extra: Record<string, unknown>): boolean | null {
+  const notify = extra.notify;
+  return isTable(notify) && typeof notify.macos === "boolean" ? notify.macos : null;
+}
 
 export interface InitIo {
   print(line: string): void;
@@ -163,6 +182,11 @@ export async function runInit(deps: InitDeps): Promise<number> {
     return 1;
   }
 
+  // macOS notifications, written explicitly either way
+  const macos = await io.confirm("Post macOS notifications when something needs you?", currentMacosNotifications(current.extra) ?? true);
+  const extra = withMissingDefaults(current.extra, LATER_SECTION_DEFAULTS);
+  extra.notify = { ...(isTable(extra.notify) ? extra.notify : (LATER_SECTION_DEFAULTS.notify as Record<string, unknown>)), macos };
+
   const config: FlowrynConfig = {
     home,
     data_dir: dataDir,
@@ -170,7 +194,7 @@ export async function runInit(deps: InitDeps): Promise<number> {
     morning_hour: morningHour,
     tasks: { backlog, todos },
     tools,
-    extra: { ...LATER_SECTION_DEFAULTS, ...current.extra },
+    extra,
   };
   for (const problem of configProblems(config)) io.print(`${problem.level}: ${problem.message}`);
   if (configProblems(config).some((p) => p.level === "error")) {
