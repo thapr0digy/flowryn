@@ -1,4 +1,4 @@
-import { copyFileSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { constants, copyFileSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
@@ -169,7 +169,8 @@ function isInside(path: string, root: string): boolean {
 /**
  * Verify a scout's report and copy it to `<data_dir>/<task>/report.md`: a
  * regular file inside the run's worktree or its report directory, no
- * symlink, at most 1 MB. A report elsewhere is refused rather than read.
+ * symlink, at most 1 MB. A report elsewhere is refused rather than read, and
+ * whatever sits at the destination is replaced, never written through.
  */
 function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): DeliveredReport {
   const reportDir = reportDirFor(ctx.config(), run.task_id);
@@ -197,14 +198,23 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
   if (st.size > MAX_REPORT_BYTES) throw new FlowrynError("invalid_report", `${raw} is over 1 MB`);
   mkdirSync(reportDir, { recursive: true, mode: 0o700 });
   const artifact = join(realpathSync(reportDir), "report.md");
-  if (artifact !== real) copyFileSync(real, artifact);
+  if (artifact !== real) {
+    try {
+      rmSync(artifact, { force: true });
+      copyFileSync(real, artifact, constants.COPYFILE_EXCL);
+    } catch (error) {
+      throw new FlowrynError("invalid_report", `cannot store the report at ${artifact}: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
+    }
+  }
   return { source: real, artifact, bytes: st.size };
 }
 
 /**
  * `flowryn deliver --report <path>` (scout): verified and recorded; the run is
- * ready and the backlog task gets the report link. `--pr` is verified by the
- * named-head gate (design section 14), which arrives with delivery in M4.
+ * ready and the backlog task gets the report link. The task kind decides the
+ * outcome: a scout delivers only a report, a ship only a PR. A ship's `--pr`
+ * is verified by the named-head gate (design section 14), which arrives with
+ * delivery in M4.
  */
 const deliver: VerbSpec = {
   name: "deliver",
@@ -222,7 +232,12 @@ const deliver: VerbSpec = {
     const pr = stringArg(args, "pr");
     const path = stringArg(args, "report");
     if (pr && path) throw new FlowrynError("bad_args", "deliver one outcome: --report or --pr");
-    if (pr) throw new FlowrynError("not_supported", "deliver --pr is verified by the named-head gate, which arrives in M4", "a scout delivers with --report <path>");
+    if (run.kind === "ship") {
+      if (path) throw new FlowrynError("bad_args", "a ship task delivers a pull request, not a report", "flowryn deliver --pr <url>");
+      if (!pr) throw new FlowrynError("bad_args", "deliver needs --pr <url>");
+      throw new FlowrynError("not_supported", "deliver --pr is verified by the named-head gate, which arrives in M4");
+    }
+    if (pr) throw new FlowrynError("bad_args", "a scout task delivers a report, not a pull request", "flowryn deliver --report <path>");
     if (!path) throw new FlowrynError("bad_args", "deliver needs --report <path>");
     return collectReport(ctx, run, path);
   },

@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
-import { resolveItems } from "../attention/items.ts";
+import { resolveItems, resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
@@ -149,6 +149,7 @@ const resume: VerbSpec = {
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
+    resolveRunItems(ctx.db, run.id, ["failure_needs_you"], "run.resume_requested", now);
     appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1 } });
     return { data: { run: run.id, task: run.task_id, state: "resuming" }, hints: [`flowryn show ${run.task_id}`] };
   },

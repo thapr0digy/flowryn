@@ -115,6 +115,18 @@ export class Reconciler {
     await this.running;
   }
 
+  /** A full pass now, serialized with scheduled passes so no two passes ever overlap. */
+  async passNow(reason: PassReason): Promise<void> {
+    if (this.stopped) return;
+    this.queuedAll = this.queuedAll ?? reason;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    while (this.running) await this.running;
+    if (this.queuedAll || this.queued.size > 0) await this.flush();
+  }
+
   /** Every open run, plus the orphan scan and the steer checks. */
   async pass(reason: PassReason): Promise<void> {
     const { db, now, timing, log } = this.deps;
@@ -267,13 +279,16 @@ export class Reconciler {
       return "dead";
     }
     if (run.resume_count === 0 && run.agent_session) {
-      tx(db, () => {
-        db.query("UPDATE runs SET resume_count = resume_count + 1, updated_at = ?2 WHERE id = ?1").run(run.id, t);
+      const claimed = tx(db, () => {
+        const updated = db.query("UPDATE runs SET resume_count = resume_count + 1, updated_at = ?2 WHERE id = ?1 AND resume_count = ?3").run(run.id, t, run.resume_count);
+        if (updated.changes === 0) return false;
         setLiveness(db, run, "starting", "reconciler", { reason: "resuming once after the worker died", husk }, t);
         const event = appendEvent(db, { source: "reconciler", kind: "run.auto_resumed", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, pane: run.pane_id } });
         resolveRunItems(db, run.id, ["worker_idle", "trust_dialog"], "run.auto_resumed", t);
         openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died and was resumed once from its session`, now: t });
+        return true;
       });
+      if (!claimed) return "dead";
       this.attached.delete(run.id);
       this.deps.launch(run.id, "resume");
       return "resumed";

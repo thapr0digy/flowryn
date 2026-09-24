@@ -6,7 +6,7 @@
  * in scripts/lab/ (docs/m2-notes.md).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
@@ -216,6 +216,9 @@ describe("recovery", () => {
       await Bun.sleep(1_000);
       expect(env.run(run).resume_count).toBe(1);
       expect(env.herdr.livePanes()).toHaveLength(0);
+      const resumed = await env.json(["resume", run]);
+      expect(resumed.code).toBe(0);
+      expect(items(env, run).find((i) => i.kind === "failure_needs_you")?.state).toBe("resolved");
     },
     { timeout: 60_000 },
   );
@@ -243,6 +246,75 @@ describe("recovery", () => {
       expect(env.events(run)).not.toContain("run.auto_resumed");
     },
     { timeout: 60_000 },
+  );
+});
+
+interface FakeReply {
+  args: string[];
+  code: number;
+  reply: { ok?: boolean; error?: { code: string; hint?: string } };
+}
+
+async function fakeReplies(env: FleetEnv, task: string, count: number): Promise<FakeReply[]> {
+  const file = join(env.h.dataDir, task, "fake-replies.jsonl");
+  const read = () =>
+    existsSync(file)
+      ? readFileSync(file, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => {
+            const raw = JSON.parse(line) as { args: string[]; code: number; reply: string };
+            return { args: raw.args, code: raw.code, reply: JSON.parse(raw.reply) } as FakeReply;
+          })
+      : [];
+  await waitUntil(() => read().length >= count, 20_000, `${count} worker verb replies`);
+  return read();
+}
+
+describe("deliver matches the task kind", () => {
+  test(
+    "a ship's deliver --report is refused with bad_args; its --pr is not_supported until M4",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Build\nFAKE: verb deliver --report notes.md\nFAKE: verb deliver --pr https://github.com/o/r/pull/1\nFAKE: sleep 30000", { kind: "ship" });
+      const [report, pr] = await fakeReplies(env, task, 2);
+      expect(report!.code).toBe(3);
+      expect(report!.reply.error).toMatchObject({ code: "bad_args" });
+      expect(pr!.reply.error).toMatchObject({ code: "not_supported" });
+      expect(env.run(run).state).toBe("running");
+      expect(env.events(run)).not.toContain("run.delivered");
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "a scout's deliver --pr is refused with bad_args",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Scout\nFAKE: verb deliver --pr https://github.com/o/r/pull/1\nFAKE: sleep 30000");
+      const [pr] = await fakeReplies(env, task, 1);
+      expect(pr!.code).toBe(3);
+      expect(pr!.reply.error).toMatchObject({ code: "bad_args" });
+      expect(env.run(run).state).toBe("running");
+      expect(env.events(run)).not.toContain("run.delivered");
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "a symlink the worker planted at the report destination is replaced, never written through",
+    async () => {
+      const env = await fleet();
+      const victim = join(env.h.home, "victim.txt");
+      writeFileSync(victim, "untouched\n");
+      const { task, run } = await env.dispatch(`Scout\nFAKE: symlink report.md ${victim}\nFAKE: deliver notes.md the real report`);
+      await env.waitRun(run, (r) => r.state === "ready", "the run to be ready");
+      expect(readFileSync(victim, "utf8")).toBe("untouched\n");
+      const artifact = join(env.h.dataDir, task, "report.md");
+      expect(lstatSync(artifact).isSymbolicLink()).toBe(false);
+      expect(readFileSync(artifact, "utf8")).toContain("the real report");
+    },
+    { timeout: 45_000 },
   );
 });
 

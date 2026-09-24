@@ -8,6 +8,8 @@
  *
  *   FAKE: sleep <ms>                 a tool call; steers may arrive beside it
  *   FAKE: deliver <file> <text...>   write $FLOWRYN_REPORT_DIR/<file>, deliver --report
+ *   FAKE: symlink <name> <target>    make $FLOWRYN_REPORT_DIR/<name> a symlink to <target>
+ *   FAKE: verb <args...>             run flowryn <args> --json; the reply goes to $FLOWRYN_REPORT_DIR/fake-replies.jsonl
  *   FAKE: ask <a,b> <question...>    ask (blocking), then end the turn
  *   FAKE: fail <reason...>           fail
  *   FAKE: report <status>            report
@@ -19,7 +21,7 @@
  * Steps run once per session: a resumed session continues after the last step
  * it finished (state kept next to the task file).
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
@@ -147,6 +149,22 @@ async function runStep(step: string): Promise<"continue" | "end-turn"> {
       await tool(async () => {
         const result = await flowryn(["deliver", "--report", path]);
         log(`deliver -> ${result.code} ${result.stdout.trim()}`);
+      });
+      return "continue";
+    }
+    case "symlink": {
+      const [name = "report.md", target = "/dev/null"] = rest;
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      mkdirSync(dir, { recursive: true });
+      symlinkSync(target, join(dir, name));
+      return "continue";
+    }
+    case "verb": {
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      await tool(async () => {
+        const result = await flowryn([...rest, "--json"]);
+        mkdirSync(dir, { recursive: true });
+        appendFileSync(join(dir, "fake-replies.jsonl"), JSON.stringify({ args: rest, code: result.code, reply: result.stdout.trim() }) + "\n");
       });
       return "continue";
     }
