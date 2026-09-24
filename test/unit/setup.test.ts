@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, defaultConfig } from "../../src/config/config.ts";
@@ -201,6 +201,40 @@ describe("doctor --restore", () => {
     expect(restored.query("SELECT value FROM meta WHERE key = 'after_backup'").get()).toBeNull();
     restored.close();
     expect(readFileSync(result.previous!).length).toBeGreaterThan(0);
+  });
+
+  test("holds the state lock for the whole swap, so a daemon started meanwhile refuses", () => {
+    const home = tempDir();
+    const config = defaultConfig(home);
+    const files = stateFiles(config.state_dir);
+    mkdirSync(config.state_dir, { recursive: true });
+    const db = openDb(files.db);
+    migrate(db);
+    backupIfDue(db, files.backups, new Date(2026, 8, 20));
+    db.close();
+    const daemonGotLock: boolean[] = [];
+    restoreBackup(config, undefined, (from, to) => {
+      const daemonLock = tryExclusiveLock(files.lock);
+      daemonGotLock.push(daemonLock !== null);
+      daemonLock?.release();
+      copyFileSync(from, to);
+    });
+    expect(daemonGotLock).toEqual([false]);
+    const after = tryExclusiveLock(files.lock);
+    expect(after).not.toBeNull();
+    after!.release();
+  });
+
+  test("releases the state lock when the restore fails", () => {
+    const home = tempDir();
+    const config = defaultConfig(home);
+    const files = stateFiles(config.state_dir);
+    mkdirSync(files.backups, { recursive: true });
+    writeFileSync(join(files.backups, "flowryn-2026-09-20.db"), "");
+    expect(() => restoreBackup(config, "2026-01-01")).toThrow("no backup matches");
+    const after = tryExclusiveLock(files.lock);
+    expect(after).not.toBeNull();
+    after!.release();
   });
 
   test("refuses while a daemon holds the state lock", () => {

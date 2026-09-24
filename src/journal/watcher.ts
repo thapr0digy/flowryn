@@ -229,6 +229,11 @@ export class BacklogWatcher {
    * that task in the window goes back too, in order, so the task ends where the
    * journal last left it. A re-applied copy supersedes its original, so each
    * chain is considered once, through its latest application.
+   *
+   * A just-added task that is missing was deleted by hand, and stays deleted,
+   * unless the read shows a whole-file rollback: another recent journal write,
+   * on a task still in the file, reads as erased too. A task with a live run
+   * is never re-applied; a hand edit to it is a divergence instead.
    */
   private erasedIntents(file: JournalFile, tasks: BacklogTask[], now: number): (AppliedPayload & { taskId: string })[] {
     const since = now - (this.deps.eraseWindowMs ?? ERASE_WINDOW_MS);
@@ -240,24 +245,34 @@ export class BacklogWatcher {
 
     const byId = new Map(tasks.map((t) => [t.id, t]));
     const pendingTasks = new Set(pendingIntents(this.deps.db, file).map((i) => i.task_id));
+    const liveRunTasks = new Set(file === "backlog" ? this.liveRuns().map((r) => r.task_id) : []);
+    const candidates = rows
+      .filter(({ row, applied }) => latestInChain.get(chainRoot(applied)) === row.seq)
+      .map(({ row, applied }) => ({ taskId: row.task_id!, applied }))
+      .filter(({ taskId, applied }) => !pendingTasks.has(taskId) && !liveRunTasks.has(taskId) && (applied.args.reapplyDepth ?? 0) < MAX_REAPPLY_DEPTH);
+    const fileRolledBack = candidates.some(({ taskId, applied }) => applied.verb !== "add" && intentErased(applied, byId.get(taskId)));
+
     const rewinding = new Set<string>();
     const erased: (AppliedPayload & { taskId: string })[] = [];
-    for (const { row, applied } of rows) {
-      const taskId = row.task_id!;
-      if (latestInChain.get(chainRoot(applied)) !== row.seq) continue;
-      if (pendingTasks.has(taskId)) continue;
-      if ((applied.args.reapplyDepth ?? 0) >= MAX_REAPPLY_DEPTH) continue;
-      if (!rewinding.has(taskId) && !intentErased(applied, byId.get(taskId))) continue;
+    for (const { taskId, applied } of candidates) {
+      if (!rewinding.has(taskId)) {
+        if (applied.verb === "add" && !fileRolledBack) continue;
+        if (!intentErased(applied, byId.get(taskId))) continue;
+      }
       rewinding.add(taskId);
       erased.push({ ...applied, taskId });
     }
     return erased;
   }
 
+  private liveRuns(): OpenRun[] {
+    return this.deps.db.query("SELECT id, task_id, state FROM runs WHERE state NOT IN ('cleaned','failed','cancelled')").all() as OpenRun[];
+  }
+
   /** A hand edit that contradicts a live run: its task left In flight or vanished. */
   private runConflicts(tasks: BacklogTask[]): { run: OpenRun; summary: string }[] {
     const { db } = this.deps;
-    const runs = db.query("SELECT id, task_id, state FROM runs WHERE state NOT IN ('cleaned','failed','cancelled')").all() as OpenRun[];
+    const runs = this.liveRuns();
     const byId = new Map(tasks.map((t) => [t.id, t]));
     const pendingTasks = new Set(pendingIntents(db, "backlog").map((i) => i.task_id));
     const conflicts: { run: OpenRun; summary: string }[] = [];

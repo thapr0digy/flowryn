@@ -6,7 +6,7 @@ import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion } from 
 import { listBackups } from "../db/backup.ts";
 import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.ts";
 import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
-import { isLockHeld } from "../util/flock.ts";
+import { isLockHeld, tryExclusiveLock } from "../util/flock.ts";
 import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
@@ -183,29 +183,35 @@ export interface RestoreResult {
 }
 
 /**
- * Replace flowryn.db with a nightly backup. Refuses while a daemon holds the
- * state lock. The current database (and its WAL files) is kept aside, never
- * deleted.
+ * Replace flowryn.db with a nightly backup. Holds the daemon's state lock for
+ * the whole swap, so a daemon launchd restarts meanwhile refuses at the flock
+ * instead of opening a half-swapped database. The current database (and its
+ * WAL files) is kept aside, never deleted.
  */
-export function restoreBackup(config: FlowrynConfig, which: string | undefined): RestoreResult {
+export function restoreBackup(config: FlowrynConfig, which: string | undefined, copy: (from: string, to: string) => void = copyFileSync): RestoreResult {
   const files = stateFiles(config.state_dir);
-  if (existsSync(files.lock) && isLockHeld(files.lock)) throw new Error("the daemon is running; stop it first (flowryn daemon stop)");
   const backups = listBackups(files.backups);
   if (backups.length === 0) throw new Error(`no backups in ${files.backups}`);
-  const source = which ? backups.find((b) => basename(b).includes(which) || b === which) : backups[backups.length - 1];
-  if (!source) throw new Error(`no backup matches ${which}; have: ${backups.map((b) => basename(b)).join(", ")}`);
-  const probe = openDb(source, { readonly: true });
-  const problems = integrityProblems(probe);
-  probe.close();
-  if (problems.length > 0) throw new Error(`${basename(source)} fails its own integrity check: ${problems[0]}`);
-  let previous: string | null = null;
-  if (existsSync(files.db)) {
-    previous = `${files.db}.replaced-${Date.now()}`;
-    renameSync(files.db, previous);
-    for (const suffix of ["-wal", "-shm"]) if (existsSync(files.db + suffix)) renameSync(files.db + suffix, previous + suffix);
+  const lock = tryExclusiveLock(files.lock);
+  if (!lock) throw new Error("the daemon is running; stop it first (flowryn daemon stop)");
+  try {
+    const source = which ? backups.find((b) => basename(b).includes(which) || b === which) : backups[backups.length - 1];
+    if (!source) throw new Error(`no backup matches ${which}; have: ${backups.map((b) => basename(b)).join(", ")}`);
+    const probe = openDb(source, { readonly: true });
+    const problems = integrityProblems(probe);
+    probe.close();
+    if (problems.length > 0) throw new Error(`${basename(source)} fails its own integrity check: ${problems[0]}`);
+    let previous: string | null = null;
+    if (existsSync(files.db)) {
+      previous = `${files.db}.replaced-${Date.now()}`;
+      renameSync(files.db, previous);
+      for (const suffix of ["-wal", "-shm"]) if (existsSync(files.db + suffix)) renameSync(files.db + suffix, previous + suffix);
+    }
+    copy(source, files.db);
+    return { restored: files.db, from: source, previous };
+  } finally {
+    lock.release();
   }
-  copyFileSync(source, files.db);
-  return { restored: files.db, from: source, previous };
 }
 
 export function doctorExitCode(checks: Check[]): number {

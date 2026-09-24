@@ -121,6 +121,24 @@ describe("intent journal", () => {
     expect(getIntent(env.db, intent.id)!.state).toBe("applied");
   });
 
+  test("a write it cannot read back keeps the old hash, so the watcher re-reads the file", async () => {
+    env = makeJournalEnv();
+    expect((await env.watcher.check("todos", "test")).outcome).toBe("baseline");
+    await env.runner.real.run(["add", "x-a1", "exists", "--file", env.files.todos, "--json"]);
+    env.runner.intercept = (args) => {
+      if (args[0] === "list") return { exitCode: 1, stdout: "", stderr: "timed out", timedOut: true };
+      if (args[0] === "add") return { exitCode: 1, stdout: 'error: "duplicate id"\ncode: NOT_FOUND\n', stderr: "", timedOut: false };
+      return null;
+    };
+    const intent = addTodo("x-a1", "exists");
+    await env.journal.drain();
+    expect(getIntent(env.db, intent.id)!.state).toBe("applied");
+    expect(readSnapshot(env.db, "todos")!.contentHash).not.toBe(hashFile(env.files.todos));
+    env.runner.intercept = null;
+    expect((await env.watcher.check("todos", "test")).outcome).toBe("edited");
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["x-a1"]);
+  });
+
   test("keeps intents pending while tasks-axi is missing", async () => {
     env = makeJournalEnv({ runnerMissing: true });
     const intent = addTodo("a-a1", "first");

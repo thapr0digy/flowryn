@@ -306,9 +306,8 @@ export class Journal {
     const post = json.task && typeof json.task === "object" ? taskFromJson(json.task as Record<string, unknown>) : (tasks?.find((t) => t.id === intent.task_id) ?? null);
     tx(this.db, () => {
       this.db.query("UPDATE intents SET state = 'applied', applied_at = ?2, last_error = NULL, attempts = attempts + 1 WHERE id = ?1").run(intent.id, now);
-      const previous = readSnapshot(this.db, intent.file)?.tasks ?? [];
-      const nextTasks = tasks ?? (post ? patchTasks(previous, post) : previous);
-      writeSnapshot(this.db, intent.file, contentHash, nextTasks, now);
+      if (tasks) writeSnapshot(this.db, intent.file, contentHash, tasks, now);
+      else if (post) writeSnapshot(this.db, intent.file, contentHash, patchTasks(readSnapshot(this.db, intent.file)?.tasks ?? [], post), now);
       const payload: AppliedPayload = {
         intent: intent.id,
         file: intent.file,
