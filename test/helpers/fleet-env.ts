@@ -23,6 +23,8 @@ export interface FleetEnv {
   h: TestHome;
   herdr: FakeHerdr;
   repo: string;
+  /** The bare origin, when the fleet has one. */
+  origin: string | null;
   leader: string;
   daemon: DaemonProc;
   claudeStore: string;
@@ -59,7 +61,32 @@ function versionScript(dir: string, name: string): string {
   return path;
 }
 
-export async function makeFleetEnv(options: { timing?: Partial<Timing>; contracts?: boolean } = {}): Promise<FleetEnv> {
+/** A bare "origin" with one commit on main, and a clone of it as the project's primary checkout. */
+export function makeOriginRepo(dir: string): { origin: string; repo: string } {
+  const origin = join(dir, "origin.git");
+  const seed = join(dir, "seed");
+  mkdirSync(dir, { recursive: true });
+  git(dir, ["init", "-q", "--bare", "-b", "main", origin]);
+  makeRepo(seed);
+  git(seed, ["push", "-q", origin, "main"]);
+  const repo = join(dir, "repo");
+  git(dir, ["clone", "-q", origin, repo]);
+  return { origin, repo };
+}
+
+export interface FleetOptions {
+  timing?: Partial<Timing>;
+  contracts?: boolean;
+  /** The project's delivery mode (default local-only). */
+  mode?: "local-only" | "direct-PR" | "no-mistakes";
+  /** Give the project a bare origin (a clone of it is the primary checkout) and a GitHub repo URL, acme/web. */
+  origin?: boolean;
+  /** More config after the fleet's own sections ([github], [cleanup], [leader], ...). */
+  extraConfig?: string;
+  yolo?: boolean;
+}
+
+export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv> {
   const timing = { ...FAST_TIMING, ...options.timing };
   const h = makeHome({
     extraConfig: (home) => {
@@ -77,6 +104,7 @@ export async function makeFleetEnv(options: { timing?: Partial<Timing>; contract
         `config_dir = ${JSON.stringify(join(home, "claude-config"))}`,
         "[reconcile]",
         ...Object.entries(timing).map(([k, v]) => `${k} = ${v}`),
+        options.extraConfig ?? "",
       ].join("\n");
     },
   });
@@ -94,10 +122,14 @@ export async function makeFleetEnv(options: { timing?: Partial<Timing>; contract
     });
     db.close();
   }
-  const repo = makeRepo(join(home, "repo"));
+  const origin = options.origin ? makeOriginRepo(join(home, "proj")) : null;
+  const repo = origin ? origin.repo : makeRepo(join(home, "repo"));
   let daemon = await startDaemon(h);
   const env = { FLOWRYN_TOKEN: leader };
-  const added = await cliJson(h, ["project", "add", repo, "--id", "web", "--mode", "local-only"], { env });
+  const addArgs = ["project", "add", repo, "--id", "web", "--mode", options.mode ?? "local-only"];
+  if (origin) addArgs.push("--repo-url", "https://github.com/acme/web.git");
+  if (options.yolo) addArgs.push("--yolo");
+  const added = await cliJson(h, addArgs, { env });
   if (added.code !== 0) throw new Error(`project add failed: ${JSON.stringify(added.reply)}`);
 
   const withDb = <T>(fn: (db: Db) => T): T => {
@@ -112,6 +144,7 @@ export async function makeFleetEnv(options: { timing?: Partial<Timing>; contract
     h,
     herdr,
     repo,
+    origin: origin?.origin ?? null,
     leader,
     get daemon() {
       return daemon;

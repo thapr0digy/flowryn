@@ -23,7 +23,12 @@
 //     followUp, while idle and you inactive as a followUp with triggerTurn
 //     (a half-typed draft stays untouched, M0 p03); it re-checks what it sees
 //     first and declines otherwise, and always passes deliverAs (M0 finding 14);
-//   - blocks shell calls to flowryn merge, approve and hook (M0 p08).
+//   - blocks shell calls to flowryn merge, approve and hook (M0 p08);
+//   - registers the flowryn_merge tool, the Pi leader's human-confirmation
+//     channel (design section 7): it shows the PR, head and checks with
+//     ctx.ui.confirm() (M0 p07) and, on yes, merges with the approval key the
+//     daemon handed this extension at lease claim (or a fresh one from
+//     `hook approval-key`), passed on stdin, never in an environment.
 // The hook calls that report state go through one queue, so the daemon sees
 // them in the order Pi emitted them.
 import { spawn } from "node:child_process";
@@ -64,6 +69,39 @@ function runHook(name: string, input: Json): Promise<Json | null> {
   });
 }
 
+/** Run a flowryn command with text on stdin; the last JSON line of its stdout, if any. */
+function runFlowryn(args: string[], stdin: string): Promise<Json | null> {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(BIN, args, { stdio: ["pipe", "pipe", "ignore"] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    let stdout = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      try {
+        const line = stdout.trim().split("\n").pop() ?? "";
+        resolve(line ? (JSON.parse(line) as Json) : null);
+      } catch {
+        resolve(null);
+      }
+    });
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(stdin);
+  });
+}
+
+function text(value: string): Json {
+  return { content: [{ type: "text", text: value }], details: {} };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -79,6 +117,8 @@ export default function flowrynLeader(pi: any): void {
   let activityTimer: ReturnType<typeof setInterval> | undefined;
   let removeInput: (() => void) | undefined;
   let queue: Promise<unknown> = Promise.resolve();
+  /** The approval key from the daemon (design section 7): in this process's memory only. */
+  let approvalKey: string | null = null;
 
   const remember = (c: any) => {
     if (c) ctx = c;
@@ -172,6 +212,7 @@ export default function flowrynLeader(pi: any): void {
       source: event?.reason ?? "startup",
       has_ui: hasTui(),
     });
+    if (typeof reply?.approval_key === "string") approvalKey = reply.approval_key;
     const context = reply?.context;
     if (typeof context === "string" && context.length > 0) send("flowryn-briefing", context, { deliverAs: "nextTurn" });
     void p0Loop();
@@ -229,6 +270,60 @@ export default function flowrynLeader(pi: any): void {
       return { block: true, reason: "flowryn: merge and approve need the user, and hook verbs belong to the harness; this session cannot run them from the shell" };
     }
     return undefined;
+  });
+
+  /**
+   * flowryn_merge: the one way this leader merges (the shell is blocked). You
+   * see what would land and say yes or no; the daemon still applies the whole
+   * merge gate, and binds the merge to the head you saw.
+   */
+  pi.registerTool({
+    name: "flowryn_merge",
+    label: "Flowryn merge",
+    description:
+      "Merge a Flowryn task's delivered pull request (or local-only branch). The user confirms it here first; flowrynd then checks the merge gate (approval, checks, head) and proves the merge. Never run `flowryn merge` in the shell.",
+    promptSnippet: "flowryn_merge: merge a delivered Flowryn ship after the user confirms it.",
+    parameters: { type: "object", properties: { task: { type: "string", description: "the Flowryn task id, for example web-login-loop-q4" } }, required: ["task"] },
+    async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, c: any) {
+      remember(c);
+      const task = String(params?.task ?? "").trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(task)) return text("flowryn_merge needs a task id.");
+      const summary = await runHook("merge-summary", { task });
+      if (!summary) return text("Flowryn is not reachable; nothing was merged.");
+      if (typeof summary.error === "string") return text(`Cannot merge ${task}: ${summary.error}`);
+      const head = String(summary.head ?? "");
+      const lines = [
+        `${summary.title ?? task} (${summary.project ?? "?"})`,
+        `${summary.kind === "local" ? "branch" : "PR"}: ${summary.target ?? "?"}`,
+        `head: ${head.slice(0, 12)}  checks: ${summary.checks ?? "unknown"}${summary.sensitive ? "  SENSITIVE" : ""}`,
+      ];
+      let yes = false;
+      try {
+        yes = Boolean(await ctx?.ui?.confirm?.(`Merge ${task}?`, lines.join("\n")));
+      } catch {
+        yes = false;
+      }
+      if (!yes) return text(`The user declined; ${task} was not merged.`);
+      let key = approvalKey;
+      if (!key) {
+        const fresh = await runHook("approval-key", {});
+        key = typeof fresh?.key === "string" ? fresh.key : null;
+        approvalKey = key;
+      }
+      if (!key) return text("This session does not hold the leader lease, so it cannot merge.");
+      let reply = await runFlowryn(["merge", task, "--head", head, "--key-file", "-", "--json"], key);
+      if (reply?.ok === false && reply.error?.code === "approval_required" && String(reply.error?.message ?? "").includes("key")) {
+        // The lease moved and back, or the key rotated: one fresh key, once.
+        const fresh = await runHook("approval-key", {});
+        if (typeof fresh?.key === "string") {
+          approvalKey = fresh.key;
+          reply = await runFlowryn(["merge", task, "--head", head, "--key-file", "-", "--json"], fresh.key);
+        }
+      }
+      if (!reply) return text(`Flowryn did not answer; ${task} may not be merged. Check: flowryn show ${task}`);
+      if (reply.ok) return text(`Merged ${task}: ${reply.data?.state ?? "merged"} at ${String(reply.data?.sha ?? "?").slice(0, 12)} (approved in this confirm; cleanup follows).`);
+      return text(`Merge of ${task} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}${reply.error?.help ? ` Help: ${reply.error.help}` : ""}`);
+    },
   });
 
   /** Deliver one pushed P0, or decline it, after checking what Pi shows right now. */

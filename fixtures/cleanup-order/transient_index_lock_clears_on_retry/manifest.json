@@ -1,0 +1,27 @@
+{
+  "name": "transient_index_lock_clears_on_retry",
+  "ported_from": "tests/fm-teardown.test.sh:test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds",
+  "firstmate_matrix_row": "x",
+  "description": "A fresh index.lock held by a live process (a dying git) disappears on its own about 400 ms later. Patience wins: the implementation waits, sees it gone, and removes the worktree without ever force-removing the lock.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": "absent",
+    "abort": false,
+    "impl_lock": "cleared_by_itself"
+  }
+}

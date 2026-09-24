@@ -1,0 +1,30 @@
+{
+  "name": "run_abort_precedes_process_reap_precedes_worktree_removal",
+  "ported_from": "tests/fm-teardown.test.sh:test_run_abort_precedes_process_reap_precedes_worktree_removal",
+  "description": "A parked own run and a leaked process in the worktree. A git wrapper snapshots, at the moment `git worktree remove` runs, whether the abort already happened and whether the process is already gone: both must be true.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": true,
+    "processes": "dead",
+    "order": [
+      "abort-already-happened",
+      "reap-already-happened"
+    ]
+  }
+}

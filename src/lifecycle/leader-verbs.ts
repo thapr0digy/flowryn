@@ -8,6 +8,8 @@ import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "
 import { createSteer, unackedSteers } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
+import { deliveredOf, prEvidence } from "./delivery.ts";
+import { latestMerge } from "../policy/merge.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
   const run = findRun(db, ref);
@@ -203,7 +205,41 @@ function needs(ctx: ReadCtx, run: FleetRow): string {
   if (ctx.db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open'").get(run.id)) return "answer";
   if (ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND lane = 'P0' AND state IN ('open','presented')").get(run.id)) return "you";
   if (run.state === "ready") return run.kind === "scout" ? "read" : "merge";
+  if (run.state === "merging") return "proof";
+  if (run.state === "landed") return run.cleanup === "refused" ? "cleanup" : "-";
   return "-";
+}
+
+/** A ship's delivery in `show`: what was delivered, what GitHub says now, the merge and the cleanup. */
+function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | undefined {
+  const delivered = deliveredOf(ctx.db, run.task_id);
+  if (!delivered && run.cleanup === null) return undefined;
+  const view: Record<string, unknown> = {};
+  if (delivered) {
+    view[delivered.kind === "pr" ? "pr" : "branch"] = delivered.ref;
+    view.delivered_head = delivered.head.slice(0, 12);
+  }
+  const pr = prEvidence(ctx.db, run.id);
+  if (pr) {
+    view.pr_state = pr.draft ? `${pr.state} (draft)` : pr.state;
+    view.head_now = pr.head.slice(0, 12);
+    view.checks = pr.checks?.line ?? "unknown";
+    view.seen = `${age(ctx.now, pr.observed_at)} ago`;
+  }
+  const merge = latestMerge(ctx.db, run.task_id);
+  if (merge) {
+    const approval = ctx.db.query("SELECT channel, actor FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: string; actor: string } | null;
+    view.merge = `${merge.id} ${merge.state}${merge.merge_sha ? ` at ${merge.merge_sha.slice(0, 12)}` : ""} via ${approval?.channel ?? "?"}${merge.detail ? ` (${sanitizeLine(merge.detail, 100)})` : ""}`;
+  }
+  const standing = ctx.db.query("SELECT id, channel, head_sha, allow_red_check FROM approvals WHERE task_id = ?1 AND consumed_at IS NULL AND expires_at > ?2 ORDER BY created_at DESC LIMIT 1").get(run.task_id, ctx.now) as {
+    id: string;
+    channel: string;
+    head_sha: string;
+    allow_red_check: string | null;
+  } | null;
+  if (standing) view.approval = `${standing.id} ${standing.channel} for ${standing.head_sha.slice(0, 12)}${standing.allow_red_check ? `, waives ${standing.allow_red_check}` : ""}`;
+  if (run.cleanup) view.cleanup = `${run.cleanup}${run.cleanup_detail ? `: ${sanitizeLine(run.cleanup_detail, 100)}` : ""}`;
+  return view;
 }
 
 const MAX_FLEET_ROWS = 20;
@@ -300,12 +336,13 @@ const show: VerbSpec = {
         worktree: run.worktree_path,
         branch: run.branch,
         artifacts,
+        ...(deliveryView(ctx, run) ? { delivery: deliveryView(ctx, run) } : {}),
         steers,
         decisions,
         items,
         events,
       },
-      hints: [`flowryn steer ${run.task_id} --body-file -`, `flowryn cancel ${run.task_id}`],
+      hints: run.state === "ready" && policy.kind === "ship" ? [`flowryn merge ${run.task_id}`, `flowryn decline ${run.task_id} --body-file -`] : [`flowryn steer ${run.task_id} --body-file -`, `flowryn cancel ${run.task_id}`],
     };
   },
 };

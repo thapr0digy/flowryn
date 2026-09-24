@@ -9,6 +9,8 @@ import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
+import { getProject } from "./projects.ts";
+import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 
@@ -210,41 +212,57 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
 }
 
 /**
- * `flowryn deliver --report <path>` (scout): verified and recorded; the run is
- * ready and the backlog task gets the report link. The task kind decides the
- * outcome: a scout delivers only a report, a ship only a PR. A ship's `--pr`
- * is verified by the named-head gate (design section 14), which arrives with
- * delivery in M4.
+ * `flowryn deliver`: the worker's outcome, verified before the run is ready.
+ * The task kind decides it: a scout delivers `--report <path>`; a ship
+ * delivers `--pr <url>` (no-mistakes, direct-PR), checked by the named-head
+ * gate, or `--local` (local-only), a clean branch with commits the default
+ * branch lacks (src/lifecycle/delivery.ts).
  */
 const deliver: VerbSpec = {
   name: "deliver",
-  summary: "Deliver your outcome: --report <path> (scout) or --pr <url> (ship); it is verified",
+  summary: "Deliver your outcome: --report <path> (scout), --pr <url> or --local (ship); it is verified",
   positionals: [],
   flags: {
     report: { type: "string", help: "the scout report file", placeholder: "path" },
-    pr: { type: "string", help: "the pull request URL (ship)", placeholder: "url" },
+    pr: { type: "string", help: "the pull request URL (ship: no-mistakes, direct-PR)", placeholder: "url" },
+    local: { type: "boolean", help: "your committed branch (ship: local-only)" },
   },
   kind: "mutation",
   roles: ["worker"],
   spool: true,
+  // The named-head gate asks GitHub and the remote; a slow answer must not turn a refusal into a spool.
+  replyMs: 60_000,
   async prepare(ctx, args) {
     const run = activeRun(ctx);
     const pr = stringArg(args, "pr");
     const path = stringArg(args, "report");
-    if (pr && path) throw new FlowrynError("bad_args", "deliver one outcome: --report or --pr");
+    const local = boolArg(args, "local");
+    if ([pr, path, local || undefined].filter((v) => v !== undefined).length > 1) throw new FlowrynError("bad_args", "deliver one outcome: --report, --pr or --local");
     if (run.kind === "ship") {
-      if (path) throw new FlowrynError("bad_args", "a ship task delivers a pull request, not a report", "flowryn deliver --pr <url>");
+      if (path) throw new FlowrynError("bad_args", "a ship task delivers a pull request or a local branch, not a report");
+      const project = getProject(ctx.db, run.project_id);
+      if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
+      if (run.state === "merging" || run.state === "landed") throw new FlowrynError("run_not_active", `${run.task_id} is ${run.state}; it is past delivery`);
+      const deps = { db: ctx.db, git: ctx.delivery.git, forge: ctx.delivery.forge(), webUrl: ctx.delivery.github().web_url, now: ctx.now };
+      if (run.delivery_mode === "local-only") {
+        if (pr) throw new FlowrynError("bad_args", "this is a local-only task: never push; deliver --local");
+        if (!local) throw new FlowrynError("bad_args", "deliver needs --local (a local-only task)");
+        return { ship: await verifyLocalDelivery(deps, run, project) };
+      }
+      if (local) throw new FlowrynError("bad_args", `this task ships through ${run.delivery_mode}: deliver --pr <url>`);
       if (!pr) throw new FlowrynError("bad_args", "deliver needs --pr <url>");
-      throw new FlowrynError("not_supported", "deliver --pr is verified by the named-head gate, which arrives in M4");
+      return { ship: await verifyPrDelivery(deps, run, project, pr) };
     }
-    if (pr) throw new FlowrynError("bad_args", "a scout task delivers a report, not a pull request", "flowryn deliver --report <path>");
+    if (pr || local) throw new FlowrynError("bad_args", "a scout task delivers a report, not a pull request", "flowryn deliver --report <path>");
     if (!path) throw new FlowrynError("bad_args", "deliver needs --report <path>");
-    return collectReport(ctx, run, path);
+    return { report: collectReport(ctx, run, path) };
   },
   apply(ctx, _args, prepared) {
     const run = activeRun(ctx);
-    const delivered = prepared as DeliveredReport;
     const now = ctx.now();
+    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal };
+    if (outcome.ship) return { data: recordDelivery(ctx.db, run, outcome.ship, ctx.via, now), hints: ["end your turn"] };
+    const delivered = outcome.report!;
     if (run.state === "ready") {
       const existing = ctx.db.query("SELECT id FROM artifacts WHERE task_id = ?1 AND kind = 'report' AND ref = ?2").get(run.task_id, delivered.artifact);
       if (existing) return { data: { run: run.id, state: run.state, report: delivered.artifact, already: true } };
@@ -271,6 +289,10 @@ const deliver: VerbSpec = {
       now,
     });
     return { data: { run: run.id, state: "ready", report: delivered.artifact }, hints: ["end your turn"] };
+  },
+  async settle(ctx, result) {
+    if (result.data.pr) ctx.delivery.watch(String(result.data.run));
+    return result;
   },
 };
 

@@ -273,14 +273,14 @@ async function fakeReplies(env: FleetEnv, task: string, count: number): Promise<
 
 describe("deliver matches the task kind", () => {
   test(
-    "a ship's deliver --report is refused with bad_args; its --pr is not_supported until M4",
+    "a ship's deliver --report is refused with bad_args, and a local-only ship's --pr too",
     async () => {
       const env = await fleet();
       const { task, run } = await env.dispatch("Build\nFAKE: verb deliver --report notes.md\nFAKE: verb deliver --pr https://github.com/o/r/pull/1\nFAKE: sleep 30000", { kind: "ship" });
       const [report, pr] = await fakeReplies(env, task, 2);
       expect(report!.code).toBe(3);
       expect(report!.reply.error).toMatchObject({ code: "bad_args" });
-      expect(pr!.reply.error).toMatchObject({ code: "not_supported" });
+      expect(pr!.reply.error).toMatchObject({ code: "bad_args" });
       expect(env.run(run).state).toBe("running");
       expect(env.events(run)).not.toContain("run.delivered");
     },

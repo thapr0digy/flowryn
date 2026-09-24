@@ -12,6 +12,19 @@ import { PROTO } from "../../src/version.ts";
 export const REPO_ROOT = resolve(import.meta.dir, "../..");
 const MAIN = join(REPO_ROOT, "src/main.ts");
 
+/**
+ * The test homes' no-mistakes: `axi status` prints $FLOWRYN_HOME/nm-status (a
+ * test writes the run it wants the watcher to see), `axi abort` is logged to
+ * $FLOWRYN_HOME/nm-abort.log. Nothing reaches the shared no-mistakes daemon.
+ */
+const FAKE_NO_MISTAKES = `#!/bin/sh
+case "$1 $2" in
+  "axi status") [ -f "$FLOWRYN_HOME/nm-status" ] && cat "$FLOWRYN_HOME/nm-status"; exit 0 ;;
+  "axi abort") echo "$*" >> "$FLOWRYN_HOME/nm-abort.log"; exit 0 ;;
+esac
+exit 0
+`;
+
 /** The real tasks-axi. The journal tests run against it, never a reimplementation. */
 export function realTasksAxi(): string {
   const found = process.env.FLOWRYN_TEST_TASKS_AXI ?? Bun.which("tasks-axi");
@@ -56,6 +69,15 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   const todos = join(dataDir, "todos.md");
   const node = Bun.which("node");
   const git = Bun.which("git");
+  // Tests never reach the real no-mistakes (a shared daemon) or gh (a real login): stand-ins answer instead.
+  const bin = join(home, "bin");
+  mkdirSync(bin, { recursive: true });
+  const noMistakes = join(bin, "no-mistakes");
+  writeFileSync(noMistakes, FAKE_NO_MISTAKES);
+  chmodSync(noMistakes, 0o755);
+  const gh = join(bin, "gh-absent");
+  writeFileSync(gh, "#!/bin/sh\necho 'gh is not available in tests' >&2\nexit 1\n");
+  chmodSync(gh, 0o755);
   const lines = [
     `data_dir = ${JSON.stringify(dataDir)}`,
     `state_dir = ${JSON.stringify(stateDir)}`,
@@ -66,8 +88,12 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     `tasks_axi = ${JSON.stringify(options.tasksAxi ?? realTasksAxi())}`,
     ...(node ? [`node = ${JSON.stringify(node)}`] : []),
     ...(git ? [`git = ${JSON.stringify(git)}`] : []),
+    `no_mistakes = ${JSON.stringify(noMistakes)}`,
+    `gh = ${JSON.stringify(gh)}`,
     extraConfig,
   ];
+  // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.
+  if (!extraConfig.includes("[github]")) lines.push("[github]", 'api_url = "http://127.0.0.1:9"');
   // Tests never reach a real Herdr: without a socket of their own they get one that does not exist.
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });

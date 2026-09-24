@@ -17,6 +17,9 @@ export interface FakePiOptions {
 export class FakePiLeader implements BridgeDriver {
   readonly harness = "pi" as const;
   readonly seen: { text: string; via: string }[] = [];
+  /** Every ctx.ui.confirm() the extension showed: its title and message. */
+  readonly confirms: { title: string; message: string }[] = [];
+  private readonly results = new Map<number, Record<string, unknown>>();
   private readonly opts: FakePiOptions;
   private proc: ReturnType<typeof Bun.spawn> | null = null;
   private nextId = 1;
@@ -47,7 +50,7 @@ export class FakePiLeader implements BridgeDriver {
           for (let nl = buffer.indexOf("\n"); nl !== -1; nl = buffer.indexOf("\n")) {
             const line = buffer.slice(0, nl);
             buffer = buffer.slice(nl + 1);
-            let event: { ev: string; id?: number; text?: string; via?: string; error?: string };
+            let event: { ev: string; id?: number; text?: string; via?: string; error?: string; title?: string; message?: string };
             try {
               event = JSON.parse(line);
             } catch {
@@ -55,6 +58,8 @@ export class FakePiLeader implements BridgeDriver {
             }
             if (event.ev === "ready") resolveReady();
             else if (event.ev === "seen") this.seen.push({ text: event.text ?? "", via: event.via ?? "" });
+            else if (event.ev === "confirm") this.confirms.push({ title: event.title ?? "", message: event.message ?? "" });
+            else if (event.ev === "result" && event.id !== undefined) this.results.set(event.id, event as Record<string, unknown>);
             else if (event.ev === "ack" && event.id !== undefined) {
               this.acks.get(event.id)?.(event.error ?? null);
               this.acks.delete(event.id);
@@ -69,13 +74,26 @@ export class FakePiLeader implements BridgeDriver {
     return this.ready;
   }
 
-  private async send(cmd: string, extra: Record<string, unknown> = {}): Promise<void> {
+  private async send(cmd: string, extra: Record<string, unknown> = {}): Promise<number> {
     await this.boot();
     const id = this.nextId++;
     const acked = new Promise<void>((resolveAck, reject) => this.acks.set(id, (error) => (error ? reject(new Error(error)) : resolveAck())));
     (this.proc!.stdin as import("bun").FileSink).write(JSON.stringify({ id, cmd, ...extra }) + "\n");
     (this.proc!.stdin as import("bun").FileSink).flush();
     await acked;
+    return id;
+  }
+
+  /** The model calls one of the extension's tools; you answer its confirm with `confirm`. Returns the tool's text. */
+  async callTool(name: string, params: Record<string, unknown>, confirm: boolean): Promise<string> {
+    const id = await this.send("tool", { name, params, confirm });
+    return String(this.results.get(id)?.text ?? "");
+  }
+
+  /** The model runs a shell command through Pi's bash tool; the extension may block it. */
+  async bash(command: string): Promise<{ blocked: boolean; reason?: string; code?: number; stdout?: string }> {
+    const id = await this.send("bash", { command });
+    return this.results.get(id) as { blocked: boolean; reason?: string; code?: number; stdout?: string };
   }
 
   async start(): Promise<void> {

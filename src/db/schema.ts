@@ -210,10 +210,41 @@ CREATE UNIQUE INDEX one_p0_offer ON presentations(item_id)
   WHERE state IN ('carried','offered') AND path IN ('continuation','waiter','trigger');
 `;
 
+/**
+ * M4: delivery and policy. artifacts gains the kind `local`, a local-only
+ * ship's delivered branch head (SQLite cannot alter a CHECK, so the table is
+ * rebuilt; nothing references it). approval_attempts records what the Claude
+ * PreToolUse hook showed you: the task, the action and the PR and head the
+ * prompt named, so the merge binds to what you saw. merges keeps the merge
+ * method, the forge's answer and when the proof was last checked. runs gains
+ * the cleanup outcome after landing (null, refused or done) and why.
+ */
+const DELIVERY_SQL = /* sql */ `
+CREATE TABLE artifacts_m4 (id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('pr','report','file','local')), ref TEXT NOT NULL,
+  head_sha TEXT, created_at INTEGER NOT NULL);
+INSERT INTO artifacts_m4 (id, task_id, kind, ref, head_sha, created_at) SELECT id, task_id, kind, ref, head_sha, created_at FROM artifacts;
+DROP TABLE artifacts;
+ALTER TABLE artifacts_m4 RENAME TO artifacts;
+CREATE INDEX artifacts_task ON artifacts(task_id, kind);
+ALTER TABLE approval_attempts ADD COLUMN task_id TEXT;
+ALTER TABLE approval_attempts ADD COLUMN action TEXT NOT NULL DEFAULT 'merge';
+ALTER TABLE approval_attempts ADD COLUMN pr_url TEXT;
+ALTER TABLE approval_attempts ADD COLUMN head_sha TEXT;
+ALTER TABLE merges ADD COLUMN method TEXT;
+ALTER TABLE merges ADD COLUMN detail TEXT;
+ALTER TABLE merges ADD COLUMN checked_at INTEGER;
+ALTER TABLE runs ADD COLUMN cleanup TEXT;
+ALTER TABLE runs ADD COLUMN cleanup_detail TEXT;
+CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
+CREATE INDEX merges_open ON merges(state) WHERE state IN ('requested','unproven');
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
   { version: 3, name: "leader", sql: LEADER_SQL },
+  { version: 4, name: "delivery", sql: DELIVERY_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

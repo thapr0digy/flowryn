@@ -1,3 +1,4 @@
+import { PROTO } from "../../src/version.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -192,7 +193,7 @@ describe("when the daemon is down", () => {
     const dir = join(h.dataDir, "spool", "r-ghost");
     mkdirSync(dir, { recursive: true });
     const ulid = "01J8Z0000000000000000000AA";
-    writeFileSync(join(dir, `${ulid}.json`), JSON.stringify({ proto: 1, ulid, verb: "report", token: "fwr_unknown", args: { status: "blocked" } }));
+    writeFileSync(join(dir, `${ulid}.json`), JSON.stringify({ proto: PROTO, ulid, verb: "report", token: "fwr_unknown", args: { status: "blocked" } }));
     daemons.push(await startDaemon(h));
     expect(existsSync(join(h.dataDir, "spool", "rejected", "r-ghost", `${ulid}.json`))).toBe(true);
     const db = h.db();
@@ -218,6 +219,6 @@ describe("output", () => {
     const verb = await cli(h, ["todo", "add", "--help"]);
     expect((decode(verb.stdout) as { usage: string }).usage).toStartWith("flowryn todo add <title>");
     const version = await cliJson(h, ["version"]);
-    expect(version.reply.data).toMatchObject({ proto: 1 });
+    expect(version.reply.data).toMatchObject({ proto: PROTO });
   });
 });

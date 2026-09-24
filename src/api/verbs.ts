@@ -4,6 +4,7 @@ import type { Journal } from "../journal/journal.ts";
 import type { BacklogWatcher } from "../journal/watcher.ts";
 import type { FleetServices } from "../lifecycle/fleet-services.ts";
 import type { AttentionServices } from "../attention/services.ts";
+import type { DeliveryServices } from "../policy/services.ts";
 import { FlowrynError } from "./errors.ts";
 
 /**
@@ -73,6 +74,8 @@ export interface DaemonServices {
   fleet: FleetServices;
   /** Leader waiters, leader clocks and notifications (M3). */
   attention: AttentionServices;
+  /** The forge, approvals challenges, cleanup and the delivery watchers (M4). */
+  delivery: DeliveryServices;
 }
 
 export interface HandlerCtx extends DaemonServices {
@@ -109,6 +112,12 @@ export interface VerbSpec {
   roles: Role[];
   /** Worker verbs spool to disk when the daemon is down (exit 75). */
   spool?: boolean;
+  /**
+   * How long the CLI waits for the reply. Worker verbs default to 2 s before
+   * they spool (design section 12); a verb that must ask GitHub (deliver --pr)
+   * waits longer, so a refusal reaches the worker instead of a spool.
+   */
+  replyMs?: number;
   /**
    * Hook traffic: frequent, never retried and never spooled, so its replies
    * are not kept for idempotency (a PostToolUse on every tool call would fill

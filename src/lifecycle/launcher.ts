@@ -174,7 +174,8 @@ export class Launcher {
     const contractFile = join(runDir, "contract.md");
     const body = dispatchedBody(db, run.id);
     writeFileAtomic(instructionsFile, body.endsWith("\n") ? body : `${body}\n`, 0o600);
-    writeFileAtomic(contractFile, workerContract(run.harness, isTerse(config)), 0o600);
+    const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
+    writeFileAtomic(contractFile, workerContract(run.harness, isTerse(config), { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch }), 0o600);
     if (run.harness === "pi") await loadExtensionSource();
 
     const flowrynBin = await this.deps.flowrynBin();
@@ -192,7 +193,8 @@ export class Launcher {
       flowrynBin,
       binary,
       daemonSocket: this.deps.socketPath,
-      writable: [spool, reportDir],
+      // A ship commits: in a linked worktree, git writes the project's common git dir (objects, refs, the worktree's index).
+      writable: [spool, reportDir, ...(run.kind === "ship" ? await this.commonDir(project.path) : [])],
     };
     if (!context.sessionId) throw new Error("the run has no agent session id");
     const trust = await adapter.preTrust(context, workers);
@@ -251,6 +253,13 @@ export class Launcher {
       return false;
     }
     return true;
+  }
+
+  /** The project's git common dir, absolute, for a ship worker's sandbox write list. */
+  private async commonDir(projectPath: string): Promise<string[]> {
+    const result = await this.deps.git(["-C", projectPath, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    const dir = result.stdout.trim();
+    return result.exitCode === 0 && dir ? [dir] : [];
   }
 
   /** git is the ground truth for worktrees; a relaunch reuses the run's own worktree. */

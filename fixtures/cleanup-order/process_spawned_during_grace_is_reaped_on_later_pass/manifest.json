@@ -1,0 +1,26 @@
+{
+  "name": "process_spawned_during_grace_is_reaped_on_later_pass",
+  "ported_from": "tests/fm-teardown.test.sh:test_process_spawned_during_grace_is_reaped_on_later_pass",
+  "description": "A process in the worktree answers SIGTERM by forking a child (same cwd) and exiting. The child appears during the grace period and is reaped on a later pass: neither survives.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": false,
+    "processes": "dead"
+  }
+}

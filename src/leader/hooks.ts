@@ -7,6 +7,10 @@ import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
+import { hashToken, mintToken } from "../api/auth.ts";
+import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
+import { findRun, taskTitle } from "../lifecycle/runs.ts";
+import { recordAttempt, type ApprovalAction } from "../policy/approvals.ts";
 
 /**
  * The leader side of the hook verbs (design sections 5, 9 and 10). The
@@ -38,6 +42,13 @@ export interface LeaderHookInput {
   item?: string;
   mode?: string;
   ok?: boolean;
+  /** Claude PreToolUse: the tool, its input, its call id and the session's permission mode (M0 c09). */
+  tool_name?: string;
+  tool_input?: { command?: unknown } | null;
+  tool_use_id?: string;
+  permission_mode?: string;
+  /** Pi merge-summary: the task the flowryn_merge tool was asked to merge. */
+  task?: string;
 }
 
 /** At most two consecutive Stop continuations, far below Claude's cap of 8 (design section 5). */
@@ -269,6 +280,77 @@ export function toolActivity(ctx: HandlerCtx): HandlerResult {
   refreshBusy(ctx, s, now);
   heartbeat(ctx.db, s.session_id, now);
   return { data: {} };
+}
+
+export interface GatedCommand {
+  action: ApprovalAction;
+  task: string;
+}
+
+const MERGE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+merge\s+([A-Za-z0-9][\w.-]*)/g;
+const DISCARD_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+cleanup\s+([A-Za-z0-9][\w.-]*)[^;&|\n]*?--discard\b/g;
+
+/** The Flowryn commands in a shell line that need your word: merges and discards. */
+export function gatedCommands(command: string): GatedCommand[] {
+  const found: GatedCommand[] = [];
+  for (const match of command.matchAll(MERGE_COMMAND)) found.push({ action: "merge", task: match[1]! });
+  for (const match of command.matchAll(DISCARD_COMMAND)) found.push({ action: "discard", task: match[1]! });
+  return found;
+}
+
+/** What the prompt names, from what flowrynd already knows (a hook must answer fast, so no network). */
+function promptFacts(ctx: HandlerCtx, gated: GatedCommand): { line: string; prUrl: string | null; head: string | null } {
+  const run = findRun(ctx.db, gated.task);
+  if (!run) return { line: `${gated.action} ${gated.task}: no such task; it will be refused`, prUrl: null, head: null };
+  const title = taskTitle(ctx.db, run.task_id);
+  if (gated.action === "discard") return { line: `DISCARD the unlanded work of ${run.task_id} (${title}) in ${run.worktree_path}`, prUrl: null, head: null };
+  const shipped = deliveredOf(ctx.db, run.task_id);
+  if (!shipped) return { line: `merge ${run.task_id} (${title}): nothing delivered yet; it will be refused`, prUrl: null, head: null };
+  const evidence = shipped.kind === "pr" ? prEvidence(ctx.db, run.id) : null;
+  const head = evidence?.head ?? shipped.head;
+  const where = shipped.kind === "pr" ? `PR ${shipped.ref} at ${head.slice(0, 8)}, checks ${evidence?.checks?.line ?? "unknown"}` : `branch ${run.branch} at ${head.slice(0, 8)} into local main`;
+  return { line: `merge ${run.task_id} (${title}): ${where}`, prUrl: approvalRef(shipped), head };
+}
+
+/**
+ * Claude PreToolUse (design section 7): a Bash call that runs `flowryn
+ * merge` (or a cleanup --discard) is recorded as an attempt (session, tool
+ * use id, arguments, permission mode, and the PR and head the prompt names)
+ * and answered with "ask", so Claude puts it in front of you even in auto
+ * mode (M0 c08). The merge that follows matches this attempt; without one,
+ * it is refused.
+ */
+export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
+  const result = toolActivity(ctx);
+  const s = leaderSession(ctx);
+  if (s.harness !== "claude" || input.tool_name !== "Bash") return result;
+  const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
+  const gated = gatedCommands(command);
+  if (gated.length === 0) return result;
+  const now = ctx.now();
+  const lines: string[] = [];
+  for (const g of gated) {
+    const facts = promptFacts(ctx, g);
+    recordAttempt(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), action: g.action, task: g.task, permissionMode: String(input.permission_mode ?? "unknown"), prUrl: facts.prUrl, head: facts.head, now });
+    lines.push(facts.line);
+  }
+  return { data: { permission: "ask", reason: `Flowryn needs your word: ${lines.join("; ")}. Approve only if you want this.` } };
+}
+
+/**
+ * Pi: a fresh approval key for the lease holder's extension, over its own
+ * hook call and never into an environment (design section 7). A session that
+ * took the lease after it started (leader claim) gets its key this way; a
+ * new key replaces the old one.
+ */
+export function approvalKey(ctx: HandlerCtx): HandlerResult {
+  const s = leaderSession(ctx);
+  if (s.harness !== "pi") throw new FlowrynError("role_refused", "only a Pi leader's extension holds an approval key");
+  if (!isHolder(ctx.db, s.session_id)) throw new FlowrynError("not_leader", "this session does not hold the lease", "flowryn leader claim");
+  const key = mintToken("key");
+  ctx.db.query("UPDATE leader_lease SET approval_key_hash = ?2 WHERE id = 1 AND session_id = ?1").run(s.session_id, hashToken(key));
+  appendEvent(ctx.db, { source: "hook", kind: "leader.approval_key", payload: { session: s.session_id }, ts: ctx.now() });
+  return { data: { key } };
 }
 
 // --- turn end -------------------------------------------------------------------------------

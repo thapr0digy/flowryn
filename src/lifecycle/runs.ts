@@ -47,6 +47,9 @@ export interface RunRow {
   worker_started_at: number | null;
   launched_at: number | null;
   transcript_path: string | null;
+  /** M4: the worktree's cleanup after landing or cancel: null, refused or done. */
+  cleanup: string | null;
+  cleanup_detail: string | null;
 }
 
 export interface RunWithPolicy extends RunRow {

@@ -88,7 +88,8 @@ function spool(spec: VerbSpec, envelope: Envelope, io: CliIo, why: string): numb
 export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown>, io: CliIo): Promise<number> {
   const envelope = buildEnvelope(spec, args, io);
   const sock = socketPath(flowrynHome(io.env), io.env);
-  const timeouts = spec.spool ? WORKER_TIMEOUTS : LEADER_TIMEOUTS;
+  const base = spec.spool ? WORKER_TIMEOUTS : LEADER_TIMEOUTS;
+  const timeouts = spec.replyMs ? { ...base, replyMs: spec.replyMs } : base;
   let reply: Reply;
   try {
     reply = (await request(sock, envelope, timeouts)) as Reply;

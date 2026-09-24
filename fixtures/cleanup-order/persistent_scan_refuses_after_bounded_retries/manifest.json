@@ -1,0 +1,25 @@
+{
+  "name": "persistent_scan_refuses_after_bounded_retries",
+  "ported_from": "tests/fm-teardown.test.sh:test_persistent_scan_refuses_after_bounded_retries",
+  "description": "lsof keeps reporting pid 99999999 under the worktree, and ps keeps naming it with the same start time, whatever is signalled. After the bounded reap passes it is still there: refused, worktree kept.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "refused",
+    "reason_class": "survivors",
+    "lock": null,
+    "abort": false
+  }
+}

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fake lsof: every call fails, so nothing can be proven about holders or cwds.
+echo "lsof: simulated failure for ${*: -1}" >&2
+exit 2

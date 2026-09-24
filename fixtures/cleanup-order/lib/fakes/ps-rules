@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fake ps for one pid (<scenario>/runtime/ps-pid), with a rule in runtime/ps-mode:
+#   flip:<n>     after <n> reads, the pid's start time reads as a different one
+#   ghost        the pid always reads alive with a fixed start time
+#   mark:<file>  the first read creates <file>, then waits for the process to exec
+set -uo pipefail
+rt="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/runtime"
+target=$(cat "$rt/ps-pid")
+mode=$(cat "$rt/ps-mode")
+asks=0 prev="" with_pid=0
+for a in "$@"; do
+  if [ "$prev" = -p ]; then case ",$a," in *",$target,"*) asks=1 ;; esac; fi
+  case "$a" in *pid=*) with_pid=1 ;; esac
+  prev=$a
+done
+[ "$asks" = 1 ] || exec /bin/ps "$@"
+n=$(( $(cat "$rt/ps-count" 2>/dev/null || echo 0) + 1 ))
+printf '%s\n' "$n" > "$rt/ps-count"
+line() {  # <lstart> <comm>
+  if [ "$with_pid" = 1 ]; then printf '%6s %s %s\n' "$target" "$1" "$2"; else printf '%s\n' "$1"; fi
+}
+case "$mode" in
+  flip:*)
+    if [ "$n" -le "${mode#flip:}" ]; then exec /bin/ps "$@"; fi
+    out=$(LC_ALL=C /bin/ps -o comm= -p "$target" 2>/dev/null) || exit 1
+    line "Mon Jan  1 00:00:00 2001" "${out:-perl}"
+    ;;
+  ghost) line "Tue Aug  4 10:00:00 2026" "sleep" ;;
+  mark:*)
+    LC_ALL=C /bin/ps "$@"
+    rc=$?
+    [ -e "${mode#mark:}" ] || { : > "${mode#mark:}"; sleep 0.3; }
+    exit "$rc"
+    ;;
+esac

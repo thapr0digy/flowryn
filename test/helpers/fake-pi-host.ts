@@ -18,6 +18,13 @@
  *   bun fake-pi-host.ts <extension.ts>
  *   {"id": 1, "cmd": "start" | "prompt" | "prompt_busy" | "finish" | "type" | "clear"
  *                    | "interrupt" | "compact" | "quit", "text"?, "willRetry"?}
+ *   {"id": 2, "cmd": "tool", "name": "flowryn_merge", "params": {...}, "confirm": true}
+ *       the model calls a tool the extension registered; ctx.ui.confirm() answers
+ *       `confirm` and is reported as {ev: "confirm", title, message} (M0 p07);
+ *       the tool's text comes back as {ev: "result", id, text}
+ *   {"id": 3, "cmd": "bash", "command": "..."}
+ *       the model runs a shell command: tool_call handlers may block it (M0 p08);
+ *       {ev: "result", id, blocked, reason?, code?, stdout?}
  */
 
 import { resolve } from "node:path";
@@ -31,6 +38,8 @@ if (!extensionPath) {
 }
 
 const handlers = new Map<string, Handler[]>();
+const tools = new Map<string, { execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<unknown> }>();
+let confirmAnswer = false;
 const inputHandlers = new Set<(data: string) => unknown>();
 let running = false;
 let inTool = false;
@@ -74,7 +83,10 @@ const ctx = {
       return () => inputHandlers.delete(handler);
     },
     notify: () => {},
-    confirm: async () => false,
+    confirm: async (title: string, message: string) => {
+      out({ ev: "confirm", title, message });
+      return confirmAnswer;
+    },
   },
 };
 
@@ -103,7 +115,9 @@ const pi = {
     if (running) followUps.push({ text, custom: false });
     else void prompt(text);
   },
-  registerTool() {},
+  registerTool(tool: { name: string; execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, ctx: unknown) => Promise<unknown> }) {
+    tools.set(tool.name, tool);
+  },
   registerCommand() {},
   registerProvider() {},
 };
@@ -181,7 +195,22 @@ async function typeText(text: string): Promise<void> {
   for (const handler of inputHandlers) handler(text);
 }
 
-async function handle(command: { id: number; cmd: string; text?: string; willRetry?: boolean }): Promise<void> {
+function toolText(result: unknown): string {
+  const content = (result as { content?: { type: string; text?: string }[] } | null)?.content ?? [];
+  return content.map((c) => c.text ?? "").join("\n");
+}
+
+async function runBash(command: string): Promise<Record<string, unknown>> {
+  for (const result of await emit("tool_call", { toolName: "bash", input: { command } })) {
+    const r = result as { block?: boolean; reason?: string } | undefined;
+    if (r?.block) return { blocked: true, reason: r.reason ?? "" };
+  }
+  const proc = Bun.spawn(["sh", "-c", command], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env });
+  const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  return { blocked: false, code, stdout };
+}
+
+async function handle(command: { id: number; cmd: string; text?: string; willRetry?: boolean; name?: string; params?: unknown; confirm?: boolean; command?: string }): Promise<void> {
   switch (command.cmd) {
     case "start":
       await emit("session_start", { reason: "startup" });
@@ -216,6 +245,17 @@ async function handle(command: { id: number; cmd: string; text?: string; willRet
       // An idle /compact is not a run: no agent_settled (M0 p04).
       await emit("session_compact", { reason: "manual", willRetry: command.willRetry === true, fromExtension: false });
       break;
+    case "tool": {
+      const tool = tools.get(command.name ?? "");
+      if (!tool) throw new Error(`no tool ${command.name}`);
+      confirmAnswer = command.confirm === true;
+      const result = await tool.execute(`call-${command.id}`, command.params ?? {}, undefined, undefined, ctx);
+      out({ ev: "result", id: command.id, text: toolText(result) });
+      break;
+    }
+    case "bash":
+      out({ ev: "result", id: command.id, ...(await runBash(command.command ?? "")) });
+      break;
     case "quit":
       await emit("session_shutdown", { reason: "quit" });
       out({ ev: "ack", id: command.id });
@@ -239,7 +279,7 @@ process.stdin.on("data", (chunk: string) => {
     const line = buffer.slice(0, nl).trim();
     buffer = buffer.slice(nl + 1);
     if (!line) continue;
-    const command = JSON.parse(line) as { id: number; cmd: string; text?: string; willRetry?: boolean };
+    const command = JSON.parse(line) as { id: number; cmd: string; text?: string; willRetry?: boolean; name?: string; params?: unknown; confirm?: boolean; command?: string };
     // A command that holds (prompt_busy) must not block "finish" or "interrupt".
     const runNow = command.cmd === "finish" || command.cmd === "interrupt";
     const task = async () => {

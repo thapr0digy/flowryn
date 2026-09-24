@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fake lsof: the cwd scan reports <runtime>/lsof-pid under the worktree for the
+# first <runtime>/lsof-scans scans (default: every scan), then nothing; any
+# other query is a holder-free path.
+rt="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/runtime"
+case " $* " in
+  *" -d cwd "*)
+    n=$(( $(cat "$rt/lsof-count" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$n" > "$rt/lsof-count"
+    limit=$(cat "$rt/lsof-scans" 2>/dev/null || echo 999999)
+    if [ "$n" -le "$limit" ]; then
+      printf 'p%s\nfcwd\nn%s\n' "$(cat "$rt/lsof-pid")" "$(cat "$rt/lsof-cwd")"
+    fi
+    exit 0 ;;
+esac
+exit 1

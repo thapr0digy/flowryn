@@ -1,0 +1,26 @@
+{
+  "name": "exec_changed_process_is_still_reaped",
+  "ported_from": "tests/fm-teardown.test.sh:test_exec_changed_process_is_still_reaped",
+  "description": "A process in the worktree execs a new program (which ignores SIGTERM) right after its identity is first read: its executable changes, its start time does not. Identity is the birth time, so it is still the same process and is force-killed.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": false,
+    "processes": "dead"
+  }
+}

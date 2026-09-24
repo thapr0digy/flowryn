@@ -1,0 +1,25 @@
+{
+  "name": "mismatched_run_after_abort_refuses_unconfirmed",
+  "ported_from": "tests/fm-teardown.test.sh:test_mismatched_run_after_abort_refuses_unconfirmed",
+  "description": "After the abort, the status names a different run (02RUN, still parked). Another run cannot confirm the targeted abort: refused.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "refused",
+    "reason_class": "nomistakes_unconfirmed",
+    "lock": null,
+    "abort": true
+  }
+}

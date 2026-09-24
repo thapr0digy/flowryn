@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake lsof: a live process holds every path asked about; the cwd scan finds nothing.
+case " $* " in *" -d cwd "*) exit 0 ;; esac
+printf 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\ngit 4242 me 3w REG 1,4 0 1 %s\n' "${*: -1}"
+exit 0

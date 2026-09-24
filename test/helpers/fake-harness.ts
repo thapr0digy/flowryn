@@ -17,6 +17,12 @@
  *   FAKE: no-start                   never report worker-start (a trust wedge)
  *   FAKE: cwd <path>                 report this cwd at worker-start (isolation test)
  *   FAKE: ignore-steers              never acknowledge a steer
+ *   FAKE: commit <file> <text...>    write <file> in the worktree and commit it
+ *   FAKE: push                       git push origin HEAD (the run branch)
+ *   FAKE: pr <api> <owner/repo> [draft]  open a PR for the run branch on a fake GitHub
+ *   FAKE: deliver-pr                 deliver --pr <the PR it opened>; the reply goes to fake-replies.jsonl
+ *   FAKE: deliver-local              deliver --local; the reply goes to fake-replies.jsonl
+ *   FAKE: wait-file <name>           wait until $FLOWRYN_REPORT_DIR/<name> exists (the test sequences a step)
  *
  * Steps run once per session: a resumed session continues after the last step
  * it finished (state kept next to the task file).
@@ -135,6 +141,22 @@ async function tool(run: () => Promise<void>): Promise<void> {
   if (context) await onSteer(context);
 }
 
+const WORKTREE = env.FLOWRYN_WORKTREE ?? process.cwd();
+const GIT_ENV = { ...env, GIT_AUTHOR_NAME: "fake worker", GIT_AUTHOR_EMAIL: "fake@worker.invalid", GIT_COMMITTER_NAME: "fake worker", GIT_COMMITTER_EMAIL: "fake@worker.invalid", GIT_CONFIG_GLOBAL: "/dev/null" };
+
+async function git(gitArgs: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(["git", ...gitArgs], { cwd: WORKTREE, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: GIT_ENV });
+  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  if (code !== 0) log(`git ${gitArgs.join(" ")} -> ${code}: ${stderr.trim()}`);
+  return { code, stdout: stdout.trim(), stderr };
+}
+
+function recordReply(called: string[], result: { code: number; stdout: string }): void {
+  const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, "fake-replies.jsonl"), JSON.stringify({ args: called, code: result.code, reply: result.stdout.trim() }) + "\n");
+}
+
 async function runStep(step: string): Promise<"continue" | "end-turn"> {
   const [verb = "", ...rest] = step.split(/\s+/);
   switch (verb) {
@@ -184,6 +206,53 @@ async function runStep(step: string): Promise<"continue" | "end-turn"> {
     case "report":
       await tool(async () => {
         await flowryn(["report", rest[0] ?? "progress"]);
+      });
+      return "continue";
+    case "commit": {
+      const [file = "change.txt", ...words] = rest;
+      await tool(async () => {
+        writeFileSync(join(WORKTREE, file), `${words.join(" ") || "a change"}\n`);
+        await git(["add", "--", file]);
+        await git(["commit", "-q", "-m", `fake: ${file}`]);
+      });
+      return "continue";
+    }
+    case "push":
+      await tool(async () => {
+        await git(["push", "-q", "origin", "HEAD"]);
+      });
+      return "continue";
+    case "pr": {
+      const [api = "", repo = "", draft] = rest;
+      await tool(async () => {
+        const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).stdout;
+        const response = await fetch(`${api}/repos/${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: `fake PR for ${branch}`, head: branch, base: "main", draft: draft === "draft" }) });
+        const body = (await response.json()) as { html_url?: string };
+        log(`pr -> ${response.status} ${body.html_url ?? ""}`);
+        const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+        mkdirSync(dir, { recursive: true });
+        if (body.html_url) writeFileSync(join(dir, "pr-url"), body.html_url);
+      });
+      return "continue";
+    }
+    case "deliver-pr":
+      await tool(async () => {
+        const url = readFileSync(join(env.FLOWRYN_REPORT_DIR ?? ".", "pr-url"), "utf8").trim();
+        const called = ["deliver", "--pr", url];
+        recordReply(called, await flowryn([...called, "--json"]));
+      });
+      return "continue";
+    case "wait-file": {
+      const path = join(env.FLOWRYN_REPORT_DIR ?? ".", rest[0] ?? "go");
+      await tool(async () => {
+        while (!existsSync(path)) await Bun.sleep(50);
+      });
+      return "continue";
+    }
+    case "deliver-local":
+      await tool(async () => {
+        const called = ["deliver", "--local"];
+        recordReply(called, await flowryn([...called, "--json"]));
       });
       return "continue";
     case "crash":

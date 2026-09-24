@@ -1,0 +1,25 @@
+{
+  "name": "parked_run_advanced_head_locally_fetched_is_aborted",
+  "ported_from": "tests/fm-teardown.test.sh:test_parked_run_advanced_head_locally_fetched_is_still_aborted",
+  "description": "The parked run's head is a pipeline fix commit on top of this worktree's HEAD, fetched into the shared object store (no ref moves). A descendant head binds the run to this task: it is aborted.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": true
+  }
+}

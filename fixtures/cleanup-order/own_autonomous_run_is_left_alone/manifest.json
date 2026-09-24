@@ -1,0 +1,25 @@
+{
+  "name": "own_autonomous_run_is_left_alone",
+  "ported_from": "tests/fm-teardown.test.sh:test_own_autonomous_run_is_left_alone",
+  "description": "This worktree's own run is executing (running), not parked. The pipeline is doing its own work: it is left alone, and the cleanup proceeds.",
+  "delivery_mode": "no-mistakes",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "outcome": "removed",
+    "reason_class": "on_remote_tracking_branch",
+    "lock": null,
+    "abort": false
+  }
+}
