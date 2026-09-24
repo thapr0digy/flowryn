@@ -7,7 +7,7 @@ import { timingConfig, workersConfig } from "../config/workers.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { promptLine, workerContract } from "../harness/contract-text.ts";
+import { promptLine, workerContract, type ContractDelivery } from "../harness/contract-text.ts";
 import { shipGitAccess } from "../harness/git-access.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { adapterFor } from "../harness/registry.ts";
@@ -21,7 +21,7 @@ import { PROTO } from "../version.ts";
 import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
-import { positionOf, stageInstructions } from "./stages.ts";
+import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 
 /** fresh: the run's first launch; resume: its stored session again; stage: a new session for a stage with fresh = true. */
 export type LaunchMode = "fresh" | "resume" | "stage";
@@ -179,7 +179,7 @@ export class Launcher {
     const instructionsFile = join(runDir, "task.md");
     const contractFile = join(runDir, "contract.md");
     const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
-    const delivery = { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch };
+    const delivery = { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch, lastStage: lastStageOf(this.deps.db, run) };
     writeFileAtomic(instructionsFile, this.taskFile(run, config, delivery, mode), 0o600);
     writeFileAtomic(contractFile, workerContract(run.harness, styleBlock(config), delivery), 0o600);
     const skills = writeStageSkills(config.state_dir);
@@ -272,7 +272,7 @@ export class Launcher {
    * task as dispatched. Rewritten on every launch, so a resumed or fresh
    * worker reads where the run is now.
    */
-  private taskFile(run: RunWithPolicy, config: FlowrynConfig, delivery: { kind: "ship" | "scout"; mode: "no-mistakes" | "direct-PR" | "local-only"; defaultBranch: string }, mode: LaunchMode): string {
+  private taskFile(run: RunWithPolicy, config: FlowrynConfig, delivery: ContractDelivery, mode: LaunchMode): string {
     const body = dispatchedBody(this.deps.db, run.id).trim();
     const pos = positionOf(this.deps.db, run, run.kind);
     const header = stageInstructions(pos, { stateDir: config.state_dir, delivery });

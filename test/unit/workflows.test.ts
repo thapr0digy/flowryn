@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
 import { parseConfig } from "../../src/config/config.ts";
-import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleBlock, workflowConfigProblems, workflowFor, workflowsConfig } from "../../src/config/workflows.ts";
+import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleBlock, workflowConfigProblems, workflowFor, workflowsConfig, type WorkflowDef } from "../../src/config/workflows.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
-import { STYLE_BLOCK } from "../../src/harness/contract-text.ts";
+import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
 import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
@@ -199,6 +199,29 @@ describe("stage text", () => {
     const ship = stageInstructions({ def: feature, index: 3, stage: feature.stages[3]!, last: true }, { stateDir: dir, delivery });
     expect(ship).toContain("This is the last stage.");
     expect(ship).toContain("deliver --local");
+  });
+
+  test("a no-mistakes ship's emitted text starts its own last stage before the pipeline, and not again inside it", () => {
+    const release: WorkflowDef = {
+      id: "release",
+      stages: [
+        { id: "code", skill: null, gate: "none", pools: [], fresh: false },
+        { id: "publish", skill: null, gate: "merge", pools: [], fresh: false },
+      ],
+    };
+    const delivery = { kind: "ship" as const, mode: "no-mistakes" as const, defaultBranch: "main", lastStage: { id: "publish", pools: [] } };
+    const contract = workerContract("claude", null, delivery);
+    expect(contract).toContain("Before the pipeline: $FLOWRYN_BIN stage begin publish.");
+    expect(contract).not.toContain("stage_waiting");
+    const code = stageInstructions({ def: release, index: 0, stage: release.stages[0]!, last: false }, { stateDir: "/none", delivery });
+    expect(code).toContain("it runs in stage publish, once that stage has started");
+    const publish = stageInstructions({ def: release, index: 1, stage: release.stages[1]!, last: true }, { stateDir: "/none", delivery });
+    expect(publish).toContain("run its pipeline");
+    expect(publish).not.toContain("stage begin");
+
+    const pooled = workerContract("pi", null, { ...delivery, lastStage: { id: "ship", pools: ["validation"] } });
+    expect(pooled).toContain("stage begin ship; it holds a slot of validation.");
+    expect(pooled).toContain("On stage_waiting, end your turn");
   });
 
   test("a run with no frozen workflow falls back to its workflow's default, and an unknown stage to the first", () => {

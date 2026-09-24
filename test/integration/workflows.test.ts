@@ -223,7 +223,25 @@ describe("workflow stages and review gates", () => {
 
 describe("capacity is the contract for a delivery", () => {
   test(
-    "a ship that delivers from build while the validation cap is full waits for its ship stage; no pipeline runs outside the cap",
+    "no-mistakes: deliver --pr from build, without the ship stage started, is refused even with the pool free",
+    async () => {
+      ship = await makeShipEnv({ mode: "no-mistakes" });
+      const e = ship;
+      const f = e.fleet;
+      // A worker that ignores its contract: it pushes and opens the PR from build, then delivers.
+      const steps = ["Skips the slot", "FAKE: commit b.txt b", "FAKE: push", `FAKE: pr ${e.github.apiUrl} acme/web`, "FAKE: deliver-pr", "FAKE: sleep 600000"].join("\n");
+      const { task, run } = await f.dispatch(steps, { kind: "ship" });
+      const [refused] = await e.replies(task, 1);
+      expect(refused!.reply.error).toMatchObject({ code: "stage_waiting", help: "$FLOWRYN_BIN stage begin ship, then run the pipeline and deliver" });
+      expect(f.run(run)).toMatchObject({ state: "running", stage: "build", stage_state: "active" });
+      expect(rows(f, "SELECT 1 FROM pool_leases WHERE run_id = ?1 AND pool = 'validation'", run)).toEqual([]);
+      expect(rows(f, "SELECT 1 FROM artifacts WHERE task_id = ?1", task)).toEqual([]);
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "no-mistakes: stage begin waits while the validation cap is full, then holds the slot across the pipeline until the delivery",
     async () => {
       ship = await makeShipEnv({ mode: "no-mistakes", extraConfig: "[capacity]\nvalidation = 1" });
       const e = ship;
@@ -231,9 +249,9 @@ describe("capacity is the contract for a delivery", () => {
       const holder = await f.dispatch(["Holds validation", "FAKE: commit a.txt a", "FAKE: stage-done", "FAKE: sleep 600000"].join("\n"), { kind: "ship" });
       await f.waitRun(holder.run, (r) => r.stage === "ship" && r.stage_state === "active", "the holder in its ship stage");
       const steps = [
-        "Skips ahead",
+        "Waits for its slot",
         "FAKE: commit b.txt b",
-        "FAKE: verb deliver --pr https://github.com/acme/web/pull/99",
+        "FAKE: verb stage begin ship",
         "FAKE: wait-file go",
         "FAKE: push",
         `FAKE: pr ${e.github.apiUrl} acme/web`,
@@ -241,21 +259,28 @@ describe("capacity is the contract for a delivery", () => {
         "FAKE: sleep 600000",
       ].join("\n");
       const { task, run } = await f.dispatch(steps, { kind: "ship" });
-
-      // The delivery from build is refused, the ship stage waits for the full validation pool, and nothing was pushed.
-      const [refused] = await e.replies(task, 1);
-      expect((refused!.reply.error as { code: string }).code).toBe("stage_waiting");
-      expect(f.run(run)).toMatchObject({ state: "running", stage: "ship", stage_state: "waiting" });
       const validation = () => rows<{ run_id: string }>(f, "SELECT run_id FROM pool_leases WHERE pool = 'validation' AND released_at IS NULL").map((l) => l.run_id);
-      expect(validation()).toEqual([holder.run]);
-      expect(Bun.spawnSync(["git", "--git-dir", f.origin!, "for-each-ref", `refs/heads/${f.run(run).branch}`]).stdout.toString()).toBe("");
-      expect(rows(f, "SELECT 1 FROM artifacts WHERE task_id = ?1", task)).toEqual([]);
 
-      // The slot frees: the ship stage starts and its steer tells the worker to deliver again, which it does under the cap.
+      // The cap is full: stage begin says stage_waiting, and the ship stage queues.
+      const [waited] = await e.replies(task, 1);
+      expect(waited!.reply.error).toMatchObject({ code: "stage_waiting" });
+      expect(f.run(run)).toMatchObject({ state: "running", stage: "ship", stage_state: "waiting" });
+      expect(validation()).toEqual([holder.run]);
+
+      // The slot frees: the ship stage starts, and a steer says so.
       expect((await f.json(["cancel", holder.task])).code).toBe(0);
-      await f.waitRun(run, (r) => r.stage === "ship" && r.stage_state === "active", "the ship stage granted");
+      const started = await f.waitRun(run, (r) => r.stage === "ship" && r.stage_state === "active", "the ship stage granted");
       expect(validation()).toEqual([run]);
-      expect(one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE '%deliver again%'", run)!.body).toContain("Flowryn stage ship (2 of 2");
+      expect(one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE '%Stage ship has started%'", run)!.body).toContain("Flowryn stage ship (2 of 2");
+
+      // The pipeline runs (no-mistakes reports it active, then passed) under the slot; the delivery then releases it.
+      const statusFile = join(f.h.home, "nm-status");
+      writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${started.branch}\n  status: running\n  head: "abc"\n  pr: ""\n`);
+      await f.waitRun(run, (r) => r.state === "validating", "validating", 10_000);
+      expect(validation()).toEqual([run]);
+      writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${started.branch}\n  status: completed\n  head: "abc"\n  pr: ""\noutcome: passed\n`);
+      await f.waitRun(run, (r) => r.state === "running", "running again", 10_000);
+      expect(validation()).toEqual([run]);
       writeFileSync(join(f.h.dataDir, task, "go"), "");
       await f.waitRun(run, (r) => r.state === "ready" && r.stage_state === "done", "the delivery");
       expect(validation()).toEqual([]);

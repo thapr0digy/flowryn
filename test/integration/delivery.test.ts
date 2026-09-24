@@ -331,7 +331,7 @@ describe("no-mistakes, local-only, decline and cleanup", () => {
     async () => {
       env = await makeShipEnv({ mode: "no-mistakes" });
       const e = env;
-      const { task, run } = await e.fleet.dispatch(`Pipeline\nFAKE: commit fix.txt fixed\nFAKE: wait-file go\n${`FAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\n`}FAKE: deliver-pr\nFAKE: sleep 120000`, { kind: "ship" });
+      const { task, run } = await e.fleet.dispatch(`Pipeline\nFAKE: commit fix.txt fixed\nFAKE: verb stage begin ship\nFAKE: wait-file go\n${`FAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\n`}FAKE: deliver-pr\nFAKE: sleep 120000`, { kind: "ship" });
       const started = await e.fleet.waitRun(run, (r) => r.worker_started_at !== null, "worker started");
       expect(readFileSync(join(e.fleet.h.stateDir, "runs", run, "contract.md"), "utf8")).toContain("Ship with no-mistakes");
       const statusFile = join(e.fleet.h.home, "nm-status");

@@ -77,13 +77,13 @@ export class Scheduler {
   private readonly deps: SchedulerDeps;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private steady: ReturnType<typeof setInterval> | null = null;
-  private running: Promise<void> | null = null;
-  private again = false;
+  /** Passes and single-run grants run one at a time, in order. */
+  private chain: Promise<unknown> = Promise.resolve();
+  /** A pass requested but not started yet: callers meanwhile share it. */
+  private queued: Promise<void> | null = null;
   private stopped = false;
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
   private readonly relaunching = new Set<string>();
-  /** Runs whose worker waits on the reply to the grant: their stage start carries no steer. */
-  private readonly quiet = new Set<string>();
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
@@ -111,32 +111,41 @@ export class Scheduler {
     }, 25);
   }
 
-  /** A pass now, serialized with every other pass; a request during a pass runs one more after it. */
-  async passNow(): Promise<void> {
-    if (this.stopped) return;
-    if (this.running) {
-      this.again = true;
-      await this.running;
-      if (!this.again) return;
-    }
-    this.again = false;
-    this.running = this.pass().finally(() => {
-      this.running = null;
-    });
-    await this.running;
-    if (this.again) await this.passNow();
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.chain.then(fn, fn);
+    this.chain = next.catch(() => undefined);
+    return next;
   }
 
-  /** A pass now in which the run's grant carries no steer; whether its stage is now active. */
+  /** A pass now, serialized with every other pass and grant; a request during a pass runs one more after it. */
+  async passNow(): Promise<void> {
+    if (this.stopped) return;
+    this.queued ??= this.exclusive(async () => {
+      this.queued = null;
+      await this.pass();
+    });
+    await this.queued;
+  }
+
+  /**
+   * Grant this one run now, if its turn and the pools allow, and nothing else:
+   * no auto-dispatch, no other run's launch. Its worker is waiting on the
+   * reply, so the stage start carries no steer. Work nearer shipping or older
+   * that needs one of the same pools keeps its turn: then this run waits for
+   * a regular pass. Resolves whether the run's stage is now active.
+   */
   async grantNow(runId: string): Promise<boolean> {
-    this.quiet.add(runId);
-    try {
-      await this.passNow();
-    } finally {
-      this.quiet.delete(runId);
-    }
-    const row = this.deps.db.query("SELECT stage_state, pending_launch FROM runs WHERE id = ?1").get(runId) as { stage_state: string; pending_launch: string | null } | null;
-    return row?.stage_state === "active" && row.pending_launch === null;
+    if (this.stopped) return false;
+    return this.exclusive(async () => {
+      if (this.stopped) return false;
+      const candidates = this.candidates();
+      const at = candidates.findIndex((c) => c.run.id === runId);
+      if (at < 0) return false;
+      const mine = candidates[at]!;
+      if (candidates.slice(0, at).some((c) => c.needs.some((pool) => mine.needs.includes(pool)))) return false;
+      const config = this.deps.config();
+      return this.tryGrant(mine, config, { verdict: null }, false);
+    });
   }
 
   private async pass(): Promise<void> {
@@ -194,35 +203,40 @@ export class Scheduler {
   }
 
   private async grant(): Promise<void> {
-    const { db, config: configOf, now } = this.deps;
-    const config = configOf();
-    const capacity = capacityConfig(config);
-    const paused = usageLimitSince(db) !== null;
-    let verdict: HostVerdict | null = null;
+    const config = this.deps.config();
+    const host = { verdict: null as HostVerdict | null };
     for (const c of this.candidates()) {
       if (this.stopped) return;
-      if (paused && c.run.harness === "claude") continue;
-      if (c.needs.length > 0) {
-        verdict ??= await this.hostVerdict(capacity.host);
-        if (!verdict.ok) continue;
-        if (fullPools(db, capacity.pools, c.needs).length > 0) continue;
-      }
-      let activated;
-      try {
-        activated = tx(db, () => {
-          const fresh = getRunWithPolicy(db, c.run.id);
-          if (!fresh || isTerminal(fresh.state) || (fresh.stage_state !== "waiting" && !fresh.pending_launch)) return null;
-          return activateStage(db, config, fresh, now(), { steer: !this.quiet.has(fresh.id) });
-        });
-      } catch (error) {
-        if (error instanceof OverCapacity) continue;
-        throw error;
-      }
-      if (!activated) continue;
-      if (activated.steer) this.deps.notify(c.run.id);
-      if (activated.launch === "stage") await this.freshWorker(c.run.id);
-      else if (activated.launch) this.deps.launch(c.run.id, activated.launch);
+      await this.tryGrant(c, config, host, true);
     }
+  }
+
+  /** One grant: the usage pause, the host check (once per pass) and the pools, then the stage start. Whether it started. */
+  private async tryGrant(c: Candidate, config: FlowrynConfig, host: { verdict: HostVerdict | null }, steer: boolean): Promise<boolean> {
+    const { db, now } = this.deps;
+    const capacity = capacityConfig(config);
+    if (usageLimitSince(db) !== null && c.run.harness === "claude") return false;
+    if (c.needs.length > 0) {
+      host.verdict ??= await this.hostVerdict(capacity.host);
+      if (!host.verdict.ok) return false;
+      if (fullPools(db, capacity.pools, c.needs).length > 0) return false;
+    }
+    let activated;
+    try {
+      activated = tx(db, () => {
+        const fresh = getRunWithPolicy(db, c.run.id);
+        if (!fresh || isTerminal(fresh.state) || (fresh.stage_state !== "waiting" && !fresh.pending_launch)) return null;
+        return activateStage(db, config, fresh, now(), { steer });
+      });
+    } catch (error) {
+      if (error instanceof OverCapacity) return false;
+      throw error;
+    }
+    if (!activated) return false;
+    if (activated.steer) this.deps.notify(c.run.id);
+    if (activated.launch === "stage") await this.freshWorker(c.run.id);
+    else if (activated.launch) this.deps.launch(c.run.id, activated.launch);
+    return true;
   }
 
   /** A stage with fresh = true: the old worker exits, and a new session starts in the same worktree. */

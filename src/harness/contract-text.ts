@@ -19,6 +19,20 @@ export interface ContractDelivery {
   kind: "ship" | "scout";
   mode: "no-mistakes" | "direct-PR" | "local-only";
   defaultBranch: string;
+  /** The stage the delivery ends (the run's last): a no-mistakes ship starts it before its pipeline. */
+  lastStage?: { id: string; pools: string[] };
+  /** The text is that stage's own, which has already started. */
+  inLastStage?: boolean;
+}
+
+/** A no-mistakes ship's pipeline runs under its last stage's slots: start that stage first. */
+function beginLines(d: ContractDelivery): string[] {
+  if (d.inLastStage) return [];
+  const id = d.lastStage?.id ?? "<your last stage>";
+  const pools = d.lastStage?.pools ?? [];
+  const slot = pools.length > 0 ? `; it holds a slot of ${pools.join(" and ")}` : "";
+  const wait = !d.lastStage || pools.length > 0 ? ["  On stage_waiting, end your turn: a steer says when it has started."] : [];
+  return [`  Before the pipeline: $FLOWRYN_BIN stage begin ${id}${slot}.`, ...wait];
 }
 
 /** The "finished" lines: how this worker delivers, and that it is verified. */
@@ -30,8 +44,7 @@ export function deliveryLines(d: ContractDelivery): string[] {
   }
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
-    "  Run the pipeline only once your last stage (ship) has started: stage done",
-    "  requests it, and a steer starts it once its validation slot is granted.",
+    ...beginLines(d),
     "  An ask-user finding: $FLOWRYN_BIN ask with the finding; never answer it yourself.",
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",

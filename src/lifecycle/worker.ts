@@ -13,7 +13,7 @@ import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
-import { deliveryStages, recordStageDelivered, startPooledStages } from "./stages.ts";
+import { deliveryStages, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -212,6 +212,37 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
   return { source: real, artifact, bytes: st.size };
 }
 
+type DeliveryAsked = { kind: "report"; path: string } | { kind: "local" } | { kind: "pr"; url: string };
+
+/** What the worker asked to deliver, checked against the task before anything changes. */
+function deliveryAsked(ctx: HandlerCtx, run: RunWithPolicy, args: Record<string, unknown>): DeliveryAsked {
+  const pr = stringArg(args as never, "pr");
+  const path = stringArg(args as never, "report");
+  const local = boolArg(args as never, "local");
+  if ([pr, path, local || undefined].filter((v) => v !== undefined).length > 1) throw new FlowrynError("bad_args", "deliver one outcome: --report, --pr or --local");
+  if (run.kind === "scout") {
+    if (pr || local) throw new FlowrynError("bad_args", "a scout task delivers a report, not a pull request", "flowryn deliver --report <path>");
+    if (!path) throw new FlowrynError("bad_args", "deliver needs --report <path>");
+    return { kind: "report", path };
+  }
+  if (path) throw new FlowrynError("bad_args", "a ship task delivers a pull request or a local branch, not a report");
+  if (!getProject(ctx.db, run.project_id)) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
+  if (run.state === "merging" || run.state === "landed") throw new FlowrynError("run_not_active", `${run.task_id} is ${run.state}; it is past delivery`);
+  if (run.delivery_mode === "local-only") {
+    if (pr) throw new FlowrynError("bad_args", "this is a local-only task: never push; deliver --local");
+    if (!local) throw new FlowrynError("bad_args", "deliver needs --local (a local-only task)");
+    return { kind: "local" };
+  }
+  if (local) throw new FlowrynError("bad_args", `this task ships through ${run.delivery_mode}: deliver --pr <url>`);
+  if (!pr) throw new FlowrynError("bad_args", "deliver needs --pr <url>");
+  return { kind: "pr", url: pr };
+}
+
+/** A no-mistakes ship: its pipeline runs under its last stage's slots. */
+function usesPipeline(run: RunWithPolicy): boolean {
+  return run.kind === "ship" && run.delivery_mode === "no-mistakes";
+}
+
 /**
  * `flowryn deliver`: the worker's outcome, verified before the run is ready.
  * The task kind decides it: a scout delivers `--report <path>`; a ship
@@ -234,37 +265,26 @@ const deliver: VerbSpec = {
   // The named-head gate asks GitHub and the remote; a slow answer must not turn a refusal into a spool.
   replyMs: 60_000,
   async prepare(ctx, args) {
-    // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate,
-    await startPooledStages(ctx, activeRun(ctx).id);
+    const asked = deliveryAsked(ctx, activeRun(ctx), args);
+    // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate.
+    const before = activeRun(ctx);
+    if (before.state !== "ready") {
+      if (usesPipeline(before)) requireLastStageStarted(ctx.db, before);
+      else await startPooledStages(ctx, before.id);
+    }
     const run = activeRun(ctx);
     if (run.state !== "ready") deliveryStages(ctx.db, run);
-    const pr = stringArg(args, "pr");
-    const path = stringArg(args, "report");
-    const local = boolArg(args, "local");
-    if ([pr, path, local || undefined].filter((v) => v !== undefined).length > 1) throw new FlowrynError("bad_args", "deliver one outcome: --report, --pr or --local");
-    if (run.kind === "ship") {
-      if (path) throw new FlowrynError("bad_args", "a ship task delivers a pull request or a local branch, not a report");
-      const project = getProject(ctx.db, run.project_id);
-      if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
-      if (run.state === "merging" || run.state === "landed") throw new FlowrynError("run_not_active", `${run.task_id} is ${run.state}; it is past delivery`);
-      const deps = { db: ctx.db, git: ctx.delivery.git, forge: ctx.delivery.forge(), webUrl: ctx.delivery.github().web_url, now: ctx.now };
-      if (run.delivery_mode === "local-only") {
-        if (pr) throw new FlowrynError("bad_args", "this is a local-only task: never push; deliver --local");
-        if (!local) throw new FlowrynError("bad_args", "deliver needs --local (a local-only task)");
-        return { ship: await verifyLocalDelivery(deps, run, project) };
-      }
-      if (local) throw new FlowrynError("bad_args", `this task ships through ${run.delivery_mode}: deliver --pr <url>`);
-      if (!pr) throw new FlowrynError("bad_args", "deliver needs --pr <url>");
-      return { ship: await verifyPrDelivery(deps, run, project, pr) };
-    }
-    if (pr || local) throw new FlowrynError("bad_args", "a scout task delivers a report, not a pull request", "flowryn deliver --report <path>");
-    if (!path) throw new FlowrynError("bad_args", "deliver needs --report <path>");
-    return { report: collectReport(ctx, run, path) };
+    if (asked.kind === "report") return { report: collectReport(ctx, run, asked.path) };
+    const project = getProject(ctx.db, run.project_id)!;
+    const deps = { db: ctx.db, git: ctx.delivery.git, forge: ctx.delivery.forge(), webUrl: ctx.delivery.github().web_url, now: ctx.now };
+    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project) };
+    return { ship: await verifyPrDelivery(deps, run, project, asked.url) };
   },
   apply(ctx, _args, prepared) {
     const run = activeRun(ctx);
     const now = ctx.now();
     const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal };
+    if (run.state !== "ready" && usesPipeline(run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {
       const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now);
