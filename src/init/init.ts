@@ -3,6 +3,7 @@ import { join, sep } from "node:path";
 import { configProblems, defaultConfig, loadConfig, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { configPath, flowrynHome, runDir, toAbsolute } from "../config/paths.ts";
 import { renderConfig } from "../config/toml.ts";
+import { workerConfigProblems } from "../config/workers.ts";
 import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI } from "../version.ts";
 
@@ -22,7 +23,7 @@ export const INSTALL_HINTS: Record<ToolName, string> = {
 /** Defaults for the sections later milestones read; written once so they are there to edit. */
 export const LATER_SECTION_DEFAULTS: Record<string, unknown> = {
   workers: {
-    claude: { model: "opus", effort: "high", permission_mode: "bypass" },
+    claude: { model: "opus", effort: "high", permission_mode: "bypassPermissions" },
     pi: { effort: "medium" },
   },
   style: { terse: true },
@@ -197,7 +198,9 @@ export async function runInit(deps: InitDeps): Promise<number> {
     extra,
   };
   for (const problem of configProblems(config)) io.print(`${problem.level}: ${problem.message}`);
-  if (configProblems(config).some((p) => p.level === "error")) {
+  const sectionProblems = workerConfigProblems(config);
+  for (const problem of sectionProblems) io.print(`error: ${problem}`);
+  if (configProblems(config).some((p) => p.level === "error") || sectionProblems.length > 0) {
     io.print("nothing was written");
     return 1;
   }
