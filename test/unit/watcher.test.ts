@@ -112,6 +112,23 @@ describe("backlog watcher (fake hand edits)", () => {
     expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["a-a1"]);
   });
 
+  test("restoring a just-removed to-do by hand is your edit: it stays", async () => {
+    env = makeJournalEnv();
+    addTodo("a-a1", "keep");
+    addTodo("b-b2", "restore me");
+    await env.journal.drain();
+    const before = readFileSync(env.files.todos, "utf8");
+    env.record({ file: "todos", verb: "rm", taskId: "b-b2", positional: ["b-b2"] });
+    await env.journal.drain();
+    expect(readFileSync(env.files.todos, "utf8")).not.toContain("b-b2");
+    writeFileSync(env.files.todos, before);
+    const result = await env.watcher.check("todos", "test");
+    expect(result.outcome).toBe("edited");
+    expect(result.reapplied).toEqual([]);
+    await env.journal.drain();
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id).toSorted()).toEqual(["a-a1", "b-b2"]);
+  });
+
   test("deleting a just-added to-do that was also updated keeps it deleted", async () => {
     env = makeJournalEnv();
     addTodo("a-a1", "keep me");

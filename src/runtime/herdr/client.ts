@@ -28,6 +28,7 @@ export const ALLOWED_METHODS = new Set([
   "agent.start",
   "agent.get",
   "events.subscribe",
+  "notification.show",
 ]);
 
 export class HerdrError extends Error {
@@ -58,19 +59,27 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_LINE = 8 * 1024 * 1024;
 let nextId = 0;
 
-function refusal(method: string): HerdrError | null {
-  return ALLOWED_METHODS.has(method) ? null : new HerdrError("method_refused", `flowryn never calls Herdr ${method}`);
-}
+/**
+ * Methods only lab tooling may add (never the daemon): typing into a test
+ * leader's composer is how a live bridge contract run plays you.
+ */
+export const LAB_ONLY_METHODS = ["pane.send_text"] as const;
 
 export class HerdrClient implements HerdrTransport {
   readonly socketPath: string;
+  private readonly labMethods: ReadonlySet<string>;
 
-  constructor(socketPath: string) {
+  constructor(socketPath: string, options: { labMethods?: readonly (typeof LAB_ONLY_METHODS)[number][] } = {}) {
     this.socketPath = socketPath;
+    this.labMethods = new Set(options.labMethods ?? []);
+  }
+
+  private refusal(method: string): HerdrError | null {
+    return ALLOWED_METHODS.has(method) || this.labMethods.has(method) ? null : new HerdrError("method_refused", `flowryn never calls Herdr ${method}`);
   }
 
   call(method: string, params: Record<string, unknown>, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, unknown>> {
-    const refused = refusal(method);
+    const refused = this.refusal(method);
     if (refused) return Promise.reject(refused);
     const id = `f${++nextId}`;
     return new Promise((resolve, reject) => {

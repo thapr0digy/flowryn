@@ -174,9 +174,46 @@ CREATE INDEX runs_open ON runs(state) WHERE state NOT IN ('cleaned','failed','ca
 CREATE INDEX messages_open ON messages(run_id) WHERE acked_at IS NULL;
 `;
 
+/**
+ * M3: leaders and attention. A leader session is one `flowryn lead` launch,
+ * named by Flowryn (`L<n>`), so a Claude /clear or a Pi session switch inside
+ * the same process stays the same leader. token_hash is the session's CLI and
+ * hook credential; it carries the leader role only while the lease names this
+ * session. harness_session is the harness's own session id, proc_* the
+ * harness process (a holder is stale only once its process is gone),
+ * continuations the Stop continuations since the last prompt, banner a
+ * one-line notice for the next hook (leadership moved), has_ui whether a Pi
+ * leader has its TUI (without one a P0 never starts a turn), brief_pending that
+ * a session took the lease mid-conversation and gets the full briefing with its
+ * next prompt. items.due orders overdue to-dos within their lane. A P0 handed
+ * to a Pi extension is `offered` until the extension reports how it delivered
+ * it; the per-item lease covers offers as well as carries.
+ */
+const LEADER_SQL = /* sql */ `
+ALTER TABLE leader_sessions ADD COLUMN token_hash TEXT;
+ALTER TABLE leader_sessions ADD COLUMN harness_session TEXT;
+ALTER TABLE leader_sessions ADD COLUMN transcript_path TEXT;
+ALTER TABLE leader_sessions ADD COLUMN cwd TEXT;
+ALTER TABLE leader_sessions ADD COLUMN proc_pid INTEGER;
+ALTER TABLE leader_sessions ADD COLUMN proc_start INTEGER;
+ALTER TABLE leader_sessions ADD COLUMN proc_exe TEXT;
+ALTER TABLE leader_sessions ADD COLUMN continuations INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE leader_sessions ADD COLUMN banner TEXT;
+ALTER TABLE leader_sessions ADD COLUMN has_ui INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE leader_sessions ADD COLUMN brief_pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE leader_sessions ADD COLUMN started_at INTEGER;
+ALTER TABLE leader_sessions ADD COLUMN ended_at INTEGER;
+CREATE UNIQUE INDEX leader_sessions_token ON leader_sessions(token_hash) WHERE token_hash IS NOT NULL;
+ALTER TABLE items ADD COLUMN due TEXT;
+CREATE INDEX presentations_session ON presentations(session_id, state);
+CREATE UNIQUE INDEX one_p0_offer ON presentations(item_id)
+  WHERE state IN ('carried','offered') AND path IN ('continuation','waiter','trigger');
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
+  { version: 3, name: "leader", sql: LEADER_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

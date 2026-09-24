@@ -1,7 +1,8 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
-import { stringArg, type Args, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
+import { intArg, stringArg, type Args, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
+import * as leader from "../leader/hooks.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
 import { steerLine, steerPointer } from "../harness/contract-text.ts";
@@ -11,11 +12,13 @@ import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, typ
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
 
 /**
- * The hook verbs (design section 12, role "hook"): the worker's Claude hooks
- * and Pi extension call them through `flowryn hook <name>`, carrying the run
- * token of the pane they run in. They are rank-3 evidence (design section 6):
- * busy, idle, turn ended, session id and working directory. Each is a short
- * transaction; none is kept for idempotency or spooled.
+ * The hook verbs (design section 12, role "hook"). A worker's Claude hooks
+ * and Pi extension call them through `flowryn hook <name>` with the run token
+ * of their pane; for a worker they are rank-3 evidence (design section 6):
+ * busy, idle, turn ended, session id and working directory. A leader's hooks
+ * and extension call the same verbs with the leader session's token, and
+ * src/leader/hooks.ts handles those. Each is a short transaction; none is
+ * kept for idempotency or spooled.
  */
 
 export interface HookInput {
@@ -56,7 +59,20 @@ function hookFlags() {
     harness: { type: "string" as const, help: "claude or pi" },
     input: { type: "string" as const, help: "the hook's JSON input" },
     waiter: { type: "string" as const, help: "a waiter's id (a ULID minted when it was armed)" },
+    "started-at": { type: "int" as const, help: "when the hook process started (ms); a digest it cannot hand over in time is not carried" },
   };
+}
+
+function isLeaderCall(ctx: HandlerCtx): boolean {
+  return Boolean(ctx.caller.session) && !ctx.caller.runId;
+}
+
+function workerOnly(ctx: HandlerCtx, name: string): void {
+  if (isLeaderCall(ctx)) throw new FlowrynError("role_refused", `hook ${name} is a worker hook`);
+}
+
+function leaderOnly(ctx: HandlerCtx, name: string): void {
+  if (!isLeaderCall(ctx)) throw new FlowrynError("role_refused", `hook ${name} is a leader hook`);
 }
 
 /** Busy is a lease the hooks refresh; nothing fires after an interrupt, so it expires instead (design section 5). */
@@ -161,6 +177,7 @@ const workerStart: VerbSpec = {
   roles: ["worker"],
   ephemeral: true,
   async prepare(ctx, args) {
+    workerOnly(ctx, "worker-start");
     const run = hookRun(ctx);
     const input = parseInput(args);
     return { input, facts: await isolationFacts(ctx, run, input.cwd) };
@@ -211,48 +228,107 @@ const workerStart: VerbSpec = {
 
 // --- busy, idle and the mid-turn steer channel ----------------------------------------------
 
-function signalVerb(hook: HookName, summary: string, body: (ctx: HandlerCtx, run: RunWithPolicy, args: Args) => HandlerResult): VerbSpec {
+type LeaderBody = (ctx: HandlerCtx, input: leader.LeaderHookInput, args: Args, prepared: unknown) => HandlerResult;
+
+/**
+ * A hook verb both a worker and a leader call: the worker body gets the run,
+ * the leader body the parsed input. After commit it wakes whoever waits on
+ * this worker or leader session.
+ */
+function signalVerb(
+  hook: HookName,
+  summary: string,
+  body: (ctx: HandlerCtx, run: RunWithPolicy, args: Args) => HandlerResult,
+  leaderBody: LeaderBody,
+  leaderPrepare?: (ctx: HandlerCtx, args: Args) => Promise<unknown>,
+): VerbSpec {
   return {
     name: `hook.${hook}`,
     summary,
     positionals: [],
     flags: hookFlags(),
     kind: "mutation",
-    roles: ["worker"],
+    roles: ["worker", "hook"],
     ephemeral: true,
-    apply(ctx, args) {
+    async prepare(ctx, args) {
+      return isLeaderCall(ctx) && leaderPrepare ? leaderPrepare(ctx, args) : undefined;
+    },
+    apply(ctx, args, prepared) {
+      if (isLeaderCall(ctx)) return leaderBody(ctx, parseInput(args) as leader.LeaderHookInput, args, prepared);
       const run = hookRun(ctx);
       if (isTerminal(run.state)) return { data: { run: run.id, state: run.state } };
       return body(ctx, run, args);
     },
     async settle(ctx, result) {
       if (ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
+      if (isLeaderCall(ctx)) ctx.attention.bus.notify(ctx.caller.session!);
       return result;
     },
   };
 }
 
-const prompt = signalVerb("prompt", "Worker hook: a turn started (busy)", (ctx, run) => {
-  ctx.fleet.continuations.delete(run.id);
-  markBusy(ctx, run, HOOK_SIGNALS.prompt);
-  return { data: { run: run.id } };
-});
+/** A hook only a leader session calls. */
+function leaderVerb(name: string, summary: string, body: LeaderBody, prepare?: (ctx: HandlerCtx, args: Args) => Promise<unknown>, settle?: VerbSpec["settle"]): VerbSpec {
+  return {
+    name: `hook.${name}`,
+    summary,
+    positionals: [],
+    flags: hookFlags(),
+    kind: "mutation",
+    roles: ["hook"],
+    ephemeral: true,
+    async prepare(ctx, args) {
+      leaderOnly(ctx, name);
+      return prepare ? prepare(ctx, args) : undefined;
+    },
+    apply(ctx, args, prepared) {
+      return body(ctx, parseInput(args) as leader.LeaderHookInput, args, prepared);
+    },
+    async settle(ctx, result) {
+      if (settle) result = await settle(ctx, result);
+      ctx.attention.bus.notify(ctx.caller.session!);
+      return result;
+    },
+  };
+}
 
-const preTool = signalVerb("pre-tool", "Worker hook: a tool is about to run (busy lease)", (ctx, run) => {
-  markBusy(ctx, run, HOOK_SIGNALS["pre-tool"]);
-  return { data: { run: run.id } };
-});
+const prompt = signalVerb(
+  "prompt",
+  "Hook: a turn started (busy); a leader gets its P1 digest",
+  (ctx, run) => {
+    ctx.fleet.continuations.delete(run.id);
+    markBusy(ctx, run, HOOK_SIGNALS.prompt);
+    return { data: { run: run.id } };
+  },
+  (ctx, input, _args, prepared) => leader.prompt(ctx, input, (prepared as number | null | undefined) ?? null),
+  async (ctx, args) => leader.digestDeadline(ctx, intArg(args, "started-at")),
+);
+
+const preTool = signalVerb(
+  "pre-tool",
+  "Hook: a tool is about to run (busy lease)",
+  (ctx, run) => {
+    markBusy(ctx, run, HOOK_SIGNALS["pre-tool"]);
+    return { data: { run: run.id } };
+  },
+  (ctx) => leader.toolActivity(ctx),
+);
 
 /** PostToolUse carries a pending steer beside the next tool result, the documented mid-turn channel (M0 c07). */
-const postTool = signalVerb("post-tool", "Worker hook: a tool finished; returns a pending steer as context", (ctx, run, args) => {
-  markBusy(ctx, run, HOOK_SIGNALS["post-tool"]);
-  if (harnessOf(args) !== "claude") return { data: { run: run.id } };
-  const steer = takeSteer(ctx, run, "post-tool");
-  return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
-});
+const postTool = signalVerb(
+  "post-tool",
+  "Hook: a tool finished; a worker gets a pending steer as context",
+  (ctx, run, args) => {
+    markBusy(ctx, run, HOOK_SIGNALS["post-tool"]);
+    if (harnessOf(args) !== "claude") return { data: { run: run.id } };
+    const steer = takeSteer(ctx, run, "post-tool");
+    return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
+  },
+  (ctx) => leader.toolActivity(ctx),
+);
 
 /** Stop: a turn ended, unless a pending steer continues it (M0 c06), at most twice in a row. */
-const stop = signalVerb("stop", "Worker hook: a turn ended; may continue it with a pending steer", (ctx, run, args) => {
+const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer (worker) or a P0 (leader)", (ctx, run, args) => {
   if (harnessOf(args) === "claude") {
     const used = ctx.fleet.continuations.get(run.id) ?? 0;
     if (used < MAX_CONTINUATIONS) {
@@ -267,23 +343,64 @@ const stop = signalVerb("stop", "Worker hook: a turn ended; may continue it with
   ctx.fleet.continuations.delete(run.id);
   markIdle(ctx, run, HOOK_SIGNALS.stop);
   return { data: { run: run.id } };
-});
+}, (ctx) => leader.stop(ctx));
 
-const stopFailure = signalVerb("stop-failure", "Worker hook: a turn ended in an API error", (ctx, run) => {
-  ctx.fleet.continuations.delete(run.id);
-  markIdle(ctx, run, HOOK_SIGNALS["stop-failure"]);
-  appendEvent(ctx.db, { source: "hook", kind: "run.turn_failed", runId: run.id, taskId: run.task_id, payload: {} });
-  return { data: { run: run.id } };
-});
+const stopFailure = signalVerb(
+  "stop-failure",
+  "Hook: a turn ended in an API error",
+  (ctx, run) => {
+    ctx.fleet.continuations.delete(run.id);
+    markIdle(ctx, run, HOOK_SIGNALS["stop-failure"]);
+    appendEvent(ctx.db, { source: "hook", kind: "run.turn_failed", runId: run.id, taskId: run.task_id, payload: {} });
+    return { data: { run: run.id } };
+  },
+  (ctx) => leader.stopFailure(ctx),
+);
 
-const sessionEnd = signalVerb("session-end", "Worker hook: the harness session ended", (ctx, run) => {
-  const now = ctx.now();
-  ctx.db.query("UPDATE runs SET busy_until = NULL, last_hook_at = ?2, updated_at = ?2 WHERE id = ?1").run(run.id, now);
-  recordEvidence(ctx.db, run.id, "hook", 3, { signal: HOOK_SIGNALS["session-end"], at: now }, now);
-  appendEvent(ctx.db, { source: "hook", kind: "run.session_ended", runId: run.id, taskId: run.task_id, payload: {} });
-  ctx.fleet.reconcile(run.id);
-  return { data: { run: run.id } };
-});
+const sessionEnd = signalVerb(
+  "session-end",
+  "Hook: the harness session ended",
+  (ctx, run) => {
+    const now = ctx.now();
+    ctx.db.query("UPDATE runs SET busy_until = NULL, last_hook_at = ?2, updated_at = ?2 WHERE id = ?1").run(run.id, now);
+    recordEvidence(ctx.db, run.id, "hook", 3, { signal: HOOK_SIGNALS["session-end"], at: now }, now);
+    appendEvent(ctx.db, { source: "hook", kind: "run.session_ended", runId: run.id, taskId: run.task_id, payload: {} });
+    ctx.fleet.reconcile(run.id);
+    return { data: { run: run.id } };
+  },
+  (ctx, input) => leader.sessionEnd(ctx, input),
+);
+
+// --- leader-only hooks ------------------------------------------------------------------------
+
+const sessionStart = leaderVerb(
+  "session-start",
+  "Leader hook: session start, resume, clear or compaction; claims a vacant or stale lease and returns the briefing",
+  (ctx, input, _args, prepared) => leader.sessionStart(ctx, input, prepared as { state: string; epoch: number }),
+  (ctx) => leader.prepareSessionStart(ctx),
+  async (ctx, result) => {
+    // The old holder's waiter exits silently (design section 10).
+    if (typeof result.data.previous === "string") ctx.attention.bus.forget(result.data.previous);
+    ctx.attention.kick();
+    return result;
+  },
+);
+
+const notify = leaderVerb("notify", "Leader hook: you went inactive (Claude idle_prompt) or came back (Pi activity)", (ctx, input) => leader.notify(ctx, input));
+
+/**
+ * `hook wait-p0`: the leader's P0 waiter (design section 5). Claude runs it as
+ * an asyncRewake hook at SessionStart and every Stop; the Pi extension holds
+ * it as a long poll. It answers with a push, "wait" (ask again) or "exit".
+ */
+const waitP0 = leaderVerb(
+  "wait-p0",
+  "Leader hook: wait for a P0 to push (Claude asyncRewake waiter, Pi long poll)",
+  (ctx, _input, _args, prepared) => leader.takeP0(ctx, prepared as leader.WaitOutcome),
+  (ctx, args) => leader.waitForP0(ctx, stringArg(args, "waiter") ?? ""),
+);
+
+const delivered = leaderVerb("delivered", "Leader hook (Pi): the extension delivered a pushed P0, or declined it", (ctx, input) => leader.delivered(ctx, input));
 
 // --- the waiter -------------------------------------------------------------------------------
 
@@ -315,6 +432,7 @@ const waitSteer: VerbSpec = {
   roles: ["worker"],
   ephemeral: true,
   async prepare(ctx, args): Promise<WaitResult> {
+    workerOnly(ctx, "wait-steer");
     const harness = harnessOf(args);
     const waiter = stringArg(args, "waiter") ?? "";
     const runId = ctx.caller.runId ?? "";
@@ -353,4 +471,4 @@ const waitSteer: VerbSpec = {
   },
 };
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer];
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, sessionStart, notify, waitP0, delivered];

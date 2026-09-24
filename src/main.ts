@@ -19,7 +19,9 @@ async function main(): Promise<number> {
     stdinIsTty: Boolean(process.stdin.isTTY),
     stdoutIsTty: Boolean(process.stdout.isTTY),
   };
-  io.json = args.includes("--json");
+  // Words after `--` belong to a command a verb runs (flowryn lead -- ...), not to flowryn.
+  const cut = args.indexOf("--");
+  io.json = (cut === -1 ? args : args.slice(0, cut)).includes("--json");
   return cliMain(args, io, () => Bun.stdin.text());
 }
 

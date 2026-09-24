@@ -49,6 +49,8 @@ export class FakeHerdr {
   readonly panes = new Map<string, FakePane>();
   /** Methods made to fail with `{code}` while set (for example agent_pane_busy once). */
   readonly failNext = new Map<string, string[]>();
+  /** Agent statuses to report for panes regardless of their process: Herdr's own inference, which can be stale. */
+  readonly statusOverride = new Map<string, string>();
   private readonly subscribers = new Set<net.Socket>();
   private readonly server: net.Server;
   private readonly options: FakeHerdrOptions;
@@ -91,6 +93,14 @@ export class FakeHerdr {
   /** Every pane with a harness in it. */
   livePanes(): string[] {
     return [...this.panes.values()].filter((p) => this.harnessPid(p.paneId) !== null).map((p) => p.paneId);
+  }
+
+  /** A pane for a process this fake did not start (a leader in your terminal), reporting `status`. */
+  addPaneWithStatus(cwd: string, status: string): string {
+    const ws = this.createWorkspace(cwd, "leader");
+    const paneId = ws.panes[0]!;
+    this.statusOverride.set(paneId, status);
+    return paneId;
   }
 
   /** Add a pane Flowryn did not create, carrying a run's label, to exercise the orphan scan. */
@@ -169,7 +179,7 @@ export class FakeHerdr {
       cwd: pane.cwd,
       foreground_cwd: pane.cwd,
       agent: alive ? pane.kind : undefined,
-      agent_status: alive ? "working" : "unknown",
+      agent_status: this.statusOverride.get(pane.paneId) ?? (alive ? "working" : "unknown"),
       tokens: pane.tokens,
       title: pane.title,
       revision: pane.revision,
@@ -269,6 +279,8 @@ export class FakeHerdr {
         return { type: "pane_info", pane: this.paneView(this.need(params.pane_id)) };
       case "agent.get": {
         const pane = this.need(params.target);
+        const override = this.statusOverride.get(pane.paneId);
+        if (override) return { type: "agent_info", agent: { pane_id: pane.paneId, agent_status: override, revision: pane.revision } };
         if (this.harnessPid(pane.paneId) === null) throw Object.assign(new Error("agent not found"), { code: "agent_not_found" });
         return { type: "agent_info", agent: { pane_id: pane.paneId, agent_status: "working", revision: pane.revision } };
       }
@@ -286,6 +298,8 @@ export class FakeHerdr {
       }
       case "pane.close":
         this.closePane(this.need(params.pane_id));
+        return { type: "ok" };
+      case "notification.show":
         return { type: "ok" };
       case "session.snapshot":
         return { type: "session_snapshot", snapshot: { panes: [...this.panes.values()].map((p) => this.paneView(p)), agents: [] } };

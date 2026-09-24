@@ -1,0 +1,140 @@
+import type { FlowrynConfig } from "../config/config.ts";
+import { leaderTiming, notifyConfig } from "../config/leader.ts";
+import type { Db } from "../db/db.ts";
+import { getMeta, setMeta, tx } from "../db/db.ts";
+import { appendEvent } from "../db/events.ts";
+import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+
+/**
+ * OS and Herdr notifications (design section 9): a P0 at once, coalesced
+ * within p0_coalesce_s and repeated after p0_renotify_min while unresolved;
+ * at most one batched non-P0 notification per min_interval_min for new
+ * actionable P1 items and for actionable items open over a day (once a day);
+ * never one for P2. Each send is a notifications row and an event.
+ */
+
+export type MacNotify = (title: string, body: string) => Promise<void>;
+
+export interface NotifyDeps {
+  db: Db;
+  config(): FlowrynConfig;
+  runtime(): HerdrRuntime | null;
+  now(): number;
+  log(message: string): void;
+  /** macOS delivery; tests replace it. */
+  macos?: MacNotify;
+}
+
+interface Pending {
+  id: string;
+  lane: string;
+  line: string;
+}
+
+const DAY_MS = 86_400_000;
+
+/** macOS: `display notification` with the text passed as arguments, never spliced into the script. */
+export const osascriptNotify: MacNotify = async (title, body) => {
+  const proc = Bun.spawn(
+    ["/usr/bin/osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, body],
+    { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+  );
+  const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
+  const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+  clearTimeout(timer);
+  if (code !== 0) throw new Error(`osascript exited ${code}: ${stderr.trim().slice(0, 200)}`);
+};
+
+function nextNotificationId(db: Db): string {
+  const next = Number(getMeta(db, "next_notification_no") ?? "1");
+  setMeta(db, "next_notification_no", String(next + 1));
+  return `n${next}`;
+}
+
+function lastSent(db: Db, kind: "p0" | "batch"): number | null {
+  const row = db.query("SELECT MAX(sent_at) AS at FROM notifications WHERE channel LIKE ?1").get(`${kind}:%`) as { at: number | null };
+  return row.at;
+}
+
+function summary(items: Pending[]): string {
+  const first = items[0]!;
+  return items.length === 1 ? first.line : `${first.line} (+${items.length - 1} more: flowryn board)`;
+}
+
+export class NotifyPump {
+  private readonly deps: NotifyDeps;
+  private sending = false;
+
+  constructor(deps: NotifyDeps) {
+    this.deps = deps;
+  }
+
+  /** Decide and send what is due now. Never throws: a failed channel is logged. */
+  async tick(): Promise<void> {
+    if (this.sending) return;
+    this.sending = true;
+    try {
+      const plan = this.plan();
+      for (const send of plan) await this.deliver(send.channels, send.title, send.text);
+    } catch (error) {
+      this.deps.log(`notify: ${(error as Error).stack ?? String(error)}`);
+    } finally {
+      this.sending = false;
+    }
+  }
+
+  /** In one transaction: pick what is due, record it as sent, and return what to deliver. */
+  private plan(): { channels: string[]; title: string; text: string }[] {
+    const { db } = this.deps;
+    const cfg = notifyConfig(this.deps.config());
+    const channels = [...(cfg.macos ? ["macos"] : []), ...(cfg.herdr && this.deps.runtime() ? ["herdr"] : [])];
+    if (channels.length === 0) return [];
+    const now = this.deps.now();
+    const ageMs = leaderTiming(this.deps.config()).age_ms;
+    return tx(db, () => {
+      const sends: { channels: string[]; title: string; text: string }[] = [];
+      const p0 = db
+        .query(
+          `SELECT id, lane, line FROM items WHERE lane = 'P0' AND class = 'actionable' AND state IN ('open','presented')
+             AND (last_notified_at IS NULL OR last_notified_at <= ?1) ORDER BY opened_at`,
+        )
+        .all(now - cfg.p0_renotify_min * 60_000) as Pending[];
+      const lastP0 = lastSent(db, "p0");
+      if (p0.length > 0 && (lastP0 === null || now - lastP0 >= cfg.p0_coalesce_s * 1_000)) {
+        sends.push(this.record(p0, "p0", channels, `Flowryn: ${p0.length === 1 ? "a P0 needs you" : `${p0.length} P0s need you`}`, now));
+      }
+      const batch = db
+        .query(
+          `SELECT id, lane, line FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented')
+             AND (last_notified_at IS NULL OR (opened_at <= ?1 AND last_notified_at <= ?2)) ORDER BY opened_at`,
+        )
+        .all(now - ageMs, now - DAY_MS) as Pending[];
+      const lastBatch = lastSent(db, "batch");
+      if (batch.length > 0 && (lastBatch === null || now - lastBatch >= cfg.min_interval_min * 60_000)) {
+        sends.push(this.record(batch, "batch", channels, `Flowryn: ${batch.length === 1 ? "1 item needs you" : `${batch.length} items need you`}`, now));
+      }
+      return sends;
+    });
+  }
+
+  private record(items: Pending[], kind: "p0" | "batch", channels: string[], title: string, now: number) {
+    const { db } = this.deps;
+    const id = nextNotificationId(db);
+    const ids = items.map((i) => i.id);
+    db.query("INSERT INTO notifications (id, item_ids, channel, sent_at) VALUES (?1, ?2, ?3, ?4)").run(id, JSON.stringify(ids), `${kind}:${channels.join("+")}`, now);
+    for (const item of ids) db.query("UPDATE items SET last_notified_at = ?2 WHERE id = ?1").run(item, now);
+    appendEvent(db, { source: "daemon", kind: "notification.sent", payload: { notification: id, kind, items: ids, channels }, ts: now });
+    return { channels, title, text: summary(items) };
+  }
+
+  private async deliver(channels: string[], title: string, text: string): Promise<void> {
+    for (const channel of channels) {
+      try {
+        if (channel === "macos") await (this.deps.macos ?? osascriptNotify)(title, text);
+        else await this.deps.runtime()?.notify(title, text);
+      } catch (error) {
+        this.deps.log(`notify: ${channel} failed: ${(error as Error).message}`);
+      }
+    }
+  }
+}

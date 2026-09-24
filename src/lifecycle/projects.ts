@@ -235,7 +235,7 @@ const projectList: VerbSpec = {
   positionals: [],
   flags: {},
   kind: "read",
-  roles: ["leader", "human"],
+  roles: ["leader", "reader", "human"],
   read(ctx) {
     const projects = listProjects(ctx.db).map((p) => ({
       id: p.id,

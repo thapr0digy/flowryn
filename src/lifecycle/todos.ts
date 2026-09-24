@@ -1,6 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
-import type { Db } from "../db/db.ts";
+import { tx, type Db } from "../db/db.ts";
+import { syncOverdueTodos } from "../attention/todos-due.ts";
 import { boolArg, stringArg, type Args, type HandlerCtx, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { getIntent, intentArgs, pendingIntents, recordIntent, type IntentRow } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
@@ -82,12 +83,14 @@ function fromTask(task: BacklogTask): TodoView {
   return { id: task.id, title: task.title, state: task.state === "done" ? "done" : "open", due: dueOf(task.body), body: task.body };
 }
 
-/** Every to-do as the daemon knows it: the last read of todos.md plus adds still pending. */
+/** Every to-do as the daemon knows it: the last read of todos.md plus adds still pending, minus removals still pending. */
 export function todoViews(db: Db): TodoView[] {
   const tasks = readSnapshot(db, "todos")?.tasks ?? [];
-  const views = tasks.map(fromTask);
-  const known = new Set(views.map((v) => v.id));
-  for (const intent of pendingIntents(db, "todos")) {
+  const pending = pendingIntents(db, "todos");
+  const removing = new Set(pending.filter((i) => i.verb === "rm").map((i) => i.task_id));
+  const views = tasks.map(fromTask).filter((v) => !removing.has(v.id));
+  const known = new Set([...views.map((v) => v.id), ...removing]);
+  for (const intent of pending) {
     if (intent.verb !== "add" || !intent.task_id || known.has(intent.task_id)) continue;
     const args = intentArgs(intent);
     const body = typeof args.flags.body === "string" ? args.flags.body : "";
@@ -110,6 +113,8 @@ async function settleIntent(ctx: HandlerCtx, result: HandlerResult): Promise<Han
   if (row?.state === "failed") {
     throw new FlowrynError("rejected_by_tasks_axi", `tasks-axi refused ${row.verb} ${row.task_id}: ${row.last_error ?? "unknown error"}`);
   }
+  // A to-do done, removed or moved off the past opens or closes its overdue item now, not at the next pass.
+  if (row?.state === "applied") tx(ctx.db, () => syncOverdueTodos(ctx.db, ctx.now()));
   return { ...result, data: { ...result.data, intent_state: row?.state ?? "pending" } };
 }
 
@@ -189,6 +194,58 @@ const todoDue: VerbSpec = {
   settle: settleIntent,
 };
 
+const todoEdit: VerbSpec = {
+  name: "todo edit",
+  summary: "Change a to-do's title or notes (its due date stays; use todo due for that)",
+  positionals: [{ name: "id", required: true, help: "to-do id" }],
+  flags: {
+    title: { type: "string", help: "the new title, one line", placeholder: "text" },
+    "body-file": { type: "string", help: "new notes, from a file or - for stdin", fileFor: "body" },
+  },
+  kind: "mutation",
+  roles: ["leader", "human"],
+  prepare: freshTodos,
+  apply(ctx, args) {
+    const id = stringArg(args, "id")!;
+    const todo = findTodo(ctx.db, id);
+    const rawTitle = stringArg(args, "title");
+    const rawBody = stringArg(args, "body");
+    if (rawTitle === undefined && rawBody === undefined) throw new FlowrynError("bad_args", "say what changes: --title <text> and/or --body-file -");
+    const flags: Record<string, string> = {};
+    if (rawTitle !== undefined) flags.title = validateTitle(rawTitle);
+    if (rawBody !== undefined) {
+      const currentBody = pendingBody(pendingIntents(ctx.db, "todos"), id) ?? todo.body;
+      flags.body = withDue(sanitizeBlock(rawBody).trim(), dueOf(currentBody));
+    }
+    const intent = recordIntent(ctx.db, { file: "todos", verb: "update", taskId: id, positional: [id], flags, now: ctx.now() });
+    appendEvent(ctx.db, { source: "cli", kind: "todo.edited", taskId: id, payload: { intent: intent.id, fields: Object.keys(flags) } });
+    return { data: { todo: id, title: flags.title ?? todo.title, intent: intent.id }, hints: ["flowryn todo list"] };
+  },
+  settle: settleIntent,
+};
+
+/**
+ * `flowryn todo rm <id>`: take a to-do back, added by mistake or no longer
+ * wanted, without editing the file (a follow-up M1 left for M3).
+ */
+const todoRm: VerbSpec = {
+  name: "todo rm",
+  summary: "Remove a to-do",
+  positionals: [{ name: "id", required: true, help: "to-do id" }],
+  flags: {},
+  kind: "mutation",
+  roles: ["leader", "human"],
+  prepare: freshTodos,
+  apply(ctx, args) {
+    const id = stringArg(args, "id")!;
+    const todo = findTodo(ctx.db, id);
+    const intent = recordIntent(ctx.db, { file: "todos", verb: "rm", taskId: id, positional: [id], now: ctx.now() });
+    appendEvent(ctx.db, { source: "cli", kind: "todo.removed", taskId: id, payload: { intent: intent.id, title: todo.title } });
+    return { data: { todo: id, title: todo.title, removed: true, intent: intent.id }, hints: ["flowryn todo list"] };
+  },
+  settle: settleIntent,
+};
+
 type DueFilter = "today" | "overdue";
 
 function listTodos(ctx: ReadCtx, args: Args): HandlerResult {
@@ -213,7 +270,7 @@ function listTodos(ctx: ReadCtx, args: Args): HandlerResult {
   const dueToday = rows.filter((r) => r.when === "today").length;
   data.summary = `${rows.length} shown · due today ${dueToday} · overdue ${overdue}`;
   if (pending > 0) data.journal = `${pending} change(s) waiting to reach todos.md`;
-  const hints = rows.length === 0 ? ['flowryn todo add "<title>" --due <date>'] : ["flowryn todo done <id>", "flowryn todo due <id> <date>"];
+  const hints = rows.length === 0 ? ['flowryn todo add "<title>" --due <date>'] : ["flowryn todo done <id>", "flowryn todo edit <id> --title <text>"];
   return { data, hints };
 }
 
@@ -226,8 +283,8 @@ const todoList: VerbSpec = {
     due: { type: "string", help: "only today (due today or earlier) or overdue", placeholder: "today|overdue" },
   },
   kind: "read",
-  roles: ["leader", "human"],
+  roles: ["leader", "reader", "human"],
   read: listTodos,
 };
 
-export const TODO_VERBS: VerbSpec[] = [todoAdd, todoList, todoDone, todoDue];
+export const TODO_VERBS: VerbSpec[] = [todoAdd, todoList, todoDone, todoDue, todoEdit, todoRm];

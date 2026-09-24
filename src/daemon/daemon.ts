@@ -30,6 +30,11 @@ import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
+import { leaderTiming, notifyConfig } from "../config/leader.ts";
+import type { AttentionServices } from "../attention/services.ts";
+import { NotifyPump } from "../attention/notify.ts";
+import { lastItemNo } from "../attention/items.ts";
+import { syncOverdueTodos } from "../attention/todos-due.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -40,6 +45,8 @@ export interface DaemonOptions {
 }
 
 const DEFAULT_PASS_MS = 60_000;
+/** The attention pump: notifications, and a nudge to leader waiters when an item opens. */
+const ATTENTION_TICK_MS = 1_000;
 const TOOL_TIMEOUT_MS = 10_000;
 const SHUTDOWN_GRACE_MS = 12_000;
 
@@ -213,6 +220,16 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
     });
 
+    // M3: leader waiters, the leader clocks and notifications (design sections 9 and 10).
+    const notifyPump = new NotifyPump({ db: database, config: () => config, runtime: () => runtime, now: Date.now, log });
+    const attention: AttentionServices = {
+      bus: new SteerBus(),
+      timing: () => leaderTiming(config),
+      notify: () => notifyConfig(config),
+      kick: () => void notifyPump.tick(),
+      turnOffsets: new Map(),
+    };
+
     const services: DaemonServices = {
       db: database,
       config: () => config,
@@ -224,6 +241,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       requestShutdown: (reason) => setTimeout(() => stopRequested?.(reason), 10),
       runTool: (_tool, args, cwd) => git(args, cwd),
       fleet,
+      attention,
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
@@ -243,6 +261,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     if (ingested.ingested + ingested.duplicates + ingested.rejected > 0) log(`spool: ${JSON.stringify(ingested)}`);
     await watcher.start();
     journal.start();
+    const syncTodos = () => {
+      try {
+        const synced = tx(database, () => syncOverdueTodos(database, Date.now()));
+        if (synced.opened.length + synced.resolved > 0) log(`attention: overdue to-dos: ${synced.opened.length} opened, ${synced.resolved} resolved`);
+      } catch (error) {
+        log(`attention: overdue to-do check failed: ${(error as Error).message}`);
+      }
+    };
+    syncTodos();
     resolveReady();
 
     // Reconciler startup (design section 6, steps 4-7): subscribe first so events buffer,
@@ -250,6 +277,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     if (runtime) await herdrWatcher.start();
     await reconciler.passNow("startup");
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
+    let seenItem = lastItemNo(database);
+    const attentionTick = setInterval(() => {
+      const latest = lastItemNo(database);
+      if (latest !== seenItem) {
+        seenItem = latest;
+        attention.bus.notifyAll();
+      }
+      void notifyPump.tick();
+    }, ATTENTION_TICK_MS);
 
     let passing = false;
     const pass = setInterval(() => {
@@ -258,6 +294,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       void (async () => {
         try {
           await ingestSpool(spool, gateway, isIngested, log);
+          syncTodos();
           const backup = backupIfDue(database, stateFiles(config.state_dir).backups);
           if (backup) log(`backup: ${backup}`);
           gateway.sweepIdempotency(Date.now());
@@ -289,9 +326,11 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     log(`stopping: ${reason}`);
     clearInterval(pass);
     clearInterval(steady);
+    clearInterval(attentionTick);
     reconciler.stop();
     herdrWatcher.stop();
     bus.close();
+    attention.bus.close();
     removeSignals?.();
     process.off("SIGHUP", onHup);
     watcher.stop();

@@ -139,6 +139,20 @@ describe("intent journal", () => {
     expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["x-a1"]);
   });
 
+  test("a replayed rm whose first run already removed the task is applied, not failed", async () => {
+    env = makeJournalEnv();
+    addTodo("milk-a1", "buy milk");
+    const first = env.record({ file: "todos", verb: "rm", taskId: "milk-a1", positional: ["milk-a1"] });
+    const replay = env.record({ file: "todos", verb: "rm", taskId: "milk-a1", positional: ["milk-a1"] });
+    await env.journal.drain();
+    expect(getIntent(env.db, first.id)!.state).toBe("applied");
+    expect(getIntent(env.db, replay.id)!.state).toBe("applied");
+    expect(readSnapshot(env.db, "todos")!.tasks).toEqual([]);
+    expect(findOpenItem(env.db, "backlog_out_of_sync", "milk-a1")).toBeNull();
+    const payload = JSON.parse((env.db.query("SELECT payload FROM events WHERE kind = 'intent.applied' ORDER BY seq DESC LIMIT 1").get() as { payload: string }).payload);
+    expect(payload).toMatchObject({ verb: "rm", already: true });
+  });
+
   test("keeps intents pending while tasks-axi is missing", async () => {
     env = makeJournalEnv({ runnerMissing: true });
     const intent = addTodo("a-a1", "first");

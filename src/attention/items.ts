@@ -8,9 +8,9 @@ export type ItemClass = "actionable" | "info";
 /**
  * The lane table (design section 9): an event kind decides lane and class.
  * Nothing scores items; project priority and due date only order within a lane.
- * M1 opened the backlog kinds; M2 opens the worker and run kinds. The rest
- * are listed so later milestones extend data, not code. steer_unacked is the
- * section 6 "re-ring up to 3 times, then a P1".
+ * M1 opened the backlog kinds, M2 the worker and run kinds, M3 the overdue
+ * to-dos. The rest are listed so later milestones extend data, not code.
+ * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -65,6 +65,8 @@ export interface OpenItem {
   line: string;
   taskId?: string | null;
   runId?: string | null;
+  /** A due date (YYYY-MM-DD) that orders the item within its lane: overdue to-dos. */
+  due?: string | null;
   now?: number;
 }
 
@@ -73,10 +75,15 @@ export function openItem(db: Db, item: OpenItem): string {
   const { lane, class: klass } = LANE_TABLE[item.kind];
   const id = nextItemId(db);
   db.query(
-    `INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, opened_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
-  ).run(id, item.eventSeq, klass, lane, item.kind, item.taskId ?? null, item.runId ?? null, sanitizeLine(item.line), item.now ?? Date.now());
+    `INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, due, opened_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+  ).run(id, item.eventSeq, klass, lane, item.kind, item.taskId ?? null, item.runId ?? null, sanitizeLine(item.line), item.due ?? null, item.now ?? Date.now());
   return id;
+}
+
+/** The newest item number handed out, so the attention pump can tell that something opened. */
+export function lastItemNo(db: Db): number {
+  return Number(getMeta(db, "next_item_no") ?? "1") - 1;
 }
 
 export function findOpenItem(db: Db, kind: ItemKind, taskId: string | null): ItemRow | null {

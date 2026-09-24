@@ -62,7 +62,7 @@ export class Gateway {
     const spec = this.opts.lookup(env.verb);
     if (!spec || spec.kind === "local") throw new FlowrynError("unknown_verb", `unknown verb: ${env.verb}`, "flowryn help");
     const caller = resolveCaller(services.db, env.token, env.channel);
-    authorize(spec, caller);
+    authorize(spec, caller, services.db);
     const args = validateArgs(spec, env.args);
     const ctx: HandlerCtx = { ...services, caller, ulid: env.ulid, via };
 

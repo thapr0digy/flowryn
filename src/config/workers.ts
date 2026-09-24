@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { FlowrynConfig } from "./config.ts";
+import { leaderTiming, notifyConfig } from "./leader.ts";
 import { toAbsolute } from "./paths.ts";
 
 /**
@@ -153,10 +154,10 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
   };
 }
 
-/** Validate every M2 section at once; returns the problems (empty when sound). */
+/** Validate every section M2 and M3 own at once; returns the problems (empty when sound). */
 export function workerConfigProblems(config: FlowrynConfig): string[] {
   const problems: string[] = [];
-  for (const check of [() => herdrConfig(config), () => workersConfig(config), () => timingConfig(config)]) {
+  for (const check of [() => herdrConfig(config), () => workersConfig(config), () => timingConfig(config), () => leaderTiming(config), () => notifyConfig(config)]) {
     try {
       check();
     } catch (error) {

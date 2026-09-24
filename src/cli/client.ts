@@ -58,7 +58,7 @@ function readOffline(spec: VerbSpec, envelope: Envelope, io: CliIo): number {
   const db = openDb(dbPath, { readonly: true });
   try {
     const caller = resolveCaller(db, envelope.token, envelope.channel);
-    authorize(spec, caller);
+    authorize(spec, caller, db);
     const args = validateArgs(spec, envelope.args);
     const result = spec.read!({ db, config, now: Date.now(), caller }, args);
     return print(io, okReply(result.data, result.hints), READ_ONLY_BANNER);

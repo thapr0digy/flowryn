@@ -207,6 +207,11 @@ export class HerdrRuntime {
     }
   }
 
+  /** A Herdr notification, for P0 and batched attention (design section 9). */
+  async notify(title: string, body: string): Promise<void> {
+    await this.transport.call("notification.show", { title, body });
+  }
+
   /** The only keystroke v1 sends is the interrupt key (design section 5). */
   async sendInterrupt(paneId: string): Promise<void> {
     await this.transport.call("pane.send_keys", { pane_id: paneId, keys: ["Escape"] });

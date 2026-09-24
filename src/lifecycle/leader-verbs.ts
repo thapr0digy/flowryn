@@ -6,6 +6,8 @@ import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, unackedSteers } from "./steers.ts";
+import { openActionable } from "../attention/router.ts";
+import { leaderTiming } from "../config/leader.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
   const run = findRun(db, ref);
@@ -205,6 +207,7 @@ function needs(ctx: ReadCtx, run: FleetRow): string {
 }
 
 const MAX_FLEET_ROWS = 20;
+const MAX_NEEDS_ROWS = 10;
 
 /** `flowryn fleet`: every open run and today's finished ones, at most 20 rows (design section 12). */
 const fleet: VerbSpec = {
@@ -213,7 +216,7 @@ const fleet: VerbSpec = {
   positionals: [],
   flags: {},
   kind: "read",
-  roles: ["leader", "human"],
+  roles: ["leader", "reader", "human"],
   read(ctx) {
     const rows = ctx.db
       .query(
@@ -235,6 +238,12 @@ const fleet: VerbSpec = {
     const count = (lane: string) => lanes.find((l) => l.lane === lane)?.n ?? 0;
     const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}` };
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;
+    // Every open actionable item, P0 first: fleet lists what needs you, like every briefing (design section 9).
+    const waiting = openActionable(ctx.db, ctx.now, leaderTiming(ctx.config).age_ms);
+    if (waiting.length > 0) {
+      data.needs = waiting.slice(0, MAX_NEEDS_ROWS).map((i) => ({ id: i.id, lane: i.lane, line: sanitizeLine(i.line, 120) }));
+      if (waiting.length > MAX_NEEDS_ROWS) data.needs_more = `${waiting.length - MAX_NEEDS_ROWS} more: flowryn board`;
+    }
     return { data, hints: list.length > 0 ? ["flowryn show <id>", "flowryn steer <id> --body-file -"] : ["flowryn dispatch <project> --kind scout --body-file -"] };
   },
 };
@@ -246,7 +255,7 @@ const show: VerbSpec = {
   positionals: [{ name: "target", required: true, help: "task, run or item id" }],
   flags: {},
   kind: "read",
-  roles: ["leader", "human"],
+  roles: ["leader", "reader", "human"],
   read(ctx, args) {
     let target = stringArg(args, "target")!;
     const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as { task_id: string | null; run_id: string | null; line: string; lane: string; state: string } | null;

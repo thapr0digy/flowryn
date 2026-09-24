@@ -10,32 +10,56 @@ export function hashToken(token: string): string {
 }
 
 /** A new random capability token; `kind` is a readable prefix, not a secret. */
-export function mintToken(kind: "leader" | "run"): string {
-  return `fw${kind === "leader" ? "l" : "r"}_${randomBytes(32).toString("base64url")}`;
+export function mintToken(kind: "leader" | "run" | "key"): string {
+  const prefix = kind === "leader" ? "l" : kind === "run" ? "r" : "k";
+  return `fw${prefix}_${randomBytes(32).toString("base64url")}`;
+}
+
+interface LeaseRow {
+  session_id: string | null;
+  token_hash: string | null;
+  harness: string | null;
+  pane_id: string | null;
 }
 
 /**
- * Resolve the caller. A token matching the current lease is the leader; one
- * matching a run is that run's worker. No token: `human` when the CLI verified
- * your own terminal, else `anonymous`. An unknown token is refused outright
- * rather than downgraded, so a stale leader token cannot act as a human.
+ * Resolve the caller. A leader session's token is the leader while the lease
+ * names that session, and a read-only `reader` otherwise; a token matching
+ * the lease itself (a lease seeded without a session) is the leader too. One
+ * matching a run is that run's worker. No token: `human` when the CLI
+ * verified your own terminal, else `anonymous`. An unknown token is refused
+ * outright rather than downgraded, so a stale token cannot act as a human.
  */
 export function resolveCaller(db: Db, token: string | null | undefined, channel: "tty" | null | undefined): Caller {
   if (!token) return { role: channel === "tty" ? "human" : "anonymous", runId: null, taskId: null };
   const hash = hashToken(token);
-  const lease = db.query("SELECT 1 FROM leader_lease WHERE id = 1 AND token_hash = ?1").get(hash);
-  if (lease) return { role: "leader", runId: null, taskId: null };
+  const lease = db.query("SELECT session_id, token_hash, harness, pane_id FROM leader_lease WHERE id = 1").get() as LeaseRow | null;
+  const session = db.query("SELECT session_id FROM leader_sessions WHERE token_hash = ?1 AND ended_at IS NULL").get(hash) as { session_id: string } | null;
+  if (lease && lease.token_hash === hash) return { role: "leader", runId: null, taskId: null, session: session?.session_id ?? lease.session_id };
+  if (session) return { role: "reader", runId: null, taskId: null, session: session.session_id };
   const run = db.query("SELECT id, task_id FROM runs WHERE token_hash = ?1").get(hash) as { id: string; task_id: string } | null;
   if (run) return { role: "worker", runId: run.id, taskId: run.task_id };
-  throw new FlowrynError("bad_token", "FLOWRYN_TOKEN is not a current leader or run token", "a leader token changes on every lease claim; a run token ends with its run");
+  throw new FlowrynError("bad_token", "FLOWRYN_TOKEN is not a current leader session or run token", "a leader session's token ends with its session; a run token ends with its run");
+}
+
+/** Where the lease is, for a read-only session's refusal and banner. */
+export function leaderWhere(db: Db): string {
+  const lease = db.query("SELECT session_id, harness, pane_id FROM leader_lease WHERE id = 1").get() as LeaseRow | null;
+  if (!lease?.session_id) return "no session holds the lease";
+  return `the leader is ${lease.harness ?? "unknown"} ${lease.pane_id ? `in pane ${lease.pane_id}` : `session ${lease.session_id}`}`;
 }
 
 /** Refuse a caller whose role the verb does not accept, with the code section 12 names for it. */
-export function authorize(spec: VerbSpec, caller: Caller): void {
+export function authorize(spec: VerbSpec, caller: Caller, db?: Db): void {
   if (spec.roles.includes(caller.role)) return;
+  // A leader session's hooks and extension call hook verbs with the session token.
+  if (spec.roles.includes("hook") && caller.session) return;
   const who = spec.roles.join(" or ");
   if (caller.role === "worker") {
     throw new FlowrynError("worker_token", `a worker token cannot run ${spec.name}`, "report, ask or fail instead; the leader decides");
+  }
+  if (caller.role === "reader" && spec.roles.includes("leader")) {
+    throw new FlowrynError("not_leader", `this session is read-only: ${db ? leaderWhere(db) : "another session holds the lease"}`, "flowryn leader claim");
   }
   if (spec.roles.length === 1 && spec.roles[0] === "human") {
     throw new FlowrynError("human_only", `${spec.name} runs only in your own terminal`, "run it in a shell with no FLOWRYN_* variables");

@@ -15,7 +15,8 @@ function verbHelp(spec: VerbSpec): Record<string, unknown> {
   const help: Record<string, unknown> = { usage: usage(spec), summary: spec.summary };
   const args = spec.positionals.map((p) => ({ arg: `<${p.name}>`, help: p.help }));
   const flags = Object.entries(spec.flags).map(([name, f]) => ({ arg: `--${name}`, help: f.help }));
-  if (args.length + flags.length > 0) help.args = [...args, ...flags];
+  const rest = spec.rest ? [{ arg: `-- <${spec.rest.name}...>`, help: spec.rest.help }] : [];
+  if (args.length + flags.length + rest.length > 0) help.args = [...args, ...flags, ...rest];
   if (spec.kind !== "local") help.roles = spec.roles.join(" · ");
   return help;
 }
