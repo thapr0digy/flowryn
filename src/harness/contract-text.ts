@@ -41,11 +41,15 @@ export function workerContract(harness: HarnessId, terse: boolean): string {
   return [...lines, ...(terse ? ["", STYLE_BLOCK] : [])].join("\n") + "\n";
 }
 
-/** The positional prompt: one line (Herdr refuses control characters), pointing at the full task file. */
-export function promptLine(kind: "ship" | "scout", taskId: string, body: string, instructionsFile: string, maxBody = 1_500): string {
-  const flat = body.replace(/\s+/g, " ").trim();
-  const summary = flat.length > maxBody ? `${flat.slice(0, maxBody - 1)}…` : flat;
-  return `Flowryn ${kind} ${taskId}. Full task: ${instructionsFile} (read it first). ${summary}`.trim();
+/**
+ * The positional prompt: one short line pointing at the full task file.
+ * Herdr's agent.start types the command into the pane's shell, which refuses
+ * control characters (so no multi-line text) and, while a fresh shell is still
+ * starting, keeps at most one terminal line of input (1024 bytes on macOS; M0
+ * finding 11). The task itself therefore travels in the file.
+ */
+export function promptLine(kind: "ship" | "scout", taskId: string, instructionsFile: string): string {
+  return `Flowryn ${kind} ${taskId}. Your full task is in ${instructionsFile}; read it first, then do it.`;
 }
 
 /** A steer as the worker sees it mid-turn or in its inbox. */

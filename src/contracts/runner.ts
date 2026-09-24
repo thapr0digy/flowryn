@@ -15,6 +15,8 @@ import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
 import { isAlive, terminate } from "../runtime/proc.ts";
+import { HerdrClient } from "../runtime/herdr/client.ts";
+import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
@@ -197,11 +199,23 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     }
   } finally {
     db?.close();
-    await teardown(call, state, project, daemon, options.log);
+    const workspace = state ? readWorkspace(stateDir, state.run) : null;
+    await teardown(call, state, project, daemon, options.log, options.project !== null);
+    // A run that failed is not cancellable, so its workspace may still be open; close it by id.
+    if (workspace) await new HerdrRuntime(new HerdrClient(options.herdrSocket)).closeWorkspace(workspace).catch(() => undefined);
     if (!options.keep) rmSync(home, { recursive: true, force: true });
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
   return { harness: options.harness, version, passed, steps, scratch: home };
+}
+
+function readWorkspace(stateDir: string, runId: string): string | null {
+  const db = openDb(stateFiles(stateDir).db, { readonly: true });
+  try {
+    return (db.query("SELECT workspace_id FROM runs WHERE id = ?1").get(runId) as { workspace_id: string | null } | null)?.workspace_id ?? null;
+  } finally {
+    db.close();
+  }
 }
 
 /** Stop the worker and close its workspace, stop the scratch daemon, and remove the run's own worktree and branch. */
@@ -211,6 +225,7 @@ async function teardown(
   project: string | null,
   daemon: { exitCode: number | null; kill(signal?: number | NodeJS.Signals): void; exited: Promise<number> },
   log: (line: string) => void,
+  ownCheckout: boolean,
 ): Promise<void> {
   if (state) await call("cancel", { target: state.task, reason: "contract run finished" }).catch(() => ({ ok: false }));
   if (daemon.exitCode === null) {
@@ -218,7 +233,8 @@ async function teardown(
     await Promise.race([daemon.exited, Bun.sleep(15_000)]);
     if (daemon.exitCode === null) daemon.kill("SIGKILL");
   }
-  if (state && project) {
+  // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
+  if (state && project && ownCheckout) {
     const branch = `flowryn/${state.task}`;
     const listed = git(["worktree", "list", "--porcelain"], project).out;
     for (const block of listed.split("\n\n")) {

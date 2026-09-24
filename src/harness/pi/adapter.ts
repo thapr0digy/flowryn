@@ -22,7 +22,7 @@ export function extensionSourceSync(): string {
   return extensionSource;
 }
 
-function plan(run: RunContext, config: WorkersConfig, prompt: string): LaunchPlan {
+function plan(run: RunContext, config: WorkersConfig, prompt: string, includeTask: boolean): LaunchPlan {
   const pi = config.pi;
   const extensionPath = join(run.runDir, EXTENSION_FILE);
   const args = ["--session-id", run.sessionId];
@@ -37,6 +37,8 @@ function plan(run: RunContext, config: WorkersConfig, prompt: string): LaunchPla
   // --append-system-prompt takes text or a file path (M0 p05); the contract is multi-line, so a file.
   args.push("--append-system-prompt", run.contractFile);
   args.push(...pi.extra_args);
+  // `@file` attaches the task file's text to the first message (Pi 0.87.1: "Include files in initial message").
+  if (includeTask) args.push(`@${run.instructionsFile}`);
   args.push(prompt);
   const env: Record<string, string> = { ...pi.env };
   if (pi.agent_dir) env.PI_CODING_AGENT_DIR = pi.agent_dir;
@@ -48,14 +50,14 @@ export const piAdapter: HarnessAdapter = {
   busySource: "extension",
   interruptVia: "extension",
 
-  /** Exactly one positional argument, the instructions (M0 p12). */
+  /** The instructions: the task file attached with @file, and one short prompt line (M0 p12). */
   launch(run, config) {
-    return plan(run, config, run.promptLine);
+    return plan(run, config, run.promptLine, true);
   },
 
   /** --session-id with the id Flowryn chose at launch reopens the session (M0 p10). */
   resume(run, config) {
-    return plan(run, config, RESUME_PROMPT);
+    return plan(run, config, RESUME_PROMPT, false);
   },
 
   /** Pi asks only when the worktree has project resources, and the extension answers for this one process (M0 p11). */

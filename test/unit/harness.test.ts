@@ -9,6 +9,7 @@ import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude
 import { promptLine, steerLine, steerPointer, workerContract } from "../../src/harness/contract-text.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
 import type { RunContext } from "../../src/harness/types.ts";
+import { MAX_TYPED_COMMAND, typedLength } from "../../src/lifecycle/launcher.ts";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -56,6 +57,8 @@ function context(overrides: Partial<RunContext> = {}): RunContext {
     promptLine: "Flowryn scout scout-auth-k2. Full task: /state/runs/r01X/task.md (read it first). Scout auth",
     flowrynBin: "/opt/flowryn/bin/flowryn",
     binary: "/usr/local/bin/claude",
+    daemonSocket: "/h/run/flowrynd.sock",
+    writable: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"],
     ...overrides,
   };
 }
@@ -72,6 +75,11 @@ describe("claude adapter", () => {
     // Herdr refuses control characters in agent arguments.
     expect(plan.args.every((a) => !/[\n\t\r]/.test(a))).toBe(true);
     expect(plan.files[0]!.path).toBe("/state/runs/r01X/claude-settings.json");
+    // Claude's Bash sandbox, when the user runs it, must let the worker's CLI reach the daemon and its spool.
+    expect(JSON.parse(plan.files[0]!.content).sandbox).toEqual({
+      network: { allowUnixSockets: ["/h/run/flowrynd.sock"] },
+      filesystem: { allowWrite: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"] },
+    });
   });
 
   test("resume: claude --resume <session> with a continue prompt", () => {
@@ -104,7 +112,7 @@ describe("pi adapter", () => {
     expect(args[args.indexOf("-e") + 1]).toBe("/state/runs/r01X/flowryn-worker.ts");
     expect(args).toEqual(expect.arrayContaining(["-e", "/x/scripted-provider.ts", "--model", "flowryn-scripted/scripted", "--append-system-prompt", "/state/runs/r01X/contract.md"]));
     expect(args.at(-1)).toBe(context().promptLine);
-    expect(args.filter((a) => !a.startsWith("-")).length).toBeGreaterThan(0);
+    expect(args.at(-2)).toBe("@/state/runs/r01X/task.md");
     expect(plan.env.PI_CODING_AGENT_DIR).toBe("/scratch/agent");
     expect(plan.files[0]!.content).toContain("project_trust");
   });
@@ -131,10 +139,15 @@ describe("worker contract text", () => {
     expect(text.split("\n").length).toBeLessThan(25);
   });
 
-  test("the prompt line is one line and points at the full task", () => {
-    const line = promptLine("scout", "t1", "Line one\n\n- two\tthree", "/r/task.md");
-    expect(line).toBe("Flowryn scout t1. Full task: /r/task.md (read it first). Line one - two three");
-    expect(promptLine("ship", "t1", "x".repeat(5_000), "/r/task.md").length).toBeLessThan(1_600);
+  test("the prompt line is one short line that points at the full task", () => {
+    expect(promptLine("scout", "t1", "/r/task.md")).toBe("Flowryn scout t1. Your full task is in /r/task.md; read it first, then do it.");
+  });
+
+  test("a launch command stays under what a starting pane shell keeps (M0 finding 11)", () => {
+    const long = "/private/var/folders/p_/skk6jrk90q3bh6tsnwspgj_00000gn/T/fwc-yt6i9w/state/runs/r01M38QYEFGD085FDTE6YSKTPPT";
+    const ctx = context({ runDir: long, instructionsFile: `${long}/task.md`, contractFile: `${long}/contract.md`, promptLine: promptLine("scout", "contract-pi-0-p2", `${long}/task.md`) });
+    for (const plan of [piAdapter.launch(ctx, workers), claudeAdapter.launch(ctx, workers)]) expect(typedLength(plan.kind, plan.args)).toBeLessThan(MAX_TYPED_COMMAND);
+    expect(typedLength("pi", ["x".repeat(2_000)])).toBeGreaterThan(MAX_TYPED_COMMAND);
   });
 
   test("a steer names its id and how to ack it; the waiter's pointer stands on its own", () => {

@@ -34,7 +34,7 @@ function flag(name: string): string | null {
 
 const session = flag("--session-id") ?? flag("--resume") ?? "no-session";
 const prompt = args[args.length - 1] ?? "";
-const taskFile = env.FLOWRYN_TASK_FILE ?? /Full task: (\S+)/.exec(prompt)?.[1] ?? "";
+const taskFile = env.FLOWRYN_TASK_FILE ?? /task is in (\S+);/.exec(prompt)?.[1] ?? "";
 const taskText = taskFile && existsSync(taskFile) ? readFileSync(taskFile, "utf8") : prompt;
 const steps = taskText
   .split("\n")

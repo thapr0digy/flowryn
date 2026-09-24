@@ -28,6 +28,10 @@ export interface RunContext {
   flowrynBin: string;
   /** The harness binary Flowryn resolved from [tools]. */
   binary: string;
+  /** The daemon socket the worker's CLI calls; a sandboxed shell tool must be allowed to reach it. */
+  daemonSocket: string;
+  /** Directories the worker's CLI and reports write outside the worktree (its spool, its report directory). */
+  writable: string[];
 }
 
 export interface PlanFile {
