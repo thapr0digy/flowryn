@@ -43,7 +43,7 @@ if wait_settled_after a "$t"; then
   results+=("S1 normal: settled=$(settled_since a "$t") starts=$(starts_since a "$t") outcome=$(outcome_since a "$t")")
   s1=$(settled_since a "$t")
 else
-  inconclusive+=("S1 never settled"); s1=x
+  inconclusive+=("inconclusive: S1 never settled"); s1=x
 fi
 
 # S2 abort
@@ -55,7 +55,7 @@ if wait_settled_after a "$t" 90; then
   s2=$(settled_since a "$t")
   results+=("S2 abort: settled=$s2 starts=$(starts_since a "$t") outcome=$(outcome_since a "$t") abort-executed=$(log_count a ".ev == \"ctl_exec\" and .op == \"abort\" and .t > $t")")
 else
-  inconclusive+=("S2 never settled"); s2=x
+  inconclusive+=("inconclusive: S2 never settled"); s2=x
 fi
 
 # S3 compaction during a run
@@ -99,7 +99,7 @@ else
     s5=$(settled_since e "$t")
     results+=("S5 error+retry: settled=$s5 starts=$(starts_since e "$t") provider attempts=$(jq -s "[.[] | select(.t > $t)] | length" "$(provlog e)") outcome=$(outcome_since e "$t") last-error=$(log_last e '.ev == "message_end" and .role == "assistant"' | jq -r '.errorMessage // "none"' | cut -c1-80)")
   else
-    inconclusive+=("S5 never settled"); s5=x
+    inconclusive+=("inconclusive: S5 never settled"); s5=x
   fi
 
   # S6 threshold compaction inside a run
@@ -116,7 +116,7 @@ else
     s6_compacted=$(log_count t ".ev == \"session_compact\" and .t > $t")
     results+=("S6 threshold: settled=$s6 starts=$(starts_since t "$t") compactions=$s6_compacted reasons=$(log_last t ".ev == \"session_compact\" and .t > $t" | jq -r '"\(.reason)/willRetry=\(.willRetry)"') final reply=$(log_last t '.ev == "message_end" and .role == "assistant"' | jq -r '.text')")
   else
-    inconclusive+=("S6 never settled"); s6=x; s6_compacted=0
+    inconclusive+=("inconclusive: S6 never settled"); s6=x; s6_compacted=0
   fi
 
   # S7 overflow recovery (compact, then retry as a fresh run)
@@ -128,7 +128,7 @@ else
     s7_compacted=$(log_count t ".ev == \"session_compact\" and .t > $t")
     results+=("S7 overflow: settled=$s7 starts=$(starts_since t "$t") compactions=$s7_compacted reasons=$(log_last t ".ev == \"session_compact\" and .t > $t" | jq -r '"\(.reason)/willRetry=\(.willRetry)"') outcome=$(outcome_since t "$t") final reply=$(log_last t '.ev == "message_end" and .role == "assistant"' | jq -r '.text')")
   else
-    inconclusive+=("S7 never settled"); s7=x; s7_compacted=0
+    inconclusive+=("inconclusive: S7 never settled"); s7=x; s7_compacted=0
   fi
 fi
 

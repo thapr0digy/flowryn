@@ -16,8 +16,11 @@ pi_require p12-extension-flag
 pi_setup
 
 GLOBAL_LOG="$WORK/global-extension.log"
+GLOBAL_MARKER="$AGENT_DIR/extensions/flowryn-global-marker.ts"
+remove_global_marker() { rm -f "$GLOBAL_MARKER"; lab_on_exit; }
+trap remove_global_marker EXIT
 mkdir -p "$AGENT_DIR/extensions"
-cat > "$AGENT_DIR/extensions/flowryn-global-marker.ts" <<TS
+cat > "$GLOBAL_MARKER" <<TS
 import { appendFileSync } from "node:fs";
 export default function (pi: any) {
   pi.on("session_start", () => {

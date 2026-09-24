@@ -20,7 +20,7 @@ A=$PANE
 ask() { # <command>
   local t
   t=$(now_ms)
-  pane_prompt "$A" "$(scripted "Run one bash command." "bash $1 ;; say done")"
+  pane_prompt "$A" "$(scripted "Use the bash tool to run exactly this command, unchanged, and nothing else: $1" "bash $1 ;; say done")"
   wait_settled_after a "$t" || true
   wait_quiet a 3 60 || true
 }

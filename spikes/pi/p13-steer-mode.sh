@@ -22,7 +22,7 @@ A=$PANE
 t0=$(now_ms)
 ctl a '{"op":"send","api":"message","deliverAs":"steer","when":"tool_execution_start","text":"FLOWRYN-MARK-S13 Flowryn steer (fact): the user changed plans; skip any remaining sleeps and reply with the word steered."}'
 ctl a '{"op":"send","api":"message","deliverAs":"followUp","when":"tool_execution_start","text":"FLOWRYN-MARK-F13 Flowryn follow-up (fact): acknowledge with the word followed."}'
-pane_prompt "$A" "$(scripted "Run sleep 4 three times, one call at a time, then reply done." "bash sleep 4 ;; bash sleep 4 ;; bash sleep 4 ;; say done")"
+pane_prompt "$A" "$(scripted "Use the bash tool three times, one call at a time, waiting for each to finish: sleep 4, then sleep 4, then sleep 4. Then reply with the single word done." "bash sleep 4 ;; bash sleep 4 ;; bash sleep 4 ;; say done")"
 log_wait a 60 '.ev == "tool_execution_start"' || { pi_verdict partial "inconclusive: model never ran bash"; exit 0; }
 wait_settled_after a "$t0" || true
 wait_quiet a 10 "$PI_RUN_TIMEOUT" || true
