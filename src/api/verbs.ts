@@ -2,6 +2,7 @@ import type { Db } from "../db/db.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Journal } from "../journal/journal.ts";
 import type { BacklogWatcher } from "../journal/watcher.ts";
+import type { FleetServices } from "../lifecycle/fleet-services.ts";
 import { FlowrynError } from "./errors.ts";
 
 /**
@@ -62,6 +63,8 @@ export interface DaemonServices {
   info(): DaemonInfo;
   requestShutdown(reason: string): void;
   runTool(tool: "git", args: string[], cwd?: string): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  /** Runtime, steers, launcher and reconciler (M2). */
+  fleet: FleetServices;
 }
 
 export interface HandlerCtx extends DaemonServices {
@@ -96,6 +99,12 @@ export interface VerbSpec {
   roles: Role[];
   /** Worker verbs spool to disk when the daemon is down (exit 75). */
   spool?: boolean;
+  /**
+   * Hook traffic: frequent, never retried and never spooled, so its replies
+   * are not kept for idempotency (a PostToolUse on every tool call would fill
+   * the 7-day reply table).
+   */
+  ephemeral?: boolean;
   /** Mutations: async work outside the transaction (git lookups, a fresh hash check). */
   prepare?: (ctx: HandlerCtx, args: Args) => Promise<unknown>;
   /** Mutations: the state change, run inside one transaction with its event and idempotency row. */
@@ -110,6 +119,8 @@ export interface VerbSpec {
 
 export interface CliIo {
   stdout(text: string): void;
+  /** The whole of stdin, for verbs that read it themselves (hooks). Set by the CLI entry point. */
+  stdin?: () => Promise<string>;
   stderr(text: string): void;
   json: boolean;
   env: NodeJS.ProcessEnv;

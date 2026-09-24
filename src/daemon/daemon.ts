@@ -20,6 +20,16 @@ import { ulid } from "../util/ulid.ts";
 import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
+import { timingConfig, workerConfigProblems } from "../config/workers.ts";
+import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
+import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
+import { Launcher } from "../lifecycle/launcher.ts";
+import { SteerBus } from "../lifecycle/steers.ts";
+import { Reconciler } from "../reconcile/reconciler.ts";
+import { HerdrClient } from "../runtime/herdr/client.ts";
+import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
+import { HerdrWatcher } from "../watch/herdr.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -87,10 +97,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   let db: Db | null = null;
   let listener: Listener | null = null;
   let boundSocket = false;
+  let removeSignals = () => {};
   const sock = socketPath(home, env);
 
   try {
     let config = loadConfig(home).config;
+    const workerProblems = workerConfigProblems(config);
+    if (workerProblems.length > 0) throw new StartupRefused(`config.toml: ${workerProblems.join("; ")}`);
     ensureDir(config.state_dir, 0o700);
     ensureDir(config.data_dir, 0o700);
     ensureDir(runDir(home), 0o700);
@@ -136,7 +149,70 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const stopped = new Promise<string>((resolve) => {
       stopRequested = resolve;
     });
+    // Installed before any startup work, so a stop during a slow startup is still a clean exit 0.
+    const onSignal = (signal: NodeJS.Signals) => stopRequested?.(signal);
+    process.on("SIGTERM", onSignal);
+    process.on("SIGINT", onSignal);
+    removeSignals = () => {
+      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSignal);
+    };
     const info: DaemonInfo = { pid: process.pid, version: VERSION, proto: PROTO, instance, startedAt, execPath: process.execPath, socket: sock, stateDir: config.state_dir };
+
+    // M2: the Herdr runtime, launcher and reconciler (design sections 5 and 6).
+    const herdrSocket = await resolveHerdrSocket(config);
+    const runtime = herdrSocket.socket ? new HerdrRuntime(new HerdrClient(herdrSocket.socket)) : null;
+    log(runtime ? `herdr: ${herdrSocket.socket}` : `herdr: not available (${herdrSocket.reason}); workers cannot start`);
+    const bus = new SteerBus();
+    const timing = () => timingConfig(config);
+    const git = (args: string[], cwd?: string) => runTool(resolveTool(config, "git"), args, cwd);
+    let reconciler: Reconciler | null = null;
+    const launcher = new Launcher({
+      db: database,
+      config: () => config,
+      runtime: () => runtime,
+      log,
+      now: Date.now,
+      git,
+      flowrynBin: async () => workerBinary(config.state_dir),
+      socketPath: sock,
+      home,
+      onSettled: (runId) => {
+        bus.notify(runId);
+        reconciler?.schedule(runId);
+      },
+    });
+    const control: ControlDeps = { db: database, runtime: () => runtime, bus, timing, now: Date.now };
+    const fleet: FleetServices = {
+      runtime: () => runtime,
+      bus,
+      timing,
+      launch: (runId, mode) => launcher.start(runId, mode),
+      isLaunching: (runId) => launcher.isActive(runId),
+      flowrynBin: async () => workerBinary(config.state_dir),
+      harnessVersion,
+      exitRun: (runId) => exitRun(control, runId),
+      interruptRun: (runId) => interruptRun(control, runId),
+      reconcile: (runId) => reconciler?.schedule(runId),
+      continuations: new Map(),
+    };
+    reconciler = new Reconciler({
+      db: database,
+      runtime: () => runtime,
+      launch: (runId, mode) => launcher.start(runId, mode),
+      isLaunching: (runId) => launcher.isActive(runId),
+      bus,
+      timing,
+      log,
+      now: Date.now,
+    });
+    const herdrWatcher = new HerdrWatcher({
+      runtime: () => runtime,
+      onPane: (paneId) => reconciler?.onPane(paneId),
+      onConnected: (first) => reconciler?.schedule(undefined, first ? "startup" : "reconnect"),
+      log,
+    });
+
     const services: DaemonServices = {
       db: database,
       config: () => config,
@@ -146,7 +222,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
       info: () => info,
       requestShutdown: (reason) => setTimeout(() => stopRequested?.(reason), 10),
-      runTool: (_tool, args, cwd) => runTool(resolveTool(config, "git"), args, cwd),
+      runTool: (_tool, args, cwd) => git(args, cwd),
+      fleet,
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
@@ -168,6 +245,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     journal.start();
     resolveReady();
 
+    // Reconciler startup (design section 6, steps 4-7): subscribe first so events buffer,
+    // then reconcile every open run; afterwards every event plus a steady pass.
+    if (runtime) await herdrWatcher.start();
+    await reconciler.pass("startup");
+    const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
+
     let passing = false;
     const pass = setInterval(() => {
       if (passing) return;
@@ -186,7 +269,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       })();
     }, options.passMs ?? DEFAULT_PASS_MS);
 
-    const onSignal = (signal: NodeJS.Signals) => stopRequested?.(signal);
     const onHup = () => {
       try {
         const next = loadConfig(home).config;
@@ -199,15 +281,16 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         log(`SIGHUP: configuration not reloaded: ${(error as Error).message}`);
       }
     };
-    process.on("SIGTERM", onSignal);
-    process.on("SIGINT", onSignal);
     process.on("SIGHUP", onHup);
 
     const reason = await stopped;
     log(`stopping: ${reason}`);
     clearInterval(pass);
-    process.off("SIGTERM", onSignal);
-    process.off("SIGINT", onSignal);
+    clearInterval(steady);
+    reconciler.stop();
+    herdrWatcher.stop();
+    bus.close();
+    removeSignals();
     process.off("SIGHUP", onHup);
     watcher.stop();
     const closing = listener.close();
@@ -223,6 +306,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     say(`failed: ${(error as Error).stack ?? String(error)}`);
     return 1;
   } finally {
+    removeSignals();
     if (listener) await Promise.race([listener.close(), Bun.sleep(1_000)]);
     if (db) db.close();
     if (boundSocket) {

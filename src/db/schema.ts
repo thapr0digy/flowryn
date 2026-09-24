@@ -153,6 +153,30 @@ CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
   passed_at INTEGER NOT NULL, report_path TEXT, PRIMARY KEY (harness, version));
 `;
 
-export const MIGRATIONS: readonly Migration[] = [{ version: 1, name: "init", sql: INIT_SQL }];
+/**
+ * M2: what the runtime and the reconciler need on a run beyond section 13.
+ * workspace_id is the Herdr workspace holding the run's pane; busy_until is
+ * the busy lease hooks refresh (an interrupt fires no hook, so busy expires);
+ * launched_at is the latest launch or resume, and worker_started_at the
+ * worker-start report (none within 30 s of a launch is the trust wedge); transcript_path lets an interrupt be verified from
+ * Claude's own transcript. messages gains the decision an answer steer closes.
+ */
+const RUNTIME_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN workspace_id TEXT;
+ALTER TABLE runs ADD COLUMN busy_until INTEGER;
+ALTER TABLE runs ADD COLUMN last_hook_at INTEGER;
+ALTER TABLE runs ADD COLUMN idle_since INTEGER;
+ALTER TABLE runs ADD COLUMN worker_started_at INTEGER;
+ALTER TABLE runs ADD COLUMN launched_at INTEGER;
+ALTER TABLE runs ADD COLUMN transcript_path TEXT;
+ALTER TABLE messages ADD COLUMN decision_id TEXT;
+CREATE INDEX runs_open ON runs(state) WHERE state NOT IN ('cleaned','failed','cancelled');
+CREATE INDEX messages_open ON messages(run_id) WHERE acked_at IS NULL;
+`;
+
+export const MIGRATIONS: readonly Migration[] = [
+  { version: 1, name: "init", sql: INIT_SQL },
+  { version: 2, name: "runtime", sql: RUNTIME_SQL },
+];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

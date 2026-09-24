@@ -30,6 +30,7 @@ function overview(): Record<string, unknown> {
 
 /** Parse argv, then run the verb locally or through the daemon. Returns the exit code. */
 export async function cliMain(argv: string[], io: CliIo, readStdin: () => Promise<string>): Promise<number> {
+  io.stdin ??= readStdin;
   let parsed;
   try {
     parsed = parseArgv(argv, CLI_VERBS);
