@@ -3,10 +3,17 @@ import { eventPaneId, type HerdrRuntime } from "../runtime/herdr/runtime.ts";
 
 export interface HerdrWatcherDeps {
   runtime(): HerdrRuntime | null;
+  /**
+   * No runtime yet (Herdr was not running when the daemon started, so no
+   * socket was found): look for it again; whether one exists now.
+   */
+  resolve?(): Promise<boolean>;
   /** A pane named by an event: re-read it (events carry no revision, M0 h01). */
   onPane(paneId: string): void;
   /** The subscription (re)started: reconcile every run (design section 6, steps 4-7 on every reconnect). */
   onConnected(first: boolean): void;
+  /** Herdr did not answer the subscription (design section 16: detected by socket errors); it is retried with backoff. */
+  onDown?(reason: string): void;
   log(message: string): void;
 }
 
@@ -16,7 +23,8 @@ const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
  * The Herdr event subscription (a watcher: it emits observations to the
  * reconciler and writes nothing). Herdr's stream has no replay, so on every
  * (re)connect the reconciler takes a fresh look at every run instead of
- * trusting what it missed.
+ * trusting what it missed. A failure is reported and retried with backoff,
+ * never in a tight loop.
  */
 export class HerdrWatcher {
   private readonly deps: HerdrWatcherDeps;
@@ -44,8 +52,9 @@ export class HerdrWatcher {
 
   private async connect(): Promise<void> {
     if (this.stopped) return;
-    const runtime = this.deps.runtime();
-    if (!runtime) return this.retry("no Herdr runtime");
+    let runtime = this.deps.runtime();
+    if (!runtime && this.deps.resolve && (await this.deps.resolve().catch(() => false))) runtime = this.deps.runtime();
+    if (!runtime) return this.retry("no Herdr socket");
     try {
       this.subscription = await runtime.subscribe(
         (event) => {
@@ -71,6 +80,7 @@ export class HerdrWatcher {
     const delay = BACKOFF_MS[Math.min(this.attempt, BACKOFF_MS.length - 1)]!;
     if (this.attempt === 0) this.deps.log(`herdr: event subscription down (${reason}); retrying`);
     this.attempt++;
+    this.deps.onDown?.(reason);
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.connect();

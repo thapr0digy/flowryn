@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { styleBlock } from "../config/workflows.ts";
-import { timingConfig, workersConfig } from "../config/workers.ts";
+import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
+import { alertHerdrIfDue, noteHerdrNeeded } from "../reconcile/herdr-health.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -23,8 +24,18 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 
-/** fresh: the run's first launch; resume: its stored session again; stage: a new session for a stage with fresh = true. */
-export type LaunchMode = "fresh" | "resume" | "stage";
+/**
+ * fresh: the run's first launch; resume: its stored session again; stage: a
+ * new session for a stage with fresh = true; relaunch: its stored session
+ * again under a changed contract (a scout promoted in place), the old worker
+ * already stopped by the scheduler.
+ */
+export type LaunchMode = "fresh" | "resume" | "stage" | "relaunch";
+
+/** The prompt a relaunched session starts with: the contract changed, so it reads its task file again. */
+export function relaunchPrompt(instructionsFile: string): string {
+  return `Flowryn restarted you because your task changed. Read ${instructionsFile} again, then go on from there.`;
+}
 
 export interface GitResult {
   exitCode: number;
@@ -91,11 +102,28 @@ export function reportLink(taskId: string): string {
   return `data/${taskId}/report.md`;
 }
 
+/** What a dispatch recorded for a run: its task's title, text, kind and project. */
+export interface DispatchedTask {
+  title: string;
+  body: string;
+  kind: string | null;
+  project: string | null;
+}
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+export function dispatchedTask(db: Db, runId: string): DispatchedTask | null {
+  const row = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.dispatched' ORDER BY seq LIMIT 1").get(runId) as { payload: string } | null;
+  if (!row) return null;
+  const payload = JSON.parse(row.payload) as Record<string, unknown>;
+  return { title: textOrNull(payload.title) ?? "", body: textOrNull(payload.body) ?? "", kind: textOrNull(payload.kind), project: textOrNull(payload.project) };
+}
+
 /** The task text a dispatch recorded; the launcher materializes it into task.md. */
 export function dispatchedBody(db: Db, runId: string): string {
-  const row = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.dispatched' ORDER BY seq LIMIT 1").get(runId) as { payload: string } | null;
-  if (!row) return "";
-  return String((JSON.parse(row.payload) as { body?: unknown }).body ?? "");
+  return dispatchedTask(db, runId)?.body ?? "";
 }
 
 /**
@@ -131,7 +159,12 @@ export class Launcher {
       const { db, log, now } = this.deps;
       if (error instanceof TransientLaunchError || (error instanceof HerdrError && (error.code === "unreachable" || error.code === "timeout"))) {
         log(`launch ${runId}: deferred: ${(error as Error).message}`);
-        tx(db, () => appendEvent(db, { source: "daemon", kind: "run.launch_deferred", runId, payload: { mode, reason: (error as Error).message }, ts: now() }));
+        tx(db, () => {
+          appendEvent(db, { source: "daemon", kind: "run.launch_deferred", runId, payload: { mode, reason: (error as Error).message }, ts: now() });
+          // Herdr away holds this launch up (design section 16): its episode's P1, when due.
+          noteHerdrNeeded(db, (error as Error).message, "daemon", now());
+          alertHerdrIfDue(db, herdrConfig(this.deps.config()).unreachable_alert_ms, now());
+        });
         return "deferred";
       }
       log(`launch ${runId}: failed: ${(error as Error).stack ?? String(error)}`);
@@ -152,8 +185,8 @@ export class Launcher {
     if (!run || isTerminal(run.state)) return false;
     // A fresh launch happens once; a replayed dispatch or a second kick must not start another worker.
     if (mode === "fresh" && (run.state !== "launching" || run.proc_pid !== null || run.pending_launch === "fresh")) return false;
-    // A fresh stage worker starts only once the scheduler stopped the old one.
-    if (mode === "stage" && (run.pending_launch !== "stage" || run.proc_pid !== null)) return false;
+    // A fresh stage worker, or a relaunched one, starts only once the scheduler stopped the old one.
+    if ((mode === "stage" || mode === "relaunch") && (run.pending_launch !== mode || run.proc_pid !== null)) return false;
     const project = getProject(db, run.project_id);
     if (!project) throw new Error(`project ${run.project_id} is gone`);
     const config = this.deps.config();
@@ -204,12 +237,14 @@ export class Launcher {
       writable: [spool, reportDir, ...gitAccess.writable],
       readOnly: gitAccess.readOnly,
       stagePlugin: skills.claudePlugin,
+      ...(mode === "relaunch" ? { resumePrompt: relaunchPrompt(instructionsFile) } : {}),
     };
     if (!context.sessionId) throw new Error("the run has no agent session id");
     const trust = await adapter.preTrust(context, workers);
     if (!trust.ok) throw new Error(`workspace trust: ${trust.detail}`);
     // A worker that died before its session started has no session to resume; start it fresh under the same id.
-    const plan = mode === "resume" && run.worker_started_at !== null ? adapter.resume(context, workers) : adapter.launch(context, workers);
+    const resuming = (mode === "resume" || mode === "relaunch") && run.worker_started_at !== null;
+    const plan = resuming ? adapter.resume(context, workers) : adapter.launch(context, workers);
     const typed = typedLength(plan.kind, plan.args);
     if (typed > MAX_TYPED_COMMAND) {
       throw new Error(`the ${plan.kind} launch command is ${typed} bytes, over the ${MAX_TYPED_COMMAND} a starting pane shell keeps; shorten state_dir or [workers] paths`);
@@ -247,7 +282,7 @@ export class Launcher {
       if (!current) return true;
       db.query(
         `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END,
-           pending_launch = CASE WHEN pending_launch = 'stage' THEN NULL ELSE pending_launch END,
+           pending_launch = CASE WHEN pending_launch IN ('stage','relaunch') THEN NULL ELSE pending_launch END,
            stage_note = CASE WHEN ?6 = 1 THEN NULL ELSE stage_note END, updated_at = ?5 WHERE id = ?1`,
       ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now(), mode === "resume" ? 0 : 1);
       appendEvent(db, {

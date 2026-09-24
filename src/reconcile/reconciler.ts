@@ -12,7 +12,10 @@ import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/her
 import { isAlive, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
 import { applyDocker, listLabelled } from "./docker.ts";
+import { checkInvariant } from "./invariant.ts";
 import { releaseLeases } from "../sched/pools.ts";
+import type { HarnessId } from "../harness/types.ts";
+import { contractsCommand, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -42,6 +45,17 @@ export interface ReconcilerDeps {
   docker?(): string | null;
   /** Leases were released: the scheduler may grant them to waiting work. */
   released?(): void;
+  /**
+   * Check the installed harness version before a launch or resume (design
+   * section 5), recording the P1 for an untested one; absent, every harness
+   * counts as verified.
+   */
+  harnessGate?(harness: HarnessId): Promise<HarnessCheck>;
+  /**
+   * Bring the backlog snapshot up to date with the file (the watcher's check),
+   * and say whether it now matches it; absent, the invariant pass is skipped.
+   */
+  backlogFresh?(): Promise<boolean>;
 }
 
 export type PassReason = "startup" | "reconnect" | "steady" | "event" | "kick";
@@ -140,6 +154,7 @@ export class Reconciler {
     const stats = await this.passRuns(runs.map((r) => r.id), reason);
     await this.scanOrphans();
     await this.scanDocker();
+    await this.checkBacklog();
     tx(db, () => flagUnackedSteers(db, now(), timing()));
     for (const run of runs) if (unackedSteers(db, run.id).length > 0) this.deps.bus.notify(run.id);
     if (reason === "startup" && stats.dead >= HUSK_RESTART_THRESHOLD) {
@@ -190,8 +205,8 @@ export class Reconciler {
     }
     const identity = identityOf(run);
     if (run.state === "launching" && !identity) {
-      // A launch that never finished: the daemon died mid-launch, or Herdr was down.
-      this.deps.launch(run.id, "fresh");
+      // A launch that never finished: the daemon died mid-launch, or Herdr was down. It waits for a verified harness.
+      if (await this.harnessVerified(run.harness)) this.deps.launch(run.id, "fresh");
       return "launching";
     }
 
@@ -240,6 +255,20 @@ export class Reconciler {
     return this.handleDeath(run, panes);
   }
 
+  /** The harness gate before a launch this reconciler starts; a check that throws counts as unverified. */
+  private async harnessVerified(harness: HarnessId): Promise<boolean> {
+    return (await this.harnessCheck(harness)).state === "verified";
+  }
+
+  private async harnessCheck(harness: HarnessId): Promise<HarnessCheck> {
+    if (!this.deps.harnessGate) return { harness, state: "verified", version: "unchecked" };
+    try {
+      return await this.deps.harnessGate(harness);
+    } catch (error) {
+      return { harness, state: "missing", detail: (error as Error).message };
+    }
+  }
+
   /** Liveness of a run whose process is ours and alive, and the judgment pointers (design section 6). */
   private async liveChecks(run: RunRow, runtime: HerdrRuntime): Promise<void> {
     const { db, now, timing } = this.deps;
@@ -278,11 +307,19 @@ export class Reconciler {
     });
   }
 
-  /** A pane with no live harness process is dead (a husk). Resume once from the stored session; a second death needs you. */
-  private handleDeath(run: RunRow, panes: PaneProcesses | null): "dead" | "resumed" {
+  /**
+   * A pane with no live harness process is dead (a husk). Resume once from the
+   * stored session; a second death needs you. The one resume is claimed at
+   * once, but it launches only on a harness version with a passing contract
+   * (design section 5): otherwise the scheduler holds it until one passes.
+   */
+  private async handleDeath(run: RunRow, panes: PaneProcesses | null): Promise<"dead" | "resumed"> {
     const { db, now } = this.deps;
-    const t = now();
     const husk = panes !== null && panes.foregroundGroup === panes.shellPid;
+    const resumeDue = !WORK_DONE.includes(run.state) && run.resume_count === 0 && run.agent_session !== null;
+    const gate = resumeDue ? await this.harnessCheck(run.harness) : null;
+    if (gate && gate.state !== "verified") return this.deferResume(run, gate, husk);
+    const t = now();
     if (WORK_DONE.includes(run.state)) {
       const released = tx(db, () => {
         setLiveness(db, run, "dead", "reconciler", { reason: "the worker exited after delivering", husk }, t);
@@ -327,6 +364,51 @@ export class Reconciler {
     });
     if (freed) this.deps.released?.();
     return "dead";
+  }
+
+  /**
+   * The dead run's one automatic resume, claimed now and handed to the
+   * scheduler (pending_launch resume), which launches it once the harness
+   * version passes its contract suite. A dead worker holds no slot meanwhile.
+   */
+  private deferResume(run: RunRow, gate: Exclude<HarnessCheck, { state: "verified" }>, husk: boolean): "dead" {
+    const { db, now } = this.deps;
+    const t = now();
+    const why = gate.state === "missing" ? gate.detail : `${gate.harness} ${gate.version} has no passing contract run`;
+    const deferred = tx(db, () => {
+      const updated = db.query("UPDATE runs SET resume_count = resume_count + 1, pending_launch = 'resume', waiting_since = ?2, updated_at = ?2 WHERE id = ?1 AND resume_count = ?3").run(run.id, t, run.resume_count);
+      if (updated.changes === 0) return false;
+      setLiveness(db, run, "dead", "reconciler", { reason: `its resume waits: ${why}`, husk }, t);
+      const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
+      if (released.length > 0 && run.stage_state === "active") db.query("UPDATE runs SET stage_state = 'waiting', stage_note = NULL WHERE id = ?1").run(run.id);
+      const event = appendEvent(db, { source: "reconciler", kind: "run.resume_deferred", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, why } });
+      resolveRunItems(db, run.id, ["worker_idle", "trust_dialog"], "run.resume_deferred", t);
+      const waits = gate.state === "missing" ? `waits: ${gate.detail}` : `waits until ${gate.harness} ${gate.version} passes its contract suite (${contractsCommand(gate.harness)})`;
+      openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died; its one resume ${waits}`, now: t });
+      return true;
+    });
+    if (deferred) {
+      this.attached.delete(run.id);
+      this.deps.log(`reconcile ${run.id}: the worker died; its resume waits: ${why}`);
+      this.deps.released?.();
+    }
+    return "dead";
+  }
+
+  /** The invariant pass (design section 8), on a backlog snapshot known to match the file. */
+  private async checkBacklog(): Promise<void> {
+    const { db, now, log } = this.deps;
+    if (!this.deps.backlogFresh) return;
+    try {
+      if (!(await this.deps.backlogFresh())) return;
+    } catch (error) {
+      log(`reconcile: the backlog could not be read for the invariant pass: ${(error as Error).message}`);
+      return;
+    }
+    const result = tx(db, () => checkInvariant(db, now()));
+    if (result && result.opened.length + result.resolved.length > 0) {
+      log(`reconcile: invariant: ${result.opened.length} divergence(s) opened (${result.opened.join(",") || "-"}), ${result.resolved.length} settled (${result.resolved.join(",") || "-"})`);
+    }
   }
 
   /** Docker label evidence (design section 11): environments beyond a run's lease, and containers left without one. */

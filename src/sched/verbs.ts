@@ -2,6 +2,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { unverifiedVersion } from "../lifecycle/harness-gate.ts";
 import { neededPools, positionOf } from "../lifecycle/stages.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { fullPools, liveCounts } from "./pools.ts";
@@ -20,6 +21,8 @@ function age(now: number, since: number): string {
 /** Why a waiting run has no grant yet, as the scheduler would see it now. */
 function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Record<string, number>, hostOk: boolean): string {
   if (run.harness === "claude" && usageGate(ctx.db, ctx.now, run.id) === "paused") return "Claude usage limit";
+  const untested = run.pending_launch ? unverifiedVersion(ctx.db, run.harness) : null;
+  if (untested) return `${run.harness} ${untested} has no passing contract`;
   if (needs.length === 0) return "next pass";
   const full = fullPools(ctx.db, caps, needs);
   if (full.length > 0) return `full: ${full.join(", ")}`;

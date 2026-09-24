@@ -203,8 +203,9 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         if (!(harness === "pi" && env.scripted)) {
           await sendSteer(env, state, 'Write one line, "contract ok", to $FLOWRYN_REPORT_DIR/report.md, then run $FLOWRYN_BIN deliver --report $FLOWRYN_REPORT_DIR/report.md and end your turn.');
         }
-        const run = await env.waitFor("a verified deliver --report", LONG_MS, () => (env.run().state === "ready" ? env.run() : null));
-        return `run ${run.id} ready with ${String(lastEvent(env, "run.delivered")?.payload.report)}`;
+        // A scout lands with its verified report, and the daemon then cleans it up (design section 8).
+        const run = await env.waitFor("a verified deliver --report", LONG_MS, () => (["landed", "cleaned"].includes(env.run().state) ? env.run() : null));
+        return `run ${run.id} ${run.state} with ${String(lastEvent(env, "run.delivered")?.payload.report)}`;
       },
     },
   ];

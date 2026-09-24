@@ -27,6 +27,8 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 - \`flowryn steer <task> --body-file -\`: words for a worker.
 - \`flowryn answer <decision> <choice> [--body-file -]\`: answer a worker's question.
 - \`flowryn dismiss <item>\`: close an item that needs nothing more.
+- A divergence (\`flowryn show d<N>\`): ask the user which side wins, then \`flowryn divergence resolve <id> keep-run\` (the run's state goes back into the backlog) or \`accept-edit\` (their edit stands; a live run is cancelled).
+- \`flowryn promote <task> --body-file -\`: turn a scout into a ship in place, once the user wants its finding built.
 - \`flowryn interrupt|cancel|resume <task>\`.
 - \`flowryn merge <task>\`: merge a delivered ship. Claude asks the user first; on Pi use the \`flowryn_merge\` tool, never the shell. Refusals name the gate: approval_required, red_checks, checks_pending, head_moved.
 - \`flowryn decline <task> --body-file -\`: send a delivered ship back with the user's words.

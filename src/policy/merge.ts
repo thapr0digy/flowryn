@@ -4,7 +4,7 @@ import { hashToken } from "../api/auth.ts";
 import { openItem, findOpenRunItem } from "../attention/items.ts";
 import type { GitHubConfig } from "../config/delivery.ts";
 import type { Db } from "../db/db.ts";
-import { getMeta, setMeta } from "../db/db.ts";
+import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { checksLine, ForgeError, type ChecksSummary, type Forge, type PullRequest } from "../forge/types.ts";
@@ -25,6 +25,7 @@ import {
   type Channel,
 } from "./approvals.ts";
 import type { GitRunner } from "./landed.ts";
+import { isForgeOutage, noteForgeDown } from "../reconcile/forge-health.ts";
 
 /**
  * The merge gate (design section 7, policy/merge), in order: the canonical PR
@@ -69,6 +70,11 @@ async function out(git: GitRunner, cwd: string, args: string[]): Promise<string 
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+/** GitHub could not be asked while a merge waits on it: the outage's P1 (design section 16), in its own transaction, since the refusal that follows rolls nothing back. */
+function noteMergeBlocked(mc: MergeContext, error: unknown): void {
+  if (isForgeOutage(error)) tx(mc.db, () => noteForgeDown(mc.db, error, "github", mc.now()));
+}
+
 /** Everything the gate looks at, read now from the systems of record (GitHub, git). */
 export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project: ProjectRow): Promise<MergeFacts> {
   const delivered = deliveredOf(mc.db, run.task_id);
@@ -82,6 +88,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
     try {
       pr = await mc.forge.pull(ref);
     } catch (error) {
+      noteMergeBlocked(mc, error);
       throw new FlowrynError("forge_unavailable", `cannot read ${delivered.ref} from GitHub (${(error as Error).message}); a merge that cannot be proven is not attempted`, "try again later");
     }
     let checks: ChecksSummary | null = null;
@@ -89,6 +96,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
       try {
         checks = await mc.forge.checks(ref, pr.headSha);
       } catch (error) {
+        noteMergeBlocked(mc, error);
         throw new FlowrynError("forge_unavailable", `cannot read the checks of ${delivered.ref} (${(error as Error).message})`, "try again later");
       }
     }

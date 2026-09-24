@@ -1,7 +1,8 @@
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type VerbSpec } from "../api/verbs.ts";
 import { appendEvent } from "../db/events.ts";
-import { HARNESS_IDS } from "../harness/types.ts";
+import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
+import { noteContractPassed } from "../lifecycle/harness-gate.ts";
 
 const VERSION = /^\d+\.\d+\.\d+[\w.+-]*$/;
 
@@ -34,7 +35,14 @@ export const recordContract: VerbSpec = {
       )
       .run(harness, version, now, stringArg(args, "report") ?? null);
     appendEvent(ctx.db, { source: "cli", kind: "contract.passed", payload: { harness, version, report: stringArg(args, "report") ?? null, by: ctx.caller.role } });
+    noteContractPassed(ctx.db, harness as HarnessId, version, now);
     return { data: { harness, version, recorded: true } };
+  },
+  async settle(ctx, result) {
+    // Launches and resumes that waited for this version can go now.
+    ctx.sched.kick();
+    ctx.fleet.reconcile();
+    return result;
   },
 };
 

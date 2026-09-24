@@ -14,6 +14,7 @@ import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLoc
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
+import { landScout } from "./landing.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -223,6 +224,7 @@ function deliveryAsked(ctx: HandlerCtx, run: RunWithPolicy, args: Record<string,
   if (run.kind === "scout") {
     if (pr || local) throw new FlowrynError("bad_args", "a scout task delivers a report, not a pull request", "flowryn deliver --report <path>");
     if (!path) throw new FlowrynError("bad_args", "deliver needs --report <path>");
+    if (run.state === "landed") throw new FlowrynError("run_not_active", `${run.task_id} is landed: its report was delivered`, "end your turn");
     return { kind: "report", path };
   }
   if (path) throw new FlowrynError("bad_args", "a ship task delivers a pull request or a local branch, not a report");
@@ -294,7 +296,6 @@ const deliver: VerbSpec = {
     if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
     const artifactId = `a${now.toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
     ctx.db.query("INSERT INTO artifacts (id, task_id, kind, ref, created_at) VALUES (?1, ?2, 'report', ?3, ?4)").run(artifactId, run.task_id, delivered.artifact, now);
-    ctx.db.query("UPDATE runs SET state = 'ready', updated_at = ?2 WHERE id = ?1").run(run.id, now);
     recordIntent(ctx.db, { file: "backlog", verb: "update", taskId: run.task_id, positional: [run.task_id], flags: { report: reportLink(run.task_id) }, now });
     const event = appendEvent(ctx.db, {
       source: "cli",
@@ -310,13 +311,16 @@ const deliver: VerbSpec = {
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id})`,
+      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id}`,
       now,
     });
-    return { data: { run: run.id, state: "ready", report: delivered.artifact }, hints: ["end your turn"] };
+    // A scout's workflow ends in no gate: the verified report lands it, and the daemon cleans up (design section 8).
+    landScout(ctx.db, run, delivered.artifact, now);
+    return { data: { run: run.id, state: "landed", report: delivered.artifact }, hints: ["end your turn"] };
   },
   async settle(ctx, result) {
-    if (result.data.pr) ctx.delivery.watch(String(result.data.run));
+    // A PR is watched; a landed report's worktree is cleaned up by the same watcher pass.
+    if (result.data.pr || result.data.report) ctx.delivery.watch(String(result.data.run));
     ctx.sched.kick();
     return result;
   },

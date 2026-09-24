@@ -4,12 +4,14 @@ import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
+import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus } from "../policy/nomistakes.ts";
 import { applyNmObservation, applyPrObservation, noteNmOutage } from "../reconcile/delivery.ts";
+import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
 /**
  * The delivery watchers (design section 4, src/watch): GitHub PR state, head
@@ -45,6 +47,7 @@ export class DeliveryWatcher {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running: Promise<void> | null = null;
   private stopped = false;
+  private started = false;
   private again = false;
   private backoffMs = 0;
   private forgeQuietUntil = 0;
@@ -55,6 +58,7 @@ export class DeliveryWatcher {
   }
 
   start(): void {
+    this.started = true;
     this.schedule(0);
   }
 
@@ -64,8 +68,14 @@ export class DeliveryWatcher {
     this.timer = null;
   }
 
-  /** Look now (debounced); a pass in progress is followed by another. */
+  /**
+   * Look now (debounced); a pass in progress is followed by another. Before
+   * start() nothing runs: at startup the reconciler reattaches first (design
+   * section 6), and a delivery ingested from the spool must not clean up the
+   * worker under it.
+   */
   kick(): void {
+    if (!this.started) return;
     if (this.running) {
       this.again = true;
       return;
@@ -94,6 +104,7 @@ export class DeliveryWatcher {
       await this.watchPrs();
       await this.watchLocalMerges();
       await this.watchNoMistakes();
+      this.landDeliveredScouts();
       this.resumeCleanups();
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
@@ -107,6 +118,8 @@ export class DeliveryWatcher {
 
   private async watchPrs(): Promise<void> {
     const { db, now } = this.deps;
+    // A P1 about GitHub being away has nothing left to say once no merge waits (design section 16).
+    tx(db, () => settleForgeAlert(db, now()));
     if (now() < this.forgeQuietUntil) return;
     const runs = this.runs(
       `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id
@@ -123,6 +136,7 @@ export class DeliveryWatcher {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
         const applied = tx(db, () => {
+          noteForgeUp(db, "github", now());
           const current = getRunWithPolicy(db, run.id);
           return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now()) : { landed: false };
         });
@@ -133,6 +147,8 @@ export class DeliveryWatcher {
           this.deps.log(`delivery watcher: ${delivered.ref} is not found on GitHub`);
           continue;
         }
+        // Unavailable or rate-limited while a merge waits: one P1 for the outage (design section 16).
+        if (isForgeOutage(error)) tx(db, () => noteForgeDown(db, error, "github", now()));
         this.backoffMs = Math.min(MAX_BACKOFF_MS, this.backoffMs === 0 ? this.deps.pollMs() : this.backoffMs * 2);
         const retryAt = error instanceof ForgeError && error.retryAt ? error.retryAt : now() + this.backoffMs;
         this.forgeQuietUntil = retryAt;
@@ -185,6 +201,22 @@ export class DeliveryWatcher {
       tx(db, () => {
         const current = getRunWithPolicy(db, run.id);
         if (current) applyNmObservation(db, current, nm, now());
+      });
+    }
+  }
+
+  /**
+   * A scout that delivered its report before scouts landed with it (an
+   * earlier version kept it ready): land it now, and the cleanup follows.
+   */
+  private landDeliveredScouts(): void {
+    const { db, now } = this.deps;
+    const rows = db.query("SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id WHERE p.kind = 'scout' AND r.state = 'ready'").all() as { id: string }[];
+    for (const row of rows) {
+      tx(db, () => {
+        const run = getRunWithPolicy(db, row.id);
+        const report = db.query("SELECT ref FROM artifacts WHERE task_id = ?1 AND kind = 'report' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(run?.task_id ?? "") as { ref: string } | null;
+        if (run && run.state === "ready" && report) landScout(db, run, report.ref, now());
       });
     }
   }

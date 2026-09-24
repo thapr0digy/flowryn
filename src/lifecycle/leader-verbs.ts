@@ -14,6 +14,8 @@ import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
 import { planView } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow } from "./stages.ts";
+import { gateHarness, harnessRefusal } from "./harness-gate.ts";
+import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
 import { latestMerge } from "../policy/merge.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
@@ -132,10 +134,21 @@ const cancel: VerbSpec = {
   },
 };
 
+/** A run whose dead worker can be resumed from its stored session. */
+function resumable(db: ReadCtx["db"], target: string): RunRow {
+  const run = findRun(db, target);
+  if (!run) throw new FlowrynError("not_found", `no run or task ${target}`);
+  if (run.state === "cancelled" || run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
+  if (run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
+  if (!run.agent_session) throw new FlowrynError("bad_args", "the run has no stored session to resume");
+  return run;
+}
+
 /**
  * `flowryn resume <task|run>`: start a dead worker again from its stored
  * session, in the same worktree. The reconciler does this once by itself;
- * after a second death it is yours to call (design section 6).
+ * after a second death it is yours to call (design section 6). A harness
+ * version with no passing contract refuses it (section 5).
  */
 const resume: VerbSpec = {
   name: "resume",
@@ -144,12 +157,15 @@ const resume: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  async prepare(ctx, args) {
+    const run = resumable(ctx.db, stringArg(args, "target")!);
+    // Design section 5: the installed version is checked before a resume, as at dispatch.
+    const check = await gateHarness(ctx.db, ctx.config(), run.harness, ctx.fleet.harnessVersion, "cli", "resume", ctx.now);
+    if (check.state !== "verified") throw harnessRefusal(check);
+    return null;
+  },
   apply(ctx, args) {
-    const run = findRun(ctx.db, stringArg(args, "target")!);
-    if (!run) throw new FlowrynError("not_found", `no run or task ${stringArg(args, "target")}`);
-    if (run.state === "cancelled" || run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
-    if (run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
-    if (!run.agent_session) throw new FlowrynError("bad_args", "the run has no stored session to resume");
+    const run = resumable(ctx.db, stringArg(args, "target")!);
     const now = ctx.now();
     ctx.db
       .query("UPDATE runs SET state = CASE WHEN state = 'failed' THEN 'running' ELSE state END, liveness = 'starting', resume_count = resume_count + 1, ended_at = NULL, updated_at = ?2 WHERE id = ?1")
@@ -220,6 +236,8 @@ function needs(ctx: ReadCtx, run: FleetRow): string {
   if (ctx.db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open'").get(run.id)) return "answer";
   if (ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND lane = 'P0' AND state IN ('open','presented')").get(run.id)) return "you";
   if (run.stage_state === "review") return "review";
+  // A scout's report stays to be read after its run landed and was cleaned.
+  if (run.kind === "scout" && ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND kind = 'report_ready' AND state IN ('open','presented')").get(run.id)) return "read";
   if (run.state === "ready") return run.kind === "scout" ? "read" : "merge";
   if (run.state === "merging") return "proof";
   if (run.state === "landed") return run.cleanup === "refused" ? "cleanup" : "-";
@@ -338,6 +356,8 @@ const show: VerbSpec = {
     let target = stringArg(args, "target")!;
     const plan = /^p\d+$/.test(target) ? planView(ctx.db, target) : null;
     if (plan) return { data: plan, hints: ["flowryn fleet"] };
+    const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
+    if (divergence) return { data: divergenceView(divergence), hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
     const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as { task_id: string | null; run_id: string | null; line: string; lane: string; state: string } | null;
     if (item) target = item.run_id ?? item.task_id ?? target;
     const run = findRun(ctx.db, target) as FleetRow | null;

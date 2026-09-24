@@ -1,9 +1,9 @@
 import { watch, type FSWatcher } from "node:fs";
 import { basename, dirname } from "node:path";
 import type { Db } from "../db/db.ts";
-import { getMeta, setMeta, tx } from "../db/db.ts";
+import { tx } from "../db/db.ts";
 import { appendEvent, type EventRow } from "../db/events.ts";
-import { openItem } from "../attention/items.ts";
+import { openDivergence } from "../reconcile/divergence.ts";
 import { diffTasks, intentErased, isEmptyDiff, type BacklogDiff } from "./diff.ts";
 import { pendingIntents, recordIntent, type AppliedPayload, type Journal } from "./journal.ts";
 import { hashFile, readSnapshot, writeSnapshot, JOURNAL_FILES, type JournalFile } from "./snapshot.ts";
@@ -227,7 +227,10 @@ export class BacklogWatcher {
         });
         reapplied.push(copy.id);
       }
-      for (const conflict of conflicts) divergences.push(this.openDivergence(conflict, now));
+      for (const conflict of conflicts) {
+        const id = openDivergence(db, "backlog", { runId: conflict.run.id, taskId: conflict.run.task_id, higher: "run", lower: "backlog", summary: conflict.summary }, now);
+        if (id) divergences.push(id);
+      }
     });
     if (reapplied.length > 0) this.deps.journal.kick();
     if (!isEmptyDiff(diff)) this.deps.log?.(`watcher: ${file} edited by hand (${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} changed)`);
@@ -329,32 +332,5 @@ export class BacklogWatcher {
       }
     }
     return conflicts;
-  }
-
-  private openDivergence(conflict: { run: OpenRun; summary: string }, now: number): string {
-    const { db } = this.deps;
-    const next = Number(getMeta(db, "next_divergence_no") ?? "1");
-    setMeta(db, "next_divergence_no", String(next + 1));
-    const id = `d${next}`;
-    db.query(
-      "INSERT INTO divergences (id, run_id, task_id, higher, lower, summary, opened_at) VALUES (?1, ?2, ?3, 'run', 'backlog', ?4, ?5)",
-    ).run(id, conflict.run.id, conflict.run.task_id, conflict.summary, now);
-    const event = appendEvent(db, {
-      source: "backlog",
-      kind: "divergence.opened",
-      runId: conflict.run.id,
-      taskId: conflict.run.task_id,
-      payload: { divergence: id, higher: "run", lower: "backlog", summary: conflict.summary },
-      ts: now,
-    });
-    openItem(db, {
-      kind: "divergence",
-      eventSeq: event.seq,
-      taskId: conflict.run.task_id,
-      runId: conflict.run.id,
-      line: `Divergence ${id}: ${conflict.summary}; the run is untouched`,
-      now,
-    });
-    return id;
   }
 }

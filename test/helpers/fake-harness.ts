@@ -18,6 +18,7 @@
  *   FAKE: cwd <path>                 report this cwd at worker-start (isolation test)
  *   FAKE: ignore-steers              never acknowledge a steer
  *   FAKE: commit <file> <text...>    write <file> in the worktree and commit it
+ *   FAKE: scratch <file> <text...>   write <file> in the worktree and leave it uncommitted
  *   FAKE: push                       git push origin HEAD (the run branch)
  *   FAKE: pr <api> <owner/repo> [draft]  open a PR for the run branch on a fake GitHub
  *   FAKE: deliver-pr                 deliver --pr <the PR it opened>; the reply goes to fake-replies.jsonl
@@ -241,6 +242,13 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
         writeFileSync(join(WORKTREE, file), `${words.join(" ") || "a change"}\n`);
         await git(["add", "--", file]);
         await git(["commit", "-q", "-m", `fake: ${file}`]);
+      });
+      return "continue";
+    }
+    case "scratch": {
+      const [file = "scratch.txt", ...words] = rest;
+      await tool(async () => {
+        writeFileSync(join(WORKTREE, file), `${words.join(" ") || "scratch work"}\n`);
       });
       return "continue";
     }

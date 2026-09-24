@@ -12,7 +12,7 @@ import type { DaemonInfo, DaemonServices } from "../api/verbs.ts";
 import { Journal, pendingIntents } from "../journal/journal.ts";
 import { BacklogWatcher } from "../journal/watcher.ts";
 import { processRunner, type TasksAxiRunner } from "../journal/tasks-axi.ts";
-import type { JournalFile } from "../journal/snapshot.ts";
+import { hashFile, readSnapshot, type JournalFile } from "../journal/snapshot.ts";
 import { listen, request, type Listener } from "../transport/unix.ts";
 import { ensureDir } from "../util/fsx.ts";
 import { tryExclusiveLock, type HeldLock } from "../util/flock.ts";
@@ -20,7 +20,7 @@ import { ulid } from "../util/ulid.ts";
 import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
-import { timingConfig, workerConfigProblems } from "../config/workers.ts";
+import { herdrConfig, timingConfig, workerConfigProblems } from "../config/workers.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
 import { Launcher } from "../lifecycle/launcher.ts";
@@ -46,6 +46,8 @@ import { DeliveryWatcher } from "../watch/delivery.ts";
 import { Scheduler } from "../sched/scheduler.ts";
 import type { SchedServices } from "../sched/services.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
+import { checkHarnessesAtStartup, gateHarness } from "../lifecycle/harness-gate.ts";
+import { alertHerdrIfDue, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -184,8 +186,17 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     // M2: the Herdr runtime, launcher and reconciler (design sections 5 and 6).
     const herdrSocket = await resolveHerdrSocket(config);
-    const runtime = herdrSocket.socket ? new HerdrRuntime(new HerdrClient(herdrSocket.socket)) : null;
-    log(runtime ? `herdr: ${herdrSocket.socket}` : `herdr: not available (${herdrSocket.reason}); workers cannot start`);
+    let runtime = herdrSocket.socket ? new HerdrRuntime(new HerdrClient(herdrSocket.socket)) : null;
+    log(runtime ? `herdr: ${herdrSocket.socket}` : `herdr: not available (${herdrSocket.reason}); workers cannot start until it is`);
+    // Herdr may start after the daemon (launchd starts it at login): the watcher looks for its socket again with backoff.
+    const resolveRuntime = async (): Promise<boolean> => {
+      if (runtime) return true;
+      const found = await resolveHerdrSocket(config);
+      if (!found.socket) return false;
+      runtime = new HerdrRuntime(new HerdrClient(found.socket));
+      log(`herdr: ${found.socket}`);
+      return true;
+    };
     const bus = new SteerBus();
     const timing = () => timingConfig(config);
     const git = (args: string[], cwd?: string) => runTool(resolveTool(config, "git"), args, cwd);
@@ -233,11 +244,31 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       now: Date.now,
       docker: () => resolveTool(config, "docker"),
       released: () => scheduler?.kick(),
+      harnessGate: (harness) => gateHarness(database, config, harness, harnessVersion, "reconciler", "resume", Date.now),
+      // The invariant pass judges the snapshot only once it matches the file: a hand edit is diffed first.
+      backlogFresh: async () => {
+        await watcher.refreshIfIdle("backlog");
+        if (journal.locks.isHeld("backlog")) return false;
+        const snapshot = readSnapshot(database, "backlog");
+        return snapshot !== null && snapshot.contentHash === hashFile(config.tasks.backlog);
+      },
     });
     const herdrWatcher = new HerdrWatcher({
       runtime: () => runtime,
+      resolve: resolveRuntime,
       onPane: (paneId) => reconciler?.onPane(paneId),
-      onConnected: (first) => reconciler?.schedule(undefined, first ? "startup" : "reconnect"),
+      onConnected: (first) => {
+        if (tx(database, () => noteHerdrUp(database, "herdr", Date.now()))) log("herdr: reachable again");
+        reconciler?.schedule(undefined, first ? "startup" : "reconnect");
+        // Launches deferred while Herdr was away go now.
+        scheduler?.kick();
+      },
+      // Design section 16: Herdr unreachable is one P1 per episode, once it matters.
+      onDown: (reason) =>
+        tx(database, () => {
+          noteHerdrDown(database, reason, "herdr", Date.now());
+          alertHerdrIfDue(database, herdrConfig(config).unreachable_alert_ms, Date.now());
+        }),
       log,
     });
 
@@ -351,7 +382,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       launch: (runId, mode) => launcher.start(runId, mode),
       isLaunching: (runId) => launcher.isActive(runId),
       exitWorker: async (runId) => {
-        await exitRun(control, runId);
+        const exited = await exitRun(control, runId);
+        return { ok: exited.ok, detail: exited.detail ?? exited.evidence };
       },
       notify: (runId) => bus.notify(runId),
       startDeps,
@@ -403,9 +435,17 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     syncTodos();
     resolveReady();
 
+    // Design section 5: every harness in use, its installed version against the passing contract records, before any launch.
+    try {
+      const checks = await checkHarnessesAtStartup(database, config, harnessVersion, Date.now);
+      if (checks.length > 0) log(`harness: ${checks.map((c) => (c.state === "missing" ? `${c.harness} ${c.detail}` : `${c.harness} ${c.version} ${c.state}`)).join("; ")}`);
+    } catch (error) {
+      log(`harness: the startup version check failed: ${(error as Error).message}`);
+    }
+
     // Reconciler startup (design section 6, steps 4-7): subscribe first so events buffer,
     // then reconcile every open run; afterwards every event plus a steady pass.
-    if (runtime) await herdrWatcher.start();
+    await herdrWatcher.start();
     await reconciler.passNow("startup");
     deliveryWatcher.start();
     scheduler.start();

@@ -18,7 +18,11 @@ export interface HerdrConfig {
   socket: string | null;
   /** Named Herdr session to resolve with `herdr session list --json` (default: the default session). */
   session: string | null;
+  /** Herdr unreachable this long, while something needs it: one P1 for the episode (design section 16). */
+  unreachable_alert_ms: number;
 }
+
+export const DEFAULT_HERDR_ALERT_MS = 60_000;
 
 export const CLAUDE_PERMISSION_MODES = ["bypassPermissions", "auto", "acceptEdits", "default", "dontAsk", "plan"] as const;
 export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
@@ -120,9 +124,14 @@ function branchPrefix(value: string): string {
 
 export function herdrConfig(config: FlowrynConfig): HerdrConfig {
   const raw = table(config.extra.herdr, "[herdr]");
+  const alert = raw.unreachable_alert_ms;
+  if (alert !== undefined && (typeof alert !== "number" || !Number.isInteger(alert) || alert <= 0)) {
+    throw new FlowrynError("config_invalid", "[herdr] unreachable_alert_ms must be a positive integer");
+  }
   return {
     socket: absPath(optString(raw.socket, "[herdr] socket"), config.home),
     session: optString(raw.session, "[herdr] session"),
+    unreachable_alert_ms: (alert as number | undefined) ?? DEFAULT_HERDR_ALERT_MS,
   };
 }
 

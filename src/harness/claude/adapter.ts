@@ -86,7 +86,7 @@ export const claudeAdapter: HarnessAdapter = {
 
   /** claude --resume <session_id> in the same worktree (design section 5). */
   resume(run, config) {
-    return plan(run, config, ["--resume", run.sessionId], RESUME_PROMPT);
+    return plan(run, config, ["--resume", run.sessionId], run.resumePrompt ?? RESUME_PROMPT);
   },
 
   async preTrust(run, config): Promise<Trust> {

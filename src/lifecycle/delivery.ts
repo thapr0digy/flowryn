@@ -8,7 +8,7 @@ import { checksLine, ForgeError, type ChecksSummary, type Forge, type PullReques
 import { recordIntent } from "../journal/journal.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { voidApprovals } from "../policy/approvals.ts";
-import { openDivergence } from "../reconcile/divergence.ts";
+import { closeDivergence, openDivergence, type DivergenceRow } from "../reconcile/divergence.ts";
 import type { ProjectRow } from "./projects.ts";
 import { recordEvidence, taskTitle, type RunWithPolicy } from "./runs.ts";
 
@@ -244,11 +244,8 @@ export function recordDelivery(db: Db, run: RunWithPolicy, verified: VerifiedPr 
       : `Branch ready to merge: ${title} (${run.project_id}), local-only, ${verified.commits} commit(s)`;
   }
   // A later delivery that passes settles what an earlier refused one contradicted.
-  const settled = db.query("SELECT id FROM divergences WHERE run_id = ?1 AND higher = 'github' AND lower = 'worker' AND resolved_at IS NULL").all(run.id) as { id: string }[];
-  for (const d of settled) {
-    db.query("UPDATE divergences SET resolved_at = ?2, resolution = 'delivered' WHERE id = ?1").run(d.id, now);
-    db.query("UPDATE items SET state = 'resolved', resolved_by = 'run.delivered', resolved_at = ?2 WHERE kind = 'divergence' AND run_id = ?1 AND line LIKE ?3 AND state IN ('open','presented')").run(run.id, now, `Divergence ${d.id}:%`);
-  }
+  const settled = db.query("SELECT * FROM divergences WHERE run_id = ?1 AND higher = 'github' AND lower = 'worker' AND resolved_at IS NULL").all(run.id) as DivergenceRow[];
+  for (const d of settled) closeDivergence(db, d, "delivered", "run.delivered", "cli", now);
   const event = appendEvent(db, {
     source: "cli",
     kind: "run.delivered",

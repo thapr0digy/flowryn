@@ -21,7 +21,7 @@ export const FAKE_VERSION = "9.9.9";
 
 export interface FleetEnv {
   h: TestHome;
-  herdr: FakeHerdr;
+  readonly herdr: FakeHerdr;
   repo: string;
   /** The bare origin, when the fleet has one. */
   origin: string | null;
@@ -35,6 +35,9 @@ export interface FleetEnv {
   events(runId: string): string[];
   waitRun(runId: string, predicate: (run: RunRow) => boolean, what: string, timeoutMs?: number): Promise<RunRow>;
   restartDaemon(): Promise<void>;
+  /** Herdr goes away (its server stops, and with it every harness in its panes), and comes back on the same socket. */
+  stopHerdr(): Promise<void>;
+  startHerdr(): Promise<void>;
   cleanup(): Promise<void>;
 }
 
@@ -54,11 +57,16 @@ export function makeRepo(dir: string): string {
 }
 
 /** A stand-in harness binary that only answers --version. */
-function versionScript(dir: string, name: string): string {
+function versionScript(dir: string, name: string, version = FAKE_VERSION): string {
   const path = join(dir, name);
-  writeFileSync(path, `#!/bin/sh\necho "${FAKE_VERSION} (fake ${name})"\n`);
+  writeFileSync(path, `#!/bin/sh\necho "${version} (fake ${name})"\n`);
   chmodSync(path, 0o755);
   return path;
+}
+
+/** The harness "updated": its stand-in binary now answers another version (design section 16). */
+export function setHarnessVersion(h: TestHome, harness: "claude" | "pi", version: string): void {
+  versionScript(join(h.home, "bin"), harness, version);
 }
 
 /**
@@ -96,6 +104,8 @@ export interface FleetOptions {
   /** More config after the fleet's own sections ([github], [cleanup], [leader], ...). */
   extraConfig?: string;
   yolo?: boolean;
+  /** [herdr] unreachable_alert_ms: how long Herdr may be away before its P1. */
+  herdrAlertMs?: number;
 }
 
 export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv> {
@@ -110,6 +120,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
         `docker = ${JSON.stringify(dockerScript(bin, home))}`,
         "[herdr]",
         `socket = ${JSON.stringify(join(home, "herdr.sock"))}`,
+        ...(options.herdrAlertMs ? [`unreachable_alert_ms = ${options.herdrAlertMs}`] : []),
         "[workers]",
         `worktree_root = ${JSON.stringify(join(home, "wt"))}`,
         "[workers.claude]",
@@ -126,7 +137,8 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   mkdirSync(store, { recursive: true });
   const logDir = join(home, "harness-logs");
   mkdirSync(logDir, { recursive: true });
-  const herdr = await FakeHerdr.start(join(home, "herdr.sock"), { env: h.env, logDir });
+  let herdr = await FakeHerdr.start(join(home, "herdr.sock"), { env: h.env, logDir });
+  let herdrUp = true;
   const leader = seedLeader(h);
   if (options.contracts !== false) {
     const db = h.db();
@@ -155,7 +167,9 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   };
   const fleet: FleetEnv = {
     h,
-    herdr,
+    get herdr() {
+      return herdr;
+    },
     repo,
     origin: origin?.origin ?? null,
     leader,
@@ -188,9 +202,17 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
     async restartDaemon() {
       daemon = await startDaemon(h);
     },
+    async stopHerdr() {
+      herdrUp = false;
+      await herdr.stop();
+    },
+    async startHerdr() {
+      herdr = await FakeHerdr.start(join(home, "herdr.sock"), { env: h.env, logDir });
+      herdrUp = true;
+    },
     async cleanup() {
       await daemon.kill9().catch(() => {});
-      await herdr.stop().catch(() => {});
+      if (herdrUp) await herdr.stop().catch(() => {});
       if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
       else h.cleanup();
     },

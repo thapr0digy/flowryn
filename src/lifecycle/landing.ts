@@ -11,7 +11,8 @@ import { runCleanup, type CleanupOutcome } from "../policy/cleanup.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { psRunner, type PsRunner } from "../runtime/proc.ts";
 import { deliveredOf, projectRepo } from "./delivery.ts";
-import { getProject } from "./projects.ts";
+import { reportLink } from "./launcher.ts";
+import { getProject, type ProjectRow } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { closeMergeGate } from "./stages.ts";
@@ -82,7 +83,33 @@ export interface CleanupReport extends CleanupOutcome {
 }
 
 function cleanupLine(db: Db, run: RunWithPolicy, outcome: CleanupOutcome): string {
-  return `Merged, but cleanup refused for ${taskTitle(db, run.task_id)} (${outcome.reason}): ${outcome.detail}; flowryn cleanup ${run.task_id}`;
+  const what = run.kind === "scout" ? "Report delivered" : "Merged";
+  return `${what}, but cleanup refused for ${taskTitle(db, run.task_id)} (${outcome.reason}): ${outcome.detail}; flowryn cleanup ${run.task_id}`;
+}
+
+/** What `done` records for a landed task (design section 8): its PR, its report (a scout), or a note naming the local merge. */
+export function doneFlags(db: Db, run: Pick<RunWithPolicy, "task_id" | "kind">, project: ProjectRow | null): Record<string, string> {
+  if (run.kind === "scout") return { report: reportLink(run.task_id) };
+  const delivered = deliveredOf(db, run.task_id);
+  if (delivered?.kind === "pr") return { pr: delivered.ref };
+  const merge = db.query("SELECT merge_sha FROM merges WHERE task_id = ?1 AND state = 'merged' ORDER BY proven_at DESC LIMIT 1").get(run.task_id) as { merge_sha: string | null } | null;
+  return { note: `merged into local ${project?.default_branch ?? "its default branch"}${merge?.merge_sha ? ` at ${merge.merge_sha.slice(0, 8)}` : ""}` };
+}
+
+/**
+ * A scout lands with its report (design section 8): its workflow ends in no
+ * gate, so the verified report is the proof, as a proven merge is a ship's.
+ * The report_ready P1 stays open until the leader has read it; the daemon
+ * then cleans the worktree up through the cleanup guard. Call inside a
+ * transaction.
+ */
+export function landScout(db: Db, run: RunWithPolicy, report: string, now: number): void {
+  if (run.state === "landed" || isTerminal(run.state)) return;
+  db.query("UPDATE runs SET state = 'landed', updated_at = ?2 WHERE id = ?1").run(run.id, now);
+  resolveRunItems(db, run.id, ["worker_idle", "steer_unacked"], "run.landed report", now);
+  releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
+  appendEvent(db, { source: "daemon", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { how: "report", report }, ts: now });
+  run.state = "landed";
 }
 
 /**
@@ -150,12 +177,17 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
     if (current.state === "landed") {
       db.query("UPDATE runs SET state = 'cleaned', ended_at = ?2, updated_at = ?2, pending_launch = NULL WHERE id = ?1").run(run.id, now);
       releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.cleaned", now);
-      const merge = db.query("SELECT merge_sha FROM merges WHERE task_id = ?1 AND state = 'merged' ORDER BY proven_at DESC LIMIT 1").get(run.task_id) as { merge_sha: string | null } | null;
-      const flags: Record<string, string> = delivered?.kind === "pr" ? { pr: delivered.ref } : { note: `merged into local ${project.default_branch}${merge?.merge_sha ? ` at ${merge.merge_sha.slice(0, 8)}` : ""}` };
+      const flags = doneFlags(db, run, project);
       recordIntent(db, { file: "backlog", verb: "done", taskId: run.task_id, positional: [run.task_id], flags, now });
-      resolveRunItems(db, run.id, null, "run.cleaned", now);
-      const event = appendEvent(db, { source: "daemon", kind: "run.cleaned", runId: run.id, taskId: run.task_id, payload: { merge_sha: merge?.merge_sha ?? null }, ts: now });
-      openItem(db, { kind: "progress", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Landed and cleaned: ${taskTitle(db, run.task_id)} (${run.project_id})`, now });
+      // A scout's report stays to be read: its report_ready P1 closes only once the leader has read it (design section 9).
+      db.query("UPDATE items SET state = 'resolved', resolved_by = 'run.cleaned', resolved_at = ?2 WHERE run_id = ?1 AND state IN ('open','presented') AND kind != ?3").run(
+        run.id,
+        now,
+        run.kind === "scout" ? "report_ready" : "",
+      );
+      const merge = db.query("SELECT merge_sha FROM merges WHERE task_id = ?1 AND state = 'merged' ORDER BY proven_at DESC LIMIT 1").get(run.task_id) as { merge_sha: string | null } | null;
+      const event = appendEvent(db, { source: "daemon", kind: "run.cleaned", runId: run.id, taskId: run.task_id, payload: { merge_sha: merge?.merge_sha ?? null, ...flags }, ts: now });
+      openItem(db, { kind: "progress", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `${run.kind === "scout" ? "Report landed" : "Landed"} and cleaned: ${taskTitle(db, run.task_id)} (${run.project_id})`, now });
     }
   });
   deps.kickJournal();
