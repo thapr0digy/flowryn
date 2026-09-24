@@ -69,6 +69,9 @@ function log(line: string): void {
 // --- the scratch home ---------------------------------------------------------------------
 const piAgent = process.env.M3_PI_AGENT_DIR ?? join(home, "pi-agent");
 mkdirSync(piAgent, { recursive: true });
+// Pi refuses to compact a short session ("Nothing to compact"); keeping one recent token makes /compact work, as in M0 p06.
+// It goes in the scratch agent dir's own settings, which need no project trust; a given agent dir is left alone.
+if (!process.env.M3_PI_AGENT_DIR) writeFileSync(join(piAgent, "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 1 } }) + "\n");
 writeFileSync(
   join(home, "config.toml"),
   renderToml(

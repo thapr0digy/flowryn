@@ -52,6 +52,24 @@ async function readInput(io: CliIo): Promise<string> {
   }
 }
 
+/**
+ * A waiter whose harness is gone has nobody to wake, so it stops instead of
+ * retrying for 8 h. Bun reads process.ppid once at startup and never sees the
+ * re-parenting, so the check asks whether the original parent still exists.
+ */
+function orphanCheck(): () => boolean {
+  const parent = process.ppid;
+  return () => {
+    if (parent <= 1) return true;
+    try {
+      process.kill(parent, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "EPERM";
+    }
+  };
+}
+
 function harnessOf(value: string | undefined): Harness {
   return value === "pi" ? "pi" : "claude";
 }
@@ -103,7 +121,9 @@ const waitSteer: VerbSpec = {
     if (!io.env.FLOWRYN_TOKEN) return 0;
     const waiter = ulid();
     const deadline = Date.now() + WAITER_MAX_MS;
+    const orphaned = orphanCheck();
     while (Date.now() < deadline) {
+      if (orphaned()) return 0;
       const reply = await call(io, "hook.wait-steer", { harness, waiter }, WAITER_TIMEOUTS).catch(() => null);
       if (!reply) {
         await Bun.sleep(WAITER_RETRY_MS);
@@ -161,7 +181,9 @@ const waitP0: VerbSpec = {
       if (harness === "pi") io.stdout(JSON.stringify({ exit: true }) + "\n");
       return 0;
     };
+    const orphaned = orphanCheck();
     while (Date.now() < deadline) {
+      if (orphaned()) return 0;
       const reply = await call(io, "hook.wait-p0", { harness, waiter }, WAITER_TIMEOUTS).catch(() => null);
       if (!reply) {
         await Bun.sleep(WAITER_RETRY_MS);

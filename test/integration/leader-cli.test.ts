@@ -6,7 +6,7 @@ import { SKILL_DESCRIPTION } from "../../src/bridges/skill.ts";
 import { claudeLeaderArgs, leaderEnv, piLeaderArgs } from "../../src/cli/commands/lead.ts";
 import { STYLE_BLOCK } from "../../src/harness/contract-text.ts";
 import { localDate } from "../../src/lifecycle/dates.ts";
-import { cli, cliJson, readText } from "../helpers/harness.ts";
+import { cli, cliJson, readText, REPO_ROOT } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
 
 let env: LeaderEnv | null = null;
@@ -111,6 +111,32 @@ describe("leader verbs", () => {
     expect(frame.stdout).toContain("FLEET (1)");
     const agent = await cli(env.h, ["board", "--once"], { env: { FLOWRYN_TOKEN: env.worker.token } });
     expect(agent.code).toBe(77);
+  });
+});
+
+describe("waiters", () => {
+  test("a waiter whose harness is gone stops instead of retrying for hours", async () => {
+    env = await makeLeaderEnv();
+    const e = env;
+    const lead = await e.openSession("pi");
+    await e.call("hook.session-start", { harness: "pi", input: JSON.stringify({ source: "startup" }) }, lead.token);
+    // Its parent (standing in for Pi) lives a second, then dies, as Pi does when it crashes.
+    const spawned = Bun.spawnSync(["sh", "-c", `bun ${JSON.stringify(join(REPO_ROOT, "src/main.ts"))} hook wait-p0 --harness pi --json >/dev/null 2>&1 & echo $!; sleep 1`], {
+      env: { ...e.h.env, FLOWRYN_TOKEN: lead.token },
+      stdin: "ignore",
+    });
+    const pid = Number(spawned.stdout.toString().trim());
+    expect(pid).toBeGreaterThan(1);
+    // Still waiting while its parent lived: it holds the session's long poll.
+    expect(e.withDb((db) => db.query("SELECT 1 FROM leader_sessions WHERE session_id = ?1 AND ended_at IS NULL").get(lead.session))).toBeTruthy();
+    await waitFor("the orphaned waiter to exit", 15_000, () => {
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
   });
 });
 
