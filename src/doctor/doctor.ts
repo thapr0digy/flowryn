@@ -10,6 +10,12 @@ import { isLockHeld, tryExclusiveLock } from "../util/flock.ts";
 import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
+import { workerConfigProblems } from "../config/workers.ts";
+import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
+import { harnessVersion } from "../lifecycle/fleet-services.ts";
+import { HerdrClient } from "../runtime/herdr/client.ts";
+import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
+import { loadExtensionSource } from "../harness/pi/adapter.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -153,8 +159,66 @@ function binaryCheck(): Check | null {
     : { check: "binary", status: "fail", detail: `${process.execPath} signature invalid; rebuild (the build re-signs with codesign --force --sign -)` };
 }
 
+/** The Pi worker extension ships inside the binary; a build that lost it could not start a Pi worker. */
+async function piExtensionCheck(): Promise<Check> {
+  try {
+    const source = await loadExtensionSource();
+    return source.includes("project_trust")
+      ? { check: "pi extension", status: "ok", detail: `embedded worker extension, ${source.length} bytes` }
+      : { check: "pi extension", status: "fail", detail: "the embedded worker extension is not the Flowryn one" };
+  } catch (error) {
+    return { check: "pi extension", status: "fail", detail: `cannot read the embedded worker extension: ${(error as Error).message}` };
+  }
+}
+
+/** Is the Herdr session flowrynd drives reachable? Read-only: a ping on its socket. */
+async function herdrCheck(config: FlowrynConfig): Promise<Check> {
+  let resolution;
+  try {
+    resolution = await resolveHerdrSocket(config);
+  } catch (error) {
+    return { check: "herdr", status: "fail", detail: (error as Error).message };
+  }
+  if (!resolution.socket) return { check: "herdr", status: "warn", detail: `${resolution.reason}; workers cannot start` };
+  try {
+    await new HerdrClient(resolution.socket).call("ping", {}, 3_000);
+    return { check: "herdr", status: "ok", detail: resolution.socket };
+  } catch (error) {
+    return { check: "herdr", status: "warn", detail: `${resolution.socket} does not answer (${(error as Error).message}); workers cannot start` };
+  }
+}
+
+/**
+ * Design section 5: dispatch refuses a harness version with no passing
+ * contract run. Report each installed harness against the recorded passes.
+ */
+async function contractChecks(config: FlowrynConfig): Promise<Check[]> {
+  const db = existsSync(stateFiles(config.state_dir).db) ? openDb(stateFiles(config.state_dir).db, { readonly: true }) : null;
+  const checks: Check[] = [];
+  try {
+    for (const harness of HARNESS_IDS) {
+      const binary = resolveTool(config, harness);
+      if (!binary) continue;
+      const version = await harnessVersion(harness as HarnessId, binary);
+      if (!version) {
+        checks.push({ check: `contract ${harness}`, status: "warn", detail: `cannot read the version from ${binary} --version` });
+        continue;
+      }
+      const row = db && schemaVersion(db) >= 2 ? (db.query("SELECT passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2").get(harness, version) as { passed_at: number } | null) : null;
+      checks.push(
+        row
+          ? { check: `contract ${harness}`, status: "ok", detail: `${version} passed ${new Date(row.passed_at).toISOString().slice(0, 10)}` }
+          : { check: `contract ${harness}`, status: "warn", detail: `${version} has no passing contract run, so dispatch refuses it: flowryn doctor --contracts --harness ${harness}` },
+      );
+    }
+  } finally {
+    db?.close();
+  }
+  return checks;
+}
+
 /** Every doctor check, in reading order. Never mutates anything. */
-export async function runChecks(env: DoctorEnv, contracts: boolean): Promise<Check[]> {
+export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const home = flowrynHome(env.env);
   const checks: Check[] = [];
   let config: FlowrynConfig;
@@ -172,7 +236,10 @@ export async function runChecks(env: DoctorEnv, contracts: boolean): Promise<Che
   checks.push(...(await tasksChecks(config)));
   checks.push(...databaseChecks(config));
   checks.push(...(await daemonChecks(home, config, env)));
-  if (contracts) checks.push({ check: "contracts", status: "warn", detail: "harness contract suites ship with the worker adapters in M2; nothing to run yet" });
+  checks.push(...workerConfigProblems(config).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
+  checks.push(await herdrCheck(config));
+  checks.push(await piExtensionCheck());
+  checks.push(...(await contractChecks(config)));
   return checks;
 }
 

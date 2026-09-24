@@ -10,6 +10,7 @@ import { defaultConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { Journal } from "../../src/journal/journal.ts";
+import { inertFleet } from "../../src/lifecycle/fleet-services.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { parseArgv } from "../../src/cli/argv.ts";
 import { notHumanReason } from "../../src/cli/human.ts";
@@ -72,6 +73,7 @@ beforeEach(() => {
     info: () => ({ pid: 1, version: "t", proto: PROTO, instance: "i", startedAt: 0, execPath: "/bin/flowryn", socket: "/s", stateDir: dir }),
     requestShutdown: () => {},
     runTool: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    fleet: inertFleet(),
   };
   gateway = new Gateway({ services, lookup: (v) => VERBS.get(v) });
 });

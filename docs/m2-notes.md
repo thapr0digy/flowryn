@@ -1,0 +1,81 @@
+# M2 notes
+
+M2 builds section 17's "M2 · Runtime, workers, reconciler" of [`design-v3.html`](design-v3.html) on top of [M1](m1-notes.md). This file records where the design left room, what M2 chose, and what the live runs showed. Each item names the code that holds it.
+
+## The Herdr runtime
+
+- flowrynd drives Herdr's socket API directly (`src/runtime/herdr/client.ts`), one JSON line per request. The client refuses every method outside an allowlist before sending a byte: no `server.*`, no session lifecycle, no `worktree.remove`.
+- The socket comes from `[herdr] socket` when set (the lab and the tests set it, so the daemon runs no Herdr command), else from `[herdr] session` or the default session through the read-only `herdr session list --json` (`src/runtime/herdr/socket.ts`).
+- **Worktrees are made with git, not Herdr's `worktree.create`.** Herdr 0.7.5 refuses a linked worktree as the source (`linked_worktree_source`), and git is the ground truth the cleanup guard reads anyway. The launcher runs `git worktree add -b flowryn/<task> <worktree_root>/<project>/<task> <base>` (`src/lifecycle/launcher.ts`).
+- A launch opens a workspace at the worktree (its root pane stays a plain shell), splits it with the run's environment (M0 h04), labels the new pane with the metadata token `flowryn_run` and no TTL (M0 h03), then calls `agent.start`. A fresh pane answers `agent_pane_busy` until its shell is up, so the call retries for up to 20 s.
+- **`agent.start` types `<kind> <args>` into the pane's shell,** with shell quoting. Two limits follow. Arguments may not contain control characters (`invalid_agent_argument`), so nothing multi-line goes on the command line. A shell that is still starting reads in canonical mode, which keeps one 1024-byte line; M0 finding 11 came back live in M2, as a Pi launch cut off mid-prompt. So the positional prompt is one short line pointing at the task file, Pi also attaches that file with `@file`, and the launcher refuses a typed command over 960 bytes (`MAX_TYPED_COMMAND`).
+- `agent.start` types the harness's canonical name (`claude`, `pi`). A shim directory first on the pane's `PATH` maps it to the binary in `[tools]`, so the version the contract gate checked is the one that runs. A shell alias still wins; for Pi that is the user's `pi` alias to the same `pi-signed`.
+- The harness process is the foreground process group's leader: `claude` itself, or `pi-signed` (the Pi Launcher, which runs the real `pi` as its child). Its identity is pid, start time and executable, from `ps -o lstart=,comm=` in the C locale, to the second (`src/runtime/proc.ts`). Exit signals the whole group, because Claude keeps `caffeinate` and its tools there. Nothing is signalled unless start time and executable still match, and the check runs again right before SIGKILL.
+- `CLAUDECODE` and the inherited `CLAUDE_CODE_*` session variables are blanked on `pane.split` (M0 finding 1); an empty value reads as unset.
+
+## Worker adapters
+
+- Flowryn chooses each run's harness session id (a UUID) at dispatch. Claude launches with `--session-id` and resumes with `--resume`; Pi's `--session-id` creates or reopens the session (M0 p10). A worker that died before its session started (no worker-start yet) is relaunched fresh under the same id, not resumed.
+- **Claude** (`src/harness/claude/`): the worker contract and style block go in with `--append-system-prompt-file`, and the hooks in a per-run `--settings` file. The permission mode comes from `[workers.claude] permission_mode`, `bypassPermissions` by default.
+- **Claude's Bash sandbox, found live.** When the user runs Claude's sandbox, a worker's `$FLOWRYN_BIN` calls run inside it, but its hooks do not. The first live contract run showed hooks reaching the daemon while the model's `ack` failed with ENOENT on the socket. The per-run settings now allow that one socket (`sandbox.network.allowUnixSockets`) and writes to the run's spool and report directories (`sandbox.filesystem.allowWrite`). The launcher creates the spool directory with the modes the CLI expects, so the CLI never has to chmod it.
+- **Claude trust** is a port of Firstmate's `bin/fm-claude-trust.sh` (`src/harness/claude/trust.ts`). `[workers.claude] pretrust = "register"` (the default) writes trust for the worktree and its canonical project, fingerprint-and-refuse, never granting external-import consent the human did not give. `"check"` only reads, and refuses an untrusted worktree. Claude keys trust by the canonical project and canonicalizes a linked worktree to its primary checkout, so a worktree of a checkout Claude already trusts needs no write at all. This was confirmed live on 2.1.281, including in a temp directory. A separate repository nested inside a trusted directory is *not* trusted.
+- **Pi** (`src/harness/pi/`): the worker extension is one `.ts` file embedded in the binary (`with { type: "file" }`), written into the run directory and loaded with `-e`. It answers `project_trust` only for the run's own worktree and remembers nothing. It reports its events through `flowryn hook ...`, and holds one `hook wait-steer --harness pi` long poll. That poll carries steers (`deliverAs: "steer"` while busy, `followUp` with `triggerTurn` while idle) and the daemon's interrupt command (`ctx.abort()`).
+- `[workers.pi]` keeps the user's own Pi environment by default (M0 finding 12); `no_extensions`, `no_skills` and `no_context_files` turn it off, and `agent_dir`, `session_dir`, `extensions` and `env` point it elsewhere (the tests and the lab use a scratch agent dir and the offline scripted provider).
+- The adapters' `interrupt` and `exit` live in `src/lifecycle/control.ts`, because they need the runtime and the database. Claude: the interrupt key through Herdr, verified by the interrupt marker in its transcript (M0 finding 6), after which the daemon clears busy itself because no hook fires. Pi: the extension's abort, verified by the `agent_settled` that follows.
+
+## Dispatch, runs and the worker verbs
+
+- `flowryn dispatch <project> --kind ship|scout --body-file -` (`src/lifecycle/dispatch.ts`) refuses in this order: Herdr unreachable (`herdr_unavailable`), no passing contract for the installed harness version (`contract_unverified`, exit 2), and a primary checkout off its default branch (`primary_checkout_tangle`, exit 2, plus one P1 per project). Then one transaction records the task policy, the run in `launching`, the tasks-axi `add … --start` intent and the event. The launch runs in the background after commit.
+- The run token is minted at launch and kept in the run's private directory (`<state_dir>/runs/<run>/token`, 0600 in a 0700 tree). A resume therefore hands the worker the same token, and anything it spooled before dying stays valid. The database keeps only the hash.
+- The task body lives in the `run.dispatched` event; the launcher writes it to `task.md` on every launch.
+- **Reports** land at `<data_dir>/<task>/report.md` (the worker's `$FLOWRYN_REPORT_DIR`), because tasks-axi 0.2.5 accepts `--report` only as `data/<id>/report.md`; that relative path is the backlog link. `deliver --report` takes a regular file under the worktree or the report directory, no symlink, at most 1 MB. Whatever sits at `report.md` is removed and the copy is exclusive, so a symlink a worker plants there is never written through.
+- The task kind decides the deliverable: a scout delivers only `--report`, a ship only `--pr`; the other one is `bad_args`. A ship's `deliver --pr` answers `not_supported`: it is verified by the named-head gate, which arrives with delivery in M4.
+- `fail` does not fail the run on the worker's word. Section 8 fails or cancels a run only "with your consent", so `fail` opens a P0 and the leader cancels, resumes or steers.
+- `ask` opens decision `q<N>`: a P0 with a captain hold when blocking, a P1 otherwise. `answer` resolves it, lifts the hold, and reaches the worker as a steer.
+- The leader verbs M2 adds are `dispatch`, `steer`, `answer`, `interrupt`, `cancel`, `resume`, `fleet` and `show`. As in M1, your own terminal may run them until the lease arrives in M3. `interrupt`, `cancel` and `resume` are not in section 12's list, but the design needs them: a second death is "a failure needing you", and cancellation needs your consent. `cancel` keeps the worktree, because removing it is the cleanup guard's job (M4).
+- **Launch failures.** Herdr unreachable defers the launch; the run stays `launching` and every pass retries. Any other failure fails the run: P0, and the task goes back to Queued with a parked hold. An isolation failure fails the run, then interrupts and exits the process. When a launch finds its run already ended by the time the harness appears (an isolation failure races the identity read), it terminates that process by identity.
+
+## Steers
+
+- A steer is a `messages` row `m<N>` (`src/lifecycle/steers.ts`). Only the worker's `ack` proves it was seen. It rings at most `max_rings` times in all: the first delivery plus three re-rings, 5 minutes apart. After the last ring plus one interval it opens one P1 (`steer_unacked`). An acknowledgement after re-rings resolves that P1 and opens an informational one.
+- Claude channels: PostToolUse returns a due steer beside the next tool result (M0 c07). Stop continues the turn with one, at most twice in a row (M0 c06). The asyncRewake waiter fires only while the worker is idle, so a busy worker gets its steers mid-turn.
+- Waiter supersession: each waiter mints a ULID when armed; the daemon keeps the newest per run and answers older ones "exit 0". The latest id is kept only in memory: after a restart the first waiter to reconnect is adopted. A waiter keeps reconnecting while the daemon is down, because Claude re-arms one only at the next Stop.
+- Hook verbs are `ephemeral`: never kept for idempotency (a PostToolUse on every tool call would fill the 7-day reply table), never spooled. They step aside silently when the daemon is slow or down.
+
+## The reconciler
+
+- Startup order (section 6): journal replay and spool ingest (M1), then the Herdr subscription, then one full pass, then every event (the run whose pane an event names is re-read, since events carry no revision, M0 h01) plus a steady pass every `pass_ms` (`src/reconcile/reconciler.ts`, `src/watch/herdr.ts`). Every reconnect runs a full pass again.
+- Evidence rows: `process` (rank 2), `hook` (rank 3), `herdr` (rank 5). A run is alive when its identity matches the process table, the pid is among its pane's foreground processes, and the process's cwd is the run's worktree. The first such match after a (re)start is a `run.reattached` event. A matching process that lives outside its pane or worktree is `orphaned`, with a divergence; it is never adopted.
+- A dead run in `ready` (work delivered) is just dead. Otherwise it is resumed once from its session, with an informational P1; a second death is a P0 that names `flowryn resume` and `flowryn cancel`; `flowryn resume` resolves it. The startup pass is serialized with every scheduled pass, and the automatic resume claims `resume_count` by compare-and-set, so a dead run is resumed at most once. Two or more husks in one startup pass record `herdr.restart_suspected`.
+- A trust wedge (no worker-start `trust_wedge_ms` after the latest launch) is `blocked_dialog` with a P1, and no keystroke. A run idle for `idle_alert_ms` without an outcome gets a P1. So does one Herdr calls `working` that has sent no hook event for `stale_hook_ms`.
+- The orphan scan reads the snapshot's pane labels. A pane labelled for a live run that is not its pane of record is a divergence, left alone.
+- Not in M2: the section 8 invariant pass ("In flight if and only if a non-terminal run"; M1's watcher already flags hand edits against live runs) and Docker label evidence (M5).
+- `[reconcile]` sets every clock (`pass_ms`, `trust_wedge_ms`, `busy_lease_ms`, `ring_interval_ms`, `max_rings`, `idle_alert_ms`, `stale_hook_ms`, `launch_timeout_ms`, `exit_grace_ms`, `wait_poll_ms`). The defaults are the design's numbers; the section exists for tests and the lab.
+
+## Contract suites
+
+- `flowryn doctor --contracts [--harness claude|pi] [--project <checkout>] [--herdr-socket <path>] [--model <m>] [--keep]` (`src/contracts/`). Each run makes a scratch home and daemon, dispatches one real worker, and walks launch, session id, busy, deliver while busy, idle, deliver while idle, interrupt, exit, resume and a verified deliver. It then tears everything down in code and removes the scratch home. A pass is recorded by the daemon (`contracts.record`, human or leader), and dispatch checks it.
+- The worker works in a scratch repository by default. `--project` uses linked worktrees of a given checkout instead, created and removed in code. That is how a Claude run can use a checkout Claude already trusts.
+- With `[workers.pi] model` set to the offline scripted provider (`flowryn-scripted/*`), the task file carries a script, so Pi's side is deterministic. Steer ids are predictable (`m1`, `m2`, …) in a fresh scratch daemon.
+
+## Tests
+
+- `bun test` never reaches a real Herdr: test homes get `[herdr] socket` pointing at a path that does not exist unless a test sets one. Runtime tests use a fake Herdr (`test/helpers/fake-herdr.ts`) that spawns a fake harness (`test/helpers/fake-harness.ts`) as a real process in its own group. The fake plays a worker only through the real `flowryn hook` and worker verbs, so identity checks, hooks, steers, the spool and the reconciler all run for real. Every test has a timeout, and `FLOWRYN_TEST_KEEP=1` keeps a failing test's home.
+- The daemon installs its stop handlers before any startup work, so a SIGTERM during a slow startup is still a clean exit 0.
+
+## Live runs
+
+`scripts/lab/m2-live.sh [--claude-project <checkout>] [phase ...]` runs the M2 exit in a Firstmate lab session (`fm-herdr-lab.sh`): the contract suites, a real scout on each harness, a worker killed mid-run, and the daemon killed mid-run. Pi works in a fresh clone inside the scratch home, which is removed at the end. Claude works in linked worktrees of a checkout it already trusts (`--claude-project`), with `pretrust = "check"`, so `~/.claude.json` is never written. Every branch such a run creates is `flowryn/contract-<runid>-…`, and the run removes exactly those branches and worktrees by name on exit.
+
+Latest run, 2026-09-24, 26/26 passed: Herdr 0.7.5 (protocol 17), Claude Code 2.1.281 with Haiku 4.5 as the worker model, Pi 0.87.1 with the offline scripted provider, in lab session `fm-lab-flowryn-m2-85271-11126`.
+
+| Phase | Result |
+|---|---|
+| Contract, Pi 0.87.1 | All 10 steps. The busy steer was carried by the extension and acknowledged in 25 s; the idle steer woke the worker in 1 s; the abort was verified by `agent_settled`; SIGTERM exit; resumed in the same session; deliver verified. Recorded. |
+| Contract, Claude 2.1.281 | All 10 steps. The busy steer was carried by PostToolUse and acknowledged in 34 s; the idle steer woke the worker through the asyncRewake waiter in 5 s; the interrupt key was verified by the transcript marker; SIGTERM exit; the reconciler resumed it (`--resume`) in the same session; deliver verified. Recorded. |
+| Scout, Pi | Dispatched on a fresh clone of this repository; a verified report 3 s after launch. |
+| Scout, Claude | Dispatched on a linked worktree of the trusted checkout; the model read README.md, wrote a three-line summary and delivered it, 19 s after launch. |
+| Kill a worker | SIGKILL to a busy Pi worker's process group; the reconciler found the husk, resumed it once from its session (a new pid), and the run finished with a verified report. |
+| Kill the daemon | `kill -9` of flowrynd while a Pi worker was busy. The worker's `deliver` spooled (exit 75). The restarted daemon ingested the spool, then reattached the same pid (pane, worktree and process identity matched): no resume, `run.reattached`. |
+
+The first live attempts found two problems the fakes could not show, both fixed and covered above: the 1024-byte typed-command limit, and Claude's Bash sandbox blocking the worker's own CLI.

@@ -72,6 +72,14 @@ export class Gateway {
     }
 
     if (!isUlid(env.ulid)) throw new FlowrynError("bad_envelope", "a mutation needs a ULID idempotency key");
+    if (spec.ephemeral) {
+      if (via === "spool") throw new FlowrynError("bad_envelope", `${spec.name} is never spooled`);
+      const prepared = spec.prepare ? await spec.prepare(ctx, args) : undefined;
+      const applied = tx(services.db, () => spec.apply!(ctx, args, prepared));
+      services.journal.kick();
+      const settled = spec.settle ? await spec.settle(ctx, applied) : applied;
+      return okReply(settled.data, settled.hints);
+    }
     const stored = this.storedReply(env.ulid, via, caller.runId);
     if (stored) return this.settleStored(spec, ctx, stored);
 

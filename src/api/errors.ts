@@ -22,6 +22,8 @@ export const ERROR_CODES = {
   approval_required: EXIT.policy,
   red_checks: EXIT.policy,
   not_landed: EXIT.policy,
+  contract_unverified: EXIT.policy,
+  primary_checkout_tangle: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,
@@ -30,6 +32,9 @@ export const ERROR_CODES = {
   invalid_todo: EXIT.validation,
   already_exists: EXIT.validation,
   rejected_by_tasks_axi: EXIT.validation,
+  not_supported: EXIT.validation,
+  run_not_active: EXIT.validation,
+  invalid_report: EXIT.validation,
   // not found
   not_found: EXIT.notFound,
   // transport
@@ -45,6 +50,8 @@ export const ERROR_CODES = {
   internal: EXIT.failure,
   config_invalid: EXIT.failure,
   already_running: EXIT.failure,
+  tool_missing: EXIT.failure,
+  herdr_unavailable: EXIT.failure,
 } as const satisfies Record<string, ExitCode>;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

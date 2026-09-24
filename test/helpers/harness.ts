@@ -42,12 +42,14 @@ function cleanEnv(): Record<string, string> {
 
 export interface HomeOptions {
   tasksAxi?: string;
-  extraConfig?: string;
+  /** Appended after [tools]; lines before its first table header add tools. A function gets the home path. */
+  extraConfig?: string | ((home: string) => string);
 }
 
 /** A throwaway Flowryn home: config.toml, data and state directories, short enough for a socket path. */
 export function makeHome(options: HomeOptions = {}): TestHome {
   const home = mkdtempSync(join(tmpdir(), "fw-"));
+  const extraConfig = typeof options.extraConfig === "function" ? options.extraConfig(home) : (options.extraConfig ?? "");
   const dataDir = join(home, "data");
   const stateDir = join(home, "state");
   const backlog = join(dataDir, "backlog.md");
@@ -64,8 +66,10 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     `tasks_axi = ${JSON.stringify(options.tasksAxi ?? realTasksAxi())}`,
     ...(node ? [`node = ${JSON.stringify(node)}`] : []),
     ...(git ? [`git = ${JSON.stringify(git)}`] : []),
-    options.extraConfig ?? "",
+    extraConfig,
   ];
+  // Tests never reach a real Herdr: without a socket of their own they get one that does not exist.
+  if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
   const env = { ...cleanEnv(), FLOWRYN_HOME: home };

@@ -8,8 +8,9 @@ export type ItemClass = "actionable" | "info";
 /**
  * The lane table (design section 9): an event kind decides lane and class.
  * Nothing scores items; project priority and due date only order within a lane.
- * M1 opens only the backlog kinds; the rest are listed so later milestones
- * extend data, not code.
+ * M1 opened the backlog kinds; M2 opens the worker and run kinds. The rest
+ * are listed so later milestones extend data, not code. steer_unacked is the
+ * section 6 "re-ring up to 3 times, then a P1".
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -25,6 +26,8 @@ export const LANE_TABLE = {
   backlog_out_of_sync: { lane: "P1", class: "actionable" },
   trust_dialog: { lane: "P1", class: "actionable" },
   overdue_todo: { lane: "P1", class: "actionable" },
+  steer_unacked: { lane: "P1", class: "actionable" },
+  checkout_tangle: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
@@ -91,6 +94,22 @@ export function resolveItems(db: Db, kind: ItemKind, taskId: string | null, reso
     )
     .run(kind, taskId, resolvedBy, now);
   return result.changes;
+}
+
+/** Open items of a kind for one run. */
+export function findOpenRunItem(db: Db, kind: ItemKind, runId: string): ItemRow | null {
+  return db
+    .query("SELECT * FROM items WHERE kind = ?1 AND run_id = ?2 AND state IN ('open','presented') ORDER BY opened_at LIMIT 1")
+    .get(kind, runId) as ItemRow | null;
+}
+
+/** Resolve a run's open items of the given kinds (all kinds when none are named). */
+export function resolveRunItems(db: Db, runId: string, kinds: readonly ItemKind[] | null, resolvedBy: string, now = Date.now()): number {
+  if (kinds && kinds.length === 0) return 0;
+  const filter = kinds ? `AND kind IN (${kinds.map((_, i) => `?${i + 4}`).join(", ")})` : "";
+  return db
+    .query(`UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE run_id = ?1 AND state IN ('open','presented') ${filter}`)
+    .run(runId, resolvedBy, now, ...(kinds ?? [])).changes;
 }
 
 export function openItems(db: Db): ItemRow[] {
