@@ -296,6 +296,22 @@ describe("questions, cancel and interrupt", () => {
   );
 
   test(
+    "interrupt on pi is the extension's abort, verified by the agent_settled that follows",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Build\nFAKE: sleep 30000", { harness: "pi" });
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      const result = await env.json(["interrupt", task]);
+      expect(result.reply).toMatchObject({ ok: true });
+      expect(result.code).toBe(0);
+      expect(result.reply.data).toMatchObject({ interrupted: true, evidence: "hook" });
+      expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
+      expect(env.herdr.calls.some((c) => c.method === "pane.send_keys")).toBe(false);
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
     "fail opens a P0 and leaves the run to the leader",
     async () => {
       const env = await fleet();

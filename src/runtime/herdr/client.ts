@@ -58,8 +58,8 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_LINE = 8 * 1024 * 1024;
 let nextId = 0;
 
-function assertAllowed(method: string): void {
-  if (!ALLOWED_METHODS.has(method)) throw new HerdrError("method_refused", `flowryn never calls Herdr ${method}`);
+function refusal(method: string): HerdrError | null {
+  return ALLOWED_METHODS.has(method) ? null : new HerdrError("method_refused", `flowryn never calls Herdr ${method}`);
 }
 
 export class HerdrClient implements HerdrTransport {
@@ -70,7 +70,8 @@ export class HerdrClient implements HerdrTransport {
   }
 
   call(method: string, params: Record<string, unknown>, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, unknown>> {
-    assertAllowed(method);
+    const refused = refusal(method);
+    if (refused) return Promise.reject(refused);
     const id = `f${++nextId}`;
     return new Promise((resolve, reject) => {
       const socket = new net.Socket();

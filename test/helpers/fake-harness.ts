@@ -112,7 +112,9 @@ process.on("SIGINT", () => {
 });
 process.on("SIGTERM", () => process.exit(0));
 
+/** A tool call's wait; an interrupt that landed before it started still ends it, as Pi's abort ends the whole run. */
 function sleep(ms: number): Promise<void> {
+  if (interrupted) return Promise.resolve();
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     abortSleep = () => {
@@ -192,7 +194,7 @@ async function claudeIdle(): Promise<never> {
       await hook("prompt");
       await onSteer(waiter.stderr);
       await endTurn();
-    } else await sleep(200);
+    } else await Bun.sleep(200);
   }
 }
 
@@ -214,14 +216,14 @@ async function piLoop(): Promise<void> {
       continue;
     }
     if (message.steer) await onSteer(message.steer.line);
-    else await sleep(200);
+    else await Bun.sleep(200);
   }
 }
 
 async function main(): Promise<void> {
   if (steps.includes("no-start")) {
     log("no-start: waiting forever");
-    for (;;) await sleep(60_000);
+    for (;;) await Bun.sleep(60_000);
   }
   await hook("worker-start", { session_id: session, cwd: cwdOverride ?? process.cwd(), transcript_path: transcript, source: flag("--resume") ? "resume" : "startup" });
   if (harness === "pi") void piLoop();
@@ -232,9 +234,10 @@ async function main(): Promise<void> {
     markDone(i + 1);
     if (outcome === "end-turn") break;
   }
-  if (!interrupted) await endTurn();
+  // Pi's abort still ends in agent_settled (M0 p14); Claude's interrupt fires no hook at all (M0 c04).
+  if (!interrupted || harness === "pi") await endTurn();
   if (harness === "claude") await claudeIdle();
-  for (;;) await sleep(60_000);
+  for (;;) await Bun.sleep(60_000);
 }
 
 void main();
