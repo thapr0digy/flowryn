@@ -40,16 +40,40 @@ describe("config", () => {
   });
 
   test("refuses a state directory in a synced folder, warns for a data directory in Documents", () => {
-    const home = homedir();
-    expect(syncedFolderOf(join(home, "Library/Mobile Documents/com~apple~CloudDocs/fw"), home)).not.toBeNull();
-    expect(syncedFolderOf(join(home, "Dropbox/fw"), home)).not.toBeNull();
-    expect(syncedFolderOf(join(home, ".flowryn/state"), home)).toBeNull();
-    expect(privacyFolderOf(join(home, "Documents/fw"), home)).not.toBeNull();
-    const config = { ...defaultConfig(HOME), state_dir: join(home, "Documents/fw-state"), data_dir: join(home, "Desktop/fw") };
-    const problems = configProblems(config, home);
-    expect(problems.find((p) => p.level === "error")?.message).toContain("synced folder");
-    expect(problems.find((p) => p.level === "warn")?.message).toContain("privacy");
-    expect(() => parseConfig(`state_dir = ${JSON.stringify(join(home, "Documents/fw-state"))}`, HOME)).toThrow("synced folder");
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "fw-fakehome-")));
+    try {
+      expect(syncedFolderOf(join(home, "Library/Mobile Documents/com~apple~CloudDocs/fw"), home)).not.toBeNull();
+      expect(syncedFolderOf(join(home, "Dropbox/fw"), home)).not.toBeNull();
+      expect(syncedFolderOf(join(home, ".flowryn/state"), home)).toBeNull();
+      expect(privacyFolderOf(join(home, "Documents/fw"), home)).not.toBeNull();
+      const config = { ...defaultConfig(HOME), state_dir: join(home, "Documents/fw-state"), data_dir: join(home, "Desktop/fw") };
+      const problems = configProblems(config, home);
+      expect(problems.find((p) => p.level === "error")?.message).toContain("synced folder");
+      expect(problems.find((p) => p.level === "warn")?.message).toContain("privacy");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+    // Matched literally against the real home, so the check never touches ~/Documents.
+    expect(() => parseConfig(`state_dir = ${JSON.stringify(join(homedir(), "Documents/fw-state"))}`, HOME)).toThrow("synced folder");
+  });
+
+  test("a symlink into a synced folder is still refused", () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "fw-fakehome-")));
+    try {
+      const iCloud = join(home, "Library", "Mobile Documents");
+      mkdirSync(join(home, "links"), { recursive: true });
+      mkdirSync(join(home, "plain"));
+      symlinkSync(join(iCloud, "x"), join(home, "links", "absolute"));
+      symlinkSync(join("..", "Library", "Mobile Documents", "x"), join(home, "links", "relative"));
+      symlinkSync(join(home, "plain"), join(home, "links", "safe"));
+      expect(syncedFolderOf(join(home, "links", "absolute", "state"), home)).toBe(iCloud);
+      expect(syncedFolderOf(join(home, "links", "relative", "state"), home)).toBe(iCloud);
+      expect(privacyFolderOf(join(home, "links", "absolute"), home)).toBe(iCloud);
+      expect(syncedFolderOf(join(home, "links", "safe", "state"), home)).toBeNull();
+      expect(configProblems({ ...defaultConfig(HOME), state_dir: join(home, "links", "absolute") }, home).some((p) => p.level === "error")).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("flags tasks-axi under nvm", () => {

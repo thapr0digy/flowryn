@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, isAbsolute, join, sep } from "node:path";
 import { configPath, flowrynHome, toAbsolute } from "./paths.ts";
 import { FlowrynError } from "../api/errors.ts";
 
@@ -138,31 +138,72 @@ export interface ConfigProblem {
   message: string;
 }
 
-/** Resolve symlinks on the longest existing prefix, so a symlink into iCloud is still caught. */
-function realishPath(path: string): string {
-  let probe = path;
-  const suffix: string[] = [];
-  while (!existsSync(probe)) {
-    const parent = dirname(probe);
-    if (parent === probe) return path;
-    suffix.unshift(probe.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
-    probe = parent;
-  }
-  try {
-    return join(realpathSync(probe), ...suffix);
-  } catch {
-    return path;
-  }
-}
-
 function isUnder(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
+function protectedRootOf(path: string, roots: readonly string[]): string | null {
+  return roots.find((root) => isUnder(path, root)) ?? null;
+}
+
+const MAX_SYMLINK_HOPS = 40;
+
+/** Folders macOS guards with privacy (TCC) or File Provider; nothing at or inside them is ever opened here. */
+function guardedRoots(home: string): string[] {
+  return ["Documents", "Desktop", "Downloads", join("Library", "Mobile Documents"), join("Library", "CloudStorage")].map((dir) => join(home, dir));
+}
+
+/**
+ * Resolve symlinks one component at a time with lstat/readlink, so a symlink
+ * into iCloud is still caught. It stops as soon as the partial path reaches a
+ * protected root: on macOS, opening or stat-ing a TCC-protected folder (iCloud,
+ * Documents, Desktop, CloudStorage) from a launchd-descended process can block
+ * forever on an invisible privacy prompt, and realpath opens the path.
+ */
+function resolveTowardRoots(path: string, roots: readonly string[]): string {
+  let resolved = sep;
+  const pending = path.split(sep).filter(Boolean);
+  let hops = 0;
+  while (pending.length > 0) {
+    const part = pending.shift()!;
+    if (part === ".") continue;
+    if (part === "..") {
+      resolved = dirname(resolved);
+      continue;
+    }
+    const next = join(resolved, part);
+    if (protectedRootOf(next, roots)) return join(next, ...pending);
+    let isLink: boolean;
+    try {
+      isLink = lstatSync(next).isSymbolicLink();
+    } catch {
+      return join(next, ...pending);
+    }
+    if (!isLink) {
+      resolved = next;
+      continue;
+    }
+    if (++hops > MAX_SYMLINK_HOPS) return path;
+    let target: string;
+    try {
+      target = readlinkSync(next);
+    } catch {
+      return path;
+    }
+    if (isAbsolute(target)) resolved = sep;
+    pending.unshift(...target.split(sep).filter(Boolean));
+  }
+  return resolved;
+}
+
+/** The protected root a path is under, literally or through symlinks; never touches the root itself. */
+function folderUnder(path: string, roots: readonly string[], home: string): string | null {
+  return protectedRootOf(path, roots) ?? protectedRootOf(resolveTowardRoots(path, [...roots, ...guardedRoots(home)]), roots);
+}
+
 /** Folders a sync client may manage. SQLite WAL there risks corruption (design section 15). */
 export function syncedFolderOf(path: string, home: string = homedir()): string | null {
-  const real = realishPath(path);
-  const roots = [
+  return folderUnder(path, [
     join(home, "Library", "Mobile Documents"),
     join(home, "Library", "CloudStorage"),
     join(home, "Dropbox"),
@@ -170,21 +211,12 @@ export function syncedFolderOf(path: string, home: string = homedir()): string |
     join(home, "OneDrive"),
     join(home, "Documents"),
     join(home, "Desktop"),
-  ];
-  for (const root of roots) {
-    if (isUnder(real, root) || isUnder(path, root)) return root;
-  }
-  return null;
+  ], home);
 }
 
 /** Folders where a background binary triggers macOS privacy prompts. */
 export function privacyFolderOf(path: string, home: string = homedir()): string | null {
-  const real = realishPath(path);
-  const roots = [join(home, "Documents"), join(home, "Desktop"), join(home, "Downloads"), join(home, "Library", "Mobile Documents")];
-  for (const root of roots) {
-    if (isUnder(real, root) || isUnder(path, root)) return root;
-  }
-  return null;
+  return folderUnder(path, [join(home, "Documents"), join(home, "Desktop"), join(home, "Downloads"), join(home, "Library", "Mobile Documents")], home);
 }
 
 export function configProblems(config: FlowrynConfig, home: string = homedir()): ConfigProblem[] {
