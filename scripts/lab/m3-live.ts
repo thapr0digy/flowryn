@@ -267,11 +267,12 @@ class LiveLeader implements BridgeDriver {
     if (this.harness === "pi") await Bun.sleep(1_500);
   }
 
-  private promptText(label: string, busy: boolean): string {
-    if (this.harness === "pi") return scripted ? `FLOWRYN-SCRIPT: ${busy ? "bash perl -e 'sleep 20' ;; " : ""}say {markers}` : `${label}: reply with the single word ok.`;
+  /** The step's label stays out of the prompt: a model reads "to interrupt: ..." as a condition, not an instruction. */
+  private promptText(busy: boolean): string {
+    if (this.harness === "pi" && scripted) return `FLOWRYN-SCRIPT: ${busy ? "bash perl -e 'sleep 20' ;; " : ""}say {markers}`;
     return busy
-      ? `${label}: use the Bash tool to run exactly this command and wait for it to finish: perl -e 'sleep 20'. Then reply with the single word ok.`
-      : `${label}: reply with the single word ok.`;
+      ? "Use the Bash tool now to run exactly this command and wait for it to finish: perl -e 'sleep 20'. Then reply with the single word ok."
+      : "Reply with the single word ok.";
   }
 
   private async send(text: string): Promise<void> {
@@ -291,13 +292,15 @@ class LiveLeader implements BridgeDriver {
 
   async prompt(label: string): Promise<void> {
     const before = this.row().turn_no;
-    await this.send(this.promptText(label, false));
+    log(`${this.name}: prompt (${label})`);
+    await this.send(this.promptText(false));
     await this.turnEnded(before, 180_000);
   }
 
   async promptBusy(label: string): Promise<void> {
     const before = this.row().turn_no;
-    await this.send(this.promptText(label, true));
+    log(`${this.name}: long command (${label})`);
+    await this.send(this.promptText(true));
     await waitFor(`${this.name} busy`, 90_000, () => this.row().turn_no > before && this.busyNow());
     await Bun.sleep(4_000);
   }

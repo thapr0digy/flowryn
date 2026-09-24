@@ -215,10 +215,11 @@ export default function flowrynLeader(pi: any): void {
   });
 
   pi.on("session_shutdown", async (event: any) => {
-    const reason = String(event?.reason ?? "quit");
-    if (reason === "quit") stopped = true;
+    // Every shutdown ends this runtime's long poll: a /reload starts a new runtime with its own, and a
+    // session switch in this one starts it again at the session_start that follows.
+    stopped = true;
     stopSessionResources();
-    await enqueue("session-end", { reason });
+    await enqueue("session-end", { reason: String(event?.reason ?? "quit") });
   });
 
   pi.on("tool_call", async (event: any) => {
