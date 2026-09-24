@@ -33,7 +33,7 @@ export const DEFAULT_LEADER_TIMING: LeaderTiming = {
 };
 
 export interface NotifyConfig {
-  /** macOS notifications through osascript. */
+  /** macOS notifications through osascript: on unless your config says `macos = false` (flowryn init asks). */
   macos: boolean;
   /** Herdr's notification.show, when a Herdr session is reachable. */
   herdr: boolean;
@@ -97,8 +97,34 @@ export function notifyConfig(config: FlowrynConfig): NotifyConfig {
   return out;
 }
 
-/** The terse style block is on unless [style] terse = false (design section 11). */
-export function isTerse(config: FlowrynConfig): boolean {
-  const style = config.extra.style as Record<string, unknown> | undefined;
-  return style?.terse !== false;
+/**
+ * The notification override for everything that is not your own setup: tests,
+ * the fixtures, the spikes, the contract suites and the live runs set
+ * FLOWRYN_NOTIFY=off (or FLOWRYN_NOTIFIER=null). The daemon still decides
+ * and records each notification (the rows and events stay the same), but
+ * delivers nothing on any channel, whatever config.toml says.
+ */
+export function notificationsOff(env: NodeJS.ProcessEnv): boolean {
+  return env.FLOWRYN_NOTIFY === "off" || env.FLOWRYN_NOTIFIER === "null";
+}
+
+/**
+ * Every launcher of a daemon for testing (the test harness, the live-exit
+ * scripts, the contract runner) calls this first: without FLOWRYN_NOTIFY=off
+ * the daemon would post real notifications, so it refuses to start one.
+ */
+export function requireNotificationsOff(env: NodeJS.ProcessEnv | Record<string, string>, launcher: string): void {
+  if (env.FLOWRYN_NOTIFY !== "off") {
+    throw new Error(`${launcher} starts no daemon without FLOWRYN_NOTIFY=off: it would post real notifications to your Mac`);
+  }
+}
+
+/**
+ * FLOWRYN_NOTIFIER=record:<path>: the macOS channel appends each notification
+ * to that file instead of running osascript. The test harness sets it beside
+ * FLOWRYN_NOTIFY=off, a second guard between a test daemon and osascript.
+ */
+export function recordingNotifierPath(env: NodeJS.ProcessEnv): string | null {
+  const value = env.FLOWRYN_NOTIFIER;
+  return value?.startsWith("record:") && value.length > "record:".length ? value.slice("record:".length) : null;
 }

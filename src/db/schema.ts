@@ -240,11 +240,78 @@ CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 CREATE INDEX merges_open ON merges(state) WHERE state IN ('requested','unproven');
 `;
 
+/**
+ * M5: workflows, capacity and autonomy (design section 11). A run's stage
+ * gains its state: waiting (for a capacity grant), active, review (a review
+ * gate is open) or done (the last stage delivered); waiting_since orders the
+ * queue and times its alert; pending_launch is the launch a grant must start
+ * (fresh, resume or a fresh stage worker); stage_note is the steer the stage
+ * start carries. pool_leases is rebuilt with its own id, so a stage granted
+ * again after a release (changes requested, a declined delivery) gets a new
+ * row; one live lease per pool and run. Every open run already has a live
+ * worker, so each gets its worker lease. plans and plan_phases hold a phased
+ * feature (design section 11): the phases reach the backlog only once the plan
+ * is approved. runs.workflow_def freezes the workflow a run already open
+ * before M5 finishes under, the contract its worker was given: a ship builds
+ * then ships (the ship stage holds a validation slot and ends at the merge
+ * gate) and a scout investigates, whatever its workflow id names today. Both
+ * are marked legacy_m4: such a ship's slot is granted at delivery time.
+ */
+/** The workflow migration 5 freezes for a ship already open before M5 (marked legacy_m4). */
+export const M4_SHIP_WORKFLOW = JSON.stringify({
+  id: "fix",
+  stages: [
+    { id: "build", skill: null, gate: "none", pools: [], fresh: false },
+    { id: "ship", skill: null, gate: "merge", pools: ["validation"], fresh: false },
+  ],
+  legacy_m4: true,
+});
+
+/** The workflow migration 5 freezes for a scout already open before M5. */
+const M4_SCOUT_WORKFLOW = JSON.stringify({ id: "scout", stages: [{ id: "investigate", skill: null, gate: "none", pools: [], fresh: false }], legacy_m4: true });
+
+const WORKFLOW_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN workflow_def TEXT;
+UPDATE runs SET workflow_def = CASE
+    WHEN (SELECT kind FROM task_policy tp WHERE tp.task_id = runs.task_id) = 'scout'
+      THEN '${M4_SCOUT_WORKFLOW}'
+    ELSE '${M4_SHIP_WORKFLOW}'
+  END
+  WHERE state NOT IN ('cleaned','failed','cancelled');
+ALTER TABLE runs ADD COLUMN stage_state TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE runs ADD COLUMN stage_started_at INTEGER;
+ALTER TABLE runs ADD COLUMN waiting_since INTEGER;
+ALTER TABLE runs ADD COLUMN pending_launch TEXT;
+ALTER TABLE runs ADD COLUMN stage_note TEXT;
+CREATE TABLE pool_leases_m5 (
+  id INTEGER PRIMARY KEY, pool TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id), stage TEXT NOT NULL,
+  granted_at INTEGER NOT NULL, released_at INTEGER, released_by TEXT);
+INSERT INTO pool_leases_m5 (pool, run_id, stage, granted_at, released_at) SELECT pool, run_id, stage, granted_at, released_at FROM pool_leases;
+DROP TABLE pool_leases;
+ALTER TABLE pool_leases_m5 RENAME TO pool_leases;
+CREATE UNIQUE INDEX pool_one_live ON pool_leases(pool, run_id) WHERE released_at IS NULL;
+CREATE INDEX pool_live ON pool_leases(pool) WHERE released_at IS NULL;
+INSERT INTO pool_leases (pool, run_id, stage, granted_at)
+  SELECT 'worker', id, stage, CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM runs WHERE state NOT IN ('cleaned','failed','cancelled');
+CREATE INDEX runs_waiting ON runs(waiting_since) WHERE stage_state = 'waiting' OR pending_launch IS NOT NULL;
+CREATE INDEX gates_open ON gates(run_id) WHERE state = 'open';
+CREATE TABLE plans (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','approved','discarded')),
+  source_task TEXT, gate_id TEXT, filed_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  approved_at INTEGER, approved_via TEXT);
+CREATE TABLE plan_phases (
+  plan_id TEXT NOT NULL REFERENCES plans(id), phase_no INTEGER NOT NULL, task_id TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL, body TEXT NOT NULL, workflow TEXT NOT NULL, harness TEXT, blocked_by TEXT NOT NULL,
+  PRIMARY KEY (plan_id, phase_no));
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
   { version: 3, name: "leader", sql: LEADER_SQL },
   { version: 4, name: "delivery", sql: DELIVERY_SQL },
+  { version: 5, name: "workflows", sql: WORKFLOW_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

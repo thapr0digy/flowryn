@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import type { Reply } from "../api/envelope.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
+import { requireNotificationsOff } from "../config/leader.ts";
 import { socketPath, stateFiles } from "../config/paths.ts";
 import { renderToml } from "../config/toml.ts";
 import { workersConfig } from "../config/workers.ts";
@@ -122,6 +123,9 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FLOWRYN_")) env[k] = v;
   env.FLOWRYN_HOME = home;
+  // A contract run's scratch daemon delivers no notification to your Mac (or Herdr).
+  env.FLOWRYN_NOTIFY = "off";
+  requireNotificationsOff(env, "the contract runner");
   const sock = socketPath(home, env);
   const logFd = openSync(join(home, "daemon.log"), "a");
   const daemon = Bun.spawn([...selfCommand(), "daemon", "run"], { env, stdin: "ignore", stdout: logFd, stderr: logFd });

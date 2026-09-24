@@ -4,6 +4,9 @@ import type { PaneProcess } from "../../runtime/herdr/runtime.ts";
 import { HOOK_SIGNALS, type HarnessAdapter, type HookName, type LaunchPlan, type RunContext, type Trust } from "../types.ts";
 import { claudeConfigDir, checkOrRegisterTrust } from "./trust.ts";
 
+/** Claude's Notification types about a claude.ai usage limit ending (Claude Code 2.1.234 and later). */
+export const USAGE_NOTIFICATIONS = "quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled";
+
 /** The asyncRewake waiter's timeout: 8 h, re-armed by every Stop (design section 5, M0 c01). */
 export const WAITER_TIMEOUT_S = 28_800;
 
@@ -39,6 +42,8 @@ export function workerSettings(bin: string, access: { socket: string; writable: 
       Stop: [{ hooks: [command("stop"), { ...command("wait-steer"), asyncRewake: true, timeout: WAITER_TIMEOUT_S }] }],
       StopFailure: [{ hooks: [command("stop-failure")] }],
       SessionEnd: [{ hooks: [command("session-end")] }],
+      // Claude continued after a usage limit reset: Flowryn's pause on Claude work lifts (design section 16).
+      Notification: [{ matcher: USAGE_NOTIFICATIONS, hooks: [command("notify")] }],
     },
     ...(access.socket
       ? { sandbox: { network: { allowUnixSockets: [access.socket] }, filesystem: { allowWrite: access.writable, denyWrite: access.readOnly ?? [] } } }
@@ -49,6 +54,7 @@ export function workerSettings(bin: string, access: { socket: string; writable: 
 function sharedArgs(run: RunContext, config: WorkersConfig, settingsPath: string): string[] {
   const claude = config.claude;
   const args = ["--settings", settingsPath, "--append-system-prompt-file", run.contractFile, "--permission-mode", claude.permission_mode];
+  if (run.stagePlugin) args.push("--plugin-dir", run.stagePlugin);
   if (claude.model) args.push("--model", claude.model);
   if (claude.effort) args.push("--effort", claude.effort);
   args.push(...claude.extra_args);

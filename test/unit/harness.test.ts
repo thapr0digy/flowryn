@@ -6,7 +6,7 @@ import { defaultConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING, timingConfig, workerConfigProblems, workersConfig } from "../../src/config/workers.ts";
 import { claudeAdapter, workerSettings } from "../../src/harness/claude/adapter.ts";
 import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude/trust.ts";
-import { promptLine, steerLine, steerPointer, workerContract } from "../../src/harness/contract-text.ts";
+import { promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
 import { shipGitAccess } from "../../src/harness/git-access.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
 import type { RunContext } from "../../src/harness/types.ts";
@@ -92,7 +92,9 @@ describe("claude adapter", () => {
 
   test("the worker settings wire every hook verb, and the Stop waiter is asyncRewake with an 8 h timeout", () => {
     const settings = workerSettings("/opt/flowryn bin/flowryn") as { hooks: Record<string, { hooks: { command: string; asyncRewake?: boolean; timeout?: number }[] }[]> };
-    expect(Object.keys(settings.hooks).toSorted()).toEqual(["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    // The usage-limit resume signals only (design section 16): a worker's idle_prompt means nothing to Flowryn.
+    expect((settings.hooks.Notification![0] as unknown as { matcher: string }).matcher).toBe("quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled");
     const stop = settings.hooks.Stop![0]!.hooks;
     expect(stop[1]).toMatchObject({ asyncRewake: true, timeout: 28_800 });
     expect(stop[1]!.command).toBe("'/opt/flowryn bin/flowryn' hook wait-steer --harness claude");
@@ -134,10 +136,13 @@ describe("pi adapter", () => {
 
 describe("worker contract text", () => {
   test("names the mid-turn steer channel (M0 c07) and carries the style block when terse", () => {
-    const text = workerContract("claude", true);
+    const text = workerContract("claude", STYLE_BLOCK);
     expect(text).toContain('arrive mid-turn as hook context starting "Flowryn steer [<id>]:"');
     expect(text).toContain("Reply in the fewest words");
-    expect(workerContract("pi", false)).not.toContain("fewest words");
+    expect(workerContract("pi", null)).not.toContain("fewest words");
+    // The style block leads the instructions (design section 11).
+    expect(text.startsWith("Reply in the fewest words")).toBe(true);
+    expect(text).toContain("$FLOWRYN_BIN stage done [--review <lavish url>]");
     expect(text.split("\n").length).toBeLessThan(25);
   });
 

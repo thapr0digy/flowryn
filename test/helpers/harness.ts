@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { hashToken, mintToken } from "../../src/api/auth.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { stateFiles } from "../../src/config/paths.ts";
 import { PING_VERB } from "../../src/daemon/system-verbs.ts";
 import { request } from "../../src/transport/unix.ts";
@@ -94,11 +95,15 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   ];
   // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.
   if (!extraConfig.includes("[github]")) lines.push("[github]", 'api_url = "http://127.0.0.1:9"');
+  // Nor this machine's memory and load: the host check passes unless a test sets its own (a probe, or limits).
+  if (!extraConfig.includes("[capacity.host]")) lines.push("[capacity.host]", "min_free_mem_gb = 0", "max_load_per_core = 1000");
   // Tests never reach a real Herdr: without a socket of their own they get one that does not exist.
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
-  const env = { ...cleanEnv(), FLOWRYN_HOME: home };
+  // No daemon the tests start ever delivers a notification (FLOWRYN_NOTIFY=off, which startDaemon requires);
+  // behind it, the macOS channel only records, never runs osascript.
+  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}` };
   return {
     home,
     stateDir,
@@ -216,11 +221,13 @@ export async function waitUntil(check: () => boolean | Promise<boolean>, timeout
   throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
 }
 
-/** Start flowrynd as a subprocess and wait until it answers the handshake. */
+/** Start flowrynd as a subprocess and wait until it answers the handshake; refused without FLOWRYN_NOTIFY=off. */
 export async function startDaemon(h: TestHome, extraEnv: Record<string, string> = {}): Promise<DaemonProc> {
+  const env = { ...h.env, ...extraEnv, FLOWRYN_LOG_STDERR: "1" };
+  requireNotificationsOff(env, "the test harness");
   const proc = Bun.spawn(["bun", MAIN, "daemon", "run"], {
     cwd: REPO_ROOT,
-    env: { ...h.env, ...extraEnv, FLOWRYN_LOG_STDERR: "1" },
+    env,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

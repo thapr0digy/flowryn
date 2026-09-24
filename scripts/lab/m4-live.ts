@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Reply } from "../../src/api/envelope.ts";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
 import { contractPrefix, removeOwnWorktrees } from "../../src/contracts/cleanup.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
@@ -168,9 +169,12 @@ mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
 const env: Record<string, string> = {};
 for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FLOWRYN_") && k !== "CLAUDECODE" && !k.startsWith("CLAUDE_CODE_")) env[k] = v;
 env.FLOWRYN_HOME = home;
+// A live run never posts to your Mac: its scratch daemon records notifications and delivers none.
+env.FLOWRYN_NOTIFY = "off";
 
 let daemon: ReturnType<typeof Bun.spawn> | null = null;
 async function startDaemon(): Promise<void> {
+  requireNotificationsOff(env, "m4-live");
   const fd = openSync(join(home, "daemon.log"), "a");
   daemon = Bun.spawn([BUN, MAIN, "daemon", "run"], { env, stdin: "ignore", stdout: fd, stderr: fd });
   closeSync(fd);

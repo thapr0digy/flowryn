@@ -2,7 +2,10 @@ import { PROJECT_VERBS } from "../lifecycle/projects.ts";
 import { TODO_VERBS } from "../lifecycle/todos.ts";
 import { WORKER_VERBS } from "../lifecycle/worker.ts";
 import { HOOK_VERBS } from "../lifecycle/hooks.ts";
-import { dispatchVerb } from "../lifecycle/dispatch.ts";
+import { dispatchVerb, planVerb } from "../lifecycle/dispatch.ts";
+import { STAGE_VERBS } from "../lifecycle/stages.ts";
+import { GATE_VERBS } from "../policy/gates.ts";
+import { SCHED_VERBS } from "../sched/verbs.ts";
 import { LEADER_RUN_VERBS } from "../lifecycle/leader-verbs.ts";
 import { CONTRACT_VERBS } from "../contracts/verbs.ts";
 import { systemVerbs } from "../daemon/system-verbs.ts";
@@ -14,6 +17,10 @@ import type { VerbSpec } from "./verbs.ts";
 /** Every verb the daemon serves over the socket. The CLI adds its local verbs on top. */
 export const SERVER_VERBS: readonly VerbSpec[] = [
   dispatchVerb,
+  planVerb,
+  ...STAGE_VERBS,
+  ...GATE_VERBS,
+  ...SCHED_VERBS,
   ...LEADER_RUN_VERBS,
   ...WORKER_VERBS,
   ...TODO_VERBS,

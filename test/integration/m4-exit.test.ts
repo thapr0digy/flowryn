@@ -38,7 +38,8 @@ async function ship(e: ShipEnv, title: string): Promise<{ task: string; run: str
   const db = e.fleet.h.db();
   const mode = (db.query("SELECT delivery_mode FROM projects WHERE id = 'web'").get() as { delivery_mode: string }).delivery_mode;
   db.close();
-  const steps = mode === "local-only" ? `FAKE: commit ${title}.txt ${title}\nFAKE: deliver-local\n` : `FAKE: commit ${title}.txt ${title}\nFAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\nFAKE: deliver-pr\n`;
+  const begin = mode === "no-mistakes" ? "FAKE: verb stage begin ship\n" : "";
+  const steps = mode === "local-only" ? `FAKE: commit ${title}.txt ${title}\nFAKE: deliver-local\n` : `FAKE: commit ${title}.txt ${title}\n${begin}FAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\nFAKE: deliver-pr\n`;
   const dispatched = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: `${title}\n${steps}FAKE: sleep 120000` });
   if (dispatched.code !== 0) throw new Error(`dispatch: ${JSON.stringify(dispatched.reply)}`);
   const shipped = dispatched.reply.data as { task: string; run: string };

@@ -9,6 +9,11 @@ import { createSteer, unackedSteers } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
 import { deliveredOf, prEvidence } from "./delivery.ts";
+import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
+import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
+import { phaseOfTask } from "./plans.ts";
+import { planView } from "./dispatch.ts";
+import { flowLine, gatesOf, runWorkflow } from "./stages.ts";
 import { latestMerge } from "../policy/merge.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
@@ -119,6 +124,7 @@ const cancel: VerbSpec = {
   async settle(ctx, result) {
     const runId = String(result.data.run);
     ctx.fleet.bus.forget(runId);
+    ctx.sched.kick();
     const run = getRun(ctx.db, runId);
     const runtime = ctx.fleet.runtime();
     if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id).catch(() => undefined);
@@ -148,16 +154,25 @@ const resume: VerbSpec = {
     ctx.db
       .query("UPDATE runs SET state = CASE WHEN state = 'failed' THEN 'running' ELSE state END, liveness = 'starting', resume_count = resume_count + 1, ended_at = NULL, updated_at = ?2 WHERE id = ?1")
       .run(run.id, now);
+    // A dead worker holds no slot (design section 11): the scheduler grants its worker slot, and its stage's pools, first.
+    const viaScheduler = !holdsLease(ctx.db, run.id, WORKER_POOL);
+    if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
     if (run.state === "failed") {
       // failRun parked the task; take it back to In flight.
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
     resolveRunItems(ctx.db, run.id, ["failure_needs_you"], "run.resume_requested", now);
-    appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1 } });
+    appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler } });
     return { data: { run: run.id, task: run.task_id, state: "resuming" }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
+    const row = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
+    if (row?.pending_launch === "resume") {
+      await ctx.sched.passNow();
+      const after = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
+      return after?.pending_launch === "resume" ? { data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity"] } : result;
+    }
     ctx.fleet.launch(String(result.data.run), "resume");
     return result;
   },
@@ -204,6 +219,7 @@ interface FleetRow extends RunRow {
 function needs(ctx: ReadCtx, run: FleetRow): string {
   if (ctx.db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open'").get(run.id)) return "answer";
   if (ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND lane = 'P0' AND state IN ('open','presented')").get(run.id)) return "you";
+  if (run.stage_state === "review") return "review";
   if (run.state === "ready") return run.kind === "scout" ? "read" : "merge";
   if (run.state === "merging") return "proof";
   if (run.state === "landed") return run.cleanup === "refused" ? "cleanup" : "-";
@@ -242,6 +258,17 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
   return view;
 }
 
+function gatesView(ctx: ReadCtx, runId: string): string[] | null {
+  const gates = gatesOf(ctx.db, runId);
+  if (gates.length === 0) return null;
+  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
+}
+
+function planLine(ctx: ReadCtx, taskId: string): string {
+  const phase = phaseOfTask(ctx.db, taskId)!;
+  return `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}: ${sanitizeLine(phase.plan_title, 80)}`;
+}
+
 const MAX_FLEET_ROWS = 20;
 const MAX_NEEDS_ROWS = 10;
 
@@ -266,13 +293,14 @@ const fleet: VerbSpec = {
       kind: r.kind,
       project: r.project_id,
       state: r.state,
+      stage: stageLabel(r),
       live: r.liveness,
       age: age(ctx.now, r.started_at),
       needs: needs(ctx, r),
     }));
     const lanes = ctx.db.query("SELECT lane, COUNT(*) AS n FROM items WHERE state IN ('open','presented') GROUP BY lane").all() as { lane: string; n: number }[];
     const count = (lane: string) => lanes.find((l) => l.lane === lane)?.n ?? 0;
-    const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}` };
+    const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}`, capacity: capacityLine(ctx) };
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;
     // Every open actionable item, P0 first: fleet lists what needs you, like every briefing (design section 9).
     const waiting = openActionable(ctx.db, ctx.now, leaderTiming(ctx.config).age_ms);
@@ -284,6 +312,20 @@ const fleet: VerbSpec = {
   },
 };
 
+/** "build", "qa review", "ship waiting": the stage, with its state when it is not simply running. */
+export function stageLabel(run: Pick<RunRow, "stage" | "stage_state" | "pending_launch">): string {
+  if (run.pending_launch === "fresh" || run.pending_launch === "resume") return `${run.stage} waiting`;
+  return run.stage_state === "active" ? run.stage : `${run.stage} ${run.stage_state}`;
+}
+
+/** One line of capacity: each pool's live leases over its cap, and how many runs wait. */
+export function capacityLine(ctx: ReadCtx): string {
+  const caps = capacityConfig(ctx.config).pools;
+  const counts = liveCounts(ctx.db);
+  const waiting = (ctx.db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead')").get() as { n: number }).n;
+  return `${Object.entries(caps).map(([pool, cap]) => `${pool} ${counts[pool] ?? 0}/${cap}`).join(" · ")}${waiting > 0 ? ` · waiting ${waiting}` : ""}`;
+}
+
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines. */
 const show: VerbSpec = {
   name: "show",
@@ -294,12 +336,16 @@ const show: VerbSpec = {
   roles: ["leader", "reader", "human"],
   read(ctx, args) {
     let target = stringArg(args, "target")!;
+    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target) : null;
+    if (plan) return { data: plan, hints: ["flowryn fleet"] };
     const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as { task_id: string | null; run_id: string | null; line: string; lane: string; state: string } | null;
     if (item) target = item.run_id ?? item.task_id ?? target;
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
       if (item) return { data: { item: target, lane: item.lane, state: item.state, line: item.line } };
-      throw new FlowrynError("not_found", `no task, run or item ${target}`, "flowryn fleet");
+      const phase = phaseOfTask(ctx.db, target);
+      if (phase) return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...planView(ctx.db, phase.plan_id) }, hints: [`flowryn show ${phase.plan_id}`] };
+      throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
     }
     const policy = ctx.db.query("SELECT project_id, kind FROM task_policy WHERE task_id = ?1").get(run.task_id) as { project_id: string; kind: string };
     const steers = unackedSteers(ctx.db, run.id).map((m) => ({ id: m.id, rings: m.rings, body: sanitizeLine(m.body, 80) }));
@@ -330,6 +376,11 @@ const show: VerbSpec = {
         harness: `${run.harness} ${run.harness_version}`,
         state: run.state,
         liveness: run.liveness,
+        workflow: `${run.workflow}: ${flowLine(runWorkflow(ctx.db, run, policy.kind as "ship" | "scout"))}`,
+        stage: stageLabel(run),
+        ...(gatesView(ctx, run.id) ? { gates: gatesView(ctx, run.id) } : {}),
+        leases: runLeases(ctx.db, run.id).map((l) => l.pool).join(" ") || "-",
+        ...(phaseOfTask(ctx.db, run.task_id) ? { plan: planLine(ctx, run.task_id) } : {}),
         pane: run.pane_id ?? "-",
         pid: run.proc_pid ?? "-",
         resumes: run.resume_count,

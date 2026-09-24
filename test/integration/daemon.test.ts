@@ -6,6 +6,7 @@ import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
 import { exitCodeFor } from "../../src/api/errors.ts";
 import { PING_VERB } from "../../src/daemon/system-verbs.ts";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { cli, cliJson, makeHome, pingSocket, REPO_ROOT, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 
 const homes: TestHome[] = [];
@@ -25,8 +26,10 @@ afterEach(async () => {
   for (const h of homes.splice(0)) h.cleanup();
 });
 
-async function runDaemonOnce(h: TestHome, env: Record<string, string> = {}) {
-  const proc = Bun.spawn(["bun", join(REPO_ROOT, "src/main.ts"), "daemon", "run"], { cwd: REPO_ROOT, env: { ...h.env, ...env }, stdout: "pipe", stderr: "pipe" });
+async function runDaemonOnce(h: TestHome, extraEnv: Record<string, string> = {}) {
+  const env = { ...h.env, ...extraEnv };
+  requireNotificationsOff(env, "runDaemonOnce");
+  const proc = Bun.spawn(["bun", join(REPO_ROOT, "src/main.ts"), "daemon", "run"], { cwd: REPO_ROOT, env, stdout: "pipe", stderr: "pipe" });
   const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
   return { code, stderr };
 }

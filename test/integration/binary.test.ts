@@ -2,6 +2,7 @@ import { PROTO, VERSION } from "../../src/version.ts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { decode } from "@toon-format/toon";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { makeHome, pingSocket, REPO_ROOT, readText, seedLeader, waitUntil, type TestHome } from "../helpers/harness.ts";
 
 /**
@@ -38,6 +39,7 @@ describe("compiled binary", () => {
   test("runs as flowryn and, through the flowrynd link, as the daemon", async () => {
     expect(decode(run(bin, ["version"]).stdout)).toMatchObject({ flowryn: VERSION, proto: PROTO });
     const token = seedLeader(h);
+    requireNotificationsOff(h.env, "binary test");
     const daemon = Bun.spawn([join(h.home, "bin", "flowrynd")], { env: h.env, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
     try {
       await waitUntil(() => pingSocket(h), 15_000, "the compiled daemon");

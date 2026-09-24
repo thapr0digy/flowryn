@@ -30,9 +30,9 @@ import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
-import { leaderTiming, notifyConfig } from "../config/leader.ts";
+import { leaderTiming, notificationsOff, notifyConfig, recordingNotifierPath } from "../config/leader.ts";
 import type { AttentionServices } from "../attention/services.ts";
-import { NotifyPump } from "../attention/notify.ts";
+import { NotifyPump, recordingNotify } from "../attention/notify.ts";
 import { lastItemNo } from "../attention/items.ts";
 import { syncOverdueTodos } from "../attention/todos-due.ts";
 import { cleanupConfig, githubConfig, type GitHubConfig } from "../config/delivery.ts";
@@ -43,6 +43,9 @@ import { ChallengeStore } from "../policy/approvals.ts";
 import { gitRunner } from "../policy/git.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { DeliveryWatcher } from "../watch/delivery.ts";
+import { Scheduler } from "../sched/scheduler.ts";
+import type { SchedServices } from "../sched/services.ts";
+import type { StartDeps } from "../lifecycle/dispatch.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -187,6 +190,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const timing = () => timingConfig(config);
     const git = (args: string[], cwd?: string) => runTool(resolveTool(config, "git"), args, cwd);
     let reconciler: Reconciler | null = null;
+    let scheduler: Scheduler | null = null;
     const launcher = new Launcher({
       db: database,
       config: () => config,
@@ -200,6 +204,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       onSettled: (runId) => {
         bus.notify(runId);
         reconciler?.schedule(runId);
+        // A launch that failed released its slots; a stage worker that started may free the queue.
+        scheduler?.kick();
       },
     });
     const control: ControlDeps = { db: database, runtime: () => runtime, bus, timing, now: Date.now };
@@ -225,6 +231,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       timing,
       log,
       now: Date.now,
+      docker: () => resolveTool(config, "docker"),
+      released: () => scheduler?.kick(),
     });
     const herdrWatcher = new HerdrWatcher({
       runtime: () => runtime,
@@ -234,7 +242,18 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     });
 
     // M3: leader waiters, the leader clocks and notifications (design sections 9 and 10).
-    const notifyPump = new NotifyPump({ db: database, config: () => config, runtime: () => runtime, now: Date.now, log });
+    const recorder = recordingNotifierPath(env);
+    const notifyPump = new NotifyPump({
+      db: database,
+      config: () => config,
+      runtime: () => runtime,
+      now: Date.now,
+      log,
+      off: () => notificationsOff(env),
+      ...(recorder ? { macos: recordingNotify(recorder) } : {}),
+    });
+    if (notificationsOff(env)) log("notify: off (FLOWRYN_NOTIFY=off or FLOWRYN_NOTIFIER=null): notifications are recorded, none is delivered");
+    else if (recorder) log(`notify: the macOS channel records to ${recorder} (FLOWRYN_NOTIFIER)`);
     const attention: AttentionServices = {
       bus: new SteerBus(),
       timing: () => leaderTiming(config),
@@ -287,7 +306,11 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       cleanup: (runId, opts) => {
         const running = cleanups.get(runId);
         if (running) return running;
-        const attempt = cleanupRun(landingDeps, runId, opts).finally(() => cleanups.delete(runId));
+        // A cleaned run released its slots and landed its task: the scheduler looks at once (design section 11).
+        const attempt = cleanupRun(landingDeps, runId, opts).finally(() => {
+          cleanups.delete(runId);
+          scheduler?.kick();
+        });
         cleanups.set(runId, attempt);
         return attempt;
       },
@@ -308,6 +331,34 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       now: Date.now,
     });
 
+    // M5: the scheduler (design section 11): capacity grants, the host check and auto-dispatch.
+    const startDeps: StartDeps = {
+      db: database,
+      config: () => config,
+      runtime: () => runtime,
+      harnessVersion,
+      git: async (cwd, args) => {
+        const result = await git(["-C", cwd, ...args]);
+        return result.exitCode === 0 ? result.stdout.trim() : null;
+      },
+      now: Date.now,
+    };
+    scheduler = new Scheduler({
+      db: database,
+      config: () => config,
+      now: Date.now,
+      log,
+      launch: (runId, mode) => launcher.start(runId, mode),
+      isLaunching: (runId) => launcher.isActive(runId),
+      exitWorker: async (runId) => {
+        await exitRun(control, runId);
+      },
+      notify: (runId) => bus.notify(runId),
+      startDeps,
+      kickJournal: () => journal.kick(),
+    });
+    const sched: SchedServices = { kick: () => scheduler?.kick(), passNow: async () => scheduler?.passNow(), grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false };
+
     const services: DaemonServices = {
       db: database,
       config: () => config,
@@ -321,6 +372,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       fleet,
       attention,
       delivery,
+      sched,
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
@@ -356,6 +408,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     if (runtime) await herdrWatcher.start();
     await reconciler.passNow("startup");
     deliveryWatcher.start();
+    scheduler.start();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
     const attentionTick = setInterval(() => {
@@ -408,6 +461,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(steady);
     clearInterval(attentionTick);
     reconciler.stop();
+    scheduler.stop();
     deliveryWatcher.stop();
     herdrWatcher.stop();
     bus.close();

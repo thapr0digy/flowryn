@@ -34,6 +34,8 @@ export interface RunContext {
   writable: string[];
   /** Paths the worker's sandbox must never write, even inside a writable one (the project's git hooks and config). */
   readOnly: string[];
+  /** The Claude plugin holding the stage skills (design section 11); Pi reads the SKILL.md a stage names. */
+  stagePlugin?: string;
 }
 
 export interface PlanFile {

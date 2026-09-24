@@ -8,7 +8,7 @@
 export const SKILL_NAME = "flowryn";
 
 export const SKILL_DESCRIPTION =
-  "Run the Flowryn crew from this conversation: dispatch ships and scouts, read the fleet, answer, steer and merge workers, keep to-dos. Use for any task, worker, merge, fleet or to-do request.";
+  "Run the Flowryn crew from this conversation: dispatch ships, scouts and phased plans, read the fleet, answer, steer, review and merge workers, keep to-dos. Use for any task, worker, review, merge, fleet or to-do request.";
 
 export const SKILL_BODY = `# Flowryn leader
 
@@ -21,7 +21,9 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 - \`flowryn leader status\`: which session leads.
 
 ## Act
-- \`flowryn dispatch <project> --kind ship|scout --body-file - <<'EOF'\` … \`EOF\`: start a worker.
+- \`flowryn dispatch <project> --kind ship|scout [--workflow feature|fix] --body-file - <<'EOF'\` … \`EOF\`: start a worker. It may wait for capacity (\`flowryn capacity\`).
+- \`flowryn plan <project> --body-file -\`: a phased feature, one \`## Phase\` section each; each phase starts by itself once the one before it has landed. \`flowryn show <plan id>\` shows where each is.
+- Review gates (a design or visual QA page in Lavish): the user reviews the link, then passes it: Claude asks the user for \`flowryn gate pass <task>\`; on Pi use the \`flowryn_gate_pass\` tool; or the user runs \`flowryn approve <task> --gate <stage>\`. \`flowryn gate changes <task> --body-file -\` sends it back with the user's words. Never pass a gate the user has not approved.
 - \`flowryn steer <task> --body-file -\`: words for a worker.
 - \`flowryn answer <decision> <choice> [--body-file -]\`: answer a worker's question.
 - \`flowryn dismiss <item>\`: close an item that needs nothing more.

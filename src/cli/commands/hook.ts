@@ -226,9 +226,10 @@ export const HOOK_CLI_VERBS: VerbSpec[] = [
   signalHook("session-end", "Hook: the harness session ended"),
   waitSteer,
   signalHook("session-start", "Leader hook: session start or compaction; prints the briefing"),
-  signalHook("notify", "Leader hook: you went inactive (Claude idle_prompt) or came back (Pi)"),
+  signalHook("notify", "Hook: you went inactive or came back (leader); Claude's usage-limit notifications"),
   signalHook("delivered", "Leader hook (Pi): a pushed P0 was delivered or declined"),
   signalHook("merge-summary", "Leader hook (Pi): what a merge would land, for the flowryn_merge confirm"),
+  signalHook("gate-summary", "Leader hook (Pi): a task's open review gate, for the flowryn_gate_pass confirm"),
   signalHook("approval-key", "Leader hook (Pi): a fresh approval key for the lease holder's extension"),
   waitP0,
 ];

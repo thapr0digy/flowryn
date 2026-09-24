@@ -11,6 +11,8 @@ import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
 import { isAlive, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
+import { applyDocker, listLabelled } from "./docker.ts";
+import { releaseLeases } from "../sched/pools.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -36,6 +38,10 @@ export interface ReconcilerDeps {
   log(message: string): void;
   now(): number;
   ps?: PsRunner;
+  /** The docker binary for the label evidence, or null (none installed: nothing to count). */
+  docker?(): string | null;
+  /** Leases were released: the scheduler may grant them to waiting work. */
+  released?(): void;
 }
 
 export type PassReason = "startup" | "reconnect" | "steady" | "event" | "kick";
@@ -133,6 +139,7 @@ export class Reconciler {
     const runs = openRuns(db);
     const stats = await this.passRuns(runs.map((r) => r.id), reason);
     await this.scanOrphans();
+    await this.scanDocker();
     tx(db, () => flagUnackedSteers(db, now(), timing()));
     for (const run of runs) if (unackedSteers(db, run.id).length > 0) this.deps.bus.notify(run.id);
     if (reason === "startup" && stats.dead >= HUSK_RESTART_THRESHOLD) {
@@ -174,6 +181,8 @@ export class Reconciler {
   async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown"> {
     const { db, now } = this.deps;
     if (this.deps.isLaunching(run.id)) return "launching";
+    // A launch the scheduler owns: waiting for its grant, or a fresh stage worker being started.
+    if (run.pending_launch) return "launching";
     const runtime = this.deps.runtime();
     if (!runtime) {
       this.setLive(run, "unknown", { reason: "Herdr is not configured or not reachable" });
@@ -275,7 +284,12 @@ export class Reconciler {
     const t = now();
     const husk = panes !== null && panes.foregroundGroup === panes.shellPid;
     if (WORK_DONE.includes(run.state)) {
-      tx(db, () => setLiveness(db, run, "dead", "reconciler", { reason: "the worker exited after delivering", husk }, t));
+      const released = tx(db, () => {
+        setLiveness(db, run, "dead", "reconciler", { reason: "the worker exited after delivering", husk }, t);
+        // Its pane holds no live worker any more; a declined delivery resumes it through the scheduler.
+        return releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker exited", t);
+      });
+      if (released.length > 0) this.deps.released?.();
       return "dead";
     }
     if (run.resume_count === 0 && run.agent_session) {
@@ -293,8 +307,11 @@ export class Reconciler {
       this.deps.launch(run.id, "resume");
       return "resumed";
     }
-    tx(db, () => {
+    const freed = tx(db, () => {
       const changed = setLiveness(db, run, "dead", "reconciler", { reason: run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume", husk }, t);
+      // Nothing holds a slot for a dead worker (design section 11); `flowryn resume` asks for them again.
+      const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
+      if (released.length > 0 && run.stage_state === "active") db.query("UPDATE runs SET stage_state = 'waiting', waiting_since = NULL, stage_note = NULL WHERE id = ?1").run(run.id);
       if (changed) {
         const event = appendEvent(db, { source: "reconciler", kind: "run.died", runId: run.id, taskId: run.task_id, payload: { resume_count: run.resume_count, husk } });
         openRunItemOnce(
@@ -306,8 +323,20 @@ export class Reconciler {
           t,
         );
       }
+      return released.length > 0;
     });
+    if (freed) this.deps.released?.();
     return "dead";
+  }
+
+  /** Docker label evidence (design section 11): environments beyond a run's lease, and containers left without one. */
+  private async scanDocker(): Promise<void> {
+    const docker = this.deps.docker?.();
+    if (!docker) return;
+    const containers = await listLabelled(docker);
+    if (containers === null || containers.length === 0) return;
+    const findings = applyDocker(this.deps.db, containers, this.deps.now());
+    if (findings.over.length + findings.leftover.length > 0) this.deps.log(`reconcile: docker: over the lease ${findings.over.join(",") || "-"}; left without one ${findings.leftover.join(",") || "-"}`);
   }
 
   /**

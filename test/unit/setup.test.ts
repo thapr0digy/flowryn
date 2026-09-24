@@ -3,9 +3,11 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, defaultConfig } from "../../src/config/config.ts";
+import { notifyConfig } from "../../src/config/leader.ts";
+import { workerConfigProblems } from "../../src/config/workers.ts";
 import { migrate, openDb, schemaVersion, LATEST_SCHEMA_VERSION } from "../../src/db/db.ts";
 import { backupIfDue } from "../../src/db/backup.ts";
-import { restoreBackup } from "../../src/doctor/doctor.ts";
+import { notifyMacosCheck, restoreBackup } from "../../src/doctor/doctor.ts";
 import { runInit, type InitDeps } from "../../src/init/init.ts";
 import { renderPlist, plistSpecFor, serviceLabel, BASE_LABEL } from "../../src/service/launchd.ts";
 import { stateFiles } from "../../src/config/paths.ts";
@@ -108,6 +110,58 @@ describe("init", () => {
     expect(config.extra.capacity).toBeDefined();
     expect(statSync(join(home, "config.toml")).mode & 0o777).toBe(0o600);
     expect(statSync(join(home, "run")).mode & 0o777).toBe(0o700);
+  });
+
+  test("writes macos explicitly: on unless you decline", async () => {
+    const on = tempDir();
+    expect(await runInit(initDeps(on, scriptedIo({ "Add a project": "" }, { Write: true, Install: false }).io))).toBe(0);
+    expect(loadConfig(on).config.extra.notify).toMatchObject({ macos: true });
+    const off = tempDir();
+    expect(await runInit(initDeps(off, scriptedIo({ "Add a project": "" }, { "Post macOS notifications": false, Write: true, Install: false }).io))).toBe(0);
+    expect(loadConfig(off).config.extra.notify).toMatchObject({ macos: false });
+  });
+
+  test("re-running fills keys an existing table lacks, keeping every current value", async () => {
+    const home = tempDir();
+    writeFileSync(join(home, "config.toml"), "[notify]\nmin_interval_min = 45\n[capacity]\nworker = 7\n");
+    const before = loadConfig(home).config;
+    expect(notifyMacosCheck(before)?.status).toBe("warn");
+    expect(notifyConfig(before).macos).toBe(true);
+    const { io } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(home, io))).toBe(0);
+    const after = loadConfig(home).config;
+    expect(after.extra.notify).toEqual({ macos: true, herdr: true, min_interval_min: 45, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 });
+    expect(after.extra.capacity).toMatchObject({ worker: 7, validation: 5, host: { min_free_mem_gb: 8, max_load_per_core: 1.5 } });
+    expect(notifyMacosCheck(after)).toBeNull();
+  });
+
+  test("re-running fills a [workers.claude] table that lacks permission_mode with a valid one", async () => {
+    const home = tempDir();
+    writeFileSync(join(home, "config.toml"), '[workers.claude]\nmodel = "sonnet"\n');
+    const { io } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(home, io))).toBe(0);
+    const config = loadConfig(home).config;
+    expect(config.extra.workers).toMatchObject({ claude: { model: "sonnet", permission_mode: "bypassPermissions" } });
+    expect(workerConfigProblems(config)).toEqual([]);
+  });
+
+  test("refuses to write a config whose sections fail validation", async () => {
+    const home = tempDir();
+    const original = '[workers.claude]\npermission_mode = "bypass"\n';
+    writeFileSync(join(home, "config.toml"), original);
+    const { io, printed } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(home, io))).toBe(1);
+    expect(printed.some((l) => l.startsWith("error:") && l.includes("permission_mode"))).toBe(true);
+    expect(printed.at(-1)).toBe("nothing was written");
+    expect(readFileSync(join(home, "config.toml"), "utf8")).toBe(original);
+  });
+
+  test("re-running keeps macos = false as the answer to keep", async () => {
+    const home = tempDir();
+    writeFileSync(join(home, "config.toml"), "[notify]\nmacos = false\n");
+    const { io } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(home, io))).toBe(0);
+    expect(notifyConfig(loadConfig(home).config).macos).toBe(false);
   });
 
   test("refuses a synced state directory and re-asks", async () => {

@@ -13,6 +13,7 @@ import { Journal } from "../../src/journal/journal.ts";
 import { inertFleet } from "../../src/lifecycle/fleet-services.ts";
 import { inertAttention } from "../../src/attention/services.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
+import { inertSched } from "../../src/sched/services.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { parseArgv } from "../../src/cli/argv.ts";
 import { notHumanReason } from "../../src/cli/human.ts";
@@ -78,6 +79,7 @@ beforeEach(() => {
     fleet: inertFleet(),
     attention: inertAttention(),
     delivery: inertDelivery(),
+    sched: inertSched(),
   };
   gateway = new Gateway({ services, lookup: (v) => VERBS.get(v) });
 });

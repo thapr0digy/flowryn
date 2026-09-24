@@ -39,6 +39,8 @@ done
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+# Nothing a fixture run starts posts a notification to your Mac.
+export FLOWRYN_NOTIFY=off
 
 # The ported cases (docs: README.md): name -> expected outcome.
 EXPECTED_CASES='stale_index_lock_cleared_and_cleanup_succeeds removed

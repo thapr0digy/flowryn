@@ -16,6 +16,8 @@ import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
+import { capacityConfig } from "../config/workflows.ts";
+import { checkHost } from "../sched/host.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -30,8 +32,12 @@ export interface DoctorEnv {
   ping: () => Promise<Reply | null>;
 }
 
-/** Tools M1 cannot work without; the rest are needed from M2 on. */
+/** Tools M1 cannot work without; the rest are needed from M2 on, and these only for what uses them. */
 const REQUIRED_TOOLS: readonly ToolName[] = ["tasks_axi", "git", "node"];
+const OPTIONAL_TOOLS: Partial<Record<ToolName, string>> = {
+  no_mistakes: "not found (optional: the no-mistakes delivery mode needs it)",
+  docker: "not found (optional: visual QA runs Docker environments, and the capacity check counts them)",
+};
 
 const STALE_LOCK_MS = 30_000;
 
@@ -59,7 +65,7 @@ function toolChecks(config: FlowrynConfig): Check[] {
     } else if (found) {
       checks.push({ check: `tool ${name}`, status: required ? "warn" : "info", detail: `found on PATH, not recorded in config: ${found} (flowryn init records it)` });
     } else {
-      checks.push({ check: `tool ${name}`, status: required ? "fail" : "info", detail: required ? "not found" : "not found (needed from M2)" });
+      checks.push({ check: `tool ${name}`, status: required ? "fail" : "info", detail: required ? "not found" : (OPTIONAL_TOOLS[name] ?? "not found (needed from M2)") });
     }
   }
   return checks;
@@ -217,6 +223,14 @@ async function contractChecks(config: FlowrynConfig): Promise<Check[]> {
   return checks;
 }
 
+/** A config that does not say whether macOS notifications are on gets them by default: say so, so it is a choice. */
+export function notifyMacosCheck(config: FlowrynConfig): Check | null {
+  const notify = config.extra.notify;
+  const table = typeof notify === "object" && notify !== null && !Array.isArray(notify) ? (notify as Record<string, unknown>) : {};
+  if ("macos" in table) return null;
+  return { check: "notify", status: "warn", detail: "[notify] has no macos key, so macOS notifications are on by default; set macos = true or false (flowryn init asks)" };
+}
+
 /** Every doctor check, in reading order. Never mutates anything. */
 export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const home = flowrynHome(env.env);
@@ -227,6 +241,10 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
     config = loaded.config;
     checks.push(loaded.exists ? { check: "config", status: "ok", detail: loaded.path } : { check: "config", status: "warn", detail: `${loaded.path} missing; using defaults (flowryn init)` });
     for (const problem of configProblems(config)) checks.push({ check: "config", status: problem.level === "error" ? "fail" : "warn", detail: problem.message });
+    if (loaded.exists) {
+      const notify = notifyMacosCheck(config);
+      if (notify) checks.push(notify);
+    }
   } catch (error) {
     return [{ check: "config", status: "fail", detail: (error as Error).message }];
   }
@@ -240,7 +258,23 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(await herdrCheck(config));
   checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
+  checks.push(await hostCheckNow(config));
   return checks;
+}
+
+/** The capacity host check against this machine now (design section 11): a host that fails it starts no worker. */
+async function hostCheckNow(config: FlowrynConfig): Promise<Check> {
+  let host;
+  try {
+    host = capacityConfig(config).host;
+  } catch {
+    return { check: "host check", status: "info", detail: "not checked: the [capacity] config is invalid" };
+  }
+  const verdict = await checkHost(host);
+  const pools = Object.entries(capacityConfig(config).pools).map(([pool, cap]) => `${pool} ${cap}`).join(", ");
+  const now = verdict.sample ? `${verdict.sample.free_mem_gb.toFixed(1)} GB available, load ${verdict.sample.load_per_core.toFixed(2)} per core` : verdict.reason;
+  if (verdict.ok) return { check: "host check", status: "ok", detail: `${now}; needs ${host.min_free_mem_gb} GB and at most ${host.max_load_per_core} per core; pools: ${pools}` };
+  return { check: "host check", status: "warn", detail: `fails now (${verdict.reason}): no new worker or stage starts while it fails; lower [capacity.host] min_free_mem_gb or max_load_per_core if this machine never has that room` };
 }
 
 export interface RestoreResult {

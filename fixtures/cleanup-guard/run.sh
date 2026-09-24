@@ -39,6 +39,8 @@ done
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_COMMON_DIR
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+# Nothing a fixture run starts posts a notification to your Mac.
+export FLOWRYN_NOTIFY=off
 
 # The design's case list (docs/design-v3.html section 14): name -> verdict.
 EXPECTED_CASES='local_only_fork_remote allow

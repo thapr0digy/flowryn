@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { hashToken, mintToken } from "../../src/api/auth.ts";
+import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
@@ -117,11 +118,14 @@ const leader = mintToken("leader");
 const env: Record<string, string> = {};
 for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FLOWRYN_") && k !== "CLAUDECODE" && !k.startsWith("CLAUDE_CODE_")) env[k] = v;
 env.FLOWRYN_HOME = home;
+// A live run never posts to your Mac: its scratch daemon records notifications and delivers none.
+env.FLOWRYN_NOTIFY = "off";
 const sock = join(home, "run", "flowrynd.sock");
 
 // --- the daemon ------------------------------------------------------------------------------
 let daemon: ReturnType<typeof Bun.spawn> | null = null;
 async function startDaemon(): Promise<void> {
+  requireNotificationsOff(env, "m2-live");
   const fd = openSync(join(home, "daemon.log"), "a");
   daemon = Bun.spawn(["bun", MAIN, "daemon", "run"], { env, stdin: "ignore", stdout: fd, stderr: fd });
   closeSync(fd);

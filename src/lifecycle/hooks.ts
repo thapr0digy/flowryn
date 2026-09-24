@@ -10,8 +10,12 @@ import { HOOK_SIGNALS, type HookName } from "../harness/types.ts";
 import { getProject } from "./projects.ts";
 import { gatherFacts } from "../policy/merge.ts";
 import { mergeContext, mergeSummary, runAndProject } from "../policy/verbs.ts";
-import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, type RunWithPolicy } from "./runs.ts";
+import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { openReviewGate } from "../policy/gates.ts";
+import { pendingPlanLine } from "./plans.ts";
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
+import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
+import { schedTiming } from "../config/workflows.ts";
 
 /**
  * The hook verbs (design section 12, role "hook"). A worker's Claude hooks
@@ -30,6 +34,11 @@ export interface HookInput {
   cwd?: string | null;
   source?: string | null;
   stop_hook_active?: boolean;
+  /** Claude StopFailure: the error type (rate_limit for a claude.ai usage limit) and its details. */
+  error?: string | null;
+  error_details?: string | null;
+  /** Claude Notification: its type (quota_auto_resume_fired after a usage limit reset). */
+  notification_type?: string | null;
 }
 
 /** At most two consecutive Stop continuations, far below Claude's cap of 8 (design section 5). */
@@ -238,7 +247,7 @@ type LeaderBody = (ctx: HandlerCtx, input: leader.LeaderHookInput, args: Args, p
  * this worker or leader session.
  */
 function signalVerb(
-  hook: HookName,
+  hook: HookName | "notify",
   summary: string,
   body: (ctx: HandlerCtx, run: RunWithPolicy, args: Args) => HandlerResult,
   leaderBody: LeaderBody,
@@ -264,9 +273,34 @@ function signalVerb(
     async settle(ctx, result) {
       if (ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
       if (isLeaderCall(ctx)) ctx.attention.bus.notify(ctx.caller.session!);
+      if (result.data.usage === "paused" || result.data.usage === "resumed") ctx.sched.kick();
       return result;
     },
   };
+}
+
+/**
+ * The Claude usage limit (design section 16), seen by any Claude session,
+ * worker or leader: a turn that ends in StopFailure with error rate_limit
+ * pauses Claude work (or re-arms an expired pause); a turn that ends normally, or Claude's own
+ * quota_auto_resume_fired notification, lifts the pause. Call inside the
+ * hook's transaction; returns what changed, for the reply.
+ */
+export function usageSignal(ctx: HandlerCtx, harness: "claude" | "pi", who: string, signal: { stop?: boolean; error?: string | null; details?: string | null; notification?: string | null }): "paused" | "resumed" | null {
+  if (harness !== "claude") return null;
+  const now = ctx.now();
+  if (signal.error === "rate_limit") return noteUsageLimit(ctx.db, who, sanitizeUsage(signal.details), now, schedTiming(ctx.config())) ? "paused" : null;
+  if (signal.stop || signal.notification === "quota_auto_resume_fired") return clearUsageLimit(ctx.db, signal.stop ? `a turn of ${who} ended normally` : `Claude resumed ${who} after the reset`, now) ? "resumed" : null;
+  if (signal.notification?.startsWith("quota_auto_resume_")) appendEvent(ctx.db, { source: "hook", kind: "sched.usage_notice", payload: { who, notification: signal.notification }, ts: now });
+  return null;
+}
+
+function sanitizeUsage(details: string | null | undefined): string {
+  return typeof details === "string" ? details.replace(/[^\x20-\x7e]/g, " ").slice(0, 120) : "";
+}
+
+function withUsage(result: HandlerResult, usage: "paused" | "resumed" | null): HandlerResult {
+  return usage ? { ...result, data: { ...result.data, usage } } : result;
 }
 
 /** A hook only a leader session calls. */
@@ -344,19 +378,20 @@ const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pend
   }
   ctx.fleet.continuations.delete(run.id);
   markIdle(ctx, run, HOOK_SIGNALS.stop);
-  return { data: { run: run.id } };
-}, (ctx) => leader.stop(ctx));
+  return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { stop: true }));
+}, (ctx, _input, args) => withUsage(leader.stop(ctx), usageSignal(ctx, harnessOf(args), "the leader", { stop: true })));
 
 const stopFailure = signalVerb(
   "stop-failure",
   "Hook: a turn ended in an API error",
-  (ctx, run) => {
+  (ctx, run, args) => {
     ctx.fleet.continuations.delete(run.id);
     markIdle(ctx, run, HOOK_SIGNALS["stop-failure"]);
-    appendEvent(ctx.db, { source: "hook", kind: "run.turn_failed", runId: run.id, taskId: run.task_id, payload: {} });
-    return { data: { run: run.id } };
+    const input = parseInput(args);
+    appendEvent(ctx.db, { source: "hook", kind: "run.turn_failed", runId: run.id, taskId: run.task_id, payload: { error: typeof input.error === "string" ? input.error : null } });
+    return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { error: input.error, details: input.error_details }));
   },
-  (ctx) => leader.stopFailure(ctx),
+  (ctx, input, args) => withUsage(leader.stopFailure(ctx), usageSignal(ctx, harnessOf(args), "the leader", { error: input.error ?? null, details: input.error_details ?? null })),
 );
 
 const sessionEnd = signalVerb(
@@ -388,7 +423,19 @@ const sessionStart = leaderVerb(
   },
 );
 
-const notify = leaderVerb("notify", "Leader hook: you went inactive (Claude idle_prompt) or came back (Pi activity)", (ctx, input) => leader.notify(ctx, input));
+/**
+ * `hook notify`: a leader's activity (Claude idle_prompt, the Pi extension's
+ * check) and, from any Claude session, its usage-limit notifications.
+ */
+const notify = signalVerb(
+  "notify",
+  "Hook: you went inactive or came back (leader); Claude's usage-limit notifications (any Claude session)",
+  (ctx, run, args) => {
+    const input = parseInput(args);
+    return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { notification: input.notification_type ?? null }));
+  },
+  (ctx, input, args) => withUsage(leader.notify(ctx, input), usageSignal(ctx, harnessOf(args), "the leader", { notification: input.notification_type ?? null })),
+);
 
 /**
  * `hook wait-p0`: the leader's P0 waiter (design section 5). Claude runs it as
@@ -412,6 +459,22 @@ const mergeSummaryHook = leaderVerb(
     try {
       const { run, project } = runAndProject(ctx.db, String(input.task ?? ""));
       return mergeSummary(await gatherFacts(mergeContext(ctx), run, project));
+    } catch (error) {
+      return { error: (error as Error).message };
+    }
+  },
+);
+
+/** Pi's flowryn_gate_pass tool: the open review gate of a task, for its confirm. */
+const gateSummaryHook = leaderVerb(
+  "gate-summary",
+  "Leader hook (Pi): a task's open review gate (stage, review page), for the confirm",
+  (_ctx, _input, _args, prepared) => ({ data: prepared as Record<string, unknown> }),
+  async (ctx, args) => {
+    const input = parseInput(args) as leader.LeaderHookInput;
+    try {
+      const { run, gate } = openReviewGate(ctx.db, String(input.task ?? ""));
+      return { task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", plan: pendingPlanLine(ctx.db, gate.id) ?? "-" };
     } catch (error) {
       return { error: (error as Error).message };
     }
@@ -491,4 +554,4 @@ const waitSteer: VerbSpec = {
   },
 };
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, sessionStart, notify, waitP0, delivered, mergeSummaryHook, approvalKeyHook];
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];

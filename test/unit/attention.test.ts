@@ -220,7 +220,7 @@ describe("overdue to-dos", () => {
 });
 
 function pump(clock: { now: number }, sent: string[], extra = "") {
-  const cfg = parseConfig(`[notify]\nherdr = false\np0_coalesce_s = 60\nmin_interval_min = 30\np0_renotify_min = 240\n${extra}`, h.home);
+  const cfg = parseConfig(`[notify]\nmacos = true\nherdr = false\np0_coalesce_s = 60\nmin_interval_min = 30\np0_renotify_min = 240\n${extra}`, h.home);
   return new NotifyPump({ db, config: () => cfg, runtime: () => null, now: () => clock.now, log: () => {}, macos: async (title, body) => void sent.push(`${title}: ${body}`) });
 }
 

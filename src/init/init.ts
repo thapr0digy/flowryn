@@ -3,6 +3,7 @@ import { join, sep } from "node:path";
 import { configProblems, defaultConfig, loadConfig, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { configPath, flowrynHome, runDir, toAbsolute } from "../config/paths.ts";
 import { renderConfig } from "../config/toml.ts";
+import { workerConfigProblems } from "../config/workers.ts";
 import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI } from "../version.ts";
 
@@ -16,19 +17,40 @@ export const INSTALL_HINTS: Record<ToolName, string> = {
   claude: "npm install -g @anthropic-ai/claude-code",
   pi: "npm install -g @earendil-works/pi-coding-agent (or the signed Pi Launcher, found as pi-signed)",
   no_mistakes: "install no-mistakes (optional; the no-mistakes delivery mode needs it)",
+  docker: "install Docker Desktop (optional; visual QA runs the app's environments in it, and the capacity check counts them)",
 };
 
 /** Defaults for the sections later milestones read; written once so they are there to edit. */
 export const LATER_SECTION_DEFAULTS: Record<string, unknown> = {
   workers: {
-    claude: { model: "opus", effort: "high", permission_mode: "bypass" },
+    claude: { model: "opus", effort: "high", permission_mode: "bypassPermissions" },
     pi: { effort: "medium" },
   },
   style: { terse: true },
   capacity: { worker: 20, validation: 5, docker_env: 5, browser: 5, host: { min_free_mem_gb: 8, max_load_per_core: 1.5 } },
   autonomy: { default: "plan" },
-  notify: { min_interval_min: 30, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 },
+  notify: { macos: true, herdr: true, min_interval_min: 30, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 },
 };
+
+function isTable(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The current config's sections, with every key they lack filled in from the defaults, at any depth; nothing current is replaced. */
+export function withMissingDefaults(current: Record<string, unknown>, defaults: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...current };
+  for (const [key, fallback] of Object.entries(defaults)) {
+    const value = current[key];
+    if (value === undefined) out[key] = fallback;
+    else if (isTable(value) && isTable(fallback)) out[key] = withMissingDefaults(value, fallback);
+  }
+  return out;
+}
+
+function currentMacosNotifications(extra: Record<string, unknown>): boolean | null {
+  const notify = extra.notify;
+  return isTable(notify) && typeof notify.macos === "boolean" ? notify.macos : null;
+}
 
 export interface InitIo {
   print(line: string): void;
@@ -161,6 +183,11 @@ export async function runInit(deps: InitDeps): Promise<number> {
     return 1;
   }
 
+  // macOS notifications, written explicitly either way
+  const macos = await io.confirm("Post macOS notifications when something needs you?", currentMacosNotifications(current.extra) ?? true);
+  const extra = withMissingDefaults(current.extra, LATER_SECTION_DEFAULTS);
+  extra.notify = { ...(isTable(extra.notify) ? extra.notify : (LATER_SECTION_DEFAULTS.notify as Record<string, unknown>)), macos };
+
   const config: FlowrynConfig = {
     home,
     data_dir: dataDir,
@@ -168,10 +195,12 @@ export async function runInit(deps: InitDeps): Promise<number> {
     morning_hour: morningHour,
     tasks: { backlog, todos },
     tools,
-    extra: { ...LATER_SECTION_DEFAULTS, ...current.extra },
+    extra,
   };
   for (const problem of configProblems(config)) io.print(`${problem.level}: ${problem.message}`);
-  if (configProblems(config).some((p) => p.level === "error")) {
+  const sectionProblems = workerConfigProblems(config);
+  for (const problem of sectionProblems) io.print(`error: ${problem}`);
+  if (configProblems(config).some((p) => p.level === "error") || sectionProblems.length > 0) {
     io.print("nothing was written");
     return 1;
   }

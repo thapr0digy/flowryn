@@ -126,7 +126,7 @@ async function daemonFacts(io: CliIo): Promise<string> {
 
 const board: VerbSpec = {
   name: "board",
-  summary: "A live view in your terminal: what needs you, the fleet, updates, to-dos; a approves a merge",
+  summary: "A live view in your terminal: what needs you, the fleet, updates, to-dos; a approves a merge or a review gate",
   positionals: [],
   flags: { once: { type: "boolean", help: "print one frame and exit" } },
   kind: "local",
@@ -164,15 +164,37 @@ const board: VerbSpec = {
   },
 };
 
-/** Ships that wait for a merge approval: delivered (ready), or merging with a merge that was not proven. */
-export function approvable(db: Db): { task: string; title: string; project: string; state: string }[] {
+export interface Approvable {
+  task: string;
+  title: string;
+  project: string;
+  state: string;
+  /** A review gate's stage; absent for a merge. */
+  gate?: string;
+}
+
+/**
+ * What waits for your word: review gates open for review (design section 11),
+ * and ships that wait for a merge approval: delivered (ready), or merging with
+ * a merge that was not proven.
+ */
+export function approvable(db: Db): Approvable[] {
+  const gates = db
+    .query(
+      `SELECT r.task_id, p.project_id, g.stage FROM gates g JOIN runs r ON r.id = g.run_id JOIN task_policy p ON p.task_id = r.task_id
+       WHERE g.kind = 'review' AND g.state = 'open' ORDER BY g.opened_at`,
+    )
+    .all() as { task_id: string; project_id: string; stage: string }[];
   const rows = db
     .query(
       `SELECT r.task_id, p.project_id, r.state FROM runs r JOIN task_policy p ON p.task_id = r.task_id
        WHERE p.kind = 'ship' AND r.state IN ('ready','merging') ORDER BY r.updated_at`,
     )
     .all() as { task_id: string; project_id: string; state: string }[];
-  return rows.map((r) => ({ task: r.task_id, title: taskTitle(db, r.task_id), project: r.project_id, state: r.state }));
+  return [
+    ...gates.map((g) => ({ task: g.task_id, title: taskTitle(db, g.task_id), project: g.project_id, state: `${g.stage} review`, gate: g.stage })),
+    ...rows.map((r) => ({ task: r.task_id, title: taskTitle(db, r.task_id), project: r.project_id, state: r.state })),
+  ];
 }
 
 /**
@@ -234,18 +256,19 @@ async function approveFromBoard(io: CliIo, db: Db, tty: KeyTty): Promise<void> {
   out("\u001b[H\u001b[2J");
   const list = approvable(db);
   if (list.length === 0) {
-    tty.write("Nothing waits for a merge approval.\n\nPress Enter to go back. ");
+    tty.write("Nothing waits for your approval.\n\nPress Enter to go back. ");
     await tty.readLine(60_000);
     return;
   }
-  tty.write("APPROVE A MERGE\n\n");
-  list.forEach((row, i) => tty.write(`  ${i + 1}. ${pad(row.task, 28)} ${pad(row.project, 12)} ${row.state === "merging" ? "(merge not proven) " : ""}${row.title}\n`));
+  tty.write("APPROVE A MERGE OR A REVIEW\n\n");
+  list.forEach((row, i) => tty.write(`  ${i + 1}. ${pad(row.task, 28)} ${pad(row.project, 12)} ${row.gate ? `(${row.state}) ` : row.state === "merging" ? "(merge not proven) " : ""}${row.title}\n`));
   tty.write("\nNumber, then Enter (Escape cancels): ");
   const pick = await tty.readLine(120_000);
   const chosen = pick === null ? undefined : list[Number(pick.trim()) - 1];
   if (!chosen) return;
-  const reply = await runApprovalFlow(io.env, tty, { task: chosen.task, channel: "board", actor: io.env.USER || io.env.LOGNAME || "you" });
-  tty.write(reply.ok ? `\nApproved ${chosen.task} (${(reply.data as { approval?: string }).approval}). The leader can merge it now.\n` : `\nNot approved: ${reply.error?.message ?? "error"}\n`);
+  const reply = await runApprovalFlow(io.env, tty, { task: chosen.task, gate: chosen.gate, channel: "board", actor: io.env.USER || io.env.LOGNAME || "you" });
+  const done = chosen.gate ? `The ${chosen.gate} review passed; the next stage starts.` : "The leader can merge it now.";
+  tty.write(reply.ok ? `\nApproved ${chosen.task} (${(reply.data as { approval?: string }).approval}). ${done}\n` : `\nNot approved: ${reply.error?.message ?? "error"}\n`);
   tty.write("\nPress Enter to go back. ");
   await tty.readLine(60_000);
 }
@@ -261,7 +284,7 @@ async function live(io: CliIo, db: Db, ageMs: number): Promise<number> {
   const draw = async () => {
     if (view.approving) return;
     const lines = boardFrame(db, { now: Date.now(), daemon: await daemonFacts(io) }, ageMs);
-    lines.push("", "q quit · r refresh · a approve a merge · every 2s");
+    lines.push("", "q quit · r refresh · a approve a merge or review · every 2s");
     if (view.approving) return;
     out(`\u001b[H\u001b[2J${fit(lines, process.stdout.columns || 120)}`);
   };

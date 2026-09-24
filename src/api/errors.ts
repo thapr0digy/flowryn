@@ -37,6 +37,10 @@ export const ERROR_CODES = {
   merge_in_flight: EXIT.policy,
   cleanup_refused: EXIT.policy,
   not_ready: EXIT.policy,
+  // M5: workflows and autonomy
+  wrong_stage: EXIT.policy,
+  blockers_not_landed: EXIT.policy,
+  stage_waiting: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,

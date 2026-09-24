@@ -8,9 +8,13 @@ import { deliveredOf } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
-import { createSteer } from "../lifecycle/steers.ts";
 import type { DiscardAttempt } from "../lifecycle/landing.ts";
 import { discardRef, findAttempt, findHumanApproval, insertApproval, voidApprovals } from "./approvals.ts";
+import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
+import { closeMergeGate, positionOf, requestStage } from "../lifecycle/stages.ts";
+import { holdsLease } from "../sched/pools.ts";
+import { pendingPlanLine } from "../lifecycle/plans.ts";
+import { WORKER_POOL } from "../config/workflows.ts";
 import {
   checkGate,
   chooseApproval,
@@ -187,12 +191,19 @@ const decline: VerbSpec = {
     resolveRunItems(ctx.db, run.id, ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed"], "run.declined", now);
     appendEvent(ctx.db, { source: "cli", kind: "run.declined", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, ref: delivered?.ref ?? null, head: delivered?.head ?? null }, ts: now });
     const text = `Your delivery ${delivered ? `(${delivered.ref} at ${delivered.head.slice(0, 8)}) ` : ""}was declined.${note ? ` ${note}` : " Ask your leader what to change."} Change it, then deliver again.`;
-    const steer = createSteer(ctx.db, run, text, now);
-    return { data: { task: run.task_id, run: run.id, state: "running", steer: steer.id } };
+    closeMergeGate(ctx.db, run, { passed: false, feedback: note || "declined" }, now);
+    // The last stage starts again, through the scheduler: its pools are granted again, and a worker
+    // that is gone meanwhile is resumed with the steer.
+    const pos = positionOf(ctx.db, run, run.kind);
+    if (run.liveness === "dead" || !holdsLease(ctx.db, run.id, WORKER_POOL)) run.pending_launch = "resume";
+    requestStage(ctx.db, run, pos.def, pos.index, text, now);
+    return { data: { task: run.task_id, run: run.id, state: "running", stage: pos.stage.id } };
   },
   async settle(ctx, result) {
-    ctx.fleet.bus.notify(String(result.data.run));
-    return result;
+    await ctx.sched.passNow();
+    const steer = ctx.db.query("SELECT id FROM messages WHERE run_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1").get(String(result.data.run)) as { id: string } | null;
+    const row = ctx.db.query("SELECT stage_state FROM runs WHERE id = ?1").get(String(result.data.run)) as { stage_state: string } | null;
+    return { data: { ...result.data, steer: row?.stage_state === "waiting" ? "waits for capacity" : (steer?.id ?? "-") } };
   },
 };
 
@@ -261,6 +272,7 @@ const approveBegin: VerbSpec = {
   flags: {
     "allow-red": { type: "string", help: "waive exactly this one failing check" },
     discard: { type: "boolean", help: "approve discarding unlanded work" },
+    gate: { type: "string", help: "pass the open review gate of this stage" },
     channel: { type: "string", help: "cli-tty or board" },
   },
   kind: "mutation",
@@ -271,6 +283,18 @@ const approveBegin: VerbSpec = {
     const channel = stringArg(args, "channel") === "board" ? "board" : "cli-tty";
     const { run, project } = runAndProject(ctx.db, stringArg(args, "task")!);
     const now = ctx.now();
+    const gateStage = stringArg(args, "gate");
+    if (gateStage !== undefined) {
+      if (boolArg(args, "discard") || stringArg(args, "allow-red")) throw new FlowrynError("bad_args", "--gate approves a review gate; it takes no --discard or --allow-red");
+      const { gate } = openReviewGate(ctx.db, run.id);
+      checkStage(gate, gateStage || undefined);
+      const head = await reviewedHead(ctx, run);
+      const challenge = ctx.delivery.challenges.create({ task: run.task_id, action: "gate", ref: gateRef(gate), head, allowRed: null, channel }, now);
+      return {
+        challenge: { id: challenge.id, code: challenge.code },
+        summary: { action: "gate", task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", head, plan: pendingPlanLine(ctx.db, gate.id) ?? "-" },
+      };
+    }
     if (boolArg(args, "discard")) {
       if (stringArg(args, "allow-red")) throw new FlowrynError("bad_args", "--allow-red belongs to a merge approval, not a discard");
       const head = await worktreeHead(ctx, run, project);
@@ -321,11 +345,23 @@ const approveConfirm: VerbSpec = {
     if (taken === "expired") throw new FlowrynError("challenge_failed", "the approval challenge expired", "run flowryn approve again");
     if (taken === "wrong") throw new FlowrynError("challenge_failed", "the code does not match; nothing was approved", "run flowryn approve again");
     const actor = (stringArg(args, "actor") ?? "").replace(/[^A-Za-z0-9._@-]/g, "").slice(0, 64) || "you";
+    if (taken.action === "gate") {
+      // Your word on a review gate passes it as it is recorded (design section 11).
+      const { run, gate } = openReviewGate(ctx.db, taken.task);
+      if (gateRef(gate) !== taken.ref) throw new FlowrynError("challenge_failed", `the review gate of ${taken.task} changed since you were shown it`, `flowryn approve ${taken.task} --gate ${gate.stage}`);
+      const passed = recordGatePass(ctx.db, run, gate, { channel: taken.channel, actor, head: taken.head }, ctx.now());
+      return { data: { ...passed, passed: true }, hints: [`flowryn show ${passed.task}`] };
+    }
     const row = insertApproval(ctx.db, { task: taken.task, ref: taken.ref, head: taken.head, channel: taken.channel, actor, action: taken.action, allowRed: taken.allowRed, now: ctx.now() });
     return {
       data: { approval: row.id, task: row.task_id, action: row.action, head: row.head_sha, channel: row.channel, waived: row.allow_red_check ?? "-", expires: new Date(row.expires_at).toISOString() },
       hints: row.action === "merge" ? [`flowryn merge ${row.task_id}`] : [`flowryn cleanup ${row.task_id} --discard`],
     };
+  },
+  async settle(ctx, result) {
+    if (result.data.passed !== true) return result;
+    ctx.journal.kick();
+    return stageStartedReply(ctx, result);
   },
 };
 
