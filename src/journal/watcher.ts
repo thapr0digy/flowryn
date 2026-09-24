@@ -184,7 +184,7 @@ export class BacklogWatcher {
     }
 
     const diff = diffTasks(snapshot.tasks, tasks);
-    const erased = this.erasedIntents(file, tasks, now);
+    const erased = this.erasedIntents(file, tasks, diff, contentHash, now);
     const conflicts = file === "backlog" ? this.runConflicts(tasks) : [];
     const reapplied: string[] = [];
     const divergences: string[] = [];
@@ -230,12 +230,17 @@ export class BacklogWatcher {
    * journal last left it. A re-applied copy supersedes its original, so each
    * chain is considered once, through its latest application.
    *
+   * The file reads as rolled back when its bytes match the content some
+   * intent in the window was written over: then that intent and every later
+   * one go back. It also reads as rolled back when another recent journal
+   * write, on a task still in the file, reads as erased.
+   *
    * A just-added task that is missing was deleted by hand, and stays deleted,
-   * unless the read shows a whole-file rollback: another recent journal write,
-   * on a task still in the file, reads as erased too. A task with a live run
-   * is never re-applied; a hand edit to it is a divergence instead.
+   * unless the file rolled back and this read is the one that removed it. A
+   * deletion an earlier read already accepted stays deleted even then. A task
+   * with a live run is never re-applied; a hand edit to it is a divergence.
    */
-  private erasedIntents(file: JournalFile, tasks: BacklogTask[], now: number): (AppliedPayload & { taskId: string })[] {
+  private erasedIntents(file: JournalFile, tasks: BacklogTask[], diff: BacklogDiff, contentHash: string, now: number): (AppliedPayload & { taskId: string })[] {
     const since = now - (this.deps.eraseWindowMs ?? ERASE_WINDOW_MS);
     const rows = (this.deps.db.query("SELECT * FROM events WHERE kind = 'intent.applied' AND ts >= ?1 ORDER BY seq").all(since) as EventRow[])
       .map((row) => ({ row, applied: JSON.parse(row.payload) as AppliedPayload }))
@@ -243,21 +248,29 @@ export class BacklogWatcher {
     const latestInChain = new Map<string, number>();
     for (const { row, applied } of rows) latestInChain.set(chainRoot(applied), row.seq);
 
+    let rolledBackFrom: number | null = null;
+    for (const { row, applied } of rows) if (applied.preHash === contentHash) rolledBackFrom = row.seq;
+
     const byId = new Map(tasks.map((t) => [t.id, t]));
+    const removedNow = new Set(diff.removed);
     const pendingTasks = new Set(pendingIntents(this.deps.db, file).map((i) => i.task_id));
     const liveRunTasks = new Set(file === "backlog" ? this.liveRuns().map((r) => r.task_id) : []);
     const candidates = rows
       .filter(({ row, applied }) => latestInChain.get(chainRoot(applied)) === row.seq)
-      .map(({ row, applied }) => ({ taskId: row.task_id!, applied }))
+      .map(({ row, applied }) => ({ seq: row.seq, taskId: row.task_id!, applied }))
       .filter(({ taskId, applied }) => !pendingTasks.has(taskId) && !liveRunTasks.has(taskId) && (applied.args.reapplyDepth ?? 0) < MAX_REAPPLY_DEPTH);
-    const fileRolledBack = candidates.some(({ taskId, applied }) => applied.verb !== "add" && intentErased(applied, byId.get(taskId)));
+    const fileRolledBack = rolledBackFrom !== null || candidates.some(({ taskId, applied }) => applied.verb !== "add" && intentErased(applied, byId.get(taskId)));
 
     const rewinding = new Set<string>();
     const erased: (AppliedPayload & { taskId: string })[] = [];
-    for (const { taskId, applied } of candidates) {
+    for (const { seq, taskId, applied } of candidates) {
       if (!rewinding.has(taskId)) {
-        if (applied.verb === "add" && !fileRolledBack) continue;
-        if (!intentErased(applied, byId.get(taskId))) continue;
+        if (applied.verb === "add") {
+          if (!fileRolledBack || !removedNow.has(taskId)) continue;
+        } else {
+          const writtenOver = rolledBackFrom !== null && seq >= rolledBackFrom && byId.has(taskId);
+          if (!writtenOver && !intentErased(applied, byId.get(taskId))) continue;
+        }
       }
       rewinding.add(taskId);
       erased.push({ ...applied, taskId });

@@ -129,6 +129,8 @@ export interface AppliedPayload {
   already: boolean;
   pre: BacklogTask | null;
   post: BacklogTask | null;
+  /** The file's hash just before the write; a later read with this hash is the file rolled back to before this intent. */
+  preHash: string | null;
 }
 
 /**
@@ -266,6 +268,7 @@ export class Journal {
       const snapshot = readSnapshot(this.db, fresh.file);
       if (runner && this.beforeWrite && snapshot && snapshot.contentHash !== hashFile(filePath)) await this.beforeWrite(fresh.file);
       const pre = readSnapshot(this.db, fresh.file)?.tasks.find((t) => t.id === fresh.task_id) ?? null;
+      const preHash = hashFile(filePath);
       let outcome: TasksAxiOutcome;
       if (!runner) {
         outcome = { ok: false, kind: "transient", code: "TOOL_MISSING", message: "tasks-axi was not found; set [tools] tasks_axi in config.toml", exitCode: null };
@@ -276,7 +279,7 @@ export class Journal {
         }
       }
       if (outcome.ok) {
-        await this.markApplied(fresh, filePath, runner!, outcome.json, pre);
+        await this.markApplied(fresh, filePath, runner!, outcome.json, pre, preHash);
       } else if (outcome.kind === "transient") {
         this.markRetry(fresh, attempts, filePath, outcome);
       } else {
@@ -294,7 +297,7 @@ export class Journal {
     return failure;
   }
 
-  private async markApplied(intent: IntentRow, filePath: string, runner: TasksAxiRunner, json: Record<string, unknown>, pre: BacklogTask | null) {
+  private async markApplied(intent: IntentRow, filePath: string, runner: TasksAxiRunner, json: Record<string, unknown>, pre: BacklogTask | null, preHash: string) {
     const now = this.now();
     const contentHash = hashFile(filePath);
     let tasks: BacklogTask[] | null = null;
@@ -316,6 +319,7 @@ export class Journal {
         already: json.already === true,
         pre,
         post,
+        preHash,
       };
       appendEvent(this.db, { source: "daemon", kind: "intent.applied", taskId: intent.task_id, payload, ts: now });
       resolveItems(this.db, "backlog_out_of_sync", intent.task_id, `intent:${intent.id}`, now);

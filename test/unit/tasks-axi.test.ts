@@ -84,7 +84,7 @@ describe("classifying tasks-axi results", () => {
 });
 
 function applied(verb: AppliedPayload["verb"], pre: BacklogTask | null, post: BacklogTask | null, flags: Record<string, string> = {}): AppliedPayload {
-  return { intent: "I", file: "todos", verb, args: { positional: ["t"], flags }, already: false, pre, post };
+  return { intent: "I", file: "todos", verb, args: { positional: ["t"], flags }, already: false, pre, post, preHash: null };
 }
 
 describe("erased-intent detection", () => {

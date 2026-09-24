@@ -36,6 +36,13 @@ function insertLiveRun() {
   });
 }
 
+function deleteLines(...ids: string[]) {
+  const kept = readFileSync(env.files.todos, "utf8")
+    .split("\n")
+    .filter((line) => !ids.some((id) => line.includes(id)));
+  writeFileSync(env.files.todos, kept.join("\n"));
+}
+
 describe("backlog watcher (fake hand edits)", () => {
   test("the first read is a baseline; an unchanged hash is a no-op", async () => {
     env = makeJournalEnv();
@@ -90,21 +97,79 @@ describe("backlog watcher (fake hand edits)", () => {
 
   test("deleting a just-added to-do by hand is your edit: it stays deleted", async () => {
     env = makeJournalEnv();
-    addTodo("a-a1", "keep me");
-    await env.journal.drain();
     addTodo("renw-b1", "Renw passport");
     await env.journal.drain();
-    const withoutTypo = readFileSync(env.files.todos, "utf8")
-      .split("\n")
-      .filter((line) => !line.includes("renw-b1"))
-      .join("\n");
-    writeFileSync(env.files.todos, withoutTypo);
+    addTodo("a-a1", "keep me");
+    await env.journal.drain();
+    deleteLines("renw-b1");
     const result = await env.watcher.check("todos", "test");
     expect(result.diff!.removed).toEqual(["renw-b1"]);
     expect(result.reapplied).toEqual([]);
     await env.journal.drain();
     expect(readFileSync(env.files.todos, "utf8")).not.toContain("renw-b1");
     expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["a-a1"]);
+  });
+
+  test("a deletion already accepted stays deleted when a later rollback is detected", async () => {
+    env = makeJournalEnv();
+    addTodo("renw-b1", "Renw passport");
+    addTodo("a-a1", "keep me");
+    await env.journal.drain();
+    deleteLines("renw-b1");
+    expect((await env.watcher.check("todos", "test")).reapplied).toEqual([]);
+    env.record({ file: "todos", verb: "done", taskId: "a-a1", positional: ["a-a1"] });
+    await env.journal.drain();
+    await env.runner.real.run(["reopen", "a-a1", "--file", env.files.todos, "--json"]);
+    const result = await env.watcher.check("todos", "test");
+    expect(result.reapplied!.length).toBe(1);
+    await env.journal.drain();
+    const tasks = readSnapshot(env.db, "todos")!.tasks;
+    expect(tasks.map((t) => [t.id, t.state])).toEqual([["a-a1", "done"]]);
+  });
+
+  test("restoring the exact bytes from before three adds re-applies all three", async () => {
+    env = makeJournalEnv();
+    addTodo("x-x1", "already there");
+    await env.journal.drain();
+    const preAdd = readFileSync(env.files.todos, "utf8");
+    for (const id of ["a-a1", "b-b1", "c-c1"]) addTodo(id, `added ${id}`);
+    await env.journal.drain();
+    writeFileSync(env.files.todos, preAdd);
+    const result = await env.watcher.check("todos", "test");
+    expect(result.reapplied!.length).toBe(3);
+    await env.journal.drain();
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id).toSorted()).toEqual(["a-a1", "b-b1", "c-c1", "x-x1"]);
+  });
+
+  test("deleting three just-added to-dos by hand to new content keeps all three deleted", async () => {
+    env = makeJournalEnv();
+    addTodo("x-x1", "already there");
+    await env.journal.drain();
+    for (const id of ["a-a1", "b-b1", "c-c1"]) addTodo(id, `added ${id}`);
+    await env.journal.drain();
+    deleteLines("a-a1", "b-b1", "c-c1");
+    writeFileSync(env.files.todos, readFileSync(env.files.todos, "utf8").replace("already there", "already there, renamed"));
+    const result = await env.watcher.check("todos", "test");
+    expect(result.diff!.removed.toSorted()).toEqual(["a-a1", "b-b1", "c-c1"]);
+    expect(result.reapplied).toEqual([]);
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["x-x1"]);
+  });
+
+  test("a rollback to bytes from before a hand deletion re-applies the rest, not the deleted task", async () => {
+    env = makeJournalEnv();
+    addTodo("x-x1", "already there");
+    await env.journal.drain();
+    const preAdd = readFileSync(env.files.todos, "utf8");
+    addTodo("renw-b1", "Renw passport");
+    addTodo("a-a1", "keep me");
+    await env.journal.drain();
+    deleteLines("renw-b1");
+    await env.watcher.check("todos", "test");
+    writeFileSync(env.files.todos, preAdd);
+    const result = await env.watcher.check("todos", "test");
+    expect(result.reapplied!.length).toBe(1);
+    await env.journal.drain();
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id).toSorted()).toEqual(["a-a1", "x-x1"]);
   });
 
   test("a whole-file revert to older content re-applies the journal", async () => {
