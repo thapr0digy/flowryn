@@ -4,6 +4,7 @@ import { WORKER_VERBS } from "../lifecycle/worker.ts";
 import { HOOK_VERBS } from "../lifecycle/hooks.ts";
 import { dispatchVerb } from "../lifecycle/dispatch.ts";
 import { LEADER_RUN_VERBS } from "../lifecycle/leader-verbs.ts";
+import { CONTRACT_VERBS } from "../contracts/verbs.ts";
 import { systemVerbs } from "../daemon/system-verbs.ts";
 import type { VerbSpec } from "./verbs.ts";
 
@@ -15,6 +16,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...TODO_VERBS,
   ...PROJECT_VERBS,
   ...HOOK_VERBS,
+  ...CONTRACT_VERBS,
   ...systemVerbs(),
 ];
 

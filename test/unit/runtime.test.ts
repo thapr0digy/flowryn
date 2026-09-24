@@ -19,6 +19,9 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** The process table after pid 4242 was reused by another executable. */
+const reusedPid: PsRunner = async () => "  4242 Wed Sep 23 22:48:39 2026     /bin/other\n";
+
 describe("process identity", () => {
   test("parses ps lstart in the C locale as local time", () => {
     const at = parseLstart("Wed Sep 23 22:53:49 2026");
@@ -41,8 +44,7 @@ describe("process identity", () => {
 
   test("terminate never signals a process whose identity no longer matches", async () => {
     const sent: string[] = [];
-    const ps: PsRunner = async () => "  4242 Wed Sep 23 22:48:39 2026     /bin/other\n";
-    const result = await terminate({ pid: 4242, start: parseLstart("Wed Sep 23 22:48:39 2026")!, exe: "/bin/claude" }, { ps, kill: (pid, s) => sent.push(`${pid}:${s}`), graceMs: 10 });
+    const result = await terminate({ pid: 4242, start: parseLstart("Wed Sep 23 22:48:39 2026")!, exe: "/bin/claude" }, { ps: reusedPid, kill: (pid, s) => sent.push(`${pid}:${s}`), graceMs: 10 });
     expect(result).toEqual({ ok: true, evidence: "absent", signal: "none" });
     expect(sent).toEqual([]);
   });
