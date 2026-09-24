@@ -20,11 +20,11 @@
  *                    | "interrupt" | "compact" | "quit", "text"?, "willRetry"?}
  */
 
-export {};
+import { resolve } from "node:path";
 
 type Handler = (event: any, ctx: any) => unknown;
 
-const extensionPath = process.argv[2];
+const extensionPath = process.argv[2] ? resolve(process.argv[2]) : "";
 if (!extensionPath) {
   process.stderr.write("usage: fake-pi-host.ts <extension.ts>\n");
   process.exit(2);
@@ -123,14 +123,17 @@ async function run(messages: string[], via: string, holdTool = false): Promise<v
     inTool = true;
     await emit("tool_execution_start", { toolName: "bash" });
     out({ ev: "busy" });
-    await new Promise<void>((resolve) => {
-      releaseTool = resolve;
+    await new Promise<void>((release) => {
+      releaseTool = release;
     });
     inTool = false;
     if (aborted) return;
     await flushSteers();
   }
-  while (followUps.length > 0 && !aborted) see(followUps.shift()!.text, "followUp");
+  for (;;) {
+    if (aborted || followUps.length === 0) break;
+    see(followUps.shift()!.text, "followUp");
+  }
   await settle();
 }
 
@@ -165,6 +168,14 @@ async function prompt(text: string, holdTool = false): Promise<void> {
   await run(messages, "prompt");
 }
 
+/** State the fake changes from other callbacks; poll it rather than loop on a variable. */
+async function until(check: () => boolean): Promise<void> {
+  for (;;) {
+    if (check()) return;
+    await Bun.sleep(5);
+  }
+}
+
 async function typeText(text: string): Promise<void> {
   editor += text;
   for (const handler of inputHandlers) handler(text);
@@ -182,13 +193,13 @@ async function handle(command: { id: number; cmd: string; text?: string; willRet
     case "prompt_busy":
       editor = "";
       await prompt(command.text ?? "work", true);
-      while (!inTool) await Bun.sleep(5);
+      await until(() => inTool);
       break;
     case "finish": {
       const release = releaseTool;
       releaseTool = null;
       release?.();
-      while (running) await Bun.sleep(5);
+      await until(() => !running);
       break;
     }
     case "type":

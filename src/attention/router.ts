@@ -109,9 +109,11 @@ export function composeDigest(candidates: RankedItem[]): Digest | null {
 export function p0Line(item: Pick<RankedItem, "id" | "line">): string {
   const tail = ` Details: flowryn show ${item.id}`;
   const head = `Flowryn P0 [${item.id}]: `;
-  const room = P0_LINE_MAX - head.length - tail.length;
-  const body = item.line.length > room ? `${item.line.slice(0, room - 1)}…` : item.line;
-  return `${head}${body.replace(/[.\s]+$/, "")}.${tail}`;
+  // One character is kept for the full stop that ends the fact.
+  const room = P0_LINE_MAX - head.length - tail.length - 1;
+  const fact = item.line.replace(/[.\s]+$/, "");
+  const body = fact.length > room ? `${fact.slice(0, room - 1)}…` : fact;
+  return `${head}${body}.${tail}`;
 }
 
 /** A prompt that is a P0 wake, not you typing: a woken turn also runs UserPromptSubmit (M0 c01). */
