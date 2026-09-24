@@ -44,15 +44,33 @@ export function carry(db: Db, c: Carry): boolean {
   return true;
 }
 
-/** A push path declined the item (a Pi leader became active before it could trigger); the lease is free again. */
-export function releaseCarry(db: Db, itemId: string, session: string): void {
-  db.query("DELETE FROM presentations WHERE item_id = ?1 AND session_id = ?2 AND state = 'carried'").run(itemId, session);
-  db.query("UPDATE items SET attempts = MAX(attempts - 1, 0) WHERE id = ?1").run(itemId);
+/**
+ * Offer a P0 to a Pi extension. Call inside a transaction. The offer holds
+ * the item's push lease, but no turn end confirms it: the extension looks at
+ * Pi first (a run may have just ended, a draft may have just been typed) and
+ * reports whether and how it delivered. False when the lease is taken.
+ */
+export function offer(db: Db, c: Carry): boolean {
+  return (
+    db
+      .query("INSERT OR IGNORE INTO presentations (item_id, session_id, turn_no, path, state, carried_at) VALUES (?1, ?2, ?3, ?4, 'offered', ?5)")
+      .run(c.itemId, c.session, c.turn, c.path, c.now).changes > 0
+  );
 }
 
-/** Move a reserved carry to the path and turn the extension actually used. */
-export function moveCarry(db: Db, itemId: string, session: string, path: PresentationPath, turn: number): void {
-  db.query("UPDATE presentations SET path = ?3, turn_no = ?4 WHERE item_id = ?1 AND session_id = ?2 AND state = 'carried'").run(itemId, session, path, turn);
+/** The extension delivered an offered P0 by `path`: it is carried for `turn` from now on. */
+export function acceptOffer(db: Db, itemId: string, session: string, path: PresentationPath, turn: number, now: number): boolean {
+  const moved = db
+    .query("UPDATE presentations SET state = 'carried', path = ?3, turn_no = ?4, carried_at = ?5 WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'")
+    .run(itemId, session, path, turn, now).changes;
+  if (moved === 0) return carry(db, { itemId, session, turn, path, now });
+  db.query("UPDATE items SET attempts = attempts + 1 WHERE id = ?1").run(itemId);
+  return true;
+}
+
+/** A push path declined the item (a Pi leader went idle, or you started typing); the lease is free again. */
+export function releaseOffer(db: Db, itemId: string, session: string): void {
+  db.query("DELETE FROM presentations WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'").run(itemId, session);
 }
 
 /**
@@ -70,7 +88,7 @@ export function confirmTurn(db: Db, session: string, turn: number, now: number):
 }
 
 /**
- * Carries that will never be confirmed: those for turns before `beforeTurn`
+ * Carries (and offers) that will never be confirmed: those for turns before `beforeTurn`
  * (a new turn started without the old one ending), or all of the session's
  * when `beforeTurn` is null (the session ended or lost the lease). An
  * informational item that used its attempts drops to the board. Call inside a
@@ -79,9 +97,9 @@ export function confirmTurn(db: Db, session: string, turn: number, now: number):
 export function loseCarried(db: Db, session: string, beforeTurn: number | null, now: number): string[] {
   const filter = beforeTurn === null ? "" : "AND turn_no < ?2";
   const params = beforeTurn === null ? [session] : [session, beforeTurn];
-  const rows = db.query(`SELECT item_id FROM presentations WHERE session_id = ?1 AND state = 'carried' ${filter}`).all(...params) as { item_id: string }[];
+  const rows = db.query(`SELECT item_id FROM presentations WHERE session_id = ?1 AND state IN ('carried','offered') ${filter}`).all(...params) as { item_id: string }[];
   if (rows.length === 0) return [];
-  db.query(`UPDATE presentations SET state = 'lost' WHERE session_id = ?1 AND state = 'carried' ${filter}`).run(...params);
+  db.query(`UPDATE presentations SET state = 'lost' WHERE session_id = ?1 AND state IN ('carried','offered') ${filter}`).run(...params);
   const ids = [...new Set(rows.map((r) => r.item_id))];
   for (const id of ids) {
     db.query("UPDATE items SET state = 'dropped', resolved_by = 'not presented after 3 attempts', resolved_at = ?2 WHERE id = ?1 AND class = 'info' AND state = 'open' AND attempts >= ?3").run(

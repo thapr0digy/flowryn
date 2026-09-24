@@ -1,7 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
 import { composeBriefing, readOnlyBanner } from "../attention/briefing.ts";
-import { carry, confirmTurn, loseCarried, moveCarry, releaseCarry, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
+import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
 import { composeDigest, digestCandidates, isWakePrompt, p0Candidate, p0Line, type RankedItem } from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -138,6 +138,14 @@ function pushTurn(s: LeaderSessionRow, mode: PushMode): number {
   return mode === "continuation" ? s.turn_no : s.turn_no + 1;
 }
 
+/** Compose the holder's briefing and carry every item it lists for `turn`. Inside a transaction. */
+function brief(ctx: HandlerCtx, s: LeaderSessionRow, turn: number, now: number): { text: string; listed: number } {
+  const briefing = composeBriefing(ctx.db, { session: s.session_id, now, morningHour: ctx.config().morning_hour, ageMs: ageMs(ctx), markMorning: true });
+  for (const item of briefing.listed) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "briefing", now });
+  setSession(ctx.db, s.session_id, { brief_pending: 0 });
+  return { text: briefing.text, listed: briefing.listed.length };
+}
+
 // --- session start ------------------------------------------------------------------------
 
 export async function prepareSessionStart(ctx: HandlerCtx): Promise<{ state: string; epoch: number }> {
@@ -183,9 +191,8 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
     setSession(ctx.db, s.session_id, { banner: null });
   } else {
     const turn = compact && busyNow(s, now) ? s.turn_no : s.turn_no + 1;
-    const briefing = composeBriefing(ctx.db, { session: s.session_id, now, morningHour: ctx.config().morning_hour, ageMs: ageMs(ctx), markMorning: true });
-    for (const item of briefing.listed) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "briefing", now });
-    listed = briefing.listed.length;
+    const briefing = brief(ctx, s, turn, now);
+    listed = briefing.listed;
     context = briefing.text;
   }
   const epoch = getLease(ctx.db).epoch;
@@ -199,9 +206,14 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
 
 // --- prompt and busy ------------------------------------------------------------------------
 
-/** Did the hook start too long ago for Claude to still use its answer? Then nothing counts as carried. */
-export function digestLate(ctx: HandlerCtx, startedAt: number | undefined): boolean {
-  return startedAt !== undefined && ctx.now() - startedAt > ctx.attention.timing().digest_budget_ms;
+/**
+ * The digest's hand-over deadline: the hook process start plus the budget.
+ * The daemon carries nothing past it, and the CLI prints nothing it receives
+ * past it, so a hook that ran too slow for Claude to use (a timed-out hook's
+ * context is dropped) never counts as carried. Null when the start is unknown.
+ */
+export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): number | null {
+  return startedAt === undefined ? null : startedAt + ctx.attention.timing().digest_budget_ms;
 }
 
 /**
@@ -210,9 +222,10 @@ export function digestLate(ctx: HandlerCtx, startedAt: number | undefined): bool
  * (source "run"), which repeats on retries and so is idempotent while busy
  * (M0 p04). A prompt you typed makes you active and gets the P1 digest.
  */
-export function prompt(ctx: HandlerCtx, input: LeaderHookInput, late: boolean): HandlerResult {
+export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  const late = deadline !== null && now > deadline;
   if (s.harness === "pi" && input.source === "run") {
     if (busyNow(s, now)) refreshBusy(ctx, s, now);
     else startTurn(ctx, s, now, "run");
@@ -236,13 +249,16 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, late: boolean): 
     setSession(ctx.db, s.session_id, { banner: null });
   }
   if (isHolder(ctx.db, s.session_id)) {
+    // Taken over mid-conversation: the full briefing first, then whatever it does not list.
+    if (s.brief_pending === 1) lines.push(brief(ctx, s, turn, now).text);
     const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx)));
     if (digest) {
       for (const item of digest.shown) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "digest", now });
       lines.push(digest.text);
     }
   }
-  return { data: lines.length > 0 ? { context: lines.join("\n") } : {} };
+  if (lines.length === 0) return { data: {} };
+  return { data: deadline === null ? { context: lines.join("\n") } : { context: lines.join("\n"), deadline } };
 }
 
 /** Pre/PostToolUse: refresh the busy lease, and the heartbeat. A tool never starts a turn. */
@@ -375,8 +391,10 @@ export function takeP0(ctx: HandlerCtx, outcome: WaitOutcome): HandlerResult {
   const push = p0Push(ctx, s, now);
   if (!push || push.item.id !== outcome.push.item) return { data: { wait: true } };
   const path: PresentationPath = push.mode;
-  if (!carry(ctx.db, { itemId: push.item.id, session: s.session_id, turn: pushTurn(s, push.mode), path, now })) return { data: { wait: true } };
-  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: push.item.id, path, turn: pushTurn(s, push.mode) }, ts: now });
+  const c = { itemId: push.item.id, session: s.session_id, turn: pushTurn(s, push.mode), path, now };
+  // Claude's waiter wakes the session by itself; the Pi extension decides after it looks at Pi, so it gets an offer.
+  if (!(s.harness === "pi" ? offer(ctx.db, c) : carry(ctx.db, c))) return { data: { wait: true } };
+  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: push.item.id, path, turn: c.turn }, ts: now });
   return { data: { fire: { id: push.item.id, line: p0Line(push.item), mode: push.mode } } };
 }
 
@@ -389,18 +407,15 @@ export function delivered(ctx: HandlerCtx, input: LeaderHookInput): HandlerResul
   const s = leaderSession(ctx);
   const now = ctx.now();
   const item = String(input.item ?? "");
-  const row = ctx.db.query("SELECT turn_no, path FROM presentations WHERE item_id = ?1 AND session_id = ?2 AND state = 'carried'").get(item, s.session_id) as {
-    turn_no: number;
-    path: string;
-  } | null;
-  if (!row) return { data: { item, recorded: false } };
   if (input.ok === false) {
-    releaseCarry(ctx.db, item, s.session_id);
+    releaseOffer(ctx.db, item, s.session_id);
     appendEvent(ctx.db, { source: "hook", kind: "leader.p0_declined", payload: { session: s.session_id, item }, ts: now });
-    return { data: { item, recorded: true, declined: true } };
+    return { data: { item, declined: true } };
   }
-  const mode = input.mode === "trigger" ? "trigger" : "continuation";
-  if (mode !== row.path) moveCarry(ctx.db, item, s.session_id, mode, mode === "trigger" ? row.turn_no + 1 : row.turn_no - 1);
-  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_delivered", payload: { session: s.session_id, item, path: mode }, ts: now });
-  return { data: { item, recorded: true } };
+  // The extension reports before it sends, in order with its other hooks, so the session's turn is Pi's turn now:
+  // a followUp rides in the running turn, a triggered turn is the next one.
+  const mode: PushMode = input.mode === "trigger" ? "trigger" : "continuation";
+  const recorded = acceptOffer(ctx.db, item, s.session_id, mode, pushTurn(s, mode), now);
+  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_delivered", payload: { session: s.session_id, item, path: mode, recorded }, ts: now });
+  return { data: { item, recorded } };
 }

@@ -36,6 +36,7 @@ export interface LeaderSessionRow {
   continuations: number;
   banner: string | null;
   has_ui: number;
+  brief_pending: number;
   started_at: number | null;
   ended_at: number | null;
 }
@@ -147,7 +148,8 @@ export function claim(db: Db, sessionId: string, reason: string, now: number): C
        approval_key_hash = ?5, claimed_at = ?6, heartbeat_at = ?6 WHERE id = 1`,
   ).run(sessionId, session.harness, session.pane_id, session.token_hash, hashToken(approvalKey), now);
   const epoch = getLease(db).epoch;
-  db.query("UPDATE leader_sessions SET banner = NULL, last_event_at = ?2 WHERE session_id = ?1").run(sessionId, now);
+  // A session that takes over mid-conversation has had no briefing as holder: its next prompt carries one.
+  db.query("UPDATE leader_sessions SET banner = NULL, brief_pending = 1, last_event_at = ?2 WHERE session_id = ?1").run(sessionId, now);
   if (previous) {
     db.query("UPDATE leader_sessions SET banner = ?2, continuations = 0 WHERE session_id = ?1").run(previous, `Flowryn: leadership moved to ${describeSession(session)}; this session is read-only.`);
     loseCarried(db, previous, null, now);

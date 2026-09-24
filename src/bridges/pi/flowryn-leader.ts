@@ -237,8 +237,11 @@ export default function flowrynLeader(pi: any): void {
     if (!item || !line) return;
     const mode = !idle() ? "continuation" : inactiveNow() ? "trigger" : null;
     await enqueue("delivered", { item, mode: mode ?? "declined", ok: mode !== null });
-    if (mode === "continuation") send("flowryn-p0", line, { deliverAs: "followUp" });
-    else if (mode === "trigger") send("flowryn-p0", line, { deliverAs: "followUp", triggerTurn: true });
+    if (mode === "trigger") send("flowryn-p0", line, { deliverAs: "followUp", triggerTurn: true });
+    else if (mode === "continuation") {
+      // The run may have ended while the report was on its way: then it rides with your next prompt instead.
+      send("flowryn-p0", line, idle() ? { deliverAs: "nextTurn" } : { deliverAs: "followUp" });
+    }
   }
 
   async function p0Loop(): Promise<void> {

@@ -53,7 +53,7 @@ export function digestCandidates(db: Db, session: string, now: number, ageMs: nu
       `${RANK_SELECT}
        WHERE i.lane IN ('P0','P1')
          AND ((i.class = 'actionable' AND i.state IN ('open','presented')) OR (i.class = 'info' AND i.state = 'open' AND i.attempts < ?2))
-         AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?3 AND s.state IN ('presented','carried'))
+         AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?3 AND s.state IN ('presented','carried','offered'))
        ${RANK_ORDER}`,
     )
     .all(now - ageMs, MAX_INFO_ATTEMPTS, session) as RankedItem[];
@@ -69,8 +69,8 @@ export function p0Candidate(db: Db, session: string, now: number, ageMs: number)
       .query(
         `${RANK_SELECT}
          WHERE i.lane = 'P0' AND i.class = 'actionable' AND i.state IN ('open','presented')
-           AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried'))
-           AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state = 'carried' AND s.path IN ('continuation','waiter','trigger'))
+           AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried','offered'))
+           AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
          ${RANK_ORDER} LIMIT 1`,
       )
       .get(now - ageMs, session) as RankedItem | null) ?? null

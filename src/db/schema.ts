@@ -183,8 +183,11 @@ CREATE INDEX messages_open ON messages(run_id) WHERE acked_at IS NULL;
  * harness process (a holder is stale only once its process is gone),
  * continuations the Stop continuations since the last prompt, banner a
  * one-line notice for the next hook (leadership moved), has_ui whether a Pi
- * leader has its TUI (without one a P0 never starts a turn). items.due orders
- * overdue to-dos within their lane.
+ * leader has its TUI (without one a P0 never starts a turn), brief_pending that
+ * a session took the lease mid-conversation and gets the full briefing with its
+ * next prompt. items.due orders overdue to-dos within their lane. A P0 handed
+ * to a Pi extension is `offered` until the extension reports how it delivered
+ * it; the per-item lease covers offers as well as carries.
  */
 const LEADER_SQL = /* sql */ `
 ALTER TABLE leader_sessions ADD COLUMN token_hash TEXT;
@@ -197,11 +200,14 @@ ALTER TABLE leader_sessions ADD COLUMN proc_exe TEXT;
 ALTER TABLE leader_sessions ADD COLUMN continuations INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE leader_sessions ADD COLUMN banner TEXT;
 ALTER TABLE leader_sessions ADD COLUMN has_ui INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE leader_sessions ADD COLUMN brief_pending INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE leader_sessions ADD COLUMN started_at INTEGER;
 ALTER TABLE leader_sessions ADD COLUMN ended_at INTEGER;
 CREATE UNIQUE INDEX leader_sessions_token ON leader_sessions(token_hash) WHERE token_hash IS NOT NULL;
 ALTER TABLE items ADD COLUMN due TEXT;
 CREATE INDEX presentations_session ON presentations(session_id, state);
+CREATE UNIQUE INDEX one_p0_offer ON presentations(item_id)
+  WHERE state IN ('carried','offered') AND path IN ('continuation','waiter','trigger');
 `;
 
 export const MIGRATIONS: readonly Migration[] = [

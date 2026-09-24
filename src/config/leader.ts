@@ -14,7 +14,11 @@ export interface LeaderTiming {
   stale_ms: number;
   /** Pi: idle, empty composer and no terminal input this long means you are inactive (design section 5). */
   inactive_ms: number;
-  /** A digest the hook could not hand over this soon after it started is not carried (a timed-out hook's context is dropped). */
+  /**
+   * A digest the hook cannot hand over this soon after its process started is
+   * not carried: the CLI gives up on a slow daemon after about 2 s, and a hook
+   * that prints nothing hands nothing to the model.
+   */
   digest_budget_ms: number;
   /** An actionable item open this long moves to the top of its lane (design section 9). */
   age_ms: number;
@@ -24,7 +28,7 @@ export const DEFAULT_LEADER_TIMING: LeaderTiming = {
   busy_lease_ms: 10 * 60_000,
   stale_ms: 10 * 60_000,
   inactive_ms: 60_000,
-  digest_budget_ms: 1_500,
+  digest_budget_ms: 2_000,
   age_ms: 24 * 60 * 60_000,
 };
 

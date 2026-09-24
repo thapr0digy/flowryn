@@ -300,8 +300,8 @@ const prompt = signalVerb(
     markBusy(ctx, run, HOOK_SIGNALS.prompt);
     return { data: { run: run.id } };
   },
-  (ctx, input, _args, prepared) => leader.prompt(ctx, input, prepared === true),
-  async (ctx, args) => leader.digestLate(ctx, intArg(args, "started-at")),
+  (ctx, input, _args, prepared) => leader.prompt(ctx, input, (prepared as number | null | undefined) ?? null),
+  async (ctx, args) => leader.digestDeadline(ctx, intArg(args, "started-at")),
 );
 
 const preTool = signalVerb(
