@@ -25,11 +25,11 @@ beforeEach(() => {
   db = h.db();
   tx(db, () => {
     db.query("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, priority) VALUES ('hot', 'u', '/h', 'main', 'local-only', 0), ('cold', 'u', '/c', 'main', 'local-only', 3)").run();
-    for (const [task, project] of [
+    for (const [taskId, project] of [
       ["hot-a", "hot"],
       ["cold-a", "cold"],
     ] as const) {
-      db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, ?2, 'ship', 'local-only', 0, 'fix', 1)").run(task, project);
+      db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, ?2, 'ship', 'local-only', 0, 'fix', 1)").run(taskId, project);
     }
   });
 });
