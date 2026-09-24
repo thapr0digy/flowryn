@@ -346,7 +346,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       startDeps,
       kickJournal: () => journal.kick(),
     });
-    const sched: SchedServices = { kick: () => scheduler?.kick(), passNow: async () => scheduler?.passNow() };
+    const sched: SchedServices = { kick: () => scheduler?.kick(), passNow: async () => scheduler?.passNow(), grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false };
 
     const services: DaemonServices = {
       db: database,

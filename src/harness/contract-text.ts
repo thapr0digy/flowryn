@@ -30,6 +30,8 @@ export function deliveryLines(d: ContractDelivery): string[] {
   }
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
+    "  Run the pipeline only once your last stage (ship) has started: stage done",
+    "  requests it, and a steer starts it once its validation slot is granted.",
     "  An ask-user finding: $FLOWRYN_BIN ask with the finding; never answer it yourself.",
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",

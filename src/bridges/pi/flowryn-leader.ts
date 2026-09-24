@@ -363,12 +363,13 @@ export default function flowrynLeader(pi: any): void {
         approvalKey = key;
       }
       if (!key) return text("This session does not hold the leader lease, so it cannot pass a gate.");
-      let reply = await runFlowryn(["gate", "pass", task, "--stage", String(summary.stage ?? ""), "--key-file", "-", "--json"], key);
+      const passArgs = ["gate", "pass", task, "--stage", String(summary.stage ?? ""), "--gate-id", String(summary.gate ?? ""), "--key-file", "-", "--json"];
+      let reply = await runFlowryn(passArgs, key);
       if (reply?.ok === false && reply.error?.code === "approval_required" && String(reply.error?.message ?? "").includes("key")) {
         const fresh = await runHook("approval-key", {});
         if (typeof fresh?.key === "string") {
           approvalKey = fresh.key;
-          reply = await runFlowryn(["gate", "pass", task, "--stage", String(summary.stage ?? ""), "--key-file", "-", "--json"], fresh.key);
+          reply = await runFlowryn(passArgs, fresh.key);
         }
       }
       if (!reply) return text(`Flowryn did not answer; the gate of ${task} may still be open. Check: flowryn show ${task}`);

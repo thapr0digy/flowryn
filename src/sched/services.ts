@@ -9,8 +9,14 @@ export interface SchedServices {
   kick(): void;
   /** One pass now, serialized with every other. */
   passNow(): Promise<void>;
+  /**
+   * One pass now for a run whose worker waits on the reply (a delivery that
+   * needs its pooled stage): a grant in it carries no steer. Resolves whether
+   * the run's stage is now active.
+   */
+  grantNow(runId: string): Promise<boolean>;
 }
 
 export function inertSched(overrides: Partial<SchedServices> = {}): SchedServices {
-  return { kick: () => {}, passNow: async () => {}, ...overrides };
+  return { kick: () => {}, passNow: async () => {}, grantNow: async () => false, ...overrides };
 }

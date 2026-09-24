@@ -251,9 +251,19 @@ CREATE INDEX merges_open ON merges(state) WHERE state IN ('requested','unproven'
  * row; one live lease per pool and run. Every open run already has a live
  * worker, so each gets its worker lease. plans and plan_phases hold a phased
  * feature (design section 11): the phases reach the backlog only once the plan
- * is approved.
+ * is approved. runs.workflow_def freezes the workflow a run already open
+ * before M5 finishes under, the contract its worker was given: a ship builds
+ * then ships (the ship stage holds a validation slot and ends at the merge
+ * gate) and a scout investigates, whatever its workflow id names today.
  */
 const WORKFLOW_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN workflow_def TEXT;
+UPDATE runs SET workflow_def = CASE
+    WHEN (SELECT kind FROM task_policy tp WHERE tp.task_id = runs.task_id) = 'scout'
+      THEN '{"id":"scout","stages":[{"id":"investigate","skill":null,"gate":"none","pools":[],"fresh":false}]}'
+    ELSE '{"id":"fix","stages":[{"id":"build","skill":null,"gate":"none","pools":[],"fresh":false},{"id":"ship","skill":null,"gate":"merge","pools":["validation"],"fresh":false}]}'
+  END
+  WHERE state NOT IN ('cleaned','failed','cancelled');
 ALTER TABLE runs ADD COLUMN stage_state TEXT NOT NULL DEFAULT 'active';
 ALTER TABLE runs ADD COLUMN stage_started_at INTEGER;
 ALTER TABLE runs ADD COLUMN waiting_since INTEGER;

@@ -82,6 +82,8 @@ export class Scheduler {
   private stopped = false;
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
   private readonly relaunching = new Set<string>();
+  /** Runs whose worker waits on the reply to the grant: their stage start carries no steer. */
+  private readonly quiet = new Set<string>();
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
@@ -123,6 +125,18 @@ export class Scheduler {
     });
     await this.running;
     if (this.again) await this.passNow();
+  }
+
+  /** A pass now in which the run's grant carries no steer; whether its stage is now active. */
+  async grantNow(runId: string): Promise<boolean> {
+    this.quiet.add(runId);
+    try {
+      await this.passNow();
+    } finally {
+      this.quiet.delete(runId);
+    }
+    const row = this.deps.db.query("SELECT stage_state, pending_launch FROM runs WHERE id = ?1").get(runId) as { stage_state: string; pending_launch: string | null } | null;
+    return row?.stage_state === "active" && row.pending_launch === null;
   }
 
   private async pass(): Promise<void> {
@@ -198,7 +212,7 @@ export class Scheduler {
         activated = tx(db, () => {
           const fresh = getRunWithPolicy(db, c.run.id);
           if (!fresh || isTerminal(fresh.state) || (fresh.stage_state !== "waiting" && !fresh.pending_launch)) return null;
-          return activateStage(db, config, fresh, now());
+          return activateStage(db, config, fresh, now(), { steer: !this.quiet.has(fresh.id) });
         });
       } catch (error) {
         if (error instanceof OverCapacity) continue;

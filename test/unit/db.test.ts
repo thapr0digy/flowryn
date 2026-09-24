@@ -7,6 +7,7 @@ import { appendEvent } from "../../src/db/events.ts";
 import { backupIfDue, listBackups, BACKUPS_KEPT } from "../../src/db/backup.ts";
 import { MIGRATIONS, type Migration } from "../../src/db/schema.ts";
 import { openItem, resolveItems, findOpenItem, openItems } from "../../src/attention/items.ts";
+import { positionOf, runWorkflow } from "../../src/lifecycle/stages.ts";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -97,6 +98,33 @@ describe("migrations", () => {
     insert("r1", "failed");
     insert("r2", "running");
     expect(() => insert("r3", "launching")).toThrow();
+    db.close();
+  });
+
+  test("a run open before M5 keeps the build-then-ship workflow its worker was given, whatever its workflow id names now", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 4));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, workflow) VALUES ('p', 'u', '/p', 'main', 'no-mistakes', 'feature')");
+    const run = (id: string, task: string, kind: string, workflow: string, stage: string, state: string) => {
+      db.exec(`INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('${task}', 'p', '${kind}', 'no-mistakes', 0, '${workflow}', 1)`);
+      db.exec(
+        `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+         VALUES ('${id}', '${task}', 'claude', 'v', '${state}', 'busy', '${workflow}', '${stage}', '/w/${task}', 'b-${task}', 's', 'h-${id}', 1, 1)`,
+      );
+      tx(db, () => appendEvent(db, { source: "cli", kind: "run.dispatched", runId: id, taskId: task, payload: { kind } }));
+    };
+    run("r1", "t1", "ship", "feature", "build", "running");
+    run("r2", "t2", "scout", "scout", "investigate", "running");
+    run("r3", "t3", "ship", "feature", "build", "cleaned");
+    migrate(db);
+
+    const shape = (id: string, workflow: string) => runWorkflow(db, { id, workflow }).stages.map((s) => `${s.id}:${s.gate}:${s.pools.join("+")}`);
+    expect(shape("r1", "feature")).toEqual(["build:none:", "ship:merge:validation"]);
+    const pos = positionOf(db, { id: "r1", workflow: "feature", stage: "build" }, "ship");
+    expect([pos.index, pos.last]).toEqual([0, false]);
+    expect(shape("r2", "scout")).toEqual(["investigate:none:"]);
+    // A run already closed is not frozen: it never moves again.
+    expect(db.query("SELECT workflow_def FROM runs WHERE id = 'r3'").get()).toEqual({ workflow_def: null });
     db.close();
   });
 });

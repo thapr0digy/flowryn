@@ -50,7 +50,7 @@ v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the 
 | **M5** plan, and auto-dispatch on landing | Done (M5) |
 | **M5** the terse style block | Done (M3 #5 wrote it into the leader's prompt and the worker contract; M5 made it configurable in `[style]` and leading) |
 | **M5** the three stage skills | Done (M5) |
-| **M5 exit** a two-phase feature runs design, review, build, visual QA, review, ship and merge, and phase 2 starts by itself | Done (M5): fake leaders in `bun test`, and live in a Herdr lab session with one live worker at a time (scaled from the design's "20 workers on a real machine" for cost; see [M5 notes](m5-notes.md#live-runs)) |
+| **M5 exit** a two-phase feature runs design, review, build, visual QA, review, ship and merge, and phase 2 starts by itself | Done (M5): fake leaders in `bun test`. The live lab run (`scripts/lab/m5-live.sh`) now runs two features side by side per flow, with 2 to 4 live workers at once (the scale the user approved, scaled from the design's "20 workers on a real machine" for cost). **Its results are to be recorded by the operator**, including the peak concurrency; see [M5 notes](m5-notes.md#live-runs) |
 | **M5 exit** 20 workers under the caps | Done (M5) with fake workers (real processes through the real CLI, no model calls) on the fake Herdr: 24 ships against the design's caps, the host check and the queue (`test/integration/capacity.test.ts`); not with 20 live model sessions, for cost |
 
 ## Other v1 items of the design

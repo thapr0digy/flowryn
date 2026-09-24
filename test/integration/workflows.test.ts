@@ -165,6 +165,42 @@ describe("workflow stages and review gates", () => {
   );
 
   test(
+    "a gate pass binds to the gate you were shown: a prompt for an earlier gate, or another gate id, is refused",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const leader = await e.claude();
+      await leader.start();
+      const steps = ["Feature three", "FAKE: stage-done --review https://lavish.test/three/design-1", "FAKE: stage-done --review https://lavish.test/three/design-2", "FAKE: sleep 120000"].join("\n");
+      const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: steps });
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await f.waitRun(run, (r) => r.stage_state === "review", "the first design review");
+      const first = one<{ id: string }>(f, "SELECT id FROM gates WHERE run_id = ?1 AND state = 'open'", run)!.id;
+
+      // You were prompted for the first gate; it is sent back and a second one opens before the pass runs.
+      const prompted = await leader.runBash(`flowryn gate pass ${task} --json`, { approve: false });
+      expect(prompted).toMatchObject({ prompted: true, ran: false });
+      expect((await f.json(["gate", "changes", task, "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: "Try again." })).code).toBe(0);
+      await f.waitRun(run, (r) => r.stage_state === "review" && one(f, "SELECT 1 FROM gates WHERE run_id = ?1 AND state = 'open' AND id != ?2", run, first) !== null, "the second design review");
+      const second = one<{ id: string }>(f, "SELECT id FROM gates WHERE run_id = ?1 AND state = 'open'", run)!.id;
+
+      const stale = await f.json(["gate", "pass", task], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      expect(stale.reply.error).toMatchObject({ code: "approval_required" });
+      expect((stale.reply.error as { message: string }).message).toContain(`showed gate ${first}`);
+      const otherId = await f.json(["gate", "pass", task, "--gate-id", first], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      expect(otherId.reply.error).toMatchObject({ code: "not_ready" });
+      expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", second)!.state).toBe("open");
+
+      const yes = await leader.runBash(`flowryn gate pass ${task} --gate-id ${second} --json`, { approve: true });
+      expect(yes).toMatchObject({ ran: true, code: 0 });
+      expect(JSON.parse(yes.stdout).data).toMatchObject({ gate: second, channel: "claude-ask" });
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
     "a stage with fresh = true starts a new worker session in the same worktree",
     async () => {
       fleet = await makeFleetEnv({
@@ -182,6 +218,80 @@ describe("workflow stages and review gates", () => {
       await f.waitRun(run, (r) => r.state === "ready", "the delivery");
     },
     { timeout: 90_000 },
+  );
+});
+
+describe("capacity is the contract for a delivery", () => {
+  test(
+    "a ship that delivers from build while the validation cap is full waits for its ship stage; no pipeline runs outside the cap",
+    async () => {
+      ship = await makeShipEnv({ mode: "no-mistakes", extraConfig: "[capacity]\nvalidation = 1" });
+      const e = ship;
+      const f = e.fleet;
+      const holder = await f.dispatch(["Holds validation", "FAKE: commit a.txt a", "FAKE: stage-done", "FAKE: sleep 600000"].join("\n"), { kind: "ship" });
+      await f.waitRun(holder.run, (r) => r.stage === "ship" && r.stage_state === "active", "the holder in its ship stage");
+      const steps = [
+        "Skips ahead",
+        "FAKE: commit b.txt b",
+        "FAKE: verb deliver --pr https://github.com/acme/web/pull/99",
+        "FAKE: wait-file go",
+        "FAKE: push",
+        `FAKE: pr ${e.github.apiUrl} acme/web`,
+        "FAKE: deliver-pr",
+        "FAKE: sleep 600000",
+      ].join("\n");
+      const { task, run } = await f.dispatch(steps, { kind: "ship" });
+
+      // The delivery from build is refused, the ship stage waits for the full validation pool, and nothing was pushed.
+      const [refused] = await e.replies(task, 1);
+      expect((refused!.reply.error as { code: string }).code).toBe("stage_waiting");
+      expect(f.run(run)).toMatchObject({ state: "running", stage: "ship", stage_state: "waiting" });
+      const validation = () => rows<{ run_id: string }>(f, "SELECT run_id FROM pool_leases WHERE pool = 'validation' AND released_at IS NULL").map((l) => l.run_id);
+      expect(validation()).toEqual([holder.run]);
+      expect(Bun.spawnSync(["git", "--git-dir", f.origin!, "for-each-ref", `refs/heads/${f.run(run).branch}`]).stdout.toString()).toBe("");
+      expect(rows(f, "SELECT 1 FROM artifacts WHERE task_id = ?1", task)).toEqual([]);
+
+      // The slot frees: the ship stage starts and its steer tells the worker to deliver again, which it does under the cap.
+      expect((await f.json(["cancel", holder.task])).code).toBe(0);
+      await f.waitRun(run, (r) => r.stage === "ship" && r.stage_state === "active", "the ship stage granted");
+      expect(validation()).toEqual([run]);
+      expect(one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE '%deliver again%'", run)!.body).toContain("Flowryn stage ship (2 of 2");
+      writeFileSync(join(f.h.dataDir, task, "go"), "");
+      await f.waitRun(run, (r) => r.state === "ready" && r.stage_state === "done", "the delivery");
+      expect(validation()).toEqual([]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "with the pools free, a delivery from build takes its ship stage's slot at once and delivers",
+    async () => {
+      fleet = await makeFleetEnv();
+      const f = fleet;
+      const { run } = await f.dispatch(["Direct", "FAKE: commit c.txt c", "FAKE: deliver-local", "FAKE: sleep 600000"].join("\n"), { kind: "ship" });
+      await f.waitRun(run, (r) => r.state === "ready", "the delivery");
+      const started = rows<{ payload: string }>(f, "SELECT payload FROM events WHERE run_id = ?1 AND kind = 'stage.started' ORDER BY seq", run).map((r) => JSON.parse(r.payload) as { stage: string; steer: string | null });
+      expect(started.map((s) => [s.stage, s.steer])).toEqual([["build", null], ["ship", null]]);
+      expect(one<{ released_by: string }>(f, "SELECT released_by FROM pool_leases WHERE run_id = ?1 AND pool = 'validation'", run)!.released_by).toBe("stage ship delivered");
+    },
+    { timeout: 60_000 },
+  );
+});
+
+describe("dispatch --blocked-by", () => {
+  test(
+    "a task can wait only for ships: a scout never lands, so it is refused as a blocker",
+    async () => {
+      fleet = await makeFleetEnv();
+      const f = fleet;
+      const scout = await f.dispatch("Look around\nFAKE: sleep 120000", { kind: "scout" });
+      const refused = await f.json(["dispatch", "web", "--kind", "ship", "--blocked-by", scout.task, "--body-file", "-"], { stdin: "After the scout\nFAKE: sleep 120000" });
+      expect(refused.code).not.toBe(0);
+      expect(refused.reply.error).toMatchObject({ code: "bad_args" });
+      expect((refused.reply.error as { message: string }).message).toContain(`${scout.task} is a scout`);
+      expect(rows(f, "SELECT 1 FROM plans")).toEqual([]);
+    },
+    { timeout: 60_000 },
   );
 });
 
@@ -225,8 +335,9 @@ describe("autonomy and the usage limit", () => {
       const second = await f.json(["dispatch", "web", "--task", data.phases[1]!.task]);
       expect(second.code).toBe(2);
       expect((second.reply.error as { code: string }).code).toBe("blockers_not_landed");
-      const first = await f.json(["dispatch", "web", "--task", data.phases[0]!.task]);
+      const first = await f.json(["dispatch", "web", "--task", data.phases[0]!.task, "--sensitive"]);
       expect(first.code).toBe(0);
+      expect(one<{ sensitive: number }>(f, "SELECT sensitive FROM task_policy WHERE task_id = ?1", data.phases[0]!.task)!.sensitive).toBe(1);
       const shown = await f.json(["show", data.plan]);
       expect(JSON.stringify(shown.reply.data)).toContain(`queued, waits for ${data.phases[0]!.task}`);
     },

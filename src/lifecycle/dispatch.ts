@@ -153,7 +153,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   db.query(
     `INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, auto, created_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
-     ON CONFLICT(task_id) DO UPDATE SET workflow = excluded.workflow`,
+     ON CONFLICT(task_id) DO UPDATE SET workflow = excluded.workflow, sensitive = MAX(sensitive, excluded.sensitive)`,
   ).run(r.taskId, r.project.id, r.kind, r.project.delivery_mode, r.project.yolo, r.sensitive ? 1 : 0, r.workflow.id, r.now);
   const first = r.workflow.stages[0]!;
   // The run token is minted at launch and kept in the run's private directory; this hash is a placeholder no token matches.
@@ -190,9 +190,13 @@ function harnessArg(args: Record<string, unknown>, fallback: HarnessId): Harness
   return harness;
 }
 
-function knownTask(db: Db, id: string): boolean {
-  if (db.query("SELECT 1 FROM task_policy WHERE task_id = ?1 UNION SELECT 1 FROM plan_phases WHERE task_id = ?1").get(id)) return true;
-  return (readSnapshot(db, "backlog")?.tasks ?? []).some((t) => t.id === id);
+/** A blocker's task kind: a plan phase is a ship; null when there is no such task. */
+function blockerKind(db: Db, id: string): string | null {
+  const policy = db.query("SELECT kind FROM task_policy WHERE task_id = ?1").get(id) as { kind: string } | null;
+  if (policy) return policy.kind;
+  if (db.query("SELECT 1 FROM plan_phases WHERE task_id = ?1").get(id)) return "ship";
+  const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === id);
+  return task ? (task.kind ?? "ship") : null;
 }
 
 async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): Promise<DispatchPlan> {
@@ -217,8 +221,13 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const blockedBy = (args["blocked-by"] as string[] | undefined) ?? [];
   if (blockedBy.length > 0) {
     if (kind !== "ship") throw new FlowrynError("bad_args", "a task that waits for others is a ship");
-    const unknown = blockedBy.filter((id) => !knownTask(ctx.db, id));
+    const kinds = new Map(blockedBy.map((id) => [id, blockerKind(ctx.db, id)]));
+    const unknown = blockedBy.filter((id) => kinds.get(id) === null);
     if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
+    const unshipped = blockedBy.filter((id) => kinds.get(id) !== "ship");
+    if (unshipped.length > 0) {
+      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship lands, so a task can wait only for ships`, "wait for the report yourself, then dispatch");
+    }
     return { mode: "queue", project, harness, blockedBy };
   }
   if (boolArg(args as never, "auto")) throw new FlowrynError("bad_args", "--auto goes with --blocked-by: a task that starts by itself once its blockers land");

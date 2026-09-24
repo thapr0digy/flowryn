@@ -40,6 +40,7 @@ export const ERROR_CODES = {
   // M5: workflows and autonomy
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
+  stage_waiting: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,

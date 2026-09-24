@@ -4,7 +4,7 @@ import { openItem, resolveRunItems } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, WORKER_POOL, type StageDef, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
-import { getMeta, setMeta } from "../db/db.ts";
+import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines, type ContractDelivery } from "../harness/contract-text.ts";
 import { grantLeases, holdsLease, releaseLeases, runLeases } from "../sched/pools.ts";
@@ -41,11 +41,22 @@ interface DispatchedPayload {
   workflow_def?: WorkflowDef;
 }
 
-/** The workflow a run was dispatched with, frozen then, so a later config edit never reshapes a running run. */
+function usable(def: WorkflowDef | undefined | null): def is WorkflowDef {
+  return Boolean(def && Array.isArray(def.stages) && def.stages.length > 0);
+}
+
+/**
+ * The workflow a run was dispatched with, frozen then, so a later config edit
+ * never reshapes a running run. A run open before M5 has its workflow frozen
+ * by the migration instead (runs.workflow_def).
+ */
 export function runWorkflow(db: Db, run: Pick<RunRow, "id" | "workflow">, kind?: "ship" | "scout"): WorkflowDef {
+  const migrated = db.query("SELECT workflow_def FROM runs WHERE id = ?1").get(run.id) as { workflow_def: string | null } | null;
+  const carried = migrated?.workflow_def ? (JSON.parse(migrated.workflow_def) as WorkflowDef) : null;
+  if (usable(carried)) return carried;
   const row = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.dispatched' ORDER BY seq LIMIT 1").get(run.id) as { payload: string } | null;
   const frozen = row ? (JSON.parse(row.payload) as DispatchedPayload).workflow_def : undefined;
-  if (frozen && Array.isArray(frozen.stages) && frozen.stages.length > 0) return frozen;
+  if (usable(frozen)) return frozen;
   return DEFAULT_WORKFLOWS[run.workflow] ?? (kind === "scout" ? DEFAULT_WORKFLOWS.scout! : DEFAULT_WORKFLOWS.fix!);
 }
 
@@ -73,8 +84,12 @@ export function stageInstructions(pos: StagePos, ctx: StageTextContext): string 
   const path = skillPath(ctx.stateDir, stage.skill);
   if (stage.skill) parts.push(path ? `Follow the ${stage.skill} skill: read ${path} first.` : `Follow the ${stage.skill} skill.`);
   if (stage.pools.length > 0) parts.push(`You hold a slot of ${stage.pools.join(" and ")} until this stage ends.`);
-  if (pos.last) parts.push(`This is the last stage. ${deliveryLines(ctx.delivery).map((l) => l.replace(/^-\s*/, "").trim()).join(" ")}`);
-  else if (stage.gate === "review") parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url>, then end your turn; a steer brings the verdict.");
+  if (pos.last) {
+    parts.push(`This is the last stage. ${deliveryLines(ctx.delivery).map((l) => l.replace(/^-\s*/, "").trim()).join(" ")}`);
+    return parts.join(" ");
+  }
+  if (ctx.delivery.kind === "ship" && ctx.delivery.mode === "no-mistakes") parts.push(`Do not run the no-mistakes pipeline yet: it runs in stage ${def.stages[def.stages.length - 1]!.id}, once that stage has started.`);
+  if (stage.gate === "review") parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url>, then end your turn; a steer brings the verdict.");
   else parts.push("When it is done: $FLOWRYN_BIN stage done, then end your turn; a steer starts the next stage.");
   return parts.join(" ");
 }
@@ -126,12 +141,13 @@ export interface Activated {
 
 /**
  * The scheduler granted the run: take the leases, start the stage and, when
- * a live worker carries on, steer it with the stage's instructions. A launch
- * the grant starts gets the instructions in its task file instead. Throws
+ * a live worker carries on, steer it with the stage's instructions (unless
+ * `steer: false`: the worker is waiting on the reply that says it started). A
+ * launch the grant starts gets the instructions in its task file instead. Throws
  * OverCapacity (taking nothing) when a pool filled meanwhile. Call inside a
  * transaction.
  */
-export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy, now: number): Activated {
+export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy, now: number, opts: { steer?: boolean } = {}): Activated {
   const pos = positionOf(db, run, run.kind);
   const caps = capacityConfig(config).pools;
   grantLeases(db, run.id, run.task_id, pos.stage.id, neededPools(db, run, pos), caps, now);
@@ -140,7 +156,7 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
   // A fresh launch reads its stage from the task file, and a fresh stage worker its note too: the launcher clears it.
   const noteInFile = launch === "fresh" || launch === "stage";
   let steer: string | null = null;
-  if (starting && run.stage_note !== null && !noteInFile) {
+  if (starting && opts.steer !== false && run.stage_note !== null && !noteInFile) {
     const text = [run.stage_note, stageInstructions(pos, stageTextContext(db, config, run))].filter((t) => t.length > 0).join(" ");
     steer = createSteer(db, run, text, now).id;
   }
@@ -242,9 +258,11 @@ export function sendBack(db: Db, run: RunWithPolicy, gate: GateRow, words: strin
 
 /**
  * May the run deliver now? From its last stage, once that stage runs; from an
- * earlier stage only when every stage after it lacks a review gate: the
- * delivery then finishes them at once and holds nothing, since nothing of
- * them remains to run. Returns the stages it finishes that way.
+ * earlier stage only when every stage after it lacks a review gate. A stage it
+ * would skip that holds pools is never finished for free (the caps are the
+ * contract): startPooledStages requests it through the scheduler first, and
+ * the delivery waits for its grant. The rest the delivery finishes at once.
+ * Returns the stages it finishes that way; refuses while a pooled one remains.
  */
 export function deliveryStages(db: Db, run: RunWithPolicy): string[] {
   const pos = positionOf(db, run, run.kind);
@@ -254,7 +272,62 @@ export function deliveryStages(db: Db, run: RunWithPolicy): string[] {
   const later = pos.def.stages.slice(pos.index + 1);
   const gated = [pos.stage, ...later.slice(0, -1)].find((s) => s.gate === "review");
   if (gated) throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} comes before the ${gated.id} review; you cannot deliver yet`, stageDoneHelp(pos));
+  const pooled = later.find((s) => s.pools.length > 0);
+  if (pooled) throw stageWaiting(pooled);
   return later.map((s) => s.id);
+}
+
+function stageWaiting(stage: StageDef): FlowrynError {
+  return new FlowrynError(
+    "stage_waiting",
+    `your delivery needs stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it waits for capacity`,
+    `end your turn; a steer starts stage ${stage.id}, then deliver again`,
+  );
+}
+
+/** The first stage after the current one that holds pools, when a delivery from here would skip it. */
+function pooledStageAhead(pos: StagePos): number | null {
+  if (pos.last) return null;
+  const found = pos.def.stages.findIndex((s, i) => i > pos.index && s.pools.length > 0);
+  return found >= 0 ? found : null;
+}
+
+/**
+ * A delivery from an earlier stage whose skipped stages hold pools: the
+ * current stage ends and the pooled stage is requested, then granted through
+ * the scheduler (the same grant path and host check as any stage start). When
+ * the grant comes at once the delivery goes on from that stage; otherwise it
+ * is refused (stage_waiting) and the run waits: the steer that starts the
+ * stage tells the worker to deliver again. A stage that starts a fresh worker
+ * is never granted under a delivery in flight.
+ */
+export async function startPooledStages(ctx: HandlerCtx, runId: string): Promise<void> {
+  for (;;) {
+    const requested = tx(ctx.db, () => {
+      const run = getRunWithPolicy(ctx.db, runId);
+      if (!run || isTerminal(run.state) || run.state === "ready" || run.stage_state === "done") return null;
+      const pos = positionOf(ctx.db, run, run.kind);
+      const index = pooledStageAhead(pos);
+      if (index === null) return null;
+      try {
+        deliveryStages(ctx.db, run);
+      } catch (error) {
+        if (!(error instanceof FlowrynError && error.code === "stage_waiting")) throw error;
+      }
+      const stage = pos.def.stages[index]!;
+      const now = ctx.now();
+      releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
+      appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, via: ctx.via, for: "deliver", next: stage.id }, ts: now });
+      requestStage(ctx.db, run, pos.def, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, now);
+      return { stage, fresh: run.pending_launch === "stage" };
+    });
+    if (!requested) return;
+    if (requested.fresh) {
+      ctx.sched.kick();
+      throw stageWaiting(requested.stage);
+    }
+    if (!(await ctx.sched.grantNow(runId))) throw stageWaiting(requested.stage);
+  }
 }
 
 function stageDoneHelp(pos: StagePos): string {

@@ -1,10 +1,15 @@
 #!/usr/bin/env bun
 /**
  * M5 exit, live. Run it through scripts/lab/m5-live.sh, which owns the Herdr
- * lab session. Each flow is one two-phase feature (design section 17): phase 1
+ * lab session. Each flow runs two independent two-phase features side by side
+ * under its one leader (design section 17), each in its own project: phase 1
  * runs the feature workflow (design, review, build, visual QA, review, ship)
  * and hands in a phase plan with its design; approving the design approves the
  * plan; phase 1 merges and is cleaned; phase 2 starts by itself and ships.
+ * Both phase-1 workers are live together; gates and merges take turns with
+ * the one leader and the one of you, as each opens. The worker pool is capped
+ * at 4, and a sampler counts the runs with a live harness process every
+ * second: a flow passes its concurrency check only if the peak is 2 to 4.
  *
  *   pi      Pi leader; Pi workers on the scripted provider; a scratch repo.
  *           Design gate: flowryn_gate_pass (ctx.ui.confirm); QA gate: the board.
@@ -63,6 +68,9 @@ if (!scripted) {
   process.exit(2);
 }
 const MIN_FREE_GB = Number(process.env.M5_MIN_FREE_GB ?? "4");
+/** The live concurrency the exit proves: at least 2 workers at once, never more than 4. */
+const MIN_LIVE = 2;
+const MAX_LIVE = 4;
 const which = (name: string) => Bun.which(name) ?? "";
 const PI_BIN = process.env.PI_BIN ?? (existsSync("/opt/homebrew/bin/pi-signed") ? "/opt/homebrew/bin/pi-signed" : which("pi"));
 const BUN = process.execPath;
@@ -142,7 +150,7 @@ writeFileSync(
         },
       },
       // The design's pools; the host check reads this machine (vm_stat and the load average).
-      capacity: { worker: 20, validation: 5, docker_env: 5, browser: 5, host: { min_free_mem_gb: MIN_FREE_GB, max_load_per_core: 1.5 } },
+      capacity: { worker: MAX_LIVE, validation: 5, docker_env: 5, browser: 5, host: { min_free_mem_gb: MIN_FREE_GB, max_load_per_core: 1.5 } },
       autonomy: { default: "plan" },
       sched: { pass_ms: 5_000 },
       leader: { busy_lease_ms: 45_000, inactive_ms: 5_000 },
@@ -449,9 +457,74 @@ async function approveGateOnBoard(task: string, stage: string): Promise<string> 
   return shown;
 }
 
+let turn: Promise<unknown> = Promise.resolve();
+
+/** One leader and one of you: the gate passes and merges of features running side by side take turns. */
+function inTurn<T>(fn: () => Promise<T>): Promise<T> {
+  const next = turn.then(fn, fn);
+  turn = next.catch(() => undefined);
+  return next;
+}
+
+/** Runs with a live harness process: a recorded pid that still answers signal 0. */
+function liveWorkers(): number {
+  const rows = withDb((db) => db.query("SELECT proc_pid FROM runs WHERE proc_pid IS NOT NULL AND state NOT IN ('cleaned','failed','cancelled')").all() as { proc_pid: number }[]);
+  return rows.filter(({ proc_pid }) => {
+    try {
+      process.kill(proc_pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+/** Samples the live workers every second until stopped; the peak is the concurrency the flow reached. */
+function concurrencySampler(): { stop(): Promise<{ peak: number; samples: number }> } {
+  const state = { running: true, peak: 0, samples: 0 };
+  const loop = (async () => {
+    while (state.running) {
+      state.peak = Math.max(state.peak, liveWorkers());
+      state.samples++;
+      await Bun.sleep(1_000);
+    }
+  })();
+  return {
+    async stop() {
+      state.running = false;
+      await loop;
+      return { peak: state.peak, samples: state.samples };
+    },
+  };
+}
+
+interface Feature {
+  name: string;
+  project: string;
+  checkout: string;
+  mainBranch: string;
+}
+
+/**
+ * A flow's features side by side under its one leader, with the live workers
+ * sampled throughout. Each feature's failure is recorded on its own; the
+ * concurrency check fails when the peak is under 2 or over 4.
+ */
+async function sideBySide(flowName: string, features: Feature[], leader: LiveLeader, phase2: "pi" | "claude", gateQa: (task: string) => Promise<string>, expected: { design: string; qa: string }): Promise<void> {
+  const started = Date.now();
+  const sampler = concurrencySampler();
+  const outcomes = await Promise.allSettled(features.map((f) => twoPhaseFeature(f.name, f.project, f.checkout, f.mainBranch, leader, phase2, gateQa, expected)));
+  const { peak, samples } = await sampler.stop();
+  record(flowName, `${MIN_LIVE} to ${MAX_LIVE} live workers at once`, peak >= MIN_LIVE && peak <= MAX_LIVE, `peak ${peak} live worker processes over ${samples} one-second samples`, started);
+  outcomes.forEach((o, i) => {
+    if (o.status === "rejected") record(features[i]!.name, "flow", false, (o.reason as Error).message, started);
+  });
+}
+
 /**
  * One two-phase feature, end to end. `gateDesign` and `gateQa` are the human
- * channels this flow proves; `merge` is the leader's.
+ * channels this flow proves; `merge` is the leader's. The leader and human
+ * steps take turns with a feature running beside it.
  */
 async function twoPhaseFeature(
   name: string,
@@ -478,7 +551,7 @@ async function twoPhaseFeature(
   await waitRun(run, "the design review", 240_000, (r) => r.stage === "design" && r.stage_state === "review" && r.liveness === "idle");
   const plan = one<{ id: string; state: string }>("SELECT id, state FROM plans WHERE source_task = ?1", task);
   record(name, "the design stage handed in its page and plan; the gate is open", plan?.state === "pending" && one("SELECT 1 FROM items WHERE kind = 'gate_ready' AND run_id = ?1", run) !== null, `plan ${plan?.id} ${plan?.state}`, started);
-  const designShown = await leader.passGate(task, "design");
+  const designShown = await inTurn(() => leader.passGate(task, "design"));
   writeFileSync(join(home, `screen-design-${task}.txt`), designShown);
   await waitRun(run, "the build stage", 120_000, (r) => r.stage !== "design");
   const phase = one<{ task_id: string }>("SELECT task_id FROM plan_phases WHERE plan_id = ?1", plan!.id)!;
@@ -493,14 +566,14 @@ async function twoPhaseFeature(
   await waitRun(run, "the QA review", 240_000, (r) => r.stage === "qa" && r.stage_state === "review" && r.liveness === "idle");
   const shot = existsSync(join(home, "data", task, "qa", "cart.png"));
   record(name, "the QA evidence page is in the report directory", existsSync(join(home, "data", task, "qa", "evidence.html")), `evidence.html${shot ? " with a chrome-devtools-axi screenshot" : " (no screenshot)"}`, started);
-  const qaShown = await gateQa(task);
+  const qaShown = await inTurn(() => gateQa(task));
   writeFileSync(join(home, `screen-qa-${task}.txt`), qaShown);
 
   // Ship, and the merge: phase 2 waits until phase 1 has landed.
   await waitRun(run, "phase 1 delivered", 240_000, (r) => r.state === "ready");
   await Bun.sleep(6_000);
   record(name, "phase 2 did not start on unmerged work", one("SELECT 1 FROM runs WHERE task_id = ?1", phase.task_id) === null, `${phase.task_id} has no run while ${task} is ready`, started);
-  const merged = await leader.merge(task);
+  const merged = await inTurn(() => leader.merge(task));
   writeFileSync(join(home, `screen-merge-${task}.txt`), merged);
   await waitRun(run, "phase 1 merged and cleaned", 240_000, (r) => r.state === "cleaned");
   const gates = withDb((db) => db.query("SELECT g.kind, g.stage, g.state, a.channel FROM gates g LEFT JOIN approvals a ON a.id = g.approval_id WHERE g.run_id = ?1 ORDER BY g.opened_at").all(run) as { kind: string; stage: string; state: string; channel: string | null }[]);
@@ -512,7 +585,7 @@ async function twoPhaseFeature(
   const startedLine = one<{ line: string }>("SELECT line FROM items WHERE kind = 'phase_started' AND task_id = ?1", phase.task_id);
   record(name, "phase 2 started by itself once phase 1 landed", startedLine !== null && one("SELECT 1 FROM events WHERE kind = 'phase.started' AND task_id = ?1", phase.task_id) !== null, startedLine?.line ?? "no phase_started item", started);
   await waitRun(run2.id, "phase 2 delivered", phase2 === "claude" ? 600_000 : 240_000, (r) => r.state === "ready");
-  await leader.merge(phase.task_id);
+  await inTurn(() => leader.merge(phase.task_id));
   await waitRun(run2.id, "phase 2 merged and cleaned", 240_000, (r) => r.state === "cleaned");
   const files = phase2 === "pi" ? ["index.html", "checkout.html"] : ["index.html", "NOTES.md"];
   const onMain = files.every((f) => git(["cat-file", "-e", `${mainBranch}:m5-live/${label}/${f}`], checkout).code === 0);
@@ -533,14 +606,22 @@ function trustedWorktree(suffix: string): string {
 async function main(): Promise<number> {
   log(`scratch home ${home}; lab ${values.session}; flows ${flows.join(",")}; claude ${CLAUDE_MODEL}; pi ${PI_MODEL}; host check needs ${MIN_FREE_GB} GB`);
   await startDaemon();
-  const shop = scratchRepo("shop");
-  const added = await call("project add", { path: shop, id: "shop", mode: "local-only", harness: "pi", workflow: "feature" });
-  if (!added.ok) throw new Error(`project add shop: ${JSON.stringify(added.error)}`);
-  let trustedPrimary: string | null = null;
+  // One project per feature: a local-only merge is a fast-forward, so two features never share a main.
+  const shops: Feature[] = [];
+  for (const id of ["a", "b"]) {
+    const path = scratchRepo(`shop-${id}`);
+    const added = await call("project add", { path, id: `shop-${id}`, mode: "local-only", harness: "pi", workflow: "feature" });
+    if (!added.ok) throw new Error(`project add shop-${id}: ${JSON.stringify(added.error)}`);
+    shops.push({ name: `pi-${id}`, project: `shop-${id}`, checkout: path, mainBranch: "main" });
+  }
+  const trusted: Feature[] = [];
   if (claudeProject && flows.includes("claude")) {
-    trustedPrimary = trustedWorktree("main");
-    const trusted = await call("project add", { path: trustedPrimary, id: "trusted", mode: "local-only", "default-branch": `${runPrefix}main`, harness: "pi", workflow: "feature" });
-    if (!trusted.ok) throw new Error(`project add trusted: ${JSON.stringify(trusted.error)}`);
+    for (const id of ["a", "b"]) {
+      const path = trustedWorktree(`main-${id}`);
+      const added = await call("project add", { path, id: `trusted-${id}`, mode: "local-only", "default-branch": `${runPrefix}main-${id}`, harness: "pi", workflow: "feature" });
+      if (!added.ok) throw new Error(`project add trusted-${id}: ${JSON.stringify(added.error)}`);
+      trusted.push({ name: `claude-${id}`, project: `trusted-${id}`, checkout: path, mainBranch: `${runPrefix}main-${id}` });
+    }
   }
 
   // The contract gate: dispatch refuses a harness version with no passing contract run.
@@ -573,21 +654,21 @@ async function main(): Promise<number> {
     const leader = new LiveLeader("pi", cwd);
     await leader.start();
     try {
-      await twoPhaseFeature("pi", "shop", shop, "main", leader, "pi", (task) => approveGateOnBoard(task, "qa"), { design: "pi-confirm", qa: "board" });
+      await sideBySide("pi", shops, leader, "pi", (task) => approveGateOnBoard(task, "qa"), { design: "pi-confirm", qa: "board" });
     } finally {
       await leader.quit();
     }
   });
 
   await flow("claude", async () => {
-    if (!claudeProject || !trustedPrimary) {
+    if (!claudeProject || trusted.length === 0) {
       record("claude", "flow", false, "skipped: needs --claude-project <a checkout Claude trusts>", Date.now());
       return;
     }
     const leader = new LiveLeader("claude", trustedWorktree("leader"));
     await leader.start();
     try {
-      await twoPhaseFeature("claude", "trusted", trustedPrimary, `${runPrefix}main`, leader, "claude", (task) => approveGateInPane(task, "qa"), { design: "claude-ask", qa: "cli-tty" });
+      await sideBySide("claude", trusted, leader, "claude", (task) => approveGateInPane(task, "qa"), { design: "claude-ask", qa: "cli-tty" });
     } finally {
       await leader.quit();
     }

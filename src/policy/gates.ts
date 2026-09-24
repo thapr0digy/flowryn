@@ -44,6 +44,11 @@ export function checkStage(gate: GateRow, stage: string | undefined): void {
   if (stage && stage !== gate.stage) throw new FlowrynError("not_ready", `the open review gate is ${gate.stage}, not ${stage}`);
 }
 
+/** A gate id named on the command line (the one you were shown) must be the open one. */
+export function checkGateId(gate: GateRow, id: string | undefined): void {
+  if (id && id !== gate.id) throw new FlowrynError("not_ready", `gate ${id} is no longer open; the open ${gate.stage} review is gate ${gate.id}`, "look at the new review, then pass it");
+}
+
 export interface GatePassed {
   task: string;
   gate: string;
@@ -78,6 +83,7 @@ const gatePass: VerbSpec = {
   positionals: [{ name: "task", required: true, help: "task or run id" }],
   flags: {
     stage: { type: "string", help: "the gate's stage, as a check (design, qa, ...)", placeholder: "stage" },
+    "gate-id": { type: "string", help: "the gate you were shown (g<n>), as a check: refused when another gate is open", placeholder: "id" },
     "key-file": { type: "string", help: "Pi leader extension only: its approval key, from stdin", fileFor: "approval_key" },
   },
   kind: "mutation",
@@ -85,6 +91,7 @@ const gatePass: VerbSpec = {
   async prepare(ctx, args): Promise<PassPrepared> {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
     checkStage(gate, stringArg(args, "stage"));
+    checkGateId(gate, stringArg(args, "gate-id"));
     return { runId: run.id, gateId: gate.id, head: await reviewedHead(ctx, run) };
   },
   apply(ctx, args, prepared) {
@@ -101,6 +108,9 @@ const gatePass: VerbSpec = {
       // The attempt Claude's PreToolUse hook recorded when it asked you, matched by the task as typed.
       const attempt = findAttempt(ctx.db, { session: session.session_id, action: "gate", task: typed, now });
       if (!attempt) throw new FlowrynError("approval_required", "no confirmed Claude prompt for this gate pass (under bypassPermissions there is none to trust)", help);
+      if (attempt.pr_url !== gateRef(gate)) {
+        throw new FlowrynError("approval_required", `the prompt you confirmed showed ${attempt.pr_url?.replace(/^gate:/, "gate ") ?? "no open gate"}, but the open ${gate.stage} review is gate ${gate.id}`, "run the gate pass again, so Claude shows you this gate");
+      }
       matchAttempt(ctx.db, attempt.id, now);
       approval = { channel: "claude-ask", actor: `${user()} (Claude prompt, leader ${session.session_id})`, head };
     } else if (session?.harness === "pi") {

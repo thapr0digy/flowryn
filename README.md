@@ -128,14 +128,14 @@ Flows: `claude-ask` and `cli-tty` on a Claude leader, `pi-confirm`, `board` and 
 
 ### The M5 exit, live
 
-The M5 exit test runs in `bun test` against fake leaders and fake workers (`test/integration/m5-exit.test.ts`), and the 20-worker capacity exit against fake workers on the fake Herdr (`test/integration/capacity.test.ts`). The live run proves a two-phase feature against real leaders and workers in a Herdr lab session.
+The M5 exit test runs in `bun test` against fake leaders and fake workers (`test/integration/m5-exit.test.ts`), and the 20-worker capacity exit against fake workers on the fake Herdr (`test/integration/capacity.test.ts`). The live run proves two-phase features against real leaders and concurrent real workers in a Herdr lab session.
 
 ```bash
 scripts/lab/m5-live.sh --claude-project "$PWD"               # both flows, with the harness contract suites first
 scripts/lab/m5-live.sh --seed-contracts pi                     # the Pi flow only; seed the contract record instead of running it
 ```
 
-Flows: `pi` (a Pi leader, Pi workers on the offline scripted provider, a scratch repository; the design passes through the `flowryn_gate_pass` confirm and QA on the board) and `claude` (a Claude leader; phase 1 on a scripted Pi worker, phase 2 on a real Claude worker, in linked worktrees of the checkout you name; the design passes through Claude's prompt and QA through `flowryn approve --gate qa` in a lab pane). Each runs design, review, build, visual QA (a real `nginx:alpine` container labelled with the run, a curl and a `chrome-devtools-axi` screenshot), review, ship and merge, then checks that phase 2 starts by itself only after phase 1 has landed. One worker is live at a time, besides the leader. The run answers only the review and merge prompts under test, never a trust dialog, and removes every branch, worktree and container it made. Results print as PASS/FAIL lines and go to `spikes/.runs/m5-live-results.json`. Run it outside any command sandbox.
+Flows: `pi` (a Pi leader, Pi workers on the offline scripted provider, scratch repositories; the design passes through the `flowryn_gate_pass` confirm and QA on the board) and `claude` (a Claude leader; phase 1 on a scripted Pi worker, phase 2 on a real Claude worker, in linked worktrees of the checkout you name; the design passes through Claude's prompt and QA through `flowryn approve --gate qa` in a lab pane). Each flow runs two independent two-phase features side by side under its one leader, each in its own project. Each feature runs design, review, build, visual QA (a real `nginx:alpine` container labelled with the run, a curl and a `chrome-devtools-axi` screenshot), review, ship and merge, then checks that phase 2 starts by itself only after phase 1 has landed. Both phase-1 workers are live together, and the worker pool is capped at 4. The run samples the live worker processes throughout, and a flow fails unless the peak is 2 to 4. The results of the concurrent run are to be recorded by the operator in `docs/m5-notes.md`. The run answers only the review and merge prompts under test, never a trust dialog, and removes every branch, worktree and container it made. Results print as PASS/FAIL lines and go to `spikes/.runs/m5-live-results.json`. Run it outside any command sandbox.
 
 ## Running the M0 spikes
 

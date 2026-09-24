@@ -13,7 +13,7 @@ import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
-import { deliveryStages, recordStageDelivered } from "./stages.ts";
+import { deliveryStages, recordStageDelivered, startPooledStages } from "./stages.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -234,8 +234,9 @@ const deliver: VerbSpec = {
   // The named-head gate asks GitHub and the remote; a slow answer must not turn a refusal into a spool.
   replyMs: 60_000,
   async prepare(ctx, args) {
+    // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate,
+    await startPooledStages(ctx, activeRun(ctx).id);
     const run = activeRun(ctx);
-    // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate.
     if (run.state !== "ready") deliveryStages(ctx.db, run);
     const pr = stringArg(args, "pr");
     const path = stringArg(args, "report");
