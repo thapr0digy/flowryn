@@ -189,7 +189,7 @@ const config: VerbSpec = {
   positionals: [],
   flags: {},
   kind: "local",
-  roles: ["leader", "worker", "human", "anonymous"],
+  roles: ["leader", "reader", "worker", "human", "anonymous"],
   async local(_args, io) {
     try {
       const loaded = loadConfig(flowrynHome(io.env));
@@ -219,7 +219,7 @@ const version: VerbSpec = {
   positionals: [],
   flags: {},
   kind: "local",
-  roles: ["leader", "worker", "human", "anonymous"],
+  roles: ["leader", "reader", "worker", "human", "anonymous"],
   async local(_args, io) {
     return print(io, okReply({ flowryn: VERSION, proto: PROTO, bun: Bun.version, exec: process.execPath }));
   },

@@ -68,6 +68,11 @@ export function parseArgv(argv: string[], verbs: readonly VerbSpec[]): ParsedArg
     const token = tokens[i]!;
     if (!flagsDone && token === "--") {
       flagsDone = true;
+      if (spec.rest) {
+        // Everything after -- belongs to the command this verb runs, untouched.
+        args[spec.rest.name] = tokens.slice(i + 1);
+        break;
+      }
       continue;
     }
     if (flagsDone || !token.startsWith("--") || token === "-") {

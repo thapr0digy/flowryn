@@ -45,7 +45,7 @@ export async function exitRun(deps: ControlDeps, runId: string): Promise<Verifie
 const INTERRUPT_MARKER = "[Request interrupted by user";
 
 /** Has the transcript recorded an interrupt since `since` bytes? (M0 finding 6: it appears at once.) */
-function transcriptShowsInterrupt(path: string, fromByte: number): boolean {
+export function transcriptShowsInterrupt(path: string, fromByte: number): boolean {
   let fd: number | null = null;
   try {
     const size = statSync(path).size;
@@ -62,7 +62,7 @@ function transcriptShowsInterrupt(path: string, fromByte: number): boolean {
   }
 }
 
-function transcriptSize(path: string | null): number {
+export function transcriptSize(path: string | null): number {
   if (!path) return 0;
   try {
     return statSync(path).size;

@@ -3,19 +3,25 @@ import type { FlowrynConfig } from "../config/config.ts";
 import type { Journal } from "../journal/journal.ts";
 import type { BacklogWatcher } from "../journal/watcher.ts";
 import type { FleetServices } from "../lifecycle/fleet-services.ts";
+import type { AttentionServices } from "../attention/services.ts";
 import { FlowrynError } from "./errors.ts";
 
 /**
  * Who is calling, resolved from the token (design section 12). `human` is a
  * token-less CLI in your own terminal; `anonymous` is a token-less caller
- * that is not (a gate process, a script), which may only ping.
+ * that is not (a gate process, a script), which may only ping. A leader
+ * session's token is `leader` while the lease names that session and
+ * `reader` otherwise (design section 10: a read-only session may read and
+ * claim). `hook` verbs accept a leader session's token as well as a run's.
  */
-export type Role = "leader" | "worker" | "hook" | "human" | "anonymous";
+export type Role = "leader" | "reader" | "worker" | "hook" | "human" | "anonymous";
 
 export interface Caller {
   role: Role;
   runId: string | null;
   taskId: string | null;
+  /** The leader session (`L<n>`) the token belongs to, for leader and reader callers. */
+  session?: string | null;
 }
 
 export type ArgValue = string | number | boolean | string[];
@@ -65,6 +71,8 @@ export interface DaemonServices {
   runTool(tool: "git", args: string[], cwd?: string): Promise<{ exitCode: number; stdout: string; stderr: string }>;
   /** Runtime, steers, launcher and reconciler (M2). */
   fleet: FleetServices;
+  /** Leader waiters, leader clocks and notifications (M3). */
+  attention: AttentionServices;
 }
 
 export interface HandlerCtx extends DaemonServices {
@@ -94,6 +102,8 @@ export interface VerbSpec {
   summary: string;
   positionals: PositionalSpec[];
   flags: Record<string, FlagSpec>;
+  /** Words after `--` are passed through as a list under this name (`flowryn lead -- --model haiku`). */
+  rest?: { name: string; help: string };
   kind: VerbKind;
   /** Roles the daemon accepts for this verb. Local verbs check their own rules. */
   roles: Role[];
@@ -172,6 +182,14 @@ export function validateArgs(spec: VerbSpec, raw: Record<string, unknown>): Args
     if (value === undefined || value === null) continue;
     args[target] = flag.fileFor ? coerce(target, { type: "string", help: "" }, value) : coerce(name, flag, value);
   }
+  if (spec.rest) {
+    known.add(spec.rest.name);
+    const value = raw[spec.rest.name];
+    if (value !== undefined && value !== null) {
+      if (!Array.isArray(value) || !value.every((v) => typeof v === "string")) throw new FlowrynError("bad_args", `${spec.rest.name} must be a list of words`);
+      args[spec.rest.name] = value as string[];
+    }
+  }
   for (const key of Object.keys(raw)) {
     if (!known.has(key)) throw new FlowrynError("bad_args", `unknown argument ${key}`, `usage: ${usage(spec)}`);
   }
@@ -185,6 +203,7 @@ export function usage(spec: VerbSpec): string {
     if (flag.type === "boolean") parts.push(`[--${name}]`);
     else parts.push(`[--${name} <${flag.placeholder ?? (flag.fileFor ? "path|-" : name)}>]`);
   }
+  if (spec.rest) parts.push(`[-- <${spec.rest.name}...>]`);
   return parts.join(" ");
 }
 

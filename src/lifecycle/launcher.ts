@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
+import { isTerse } from "../config/leader.ts";
 import { timingConfig, workersConfig } from "../config/workers.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
@@ -91,11 +92,6 @@ export function dispatchedBody(db: Db, runId: string): string {
   const row = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.dispatched' ORDER BY seq LIMIT 1").get(runId) as { payload: string } | null;
   if (!row) return "";
   return String((JSON.parse(row.payload) as { body?: unknown }).body ?? "");
-}
-
-function isTerse(config: FlowrynConfig): boolean {
-  const style = config.extra.style as Record<string, unknown> | undefined;
-  return style?.terse !== false;
 }
 
 /**

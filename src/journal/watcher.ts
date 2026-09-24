@@ -271,7 +271,10 @@ export class BacklogWatcher {
     const byId = new Map(tasks.map((t) => [t.id, t]));
     let matchedFrom: number | null = null;
     for (const { row, applied } of rows) if (applied.preHash === contentHash) matchedFrom = row.seq;
-    const undoesSurvivingWrite = rows.some(({ row, applied }) => matchedFrom !== null && row.seq >= matchedFrom && applied.verb !== "add" && byId.has(row.task_id!));
+    // Restoring removed tasks, like deleting added ones, is never on its own a rollback.
+    const undoesSurvivingWrite = rows.some(
+      ({ row, applied }) => matchedFrom !== null && row.seq >= matchedFrom && applied.verb !== "add" && applied.verb !== "rm" && byId.has(row.task_id!),
+    );
     const rolledBackFrom = undoesSurvivingWrite ? matchedFrom : null;
 
     const removedNow = new Set(diff.removed);

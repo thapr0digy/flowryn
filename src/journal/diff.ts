@@ -82,6 +82,7 @@ export function fieldsSetBy(verb: AppliedPayload["verb"], args: IntentArgs): Tas
       return fields;
     }
     case "add":
+    case "rm":
       return [];
   }
 }
@@ -94,6 +95,8 @@ export function fieldsSetBy(verb: AppliedPayload["verb"], args: IntentArgs): Tas
  */
 export function intentErased(applied: AppliedPayload, current: BacklogTask | undefined): boolean {
   if (applied.verb === "add") return current === undefined;
+  // A task back after its rm is your edit, like a just-added task you delete: it stays.
+  if (applied.verb === "rm") return false;
   if (!current || !applied.pre || !applied.post) return false;
   const fields = fieldsSetBy(applied.verb, applied.args);
   if (fields.length === 0) return false;

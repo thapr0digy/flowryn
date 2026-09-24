@@ -11,9 +11,10 @@ import { classifyMutation, listTasks, taskFromJson, type BacklogTask, type Tasks
 /**
  * The tasks-axi verbs the journal issues. `mv` is deliberately absent: a repeat
  * returns NOT_FOUND and it moves a task to another file (M0 spike t01), so it is
- * not replay-safe.
+ * not replay-safe. `rm` repeats with NOT_FOUND too, but its goal state is the
+ * task being gone, so a replay confirms that with `show` and counts it applied.
  */
-export const INTENT_VERBS = ["add", "start", "done", "hold", "unhold", "update", "reopen"] as const;
+export const INTENT_VERBS = ["add", "start", "done", "hold", "unhold", "update", "reopen", "rm"] as const;
 export type IntentVerb = (typeof INTENT_VERBS)[number];
 
 export type FlagValue = string | true | string[];
@@ -277,6 +278,9 @@ export class Journal {
         if (!outcome.ok && outcome.kind === "permanent" && fresh.verb === "add" && fresh.task_id) {
           outcome = await this.addAlreadyApplied(runner, fresh.task_id, filePath, outcome);
         }
+        if (!outcome.ok && outcome.kind === "permanent" && fresh.verb === "rm" && fresh.task_id) {
+          outcome = await this.rmAlreadyApplied(runner, fresh.task_id, filePath, outcome);
+        }
       }
       if (outcome.ok) {
         await this.markApplied(fresh, filePath, runner!, outcome.json, pre, preHash);
@@ -294,6 +298,14 @@ export class Journal {
   private async addAlreadyApplied(runner: TasksAxiRunner, taskId: string, filePath: string, failure: TasksAxiOutcome): Promise<TasksAxiOutcome> {
     const shown = await runner.run(["show", taskId, "--file", filePath]);
     if (shown.exitCode === 0) return { ok: true, json: { ok: true, action: "add", already: true } };
+    return failure;
+  }
+
+  /** A repeated rm answers NOT_FOUND; when `show` agrees the task is gone, the rm has done its job. */
+  private async rmAlreadyApplied(runner: TasksAxiRunner, taskId: string, filePath: string, failure: TasksAxiOutcome): Promise<TasksAxiOutcome> {
+    if (failure.ok || failure.code !== "NOT_FOUND") return failure;
+    const shown = await runner.run(["show", taskId, "--file", filePath]);
+    if (shown.exitCode !== 0 && !shown.timedOut && !shown.spawnError) return { ok: true, json: { ok: true, action: "rm", already: true } };
     return failure;
   }
 

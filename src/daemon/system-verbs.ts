@@ -17,7 +17,7 @@ export function systemVerbs(): VerbSpec[] {
       positionals: [],
       flags: {},
       kind: "read",
-      roles: ["leader", "worker", "hook", "human", "anonymous"],
+      roles: ["leader", "reader", "worker", "hook", "human", "anonymous"],
       read(ctx) {
         const pending = pendingIntents(ctx.db).length;
         const failed = (ctx.db.query("SELECT COUNT(*) AS n FROM intents WHERE state = 'failed'").get() as { n: number }).n;

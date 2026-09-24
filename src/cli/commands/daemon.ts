@@ -71,7 +71,7 @@ const status: VerbSpec = {
   positionals: [],
   flags: {},
   kind: "local",
-  roles: ["leader", "worker", "human", "anonymous"],
+  roles: ["leader", "reader", "worker", "human", "anonymous"],
   async local(_args, io) {
     const reply = await ping(io.env);
     if (reply && reply.ok) return print(io, okReply(reply.data, []));
