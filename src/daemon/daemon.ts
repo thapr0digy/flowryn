@@ -272,8 +272,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const onHup = () => {
       try {
         const next = loadConfig(home).config;
-        const problems = workerConfigProblems(next);
-        if (problems.length > 0) throw new Error(problems.join("; "));
+        const configProblems = workerConfigProblems(next);
+        if (configProblems.length > 0) throw new Error(configProblems.join("; "));
         if (next.state_dir !== config.state_dir) log("SIGHUP: state_dir changed; restart the daemon to use it");
         config = { ...next, state_dir: config.state_dir };
         watcher.rewatch();
