@@ -112,6 +112,24 @@ describe("backlog watcher (fake hand edits)", () => {
     expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["a-a1"]);
   });
 
+  test("deleting a just-added to-do that was also updated keeps it deleted", async () => {
+    env = makeJournalEnv();
+    addTodo("a-a1", "keep me");
+    await env.journal.drain();
+    const preAdd = readFileSync(env.files.todos, "utf8");
+    addTodo("renw-b1", "Renw passport");
+    env.record({ file: "todos", verb: "update", taskId: "renw-b1", positional: ["renw-b1"], flags: { priority: "1" } });
+    await env.journal.drain();
+    deleteLines("renw-b1");
+    expect(readFileSync(env.files.todos, "utf8")).toBe(preAdd);
+    const result = await env.watcher.check("todos", "test");
+    expect(result.reapplied).toEqual([]);
+    expect(result.undone).toEqual(["renw-b1"]);
+    expect(lastEventPayload("intent.undone")).toMatchObject({ file: "todos", verb: "add" });
+    await env.journal.drain();
+    expect(readSnapshot(env.db, "todos")!.tasks.map((t) => t.id)).toEqual(["a-a1"]);
+  });
+
   test("a deletion already accepted stays deleted when a later rollback is detected", async () => {
     env = makeJournalEnv();
     addTodo("renw-b1", "Renw passport");

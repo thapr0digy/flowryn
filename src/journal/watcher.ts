@@ -243,7 +243,7 @@ export class BacklogWatcher {
    *
    * The file reads as rolled back when its bytes match the content some
    * intent in the window was written over and the writes that match would
-   * undo include a non-add intent: then that intent and every later one go
+   * undo include a non-add intent on a task still in the file: then that intent and every later one go
    * back. It also reads as rolled back when another recent journal write, on a
    * task still in the file, reads as erased. Undoing only adds, even several,
    * is hand deletion.
@@ -268,11 +268,12 @@ export class BacklogWatcher {
     const latestInChain = new Map<string, number>();
     for (const { row, applied } of rows) latestInChain.set(chainRoot(applied), row.seq);
 
+    const byId = new Map(tasks.map((t) => [t.id, t]));
     let matchedFrom: number | null = null;
     for (const { row, applied } of rows) if (applied.preHash === contentHash) matchedFrom = row.seq;
-    const rolledBackFrom = matchedFrom !== null && rows.some(({ row, applied }) => row.seq >= matchedFrom && applied.verb !== "add") ? matchedFrom : null;
+    const undoesSurvivingWrite = rows.some(({ row, applied }) => matchedFrom !== null && row.seq >= matchedFrom && applied.verb !== "add" && byId.has(row.task_id!));
+    const rolledBackFrom = undoesSurvivingWrite ? matchedFrom : null;
 
-    const byId = new Map(tasks.map((t) => [t.id, t]));
     const removedNow = new Set(diff.removed);
     const pendingTasks = new Set(pendingIntents(this.deps.db, file).map((i) => i.task_id));
     const liveRunTasks = new Set(file === "backlog" ? this.liveRuns().map((r) => r.task_id) : []);
