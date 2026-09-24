@@ -65,4 +65,17 @@ M2 builds section 17's "M2 · Runtime, workers, reconciler" of [`design-v3.html`
 
 ## Live runs
 
-`scripts/lab/m2-live.sh [--claude-project <checkout>] [phase ...]` runs the M2 exit in a Firstmate lab session (`fm-herdr-lab.sh`): the contract suites, a real scout on each harness, a worker killed mid-run, and the daemon killed mid-run. Pi works in a fresh clone inside the scratch home, which is removed at the end.
+`scripts/lab/m2-live.sh [--claude-project <checkout>] [phase ...]` runs the M2 exit in a Firstmate lab session (`fm-herdr-lab.sh`): the contract suites, a real scout on each harness, a worker killed mid-run, and the daemon killed mid-run. Pi works in a fresh clone inside the scratch home, which is removed at the end. Claude works in linked worktrees of a checkout it already trusts (`--claude-project`), with `pretrust = "check"`, so `~/.claude.json` is never written. Every branch such a run creates is `flowryn/contract-<runid>-…`, and the run removes exactly those branches and worktrees by name on exit.
+
+Latest run, 2026-09-24, 26/26 passed: Herdr 0.7.5 (protocol 17), Claude Code 2.1.281 with Haiku 4.5 as the worker model, Pi 0.87.1 with the offline scripted provider, in lab session `fm-lab-flowryn-m2-85271-11126`.
+
+| Phase | Result |
+|---|---|
+| Contract, Pi 0.87.1 | All 10 steps. The busy steer was carried by the extension and acknowledged in 25 s; the idle steer woke the worker in 1 s; the abort was verified by `agent_settled`; SIGTERM exit; resumed in the same session; deliver verified. Recorded. |
+| Contract, Claude 2.1.281 | All 10 steps. The busy steer was carried by PostToolUse and acknowledged in 34 s; the idle steer woke the worker through the asyncRewake waiter in 5 s; the interrupt key was verified by the transcript marker; SIGTERM exit; the reconciler resumed it (`--resume`) in the same session; deliver verified. Recorded. |
+| Scout, Pi | Dispatched on a fresh clone of this repository; a verified report 3 s after launch. |
+| Scout, Claude | Dispatched on a linked worktree of the trusted checkout; the model read README.md, wrote a three-line summary and delivered it, 19 s after launch. |
+| Kill a worker | SIGKILL to a busy Pi worker's process group; the reconciler found the husk, resumed it once from its session (a new pid), and the run finished with a verified report. |
+| Kill the daemon | `kill -9` of flowrynd while a Pi worker was busy. The worker's `deliver` spooled (exit 75). The restarted daemon ingested the spool, then reattached the same pid (pane, worktree and process identity matched): no resume, `run.reattached`. |
+
+The first live attempts found two problems the fakes could not show, both fixed and covered above: the 1024-byte typed-command limit, and Claude's Bash sandbox blocking the worker's own CLI.

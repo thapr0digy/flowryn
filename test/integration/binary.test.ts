@@ -29,8 +29,13 @@ describe("compiled binary", () => {
     expect(Bun.spawnSync(["/usr/bin/codesign", "--verify", "--strict", bin]).exitCode).toBe(0);
   });
 
+  test("embeds the Pi worker extension, which a worker launch writes out per run", () => {
+    const report = JSON.parse(run(bin, ["doctor", "--json"]).stdout) as { data: { checks: { check: string; status: string }[] } };
+    expect(report.data.checks.find((c) => c.check === "pi extension")).toMatchObject({ status: "ok" });
+  });
+
   test("runs as flowryn and, through the flowrynd link, as the daemon", async () => {
-    expect(decode(run(bin, ["version"]).stdout)).toMatchObject({ flowryn: "0.1.0", proto: 1 });
+    expect(decode(run(bin, ["version"]).stdout)).toMatchObject({ flowryn: "0.2.0", proto: 1 });
     const token = seedLeader(h);
     const daemon = Bun.spawn([join(h.home, "bin", "flowrynd")], { env: h.env, stdin: "ignore", stdout: "ignore", stderr: "pipe" });
     try {
@@ -39,7 +44,7 @@ describe("compiled binary", () => {
       expect(added.code).toBe(0);
       expect(readText(h.todos)).toContain("from the binary");
       const status = decode(run(bin, ["daemon", "status"]).stdout) as { daemon: string; version: string };
-      expect(status).toMatchObject({ daemon: "up", version: "0.1.0" });
+      expect(status).toMatchObject({ daemon: "up", version: "0.2.0" });
     } finally {
       daemon.kill("SIGTERM");
       expect(await daemon.exited).toBe(0);

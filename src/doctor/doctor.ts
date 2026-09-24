@@ -15,6 +15,7 @@ import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
+import { loadExtensionSource } from "../harness/pi/adapter.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -158,6 +159,18 @@ function binaryCheck(): Check | null {
     : { check: "binary", status: "fail", detail: `${process.execPath} signature invalid; rebuild (the build re-signs with codesign --force --sign -)` };
 }
 
+/** The Pi worker extension ships inside the binary; a build that lost it could not start a Pi worker. */
+async function piExtensionCheck(): Promise<Check> {
+  try {
+    const source = await loadExtensionSource();
+    return source.includes("project_trust")
+      ? { check: "pi extension", status: "ok", detail: `embedded worker extension, ${source.length} bytes` }
+      : { check: "pi extension", status: "fail", detail: "the embedded worker extension is not the Flowryn one" };
+  } catch (error) {
+    return { check: "pi extension", status: "fail", detail: `cannot read the embedded worker extension: ${(error as Error).message}` };
+  }
+}
+
 /** Is the Herdr session flowrynd drives reachable? Read-only: a ping on its socket. */
 async function herdrCheck(config: FlowrynConfig): Promise<Check> {
   let resolution;
@@ -225,6 +238,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(...(await daemonChecks(home, config, env)));
   checks.push(...workerConfigProblems(config).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
   checks.push(await herdrCheck(config));
+  checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
   return checks;
 }
