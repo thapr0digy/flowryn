@@ -82,6 +82,21 @@ M5 builds section 17's "M5 · Workflows, capacity, autonomy" of [`design-v3.html
 
 The `pi` flow: a Pi leader and scripted Pi workers, each feature in its own scratch local-only repository; the design passes through the `flowryn_gate_pass` confirm and QA on the board. The `claude` flow: a Claude leader, phase 1 on a scripted Pi worker and phase 2 on a real Claude worker, in linked worktrees of a checkout Claude trusts (`--claude-project`, with `pretrust = "check"`); the design passes through Claude's permission prompt and QA through `flowryn approve --gate qa` typed in a lab pane. In both, phase 1's design hands in a page and a one-phase plan; visual QA is real (an `nginx:alpine` container labelled with the run, a curl of the page and a `chrome-devtools-axi` screenshot on a session named after the run, while the reconciler counts the container against the run's `docker_env` lease); ship is a local-only delivery; the leader merges; and phase 2 must start by itself. The run answers only the review and merge prompts under test, never a trust dialog, and removes every branch, worktree and container it made. The contract record was seeded (`--seed-contracts`) for the versions M4's live run had verified, Claude Code 2.1.281 and Pi 0.87.1.
 
-> **To be recorded by the operator.** The concurrent live run has not been run since this change. The results table (the checks per flow, and each flow's peak of live worker processes) goes here once `scripts/lab/m5-live.sh` has run in a lab session. An earlier version of the script ran one feature per flow, with one worker live at a time; that run's results no longer describe what the script proves, so they were removed.
+Latest runs, 2026-09-24, Herdr 0.7.5 (protocol 17), Claude Code 2.1.281 with Haiku as the leader and the phase 2 workers, Pi 0.87.1 with the offline scripted provider, Docker 29.2.1, the host check at `min_free_mem_gb = 4` (the machine had 8.1 GB available and a load of 0.1 to 0.2 per core); each lab session was torn down by the helper, which checked the default session unchanged.
+
+- Both flows in one daemon, lab session `fm-lab-flowryn-m5-52442-1139`: **33/34**. The `pi` flow passed all 17 checks with a **peak of 2 live workers** over 56 one-second samples. The `claude` flow reached a **peak of 2** over 649 samples and passed 16 of 17: in feature `claude-b`, the real Claude worker of phase 2 finished its build stage, was granted the ship stage and was steered once, then went idle without acknowledging the steer or delivering, and the run's 10-minute wait expired. The lab sets `ring_interval_ms` to 30 minutes so that a re-ring never advances a scripted Pi worker's script, so that worker was never re-rung; with the default 5 minutes Flowryn would have rung it again (up to three times) and then opened a P1.
+- The `claude` flow alone, again, lab session `fm-lab-flowryn-m5-21746-19948`: **17/17**, a **peak of 2 live workers** over 80 samples; both real Claude workers shipped phase 2, 25 s and 32 s after it started by itself.
+
+| Check (per feature) | `pi` flow (features `pi-a`, `pi-b`) | `claude` flow (features `claude-a`, `claude-b`) |
+|---|---|---|
+| The design stage hands in its page and plan; the gate opens, the plan waits | both | both |
+| Passing the design approves the plan | via the Pi confirm (pi-confirm), both | via Claude's prompt (claude-ask), both |
+| Visual QA holds `docker_env` and `browser`; the labelled container is counted | both, 1 environment on 1 lease each | both |
+| The QA evidence page, with the screenshot | both | both |
+| Phase 2 does not start while phase 1 is only delivered | both | both |
+| Phase 1: every gate passed, by the channel under test | design pi-confirm, QA board, merge pi-confirm | design claude-ask, QA cli-tty, merge claude-ask |
+| Phase 2 starts by itself once phase 1 is cleaned | both, "Phase 2 of 2 … started by itself" | both |
+| Both phases on the project's main | both | both in the rerun; `claude-b`'s real worker did not deliver in the combined run |
+| 2 to 4 live workers at once (per flow) | peak 2 | peak 2, in both runs |
 
 Two things an earlier run found are still covered by the script. The lab pane is narrow, so the board can wrap "(qa review)" across two lines: the run finds the task's line and logs the list when the label is split. A design's one-phase plan numbers its phases after the design's own task ("Phase 2 of 2"), not "Queued task … started by itself".
