@@ -112,6 +112,11 @@ export function staleApprovals(db: Db, q: { task: string; action: ApprovalAction
     .all(q.task, q.action, q.head, q.now) as ApprovalRow[];
 }
 
+/** What a discard approval binds to: the worktree's branch (and, in the row, its HEAD when you approved). */
+export function discardRef(run: { branch: string }): string {
+  return `discard:${run.branch}`;
+}
+
 export function consumeApproval(db: Db, id: string, now: number, why: string): void {
   db.query("UPDATE approvals SET consumed_at = ?2 WHERE id = ?1 AND consumed_at IS NULL").run(id, now);
   appendEvent(db, { source: "daemon", kind: "approval.consumed", payload: { approval: id, why }, ts: now });

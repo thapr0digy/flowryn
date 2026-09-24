@@ -239,6 +239,73 @@ describe("the cleanup procedure", () => {
   });
 });
 
+describe("a cleanup whose worktree is already gone", () => {
+  const env = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (cwd: string, args: string[]) => {
+    const r = Bun.spawnSync(["git", ...args], { cwd, stdin: "ignore", env: { ...process.env, ...env } });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+    return r.stdout.toString().trim();
+  };
+
+  /** A primary checkout on main, and a run branch with one commit whose worktree someone deleted by hand. */
+  function abandonedBranch(): { primary: string; worktree: string; tip: string } {
+    dir = mkdtempSync(join(tmpdir(), "fw-absent-"));
+    const primary = join(dir, "repo");
+    g(dir, ["init", "-q", "-b", "main", primary]);
+    writeFileSync(join(primary, "a.txt"), "a\n");
+    g(primary, ["add", "."]);
+    g(primary, ["commit", "-q", "-m", "init"]);
+    const worktree = join(dir, "wt");
+    g(primary, ["worktree", "add", "-q", "-b", "fm/x", worktree]);
+    writeFileSync(join(worktree, "work.txt"), "only copy\n");
+    g(worktree, ["add", "."]);
+    g(worktree, ["commit", "-q", "-m", "work"]);
+    const tip = g(worktree, ["rev-parse", "HEAD"]);
+    rmSync(worktree, { recursive: true, force: true });
+    return { primary, worktree, tip };
+  }
+
+  function cleanup(primary: string, worktree: string, discardApproved: boolean) {
+    return runCleanup(
+      { guard: { mode: "local-only", kind: "ship", worktree, branch: "fm/x", defaultBranch: "main", repo: null, recordedPrUrl: null, discardApproved }, primary },
+      {
+        git: gitRunner(Bun.which("git") ?? "git"),
+        forge: null,
+        webUrl: "https://github.com",
+        lsof: null,
+        noMistakes: null,
+        ps: async () => "",
+        config: cleanupConfig(parseConfig('data_dir = "/tmp/d"\nstate_dir = "/tmp/s"\n', "/tmp/h")),
+        log: () => {},
+      },
+    );
+  }
+
+  const branchTip = (primary: string) => Bun.spawnSync(["git", "rev-parse", "--verify", "--quiet", "refs/heads/fm/x"], { cwd: primary }).stdout.toString().trim();
+
+  test("the branch holding unlanded work is judged itself, refused, and kept", async () => {
+    const { primary, worktree, tip } = abandonedBranch();
+    const outcome = await cleanup(primary, worktree, false);
+    expect(outcome).toMatchObject({ outcome: "refused", reason: "unpushed", branchDeleted: false });
+    expect(outcome.detail).toContain("fm/x");
+    expect(branchTip(primary)).toBe(tip);
+  });
+
+  test("a branch whose work is landed goes, and a gone branch has nothing to lose", async () => {
+    const { primary, worktree } = abandonedBranch();
+    g(primary, ["merge", "-q", "--ff-only", "fm/x"]);
+    expect(await cleanup(primary, worktree, false)).toMatchObject({ outcome: "removed", reason: "merged_to_local_default", branchDeleted: true });
+    expect(branchTip(primary)).toBe("");
+    expect(await cleanup(primary, worktree, false)).toMatchObject({ outcome: "removed", reason: "worktree_absent", branchDeleted: false });
+  });
+
+  test("with a human discard approval the unlanded branch goes, and its tip is reported for recovery", async () => {
+    const { primary, worktree, tip } = abandonedBranch();
+    expect(await cleanup(primary, worktree, true)).toMatchObject({ outcome: "removed", reason: "discard_approved", branchDeleted: true, discardedHead: tip });
+    expect(branchTip(primary)).toBe("");
+  });
+});
+
 describe("M4 config", () => {
   test("[github] and [cleanup] have the design's defaults and refuse nonsense", () => {
     const base = "data_dir = \"/tmp/d\"\nstate_dir = \"/tmp/s\"\n";

@@ -23,10 +23,12 @@ function hookCommand(bin: string, hook: string): string {
  * When the user runs Claude's Bash sandbox, a worker's `$FLOWRYN_BIN` calls
  * run inside it, while hooks do not. Found live in M2: the sandbox refused the
  * daemon socket, so every worker verb failed. The settings therefore allow
- * this one socket, and writes to the run's spool and report directories; they
- * change nothing when the sandbox is off.
+ * this one socket, and writes to the run's spool and report directories (for a
+ * ship, also what a commit in its linked worktree writes, while the project's
+ * git hooks and config stay denied); they change nothing when the sandbox is
+ * off.
  */
-export function workerSettings(bin: string, access: { socket: string; writable: string[] } = { socket: "", writable: [] }): Record<string, unknown> {
+export function workerSettings(bin: string, access: { socket: string; writable: string[]; readOnly?: string[] } = { socket: "", writable: [] }): Record<string, unknown> {
   const command = (hook: string) => ({ type: "command", command: hookCommand(bin, hook) });
   return {
     hooks: {
@@ -39,7 +41,7 @@ export function workerSettings(bin: string, access: { socket: string; writable: 
       SessionEnd: [{ hooks: [command("session-end")] }],
     },
     ...(access.socket
-      ? { sandbox: { network: { allowUnixSockets: [access.socket] }, filesystem: { allowWrite: access.writable } } }
+      ? { sandbox: { network: { allowUnixSockets: [access.socket] }, filesystem: { allowWrite: access.writable, denyWrite: access.readOnly ?? [] } } }
       : {}),
   };
 }
@@ -61,7 +63,7 @@ function plan(run: RunContext, config: WorkersConfig, sessionArgs: string[], pro
     kind: "claude",
     args: [...sessionArgs, ...sharedArgs(run, config, settingsPath), prompt],
     env,
-    files: [{ path: settingsPath, content: JSON.stringify(workerSettings(run.flowrynBin, { socket: run.daemonSocket, writable: run.writable }), null, 2) + "\n", mode: 0o600 }],
+    files: [{ path: settingsPath, content: JSON.stringify(workerSettings(run.flowrynBin, { socket: run.daemonSocket, writable: run.writable, readOnly: run.readOnly }), null, 2) + "\n", mode: 0o600 }],
   };
 }
 

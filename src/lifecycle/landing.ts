@@ -6,6 +6,7 @@ import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { Forge } from "../forge/types.ts";
 import { recordIntent } from "../journal/journal.ts";
+import { consumeApproval, discardRef, insertApproval, matchAttempt } from "../policy/approvals.ts";
 import { runCleanup, type CleanupOutcome } from "../policy/cleanup.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { psRunner, type PsRunner } from "../runtime/proc.ts";
@@ -53,9 +54,18 @@ export interface LandingDeps {
   now(): number;
 }
 
+/** A Claude prompt you answered for `cleanup --discard`: the attempt its PreToolUse hook recorded. */
+export interface DiscardAttempt {
+  attempt: string;
+  session: string;
+  head: string;
+}
+
 export interface CleanupRequestOptions {
-  /** The discard approval allowing unlanded work to go (human channel, action discard). */
+  /** The discard approval allowing unlanded work to go (human channel, action discard); used up only by a removal. */
   discardApproval: string | null;
+  /** Or a matched Claude prompt, recorded as a claude-ask approval only by a removal, so a refusal leaves it usable. */
+  discardAttempt?: DiscardAttempt | null;
   /** The daemon's own cleanup after a proven merge: a refusal is a P1 rather than an error. */
   auto: boolean;
 }
@@ -94,7 +104,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
         defaultBranch: project.default_branch,
         repo: projectRepo(project, github.web_url),
         recordedPrUrl: delivered?.kind === "pr" ? delivered.ref : null,
-        discardApproved: opts.discardApproval !== null,
+        discardApproved: opts.discardApproval !== null || Boolean(opts.discardAttempt),
       },
       primary: project.path,
     },
@@ -122,7 +132,13 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
       }
       return;
     }
-    if (opts.discardApproval) db.query("UPDATE approvals SET consumed_at = ?2 WHERE id = ?1 AND consumed_at IS NULL").run(opts.discardApproval, now);
+    if (opts.discardApproval) consumeApproval(db, opts.discardApproval, now, `discard ${run.task_id}`);
+    if (opts.discardAttempt) {
+      const { attempt, session, head } = opts.discardAttempt;
+      matchAttempt(db, attempt, now);
+      const made = insertApproval(db, { task: run.task_id, ref: discardRef(run), head, channel: "claude-ask", actor: `${process.env.USER ?? "you"} (Claude prompt, leader ${session})`, action: "discard", now });
+      consumeApproval(db, made.id, now, `discard ${run.task_id}`);
+    }
     db.query("UPDATE runs SET cleanup = 'done', cleanup_detail = ?2, liveness = 'dead', busy_until = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, outcome.reason, now);
     appendEvent(db, { source: "daemon", kind: "cleanup.done", runId: run.id, taskId: run.task_id, payload, ts: now });
     resolveRunItems(db, run.id, ["cleanup_refused"], "cleanup.done", now);

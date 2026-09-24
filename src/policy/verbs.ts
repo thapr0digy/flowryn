@@ -9,7 +9,8 @@ import { landRun } from "../lifecycle/landing.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
-import { consumeApproval, findAttempt, findHumanApproval, insertApproval, matchAttempt, voidApprovals, type ApprovalRow } from "./approvals.ts";
+import type { DiscardAttempt } from "../lifecycle/landing.ts";
+import { discardRef, findAttempt, findHumanApproval, insertApproval, voidApprovals } from "./approvals.ts";
 import {
   checkGate,
   chooseApproval,
@@ -197,14 +198,12 @@ const decline: VerbSpec = {
 
 // --- cleanup --------------------------------------------------------------------------------------
 
-/** What a discard approval binds to: the worktree's branch and its HEAD when you approved. */
-export function discardRef(run: RunWithPolicy): string {
-  return `discard:${run.branch}`;
-}
-
-async function worktreeHead(ctx: HandlerCtx, run: RunWithPolicy): Promise<string> {
+/** The worktree's HEAD; once the worktree is gone, the tip of its branch in the primary checkout. */
+async function worktreeHead(ctx: HandlerCtx, run: RunWithPolicy, project: ProjectRow): Promise<string> {
   const head = await ctx.delivery.git(["rev-parse", "HEAD"], run.worktree_path);
-  return head.code === 0 ? head.stdout.trim() : "none";
+  if (head.code === 0) return head.stdout.trim();
+  const branch = await ctx.delivery.git(["rev-parse", "--verify", "--quiet", `refs/heads/${run.branch}`], project.path);
+  return branch.code === 0 ? branch.stdout.trim() : "none";
 }
 
 const cleanup: VerbSpec = {
@@ -217,32 +216,26 @@ const cleanup: VerbSpec = {
   replyMs: 120_000,
   async prepare(ctx, args) {
     const task = stringArg(args, "task")!;
-    const { run } = runAndProject(ctx.db, task);
+    const { run, project } = runAndProject(ctx.db, task);
     if (run.cleanup === "done") throw new FlowrynError("not_ready", `${run.task_id}'s worktree was already removed`);
     if (!isTerminal(run.state) && run.state !== "landed") {
       throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}; merge it or cancel it first`, `flowryn cancel ${run.task_id}`);
     }
+    // The approval is only found here; the cleanup uses it up when it removes the worktree, so a refusal leaves it for a retry.
     let discardApproval: string | null = null;
+    let discardAttempt: DiscardAttempt | null = null;
     if (boolArg(args, "discard")) {
-      const head = await worktreeHead(ctx, run);
+      const head = await worktreeHead(ctx, run, project);
       const now = ctx.now();
-      discardApproval = tx(ctx.db, () => {
-        const row: ApprovalRow | null = findHumanApproval(ctx.db, { task: run.task_id, action: "discard", ref: discardRef(run), head, now });
-        if (row) {
-          consumeApproval(ctx.db, row.id, now, `discard ${run.task_id}`);
-          return row.id;
-        }
-        const session = ctx.caller.role === "leader" ? ctx.caller.session : null;
-        const attempt = session ? findAttempt(ctx.db, { session, action: "discard", task, now }) : null;
-        if (!attempt || !session) return null;
-        matchAttempt(ctx.db, attempt.id, now);
-        const made = insertApproval(ctx.db, { task: run.task_id, ref: discardRef(run), head, channel: "claude-ask", actor: `${process.env.USER ?? "you"} (Claude prompt, leader ${session})`, action: "discard", now });
-        consumeApproval(ctx.db, made.id, now, `discard ${run.task_id}`);
-        return made.id;
-      });
-      if (!discardApproval) throw new FlowrynError("approval_required", `discarding ${run.task_id}'s work needs your approval for head ${head.slice(0, 8)}`, `in your shell: flowryn approve ${run.task_id} --discard`);
+      discardApproval = findHumanApproval(ctx.db, { task: run.task_id, action: "discard", ref: discardRef(run), head, now })?.id ?? null;
+      const session = ctx.caller.role === "leader" ? ctx.caller.session : null;
+      if (!discardApproval && session) {
+        const attempt = findAttempt(ctx.db, { session, action: "discard", task, now });
+        if (attempt) discardAttempt = { attempt: attempt.id, session, head };
+      }
+      if (!discardApproval && !discardAttempt) throw new FlowrynError("approval_required", `discarding ${run.task_id}'s work needs your approval for head ${head.slice(0, 8)}`, `in your shell: flowryn approve ${run.task_id} --discard`);
     }
-    const report = await ctx.delivery.cleanup(run.id, { discardApproval, auto: false });
+    const report = await ctx.delivery.cleanup(run.id, { discardApproval, discardAttempt, auto: false });
     if (report.outcome === "refused") throw new FlowrynError("cleanup_refused", `cleanup refused (${report.reason}): ${report.detail}`, report.reason === "dirty" || report.reason === "unlanded" || report.reason === "unpushed" ? `discard only with your approval: flowryn approve ${run.task_id} --discard` : `flowryn show ${run.task_id}`);
     return report;
   },
@@ -280,7 +273,7 @@ const approveBegin: VerbSpec = {
     const now = ctx.now();
     if (boolArg(args, "discard")) {
       if (stringArg(args, "allow-red")) throw new FlowrynError("bad_args", "--allow-red belongs to a merge approval, not a discard");
-      const head = await worktreeHead(ctx, run);
+      const head = await worktreeHead(ctx, run, project);
       const status = await ctx.delivery.git(["status", "--porcelain"], run.worktree_path);
       const dirty = status.code === 0 ? status.stdout.split("\n").filter(Boolean).length : -1;
       const challenge = ctx.delivery.challenges.create({ task: run.task_id, action: "discard", ref: discardRef(run), head, allowRed: null, channel }, now);

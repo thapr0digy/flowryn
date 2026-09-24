@@ -26,7 +26,7 @@ function deliveryLines(d: ContractDelivery): string[] {
   if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
   if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", "  Finished: $FLOWRYN_BIN deliver --local. It is verified."];
   if (d.mode === "direct-PR") {
-    return [`- Ship: commit, git push -u origin HEAD, open a PR into ${d.defaultBranch} (gh pr create).`, "  Finished: $FLOWRYN_BIN deliver --pr <url>. Verified: your HEAD must be the PR head."];
+    return [`- Ship: commit, git push origin HEAD, open a PR into ${d.defaultBranch} (gh pr create).`, "  Finished: $FLOWRYN_BIN deliver --pr <url>. Verified: your HEAD must be the PR head."];
   }
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",

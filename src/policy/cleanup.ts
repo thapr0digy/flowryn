@@ -15,7 +15,9 @@ import { reapUnder } from "./reap.ts";
  * no-mistakes run is aborted (proven its own, never another branch's); the
  * worker stops; leaked processes are reaped by identity; and last the
  * worktree is removed, with --force only for an approved discard, and its
- * branch deleted. Each refusal leaves the worktree, its branch and its HEAD
+ * branch deleted. A worktree already gone is pruned; its branch goes only
+ * when the guard, judging the branch itself, allows it or a human approved
+ * the discard. Each refusal leaves the worktree, its branch and its HEAD
  * exactly as they were. An unexpected error at any step is a refusal too
  * (`guard_error`). fixtures/cleanup-order checks this order and every refusal
  * against any implementation.
@@ -137,7 +139,7 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
     ...extra,
   });
   const judge = async () => {
-    const verdict = await judgeCleanup(req.guard, { git: deps.git, forge: deps.forge, webUrl: deps.webUrl });
+    const verdict = await judgeCleanup({ ...req.guard, primary: req.guard.primary ?? req.primary }, { git: deps.git, forge: deps.forge, webUrl: deps.webUrl });
     steps.push(`verdict:${verdict.verdict}:${verdict.reason}`);
     return verdict;
   };
@@ -185,7 +187,9 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
   if (again) return { ...again, aborted, reaped: reap.reaped };
 
   const discard = verdict.verdict === "discard";
-  const head = (await deps.git(["rev-parse", "HEAD"], req.guard.worktree)).stdout.trim() || null;
+  const head = existsSync(req.guard.worktree)
+    ? (await deps.git(["rev-parse", "HEAD"], req.guard.worktree)).stdout.trim() || null
+    : (await deps.git(["rev-parse", "--verify", "--quiet", `refs/heads/${req.guard.branch}`], req.primary)).stdout.trim() || null;
   if (existsSync(req.guard.worktree)) {
     const removed = await deps.git(["worktree", "remove", ...(discard ? ["--force"] : []), req.guard.worktree], req.primary);
     steps.push(`worktree_remove:${removed.code === 0 ? "ok" : "failed"}`);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
@@ -56,6 +56,30 @@ function openItems(e: ShipEnv, kind: string): { id: string; line: string }[] {
 async function taskState(e: ShipEnv, task: string): Promise<string> {
   const proc = Bun.spawnSync([realTasksAxi(), "show", task, "--file", e.fleet.h.backlog], { stdin: "ignore" });
   return /^\s*state:\s*(\S+)/m.exec(proc.stdout.toString())?.[1] ?? "?";
+}
+
+function discardApprovals(e: ShipEnv, task: string): { channel: string; consumed: boolean }[] {
+  const db = e.fleet.h.db();
+  try {
+    const rows = db.query("SELECT channel, consumed_at FROM approvals WHERE task_id = ?1 AND action = 'discard' ORDER BY created_at").all(task) as { channel: string; consumed_at: number | null }[];
+    return rows.map((r) => ({ channel: r.channel, consumed: r.consumed_at !== null }));
+  } finally {
+    db.close();
+  }
+}
+
+/** A fresh index.lock in the worktree: not provably stale, so a cleanup refuses and leaves everything as it was. */
+function holdIndexLock(worktree: string): string {
+  const lock = git(worktree, ["rev-parse", "--path-format=absolute", "--git-path", "index.lock"]);
+  writeFileSync(lock, "");
+  return lock;
+}
+
+async function abandonedShip(e: ShipEnv): Promise<{ task: string; run: string }> {
+  const shipped = await e.fleet.dispatch("Abandon\nFAKE: commit wip.txt work in progress\nFAKE: sleep 120000", { kind: "ship" });
+  await e.fleet.waitRun(shipped.run, (r) => r.worker_started_at !== null, "worker started");
+  await waitUntil(() => git(e.fleet.run(shipped.run).worktree_path, ["log", "--oneline", "-1"]).includes("wip.txt"), 10_000, "the commit");
+  return shipped;
 }
 
 async function waitCleaned(e: ShipEnv, run: string, task: string): Promise<void> {
@@ -396,6 +420,63 @@ describe("no-mistakes, local-only, decline and cleanup", () => {
       expect(discarded.reply.data).toMatchObject({ removed: true, reason: "discard_approved" });
       expect(existsSync(e.fleet.run(run).worktree_path)).toBe(false);
       expect(e.fleet.run(run).state).toBe("cancelled");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "a discard approval from your shell survives a refused cleanup once, and a removal uses it up",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR" });
+      const e = env;
+      const { task, run } = await abandonedShip(e);
+      expect((await e.fleet.json(["cancel", task])).code).toBe(0);
+      expect((await e.approve(task, { discard: true })).ok).toBe(true);
+      const worktree = e.fleet.run(run).worktree_path;
+      const lock = holdIndexLock(worktree);
+      const refused = await e.fleet.json(["cleanup", task, "--discard"]);
+      expect(errorCode(refused.reply)).toBe("cleanup_refused");
+      expect((refused.reply.error as { message: string }).message).toContain("lock_not_provably_stale");
+      expect(existsSync(worktree)).toBe(true);
+      expect(discardApprovals(e, task)).toEqual([{ channel: "cli-tty", consumed: false }]);
+
+      rmSync(lock);
+      const discarded = await e.fleet.json(["cleanup", task, "--discard"]);
+      expect(discarded.code).toBe(0);
+      expect(discarded.reply.data).toMatchObject({ removed: true, reason: "discard_approved" });
+      expect(existsSync(worktree)).toBe(false);
+      expect(discardApprovals(e, task)).toEqual([{ channel: "cli-tty", consumed: true }]);
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "a Claude prompt you answered for a discard is recorded and used up only when the cleanup removes the worktree",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR" });
+      const e = env;
+      const { task, run } = await abandonedShip(e);
+      expect((await e.fleet.json(["cancel", task])).code).toBe(0);
+      const leader = await e.claude();
+      await leader.start();
+      const worktree = e.fleet.run(run).worktree_path;
+      const lock = holdIndexLock(worktree);
+      const refused = await leader.runBash(`flowryn cleanup ${task} --discard --json`, { approve: true });
+      expect(refused).toMatchObject({ prompted: true, ran: true, code: 2 });
+      expect(JSON.parse(refused.stdout).error.code).toBe("cleanup_refused");
+      expect(existsSync(worktree)).toBe(true);
+      expect(discardApprovals(e, task)).toEqual([]);
+      const db = e.fleet.h.db();
+      const unmatched = db.query("SELECT COUNT(*) AS n FROM approval_attempts WHERE task_id = ?1 AND action = 'discard' AND matched_at IS NULL").get(task) as { n: number };
+      db.close();
+      expect(unmatched.n).toBe(1);
+
+      rmSync(lock);
+      const discarded = await leader.runBash(`flowryn cleanup ${task} --discard --json`, { approve: true });
+      expect(discarded).toMatchObject({ prompted: true, ran: true, code: 0 });
+      expect(JSON.parse(discarded.stdout).data).toMatchObject({ removed: true, reason: "discard_approved" });
+      expect(existsSync(worktree)).toBe(false);
+      expect(discardApprovals(e, task)).toEqual([{ channel: "claude-ask", consumed: true }]);
     },
     { timeout: 90_000 },
   );

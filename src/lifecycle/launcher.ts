@@ -8,6 +8,7 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { promptLine, workerContract } from "../harness/contract-text.ts";
+import { shipGitAccess } from "../harness/git-access.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { adapterFor } from "../harness/registry.ts";
 import type { RunContext } from "../harness/types.ts";
@@ -179,6 +180,7 @@ export class Launcher {
     if (run.harness === "pi") await loadExtensionSource();
 
     const flowrynBin = await this.deps.flowrynBin();
+    const gitAccess = run.kind === "ship" ? await shipGitAccess((args) => this.deps.git(args), worktree) : { writable: [], readOnly: [] };
     const context: RunContext = {
       runId: run.id,
       taskId: run.task_id,
@@ -193,8 +195,8 @@ export class Launcher {
       flowrynBin,
       binary,
       daemonSocket: this.deps.socketPath,
-      // A ship commits: in a linked worktree, git writes the project's common git dir (objects, refs, the worktree's index).
-      writable: [spool, reportDir, ...(run.kind === "ship" ? await this.commonDir(project.path) : [])],
+      writable: [spool, reportDir, ...gitAccess.writable],
+      readOnly: gitAccess.readOnly,
     };
     if (!context.sessionId) throw new Error("the run has no agent session id");
     const trust = await adapter.preTrust(context, workers);
@@ -253,13 +255,6 @@ export class Launcher {
       return false;
     }
     return true;
-  }
-
-  /** The project's git common dir, absolute, for a ship worker's sandbox write list. */
-  private async commonDir(projectPath: string): Promise<string[]> {
-    const result = await this.deps.git(["-C", projectPath, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    const dir = result.stdout.trim();
-    return result.exitCode === 0 && dir ? [dir] : [];
   }
 
   /** git is the ground truth for worktrees; a relaunch reuses the run's own worktree. */

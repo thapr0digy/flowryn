@@ -42,6 +42,8 @@ export interface GuardInput {
   repo: RepoRef | null;
   recordedPrUrl: string | null;
   discardApproved: boolean;
+  /** The project's primary checkout: where the run branch is judged once its worktree is gone. */
+  primary?: string;
 }
 
 export interface GitResult {
@@ -98,8 +100,8 @@ async function patchId(deps: GuardDeps, cwd: string, commit: string): Promise<st
 }
 
 /** Firstmate's unpushed_patches_are_in_pr_head: every commit on no remote has its patch in merge-base..prHead. */
-async function patchesIn(deps: GuardDeps, cwd: string, prHead: string): Promise<boolean> {
-  const base = await out(deps, cwd, ["merge-base", "HEAD", prHead]);
+async function patchesIn(deps: GuardDeps, cwd: string, tip: string, prHead: string): Promise<boolean> {
+  const base = await out(deps, cwd, ["merge-base", tip, prHead]);
   if (!base) return false;
   const inPr = await out(deps, cwd, ["log", "--format=%H", `${base}..${prHead}`, "--"]);
   if (inPr === null) return false;
@@ -109,7 +111,7 @@ async function patchesIn(deps: GuardDeps, cwd: string, prHead: string): Promise<
     if (id) ids.add(id);
   }
   if (ids.size === 0) return false;
-  const unpushed = await out(deps, cwd, ["log", "--format=%H", "HEAD", "--not", "--remotes", "--"]);
+  const unpushed = await out(deps, cwd, ["log", "--format=%H", tip, "--not", "--remotes", "--"]);
   if (!unpushed) return false;
   for (const commit of unpushed.split("\n").filter(Boolean)) {
     const id = await patchId(deps, cwd, commit);
@@ -121,10 +123,11 @@ async function patchesIn(deps: GuardDeps, cwd: string, prHead: string): Promise<
 /**
  * Is the branch's content already in the up-to-date default branch? Fetch
  * the default branch explicitly (a plain fetch may not refresh it), then
- * 3-way merge it with HEAD: when HEAD adds nothing, the merged tree equals the
- * default branch's tree. A conflict or any failure is inconclusive: false.
+ * 3-way merge it with the tip: when the tip adds nothing, the merged tree
+ * equals the default branch's tree. A conflict or any failure is
+ * inconclusive: false.
  */
-async function contentInDefault(deps: GuardDeps, cwd: string, defaultBranch: string): Promise<boolean> {
+async function contentInDefault(deps: GuardDeps, cwd: string, tip: string, defaultBranch: string): Promise<boolean> {
   let ref: string;
   if ((await out(deps, cwd, ["remote", "get-url", "origin"])) !== null) {
     if ((await deps.git(["fetch", "--quiet", "origin", `+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`], cwd)).code !== 0) return false;
@@ -134,7 +137,7 @@ async function contentInDefault(deps: GuardDeps, cwd: string, defaultBranch: str
   } else return false;
   const tree = await out(deps, cwd, ["rev-parse", "--quiet", "--verify", `${ref}^{tree}`]);
   if (!tree) return false;
-  const merged = await out(deps, cwd, ["merge-tree", "--write-tree", ref, "HEAD"]);
+  const merged = await out(deps, cwd, ["merge-tree", "--write-tree", ref, tip]);
   return merged !== null && merged.split("\n")[0] === tree;
 }
 
@@ -162,26 +165,45 @@ function verdict(v: Verdict, reason: ReasonClass, detail: string, prUrl: string 
   return { verdict: v, reason, detail, prUrl, unpushed };
 }
 
+/**
+ * The worktree is gone, but its branch may still hold the only copy of the
+ * work: judge the branch ref from the primary checkout by the same rules as a
+ * HEAD. Only a branch that is gone too, or a scout's, has nothing to lose.
+ */
+async function absentWorktreeVerdict(input: GuardInput, deps: GuardDeps): Promise<GuardVerdict> {
+  const gone = `${input.worktree} is not a git worktree any more`;
+  if (input.kind === "scout") return verdict("allow", "worktree_absent", `${gone}; a scout delivers a report, so nothing can be lost`);
+  if (!input.primary) return verdict("refuse", "uninspectable", `${gone}, and there is no primary checkout to judge branch ${input.branch} from`);
+  const ref = `refs/heads/${input.branch}`;
+  const found = await deps.git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], input.primary);
+  if (found.code === 1 && found.stdout.trim() === "") return verdict("allow", "worktree_absent", `${gone} and branch ${input.branch} is gone too; nothing can be lost`);
+  if (found.code !== 0) return verdict("refuse", "uninspectable", `${gone}, and branch ${input.branch} cannot be read in ${input.primary}: ${found.stderr.trim() || `git exited ${found.code}`}`);
+  const judged = await committedVerdict(input, deps, input.primary, ref);
+  return { ...judged, detail: `${gone}; its branch ${input.branch}: ${judged.detail}` };
+}
+
 /** The landed-work verdict for one worktree, before any discard approval is applied. */
 async function landedVerdict(input: GuardInput, deps: GuardDeps): Promise<GuardVerdict> {
   const wt = input.worktree;
-  if ((await deps.git(["rev-parse", "--git-dir"], wt)).code !== 0) {
-    return verdict("allow", "worktree_absent", `${wt} is not a git worktree any more; nothing in it can be lost`);
-  }
+  if ((await deps.git(["rev-parse", "--git-dir"], wt)).code !== 0) return absentWorktreeVerdict(input, deps);
   const status = await deps.git(["status", "--porcelain"], wt);
   if (status.code !== 0) return verdict("refuse", "uninspectable", `cannot inspect ${wt} for uncommitted changes: ${status.stderr.trim() || `git exited ${status.code}`}`);
   const dirty = status.stdout.split("\n").filter((l) => l.length > 0 && !IGNORED_UNTRACKED.test(l));
   if (dirty.length > 0) return verdict("refuse", "dirty", `uncommitted changes present in ${wt} (${dirty.length} path${dirty.length === 1 ? "" : "s"})`);
   if (input.kind === "scout") return verdict("allow", "scout_clean", "a scout delivers a report; its clean worktree holds nothing to lose");
+  return committedVerdict(input, deps, wt, "HEAD");
+}
 
-  const unpushedRaw = await out(deps, wt, ["log", "--format=%h %s", "HEAD", "--not", "--remotes", "--"]);
-  if (unpushedRaw === null) return verdict("refuse", "uninspectable", `cannot inspect ${wt} for commits not on a remote`);
+/** The verdict on committed work: `tip` (HEAD in a worktree, or the branch ref) read in `cwd`. */
+async function committedVerdict(input: GuardInput, deps: GuardDeps, cwd: string, tip: string): Promise<GuardVerdict> {
+  const unpushedRaw = await out(deps, cwd, ["log", "--format=%h %s", tip, "--not", "--remotes", "--"]);
+  if (unpushedRaw === null) return verdict("refuse", "uninspectable", `cannot inspect ${tip} in ${cwd} for commits not on a remote`);
   const unpushed = unpushedRaw.split("\n").filter(Boolean).slice(0, 5);
-  if (unpushed.length === 0) return verdict("allow", "on_remote_tracking_branch", "HEAD is on a remote-tracking branch");
+  if (unpushed.length === 0) return verdict("allow", "on_remote_tracking_branch", `${tip} is on a remote-tracking branch`);
 
   if (input.mode === "local-only") {
-    const unmerged = await out(deps, wt, ["log", "--format=%h", "HEAD", "--not", `refs/heads/${input.defaultBranch}`, "--"]);
-    if (unmerged === null) return verdict("refuse", "uninspectable", `cannot compare ${wt} with local ${input.defaultBranch}`, null, unpushed);
+    const unmerged = await out(deps, cwd, ["log", "--format=%h", tip, "--not", `refs/heads/${input.defaultBranch}`, "--"]);
+    if (unmerged === null) return verdict("refuse", "uninspectable", `cannot compare ${tip} in ${cwd} with local ${input.defaultBranch}`, null, unpushed);
     if (unmerged.length === 0) return verdict("allow", "merged_to_local_default", `the work is on local ${input.defaultBranch}`);
     return verdict("refuse", "unpushed", `local-only work is on no remote and not merged into local ${input.defaultBranch}`, null, unpushed);
   }
@@ -190,13 +212,13 @@ async function landedVerdict(input: GuardInput, deps: GuardDeps): Promise<GuardV
   let mergedButNotContained = false;
   if (pr && pr.state === "merged" && pr.headSha) {
     const number = parsePrUrl(pr.url, deps.webUrl)?.number ?? pr.number;
-    if (await ensureCommit(deps, wt, pr.headSha, number)) {
-      if (await isAncestor(deps, wt, "HEAD", pr.headSha)) return verdict("allow", "merged_pr_contains_head", `PR ${pr.url} is merged and its head contains HEAD`, pr.url);
-      if (await patchesIn(deps, wt, pr.headSha)) return verdict("allow", "merged_pr_contains_patches", `PR ${pr.url} is merged and carries every unpushed patch`, pr.url);
+    if (await ensureCommit(deps, cwd, pr.headSha, number)) {
+      if (await isAncestor(deps, cwd, tip, pr.headSha)) return verdict("allow", "merged_pr_contains_head", `PR ${pr.url} is merged and its head contains ${tip}`, pr.url);
+      if (await patchesIn(deps, cwd, tip, pr.headSha)) return verdict("allow", "merged_pr_contains_patches", `PR ${pr.url} is merged and carries every unpushed patch`, pr.url);
     }
     mergedButNotContained = true;
   }
-  if (await contentInDefault(deps, wt, input.defaultBranch)) {
+  if (await contentInDefault(deps, cwd, tip, input.defaultBranch)) {
     return verdict("allow", "content_in_default", `the content is already in ${input.defaultBranch}`, pr?.url ?? input.recordedPrUrl);
   }
   if (forgeFailed) return verdict("refuse", "forge_unreachable_content_absent", "the forge could not be asked, and the content is not in the default branch", input.recordedPrUrl, unpushed);
