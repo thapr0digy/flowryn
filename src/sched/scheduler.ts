@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
-import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig } from "../config/workflows.ts";
+import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -11,12 +11,12 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, type StartDeps } from "../lifecycle/dispatch.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
-import { getProject } from "../lifecycle/projects.ts";
+import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { activateStage, neededPools, positionOf, type StagePos } from "../lifecycle/stages.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity } from "./pools.ts";
-import { usageLimitSince } from "./usage.ts";
+import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
 
 /**
  * The scheduler (design sections 4 and 11): it grants stage starts against the
@@ -148,14 +148,20 @@ export class Scheduler {
     });
   }
 
+  /** Auto-dispatch, grants and alerts, each on its own: one that throws never stops the others. */
   private async pass(): Promise<void> {
+    await this.step("auto-dispatch", async () => {
+      if ((await this.autoDispatch()) > 0) this.deps.kickJournal();
+    });
+    await this.step("grant", () => this.grant());
+    await this.step("alerts", async () => this.alerts());
+  }
+
+  private async step(name: string, fn: () => Promise<void>): Promise<void> {
     try {
-      const started = await this.autoDispatch();
-      if (started > 0) this.deps.kickJournal();
-      await this.grant();
-      this.alerts();
+      await fn();
     } catch (error) {
-      this.deps.log(`sched: pass failed: ${(error as Error).stack ?? String(error)}`);
+      this.deps.log(`sched: ${name} failed: ${(error as Error).stack ?? String(error)}`);
     }
   }
 
@@ -211,11 +217,12 @@ export class Scheduler {
     }
   }
 
-  /** One grant: the usage pause, the host check (once per pass) and the pools, then the stage start. Whether it started. */
+  /** One grant: the usage pause (or its one probe), the host check (once per pass) and the pools, then the stage start. Whether it started. */
   private async tryGrant(c: Candidate, config: FlowrynConfig, host: { verdict: HostVerdict | null }, steer: boolean): Promise<boolean> {
     const { db, now } = this.deps;
     const capacity = capacityConfig(config);
-    if (usageLimitSince(db) !== null && c.run.harness === "claude") return false;
+    const usage = c.run.harness === "claude" ? usageGate(db, now(), c.run.id) : "open";
+    if (usage === "paused") return false;
     if (c.needs.length > 0) {
       host.verdict ??= await this.hostVerdict(capacity.host);
       if (!host.verdict.ok) return false;
@@ -226,7 +233,9 @@ export class Scheduler {
       activated = tx(db, () => {
         const fresh = getRunWithPolicy(db, c.run.id);
         if (!fresh || isTerminal(fresh.state) || (fresh.stage_state !== "waiting" && !fresh.pending_launch)) return null;
-        return activateStage(db, config, fresh, now(), { steer });
+        const started = activateStage(db, config, fresh, now(), { steer });
+        if (started && usage === "probe") claimProbe(db, c.run.id, now());
+        return started;
       });
     } catch (error) {
       if (error instanceof OverCapacity) return false;
@@ -267,7 +276,6 @@ export class Scheduler {
   private async autoDispatch(): Promise<number> {
     const { db, now } = this.deps;
     const config = this.deps.config();
-    const paused = usageLimitSince(db) !== null;
     const phases = db
       .query(
         `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
@@ -287,36 +295,51 @@ export class Scheduler {
       if (!task || task.state !== "queued" || task.hold) continue;
       if (waitingOn(db, phase.task_id, backlog, JSON.parse(phase.blocked_by) as string[]).length > 0) continue;
       const harness = (phase.harness as HarnessId | null) ?? project.harness;
-      if (paused && harness === "claude") continue;
-      let start: { version: string; base: string };
-      let workflow;
+      const usage = harness === "claude" ? usageGate(db, now(), null) : "open";
+      if (usage === "paused") continue;
+      let made: string | null;
       try {
-        workflow = workflowFor(config, phase.workflow, "ship");
-        start = await checkStart(this.deps.startDeps, project, harness);
+        const workflow = workflowFor(config, phase.workflow, "ship");
+        const start = await checkStart(this.deps.startDeps, project, harness);
+        made = this.startPhase(phase, project, harness, start, workflow, usage === "probe", now());
       } catch (error) {
-        if (!(error instanceof FlowrynError)) throw error;
-        this.phaseBlocked(phase, error.message);
+        if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
+        else this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} failed to start: ${(error as Error).stack ?? String(error)}`);
         continue;
       }
-      const t = now();
-      const made = tx(db, () => {
-        if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
-        const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", harness, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", now: t });
-        resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
-        // A plan a design handed in holds the phases after the design's own task, which is phase 1.
-        const offset = phase.source_task ? 1 : 0;
-        const [n, of] = [phase.phase_no + offset, phase.phases + offset];
-        const event = appendEvent(db, { source: "daemon", kind: "phase.started", runId, taskId: phase.task_id, payload: { plan: phase.plan_id, phase: n, of }, ts: t });
-        const where = of > 1 ? `Phase ${n} of ${of} in "${phase.plan_title}"` : `Queued task "${phase.title}"`;
-        openItem(db, { kind: "phase_started", eventSeq: event.seq, taskId: phase.task_id, runId, line: `${where} started by itself: ${phase.title} (${project.id}); its blockers landed`, now: t });
-        return runId;
-      });
       if (made) {
         started++;
         this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} started as ${made}`);
       }
     }
     return started;
+  }
+
+  /** One phase's run, its backlog start and its P3, in one transaction; null when a run appeared meanwhile. */
+  private startPhase(
+    phase: PhaseRow & { plan_title: string; source_task: string | null; phases: number },
+    project: ProjectRow,
+    harness: HarnessId,
+    start: { version: string; base: string },
+    workflow: WorkflowDef,
+    probe: boolean,
+    t: number,
+  ): string | null {
+    const { db } = this.deps;
+    const config = this.deps.config();
+    return tx(db, () => {
+      if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", harness, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", now: t });
+      if (probe) claimProbe(db, runId, t);
+      resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
+      // A plan a design handed in holds the phases after the design's own task, which is phase 1.
+      const offset = phase.source_task ? 1 : 0;
+      const [n, of] = [phase.phase_no + offset, phase.phases + offset];
+      const event = appendEvent(db, { source: "daemon", kind: "phase.started", runId, taskId: phase.task_id, payload: { plan: phase.plan_id, phase: n, of }, ts: t });
+      const where = of > 1 ? `Phase ${n} of ${of} in "${phase.plan_title}"` : `Queued task "${phase.title}"`;
+      openItem(db, { kind: "phase_started", eventSeq: event.seq, taskId: phase.task_id, runId, line: `${where} started by itself: ${phase.title} (${project.id}); its blockers landed`, now: t });
+      return runId;
+    });
   }
 
   /** A phase is ready but cannot start (no contract, Herdr down, a tangled checkout): one P1, until it starts. */

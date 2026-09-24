@@ -74,6 +74,7 @@ flowryn show p1                     # a plan's phases and where each is
 flowryn approve <task> --gate design  # pass a review gate in your terminal (the board's a key lists reviews too)
 flowryn gate changes <task> --body-file -  # send a review back with your words (QA goes back to build)
 flowryn capacity                    # pools over their caps, the host check, and what waits for a grant
+flowryn capacity resume --harness claude  # lift the Claude usage-limit pause now, in your own terminal
 flowryn help                        # every verb; `flowryn <verb> --help` for one
 ```
 

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { waitUntil } from "../helpers/harness.ts";
+import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { M4_SHIP_WORKFLOW } from "../../src/db/schema.ts";
 
@@ -13,10 +14,14 @@ import { M4_SHIP_WORKFLOW } from "../../src/db/schema.ts";
  * its next stage arrives, the way the worker contract tells a real one to.
  */
 
+const MAIN = join(REPO_ROOT, "src/main.ts");
+
 let ship: ShipEnv | null = null;
 let fleet: FleetEnv | null = null;
+const ptys: Pty[] = [];
 
 afterEach(async () => {
+  for (const pty of ptys.splice(0)) pty.kill();
   await ship?.cleanup();
   await fleet?.cleanup();
   ship = null;
@@ -368,6 +373,14 @@ describe("dispatch --blocked-by", () => {
   );
 });
 
+/** A Claude worker hits the usage limit, then you cancel it: no live Claude session is left to lift the pause. */
+async function limitedAndGone(f: FleetEnv): Promise<string> {
+  const a = await f.dispatch("Hits the limit\nFAKE: usage-limit\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
+  await until(f, "the pause", () => one(f, "SELECT 1 FROM items WHERE kind = 'usage_limit' AND state IN ('open','presented')") !== null);
+  expect((await f.json(["cancel", a.task])).code).toBe(0);
+  return a.run;
+}
+
 describe("autonomy and the usage limit", () => {
   test(
     "a Claude usage limit pauses Claude launches until a Claude turn ends normally; Pi work carries on",
@@ -393,6 +406,67 @@ describe("autonomy and the usage limit", () => {
   );
 
   test(
+    "with no live Claude session left, the pause expires and lets one probe through: a rate_limit re-arms it with a longer backoff, a normal Stop lifts it",
+    async () => {
+      fleet = await makeFleetEnv({ extraConfig: "[sched]\npass_ms = 250\nusage_backoff_ms = 2000\nusage_backoff_max_ms = 60000" });
+      const f = fleet;
+      const a = await limitedAndGone(f);
+      expect(one(f, "SELECT 1 FROM items WHERE kind = 'usage_limit' AND state IN ('open','presented')")).not.toBeNull();
+      expect(f.run(a).state).toBe("cancelled");
+      const b = await f.dispatch("First probe\nFAKE: usage-limit\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
+      const c = await f.dispatch("Second probe\nFAKE: wait-file go", { kind: "scout", harness: "claude" });
+      const d = await f.dispatch("Waits for the lift\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
+      const probes = () => rows<{ run_id: string }>(f, "SELECT run_id FROM events WHERE kind = 'sched.usage_probe' ORDER BY seq").map((e) => e.run_id);
+      const limits = () => rows<{ payload: string }>(f, "SELECT payload FROM events WHERE kind = 'sched.usage_limit' ORDER BY seq").map((e) => JSON.parse(e.payload) as { backoff_ms: number; rearmed: boolean });
+      // The first probe hits the limit again: re-armed with twice the backoff, the same P1 with the new expiry.
+      await until(f, "the re-arm", () => limits().length === 2, 20_000);
+      expect(probes()).toEqual([b.run]);
+      expect(limits().map((l) => [l.backoff_ms, l.rearmed])).toEqual([[2000, false], [4000, true]]);
+      const items = rows<{ state: string; line: string }>(f, "SELECT state, line FROM items WHERE kind = 'usage_limit'");
+      expect(items.length).toBe(1);
+      expect(items[0]!.line).toContain("flowryn capacity resume --harness claude");
+      expect(f.run(c.run).proc_pid).toBeNull();
+      expect((await f.json(["cancel", b.task])).code).toBe(0);
+      // After the longer backoff exactly one more probe starts, the oldest waiting; the other keeps waiting.
+      await until(f, "the second probe", () => probes().length === 2, 20_000);
+      expect(probes()[1]).toBe(c.run);
+      await f.waitRun(c.run, (r) => r.proc_pid !== null, "the second probe's worker");
+      await Bun.sleep(1_000);
+      expect(f.run(d.run).proc_pid).toBeNull();
+      expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'usage_limit'")!.state).not.toBe("resolved");
+      // The probe's turn ends normally: the pause lifts, and what waited starts.
+      writeFileSync(join(f.h.dataDir, c.task, "go"), "");
+      await until(f, "the lift", () => one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'usage_limit'")!.state === "resolved", 20_000);
+      await f.waitRun(d.run, (r) => r.proc_pid !== null, "the waiting Claude worker", 20_000);
+      expect(one<{ source: string }>(f, "SELECT source FROM events WHERE kind = 'sched.usage_resumed'")!.source).toBe("hook");
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "you lift the pause at once with flowryn capacity resume --harness claude in your own terminal; a leader cannot",
+    async () => {
+      fleet = await makeFleetEnv();
+      const f = fleet;
+      await limitedAndGone(f);
+      const b = await f.dispatch("Waits\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
+      const view = await f.json(["capacity"]);
+      expect(view.reply.hints).toContain("flowryn capacity resume --harness claude");
+      expect(JSON.stringify(view.reply.data)).toContain("then one run probes it");
+      const refused = await f.json(["capacity", "resume", "--harness", "claude"]);
+      expect((refused.reply.error as { code: string }).code).toBe("human_only");
+      const pty = Pty.spawn(["bun", MAIN, "capacity", "resume", "--harness", "claude"], f.h.env, REPO_ROOT);
+      ptys.push(pty);
+      expect(await pty.exited).toBe(0);
+      expect(pty.text()).toContain("resumed");
+      await f.waitRun(b.run, (r) => r.proc_pid !== null, "the paused Claude worker", 20_000);
+      expect(one<{ state: string; resolved_by: string }>(f, "SELECT state, resolved_by FROM items WHERE kind = 'usage_limit'")).toMatchObject({ state: "resolved", resolved_by: "usage resumed: lifted by you (flowryn capacity resume)" });
+      expect(one<{ source: string }>(f, "SELECT source FROM events WHERE kind = 'sched.usage_resumed'")!.source).toBe("cli");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
     "a plan filed under manual autonomy waits for you; a phase never starts before its blockers land",
     async () => {
       fleet = await makeFleetEnv();
@@ -413,6 +487,53 @@ describe("autonomy and the usage limit", () => {
       expect(one<{ sensitive: number }>(f, "SELECT sensitive FROM task_policy WHERE task_id = ?1", data.phases[0]!.task)!.sensitive).toBe(1);
       const shown = await f.json(["show", data.plan]);
       expect(JSON.stringify(shown.reply.data)).toContain(`queued, waits for ${data.phases[0]!.task}`);
+    },
+    { timeout: 60_000 },
+  );
+});
+
+/** One ready phase, filed under manual autonomy so `before` runs first, then let go under plan. */
+async function fileReadyPhase(f: FleetEnv, body: string, before: (task: string) => void): Promise<string> {
+  expect((await f.json(["project", "set", "web", "--autonomy", "manual"])).code).toBe(0);
+  const filed = await f.json(["plan", "web", "--body-file", "-"], { stdin: `# One step\n## Phase 1: Only\n${body}\n` });
+  expect(filed.code).toBe(0);
+  const task = (filed.reply.data as { phases: { task: string }[] }).phases[0]!.task;
+  before(task);
+  expect((await f.json(["project", "set", "web", "--autonomy", "plan"])).code).toBe(0);
+  return task;
+}
+
+describe("the scheduler keeps going", () => {
+  const FAST_PASSES = "[sched]\npass_ms = 250";
+  test(
+    "a phase whose run cannot be created is blocked with a P1, and every other grant still happens",
+    async () => {
+      fleet = await makeFleetEnv({ extraConfig: FAST_PASSES });
+      const f = fleet;
+      const task = await fileReadyPhase(f, "FAKE: sleep 120000", (t) => mkdirSync(join(f.h.home, "wt", "web", t), { recursive: true }));
+      await until(f, "the phase blocked", () => one(f, "SELECT 1 FROM items WHERE kind = 'phase_blocked' AND task_id = ?1 AND state IN ('open','presented')", task) !== null);
+      expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'phase_blocked' AND task_id = ?1", task)!.line).toContain("already exists");
+      const other = await f.dispatch("Still granted\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
+      await f.waitRun(other.run, (r) => r.proc_pid !== null, "the other worker", 20_000);
+      expect(rows(f, "SELECT 1 FROM runs WHERE task_id = ?1", task)).toEqual([]);
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a ready phase on a tangled checkout records the refusal once, however many passes retry it",
+    async () => {
+      fleet = await makeFleetEnv({ extraConfig: FAST_PASSES });
+      const f = fleet;
+      const task = await fileReadyPhase(f, "FAKE: sleep 120000", () => {
+        expect(Bun.spawnSync(["git", "-C", f.repo, "checkout", "-q", "-b", "side"]).exitCode).toBe(0);
+      });
+      await until(f, "the phase blocked", () => one(f, "SELECT 1 FROM items WHERE kind = 'phase_blocked' AND task_id = ?1", task) !== null);
+      // A pass every 250 ms: a few seconds are a dozen passes.
+      await Bun.sleep(3_000);
+      expect(rows(f, "SELECT 1 FROM events WHERE kind = 'dispatch.refused'").length).toBe(1);
+      expect(rows(f, "SELECT 1 FROM items WHERE kind = 'checkout_tangle'").length).toBe(1);
+      expect(rows(f, "SELECT 1 FROM runs WHERE task_id = ?1", task)).toEqual([]);
     },
     { timeout: 60_000 },
   );

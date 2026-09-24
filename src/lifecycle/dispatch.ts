@@ -67,21 +67,24 @@ export function startDepsOf(ctx: HandlerCtx): StartDeps {
   };
 }
 
-/** Design section 14, primary checkout tangle: refuse, and say so once as a P1; change nothing. */
+/**
+ * Design section 14, primary checkout tangle: refuse, and say so once, with
+ * one event and a P1, until the item is resolved; the scheduler's retries of
+ * a ready phase add nothing. Change nothing.
+ */
 function recordTangle(deps: StartDeps, project: ProjectRow, branch: string | null): void {
   const { db } = deps;
   tx(db, () => {
     const key = `project:${project.id}`;
+    if (findOpenItem(db, "checkout_tangle", key)) return;
     const event = appendEvent(db, { source: "cli", kind: "dispatch.refused", payload: { project: project.id, reason: "primary_checkout_tangle", branch } });
-    if (!findOpenItem(db, "checkout_tangle", key)) {
-      openItem(db, {
-        kind: "checkout_tangle",
-        eventSeq: event.seq,
-        taskId: key,
-        line: `Project ${project.id}: its primary checkout ${project.path} is on ${branch ?? "a detached HEAD"}, not ${project.default_branch}; dispatch refused until it is back`,
-        now: deps.now(),
-      });
-    }
+    openItem(db, {
+      kind: "checkout_tangle",
+      eventSeq: event.seq,
+      taskId: key,
+      line: `Project ${project.id}: its primary checkout ${project.path} is on ${branch ?? "a detached HEAD"}, not ${project.default_branch}; dispatch refused until it is back`,
+      now: deps.now(),
+    });
   });
 }
 

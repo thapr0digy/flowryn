@@ -91,9 +91,13 @@ export interface SchedTiming {
   wait_alert_ms: number;
   /** A host check result is reused this long. */
   host_cache_ms: number;
+  /** The Claude usage-limit pause expires after this, then one run probes it. */
+  usage_backoff_ms: number;
+  /** Each re-arm doubles the backoff, up to this. */
+  usage_backoff_max_ms: number;
 }
 
-export const DEFAULT_SCHED: SchedTiming = { pass_ms: 30_000, wait_alert_ms: 30 * 60_000, host_cache_ms: 5_000 };
+export const DEFAULT_SCHED: SchedTiming = { pass_ms: 30_000, wait_alert_ms: 30 * 60_000, host_cache_ms: 5_000, usage_backoff_ms: 15 * 60_000, usage_backoff_max_ms: 2 * 60 * 60_000 };
 
 const STAGE_ID = /^[a-z][a-z0-9-]{0,23}$/;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;

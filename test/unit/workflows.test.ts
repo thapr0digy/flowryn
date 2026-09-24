@@ -12,6 +12,7 @@ import { changesTarget, flowLine, positionOf, stageInstructions } from "../../sr
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
 import { judgeHost, parseVmStat } from "../../src/sched/host.ts";
 import { fullPools, grantLeases, liveCounts, OverCapacity, releaseLeases, runLeases } from "../../src/sched/pools.ts";
+import { claimProbe, clearUsageLimit, noteUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
 const HOME = "/tmp/fw-m5";
@@ -78,6 +79,7 @@ describe("capacity, autonomy, the scheduler's clocks, the style block", () => {
     expect(() => defaultAutonomy(cfg('[autonomy]\ndefault = "yolo"'))).toThrow(FlowrynError);
     expect(schedTiming(cfg("")).wait_alert_ms).toBe(30 * 60_000);
     expect(schedTiming(cfg("[sched]\nwait_alert_ms = 500")).wait_alert_ms).toBe(500);
+    expect(schedTiming(cfg(""))).toMatchObject({ usage_backoff_ms: 15 * 60_000, usage_backoff_max_ms: 2 * 60 * 60_000 });
   });
 
   test("the style block is the design's by default, yours with text or file, and off with terse = false", () => {
@@ -229,6 +231,76 @@ describe("stage text", () => {
     const pos = positionOf(db, { id: "r1", workflow: "feature", stage: "qa" }, "ship");
     expect(pos).toMatchObject({ index: 2, last: false });
     expect(positionOf(db, { id: "r1", workflow: "nope", stage: "zzz" }, "scout").stage.id).toBe("investigate");
+    db.close();
+  });
+});
+
+function usageItem(db: Db): { state: string; line: string; resolved_by: string | null } {
+  return db.query("SELECT state, line, resolved_by FROM items WHERE kind = 'usage_limit'").get() as { state: string; line: string; resolved_by: string | null };
+}
+
+function usageEvents(db: Db): string[] {
+  return (db.query("SELECT kind FROM events WHERE kind LIKE 'sched.usage%' ORDER BY seq").all() as { kind: string }[]).map((e) => e.kind);
+}
+
+describe("the Claude usage-limit pause (design section 16)", () => {
+  const BACKOFF = { usage_backoff_ms: 1_000, usage_backoff_max_ms: 3_000 };
+
+  test("it expires after the backoff and lets exactly one probe through; a rate_limit after expiry re-arms it, doubling to the max", () => {
+    const db = scratchDb();
+    const M = 60_000;
+    const minutes = { usage_backoff_ms: 15 * M, usage_backoff_max_ms: 60 * M };
+    const t0 = new Date(2026, 8, 24, 10, 0).getTime();
+    expect(usageGate(db, t0, "r1")).toBe("open");
+    expect(tx(db, () => noteUsageLimit(db, "r1", "429", t0, minutes))).toBe(true);
+    expect(tx(db, () => noteUsageLimit(db, "r2", "429", t0 + M, minutes))).toBe(false);
+    expect(usagePause(db)).toMatchObject({ since: t0, until: t0 + 15 * M, backoff_ms: 15 * M, probe: null });
+    expect(usageItem(db).line).toContain("until 10:15");
+    expect(usageItem(db).line).toContain(RESUME_COMMAND);
+    expect(usageGate(db, t0 + 15 * M - 1, "r1")).toBe("paused");
+    expect(usageGate(db, t0 + 15 * M, "r1")).toBe("probe");
+    tx(db, () => claimProbe(db, "r1", t0 + 15 * M));
+    expect(usageGate(db, t0 + 16 * M, "r1")).toBe("open");
+    expect(usageGate(db, t0 + 16 * M, "r2")).toBe("paused");
+    expect(usageGate(db, t0 + 16 * M, null)).toBe("paused");
+    // The probe hits the limit again: the next backoff, the same P1 with the new expiry.
+    expect(tx(db, () => noteUsageLimit(db, "r1", "429", t0 + 20 * M, minutes))).toBe(true);
+    expect(usagePause(db)).toMatchObject({ since: t0, until: t0 + 50 * M, backoff_ms: 30 * M, probe: null });
+    expect(usageItem(db)).toMatchObject({ state: "open" });
+    expect(usageItem(db).line).toContain("until 10:50");
+    expect(usageGate(db, t0 + 49 * M, "r1")).toBe("paused");
+    tx(db, () => noteUsageLimit(db, "r1", "429", t0 + 50 * M, minutes));
+    expect(usagePause(db)!.backoff_ms).toBe(60 * M);
+    tx(db, () => noteUsageLimit(db, "r1", "429", t0 + 110 * M, minutes));
+    expect(usagePause(db)!.backoff_ms).toBe(60 * M);
+    expect((db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'usage_limit'").get() as { n: number }).n).toBe(1);
+    db.close();
+  });
+
+  test("a probe that died, or outlived the backoff, frees the probe for another run", () => {
+    const db = scratchDb();
+    tx(db, () => noteUsageLimit(db, "r1", "429", 0, BACKOFF));
+    tx(db, () => claimProbe(db, "r1", 1_000));
+    expect(usageGate(db, 1_500, "r2")).toBe("paused");
+    expect(usageGate(db, 2_000, "r2")).toBe("probe");
+    db.query("UPDATE runs SET liveness = 'dead' WHERE id = 'r1'").run();
+    expect(usageGate(db, 1_500, "r2")).toBe("probe");
+    db.close();
+  });
+
+  test("a normal Stop after the probe, or you, lifts it: the P1 resolves and the event says who", () => {
+    const db = scratchDb();
+    tx(db, () => noteUsageLimit(db, "r1", "429", 0, BACKOFF));
+    expect(tx(db, () => clearUsageLimit(db, "a turn of r1 ended normally", 2_000))).toBe(true);
+    expect(usagePause(db)).toBeNull();
+    expect(usageGate(db, 2_000, "r2")).toBe("open");
+    tx(db, () => noteUsageLimit(db, "r2", "429", 3_000, BACKOFF));
+    expect(usagePause(db)).toMatchObject({ since: 3_000, backoff_ms: 1_000 });
+    expect(tx(db, () => clearUsageLimit(db, "lifted by you", 3_100, "cli"))).toBe(true);
+    expect(tx(db, () => clearUsageLimit(db, "again", 3_200, "cli"))).toBe(false);
+    expect(usageEvents(db)).toEqual(["sched.usage_limit", "sched.usage_resumed", "sched.usage_limit", "sched.usage_resumed"]);
+    expect((db.query("SELECT source FROM events WHERE kind = 'sched.usage_resumed' ORDER BY seq DESC LIMIT 1").get() as { source: string }).source).toBe("cli");
+    expect(usageItem(db)).toMatchObject({ state: "resolved" });
     db.close();
   });
 });

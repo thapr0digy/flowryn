@@ -15,6 +15,7 @@ import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
+import { schedTiming } from "../config/workflows.ts";
 
 /**
  * The hook verbs (design section 12, role "hook"). A worker's Claude hooks
@@ -281,14 +282,14 @@ function signalVerb(
 /**
  * The Claude usage limit (design section 16), seen by any Claude session,
  * worker or leader: a turn that ends in StopFailure with error rate_limit
- * pauses Claude work; a turn that ends normally, or Claude's own
+ * pauses Claude work (or re-arms an expired pause); a turn that ends normally, or Claude's own
  * quota_auto_resume_fired notification, lifts the pause. Call inside the
  * hook's transaction; returns what changed, for the reply.
  */
 export function usageSignal(ctx: HandlerCtx, harness: "claude" | "pi", who: string, signal: { stop?: boolean; error?: string | null; details?: string | null; notification?: string | null }): "paused" | "resumed" | null {
   if (harness !== "claude") return null;
   const now = ctx.now();
-  if (signal.error === "rate_limit") return noteUsageLimit(ctx.db, who, sanitizeUsage(signal.details), now) ? "paused" : null;
+  if (signal.error === "rate_limit") return noteUsageLimit(ctx.db, who, sanitizeUsage(signal.details), now, schedTiming(ctx.config())) ? "paused" : null;
   if (signal.stop || signal.notification === "quota_auto_resume_fired") return clearUsageLimit(ctx.db, signal.stop ? `a turn of ${who} ended normally` : `Claude resumed ${who} after the reset`, now) ? "resumed" : null;
   if (signal.notification?.startsWith("quota_auto_resume_")) appendEvent(ctx.db, { source: "hook", kind: "sched.usage_notice", payload: { who, notification: signal.notification }, ts: now });
   return null;
