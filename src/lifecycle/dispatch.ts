@@ -5,8 +5,9 @@ import { hashToken, mintToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import { findOpenItem, openItem } from "../attention/items.ts";
-import { resolveTool, type FlowrynConfig } from "../config/config.ts";
-import { workersConfig } from "../config/workers.ts";
+import type { FlowrynConfig } from "../config/config.ts";
+import { herdrConfig, workersConfig } from "../config/workers.ts";
+import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -17,6 +18,7 @@ import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
 import { mintTaskId } from "./ids.ts";
+import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { openRunForTask } from "./runs.ts";
@@ -27,7 +29,7 @@ export type TaskKind = (typeof TASK_KINDS)[number];
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
 /** tasks-axi keeps the backlog readable; the full text lives in the run's task.md. */
-const MAX_BACKLOG_BODY = 4_000;
+export const MAX_BACKLOG_BODY = 4_000;
 const TRAILING_TAG = /\((?:kind|repo|priority|since|done|merged|hold|hold-kind|hold-until|blocked-by|pr|report): [^)]*\)\s*$/i;
 
 /** The first line of the body, as a backlog title tasks-axi accepts. */
@@ -89,26 +91,35 @@ function recordTangle(deps: StartDeps, project: ProjectRow, branch: string | nul
 }
 
 /**
+ * Herdr is unreachable, so nothing can start (design section 16): the refusal,
+ * with the episode noted as holding work up, and its P1 if it is due.
+ */
+function herdrRefusal(deps: StartDeps, message: string, detail: string): FlowrynError {
+  tx(deps.db, () => {
+    noteHerdrNeeded(deps.db, detail, "cli", deps.now());
+    alertHerdrIfDue(deps.db, herdrConfig(deps.config()).unreachable_alert_ms, deps.now());
+  });
+  return new FlowrynError("herdr_unavailable", message, "flowryn doctor");
+}
+
+/**
  * Can a worker start on this project now? Herdr reachable, the harness
  * installed with a passing contract for its version, and the primary checkout
  * on its default branch (the base the worktree branches from).
  */
 export async function checkStart(deps: StartDeps, project: ProjectRow, harness: HarnessId): Promise<{ version: string; base: string }> {
   const runtime = deps.runtime();
-  if (!runtime) throw new FlowrynError("herdr_unavailable", "Herdr is not configured, so no worker can start", "flowryn doctor");
+  if (!runtime) throw herdrRefusal(deps, "Herdr is not configured or its socket was not found, so no worker can start", "no Herdr socket");
   try {
     await runtime.ping();
   } catch (error) {
-    throw new FlowrynError("herdr_unavailable", `Herdr is not reachable (${(error as Error).message}), so no worker can start`, "flowryn doctor");
+    throw herdrRefusal(deps, `Herdr is not reachable (${(error as Error).message}), so no worker can start`, (error as Error).message);
   }
-  const binary = resolveTool(deps.config(), harness);
-  if (!binary) throw new FlowrynError("tool_missing", `${harness} is not installed or not in [tools]`, "flowryn init");
-  const version = await deps.harnessVersion(harness, binary);
-  if (!version) throw new FlowrynError("tool_missing", `cannot read the ${harness} version from ${binary} --version`);
-  const passed = deps.db.query("SELECT 1 FROM harness_contracts WHERE harness = ?1 AND version = ?2").get(harness, version);
-  if (!passed) {
-    throw new FlowrynError("contract_unverified", `no passing contract run for ${harness} ${version}`, `run the contract suite: flowryn doctor --contracts --harness ${harness}`);
-  }
+  tx(deps.db, () => noteHerdrUp(deps.db, "cli", deps.now()));
+  // The installed version, checked at every dispatch; an untested one refuses and opens its P1 (sections 5 and 16).
+  const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
+  if (check.state !== "verified") throw harnessRefusal(check);
+  const version = check.version;
   const branch = await deps.git(project.path, ["branch", "--show-current"]);
   if (branch !== project.default_branch) {
     recordTangle(deps, project, branch || null);

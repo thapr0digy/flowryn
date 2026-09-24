@@ -36,6 +36,8 @@ export interface RunContext {
   readOnly: string[];
   /** The Claude plugin holding the stage skills (design section 11); Pi reads the SKILL.md a stage names. */
   stagePlugin?: string;
+  /** The prompt a resume starts with, when not the plain "continue" (a relaunch under a changed contract). */
+  resumePrompt?: string;
 }
 
 export interface PlanFile {

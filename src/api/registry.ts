@@ -7,6 +7,8 @@ import { STAGE_VERBS } from "../lifecycle/stages.ts";
 import { GATE_VERBS } from "../policy/gates.ts";
 import { SCHED_VERBS } from "../sched/verbs.ts";
 import { LEADER_RUN_VERBS } from "../lifecycle/leader-verbs.ts";
+import { DIVERGENCE_VERBS } from "../lifecycle/divergences.ts";
+import { PROMOTE_VERBS } from "../lifecycle/promote.ts";
 import { CONTRACT_VERBS } from "../contracts/verbs.ts";
 import { systemVerbs } from "../daemon/system-verbs.ts";
 import { LEASE_VERBS } from "../lease/verbs.ts";
@@ -22,6 +24,8 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...GATE_VERBS,
   ...SCHED_VERBS,
   ...LEADER_RUN_VERBS,
+  ...DIVERGENCE_VERBS,
+  ...PROMOTE_VERBS,
   ...WORKER_VERBS,
   ...TODO_VERBS,
   ...PROJECT_VERBS,

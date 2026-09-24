@@ -57,7 +57,7 @@ export const piAdapter: HarnessAdapter = {
 
   /** --session-id with the id Flowryn chose at launch reopens the session (M0 p10). */
   resume(run, config) {
-    return plan(run, config, RESUME_PROMPT, false);
+    return plan(run, config, run.resumePrompt ?? RESUME_PROMPT, false);
   },
 
   /** Pi asks only when the worktree has project resources, and the extension answers for this one process (M0 p11). */

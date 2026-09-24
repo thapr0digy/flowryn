@@ -107,6 +107,9 @@ const workerToken = mintToken("run");
     ).run(home, hashToken(workerToken), now);
   });
   db.close();
+  // Its task is In flight in the backlog, as a dispatch leaves it: the reconciler's invariant pass holds.
+  const added = Bun.spawnSync([which("tasks-axi"), "add", "lab-billing-q4", "Lab billing migration", "--kind", "ship", "--repo", "lab", "--start", "--file", join(home, "data", "backlog.md"), "--json"], { stdin: "ignore" });
+  if (added.exitCode !== 0) throw new Error(`tasks-axi add failed: ${added.stdout.toString()}`);
 }
 const env: Record<string, string> = {};
 for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FLOWRYN_") && k !== "CLAUDECODE" && !k.startsWith("CLAUDE_CODE_")) env[k] = v;

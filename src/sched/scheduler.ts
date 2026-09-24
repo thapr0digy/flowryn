@@ -6,9 +6,10 @@ import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type Wo
 import { tx, type Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import type { HarnessId } from "../harness/types.ts";
+import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, type StartDeps } from "../lifecycle/dispatch.ts";
+import { gateHarness, unverifiedVersion } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
@@ -40,8 +41,8 @@ export interface SchedulerDeps {
   /** Start or resume a worker in the background (the launcher). */
   launch(runId: string, mode: LaunchMode): void;
   isLaunching(runId: string): boolean;
-  /** Stop the run's worker process by its recorded identity (a stage that starts a fresh worker). */
-  exitWorker(runId: string): Promise<void>;
+  /** Stop the run's worker process by its recorded identity (a fresh stage worker, a relaunch); whether it is gone. */
+  exitWorker(runId: string): Promise<{ ok: boolean; detail?: string }>;
   /** A steer is waiting for this run's worker. */
   notify(runId: string): void;
   startDeps: StartDeps;
@@ -223,6 +224,8 @@ export class Scheduler {
     const capacity = capacityConfig(config);
     const usage = c.run.harness === "claude" ? usageGate(db, now(), c.run.id) : "open";
     if (usage === "paused") return false;
+    // A grant that launches a worker checks the installed harness version first (design section 5).
+    if (c.run.pending_launch && !(await this.harnessVerified(c.run.harness, config))) return false;
     if (c.needs.length > 0) {
       host.verdict ??= await this.hostVerdict(capacity.host);
       if (!host.verdict.ok) return false;
@@ -244,8 +247,46 @@ export class Scheduler {
     if (!activated) return false;
     if (activated.steer) this.deps.notify(c.run.id);
     if (activated.launch === "stage") await this.freshWorker(c.run.id);
+    else if (activated.launch === "relaunch") await this.relaunchWorker(c.run.id);
     else if (activated.launch) this.deps.launch(c.run.id, activated.launch);
     return true;
+  }
+
+  /**
+   * A relaunch (a scout promoted in place): the live worker exits by its
+   * identity, and its own session resumes in the same worktree, so its context
+   * survives while its contract, task file and sandbox settings change.
+   */
+  private async relaunchWorker(runId: string): Promise<void> {
+    const { db, now } = this.deps;
+    this.relaunching.add(runId);
+    try {
+      const exited = await this.deps.exitWorker(runId);
+      // Never a second process in the same session: a worker that did not stop is tried again on the next pass.
+      if (!exited.ok) {
+        this.deps.log(`sched: relaunch of ${runId} waits: the worker did not exit (${exited.detail ?? "unverified"})`);
+        return;
+      }
+      tx(db, () => {
+        db.query("UPDATE runs SET proc_pid = NULL, proc_start = NULL, proc_exe = NULL, busy_until = NULL, idle_since = NULL, liveness = 'starting', updated_at = ?2 WHERE id = ?1").run(runId, now());
+        const run = getRunWithPolicy(db, runId);
+        appendEvent(db, { source: "daemon", kind: "run.relaunch", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null, session: run?.agent_session ?? null }, ts: now() });
+      });
+      this.deps.launch(runId, "relaunch");
+    } finally {
+      this.relaunching.delete(runId);
+    }
+  }
+
+  /** The harness gate before a launch: an untested version waits, with its P1; a check that fails counts as unverified. */
+  private async harnessVerified(harness: HarnessId, config: FlowrynConfig): Promise<boolean> {
+    try {
+      const check = await gateHarness(this.deps.db, config, harness, this.deps.startDeps.harnessVersion, "daemon", "launch", this.deps.now);
+      return check.state === "verified";
+    } catch (error) {
+      this.deps.log(`sched: checking ${harness} failed: ${(error as Error).message}`);
+      return false;
+    }
   }
 
   /** A stage with fresh = true: the old worker exits, and a new session starts in the same worktree. */
@@ -369,7 +410,15 @@ export class Scheduler {
       if (open) return;
       const count = (db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead') AND waiting_since <= ?1").get(t - threshold) as { n: number }).n;
       const host = hostState(db);
-      const why = host && !host.ok ? `host check: ${host.reason}` : usageLimitSince(db) !== null ? "the Claude usage limit" : "full capacity pools";
+      const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
+      const why =
+        host && !host.ok
+          ? `host check: ${host.reason}`
+          : usageLimitSince(db) !== null
+            ? "the Claude usage limit"
+            : untested
+              ? `${untested[0]} ${untested[1]} has no passing contract, or full capacity pools`
+              : "full capacity pools";
       tx(db, () => {
         const event = appendEvent(db, { source: "daemon", kind: "sched.waiting", taskId: oldest.task_id, payload: { runs: count, oldest_ms: t - oldest.waiting_since, why }, ts: t });
         openItem(db, { kind: "capacity_wait", eventSeq: event.seq, line: `${count} run(s) waiting over ${Math.round(threshold / 60_000)}m for capacity (${why}); oldest ${taskTitle(db, oldest.task_id)}; flowryn capacity`, now: t });

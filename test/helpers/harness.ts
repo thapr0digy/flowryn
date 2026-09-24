@@ -79,6 +79,12 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   const gh = join(bin, "gh-absent");
   writeFileSync(gh, "#!/bin/sh\necho 'gh is not available in tests' >&2\nexit 1\n");
   chmodSync(gh, 0o755);
+  // Nor a real harness: unless a test brings its own stand-in, `claude` and `pi` answer no version (so the
+  // daemon's startup check of the harnesses in use finds none installed, whatever this machine has on PATH).
+  const noHarness = join(bin, "harness-absent");
+  writeFileSync(noHarness, "#!/bin/sh\necho 'no harness in this test' >&2\nexit 1\n");
+  chmodSync(noHarness, 0o755);
+  const harnessStandIns = ["claude", "pi"].filter((name) => !new RegExp(`^${name}\\s*=`, "m").test(extraConfig)).map((name) => `${name} = ${JSON.stringify(noHarness)}`);
   const lines = [
     `data_dir = ${JSON.stringify(dataDir)}`,
     `state_dir = ${JSON.stringify(stateDir)}`,
@@ -91,14 +97,16 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     ...(git ? [`git = ${JSON.stringify(git)}`] : []),
     `no_mistakes = ${JSON.stringify(noMistakes)}`,
     `gh = ${JSON.stringify(gh)}`,
+    ...harnessStandIns,
     extraConfig,
   ];
   // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.
   if (!extraConfig.includes("[github]")) lines.push("[github]", 'api_url = "http://127.0.0.1:9"');
   // Nor this machine's memory and load: the host check passes unless a test sets its own (a probe, or limits).
   if (!extraConfig.includes("[capacity.host]")) lines.push("[capacity.host]", "min_free_mem_gb = 0", "max_load_per_core = 1000");
-  // Tests never reach a real Herdr: without a socket of their own they get one that does not exist.
-  if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`);
+  // Tests never reach a real Herdr: without a socket of their own they get one that does not exist. Such a
+  // home has no Herdr by design, so its "Herdr unreachable" P1 (design section 16) is kept out of its items.
+  if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`, "unreachable_alert_ms = 86400000");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
   // No daemon the tests start ever delivers a notification (FLOWRYN_NOTIFY=off, which startDaemon requires);
@@ -143,8 +151,14 @@ export interface SeededRun {
   token: string;
 }
 
-/** A project, task policy and live run, as M2's dispatch will create them. */
+/**
+ * A project, task policy and live run, as a dispatch creates them, with the
+ * task In flight in the backlog: the reconciler's invariant (design section 8)
+ * holds, so a daemon started on this home raises no divergence about it.
+ */
 export function seedRun(h: TestHome, taskId = "web-fix-a1", runId = "r01TEST"): SeededRun {
+  const added = Bun.spawnSync([realTasksAxi(), "add", taskId, taskId, "--kind", "ship", "--repo", "web", "--start", "--file", h.backlog, "--json"], { stdin: "ignore", env: process.env });
+  if (added.exitCode !== 0) throw new Error(`tasks-axi add ${taskId} failed: ${added.stdout.toString()}${added.stderr.toString()}`);
   const token = mintToken("run");
   const db = h.db();
   const now = Date.now();

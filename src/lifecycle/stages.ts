@@ -160,8 +160,8 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
   grantLeases(db, run.id, run.task_id, pos.stage.id, neededPools(db, run, pos), caps, now);
   const launch = run.pending_launch;
   const starting = run.stage_state === "waiting";
-  // A fresh launch reads its stage from the task file, and a fresh stage worker its note too: the launcher clears it.
-  const noteInFile = launch === "fresh" || launch === "stage";
+  // A fresh launch reads its stage from the task file, and a fresh stage worker or a relaunched one its note too: the launcher clears it.
+  const noteInFile = launch === "fresh" || launch === "stage" || launch === "relaunch";
   let steer: string | null = null;
   if (starting && opts.steer !== false && run.stage_note !== null && !noteInFile) {
     const text = [run.stage_note, stageInstructions(pos, stageTextContext(db, config, run))].filter((t) => t.length > 0).join(" ");
@@ -170,7 +170,7 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
   db.query(
     `UPDATE runs SET stage_state = CASE WHEN stage_state = 'waiting' THEN 'active' ELSE stage_state END,
        stage_started_at = CASE WHEN stage_state = 'waiting' THEN ?2 ELSE stage_started_at END,
-       waiting_since = NULL, pending_launch = CASE WHEN ?3 = 'stage' THEN 'stage' ELSE NULL END,
+       waiting_since = NULL, pending_launch = CASE WHEN ?3 IN ('stage','relaunch') THEN ?3 ELSE NULL END,
        stage_note = CASE WHEN ?4 = 1 THEN stage_note ELSE NULL END, updated_at = ?2 WHERE id = ?1`,
   ).run(run.id, now, launch ?? "", noteInFile ? 1 : 0);
   if (starting) appendEvent(db, { source: "daemon", kind: "stage.started", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, index: pos.index, pools: pos.stage.pools, steer, launch }, ts: now });

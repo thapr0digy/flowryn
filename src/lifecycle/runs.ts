@@ -63,7 +63,12 @@ export interface RunRow {
 
 export const STAGE_STATES = ["waiting", "active", "review", "done"] as const;
 export type StageState = (typeof STAGE_STATES)[number];
-export type PendingLaunch = "fresh" | "resume" | "stage";
+/**
+ * fresh: the first launch; resume: a dead worker's session again; stage: a new
+ * session for a stage with fresh = true; relaunch: the live worker stops and
+ * its own session resumes under a new contract (a scout promoted in place).
+ */
+export type PendingLaunch = "fresh" | "resume" | "stage" | "relaunch";
 
 export interface RunWithPolicy extends RunRow {
   project_id: string;
@@ -135,7 +140,7 @@ export function holdReason(text: string): string {
 }
 
 /** Put the task back in Queued with a parked hold (design section 8; M0 t02: reopen, then hold). */
-function parkTask(db: Db, taskId: string, reason: string, now: number): void {
+export function parkTask(db: Db, taskId: string, reason: string, now: number): void {
   recordIntent(db, { file: "backlog", verb: "reopen", taskId, positional: [taskId], now });
   recordIntent(db, { file: "backlog", verb: "hold", taskId, positional: [taskId], flags: { reason: holdReason(reason), kind: "parked" }, now });
 }
@@ -163,11 +168,15 @@ export function failRun(db: Db, run: RunRow, reason: string, source: EventSource
   run.liveness = "dead";
 }
 
-/** Cancelled with your consent (design section 8). Call inside a transaction. */
-export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSource, now: number): void {
+/**
+ * Cancelled with your consent (design section 8). The task is parked back in
+ * Queued, unless `park: false`: your own backlog edit already says where it
+ * goes (a divergence resolved with accept-edit). Call inside a transaction.
+ */
+export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSource, now: number, opts: { park?: boolean } = {}): void {
   if (isTerminal(run.state)) return;
   db.query("UPDATE runs SET state = 'cancelled', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL, pending_launch = NULL WHERE id = ?1").run(run.id, now);
-  parkTask(db, run.task_id, `cancelled: ${reason}`, now);
+  if (opts.park !== false) parkTask(db, run.task_id, `cancelled: ${reason}`, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.cancelled", now);
   appendEvent(db, { source, kind: "run.cancelled", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, null, "run.cancelled", now);

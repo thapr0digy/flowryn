@@ -27,7 +27,7 @@ M1 builds section 17's "M1 · Core" of [`design-v3.html`](design-v3.html). This 
 - **Deleting a just-added task is your edit.** A missing task counts as a deletion, not an erased `add`, unless the file rolled back as above. Undoing only adds is never a rollback, even of several at once and even to the exact bytes from before them, because tasks-axi's `add` inserts one line and deleting those lines by hand produces the same bytes. Each add a read deletes and keeps deleted is recorded as an `intent.undone` event ("add undone by edit"), so you can see it and add it again. Precedence: an `add` goes back only on the read that removed its task. A deletion an earlier read already accepted stays deleted, even when a later read rolls the file back to bytes from before that add; the rest of that rollback is still re-applied. A task with a live run is never re-applied; a hand edit to it opens a divergence instead.
 - **Follow-up for M3:** `todo rm`/`todo edit` and a task remove verb, so a mistaken add can be taken back without editing the file.
 - Titles are compared with PR URLs stripped, because `done --pr` appends them (M0 finding 7).
-- A hand edit that moves or removes the task of a live run opens a divergence (`higher: run`, `lower: backlog`) and a P1 item, and leaves the run untouched. `flowryn divergence resolve` arrives with runs in M2.
+- A hand edit that moves or removes the task of a live run opens a divergence (`higher: run`, `lower: backlog`) and a P1 item, and leaves the run untouched. `flowryn divergence resolve` arrived in the v1 completion pass ([M5 notes](m5-notes.md#divergences-section-8)).
 
 ## To-dos
 

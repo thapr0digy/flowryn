@@ -22,10 +22,10 @@ afterEach(async () => {
   for (const env of envs.splice(0)) await env.cleanup();
 });
 
-function items(env: FleetEnv, runId: string): { kind: string; lane: string; state: string; line: string }[] {
+function items(env: FleetEnv, runId: string): { id: string; kind: string; lane: string; state: string; line: string }[] {
   const db = env.h.db();
   try {
-    return db.query("SELECT kind, lane, state, line FROM items WHERE run_id = ?1 ORDER BY opened_at").all(runId) as { kind: string; lane: string; state: string; line: string }[];
+    return db.query("SELECT id, kind, lane, state, line FROM items WHERE run_id = ?1 ORDER BY opened_at").all(runId) as { id: string; kind: string; lane: string; state: string; line: string }[];
   } finally {
     db.close();
   }
@@ -36,21 +36,33 @@ async function backlogTask(env: FleetEnv, taskId: string) {
   return tasks.find((t) => t.id === taskId) ?? null;
 }
 
+/** A scout's report was delivered: the run landed with it, and is cleaned once its worktree is gone (design section 8). */
+const delivered = (r: { state: string }) => r.state === "landed" || r.state === "cleaned";
+
 describe("a scout end to end", () => {
   test(
-    "claude: launch, worker-start with isolation, deliver --report, ready, backlog updated",
+    "claude: launch, worker-start with isolation, deliver --report, landed and cleaned, the task done with its report",
     async () => {
       const env = await fleet();
-      const { task, run } = await env.dispatch("Scout the auth module\nFAKE: sleep 300\nFAKE: deliver summary.md auth is fine");
-      const ready = await env.waitRun(run, (r) => r.state === "ready", "the run to be ready");
-      expect(ready.pane_id).not.toBeNull();
-      expect(ready.proc_pid).not.toBeNull();
-      expect(ready.worker_started_at).not.toBeNull();
+      const { task, run } = await env.dispatch("Scout the auth module\nFAKE: sleep 300\nFAKE: deliver summary.md auth is fine\nFAKE: sleep 30000");
+      const landed = await env.waitRun(run, delivered, "the run to land with its report");
+      expect(landed.pane_id).not.toBeNull();
+      expect(landed.proc_pid).not.toBeNull();
+      expect(landed.worker_started_at).not.toBeNull();
+      const cleaned = await env.waitRun(run, (r) => r.state === "cleaned", "the scout cleaned up");
+      expect(cleaned.cleanup).toBe("done");
       const events = env.events(run);
-      expect(events).toEqual(expect.arrayContaining(["run.dispatched", "run.pane", "run.launching", "run.launched", "run.worker_started", "run.delivered"]));
+      expect(events).toEqual(expect.arrayContaining(["run.dispatched", "run.pane", "run.launching", "run.launched", "run.worker_started", "run.delivered", "run.landed", "cleanup.done", "run.cleaned"]));
+      // The worktree went through the cleanup guard (a clean scout), the worker was stopped, its branch deleted.
+      expect(existsSync(cleaned.worktree_path)).toBe(false);
+      await waitUntil(() => env.herdr.harnessPid(cleaned.pane_id!) === null, 10_000, "the worker gone");
+      expect(Bun.spawnSync(["git", "-C", env.repo, "rev-parse", "--verify", "--quiet", `refs/heads/${cleaned.branch}`]).exitCode).not.toBe(0);
+      // Its report stays to be read: the P1 is open until dismissed, and fleet says so.
       expect(items(env, run).find((i) => i.kind === "report_ready")).toMatchObject({ lane: "P1", state: "open" });
-      await waitUntil(async () => (await backlogTask(env, task))?.state === "in_flight", 10_000, "the backlog task in flight");
-      await waitUntil(async () => ((await backlogTask(env, task))?.links ?? []).includes(`report:data/${task}/report.md`), 10_000, "the report link in the backlog");
+      const fleetView = await env.json(["fleet"]);
+      expect((fleetView.reply.data as { fleet: { id: string; needs: string }[] }).fleet.find((f) => f.id === task)).toMatchObject({ needs: "read" });
+      await waitUntil(async () => (await backlogTask(env, task))?.state === "done", 10_000, "the backlog task done");
+      expect((await backlogTask(env, task))?.links ?? []).toContain(`report:data/${task}/report.md`);
       expect(readFileSync(join(env.h.dataDir, task, "report.md"), "utf8")).toContain("auth is fine");
       // The pane got the run's identity through pane.split env (M0 h04), and Herdr never saw a control character.
       const split = env.herdr.calls.find((c) => c.method === "pane.split")!;
@@ -59,7 +71,28 @@ describe("a scout end to end", () => {
       const start = env.herdr.calls.find((c) => c.method === "agent.start")!;
       expect((start.params.args as string[]).every((a) => !/[\n\t]/.test(a))).toBe(true);
       expect(start.params.kind).toBe("claude");
-      await env.waitRun(run, (r) => r.liveness === "idle", "the worker to go idle");
+      expect(env.run(run).liveness).toBe("dead");
+      // Read, it needs nothing more.
+      const report = items(env, run).find((i) => i.kind === "report_ready")!;
+      expect((await env.json(["dismiss", report.id])).code).toBe(0);
+      const after = await env.json(["fleet"]);
+      expect((after.reply.data as { fleet: { id: string; needs: string }[] }).fleet.find((f) => f.id === task)).toMatchObject({ state: "cleaned", needs: "-" });
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "a scout that leaves uncommitted work lands with its report, but the guard refuses its cleanup: a P1, the worktree kept",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Scout\nFAKE: scratch debug.log some scratch output\nFAKE: deliver notes.md found it\nFAKE: sleep 30000");
+      await env.waitRun(run, (r) => r.state === "landed" && r.cleanup === "refused", "the refused cleanup");
+      const refused = items(env, run).find((i) => i.kind === "cleanup_refused")!;
+      expect(refused.line).toStartWith("Report delivered, but cleanup refused");
+      expect(refused.line).toContain("(dirty)");
+      expect(existsSync(env.run(run).worktree_path)).toBe(true);
+      // The task is not done until the worktree goes: landed is not cleaned.
+      expect((await backlogTask(env, task))?.state).toBe("in_flight");
     },
     { timeout: 45_000 },
   );
@@ -93,7 +126,7 @@ describe("pi worker", () => {
       await env.waitRun(run, (r) => r.liveness === "busy", "the pi worker to be busy");
       const id = await steer(env, run, "also check eviction");
       await waitSteerAcked(env, run, id);
-      await env.waitRun(run, (r) => r.state === "ready", "the pi run to be ready");
+      await env.waitRun(run, delivered, "the pi run to land with its report");
       const start = env.herdr.calls.find((c) => c.method === "agent.start")!;
       expect(start.params.kind).toBe("pi");
       const args = start.params.args as string[];
@@ -191,7 +224,7 @@ describe("recovery", () => {
       const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
       const firstPid = busy.proc_pid;
       env.herdr.killHarness(busy.pane_id!, "SIGKILL");
-      const ready = await env.waitRun(run, (r) => r.state === "ready", "the resumed run to deliver", 30_000);
+      const ready = await env.waitRun(run, delivered, "the resumed run to deliver", 30_000);
       expect(ready.resume_count).toBe(1);
       expect(ready.proc_pid).not.toBe(firstPid);
       expect(env.events(run)).toEqual(expect.arrayContaining(["run.auto_resumed", "run.launched"]));
@@ -238,7 +271,7 @@ describe("recovery", () => {
       }, 20_000, "the spooled deliver");
       expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
       await env.restartDaemon();
-      const ready = await env.waitRun(run, (r) => r.state === "ready", "the spooled deliver to be ingested");
+      const ready = await env.waitRun(run, delivered, "the spooled deliver to be ingested");
       expect(ready.resume_count).toBe(0);
       expect(ready.proc_pid).toBe(busy.proc_pid);
       // Spool ingest runs before the reconciler's startup pass (design section 6, steps 3 then 6).
@@ -308,7 +341,7 @@ describe("deliver matches the task kind", () => {
       const victim = join(env.h.home, "victim.txt");
       writeFileSync(victim, "untouched\n");
       const { task, run } = await env.dispatch(`Scout\nFAKE: symlink report.md ${victim}\nFAKE: deliver notes.md the real report`);
-      await env.waitRun(run, (r) => r.state === "ready", "the run to be ready");
+      await env.waitRun(run, delivered, "the run to land with its report");
       expect(readFileSync(victim, "utf8")).toBe("untouched\n");
       const artifact = join(env.h.dataDir, task, "report.md");
       expect(lstatSync(artifact).isSymbolicLink()).toBe(false);

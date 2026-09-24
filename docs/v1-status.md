@@ -1,6 +1,6 @@
 # Flowryn v1 status
 
-v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the M0 spikes. This file lists every v1 item of the design: done, with the milestone and pull request that delivered it, or not built, with the reason. Each milestone's notes ([M1](m1-notes.md), [M2](m2-notes.md), [M3](m3-notes.md), [M4](m4-notes.md), [M5](m5-notes.md)) record the choices it made and its live results; [`m0-verdicts.md`](m0-verdicts.md) records the spikes.
+v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the M0 spikes, completed by one more pass for the items the milestones left open. This file lists every v1 item of the design: done, with the milestone and pull request that delivered it, or not built, with the reason. Each milestone's notes ([M1](m1-notes.md), [M2](m2-notes.md), [M3](m3-notes.md), [M4](m4-notes.md), [M5](m5-notes.md)) record the choices it made and its live results; the completion pass is the last section of the [M5 notes](m5-notes.md#the-v1-completion-pass); [`m0-verdicts.md`](m0-verdicts.md) records the spikes.
 
 | Milestone | Pull request |
 |---|---|
@@ -9,7 +9,8 @@ v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the 
 | M2 · Runtime, workers, reconciler | https://github.com/thapr0digy/flowryn/pull/4 |
 | M3 · Leaders and attention | https://github.com/thapr0digy/flowryn/pull/5 |
 | M4 · Delivery and policy | https://github.com/thapr0digy/flowryn/pull/6 |
-| M5 · Workflows, capacity, autonomy | the pull request that adds this file |
+| M5 · Workflows, capacity, autonomy | https://github.com/thapr0digy/flowryn/pull/7 |
+| v1 completion · the items M1 to M5 left not built or partly built | the pull request that marks them Done here |
 
 ## The milestone items (section 17)
 
@@ -60,20 +61,20 @@ The milestone lists name the main work. These are the other v1 items in sections
 | Section | Item | Status |
 |---|---|---|
 | 5 | Contract tests gate every harness version; dispatch refuses an untested one (`contract_unverified`) | Done (M2 #4) |
-| 5 | The daemon checks the installed harness version at startup | Not built: the check runs at every dispatch (and every auto-dispatched phase), not at daemon startup or before a resume. |
+| 5 | The daemon checks the installed harness version at startup | Done (v1 completion): at startup for every harness in use, at every dispatch, before every resume (yours or the reconciler's one automatic resume, which waits for a passing contract) and before every launch the scheduler grants; an untested version refuses (`contract_unverified`) and opens one P1 with the doctor command |
 | 6 | The four automatic actions (resume once, re-ring, clean up after a proven merge, re-arm monitoring) | Done (M2 #4, M4 #6) |
 | 6 | Judgment pointers: idle 15 min, busy with no hook 30 min, divergence, orphan | Done (M2 #4) |
 | 7 | The threat model's mitigations (role tokens, deny rules, `/dev/tty` challenge, single-use approvals bound to the head) | Done (M1 #3, M3 #5, M4 #6) |
 | 8 | One store per fact; the intent journal; hand edits win unless they contradict a live run | Done (M1 #3) |
-| 8 | `flowryn divergence resolve <id> keep-run\|accept-edit` | Not built: no milestone list names it, and M2 deferred it. A divergence's P1 can be closed with `flowryn dismiss`, but the divergence row stays unresolved and nothing re-applies the run's backlog state. A follow-up. |
-| 8 | The reconciler's invariant pass: a task is In flight if and only if it has a non-terminal run | Not built (M2 deferred it). The backlog watcher flags hand edits against live runs as divergences (M1), which covers the common case; a task that drifts another way is not caught. A follow-up. |
-| 8 | A scout's run landed and cleaned, its task done with `--report` | Not built: a scout that delivered its report stays `ready` (its P1 `report_ready` can be dismissed); nothing moves the run to `cleaned` or the task to Done. A follow-up, together with `promote`. |
+| 8 | `flowryn divergence resolve <id> keep-run\|accept-edit` | Done (v1 completion): keep-run writes the runs' state back into the backlog through the journal; accept-edit lets your edit stand and cancels a live run (worker stopped, worktree kept); the divergence row and its P1 close together. A divergence between evidence sources takes keep-run only. `flowryn show d<N>` shows one |
+| 8 | The reconciler's invariant pass: a task is In flight if and only if it has a non-terminal run | Done (v1 completion): on every full reconcile pass, against a backlog snapshot that matches the file; a violation either way is a backlog divergence (P1), one that holds again closes by itself |
+| 8 | A scout's run landed and cleaned, its task done with `--report` | Done (v1 completion): a verified report lands the run (a scout's workflow ends in no gate), the daemon cleans the worktree up through the cleanup guard, and the task is done with `--report`; the `report_ready` P1 stays open until the report is read |
 | 9 | Delivery classes, lanes, ordering, aging, limits and the listed races | Done (M3 #5) |
 | 10 | Lease, claim, handover, read-only sessions | Done (M3 #5) |
 | 11 | Workflows, gates, capacity, autonomy, the style block, the skills | Done (M5) |
 | 11, 16 | Pause while a Claude usage limit is active; P1 once | Done (M5): from Claude's `StopFailure` `rate_limit` and `quota_auto_resume_fired` hook signals; the pause also expires after a backoff with one probe run, and `flowryn capacity resume --harness claude` lifts it (docs/m5-notes.md) |
 | 12 | Leader verbs: dispatch, plan, steer, answer, dismiss, merge, decline, gate pass/changes, cleanup, fleet, show, brief, todo, project, leader status/claim | Done (M1 to M5) |
-| 12 | `flowryn promote` (a scout promoted to a ship) | Not built: no milestone list names it. Dispatch a ship that names the scout's report meanwhile. A follow-up. |
+| 12 | `flowryn promote` (a scout promoted to a ship) | Done (v1 completion): a scout at work keeps its run, worker, worktree and session (the worker is relaunched into its own session under a ship's contract); a scout whose run is over becomes a ship on the same task with a new run that names its report |
 | 12 | Worker verbs: report, ask, inbox, ack, stage done, deliver, fail | Done (M1 to M5) |
 | 12 | Human verbs: approve [--gate], board, init, doctor, daemon, lead, leader claim --session, config | Done (M1 to M5) |
 | 12 | Spool when the daemon is down; read-only reads; exit 69 for leader mutations | Done (M1 #3) |
@@ -81,9 +82,9 @@ The milestone lists name the main work. These are the other v1 items in sections
 | 14 | Every safeguard in the table, with Firstmate's fixtures ported | Done (M1 #3 to M5; capacity caps and human-bound gates in M5) |
 | 15 | `flowryn init`: preflight, data and state directories, tasks-axi files, tool paths, leaders, workers, service | Done (M1 #3; the leader files are written by `flowryn lead` on every launch, M3 #5) |
 | 16 | Failure modes with their recovery: daemon crash, second daemon, Herdr restart, worker death, never-reporting worker, trust wedge, stuck busy, hook timeout, compaction, tasks-axi failure, hand edits, unproven merge, no-mistakes down, usage limit, stale CLI, corrupt database, host pressure, leftover Docker environments, a sleeping laptop | Done (M1 to M5) |
-| 16 | Herdr unreachable: "P1 once" | Partly: dispatch refuses (`herdr_unavailable`), liveness reads `unknown` and launches retry, but no P1 opens. A follow-up. |
-| 16 | GitHub unavailable or rate-limited: "P1 only if a merge is waiting" | Partly: the watchers back off and a merge refuses (`forge_unavailable`), but no P1 opens for a waiting merge. A follow-up. |
-| 16 | Harness updated to an untested version: "P1 with the doctor command" | Partly: dispatch refuses with `contract_unverified` and the doctor command as help, and a ready plan phase opens a P1 (`phase_blocked`); a leader's dispatch gets the refusal, not a P1. |
+| 16 | Herdr unreachable: "P1 once" | Done (v1 completion): one P1 per outage, once it has lasted `[herdr] unreachable_alert_ms` (60 s) while a run is open or something it refused waits; it resolves when Herdr answers; the daemon also finds a Herdr that starts after it |
+| 16 | GitHub unavailable or rate-limited: "P1 only if a merge is waiting" | Done (v1 completion): one P1 per outage while a delivered PR waits at the merge gate or a merge waits for its proof, naming them; it resolves when GitHub answers or no merge waits |
+| 16 | Harness updated to an untested version: "P1 with the doctor command" | Done (v1 completion): the startup check, a dispatch, a resume and a launch each open it, once per version; a passing contract run resolves it |
 
 ## Not in v1
 

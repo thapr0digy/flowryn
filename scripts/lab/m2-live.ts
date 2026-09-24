@@ -241,15 +241,20 @@ async function contracts(): Promise<void> {
   }
 }
 
+/** A scout's verified report lands its run, which the daemon then cleans up (the v1 completion pass; docs/m5-notes.md). */
+function landedWithReport(r: { state: string }): boolean {
+  return r.state === "landed" || r.state === "cleaned";
+}
+
 async function scouts(): Promise<void> {
   const runs: ["pi" | "claude", { task: string; run: string }, number][] = [["pi", await dispatch("pi", piScout([]), "live pi scout"), 180_000]];
   if (claudeProject) runs.push(["claude", await dispatch("claude", CLAUDE_SCOUT, "live claude scout"), 420_000]);
   else record("scouts", "claude", false, "skipped: needs --claude-project <a checkout Claude trusts>");
   for (const [harness, run, timeout] of runs) {
     try {
-      const done = await waitRun(run.run, `the ${harness} scout's report`, timeout, (r) => r.state === "ready");
+      const done = await waitRun(run.run, `the ${harness} scout's report`, timeout, landedWithReport);
       const report = readFileSync(join(home, "data", run.task, "report.md"), "utf8").trim();
-      record("scouts", harness, true, `${run.task} ready after ${Math.round((done.updated_at - done.started_at) / 1000)}s; report: ${report.split("\n")[0]!.slice(0, 120)}`);
+      record("scouts", harness, true, `${run.task} landed after ${Math.round((done.updated_at - done.started_at) / 1000)}s; report: ${report.split("\n")[0]!.slice(0, 120)}`);
     } catch (error) {
       record("scouts", harness, false, (error as Error).message);
     }
@@ -263,7 +268,7 @@ async function killWorker(): Promise<void> {
     await Bun.sleep(4_000);
     log(`kill-worker: SIGKILL to the harness group ${busy.proc_pid} of ${task}`);
     await terminate({ pid: busy.proc_pid!, start: busy.proc_start!, exe: busy.proc_exe! }, { group: true, graceMs: 0 });
-    const done = await waitRun(run, "the resumed worker to deliver", 240_000, (r) => r.state === "ready");
+    const done = await waitRun(run, "the resumed worker to deliver", 240_000, landedWithReport);
     const events = runEvents(run);
     const ok = done.resume_count === 1 && done.proc_pid !== busy.proc_pid && events.includes("run.auto_resumed");
     record("kill-worker", "resumed once and finished", ok, `resume_count ${done.resume_count}, pid ${busy.proc_pid} -> ${done.proc_pid}`);
@@ -286,7 +291,7 @@ async function killDaemon_(): Promise<void> {
     }
     log("kill-daemon: the deliver is spooled; restarting the daemon");
     await startDaemon();
-    const done = await waitRun(run, "the spooled deliver", 60_000, (r) => r.state === "ready");
+    const done = await waitRun(run, "the spooled deliver", 60_000, landedWithReport);
     const until2 = Date.now() + 30_000;
     while (!runEvents(run).includes("run.reattached") && Date.now() < until2) await Bun.sleep(500);
     const events = runEvents(run);

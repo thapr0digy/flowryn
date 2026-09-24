@@ -110,3 +110,83 @@ Latest runs, 2026-09-24, Herdr 0.7.5 (protocol 17), Claude Code 2.1.281 with Hai
 | 2 to 4 live workers at once (per flow) | peak 2 | peak 2, in both runs |
 
 Two things an earlier run found are still covered by the script. The lab pane is narrow, so the board can wrap "(qa review)" across two lines: the run finds the task's line and logs the list when the label is split. A design's one-phase plan numbers its phases after the design's own task ("Phase 2 of 2"), not "Queued task … started by itself".
+
+## The v1 completion pass
+
+After M5, one pass built every v1 item [`v1-status.md`](v1-status.md) still listed as not built or partly built. This section records where the design left room and what the pass chose.
+
+### The harness version gate (sections 5 and 16)
+
+- `src/lifecycle/harness-gate.ts` checks the installed version (the `[tools]` binary's `--version`, cached until the binary changes) against `harness_contracts`. The daemon checks every harness in use (named by a project, an open run or a queued plan phase) at startup, before its first reconcile pass; dispatch checks it as before; so does `flowryn resume`, the reconciler before its one automatic resume and before retrying a launch that never finished, and the scheduler before any grant that launches a worker (a first launch after a capacity wait, a resume, a fresh stage worker, a relaunch).
+- An untested version refuses (`contract_unverified`, the doctor command as help) and opens one P1 `harness_unverified` naming `flowryn doctor --contracts --harness <h>`, once per harness version: a dismissed one is not reopened for the same version, and a later untested version opens its own. It resolves when the installed version is verified (a startup check, or `contracts.record` for that version).
+- **The automatic resume waits rather than fails.** A worker that dies on an untested version has its one resume claimed at once (so a second death is still "a failure needing you"), is marked dead, gives its slots back, and waits with `pending_launch = resume`; the scheduler launches it, into the same session, once the version passes. `flowryn capacity` says why it waits.
+
+### Divergences (section 8)
+
+- A divergence is a **backlog divergence** when its lower source is the backlog: a hand edit the watcher saw, or a violation the invariant pass found. Only these have an edit to accept. `flowryn divergence resolve <id> keep-run|accept-edit` (`src/lifecycle/divergences.ts`):
+  - **keep-run** writes the runs' state back through the journal: a live run's task goes back In flight (`start`, or `add … --start` with the title and text it was dispatched with when you deleted it); a task with no live run gets what its last run left: `done` with its link for a cleaned run, parked (`reopen`, `hold --kind parked`) for a failed or cancelled one, `reopen` when Flowryn never ran it.
+  - **accept-edit** lets your edit stand. A live run is cancelled with its worker stopped and verified gone first, its worktree kept for `flowryn cleanup`, and no backlog write at all (not the parked hold a `cancel` adds). With no live run, nothing changes, and the invariant pass does not raise the same violation again while the task reads the same.
+- A divergence between evidence sources (GitHub against the worker, a process against its run, a pane label, Docker against a lease) takes only keep-run, which closes it with the run as it is; the same observation does not reopen it. accept-edit is `bad_args`. Those divergences also still close by themselves as before (a new delivery settles a GitHub one).
+- The row and its P1 always close together, with a `divergence.resolved` event naming the resolution and who chose it. A backlog divergence's P1 line names the command; `flowryn show d<N>` shows one.
+
+### The invariant pass (section 8)
+
+- `src/reconcile/invariant.ts` runs on every full reconcile pass (startup, reconnect, the steady pass), after the backlog watcher has diffed any unseen edit and only while the snapshot's hash matches the file. It reads the snapshot inside its transaction, which is where the journal marks an intent applied, and skips every task with a pending intent, so it never judges a state that is about to change.
+- A live run whose task is not In flight, or is missing, is a divergence (unless one is already open for that task); so is a task In flight with no live run. The watcher still flags a hand edit as it happens; the pass catches the rest, such as an edit to a run that already had a divergence of another kind open, or a task put In flight by hand.
+- A backlog divergence whose task agrees with the runs again closes by itself (resolution `agrees`): the reconciler seeing the resolution happen elsewhere (section 9).
+
+### Scouts land with their report (section 8)
+
+- **A scout's workflow ends in no gate, so its verified report lands it.** Section 8's table puts a delivered report in `ready`, but `ready` is where a ship waits for its merge gate; a scout has none, and M5 already refuses a scout workflow that ends in one. So `deliver --report` records the report, links it in the backlog and moves the run to `landed`, and the delivery watcher's pass cleans it up through the cleanup guard, as after a proven merge (a clean scout worktree is `scout_clean`): the worker stops, the worktree and branch go, the run is `cleaned`, and the task is done with `--report data/<task>/report.md`.
+- The `report_ready` P1 is not settled by the cleanup: it stays open until the report is read (`flowryn dismiss`, or a promotion), and `fleet` says `read` for the cleaned scout meanwhile. A scout that leaves uncommitted work is refused by the guard: it stays `landed`, its worktree kept, with a P1 ("Report delivered, but cleanup refused") naming `flowryn cleanup`.
+- A scout that delivered under an earlier version and sits in `ready` is landed by the delivery watcher's next pass. The delivery watcher ignores kicks until it has started, so a report ingested from the spool at startup is cleaned only after the reconciler's startup pass has reattached the worker.
+
+### `flowryn promote` (sections 4 and 12)
+
+- **In place means the same task**: it keeps its id, its backlog entry and its report, and takes the project's ship policy (delivery mode, yolo, workflow, or `--workflow`); `--sensitive` marks it. Two cases (`src/lifecycle/promote.ts`):
+  - **A scout at work** keeps its run, worker, worktree and branch. It cannot become a ship by a steer alone: its contract is in its system prompt and its Claude sandbox settings do not let it commit. So its run takes the ship workflow (frozen in `runs.workflow_def`), its first stage is requested with `pending_launch = relaunch`, and the scheduler stops the worker by its identity and resumes the same session (`claude --resume`, Pi's `--session-id`) under a ship's contract, sandbox settings and task file. The context it built survives; the task file carries the promotion: your words, what to keep on the branch (only the change, no scratch commits or debug output, a reproduced bug as a regression test) and the ship's delivery. A scout still waiting for its first launch simply launches as a ship.
+  - **A scout whose run is over** (cleaned, cancelled or failed) becomes a ship on the same task: it goes back In flight (a parked hold is lifted) and a new run starts in a fresh worktree from the default branch, checked as a dispatch is, with a task file that names the report and quotes the scout's task.
+- A landed scout still being cleaned up is `not_ready` until it is cleaned; a cancelled or failed scout whose worktree is still there is cleaned up first (`not_ready`, naming `flowryn cleanup`).
+
+### Herdr unreachable (section 16)
+
+- `src/reconcile/herdr-health.ts` keeps one outage episode in meta, from the first socket error (the event subscription failing to connect or closing, a dispatch's ping, a deferred launch) until Herdr answers again, so a daemon restart mid-outage continues it. Its one P1 `herdr_unreachable` opens once the episode has lasted `[herdr] unreachable_alert_ms` (60 s) and something needs Herdr: an open run, or a dispatch, launch or plan phase it held up. A Herdr that is merely not running while the fleet is idle raises nothing until you dispatch. The P1 resolves when the subscription connects again; a dismissed one is not reopened in the same episode.
+- The subscription retries with its backoff (1 s to 30 s) and, when no socket was found at startup (Herdr started after the daemon), looks for the session again each time, so the daemon no longer needs a restart to find Herdr.
+- Test homes without a fake Herdr set `unreachable_alert_ms` to a day: they have no Herdr by design.
+
+### GitHub unavailable or rate-limited (section 16)
+
+- `src/reconcile/forge-health.ts`: a failed read of the kinds that mean GitHub cannot be asked (unreachable or a 5xx, rate-limited, a refused token, nonsense answers) starts an outage; its one P1 `forge_unavailable` opens only while a merge waits on GitHub (a delivered PR at the merge gate, `ready`, or a merge waiting for its proof, `merging`), and names them. The delivery watcher's poll only runs over such ships, and a `flowryn merge` refused for the outage records it too. It resolves when GitHub answers again, or when no merge waits any more (then a merge that comes to wait in the same outage raises it again).
+
+### The contract suite's host check
+
+Found live in this pass: `flowryn doctor --contracts` could not pass on a busy laptop. Its scratch daemon took M5's default host check (8 GB free), so on a machine with 7.5 GB available the scheduler never granted the suite's one worker and the suite timed out at its first step. The suite launches exactly the worker you asked for, so its scratch home now caps the worker pool at 1 and refuses only when the machine is truly out of room (1 GB free, a load of 8 per core) (`src/contracts/runner.ts`). M5's live run had seeded its contract records instead of running the suite.
+
+### Protocol and version
+
+`PROTO` is 4 (new verbs: `divergence resolve`, `promote`), so an older CLI in a running worker gets exit 76. The version is 0.5.0.
+
+### Tests
+
+- `test/integration/harness-gate.test.ts`: the startup P1 once per version (dismissed, restarted, a new version, a passing run), dispatch's refusal, and a worker that dies on an untested version: no resume, `flowryn resume` refused, the capacity view's reason, then the resume into the same session once the contract passes.
+- `test/integration/divergence.test.ts`: keep-run after a hand move to Done and after a hand deletion (the task added back as dispatched), accept-edit (the run cancelled, the worker gone, the backlog as edited, no parked hold), an undone edit closing by itself, the invariant pass on a task put In flight by hand (keep-run to Queued; accept-edit not raised again) and on a run the watcher could not flag, and a pane-label divergence that takes keep-run only.
+- `test/integration/workers.test.ts`: the scout end to end now lands, is cleaned (worker stopped, worktree and branch gone), its task done with the report, its P1 open until dismissed; a scout that leaves scratch work is refused cleanup with the scout's own P1.
+- `test/integration/promote.test.ts`: a scout at work promoted in place (the same session relaunched with `--resume`, a ship's contract and task file), then building, delivering and merging; a cleaned scout promoted as a task (a new run naming the report); the refusals.
+- `test/integration/outages.test.ts`: Herdr stopped with a run open (one P1 over many retries, dispatch refused, resolved on reconnect, a second outage a second P1) and with nothing open (no P1 until a refused dispatch); GitHub down while a PR waits (one P1, merge refused, resolved when it answers), rate-limited then no merge waiting (resolved), and down with no merge waiting (nothing).
+- Test homes now get stand-in `claude` and `pi` binaries that answer no version unless a test brings its own, so the startup check never runs a real harness from PATH; and `seedRun` adds its task to the backlog In flight, so a seeded run satisfies the invariant.
+
+### Live run
+
+`scripts/lab/v1-live.sh [--keep] [phase ...]` (phases `harness`, `scout`, `promote`, `divergence`, `herdr`) runs in a Firstmate lab session (`fm-herdr-lab.sh`) with Pi on the offline scripted provider and a scratch agent dir; no Claude model is called (the harness phase reads `claude --version` only). The projects are fresh clones in a scratch home that the run removes. The `herdr` phase comes last because it stops its own lab session through the helper, which then tears it down and checks the default session unchanged.
+
+Latest run, 2026-09-24, **24/24 passed**: Herdr 0.7.5 (protocol 17), Pi 0.87.1, Claude Code 2.1.281 (version only), lab session `fm-lab-flowryn-v1-gaps-90352-1207`.
+
+| Phase | Result |
+|---|---|
+| harness | The startup check read Claude Code 2.1.281 and Pi 0.87.1, both untested in the scratch database, and opened one P1 each naming the doctor command; a dispatch on Claude was refused `contract_unverified`; Pi's contract suite passed (all steps, 37 s) and its record resolved Pi's P1. |
+| scout | A Pi scout delivered its report, landed, and was cleaned up through the guard (worktree removed, worker stopped) 5 s later; the task was Done with its report link, and `report_ready` stayed open. |
+| promote | A Pi scout promoted in place during its first tool call: the worker stopped, and its session (the same id) resumed as a ship under the ship contract, went on with its next step, committed, delivered locally, merged under yolo and was cleaned; the task read Done, kind ship. |
+| divergence | A hand move to Done against a live run opened `d1`; keep-run wrote `start` back and the task was In flight again. A task put In flight by hand was raised by the invariant pass (`d2`); accept-edit kept it, and it was not raised again. |
+| herdr | The lab session stopped under two open runs: one P1 8 s later ("Herdr closed the event subscription"), dispatch refused `herdr_unavailable`, and after 40 s of retries still one P1 and one episode. |
+
+The first attempts found the contract suite's host check above, and a timing slip in the script (the Pi Launcher answers `--version` a few seconds after the daemon is up, so the run now waits for both startup checks).
