@@ -45,7 +45,7 @@ describe("compiled binary", () => {
       expect(added.code).toBe(0);
       expect(readText(h.todos)).toContain("from the binary");
       const status = decode(run(bin, ["daemon", "status"]).stdout) as { daemon: string; version: string };
-      expect(status).toMatchObject({ daemon: "up", version: "0.2.0" });
+      expect(status).toMatchObject({ daemon: "up", version: VERSION });
     } finally {
       daemon.kill("SIGTERM");
       expect(await daemon.exited).toBe(0);

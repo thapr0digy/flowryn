@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashToken } from "../../src/api/auth.ts";
@@ -11,6 +11,7 @@ import { tokenSource } from "../../src/forge/github.ts";
 import { summarize, type PullRequest } from "../../src/forge/types.ts";
 import { gatedCommands } from "../../src/leader/hooks.ts";
 import { ATTEMPT_WINDOW_MS, ChallengeStore, findAttempt, insertApproval, recordAttempt } from "../../src/policy/approvals.ts";
+import { runCleanup } from "../../src/policy/cleanup.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { checkGate, chooseApproval, type MergeFacts } from "../../src/policy/merge.ts";
 import { isActive, ownParkedRun, parseNmStatus } from "../../src/policy/nomistakes.ts";
@@ -208,6 +209,33 @@ describe("no-mistakes status (read-only)", () => {
     expect(await ownParkedRun(git, dir, parseNmStatus(parked("fm/other", head)))).toBe(false);
     expect(await ownParkedRun(git, dir, parseNmStatus(parked("fm/x", "deadbeef")))).toBe(false);
     expect(await ownParkedRun(git, dir, parseNmStatus(parked("fm/x", head).replace("awaiting_approval", "running").replace(/awaiting_agent.*\n/, "").replace("gate: review\n", "")))).toBe(false);
+  });
+});
+
+describe("the cleanup procedure", () => {
+  test("a step that cannot run refuses with guard_error and leaves the worktree", async () => {
+    dir = mkdtempSync(join(tmpdir(), "fw-cleanup-"));
+    const logged: string[] = [];
+    const outcome = await runCleanup(
+      { guard: { mode: "local-only", kind: "ship", worktree: dir, branch: "fm/x", defaultBranch: "main", repo: null, recordedPrUrl: null, discardApproved: false }, primary: dir },
+      {
+        git: async () => {
+          throw new Error("posix_spawn EPERM");
+        },
+        forge: null,
+        webUrl: "https://github.com",
+        lsof: null,
+        noMistakes: null,
+        ps: async () => "",
+        config: cleanupConfig(parseConfig('data_dir = "/tmp/d"\nstate_dir = "/tmp/s"\n', "/tmp/h")),
+        log: (line) => logged.push(line),
+      },
+    );
+    expect(outcome).toMatchObject({ outcome: "refused", reason: "guard_error", branchDeleted: false });
+    expect(outcome.detail).toContain("posix_spawn EPERM");
+    expect(outcome.detail).toContain("the worktree is kept");
+    expect(logged.join("\n")).toContain("posix_spawn EPERM");
+    expect(existsSync(dir)).toBe(true);
   });
 });
 

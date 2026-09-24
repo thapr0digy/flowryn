@@ -348,7 +348,7 @@ class LiveLeader {
   async merge(task: string): Promise<string> {
     if (this.harness === "claude") {
       await this.send(`Use the Bash tool to run exactly this command, once: flowryn merge ${task}. Then reply with the one line it printed about the merge.`);
-      return this.approveOnScreen(/Do you want to proceed|needs your word/, 240_000);
+      return this.approveOnScreen(/Do you want to proceed/, 240_000);
     }
     const script = scripted ? `FLOWRYN-SCRIPT: tool flowryn_merge {"task":"${task}"} ;; say merged` : `Call the flowryn_merge tool once with task ${task}, then reply ok.`;
     await this.send(script);
@@ -508,7 +508,9 @@ async function main(): Promise<number> {
       await waitRun(run, `${task} delivered`, 480_000, (r) => r.state === "ready");
       record("claude-ask", "a real Claude worker delivered its branch", true, task, started);
       const shown = await leader.merge(task);
-      record("claude-ask", "Claude prompted before the merge ran", /flowryn merge/.test(shown), shown.split("\n").filter((l) => /merge|proceed|word/i.test(l)).slice(0, 3).join(" | ").slice(0, 300), started);
+      // Claude's own permission dialog (M0 c08); the screen is kept in the run's home. The recorded channel is the proof it was this prompt.
+      writeFileSync(join(home, `screen-${task}.txt`), shown);
+      record("claude-ask", "Claude prompted before the merge ran", /Do you want to proceed/.test(shown), shown.split("\n").filter((l) => /proceed|flowryn merge|Bash|word/i.test(l)).slice(-4).join(" | ").slice(0, 400), started);
       await landed("claude-ask", task, run, "claude-ask", started);
       record("claude-ask", "the commit is on the project's main", mustGit(["show", `${runPrefix}main:m4-live-claude-ask.txt`], trustedPrimary!) === "claude-ask", `${runPrefix}main has m4-live-claude-ask.txt`, started);
     });
@@ -538,6 +540,7 @@ async function main(): Promise<number> {
       const { task, run } = await dispatch("local", "pi", piShip("pi-confirm", "local"), "m4 live pi-confirm");
       await waitRun(run, `${task} delivered`, 180_000, (r) => r.state === "ready");
       const shown = await leader.merge(task);
+      writeFileSync(join(home, `screen-${task}.txt`), shown);
       record("pi-confirm", "the flowryn_merge tool asked with ctx.ui.confirm", shown.includes(`Merge ${task}?`), shown.split("\n").filter((l) => /Merge|head|branch/.test(l)).slice(0, 3).join(" | ").slice(0, 300), started);
       await landed("pi-confirm", task, run, "pi-confirm", started);
       record("pi-confirm", "the commit is on the project's main", mustGit(["show", "main:pi-confirm.txt"], local.path) === "pi-confirm", "local main has pi-confirm.txt", started);

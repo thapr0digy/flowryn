@@ -16,8 +16,9 @@ import { reapUnder } from "./reap.ts";
  * worker stops; leaked processes are reaped by identity; and last the
  * worktree is removed, with --force only for an approved discard, and its
  * branch deleted. Each refusal leaves the worktree, its branch and its HEAD
- * exactly as they were. fixtures/cleanup-order checks this order and every
- * refusal against any implementation.
+ * exactly as they were. An unexpected error at any step is a refusal too
+ * (`guard_error`). fixtures/cleanup-order checks this order and every refusal
+ * against any implementation.
  */
 
 export type CleanupReason =
@@ -28,7 +29,8 @@ export type CleanupReason =
   | "lsof_failed"
   | "identity_unverified"
   | "survivors"
-  | "remove_failed";
+  | "remove_failed"
+  | "guard_error";
 
 export interface CleanupRequest {
   guard: GuardInput;
@@ -108,6 +110,19 @@ async function lockGate(req: CleanupRequest, deps: CleanupDeps, steps: string[])
 
 export async function runCleanup(req: CleanupRequest, deps: CleanupDeps): Promise<CleanupOutcome> {
   const steps: string[] = [];
+  try {
+    return await cleanupInOrder(req, deps, steps);
+  } catch (error) {
+    // A step that cannot run at all (a tool that will not start, say) refuses: never a half-known success, and never silence.
+    const message = error instanceof Error ? error.message : String(error);
+    steps.push("guard_error");
+    deps.log(`the cleanup stopped at an unexpected error: ${error instanceof Error ? (error.stack ?? message) : message}`);
+    const where = existsSync(req.guard.worktree) ? "the worktree is kept for inspection or a retry" : "the worktree is already gone";
+    return { outcome: "refused", reason: "guard_error", detail: `the cleanup stopped at an unexpected error (${message}); ${where}`, verdict: null, lock: "none", aborted: null, reaped: [], branchDeleted: false, discardedHead: null, steps };
+  }
+}
+
+async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: string[]): Promise<CleanupOutcome> {
   const result = (outcome: CleanupOutcome["outcome"], reason: CleanupReason, detail: string, extra: Partial<CleanupOutcome> = {}): CleanupOutcome => ({
     outcome,
     reason,

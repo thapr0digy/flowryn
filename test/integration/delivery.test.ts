@@ -84,11 +84,16 @@ describe("the named-head gate at deliver", () => {
       expect(errorCode(refused.reply)).toBe("approval_required");
 
       expect((await e.approve(task)).ok).toBe(true);
+      const shown = await e.fleet.json(["show", task]);
+      expect((shown.reply.data as { delivery: Record<string, string> }).delivery).toMatchObject({ pr: "https://github.com/acme/web/pull/1", pr_state: "open", checks: "green (1)" });
+      expect((shown.reply.data as { delivery: Record<string, string> }).delivery.approval).toContain("cli-tty");
       const merged = await e.fleet.json(["merge", task]);
       expect(merged.code).toBe(0);
       expect(merged.reply.data).toMatchObject({ state: "merged", channel: "cli-tty" });
       await waitCleaned(e, run, task);
       expect(git(e.fleet.origin!, ["show", "main:fix.txt"])).toBe("fixed");
+      const after = await e.fleet.json(["show", task]);
+      expect((after.reply.data as { delivery: Record<string, string> }).delivery.merge).toMatch(/^mg1 merged at [0-9a-f]{12} via cli-tty/);
       expect(openItems(e, "pr_ready")).toHaveLength(0);
     },
     { timeout: 90_000 },

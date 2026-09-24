@@ -8,9 +8,11 @@ M1 (core) is built: one signed binary that is both `flowryn` and `flowrynd`, the
 
 M2 (runtime, workers, reconciler) is built: the Herdr runtime, Claude Code and Pi worker adapters with their contract suites, the isolation assertion, the worker verbs, steers with re-ring, and the reconciler (evidence ranking, reattach, husks and resume-once).
 
-M3 (leaders and attention) is built: `flowryn lead` starts a Claude Code or Pi leader with its leader bridge (a leader-only hook set for Claude, a leader extension for Pi), both passing one shared bridge contract suite; the leader lease and handover; the lane table with items, presentations and notifications; the briefing with its morning section and to-dos; the read-only `flowryn board`; and `todo edit` and `todo rm`. Delivery and merge policy (M4), and workflows and capacity (M5) come next.
+M3 (leaders and attention) is built: `flowryn lead` starts a Claude Code or Pi leader with its leader bridge (a leader-only hook set for Claude, a leader extension for Pi), both passing one shared bridge contract suite; the leader lease and handover; the lane table with items, presentations and notifications; the briefing with its morning section and to-dos; the read-only `flowryn board`; and `todo edit` and `todo rm`.
 
-The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every M0 spike's verdict (Claude Code, Herdr, tasks-axi, no-mistakes and Pi), the tool versions tested, and each edit the verdicts made to the design. [`docs/m1-notes.md`](docs/m1-notes.md), [`docs/m2-notes.md`](docs/m2-notes.md) and [`docs/m3-notes.md`](docs/m3-notes.md) list the choices each milestone made where the design leaves room, and the live results of M2 and M3.
+M4 (delivery and policy) is built: ships deliver through no-mistakes, direct-PR or local-only, checked by the named-head gate; a GitHub watcher follows every delivered PR and its checks; merges go through the merge gate (red checks refused, one check waivable by you, the approval bound to the head) and count only once proven; your approval comes from Claude's own prompt, Pi's confirm, `flowryn approve` in your shell (a code read from `/dev/tty`) or the board's approve key; and landed work is cleaned up through the cleanup guard. Workflows, capacity and autonomy (M5) come next.
+
+The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every M0 spike's verdict (Claude Code, Herdr, tasks-axi, no-mistakes and Pi), the tool versions tested, and each edit the verdicts made to the design. [`docs/m1-notes.md`](docs/m1-notes.md), [`docs/m2-notes.md`](docs/m2-notes.md), [`docs/m3-notes.md`](docs/m3-notes.md) and [`docs/m4-notes.md`](docs/m4-notes.md) list the choices each milestone made where the design leaves room, and the live results of M2 to M4.
 
 ## Development
 
@@ -22,12 +24,13 @@ bun run typecheck                # tsc --noEmit
 bunx oxlint                      # lint (.oxlintrc.json); `bun run lint` runs the same
 bun test                         # unit and integration tests, including the kill -9 exit test
 bun run build                    # dist/flowryn plus the dist/flowrynd link, re-signed on macOS
-fixtures/cleanup-guard/run.sh    # the 21 cleanup-guard fixtures
+fixtures/cleanup-guard/run.sh --impl "bun $PWD/scripts/guard/landed-impl.ts"   # the 21 landed-work fixtures, against Flowryn's guard
+fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"   # the 23 cleanup-order fixtures (locks, reaping, parked runs)
 ```
 
-The tests start real daemons on Unix sockets, watch files with FSEvents and run the real tasks-axi, so run them outside any command sandbox. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the above on every pull request and on pushes to `main`.
+The tests start real daemons on Unix sockets, watch files with FSEvents, run the real tasks-axi and drive `flowryn approve` and the board through a pty (`script`), so run them outside any command sandbox. They never reach GitHub or the real no-mistakes: a local fake GitHub and a stand-in no-mistakes answer instead. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the above on every pull request and on pushes to `main`.
 
-The source layout follows the component table in section 4 of the design: `src/api` (gateway, tokens, idempotency, spool), `src/journal` (intent journal, backlog watcher), `src/lifecycle` (to-do, project, dispatch, launcher, steers, worker and hook verbs), `src/harness` (the Claude and Pi adapters and the Pi worker extension), `src/runtime` (the Herdr client and runtime, process identity), `src/reconcile`, `src/watch` (the Herdr subscription), `src/lease` (leader sessions and the lease), `src/attention` (lanes, presentations, the digest and briefing, notifications), `src/leader` (the leader side of the hook verbs), `src/bridges` (the Claude leader settings, the Pi leader extension, the leader skill), `src/contracts` (the harness contract suites and the leader bridge suite), `src/daemon`, `src/cli`, `src/db` (schema, migrations, events, backups), `src/transport`, `src/service` (launchd), `src/init` and `src/doctor`.
+The source layout follows the component table in section 4 of the design: `src/api` (gateway, tokens, idempotency, spool), `src/journal` (intent journal, backlog watcher), `src/lifecycle` (to-do, project, dispatch, launcher, steers, worker and hook verbs, delivery and landing), `src/harness` (the Claude and Pi adapters and the Pi worker extension), `src/runtime` (the Herdr client and runtime, process identity), `src/reconcile`, `src/watch` (the Herdr subscription, the GitHub and no-mistakes watchers), `src/forge` (the GitHub REST client), `src/policy` (approvals, the merge gate, the cleanup guard and cleanup order), `src/lease` (leader sessions and the lease), `src/attention` (lanes, presentations, the digest and briefing, notifications), `src/leader` (the leader side of the hook verbs), `src/bridges` (the Claude leader settings, the Pi leader extension, the leader skill), `src/contracts` (the harness contract suites and the leader bridge suite), `src/daemon`, `src/cli`, `src/db` (schema, migrations, events, backups), `src/transport`, `src/service` (launchd), `src/init` and `src/doctor`.
 
 The tests never touch a real Herdr or harness: runtime tests use a fake Herdr (`test/helpers/fake-herdr.ts`) that runs a fake worker through the real `flowryn` hook and worker verbs, and the leader tests use a fake Claude leader that runs the real leader settings file's hooks and a fake Pi that loads the real leader extension. The live runs against Herdr, Claude Code and Pi are the contract suites, `scripts/lab/m2-live.sh` and `scripts/lab/m3-live.sh` (see "Running the live runs" below).
 
@@ -58,6 +61,11 @@ flowryn brief                       # the briefing again
 flowryn dismiss <item>              # close an item that needs nothing more
 flowryn leader status               # which session leads; leader claim [--session <id>] moves the lease
 flowryn todo edit <id> --title <t>  # or --body-file -; the due date stays. todo rm <id> removes one
+flowryn approve <task>              # your word for a merge: shows the PR, head and checks, reads a code from /dev/tty
+flowryn approve <task> --allow-red lint   # waive exactly one failing check; --discard approves throwing work away
+flowryn merge <task>                # through the merge gate; it counts only once GitHub (or local main) proves it
+flowryn decline <task> --body-file -  # send a delivered ship back with your words
+flowryn cleanup <task> [--discard]  # remove a landed, cancelled or failed task's worktree, through the cleanup guard
 flowryn help                        # every verb; `flowryn <verb> --help` for one
 ```
 
@@ -65,9 +73,9 @@ A leader is the one conversation you talk to. `flowryn lead` runs Claude Code wi
 
 Output is TOON by default and JSON with `--json`. Errors print `error`, `code` and `help`, and the exit code says what happened: 0 ok, 2 policy refusal, 3 validation, 4 not found, 69 daemon down, 75 spooled, 76 protocol mismatch, 77 role refused. When the daemon is down, reads come from the database read-only with a banner, worker verbs spool to disk and are delivered at the next start, and leader mutations exit 69.
 
-Configuration lives in `~/.flowryn/config.toml` (`FLOWRYN_HOME` moves the whole home, which tests use). The daemon reloads it on `SIGHUP`, and keeps the old configuration when the new one fails validation. M2 adds `[herdr]` (`socket` or `session`), `[workers]` (`worktree_root`, `branch_prefix`), `[workers.claude]` (`model`, `effort`, `permission_mode`, `pretrust`, `config_dir`, `extra_args`), `[workers.pi]` (`model`, `effort`, `agent_dir`, `session_dir`, `extensions`, `no_extensions`, `no_skills`, `no_context_files`, `extra_args`, `env`) and `[reconcile]` (the reconciler's clocks, for tests and the lab); [`docs/m2-notes.md`](docs/m2-notes.md) explains each. M3 adds `[notify]` (`macos`, `herdr`, `min_interval_min`, `p0_coalesce_s`, `max_triggered_turns_per_hour`, `p0_renotify_min`) and `[leader]` (the leader's clocks, for tests and the lab); [`docs/m3-notes.md`](docs/m3-notes.md) explains them.
+Configuration lives in `~/.flowryn/config.toml` (`FLOWRYN_HOME` moves the whole home, which tests use). The daemon reloads it on `SIGHUP`, and keeps the old configuration when the new one fails validation. M2 adds `[herdr]` (`socket` or `session`), `[workers]` (`worktree_root`, `branch_prefix`), `[workers.claude]` (`model`, `effort`, `permission_mode`, `pretrust`, `config_dir`, `extra_args`), `[workers.pi]` (`model`, `effort`, `agent_dir`, `session_dir`, `extensions`, `no_extensions`, `no_skills`, `no_context_files`, `extra_args`, `env`) and `[reconcile]` (the reconciler's clocks, for tests and the lab); [`docs/m2-notes.md`](docs/m2-notes.md) explains each. M3 adds `[notify]` (`macos`, `herdr`, `min_interval_min`, `p0_coalesce_s`, `max_triggered_turns_per_hour`, `p0_renotify_min`) and `[leader]` (the leader's clocks, for tests and the lab); [`docs/m3-notes.md`](docs/m3-notes.md) explains them. M4 adds `[github]` (`api_url`, `web_url`, `token_env`, `poll_ms`, `timeout_ms`, `merge_method`) and `[cleanup]` (the cleanup guard's clocks); [`docs/m4-notes.md`](docs/m4-notes.md) explains them. The daemon sends a GitHub token (from `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`) only to GitHub's own API.
 
-Workers call the same CLI from their pane, with the run's token: `report`, `ask`, `inbox`, `ack`, `deliver` and `fail`, and the `hook` verbs their Claude hooks or Pi extension call. Dispatch refuses a harness version that has no passing contract run, so run `flowryn doctor --contracts` after installing or updating Claude Code or Pi.
+Workers call the same CLI from their pane, with the run's token: `report`, `ask`, `inbox`, `ack`, `deliver` (`--report` for a scout; `--pr <url>` or `--local` for a ship, by the project's delivery mode) and `fail`, and the `hook` verbs their Claude hooks or Pi extension call. A merge needs your word: a Claude leader's `flowryn merge` puts Claude's own prompt in front of you, and a Pi leader merges through its `flowryn_merge` tool, which asks you with a confirm; or approve in your shell (`flowryn approve`) or on the board (`a`). Dispatch refuses a harness version that has no passing contract run, so run `flowryn doctor --contracts` after installing or updating Claude Code or Pi.
 
 ## Key choices
 
@@ -98,6 +106,17 @@ scripts/lab/m3-live.sh pi                                     # Pi only (the off
 ```
 
 It provisions a Herdr lab session through Firstmate's `fm-herdr-lab.sh` (or reuses `FLOWRYN_LAB_SESSION`), builds a scratch Flowryn home and daemon, starts two leaders of each harness in lab panes, types into them as you would, and removes everything at the end (`--keep` leaves the home). Claude leads from a linked worktree of the checkout you name, which Claude must already trust, on a `flowryn/contract-<runid>-leader` branch removed with its worktree on exit; `M3_CLAUDE_MODEL` defaults to `haiku`. Pi leads from a scratch directory with a scratch agent dir and the offline scripted provider; set `M3_PI_MODEL` (and `M3_PI_AGENT_DIR` with a copy of its `auth.json`) to use another model. Results print as PASS/FAIL lines and go to `spikes/.runs/m3-live-results.json`. Run it outside any command sandbox.
+
+### The M4 exit, live
+
+The M4 exit test runs in `bun test` against fake leaders, fake workers and a fake GitHub (`test/integration/m4-exit.test.ts`). The live run proves it against real leaders and workers in a Herdr lab session.
+
+```bash
+scripts/lab/m4-live.sh --claude-project "$PWD"               # every flow, with the harness contract suites first
+scripts/lab/m4-live.sh --seed-contracts pi-confirm board      # some flows; seed the contract record instead of running it
+```
+
+Flows: `claude-ask` and `cli-tty` on a Claude leader, `pi-confirm`, `board` and `forge` on a Pi leader. Each is one ship from dispatch to merged and cleaned. Local-only ships land for real; direct-PR and no-mistakes ships push to bare origins behind a fake GitHub the run serves on 127.0.0.1, so no GitHub repository is touched. Claude flows need `--claude-project <checkout>` (a checkout Claude already trusts): the run makes linked worktrees of it on `flowryn/contract-<runid>-…` branches and removes exactly those on exit. The run answers only the merge prompts under test (Claude's permission prompt, Pi's confirm), never a trust dialog. Results print as PASS/FAIL lines and go to `spikes/.runs/m4-live-results.json`. Run it outside any command sandbox.
 
 ## Running the M0 spikes
 
@@ -134,4 +153,4 @@ Pi spikes need no model account: every turn comes from an offline scripted provi
 
 Claude spikes use Haiku by default (`CLAUDE_SPIKE_MODEL`). The ask-prompt and steer spikes, and the auto-mode run in `c09`, default to Sonnet, because their outcome depends on the model. A full run makes real model calls: about two dozen short sessions.
 
-The cleanup-guard fixtures are separate: `fixtures/cleanup-guard/run.sh` builds and checks all 21 cases, and `run.sh --impl <cmd>` runs a guard implementation against them. See [`fixtures/cleanup-guard/README.md`](fixtures/cleanup-guard/README.md).
+The cleanup-guard fixtures are separate: `fixtures/cleanup-guard/run.sh` builds and checks all 21 landed-work cases, and `fixtures/cleanup-order/run.sh` the 23 cleanup-order cases (index locks, parked no-mistakes runs, leaked processes, the order of the steps); `run.sh --impl <cmd>` runs an implementation against either set. See [`fixtures/cleanup-guard/README.md`](fixtures/cleanup-guard/README.md) and [`fixtures/cleanup-order/README.md`](fixtures/cleanup-order/README.md).
