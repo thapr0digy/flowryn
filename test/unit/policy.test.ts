@@ -55,6 +55,11 @@ describe("the Claude PreToolUse gate finds the commands that need your word", ()
     expect(gatedCommands("flowryn show web-fix-a1 && flowryn fleet")).toEqual([]);
     expect(gatedCommands("git merge main")).toEqual([]);
   });
+
+  test("a captain answer is gated; a leader answer is not", () => {
+    expect(gatedCommands("flowryn decide k1 yes --by captain --body-file -")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --rationale fine")).toEqual([]);
+  });
 });
 
 describe("approvals", () => {

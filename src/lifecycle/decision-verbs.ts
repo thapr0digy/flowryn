@@ -1,10 +1,13 @@
+import { hashToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type Args, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { resolveItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
+import { getLease, getSession } from "../lease/lease.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
+import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { createStandaloneDecision, getDecision, type DecisionRow } from "./decisions.ts";
@@ -61,13 +64,34 @@ export function answerDecision(ctx: HandlerCtx, d: DecisionRow, a: { choice: str
   return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(ctx, d.task_id).map((t) => t.id) : [] };
 }
 
+export function decisionRef(id: string): string {
+  return `decision:${id}`;
+}
+
 /**
- * Where a captain answer came from. Task 5 adds Claude's prompt and Pi's
- * confirm; here: your own shell (the human role) or a refusal.
+ * Where a captain answer came from: Claude's own prompt (the attempt its
+ * PreToolUse hook recorded for this decision, never under bypassPermissions),
+ * the Pi leader's confirm (the lease's approval key), or your own shell.
+ * Anything else is refused: the leader cannot record your word by itself.
  */
-export function captainChannel(ctx: HandlerCtx, _d: DecisionRow, _typed: string, _args: Args): string {
+export function captainChannel(ctx: HandlerCtx, d: DecisionRow, typed: string, args: Args): string {
   if (ctx.caller.role === "human") return "shell";
-  throw new FlowrynError("approval_required", "a captain answer needs the user's word: Claude asks the user first; on Pi use the flowryn_decide tool; or the user runs flowryn decide in their own shell");
+  const help = `ask the user; Claude shows them flowryn decide ${d.id} … --by captain; on Pi use the flowryn_decide tool; or they run it in their own shell`;
+  const session = ctx.caller.role === "leader" && ctx.caller.session ? getSession(ctx.db, ctx.caller.session) : null;
+  const now = ctx.now();
+  if (session?.harness === "claude") {
+    const attempt = findAttempt(ctx.db, { session: session.session_id, action: "decide", task: typed, now });
+    if (!attempt || attempt.pr_url !== decisionRef(d.id)) throw new FlowrynError("approval_required", "no confirmed Claude prompt for this answer (under bypassPermissions there is none to trust)", help);
+    matchAttempt(ctx.db, attempt.id, now);
+    return "claude-ask";
+  }
+  if (session?.harness === "pi") {
+    const key = stringArg(args, "approval_key")?.trim();
+    const lease = getLease(ctx.db);
+    if (!key || lease.session_id !== session.session_id || !lease.approval_key_hash || hashToken(key) !== lease.approval_key_hash) throw new FlowrynError("approval_required", "no valid approval key: answer through the flowryn_decide tool, which asks the user first", help);
+    return "pi-confirm";
+  }
+  throw new FlowrynError("approval_required", "a captain answer needs the user's word", help);
 }
 
 const decisionAdd: VerbSpec = {

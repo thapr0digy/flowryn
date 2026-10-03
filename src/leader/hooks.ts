@@ -8,11 +8,14 @@ import { appendEvent } from "../db/events.ts";
 import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
 import { hashToken, mintToken } from "../api/auth.ts";
+import { decisionRef } from "../lifecycle/decision-verbs.ts";
+import { getDecision } from "../lifecycle/decisions.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { recordAttempt, type ApprovalAction } from "../policy/approvals.ts";
+import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
  * The leader side of the hook verbs (design sections 5, 9 and 10). The
@@ -295,18 +298,26 @@ export interface GatedCommand {
 const MERGE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+merge\s+([A-Za-z0-9][\w.-]*)/g;
 const DISCARD_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+cleanup\s+([A-Za-z0-9][\w.-]*)[^;&|\n]*?--discard\b/g;
 const GATE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+gate\s+pass\s+([A-Za-z0-9][\w.-]*)/g;
+const DECIDE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+decide\s+([kq]\d+)\s+([^\s;&|]+)[^;&|\n]*?--by\s+captain\b/g;
 
-/** The Flowryn commands in a shell line that need your word: merges, discards and review gate passes. */
+/** The Flowryn commands in a shell line that need your word: merges, discards, review gate passes and captain answers. */
 export function gatedCommands(command: string): GatedCommand[] {
   const found: GatedCommand[] = [];
   for (const match of command.matchAll(MERGE_COMMAND)) found.push({ action: "merge", task: match[1]! });
   for (const match of command.matchAll(DISCARD_COMMAND)) found.push({ action: "discard", task: match[1]! });
   for (const match of command.matchAll(GATE_COMMAND)) found.push({ action: "gate", task: match[1]! });
+  for (const match of command.matchAll(DECIDE_COMMAND)) found.push({ action: "decide", task: match[1]! });
   return found;
 }
 
 /** What the prompt names, from what flowrynd already knows (a hook must answer fast, so no network). */
-function promptFacts(ctx: HandlerCtx, gated: GatedCommand): { line: string; prUrl: string | null; head: string | null } {
+function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { line: string; prUrl: string | null; head: string | null } {
+  if (gated.action === "decide") {
+    const d = getDecision(ctx.db, gated.task);
+    if (!d || d.state !== "open") return { line: `record an answer to ${gated.task}: no open decision; it will be refused`, prUrl: null, head: null };
+    const choice = /flowryn\s+decide\s+[kq]\d+\s+([^\s;&|]+)/.exec(command)?.[1] ?? "?";
+    return { line: `RECORD as the user's own answer to ${d.id} ("${sanitizeLine(d.question, 120)}"): ${choice}`, prUrl: decisionRef(d.id), head: null };
+  }
   const run = findRun(ctx.db, gated.task);
   if (!run) return { line: `${gated.action} ${gated.task}: no such task; it will be refused`, prUrl: null, head: null };
   const title = taskTitle(ctx.db, run.task_id);
@@ -343,7 +354,7 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResu
   const now = ctx.now();
   const lines: string[] = [];
   for (const g of gated) {
-    const facts = promptFacts(ctx, g);
+    const facts = promptFacts(ctx, g, command);
     recordAttempt(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), action: g.action, task: g.task, permissionMode: String(input.permission_mode ?? "unknown"), prUrl: facts.prUrl, head: facts.head, now });
     lines.push(facts.line);
   }

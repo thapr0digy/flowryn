@@ -23,13 +23,16 @@
 //     followUp, while idle and you inactive as a followUp with triggerTurn
 //     (a half-typed draft stays untouched, M0 p03); it re-checks what it sees
 //     first and declines otherwise, and always passes deliverAs (M0 finding 14);
-//   - blocks shell calls to flowryn merge, gate pass, approve and hook (M0 p08);
+//   - blocks shell calls to flowryn merge, gate pass, approve, decide --by
+//     captain and hook (M0 p08);
 //   - registers the flowryn_merge tool, the Pi leader's human-confirmation
 //     channel (design section 7): it shows the PR, head and checks with
 //     ctx.ui.confirm() (M0 p07) and, on yes, merges with the approval key the
 //     daemon handed this extension at lease claim (or a fresh one from
 //     `hook approval-key`), passed on stdin, never in an environment;
-//   - registers the flowryn_gate_pass tool the same way, for review gates (M5).
+//   - registers the flowryn_gate_pass tool the same way, for review gates (M5);
+//   - registers the flowryn_decide tool the same way, for the user's own
+//     answer to a decision (cutover C1).
 // The hook calls that report state go through one queue, so the daemon sees
 // them in the order Pi emitted them.
 import { spawn } from "node:child_process";
@@ -40,7 +43,7 @@ const BIN = process.env.FLOWRYN_BIN ?? "";
 const INACTIVE_MS = Number(process.env.FLOWRYN_LEADER_INACTIVE_MS ?? "60000") || 60_000;
 const TOOL_PING_MS = 60_000;
 const EXIT_BACKOFF_MS = 10_000;
-const SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass)\b/;
+export const SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass|decide\b[^\n]*--by\s+captain)\b/;
 
 function runHook(name: string, input: Json): Promise<Json | null> {
   return new Promise((resolve) => {
@@ -268,7 +271,7 @@ export default function flowrynLeader(pi: any): void {
     const name = String(event?.toolName ?? "");
     const command = name === "bash" ? String(event?.input?.command ?? "") : "";
     if (command !== "" && SHELL_GATE.test(command)) {
-      return { block: true, reason: "flowryn: merge, gate pass and approve need the user (use the flowryn_merge and flowryn_gate_pass tools), and hook verbs belong to the harness; this session cannot run them from the shell" };
+      return { block: true, reason: "flowryn: merge, gate pass, approve and a captain decision need the user (use the flowryn_merge, flowryn_gate_pass and flowryn_decide tools), and hook verbs belong to the harness; this session cannot run them from the shell" };
     }
     return undefined;
   });
@@ -375,6 +378,54 @@ export default function flowrynLeader(pi: any): void {
       if (!reply) return text(`Flowryn did not answer; the gate of ${task} may still be open. Check: flowryn show ${task}`);
       if (reply.ok) return text(`Passed the ${reply.data?.stage ?? ""} review of ${task}; stage ${reply.data?.next ?? "?"} starts.`);
       return text(`Gate pass of ${task} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}${reply.error?.help ? ` Help: ${reply.error.help}` : ""}`);
+    },
+  });
+
+  /**
+   * flowryn_decide: the one way this leader records the user's own answer to
+   * a decision. You see the question and the answer in your words and say yes
+   * or no; on yes it is recorded as yours, bound to this lease's key.
+   */
+  pi.registerTool({
+    name: "flowryn_decide",
+    label: "Flowryn decide",
+    description: "Record the user's own answer to a Flowryn decision (k<N> or q<N>), in their words. The user confirms it here first. Never run `flowryn decide … --by captain` in the shell.",
+    promptSnippet: "flowryn_decide: record the user's answer to a Flowryn decision after they confirm it.",
+    parameters: {
+      type: "object",
+      properties: {
+        decision: { type: "string", description: "the decision id, for example k3" },
+        choice: { type: "string", description: "one of its options, or a short answer" },
+        words: { type: "string", description: "the user's words, verbatim" },
+      },
+      required: ["decision", "choice", "words"],
+    },
+    async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, c: any) {
+      remember(c);
+      const decision = String(params?.decision ?? "").trim();
+      const choice = String(params?.choice ?? "").trim();
+      const words = String(params?.words ?? "").trim();
+      if (!/^[kq]\d+$/.test(decision)) return text("flowryn_decide needs a decision id such as k3.");
+      const shown = await runFlowryn(["show", decision, "--json"], "");
+      if (!shown?.ok) return text(`Cannot find ${decision}: ${shown?.error?.message ?? "Flowryn is not reachable"}`);
+      let yes = false;
+      try {
+        yes = Boolean(await ctx?.ui?.confirm?.(`Record your answer to ${decision}?`, [String(shown.data?.question ?? ""), `answer: ${choice}`, `your words: ${words}`].join("\n")));
+      } catch {
+        yes = false;
+      }
+      if (!yes) return text(`The user declined; ${decision} stays open.`);
+      let key = approvalKey;
+      if (!key) {
+        const fresh = await runHook("approval-key", {});
+        key = typeof fresh?.key === "string" ? fresh.key : null;
+        approvalKey = key;
+      }
+      if (!key) return text("This session does not hold the leader lease, so it cannot record an answer.");
+      const reply = await runFlowryn(["decide", decision, choice, "--by", "captain", "--words", words, "--key-file", "-", "--json"], key);
+      if (!reply) return text(`Flowryn did not answer; ${decision} may still be open. Check: flowryn show ${decision}`);
+      if (reply.ok) return text(`Recorded your answer to ${decision}: ${choice}.`);
+      return text(`Answer to ${decision} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}`);
     },
   });
 

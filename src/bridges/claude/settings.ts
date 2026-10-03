@@ -16,14 +16,14 @@ function shellQuote(text: string): string {
 }
 
 /**
- * Permission rules (design section 12): the leader may run flowryn, merges and
- * gate passes and discards ask you (a content-matching ask rule still prompts
- * in auto mode, M0 c08), and it can never run approve or a hook verb itself.
- * Deny beats ask beats allow.
+ * Permission rules (design section 12): the leader may run flowryn; merges,
+ * gate passes, discards and captain answers ask you (a content-matching ask
+ * rule still prompts in auto mode, M0 c08), and it can never run approve or
+ * a hook verb itself. Deny beats ask beats allow.
  */
 export const LEADER_PERMISSIONS = {
   allow: ["Bash(flowryn *)"],
-  ask: ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)", "Bash(flowryn cleanup * --discard*)"],
+  ask: ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)", "Bash(flowryn cleanup * --discard*)", "Bash(flowryn decide * --by captain*)"],
   deny: ["Bash(flowryn approve*)", "Bash(flowryn hook *)"],
 } as const;
 
