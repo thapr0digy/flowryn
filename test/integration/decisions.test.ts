@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { tx } from "../../src/db/db.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
-import { waitUntil } from "../helpers/harness.ts";
+import { cliJson, makeHome, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { makeShipEnv } from "../helpers/ship-env.ts";
 
 const envs: FleetEnv[] = [];
@@ -39,6 +39,17 @@ describe("decision blockers", () => {
     expect(filed.code).toBe(3);
     expect(JSON.stringify(filed.reply)).toContain("only a ship or a decision");
   });
+
+  test("a decision task is a blocker at once, before the backlog snapshot has caught up", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const blocker = await decisionTask(env, "fresh-decision");
+    // No waitUntil: the decisions table itself names the task's kind, so dispatch need not wait
+    // for the journal to apply the add before accepting it as a blocker.
+    const filed = await env.json(["dispatch", "web", "--kind", "ship", "--blocked-by", blocker, "--auto", "--body-file", "-"], { stdin: "Build it\nFAKE: sleep 100" });
+    expect(filed.code).toBe(0);
+    expect(filed.reply.data).toMatchObject({ state: "queued", blocked_by: [blocker], auto: "on" });
+  });
 });
 
 describe("decide", () => {
@@ -71,6 +82,41 @@ describe("decide", () => {
     const refused = await env.json(["decide", decision, "yes", "--rationale", "space"]);
     expect(refused.code).toBe(2);
     expect((refused.reply as { error: { code: string } }).error.code).toBe("reserved_decision");
+  });
+
+  test("answer refuses a standalone decision for a leader, pointing at decide --rationale", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const added = await env.json(["decision", "add", "--key", "answer-alias", "--question", "Keep both regions?", "--options", "yes,no", "--body-file", "-"], { stdin: "x" });
+    const { decision } = added.reply.data as { decision: string };
+    const refused = await env.json(["answer", decision, "yes"]);
+    expect(refused.code).toBe(3);
+    expect(JSON.stringify(refused.reply)).toContain(`flowryn decide ${decision} yes --rationale`);
+    expect((await env.json(["show", decision])).reply.data).toMatchObject({ state: "open" });
+  });
+
+  test("decision add refuses a --blocks target that does not exist", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const refused = await env.json(["decision", "add", "--key", "ghost-blocker", "--question", "Proceed?", "--blocks", "no-such-task-zz", "--body-file", "-"], { stdin: "x" });
+    expect(refused.code).toBe(4);
+    expect(JSON.stringify(refused.reply)).toContain("no task no-such-task-zz");
+  });
+
+  test("a repeat decision add still records a block intent for a newly named target (block is idempotent)", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const { task: shipTask } = await env.dispatch("Build\nFAKE: sleep 30000", { kind: "ship" });
+    const first = await env.json(["decision", "add", "--key", "repeat-block", "--question", "Ship this way?", "--body-file", "-"], { stdin: "x" });
+    const { decision, task } = first.reply.data as { decision: string; task: string };
+    const again = await env.json(["decision", "add", "--key", "repeat-block", "--question", "Ship this way?", "--blocks", shipTask, "--body-file", "-"], { stdin: "x" });
+    expect(again.reply.data).toMatchObject({ decision, already: true });
+    const db = env.h.db();
+    const blocks = (db.query("SELECT task_id, args FROM intents WHERE verb = 'block' ORDER BY seq").all() as { task_id: string; args: string }[]);
+    db.close();
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ task_id: shipTask });
+    expect(JSON.parse(blocks[0]!.args)).toMatchObject({ positional: [shipTask], flags: { by: task } });
   });
 
   test("answering one a non-auto ship waits on hints the dispatch", async () => {
@@ -128,6 +174,36 @@ describe("decide", () => {
   });
 });
 
+describe("deliver opens a scout's decisions", () => {
+  test("the report_ready item names how many open decisions the report opened", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const spec = "FAKE: deliver-decisions report.md a:Pick A or B?:a,b:a:- ; b:Pick X or Y?:x,y:x:-";
+    const { run } = await env.dispatch(["Scout", spec, "FAKE: sleep 30000"].join("\n"));
+    await env.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "landed");
+    const db = env.h.db();
+    const item = db.query("SELECT line FROM items WHERE run_id = ?1 AND kind = 'report_ready'").get(run) as { line: string };
+    db.close();
+    expect(item.line).toContain("; 2 open decisions");
+  });
+
+  test("a malformed entry (a bare ### heading) never blocks landing; it is skipped, with a warning", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const body = ["Scout", "FAKE: deliver-raw report.md # Fake report\\n\\n## Open decisions\\n\\n### \\n\\n## Done", "FAKE: sleep 30000"].join("\n");
+    const { run } = await env.dispatch(body);
+    const landed = await env.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "landed despite the malformed entry");
+    expect(landed.state === "landed" || landed.state === "cleaned").toBe(true);
+    const db = env.h.db();
+    const event = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'report.decisions'").get(run) as { payload: string } | null;
+    db.close();
+    expect(event).not.toBeNull();
+    const payload = JSON.parse(event!.payload) as { opened: string[]; warnings: string[] };
+    expect(payload.opened).toEqual([]);
+    expect(payload.warnings.length).toBeGreaterThan(0);
+  });
+});
+
 describe("C1 end to end", () => {
   test("exit 1: scout decisions, leader decides two, the user answers the reserved one, the waiting ship starts by itself", async () => {
     const ship = await makeShipEnv({ mode: "local-only" });
@@ -153,10 +229,48 @@ describe("C1 end to end", () => {
       await leader.start();
       const yes = await leader.runBash(`flowryn decide ${reserved.id} no --by captain --body-file - --json <<'EOF'\nkeep it\nEOF`, { approve: true });
       expect(yes.code).toBe(0);
+      const answeredRow = f.h.db().query("SELECT answered_by, answered_via, rationale FROM decisions WHERE id = ?1").get(reserved.id) as { answered_by: string; answered_via: string; rationale: string };
+      expect(answeredRow).toEqual({ answered_by: "captain", answered_via: "claude-ask", rationale: "keep it" });
       await waitUntil(() => f.h.db().query("SELECT 1 FROM runs WHERE task_id = ?1").get(shipTask) !== null, 30_000, "the waiting ship started by itself");
       expect(task).toBeTruthy();
     } finally {
       await ship.cleanup();
     }
   }, 60_000);
+});
+
+describe("ask --key", () => {
+  const homes: TestHome[] = [];
+  const daemons: DaemonProc[] = [];
+  afterEach(async () => {
+    for (const d of daemons.splice(0)) await d.kill9().catch(() => {});
+    for (const h of homes.splice(0)) h.cleanup();
+  });
+
+  test("a repeated ask --key on the same task is idempotent; once answered, the key refuses rather than crashing", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const first = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(first.code).toBe(0);
+    const decisionId = (first.reply.data as { decision: string }).decision;
+    const again = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(again.code).toBe(0);
+    expect(again.reply.data).toMatchObject({ decision: decisionId, already: true });
+    const db = h.db();
+    const count = db.query("SELECT COUNT(*) AS n FROM decisions").get() as { n: number };
+    db.close();
+    expect(count.n).toBe(1);
+
+    const leader = seedLeader(h);
+    const answered = await cliJson(h, ["decide", decisionId, "sqlite", "--rationale", "fine"], { env: { FLOWRYN_TOKEN: leader } });
+    expect(answered.code).toBe(0);
+
+    const refused = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(refused.code).toBe(3);
+    expect(JSON.stringify(refused.reply)).toContain(`key db already used by ${decisionId}`);
+  });
 });

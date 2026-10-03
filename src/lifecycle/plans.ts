@@ -130,7 +130,9 @@ function nextPlanId(db: Db): string {
 /** Task ids already used or reserved: the policy table, the backlog, pending adds and plan phases. */
 export function takenIds(db: Db): (id: string) => boolean {
   const ids = new Set<string>();
-  for (const row of db.query("SELECT task_id FROM task_policy UNION SELECT task_id FROM plan_phases").all() as { task_id: string }[]) ids.add(row.task_id);
+  // decisions is included so a pruned Done decision task's id is never re-minted: a standalone
+  // decision's task has no task_policy row, and a Done task eventually drops out of the backlog.
+  for (const row of db.query("SELECT task_id FROM task_policy UNION SELECT task_id FROM plan_phases UNION SELECT task_id FROM decisions").all() as { task_id: string }[]) ids.add(row.task_id);
   for (const task of readSnapshot(db, "backlog")?.tasks ?? []) ids.add(task.id);
   for (const row of db.query("SELECT task_id FROM intents WHERE state = 'pending' AND task_id IS NOT NULL").all() as { task_id: string }[]) ids.add(row.task_id);
   return (id) => ids.has(id);

@@ -100,11 +100,15 @@ function decisionLines(db: Db, now: number, mark: boolean): string[] {
     for (const d of reserved.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 120)} (${d.reserved_reason})`);
     if (reserved.length > MAX_DECISION_LINES) lines.push(`+${reserved.length - MAX_DECISION_LINES} more: flowryn decision list --reserved`);
   }
+  // Open decisions the leader itself may still decide (exit criterion 1): not deferred, not reserved.
+  const openForLeader = openDecisions({ db, now }, "open").filter((d) => d.reserved_reason === null);
+  if (openForLeader.length > 0) lines.push(`Open decisions to decide: ${openForLeader.length} (flowryn decision list)`);
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
   const decided = db.query("SELECT id, question, answer, rationale FROM decisions WHERE answered_by = 'leader' AND answered_at > ?1 ORDER BY answered_at").all(since) as { id: string; question: string; answer: string; rationale: string | null }[];
   if (decided.length > 0) {
     lines.push(`Decided for you since the last briefing (${decided.length}):`);
     for (const d of decided.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
+    if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
   }
   if (mark) setMeta(db, "last_briefing_at", String(now));
   return lines;

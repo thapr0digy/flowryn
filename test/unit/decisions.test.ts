@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { tx, type Db } from "../../src/db/db.ts";
 import { LATEST_SCHEMA_VERSION } from "../../src/db/schema.ts";
 import { createStandaloneDecision, getDecision } from "../../src/lifecycle/decisions.ts";
+import { takenIds } from "../../src/lifecycle/plans.ts";
 import { makeHome, type TestHome } from "../helpers/harness.ts";
 
 let h: TestHome;
@@ -50,5 +51,14 @@ describe("standalone decisions", () => {
 
   test("a bad key is refused", () => {
     expect(() => tx(db, () => createStandaloneDecision(db, { key: "Bad Key", question: "Q?", options: [], origin: "o", now: 1 }))).toThrow(/key/);
+  });
+
+  test("a decision's task id counts as taken even once pruned: no task_policy row, no pending intent, no backlog snapshot", () => {
+    const made = tx(db, () => createStandaloneDecision(db, { key: "reused", question: "Q?", options: [], origin: "o", now: 1 }));
+    expect(db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(made.taskId)).toBeNull();
+    // Simulate the journal having applied its intents and the task later pruned from Done history:
+    // takenIds must still see it (through the decisions table itself), not through a pending intent.
+    db.query("UPDATE intents SET state = 'applied' WHERE task_id = ?1").run(made.taskId);
+    expect(takenIds(db)(made.taskId)).toBe(true);
   });
 });

@@ -73,6 +73,9 @@ const answer: VerbSpec = {
     if (options.length > 0 && !options.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${options.join(", ")}`);
     const note = sanitizeBlock(stringArg(args, "body") ?? "").trim() || null;
     const human = ctx.caller.role === "human";
+    // answer stays a plain alias for a run-scoped question; a standalone decision carries no run to
+    // steer, and the leader's rationale rule (decide --rationale) must not be skippable through it.
+    if (!human && d.run_id === null) throw new FlowrynError("bad_args", `a standalone decision needs: flowryn decide ${id} ${choice} --rationale <why>`, `flowryn decide ${id} ${choice} --rationale <why>`);
     if (!human && d.reserved_reason) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
     const done = answerDecision(ctx, d, { choice, words: note, by: human ? "captain" : "leader", via: human ? captainChannel(ctx, d, id, args) : "leader" });
     return { data: { decision: id, answer: choice, steer: done.steer ?? "-", run: done.run ?? "-" } };

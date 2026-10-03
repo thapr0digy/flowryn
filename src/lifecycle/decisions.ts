@@ -68,7 +68,12 @@ export interface NewStandalone {
 export function createStandaloneDecision(db: Db, d: NewStandalone): { id: string; taskId: string; created: boolean } {
   if (!DECISION_KEY.test(d.key)) throw new FlowrynError("bad_args", `decision key ${d.key} must be lowercase letters, digits and dashes`);
   const existing = db.query("SELECT id, task_id FROM decisions WHERE origin = ?1 AND key = ?2").get(d.origin, d.key) as { id: string; task_id: string } | null;
-  if (existing) return { id: existing.id, taskId: existing.task_id, created: false };
+  if (existing) {
+    // A repeat decision add names no new question, but block is idempotent: a --blocks target
+    // given this time still gets its blocked-by edge, even though the decision itself is not new.
+    for (const blocked of d.blocks ?? []) recordIntent(db, { file: "backlog", verb: "block", taskId: blocked, positional: [blocked], flags: { by: existing.task_id }, now: d.now });
+    return { id: existing.id, taskId: existing.task_id, created: false };
+  }
   const question = sanitizeBlock(d.question).trim().slice(0, MAX_QUESTION);
   if (question.length === 0) throw new FlowrynError("bad_args", "a decision needs a question");
   const context = d.context ? sanitizeBlock(d.context).trim().slice(0, MAX_CONTEXT) : null;

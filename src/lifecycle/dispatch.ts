@@ -212,6 +212,9 @@ function blockerKind(db: Db, id: string): string | null {
   const policy = db.query("SELECT kind FROM task_policy WHERE task_id = ?1").get(id) as { kind: string } | null;
   if (policy) return policy.kind;
   if (db.query("SELECT 1 FROM plan_phases WHERE task_id = ?1").get(id)) return "ship";
+  // A decision task has no task_policy row (cutover C1); the decisions table itself names it, so a
+  // just-added decision task can be a blocker at once, before the backlog snapshot has caught up.
+  if (db.query("SELECT 1 FROM decisions WHERE task_id = ?1").get(id)) return "decision";
   const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === id);
   return task ? (task.kind ?? "ship") : null;
 }

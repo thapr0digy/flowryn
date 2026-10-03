@@ -193,6 +193,30 @@ describe("the briefing", () => {
     expect(briefing.text.length).toBeLessThan(10_000);
   });
 
+  test("open, non-deferred, non-reserved decisions get one line the leader can act on", () => {
+    const now = Date.now();
+    tx(db, () => {
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state) VALUES ('k1', 't1', 'Pick a format?', '[]', 1, 'open')").run();
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, reserved_reason) VALUES ('k2', 't2', 'Delete the old bucket?', '[]', 1, 'open', 'destructive')").run();
+    });
+    const briefing = composeBriefing(db, { session: null, now, morningHour: 99, ageMs: AGE, markMorning: false });
+    expect(briefing.text).toContain("Open decisions to decide: 1 (flowryn decision list)");
+  });
+
+  test("more than 8 decided-for-you lines carry a +N more pointer to the full list", () => {
+    const now = Date.now();
+    tx(db, () => {
+      for (let n = 1; n <= 10; n++) {
+        db.query(
+          "INSERT INTO decisions (id, task_id, question, options, blocking, state, answer, answered_via, answered_at, answered_by, rationale) VALUES (?1, ?2, ?3, '[]', 0, 'answered', 'yes', 'leader', ?4, 'leader', 'because')",
+        ).run(`k${n}`, `t${n}`, `Q${n}?`, now - 1_000 + n);
+      }
+    });
+    const briefing = composeBriefing(db, { session: null, now, morningHour: 99, ageMs: AGE, markMorning: false });
+    expect(briefing.text).toContain("Decided for you since the last briefing (10):");
+    expect(briefing.text).toContain("+2 more: flowryn decision list --all");
+  });
+
   test("before the morning hour there is no morning section; a read-only session gets one banner line", () => {
     const early = new Date(2026, 8, 25, 4, 30).getTime();
     expect(composeBriefing(db, { session: null, now: early, morningHour: 5, ageMs: AGE, markMorning: false }).morning).toBe(false);

@@ -40,6 +40,13 @@ function blocksYoloOff(ctx: HandlerCtx, blocks: string[]): boolean {
   return false;
 }
 
+/** Is this a task `decision add --blocks` can name: a live task_policy row, a plan phase, or one in the backlog snapshot? */
+function blockTargetExists(ctx: HandlerCtx, id: string): boolean {
+  if (ctx.db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(id)) return true;
+  if (ctx.db.query("SELECT 1 FROM plan_phases WHERE task_id = ?1").get(id)) return true;
+  return (readSnapshot(ctx.db, "backlog")?.tasks ?? []).some((t) => t.id === id);
+}
+
 /**
  * Record an answer (call inside the verb's transaction): the decision row,
  * its item, the hold (a blocking question holds its own task; a standalone
@@ -118,6 +125,8 @@ const decisionAdd: VerbSpec = {
     const project = stringArg(args, "project");
     if (project && !getProject(ctx.db, project)) throw new FlowrynError("not_found", `no project ${project}`);
     const blocks = (args.blocks as string[] | undefined) ?? [];
+    const unknown = blocks.filter((b) => !blockTargetExists(ctx, b));
+    if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
     const opts = options(stringArg(args, "options"));
     const recommend = stringArg(args, "recommend") ?? null;
     if (recommend && opts.length > 0 && !opts.includes(recommend)) throw new FlowrynError("bad_args", `--recommend must be one of: ${opts.join(", ")}`);
@@ -158,19 +167,21 @@ const decide: VerbSpec = {
     if (opts.length > 0 && !opts.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${opts.join(", ")}`);
     if (opts.length === 0 && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const words = sanitizeBlock(stringArg(args, "body") ?? stringArg(args, "words") ?? "").trim() || null;
+    const rationale = stringArg(args, "rationale")?.trim() || null;
     const asCaptain = stringArg(args, "by") === "captain" || ctx.caller.role === "human";
     if (stringArg(args, "by") !== undefined && stringArg(args, "by") !== "captain") throw new FlowrynError("bad_args", "--by takes only captain");
     let via: string;
     if (asCaptain) via = captainChannel(ctx, d, id, args);
     else {
       if (d.reserved_reason) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
-      const rationale = stringArg(args, "rationale")?.trim();
       if (!rationale) throw new FlowrynError("bad_args", "a leader answer needs --rationale <why>");
       via = "leader";
       const done = answerDecision(ctx, d, { choice, words: words ? `${rationale}\n${words}` : rationale, by: "leader", via });
       return reply(ctx, d, choice, "leader", done);
     }
-    const done = answerDecision(ctx, d, { choice, words, by: "captain", via });
+    // A human may pass their words as --rationale (the natural flag to reach for) as readily as
+    // --body-file/--words; neither is dropped if the other is also given, --body-file/--words wins.
+    const done = answerDecision(ctx, d, { choice, words: words ?? rationale, by: "captain", via });
     return reply(ctx, d, choice, "captain", done);
   },
   async settle(ctx, result) {

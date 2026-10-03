@@ -56,6 +56,18 @@ describe("a captain answer needs the user's word", () => {
     expect(reply.data).toMatchObject({ by: "captain" });
   });
 
+  test("a human's --rationale is not dropped: decide records it as the answer's words", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "k-rationale", "--question", "Keep the old logs?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const reply = await ship.call("decide", { decision, choice: "yes", rationale: "keep for the audit" });
+    expect(reply.ok).toBe(true);
+    expect(reply.data).toMatchObject({ by: "captain" });
+    const shown = await f.json(["show", decision], { env: { FLOWRYN_TOKEN: ship.leaderToken() } });
+    expect(shown.reply.data).toMatchObject({ by: "captain", rationale: "keep for the audit" });
+  });
+
   // SHELL_GATE (the extension's shell block) cannot be unit-tested by importing the extension module
   // directly: it is a `with { type: "file" }` asset, and a second, dynamic import of the same path
   // breaks that asset resolution elsewhere in the same test process. Drive it through the real
