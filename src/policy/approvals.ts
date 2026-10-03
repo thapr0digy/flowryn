@@ -24,7 +24,7 @@ export const ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 
 export type Channel = "claude-ask" | "pi-confirm" | "cli-tty" | "board" | "yolo";
-export type ApprovalAction = "merge" | "discard" | "gate";
+export type ApprovalAction = "merge" | "discard" | "gate" | "decide";
 export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "pi-confirm", "cli-tty", "board"];
 
 export interface ApprovalRow {
@@ -173,6 +173,22 @@ export function findAttempt(db: Db, q: { session: string; action: ApprovalAction
 
 export function matchAttempt(db: Db, id: string, now: number): void {
   db.query("UPDATE approval_attempts SET matched_at = ?2 WHERE id = ?1 AND matched_at IS NULL").run(id, now);
+}
+
+/**
+ * Void every one of this session's unmatched attempts, across every action. An unmatched (declined,
+ * or simply never run) attempt would otherwise stay valid for the rest of its five-minute window, so
+ * any later Bash call the gate cannot see as the same command — a spelling the regex misses, a
+ * `tooMany` line that records none of its own, a wrong or empty id — could still walk up to
+ * `findAttempt` and claim it. Called at the top of every Claude Bash PreToolUse (design section 7,
+ * fail-closed root-cause fix): an attempt now survives only from the PreToolUse call that recorded it
+ * to the very next Bash call, gated or not. A legitimate attempt voided by a parallel Bash call
+ * between the prompt and the command only produces a refusal, never an unapproved action.
+ */
+export function voidPendingAttempts(db: Db, session: string, now: number): number {
+  const changes = db.query("UPDATE approval_attempts SET matched_at = -1 WHERE session_id = ?1 AND matched_at IS NULL").run(session).changes;
+  if (changes > 0) appendEvent(db, { source: "hook", kind: "approval.attempts_voided", payload: { session, count: changes }, ts: now });
+  return changes;
 }
 
 // --- the /dev/tty challenge ---------------------------------------------------------------------

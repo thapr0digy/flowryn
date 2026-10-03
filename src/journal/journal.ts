@@ -13,8 +13,9 @@ import { classifyMutation, listTasks, taskFromJson, type BacklogTask, type Tasks
  * returns NOT_FOUND and it moves a task to another file (M0 spike t01), so it is
  * not replay-safe. `rm` repeats with NOT_FOUND too, but its goal state is the
  * task being gone, so a replay confirms that with `show` and counts it applied.
+ * `block` records a blocked-by edge and is idempotent per tasks-axi 0.2.5 help.
  */
-export const INTENT_VERBS = ["add", "start", "done", "hold", "unhold", "update", "reopen", "rm"] as const;
+export const INTENT_VERBS = ["add", "start", "done", "hold", "unhold", "update", "reopen", "rm", "block"] as const;
 export type IntentVerb = (typeof INTENT_VERBS)[number];
 
 export type FlagValue = string | true | string[];

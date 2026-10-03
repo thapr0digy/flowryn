@@ -8,6 +8,10 @@
  *
  *   FAKE: sleep <ms>                 a tool call; steers may arrive beside it
  *   FAKE: deliver <file> <text...>   write $FLOWRYN_REPORT_DIR/<file>, deliver --report
+ *   FAKE: deliver-raw <file> <text...>  like deliver, but literal \n tokens become real newlines
+ *                                    (hand-craft a report's exact bytes, such as a malformed heading)
+ *   FAKE: deliver-decisions <file> <k:q:opts:rec:reserved ; ...>  write a report with an ## Open decisions
+ *                                    section (- for no recommendation or reason), then deliver --report
  *   FAKE: symlink <name> <target>    make $FLOWRYN_REPORT_DIR/<name> a symlink to <target>
  *   FAKE: verb <args...>             run flowryn <args> --json; the reply goes to $FLOWRYN_REPORT_DIR/fake-replies.jsonl
  *   FAKE: ask <a,b> <question...>    ask (blocking), then end the turn
@@ -196,6 +200,35 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       const path = join(env.FLOWRYN_REPORT_DIR ?? ".", file);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, `${words.join(" ") || "fake report"}\n`);
+      await tool(async () => {
+        const result = await flowryn(["deliver", "--report", path]);
+        log(`deliver -> ${result.code} ${result.stdout.trim()}`);
+      });
+      return "continue";
+    }
+    case "deliver-raw": {
+      // Like deliver, but the body is taken verbatim (literal `\n` tokens become real newlines), so
+      // a test can hand-craft report content a scout would never produce, such as a malformed
+      // "### " heading with no key or question.
+      const [file = "report.md", ...words] = rest;
+      const path = join(env.FLOWRYN_REPORT_DIR ?? ".", file);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${words.join(" ").replaceAll("\\n", "\n")}\n`);
+      await tool(async () => {
+        const result = await flowryn(["deliver", "--report", path]);
+        log(`deliver -> ${result.code} ${result.stdout.trim()}`);
+      });
+      return "continue";
+    }
+    case "deliver-decisions": {
+      const [file = "report.md", ...spec] = rest;
+      const entries = spec.join(" ").split(";").map((s) => s.trim()).filter(Boolean).map((s) => {
+        const [key = "k", question = "?", opts = "", rec = "-", reserved = "-"] = s.split(":");
+        return [`### ${key}: ${question}`, `Options: ${opts.split(",").join(", ")}`, ...(rec !== "-" ? [`Recommendation: ${rec}`] : []), "Why it matters: fake", ...(reserved !== "-" ? [`Reserved: ${reserved}`] : []), ""].join("\n");
+      });
+      const path = join(env.FLOWRYN_REPORT_DIR ?? ".", file);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `# Fake report\n\n## Open decisions\n\n${entries.join("\n")}`);
       await tool(async () => {
         const result = await flowryn(["deliver", "--report", path]);
         log(`deliver -> ${result.code} ${result.stdout.trim()}`);

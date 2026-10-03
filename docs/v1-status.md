@@ -86,6 +86,16 @@ The milestone lists name the main work. These are the other v1 items in sections
 | 16 | GitHub unavailable or rate-limited: "P1 only if a merge is waiting" | Done (v1 completion): one P1 per outage while a delivered PR waits at the merge gate or a merge waits for its proof, naming them; it resolves when GitHub answers or no merge waits |
 | 16 | Harness updated to an untested version: "P1 with the doctor command" | Done (v1 completion): the startup check, a dispatch, a resume and a launch each open it, once per version; a passing contract run resolves it |
 
+## Cutover
+
+The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
+
+| Item | Status |
+|---|---|
+| C1 standalone decisions, the reserved policy, the user's word for a captain answer, scout open decisions, briefing sections | Done (C1) |
+| C2 mid-run prompt wedges | Not built yet |
+| C3 `flowryn import firstmate` | Not built yet |
+
 ## Not in v1
 
 These are out of v1 by the design itself (section 2's non-goals, section 17's "After v1"), not deferred work:

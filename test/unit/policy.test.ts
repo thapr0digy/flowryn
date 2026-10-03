@@ -10,7 +10,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { tokenSource } from "../../src/forge/github.ts";
 import { summarize, type PullRequest } from "../../src/forge/types.ts";
 import { gatedCommands } from "../../src/leader/hooks.ts";
-import { ATTEMPT_WINDOW_MS, ChallengeStore, findAttempt, insertApproval, recordAttempt } from "../../src/policy/approvals.ts";
+import { ATTEMPT_WINDOW_MS, ChallengeStore, findAttempt, insertApproval, matchAttempt, recordAttempt, voidPendingAttempts } from "../../src/policy/approvals.ts";
 import { runCleanup } from "../../src/policy/cleanup.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { checkGate, chooseApproval, type MergeFacts } from "../../src/policy/merge.ts";
@@ -55,6 +55,24 @@ describe("the Claude PreToolUse gate finds the commands that need your word", ()
     expect(gatedCommands("flowryn show web-fix-a1 && flowryn fleet")).toEqual([]);
     expect(gatedCommands("git merge main")).toEqual([]);
   });
+
+  test("a captain answer is gated; a leader answer is not", () => {
+    expect(gatedCommands("flowryn decide k1 yes --by captain --body-file -")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --rationale fine")).toEqual([]);
+  });
+
+  test("a captain answer is gated under every spelling the CLI parser accepts, never just the verbatim form", () => {
+    expect(gatedCommands("flowryn decide k1 yes --by=captain")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide --by captain k1 yes")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --by 'captain'")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --words 'a;b' --by captain")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes \\\n --by captain")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --rationale fine")).toEqual([]);
+  });
+
+  test("more than one captain decide in one command is gated but refused by construction (no attempt is ever matchable)", () => {
+    expect(gatedCommands("flowryn decide k1 yes --by captain; flowryn decide k2 no --by captain")).toEqual([{ action: "decide", task: "k1", tooMany: true }]);
+  });
 });
 
 describe("approvals", () => {
@@ -85,6 +103,24 @@ describe("approvals", () => {
     expect(findAttempt(d, { session: "L1", action: "discard", task: "web-a1", now })).toBeNull();
     tx(d, () => recordAttempt(d, { session: "L1", toolUseId: "t3", action: "merge", task: "web-a1", permissionMode: "auto", prUrl: null, head: "def", now: now + 2_000 }));
     expect(findAttempt(d, { session: "L1", action: "merge", task: "web-a1", now: now + 3_000 })?.tool_use_id).toBe("t3");
+  });
+
+  test("voidPendingAttempts voids only that session's unmatched rows, leaving matched rows and other sessions alone", () => {
+    const d = freshDb();
+    const now = 20_000_000;
+    tx(d, () => recordAttempt(d, { session: "L1", toolUseId: "t1", action: "decide", task: "k1", permissionMode: "auto", prUrl: null, head: null, now }));
+    tx(d, () => recordAttempt(d, { session: "L1", toolUseId: "t2", action: "merge", task: "m1", permissionMode: "auto", prUrl: null, head: null, now }));
+    tx(d, () => recordAttempt(d, { session: "L2", toolUseId: "t3", action: "decide", task: "k2", permissionMode: "auto", prUrl: null, head: null, now }));
+    const matched = findAttempt(d, { session: "L1", action: "merge", task: "m1", now })!;
+    tx(d, () => matchAttempt(d, matched.id, now));
+
+    const voided = tx(d, () => voidPendingAttempts(d, "L1", now + 1));
+    expect(voided).toBe(1); // only L1's still-unmatched decide attempt
+    expect(findAttempt(d, { session: "L1", action: "decide", task: "k1", now: now + 2 })).toBeNull();
+    const row = d.query("SELECT matched_at FROM approval_attempts WHERE id = ?1").get(matched.id) as { matched_at: number };
+    expect(row.matched_at).toBe(now); // the already-matched L1 merge attempt is untouched, not voided
+    expect(findAttempt(d, { session: "L2", action: "decide", task: "k2", now: now + 2 })?.tool_use_id).toBe("t3"); // L2 is untouched
+    expect(tx(d, () => voidPendingAttempts(d, "L1", now + 3))).toBe(0); // nothing left to void
   });
 });
 

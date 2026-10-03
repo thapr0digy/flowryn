@@ -81,6 +81,8 @@ export function fieldsSetBy(verb: AppliedPayload["verb"], args: IntentArgs): Tas
       if ("pr" in args.flags || "report" in args.flags) fields.push("links");
       return fields;
     }
+    case "block":
+      return ["deps"];
     case "add":
     case "rm":
       return [];

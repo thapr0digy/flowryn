@@ -20,6 +20,7 @@ export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
 export const ERROR_CODES = {
   // policy refusals
   approval_required: EXIT.policy,
+  reserved_decision: EXIT.policy,
   red_checks: EXIT.policy,
   not_landed: EXIT.policy,
   contract_unverified: EXIT.policy,

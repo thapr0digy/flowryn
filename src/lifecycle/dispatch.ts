@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
+import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { findOpenItem, openItem } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { herdrConfig, workersConfig } from "../config/workers.ts";
@@ -17,6 +18,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
+import { reserveDecision } from "./decisions.ts";
 import { mintTaskId } from "./ids.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
@@ -25,6 +27,9 @@ import { openRunForTask } from "./runs.ts";
 
 export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
+
+/** What a task may wait for: a ship lands; a decision lands once answered (its task is done). */
+export const BLOCKER_KINDS = ["ship", "decision"] as const;
 
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
@@ -209,8 +214,21 @@ function blockerKind(db: Db, id: string): string | null {
   const policy = db.query("SELECT kind FROM task_policy WHERE task_id = ?1").get(id) as { kind: string } | null;
   if (policy) return policy.kind;
   if (db.query("SELECT 1 FROM plan_phases WHERE task_id = ?1").get(id)) return "ship";
+  // A decision task has no task_policy row (cutover C1); the decisions table itself names it, so a
+  // just-added decision task can be a blocker at once, before the backlog snapshot has caught up.
+  // run_id IS NULL: a run-scoped q<N> names a run's own task, which always has a task_policy row
+  // caught by the check above, so this branch is standalone (k<N>) decisions only.
+  if (db.query("SELECT 1 FROM decisions WHERE task_id = ?1 AND run_id IS NULL").get(id)) return "decision";
   const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === id);
   return task ? (task.kind ?? "ship") : null;
+}
+
+/** A task that merges only with a human record waits on these decisions, so only the user may answer them. */
+function reserveBlockingDecisions(db: Db, blockedBy: string[], now: number): void {
+  for (const id of blockedBy) {
+    const d = db.query("SELECT id, task_id, reserved_reason FROM decisions WHERE task_id = ?1 AND run_id IS NULL AND state = 'open'").get(id) as { id: string; task_id: string; reserved_reason: string | null } | null;
+    if (d) reserveDecision(db, d, "merge", now);
+  }
 }
 
 async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): Promise<DispatchPlan> {
@@ -238,9 +256,9 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     const kinds = new Map(blockedBy.map((id) => [id, blockerKind(ctx.db, id)]));
     const unknown = blockedBy.filter((id) => kinds.get(id) === null);
     if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
-    const unshipped = blockedBy.filter((id) => kinds.get(id) !== "ship");
+    const unshipped = blockedBy.filter((id) => !(BLOCKER_KINDS as readonly string[]).includes(kinds.get(id) ?? ""));
     if (unshipped.length > 0) {
-      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship lands, so a task can wait only for ships`, "wait for the report yourself, then dispatch");
+      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, "wait for the report yourself, then dispatch");
     }
     return { mode: "queue", project, harness, blockedBy };
   }
@@ -307,6 +325,7 @@ export const dispatchVerb: VerbSpec = {
       const taskId = filed.phases[0]!.task_id;
       if (!boolArg(args, "auto")) ctx.db.query("UPDATE task_policy SET auto = 0 WHERE task_id = ?1").run(taskId);
       if (boolArg(args, "sensitive")) ctx.db.query("UPDATE task_policy SET sensitive = 1 WHERE task_id = ?1").run(taskId);
+      if ((plan.project.yolo === 0 || boolArg(args, "sensitive")) && decisionsConfig(config).reserved_classes.includes("merge")) reserveBlockingDecisions(ctx.db, plan.blockedBy, now);
       return {
         data: { task: taskId, plan: filed.id, state: "queued", blocked_by: plan.blockedBy, auto: boolArg(args, "auto") ? "on" : "off" },
         hints: boolArg(args, "auto") ? [`flowryn show ${taskId}`] : [`flowryn dispatch ${plan.project.id} --task ${taskId} (once its blockers land)`],

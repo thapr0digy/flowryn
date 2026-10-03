@@ -16,14 +16,18 @@ function shellQuote(text: string): string {
 }
 
 /**
- * Permission rules (design section 12): the leader may run flowryn, merges and
- * gate passes and discards ask you (a content-matching ask rule still prompts
- * in auto mode, M0 c08), and it can never run approve or a hook verb itself.
- * Deny beats ask beats allow.
+ * Permission rules (design section 12): the leader may run flowryn; merges,
+ * gate passes, discards and captain answers ask you (a content-matching ask
+ * rule still prompts in auto mode, M0 c08), and it can never run approve or
+ * a hook verb itself. Deny beats ask beats allow. The captain-answer rule is
+ * deliberately wide (`*captain*`, not `--by captain*`): a PreToolUse hook is
+ * the real gate (it over-matches `--by=captain`, reordered flags and quoting,
+ * and never trusts an attempt it did not itself record), and this static rule
+ * is only the defense-in-depth prompt Claude's own permission engine shows.
  */
 export const LEADER_PERMISSIONS = {
   allow: ["Bash(flowryn *)"],
-  ask: ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)", "Bash(flowryn cleanup * --discard*)"],
+  ask: ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)", "Bash(flowryn cleanup * --discard*)", "Bash(flowryn decide *captain*)"],
   deny: ["Bash(flowryn approve*)", "Bash(flowryn hook *)"],
 } as const;
 

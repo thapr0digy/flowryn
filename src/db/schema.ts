@@ -306,12 +306,37 @@ CREATE TABLE plan_phases (
   PRIMARY KEY (plan_id, phase_no));
 `;
 
+/**
+ * Cutover C1: decisions stand on their own (docs/cutover-notes.md). A
+ * standalone decision (k<N>) owns a backlog task of kind decision, held for
+ * the user; run-scoped questions (q<N>) keep their run. origin and key name
+ * where it came from (unique together), context and recommendation what the
+ * source said, reserved_reason why only the user may answer (null: the
+ * leader may), defer_until a date before which the briefing leaves it out,
+ * answered_by who decided (answered_via keeps the channel) and rationale the
+ * leader's reason or the user's words verbatim. run_id was already nullable.
+ */
+const DECISIONS_SQL = /* sql */ `
+ALTER TABLE decisions ADD COLUMN origin TEXT;
+ALTER TABLE decisions ADD COLUMN key TEXT;
+ALTER TABLE decisions ADD COLUMN context TEXT;
+ALTER TABLE decisions ADD COLUMN recommendation TEXT;
+ALTER TABLE decisions ADD COLUMN reserved_reason TEXT;
+ALTER TABLE decisions ADD COLUMN defer_until TEXT;
+ALTER TABLE decisions ADD COLUMN answered_by TEXT;
+ALTER TABLE decisions ADD COLUMN rationale TEXT;
+ALTER TABLE decisions ADD COLUMN created_at INTEGER;
+CREATE UNIQUE INDEX decisions_origin_key ON decisions(origin, key) WHERE origin IS NOT NULL AND key IS NOT NULL;
+CREATE INDEX decisions_open ON decisions(state) WHERE state = 'open';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
   { version: 3, name: "leader", sql: LEADER_SQL },
   { version: 4, name: "delivery", sql: DELIVERY_SQL },
   { version: 5, name: "workflows", sql: WORKFLOW_SQL },
+  { version: 6, name: "decisions", sql: DECISIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

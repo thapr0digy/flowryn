@@ -1,13 +1,16 @@
-import { constants, copyFileSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { constants, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
+import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
+import { createStandaloneDecision, DECISION_KEY } from "./decisions.ts";
+import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
@@ -84,6 +87,9 @@ const ask: VerbSpec = {
   flags: {
     options: { type: "string", help: "comma-separated choices", placeholder: "a,b" },
     blocking: { type: "boolean", help: "you cannot continue without the answer" },
+    key: { type: "string", help: "a short slug for this question, for show", placeholder: "key" },
+    recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
+    reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
     "body-file": { type: "string", help: "the question, from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -102,10 +108,24 @@ const ask: VerbSpec = {
     if (bad) throw new FlowrynError("bad_args", `option "${bad}" must be short: letters, digits, spaces, _ . -`);
     const blocking = boolArg(args, "blocking");
     const now = ctx.now();
+    const key = stringArg(args, "key") ?? null;
+    if (key && !DECISION_KEY.test(key)) throw new FlowrynError("bad_args", "--key must be lowercase letters, digits and dashes");
+    // A second ask with the same key on the same task would otherwise hit decisions_origin_key's
+    // unique index as a raw SQLite error, and a spooled ask would fail on replay. Idempotent: an
+    // open decision for the same (origin, key) is returned again; an already-settled one refuses.
+    if (key) {
+      const existing = ctx.db.query("SELECT id, run_id, state, blocking, options FROM decisions WHERE origin = ?1 AND key = ?2").get(run.task_id, key) as { id: string; run_id: string | null; state: string; blocking: number; options: string } | null;
+      if (existing && existing.run_id === null) throw new FlowrynError("bad_args", `key ${key} is already the standalone decision ${existing.id}`, "use another key");
+      if (existing) {
+        if (existing.state !== "open") throw new FlowrynError("bad_args", `key ${key} already used by ${existing.id}`);
+        return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: ["end your turn; the answer arrives as a steer"] };
+      }
+    }
     const id = nextDecisionId(ctx);
+    const reserved = reservedReason({ question, context: null, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: false }, decisionsConfig(ctx.config()));
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open')")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0);
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, now);
     const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, via: ctx.via } });
     const item = openItem(ctx.db, {
       kind: blocking ? "worker_question_blocking" : "worker_question",
@@ -164,6 +184,7 @@ interface DeliveredReport {
   source: string;
   artifact: string;
   bytes: number;
+  text: string;
 }
 
 function isInside(path: string, root: string): boolean {
@@ -210,7 +231,10 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
       throw new FlowrynError("invalid_report", `cannot store the report at ${artifact}: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
     }
   }
-  return { source: real, artifact, bytes: st.size };
+  // Read the stored copy, not the worker-controlled source: the worker's own process could still
+  // rewrite `real` between the copy above and a read of it, but nothing writes `artifact` afterward.
+  const text = readFileSync(artifact, "utf8");
+  return { source: real, artifact, bytes: st.size, text };
 }
 
 type DeliveryAsked = { kind: "report"; path: string } | { kind: "local" } | { kind: "pr"; url: string };
@@ -306,17 +330,40 @@ const deliver: VerbSpec = {
       ts: now,
     });
     resolveRunItems(ctx.db, run.id, ["worker_idle"], "run.delivered", now);
+    // A scout's `## Open decisions` become standalone decisions once (cutover C1). A second real
+    // delivery is refused above (run_not_active); a spool duplicate replays its stored reply; and
+    // createStandaloneDecision returns created: false on any repeat, so nothing opens twice. A
+    // malformed entry (spec: an empty question) never blocks landing: it is skipped, with a warning.
+    const parsed = parseOpenDecisions(delivered.text);
+    const cfg = decisionsConfig(ctx.config());
+    const opened: string[] = [];
+    const warnings: string[] = [];
+    for (const entry of parsed) {
+      if (entry.warning) warnings.push(entry.warning);
+      const options = entry.options.filter((o) => OPTION.test(o));
+      const reserved = reservedReason({ question: entry.question, context: entry.context, sourceReason: entry.reserved, blocksYoloOff: false }, cfg);
+      try {
+        const made = createStandaloneDecision(ctx.db, { key: entry.key, question: entry.question, options, recommendation: entry.recommendation, context: entry.context, origin: run.task_id, reservedReason: reserved, project: run.project_id, now });
+        if (made.created) opened.push(made.id);
+      } catch (error) {
+        if (!(error instanceof FlowrynError)) throw error;
+        warnings.push(`entry ${entry.key}: ${error.message}`);
+      }
+    }
     openItem(ctx.db, {
       kind: "report_ready",
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id}`,
+      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id}${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}`,
       now,
     });
     // A scout's workflow ends in no gate: the verified report lands it, and the daemon cleans up (design section 8).
     landScout(ctx.db, run, delivered.artifact, now);
-    return { data: { run: run.id, state: "landed", report: delivered.artifact }, hints: ["end your turn"] };
+    if (parsed.length > 0) {
+      appendEvent(ctx.db, { source: "cli", kind: "report.decisions", runId: run.id, taskId: run.task_id, payload: { opened, warnings }, ts: now });
+    }
+    return { data: { run: run.id, state: "landed", report: delivered.artifact, decisions: opened }, hints: ["end your turn"] };
   },
   async settle(ctx, result) {
     // A PR is watched; a landed report's worktree is cleaned up by the same watcher pass.

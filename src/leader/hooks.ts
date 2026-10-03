@@ -8,11 +8,14 @@ import { appendEvent } from "../db/events.ts";
 import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
 import { hashToken, mintToken } from "../api/auth.ts";
+import { decisionRef } from "../lifecycle/decision-verbs.ts";
+import { getDecision } from "../lifecycle/decisions.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
-import { recordAttempt, type ApprovalAction } from "../policy/approvals.ts";
+import { recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
+import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
  * The leader side of the hook verbs (design sections 5, 9 and 10). The
@@ -242,6 +245,9 @@ export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): 
 export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  // Fail-closed (design section 7): your next message also kills a declined attempt the Claude
+  // leader is still holding, the same as the next Bash call does.
+  if (s.harness === "claude") voidPendingAttempts(ctx.db, s.session_id, now);
   const late = deadline !== null && now > deadline;
   if (s.harness === "pi" && input.source === "run") {
     if (busyNow(s, now)) refreshBusy(ctx, s, now);
@@ -290,23 +296,64 @@ export function toolActivity(ctx: HandlerCtx): HandlerResult {
 export interface GatedCommand {
   action: ApprovalAction;
   task: string;
+  /** decide only: more than one captain answer appears in this one command; refuse all of them by construction (no attempt is ever recorded for it). */
+  tooMany?: boolean;
 }
 
 const MERGE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+merge\s+([A-Za-z0-9][\w.-]*)/g;
 const DISCARD_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+cleanup\s+([A-Za-z0-9][\w.-]*)[^;&|\n]*?--discard\b/g;
 const GATE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+gate\s+pass\s+([A-Za-z0-9][\w.-]*)/g;
+const FLOWRYN_WORD = /\bflowryn\b/;
+const CAPTAIN_WORD = /\bcaptain\b/;
+const DECIDE_WORD = /\bdecide\b/g;
+const DECISION_ID = /\b([kq]\d+)\b/;
 
-/** The Flowryn commands in a shell line that need your word: merges, discards and review gate passes. */
+/** `\` immediately before a newline is a shell line continuation: treat it as a plain space before scanning. */
+function joinContinuations(command: string): string {
+  return command.replace(/\\\r?\n/g, " ");
+}
+
+/**
+ * Every decision id a `decide` word in the line is followed by, left to right, when the line also
+ * names `flowryn` and `captain` somewhere. This over-matches by design (the controller's ruling): a
+ * precise per-spelling regex anchored on `--by captain` misses `--by=captain`, flags reordered before
+ * the positionals, quoted forms and a backslash-newline continuation — all of which the CLI parser
+ * (src/cli/argv.ts) accepts. One `decide` with no id after it (malformed) still gates, with an empty
+ * id, so it refuses rather than runs unprompted.
+ */
+function captainDecideIds(command: string): string[] {
+  const normalized = joinContinuations(command);
+  if (!FLOWRYN_WORD.test(normalized) || !CAPTAIN_WORD.test(normalized)) return [];
+  const ids: string[] = [];
+  let anyDecide = false;
+  for (const m of normalized.matchAll(DECIDE_WORD)) {
+    anyDecide = true;
+    const id = DECISION_ID.exec(normalized.slice(m.index + m[0].length))?.[1];
+    if (id) ids.push(id);
+  }
+  return anyDecide && ids.length === 0 ? [""] : ids;
+}
+
+/** The Flowryn commands in a shell line that need your word: merges, discards, review gate passes and captain answers. */
 export function gatedCommands(command: string): GatedCommand[] {
   const found: GatedCommand[] = [];
   for (const match of command.matchAll(MERGE_COMMAND)) found.push({ action: "merge", task: match[1]! });
   for (const match of command.matchAll(DISCARD_COMMAND)) found.push({ action: "discard", task: match[1]! });
   for (const match of command.matchAll(GATE_COMMAND)) found.push({ action: "gate", task: match[1]! });
+  const decideIds = captainDecideIds(command);
+  if (decideIds.length === 1) found.push({ action: "decide", task: decideIds[0]! });
+  else if (decideIds.length > 1) found.push({ action: "decide", task: decideIds[0]!, tooMany: true });
   return found;
 }
 
 /** What the prompt names, from what flowrynd already knows (a hook must answer fast, so no network). */
-function promptFacts(ctx: HandlerCtx, gated: GatedCommand): { line: string; prUrl: string | null; head: string | null } {
+function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { line: string; prUrl: string | null; head: string | null } {
+  if (gated.action === "decide") {
+    if (gated.tooMany) return { line: `more than one captain answer in one command: "${sanitizeLine(command, 300)}"; only one flowryn decide … --by captain is allowed per command, so none of them will be recorded`, prUrl: null, head: null };
+    const d = gated.task ? getDecision(ctx.db, gated.task) : null;
+    if (!d || d.state !== "open") return { line: `record an answer to ${gated.task || "?"} from: "${sanitizeLine(command, 300)}": no open decision; it will be refused`, prUrl: null, head: null };
+    return { line: `RECORD as the user's own answer to ${d.id} ("${sanitizeLine(d.question, 120)}"): ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
+  }
   const run = findRun(ctx.db, gated.task);
   if (!run) return { line: `${gated.action} ${gated.task}: no such task; it will be refused`, prUrl: null, head: null };
   const title = taskTitle(ctx.db, run.task_id);
@@ -332,19 +379,38 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand): { line: string; prUr
  * and answered with "ask", so Claude puts it in front of you even in auto
  * mode (M0 c08). The merge that follows matches this attempt; without one,
  * it is refused.
+ *
+ * Fail-closed root cause fix: every tool call of a Claude leader session,
+ * gated or not and whatever the tool, first voids every one of this
+ * session's unmatched attempts (`voidPendingAttempts`), before the
+ * Bash-only gating and recording below. Without this, a declined attempt
+ * stays claimable for its whole five-minute window by any later call the
+ * gate itself cannot see as the same command — a spelling the regex misses,
+ * a `tooMany` line, a wrong or empty id, or a non-Bash tool that can still
+ * run a shell command (Monitor, PowerShell) and so is not covered by the
+ * `Bash(...)` ask rules at all. An attempt now survives only from the call
+ * that recorded it to the very next tool call; `stop` and `prompt` void the
+ * same way, so a decline that ends the turn or your next message also
+ * kills it.
  */
 export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
-  if (s.harness !== "claude" || input.tool_name !== "Bash") return result;
+  if (s.harness !== "claude") return result;
+  const now = ctx.now();
+  voidPendingAttempts(ctx.db, s.session_id, now);
+  if (input.tool_name !== "Bash") return result;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const gated = gatedCommands(command);
   if (gated.length === 0) return result;
-  const now = ctx.now();
   const lines: string[] = [];
   for (const g of gated) {
-    const facts = promptFacts(ctx, g);
-    recordAttempt(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), action: g.action, task: g.task, permissionMode: String(input.permission_mode ?? "unknown"), prUrl: facts.prUrl, head: facts.head, now });
+    const facts = promptFacts(ctx, g, command);
+    // Refusal by construction: a line naming more than one captain decide is gated and prompted, but
+    // no attempt is ever recorded for it, so the decide calls it runs can never find one to match.
+    if (!(g.action === "decide" && g.tooMany)) {
+      recordAttempt(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), action: g.action, task: g.task, permissionMode: String(input.permission_mode ?? "unknown"), prUrl: facts.prUrl, head: facts.head, now });
+    }
     lines.push(facts.line);
   }
   return { data: { permission: "ask", reason: `Flowryn needs your word: ${lines.join("; ")}. Approve only if you want this.` } };
@@ -376,6 +442,9 @@ export function approvalKey(ctx: HandlerCtx): HandlerResult {
 export function stop(ctx: HandlerCtx): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  // Fail-closed (design section 7): a declined prompt that ends the turn here, rather than at the
+  // next Bash call, must not leave its attempt live for the rest of its five-minute window.
+  if (s.harness === "claude") voidPendingAttempts(ctx.db, s.session_id, now);
   const presented = confirmTurn(ctx.db, s.session_id, s.turn_no, now);
   heartbeat(ctx.db, s.session_id, now);
   if (s.harness === "claude" && s.continuations < MAX_LEADER_CONTINUATIONS && isHolder(ctx.db, s.session_id)) {

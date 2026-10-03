@@ -173,4 +173,15 @@ describe("intent journal", () => {
     const row = await env.journal.awaitSettled(stuck.id, 200);
     expect(row!.state).toBe("pending");
   });
+
+  test("block records a blocked-by edge, and repeats harmlessly", async () => {
+    env = makeJournalEnv();
+    env.record({ file: "backlog", verb: "add", taskId: "a-1", positional: ["a-1", "A"], flags: { kind: "ship" } });
+    env.record({ file: "backlog", verb: "add", taskId: "b-1", positional: ["b-1", "B"], flags: { kind: "decision" } });
+    env.record({ file: "backlog", verb: "block", taskId: "a-1", positional: ["a-1"], flags: { by: "b-1" } });
+    env.record({ file: "backlog", verb: "block", taskId: "a-1", positional: ["a-1"], flags: { by: "b-1" } });
+    await env.journal.drain();
+    expect(readSnapshot(env.db, "backlog")!.tasks.find((t) => t.id === "a-1")!.deps).toEqual(["blocked-by:b-1"]);
+    expect(env.runner.mutations().filter((m) => m[0] === "block")[0]).toEqual(["block", "a-1", "--by", "b-1", "--file", env.files.backlog, "--json"]);
+  });
 });
