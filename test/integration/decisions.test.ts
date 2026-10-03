@@ -3,6 +3,7 @@ import { tx } from "../../src/db/db.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { makeShipEnv } from "../helpers/ship-env.ts";
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {
@@ -125,4 +126,37 @@ describe("decide", () => {
     expect(answered.code).toBe(0);
     expect(answered.reply.data).toMatchObject({ decision: q.id, answer: "yes" });
   });
+});
+
+describe("C1 end to end", () => {
+  test("exit 1: scout decisions, leader decides two, the user answers the reserved one, the waiting ship starts by itself", async () => {
+    const ship = await makeShipEnv({ mode: "local-only" });
+    try {
+      const f = ship.fleet;
+      const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+      const { task, run } = await f.dispatch(["Scout", "FAKE: deliver-decisions report.md a:Use A or B?:a,b:a:- ; c:Cache in SQLite?:yes,no:yes:- ; drop:Delete the old bucket?:yes,no:no:-", "FAKE: sleep 30000"].join("\n"));
+      await f.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "landed");
+      const all = (await f.json(["decision", "list", "--all"], token)).reply.data as { decisions: { id: string; task: string; reserved: string }[] };
+      const reserved = all.decisions.find((d) => d.reserved !== "-")!;
+      for (const d of all.decisions.filter((x) => x.reserved === "-")) {
+        const db = f.h.db();
+        const opt = (JSON.parse((db.query("SELECT options FROM decisions WHERE id = ?1").get(d.id) as { options: string }).options) as string[])[0]!;
+        db.close();
+        expect((await f.json(["decide", d.id, opt, "--rationale", "fine"], token)).code).toBe(0);
+      }
+      await waitUntil(() => f.h.db().query("SELECT 1 FROM intents WHERE task_id = ?1 AND verb = 'hold' AND state = 'applied'").get(reserved.task) !== null, 10_000, "held");
+      const filed = await f.json(["dispatch", "web", "--kind", "ship", "--blocked-by", reserved.task, "--auto", "--body-file", "-"], { ...token, stdin: "After the decision\nFAKE: deliver-local\nFAKE: sleep 60000" });
+      const shipTask = (filed.reply.data as { task: string }).task;
+      const brief = await f.json(["brief"], token);
+      expect(JSON.stringify(brief.reply)).toContain(`[${reserved.id}]`);
+      const leader = await ship.claude();
+      await leader.start();
+      const yes = await leader.runBash(`flowryn decide ${reserved.id} no --by captain --body-file - --json <<'EOF'\nkeep it\nEOF`, { approve: true });
+      expect(yes.code).toBe(0);
+      await waitUntil(() => f.h.db().query("SELECT 1 FROM runs WHERE task_id = ?1").get(shipTask) !== null, 30_000, "the waiting ship started by itself");
+      expect(task).toBeTruthy();
+    } finally {
+      await ship.cleanup();
+    }
+  }, 60_000);
 });
