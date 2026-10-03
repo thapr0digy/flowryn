@@ -14,7 +14,7 @@ import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
-import { recordAttempt, type ApprovalAction } from "../policy/approvals.ts";
+import { recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -346,9 +346,9 @@ export function gatedCommands(command: string): GatedCommand[] {
 /** What the prompt names, from what flowrynd already knows (a hook must answer fast, so no network). */
 function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { line: string; prUrl: string | null; head: string | null } {
   if (gated.action === "decide") {
-    if (gated.tooMany) return { line: "more than one captain answer appears in this one command; only one flowryn decide … --by captain is allowed per command, so none of them will be recorded", prUrl: null, head: null };
+    if (gated.tooMany) return { line: `more than one captain answer in one command: "${sanitizeLine(command, 300)}"; only one flowryn decide … --by captain is allowed per command, so none of them will be recorded`, prUrl: null, head: null };
     const d = gated.task ? getDecision(ctx.db, gated.task) : null;
-    if (!d || d.state !== "open") return { line: `record an answer to ${gated.task || "?"}: no open decision; it will be refused`, prUrl: null, head: null };
+    if (!d || d.state !== "open") return { line: `record an answer to ${gated.task || "?"} from: "${sanitizeLine(command, 300)}": no open decision; it will be refused`, prUrl: null, head: null };
     return { line: `RECORD as the user's own answer to ${d.id} ("${sanitizeLine(d.question, 120)}"): ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
   }
   const run = findRun(ctx.db, gated.task);
@@ -376,15 +376,24 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
  * and answered with "ask", so Claude puts it in front of you even in auto
  * mode (M0 c08). The merge that follows matches this attempt; without one,
  * it is refused.
+ *
+ * Fail-closed root cause fix: every Bash call, gated or not, first voids
+ * every one of this session's unmatched attempts (`voidPendingAttempts`).
+ * Without this, a declined attempt stays claimable for its whole five-minute
+ * window by any later Bash call the gate itself cannot see as the same
+ * command — a spelling the regex misses, a `tooMany` line, a wrong or empty
+ * id. An attempt now survives only from the call that recorded it to the
+ * very next Bash call.
  */
 export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
   if (s.harness !== "claude" || input.tool_name !== "Bash") return result;
+  const now = ctx.now();
+  voidPendingAttempts(ctx.db, s.session_id, now);
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const gated = gatedCommands(command);
   if (gated.length === 0) return result;
-  const now = ctx.now();
   const lines: string[] = [];
   for (const g of gated) {
     const facts = promptFacts(ctx, g, command);

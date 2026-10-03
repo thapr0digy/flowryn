@@ -7,6 +7,11 @@ afterEach(async () => {
   ship = null;
 });
 
+/** A command's stdout may carry more than one JSON reply (a `tooMany` line runs every sub-command); the last line is the one that matters. */
+function lastJson(stdout: string): { ok: boolean; data?: unknown; error?: { code: string } } {
+  return JSON.parse(stdout.trim().split("\n").pop() ?? "{}");
+}
+
 describe("a captain answer needs the user's word", () => {
   test("Claude: the prompt shows the decision and the answer; declined or bypassed, nothing is recorded", async () => {
     ship = await makeShipEnv({ mode: "local-only" });
@@ -127,5 +132,68 @@ describe("a captain answer needs the user's word", () => {
     const again = await leader.runBash(`flowryn decide ${d1} yes --by captain --json`, { approve: true });
     expect(again.code).not.toBe(0);
     expect(JSON.parse(again.stdout).error.code).toBe("bad_args");
+  });
+
+  test("a declined attempt cannot be replayed through a tooMany line: it records none of its own", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "toomany", "--question", "Rotate key C?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    const no = await leader.runBash(`flowryn decide ${decision} no --by captain --json`, { approve: false });
+    expect(no).toMatchObject({ prompted: true, ran: false });
+
+    // Two captain decides on one line: gated and prompted, but neither gets an attempt of its own,
+    // so neither can answer the decision, no matter what a stale attempt from the declined prompt
+    // above might otherwise still let through.
+    const tooMany = await leader.runBash(`flowryn decide ${decision} yes --by captain --json; flowryn decide ${decision} yes --by captain --json`, { approve: true });
+    expect(tooMany).toMatchObject({ prompted: true, ran: true });
+    const lt = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    expect((await f.json(["show", decision], lt)).reply.data).toMatchObject({ state: "open" });
+  });
+
+  test("a declined attempt cannot be replayed by a spelling the gate cannot see (mid-word quoting)", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "capquote", "--question", "Rotate key D?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    const no = await leader.runBash(`flowryn decide ${decision} yes --by captain --json`, { approve: false });
+    expect(no).toMatchObject({ prompted: true, ran: false });
+
+    // cap''tain is "captain" once the shell evaluates it, but the raw text has no contiguous
+    // "captain" for the gate to see: it is never prompted, and runs straight through.
+    const alt = await leader.runBash(`flowryn decide ${decision} yes --by cap''tain --json`, { approve: true });
+    expect(alt).toMatchObject({ prompted: false, ran: true });
+    expect(lastJson(alt.stdout).error?.code).toBe("approval_required");
+    const lt = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    expect((await f.json(["show", decision], lt)).reply.data).toMatchObject({ state: "open" });
+  });
+
+  test("a declined attempt is voided by the very next Bash call, even an unrelated one", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "unrelated", "--question", "Rotate key E?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    const no = await leader.runBash(`flowryn decide ${decision} yes --by captain --json`, { approve: false });
+    expect(no).toMatchObject({ prompted: true, ran: false });
+
+    // An unrelated Bash call in between (an allowed, non-captain flowryn command): it is not gated,
+    // but it still voids the stale attempt.
+    const unrelated = await leader.runBash("flowryn fleet --json", { approve: true });
+    expect(unrelated).toMatchObject({ prompted: false, ran: true, code: 0 });
+
+    // The gate-blind alt spelling (which would otherwise have to do its own voiding) now has
+    // nothing left to find even if it ran as the very first replay attempt.
+    const alt = await leader.runBash(`flowryn decide ${decision} yes --by cap''tain --json`, { approve: true });
+    expect(alt).toMatchObject({ prompted: false, ran: true });
+    expect(lastJson(alt.stdout).error?.code).toBe("approval_required");
   });
 });
