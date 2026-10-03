@@ -26,6 +26,9 @@ import { openRunForTask } from "./runs.ts";
 export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
+/** What a task may wait for: a ship lands; a decision lands once answered (its task is done). */
+export const BLOCKER_KINDS = ["ship", "decision"] as const;
+
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
 /** tasks-axi keeps the backlog readable; the full text lives in the run's task.md. */
@@ -238,9 +241,9 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     const kinds = new Map(blockedBy.map((id) => [id, blockerKind(ctx.db, id)]));
     const unknown = blockedBy.filter((id) => kinds.get(id) === null);
     if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
-    const unshipped = blockedBy.filter((id) => kinds.get(id) !== "ship");
+    const unshipped = blockedBy.filter((id) => !(BLOCKER_KINDS as readonly string[]).includes(kinds.get(id) ?? ""));
     if (unshipped.length > 0) {
-      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship lands, so a task can wait only for ships`, "wait for the report yourself, then dispatch");
+      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, "wait for the report yourself, then dispatch");
     }
     return { mode: "queue", project, harness, blockedBy };
   }
