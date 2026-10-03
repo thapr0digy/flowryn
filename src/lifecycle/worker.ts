@@ -5,9 +5,11 @@ import { appendEvent } from "../db/events.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
+import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
+import { DECISION_KEY } from "./decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
@@ -84,6 +86,9 @@ const ask: VerbSpec = {
   flags: {
     options: { type: "string", help: "comma-separated choices", placeholder: "a,b" },
     blocking: { type: "boolean", help: "you cannot continue without the answer" },
+    key: { type: "string", help: "a short slug for this question, for show", placeholder: "key" },
+    recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
+    reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
     "body-file": { type: "string", help: "the question, from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -103,9 +108,12 @@ const ask: VerbSpec = {
     const blocking = boolArg(args, "blocking");
     const now = ctx.now();
     const id = nextDecisionId(ctx);
+    const reserved = reservedReason({ question, context: null, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: false }, decisionsConfig(ctx.config()));
+    const key = stringArg(args, "key") ?? null;
+    if (key && !DECISION_KEY.test(key)) throw new FlowrynError("bad_args", "--key must be lowercase letters, digits and dashes");
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open')")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0);
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, now);
     const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, via: ctx.via } });
     const item = openItem(ctx.db, {
       kind: blocking ? "worker_question_blocking" : "worker_question",

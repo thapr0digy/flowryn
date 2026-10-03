@@ -1,9 +1,11 @@
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
-import { resolveItems, resolveRunItems } from "../attention/items.ts";
+import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
+import { getDecision } from "./decisions.ts";
 import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, unackedSteers } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
@@ -50,16 +52,6 @@ const steer: VerbSpec = {
   },
 };
 
-interface DecisionRow {
-  id: string;
-  task_id: string;
-  run_id: string | null;
-  question: string;
-  options: string;
-  blocking: number;
-  state: string;
-}
-
 /** `flowryn answer <decision> <choice>`: the answer reaches the worker as a steer. */
 const answer: VerbSpec = {
   name: "answer",
@@ -74,24 +66,16 @@ const answer: VerbSpec = {
   apply(ctx, args) {
     const id = stringArg(args, "decision")!;
     const choice = stringArg(args, "choice")!;
-    const decision = ctx.db.query("SELECT * FROM decisions WHERE id = ?1").get(id) as DecisionRow | null;
-    if (!decision) throw new FlowrynError("not_found", `no decision ${id}`, "flowryn fleet");
-    if (decision.state !== "open") throw new FlowrynError("bad_args", `decision ${id} is already ${decision.state}`);
-    const options = JSON.parse(decision.options) as string[];
-    if (!options.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${options.join(", ")}`);
-    const now = ctx.now();
-    const note = sanitizeBlock(stringArg(args, "body") ?? "").trim();
-    ctx.db.query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4 WHERE id = ?1").run(id, choice, ctx.caller.role, now);
-    appendEvent(ctx.db, { source: "cli", kind: "decision.answered", runId: decision.run_id, taskId: decision.task_id, payload: { decision: id, choice, by: ctx.caller.role } });
-    resolveItems(ctx.db, decision.blocking ? "worker_question_blocking" : "worker_question", decision.task_id, `decision.answered ${id}`, now);
-    if (decision.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: decision.task_id, positional: [decision.task_id], now });
-    const run = decision.run_id ? getRun(ctx.db, decision.run_id) : null;
-    let steerId: string | null = null;
-    if (run && !isTerminal(run.state)) {
-      const text = `Answer to your question ${id} ("${sanitizeLine(decision.question, 100)}"): ${choice}.${note ? ` ${note}` : ""}`;
-      steerId = createSteer(ctx.db, run, text, now, id).id;
-    }
-    return { data: { decision: id, answer: choice, steer: steerId ?? "-", run: run?.id ?? "-" } };
+    const d = getDecision(ctx.db, id);
+    if (!d) throw new FlowrynError("not_found", `no decision ${id}`, "flowryn fleet");
+    if (d.state !== "open") throw new FlowrynError("bad_args", `decision ${id} is already ${d.state}`);
+    const options = JSON.parse(d.options) as string[];
+    if (options.length > 0 && !options.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${options.join(", ")}`);
+    const note = sanitizeBlock(stringArg(args, "body") ?? "").trim() || null;
+    const human = ctx.caller.role === "human";
+    if (!human && d.reserved_reason) throw new FlowrynError("reserved_decision", `${id} is reserved for the user (${d.reserved_reason})`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
+    const done = answerDecision(ctx, d, { choice, words: note, by: human ? "captain" : "leader", via: human ? captainChannel(ctx, d, id, args) : "leader" });
+    return { data: { decision: id, answer: choice, steer: done.steer ?? "-", run: done.run ?? "-" } };
   },
   async settle(ctx, result) {
     if (result.data.run !== "-") ctx.fleet.bus.notify(String(result.data.run));
@@ -354,6 +338,10 @@ const show: VerbSpec = {
   roles: ["leader", "reader", "human"],
   read(ctx, args) {
     let target = stringArg(args, "target")!;
+    if (/^[kq]\d+$/.test(target)) {
+      const d = getDecision(ctx.db, target);
+      if (d) return { data: decisionView(d), hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };
+    }
     const plan = /^p\d+$/.test(target) ? planView(ctx.db, target) : null;
     if (plan) return { data: plan, hints: ["flowryn fleet"] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
