@@ -2,8 +2,10 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
+import { openDecisions } from "../lifecycle/decision-verbs.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
+import { sanitizeLine } from "../util/sanitize.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -16,7 +18,8 @@ import { openActionable, type RankedItem } from "./router.ts";
 export const BRIEFING_MAX_CHARS = 6_000;
 const MAX_NEEDS_LINES = 20;
 const MAX_DUE_NAMES = 5;
-export const COMMANDS_LINE = "Commands: flowryn fleet · flowryn show <id> · flowryn answer <id> <choice>";
+export const COMMANDS_LINE = "Commands: flowryn fleet · flowryn show <id> · flowryn decide <id> <choice> --rationale <why> · flowryn decision list";
+const MAX_DECISION_LINES = 8;
 
 export interface BriefingInput {
   /** The session the briefing is for; null for your own terminal (`flowryn brief`). */
@@ -74,7 +77,7 @@ function fleetLine(db: Db): string {
     .all() as { kind: string; n: number }[];
   const ships = kinds.find((k) => k.kind === "ship")?.n ?? 0;
   const scouts = kinds.find((k) => k.kind === "scout")?.n ?? 0;
-  const queued = (readSnapshot(db, "backlog")?.tasks ?? []).filter((t) => t.state === "queued").length;
+  const queued = (readSnapshot(db, "backlog")?.tasks ?? []).filter((t) => t.state === "queued" && t.kind !== "decision").length;
   return `In flight: ${plural(ships, "ship")}, ${plural(scouts, "scout")}. Queued: ${queued}.`;
 }
 
@@ -86,6 +89,25 @@ interface TodoFacts {
 function todoFacts(db: Db, today: string): TodoFacts {
   const open = todoViews(db).filter((t) => t.state !== "done" && t.due !== null);
   return { dueToday: open.filter((t) => t.due === today).map((t) => t.title), overdue: open.filter((t) => t.due! < today).length };
+}
+
+/** Reserved decisions waiting on you, and what the leader decided since the last briefing (cutover C1). */
+function decisionLines(db: Db, now: number, mark: boolean): string[] {
+  const lines: string[] = [];
+  const reserved = openDecisions({ db, now }, "reserved");
+  if (reserved.length > 0) {
+    lines.push(`Decisions for you (${reserved.length}):`);
+    for (const d of reserved.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 120)} (${d.reserved_reason})`);
+    if (reserved.length > MAX_DECISION_LINES) lines.push(`+${reserved.length - MAX_DECISION_LINES} more: flowryn decision list --reserved`);
+  }
+  const since = Number(getMeta(db, "last_briefing_at") ?? "0");
+  const decided = db.query("SELECT id, question, answer, rationale FROM decisions WHERE answered_by = 'leader' AND answered_at > ?1 ORDER BY answered_at").all(since) as { id: string; question: string; answer: string; rationale: string | null }[];
+  if (decided.length > 0) {
+    lines.push(`Decided for you since the last briefing (${decided.length}):`);
+    for (const d of decided.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
+  }
+  if (mark) setMeta(db, "last_briefing_at", String(now));
+  return lines;
 }
 
 function doneSince(db: Db, day: string): number {
@@ -112,6 +134,7 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
     for (const item of listed) lines.push(`- [${item.id}] ${item.lane === "P0" ? "P0 · " : ""}${item.line}`);
     if (needs.length > listed.length) lines.push(`+${needs.length - listed.length} more: flowryn fleet`);
   }
+  lines.push(...decisionLines(db, input.now, input.markMorning));
   lines.push(fleetLine(db));
   const todos = todoFacts(db, today);
   if (todos.dueToday.length > 0) {

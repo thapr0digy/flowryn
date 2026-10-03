@@ -257,3 +257,27 @@ describe("notifications (design section 9)", () => {
     expect((db.query("SELECT COUNT(*) AS n FROM notifications").get() as { n: number }).n).toBe(sent.length);
   });
 });
+
+describe("decisions in the briefing", () => {
+  test("reserved open decisions are listed for you; leader answers since the last briefing are listed once", () => {
+    tx(db, () => {
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, reserved_reason, created_at) VALUES ('k1', 'decision-a-x1', 'Delete the bucket?', '[]', 1, 'open', 'destructive', 1)").run();
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, answer, answered_by, rationale, answered_at, created_at) VALUES ('k2', 'decision-b-x2', 'SQLite or Postgres?', '[]', 1, 'answered', 'sqlite', 'leader', 'one process', 5, 2)").run();
+    });
+    const first = tx(db, () => composeBriefing(db, { session: null, now: 10, morningHour: 99, ageMs: AGE, markMorning: true }));
+    expect(first.text).toContain("Decisions for you (1):");
+    expect(first.text).toContain("[k1] Delete the bucket? (destructive)");
+    expect(first.text).toContain("Decided for you since the last briefing (1):");
+    expect(first.text).toContain("[k2] SQLite or Postgres? → sqlite: one process");
+    const second = tx(db, () => composeBriefing(db, { session: null, now: 20, morningHour: 99, ageMs: AGE, markMorning: true }));
+    expect(second.text).not.toContain("Decided for you");
+  });
+
+  test("decision tasks do not count as queued work", () => {
+    writeSnapshot(db, "backlog", "h", [
+      { id: "decision-a-x1", title: "Delete?", state: "queued", kind: "decision", repo: null, priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] },
+      { id: "web-x-q1", title: "Ship", state: "queued", kind: "ship", repo: "hot", priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] },
+    ] as BacklogTask[], 1);
+    expect(composeBriefing(db, { session: null, now: 10, morningHour: 99, ageMs: AGE, markMorning: false }).text).toContain("Queued: 1.");
+  });
+});
