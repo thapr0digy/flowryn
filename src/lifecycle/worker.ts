@@ -1,4 +1,4 @@
-import { constants, copyFileSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { constants, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
@@ -9,7 +9,8 @@ import { decisionsConfig, reservedReason } from "../attention/decisions-policy.t
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
-import { DECISION_KEY } from "./decisions.ts";
+import { createStandaloneDecision, DECISION_KEY } from "./decisions.ts";
+import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
@@ -172,6 +173,7 @@ interface DeliveredReport {
   source: string;
   artifact: string;
   bytes: number;
+  text: string;
 }
 
 function isInside(path: string, root: string): boolean {
@@ -218,7 +220,8 @@ function collectReport(ctx: HandlerCtx, run: RunWithPolicy, raw: string): Delive
       throw new FlowrynError("invalid_report", `cannot store the report at ${artifact}: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}`);
     }
   }
-  return { source: real, artifact, bytes: st.size };
+  const text = readFileSync(real, "utf8");
+  return { source: real, artifact, bytes: st.size, text };
 }
 
 type DeliveryAsked = { kind: "report"; path: string } | { kind: "local" } | { kind: "pr"; url: string };
@@ -324,7 +327,22 @@ const deliver: VerbSpec = {
     });
     // A scout's workflow ends in no gate: the verified report lands it, and the daemon cleans up (design section 8).
     landScout(ctx.db, run, delivered.artifact, now);
-    return { data: { run: run.id, state: "landed", report: delivered.artifact }, hints: ["end your turn"] };
+    // A scout's `## Open decisions` become standalone decisions once (cutover C1). A second real
+    // delivery is refused above (run_not_active); a spool duplicate replays its stored reply; and
+    // createStandaloneDecision returns created: false on any repeat, so nothing opens twice.
+    const parsed = parseOpenDecisions(delivered.text);
+    const cfg = decisionsConfig(ctx.config());
+    const opened: string[] = [];
+    for (const entry of parsed) {
+      const options = entry.options.filter((o) => OPTION.test(o));
+      const reserved = reservedReason({ question: entry.question, context: entry.context, sourceReason: entry.reserved, blocksYoloOff: false }, cfg);
+      const made = createStandaloneDecision(ctx.db, { key: entry.key, question: entry.question, options, recommendation: entry.recommendation, context: entry.context, origin: run.task_id, reservedReason: reserved, project: run.project_id, now });
+      if (made.created) opened.push(made.id);
+    }
+    if (parsed.length > 0) {
+      appendEvent(ctx.db, { source: "cli", kind: "report.decisions", runId: run.id, taskId: run.task_id, payload: { opened, warnings: parsed.flatMap((p) => (p.warning ? [p.warning] : [])) }, ts: now });
+    }
+    return { data: { run: run.id, state: "landed", report: delivered.artifact, decisions: opened }, hints: ["end your turn"] };
   },
   async settle(ctx, result) {
     // A PR is watched; a landed report's worktree is cleaned up by the same watcher pass.

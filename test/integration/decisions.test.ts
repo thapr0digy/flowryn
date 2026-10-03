@@ -100,6 +100,20 @@ describe("decide", () => {
     expect(reserved.decisions).toEqual([expect.objectContaining({ id: b.decision, reserved: "credential" })]);
   });
 
+  test("a scout's open decisions become standalone decisions once, even if it delivers again", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const spec = "FAKE: deliver-decisions report.md pick-db:Which database?:sqlite,postgres:sqlite:- ; drop-old:Delete the old bucket?:yes,no:no:-";
+    // The second delivery is refused (run_not_active: the scout is landed) and opens nothing.
+    const { task, run } = await env.dispatch(["Scout the design", spec, spec, "FAKE: sleep 30000"].join("\n"));
+    await env.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "landed");
+    const list = (await env.json(["decision", "list", "--all"])).reply.data as { decisions: { id: string; reserved: string }[] };
+    expect(list.decisions).toHaveLength(2);
+    expect(list.decisions.find((d) => d.reserved === "destructive")).toBeDefined();
+    const origins = env.h.db().query("SELECT DISTINCT origin FROM decisions").all() as { origin: string }[];
+    expect(origins).toEqual([{ origin: task }]);
+  });
+
   test("answer stays an alias for run-scoped questions", async () => {
     const env = await makeFleetEnv();
     envs.push(env);
