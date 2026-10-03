@@ -214,7 +214,9 @@ function blockerKind(db: Db, id: string): string | null {
   if (db.query("SELECT 1 FROM plan_phases WHERE task_id = ?1").get(id)) return "ship";
   // A decision task has no task_policy row (cutover C1); the decisions table itself names it, so a
   // just-added decision task can be a blocker at once, before the backlog snapshot has caught up.
-  if (db.query("SELECT 1 FROM decisions WHERE task_id = ?1").get(id)) return "decision";
+  // run_id IS NULL: a run-scoped q<N> names a run's own task, which always has a task_policy row
+  // caught by the check above, so this branch is standalone (k<N>) decisions only.
+  if (db.query("SELECT 1 FROM decisions WHERE task_id = ?1 AND run_id IS NULL").get(id)) return "decision";
   const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === id);
   return task ? (task.kind ?? "ship") : null;
 }

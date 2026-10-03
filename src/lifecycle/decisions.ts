@@ -65,29 +65,38 @@ export interface NewStandalone {
 }
 
 /** Create a standalone decision and its held task. Call inside a transaction. */
-export function createStandaloneDecision(db: Db, d: NewStandalone): { id: string; taskId: string; created: boolean } {
+export function createStandaloneDecision(db: Db, d: NewStandalone): { id: string; taskId: string; created: boolean; reservedReason: string | null } {
   if (!DECISION_KEY.test(d.key)) throw new FlowrynError("bad_args", `decision key ${d.key} must be lowercase letters, digits and dashes`);
-  const existing = db.query("SELECT id, task_id FROM decisions WHERE origin = ?1 AND key = ?2").get(d.origin, d.key) as { id: string; task_id: string } | null;
+  const existing = db.query("SELECT id, task_id, reserved_reason FROM decisions WHERE origin = ?1 AND key = ?2").get(d.origin, d.key) as { id: string; task_id: string; reserved_reason: string | null } | null;
   if (existing) {
     // A repeat decision add names no new question, but block is idempotent: a --blocks target
     // given this time still gets its blocked-by edge, even though the decision itself is not new.
     for (const blocked of d.blocks ?? []) recordIntent(db, { file: "backlog", verb: "block", taskId: blocked, positional: [blocked], flags: { by: existing.task_id }, now: d.now });
-    return { id: existing.id, taskId: existing.task_id, created: false };
+    // The leader may add a reserved reason later (a --blocks target that turns out to be a
+    // non-yolo merge, a --reserved this time) but never remove or replace one already recorded.
+    let reservedReason = existing.reserved_reason;
+    if (reservedReason === null && d.reservedReason) {
+      reservedReason = d.reservedReason;
+      db.query("UPDATE decisions SET reserved_reason = ?2 WHERE id = ?1").run(existing.id, reservedReason);
+      appendEvent(db, { source: "cli", kind: "decision.reserved", taskId: existing.task_id, payload: { decision: existing.id, reserved: reservedReason }, ts: d.now });
+    }
+    return { id: existing.id, taskId: existing.task_id, created: false, reservedReason };
   }
   const question = sanitizeBlock(d.question).trim().slice(0, MAX_QUESTION);
   if (question.length === 0) throw new FlowrynError("bad_args", "a decision needs a question");
   const context = d.context ? sanitizeBlock(d.context).trim().slice(0, MAX_CONTEXT) : null;
   const id = nextStandaloneId(db);
   const taskId = mintTaskId(`decision ${d.key}`, takenIds(db));
+  const reservedReason = d.reservedReason ?? null;
   db.query(
     `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, created_at)
      VALUES (?1, ?2, NULL, ?3, ?4, 1, 'open', ?5, ?6, ?7, ?8, ?9, ?10)`,
-  ).run(id, taskId, question, JSON.stringify(d.options), d.origin, d.key, context, d.recommendation ?? null, d.reservedReason ?? null, d.now);
+  ).run(id, taskId, question, JSON.stringify(d.options), d.origin, d.key, context, d.recommendation ?? null, reservedReason, d.now);
   const flags: Record<string, string> = { kind: "decision", body: context ?? question };
   if (d.project) flags.repo = d.project;
   recordIntent(db, { file: "backlog", verb: "add", taskId, positional: [taskId, sanitizeLine(question, 120)], flags, now: d.now });
   recordIntent(db, { file: "backlog", verb: "hold", taskId, positional: [taskId], flags: { reason: holdReason(`decision ${id}`), kind: "captain" }, now: d.now });
   for (const blocked of d.blocks ?? []) recordIntent(db, { file: "backlog", verb: "block", taskId: blocked, positional: [blocked], flags: { by: taskId }, now: d.now });
-  appendEvent(db, { source: "cli", kind: "decision.opened", taskId, payload: { decision: id, origin: d.origin, key: d.key, reserved: d.reservedReason ?? null, blocks: d.blocks ?? [] }, ts: d.now });
-  return { id, taskId, created: true };
+  appendEvent(db, { source: "cli", kind: "decision.opened", taskId, payload: { decision: id, origin: d.origin, key: d.key, reserved: reservedReason, blocks: d.blocks ?? [] }, ts: d.now });
+  return { id, taskId, created: true, reservedReason };
 }

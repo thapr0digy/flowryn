@@ -119,6 +119,23 @@ describe("decide", () => {
     expect(JSON.parse(blocks[0]!.args)).toMatchObject({ positional: [shipTask], flags: { by: task } });
   });
 
+  test("a repeat decision add that newly blocks a non-yolo ship upgrades (never clears) the reserved reason", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    // The default project is not yolo, so blocking its ship makes the decision a merge reservation.
+    const { task: shipTask } = await env.dispatch("Build\nFAKE: sleep 30000", { kind: "ship" });
+    const first = await env.json(["decision", "add", "--key", "upgrade-reserved", "--question", "Ship this way?", "--body-file", "-"], { stdin: "x" });
+    expect(first.reply.data).toMatchObject({ reserved: "-" });
+    const { decision } = first.reply.data as { decision: string };
+    const again = await env.json(["decision", "add", "--key", "upgrade-reserved", "--question", "Ship this way?", "--blocks", shipTask, "--body-file", "-"], { stdin: "x" });
+    expect(again.reply.data).toMatchObject({ decision, already: true, reserved: "merge" });
+    const reservedList = (await env.json(["decision", "list", "--reserved"])).reply.data as { decisions: { id: string }[] };
+    expect(reservedList.decisions.map((d) => d.id)).toContain(decision);
+    const refused = await env.json(["decide", decision, "yes", "--rationale", "x"]);
+    expect(refused.code).toBe(2);
+    expect((refused.reply as { error: { code: string } }).error.code).toBe("reserved_decision");
+  });
+
   test("answering one a non-auto ship waits on hints the dispatch", async () => {
     const env = await makeFleetEnv();
     envs.push(env);

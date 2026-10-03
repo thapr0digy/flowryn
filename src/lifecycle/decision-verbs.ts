@@ -133,7 +133,9 @@ const decisionAdd: VerbSpec = {
     const context = sanitizeBlock(stringArg(args, "body") ?? "").trim() || null;
     const reserved = reservedReason({ question, context, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: blocksYoloOff(ctx, blocks) }, decisionsConfig(ctx.config()));
     const made = createStandaloneDecision(ctx.db, { key, question, options: opts, recommendation: recommend, context, origin: stringArg(args, "origin") ?? "leader", reservedReason: reserved, blocks, project: project ?? null, now: ctx.now() });
-    return { data: { decision: made.id, task: made.taskId, reserved: reserved ?? "-", already: !made.created }, hints: [`flowryn show ${made.id}`] };
+    // The row's actual reserved_reason, not the freshly computed one: a repeat add never clears an
+    // existing reason, and may only upgrade a null one (createStandaloneDecision's dedup path).
+    return { data: { decision: made.id, task: made.taskId, reserved: made.reservedReason ?? "-", already: !made.created }, hints: [`flowryn show ${made.id}`] };
   },
   async settle(ctx, result) {
     ctx.journal.kick();
@@ -179,8 +181,9 @@ const decide: VerbSpec = {
       const done = answerDecision(ctx, d, { choice, words: words ? `${rationale}\n${words}` : rationale, by: "leader", via });
       return reply(ctx, d, choice, "leader", done);
     }
-    // A human may pass their words as --rationale (the natural flag to reach for) as readily as
-    // --body-file/--words; neither is dropped if the other is also given, --body-file/--words wins.
+    // A human may pass their words as --rationale (the natural flag to reach for) instead of
+    // --body-file/--words; --rationale is used only as a fallback, so it is never silently dropped
+    // when --body-file/--words was not also given.
     const done = answerDecision(ctx, d, { choice, words: words ?? rationale, by: "captain", via });
     return reply(ctx, d, choice, "captain", done);
   },
