@@ -245,6 +245,9 @@ export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): 
 export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  // Fail-closed (design section 7): your next message also kills a declined attempt the Claude
+  // leader is still holding, the same as the next Bash call does.
+  if (s.harness === "claude") voidPendingAttempts(ctx.db, s.session_id, now);
   const late = deadline !== null && now > deadline;
   if (s.harness === "pi" && input.source === "run") {
     if (busyNow(s, now)) refreshBusy(ctx, s, now);
@@ -377,20 +380,26 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
  * mode (M0 c08). The merge that follows matches this attempt; without one,
  * it is refused.
  *
- * Fail-closed root cause fix: every Bash call, gated or not, first voids
- * every one of this session's unmatched attempts (`voidPendingAttempts`).
- * Without this, a declined attempt stays claimable for its whole five-minute
- * window by any later Bash call the gate itself cannot see as the same
- * command — a spelling the regex misses, a `tooMany` line, a wrong or empty
- * id. An attempt now survives only from the call that recorded it to the
- * very next Bash call.
+ * Fail-closed root cause fix: every tool call of a Claude leader session,
+ * gated or not and whatever the tool, first voids every one of this
+ * session's unmatched attempts (`voidPendingAttempts`), before the
+ * Bash-only gating and recording below. Without this, a declined attempt
+ * stays claimable for its whole five-minute window by any later call the
+ * gate itself cannot see as the same command — a spelling the regex misses,
+ * a `tooMany` line, a wrong or empty id, or a non-Bash tool that can still
+ * run a shell command (Monitor, PowerShell) and so is not covered by the
+ * `Bash(...)` ask rules at all. An attempt now survives only from the call
+ * that recorded it to the very next tool call; `stop` and `prompt` void the
+ * same way, so a decline that ends the turn or your next message also
+ * kills it.
  */
 export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
-  if (s.harness !== "claude" || input.tool_name !== "Bash") return result;
+  if (s.harness !== "claude") return result;
   const now = ctx.now();
   voidPendingAttempts(ctx.db, s.session_id, now);
+  if (input.tool_name !== "Bash") return result;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const gated = gatedCommands(command);
   if (gated.length === 0) return result;
@@ -433,6 +442,9 @@ export function approvalKey(ctx: HandlerCtx): HandlerResult {
 export function stop(ctx: HandlerCtx): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  // Fail-closed (design section 7): a declined prompt that ends the turn here, rather than at the
+  // next Bash call, must not leave its attempt live for the rest of its five-minute window.
+  if (s.harness === "claude") voidPendingAttempts(ctx.db, s.session_id, now);
   const presented = confirmTurn(ctx.db, s.session_id, s.turn_no, now);
   heartbeat(ctx.db, s.session_id, now);
   if (s.harness === "claude" && s.continuations < MAX_LEADER_CONTINUATIONS && isHolder(ctx.db, s.session_id)) {

@@ -132,6 +132,8 @@ describe("a captain answer needs the user's word", () => {
     const again = await leader.runBash(`flowryn decide ${d1} yes --by captain --json`, { approve: true });
     expect(again.code).not.toBe(0);
     expect(JSON.parse(again.stdout).error.code).toBe("bad_args");
+    // The "no open decision" prompt names the literal command, not just the id.
+    expect(leader.prompts.at(-1)).toContain(`flowryn decide ${d1} yes --by captain --json`);
   });
 
   test("a declined attempt cannot be replayed through a tooMany line: it records none of its own", async () => {
@@ -148,8 +150,11 @@ describe("a captain answer needs the user's word", () => {
     // Two captain decides on one line: gated and prompted, but neither gets an attempt of its own,
     // so neither can answer the decision, no matter what a stale attempt from the declined prompt
     // above might otherwise still let through.
-    const tooMany = await leader.runBash(`flowryn decide ${decision} yes --by captain --json; flowryn decide ${decision} yes --by captain --json`, { approve: true });
+    const tooManyCommand = `flowryn decide ${decision} yes --by captain --json; flowryn decide ${decision} yes --by captain --json`;
+    const tooMany = await leader.runBash(tooManyCommand, { approve: true });
     expect(tooMany).toMatchObject({ prompted: true, ran: true });
+    // The refusal prompt names the literal command, not just "too many" with no detail.
+    expect(leader.prompts.at(-1)).toContain(tooManyCommand);
     const lt = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
     expect((await f.json(["show", decision], lt)).reply.data).toMatchObject({ state: "open" });
   });
@@ -195,5 +200,45 @@ describe("a captain answer needs the user's word", () => {
     const alt = await leader.runBash(`flowryn decide ${decision} yes --by cap''tain --json`, { approve: true });
     expect(alt).toMatchObject({ prompted: false, ran: true });
     expect(lastJson(alt.stdout).error?.code).toBe("approval_required");
+  });
+
+  test("a declined attempt is voided by a non-Bash tool call, not only by Bash", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "monitor", "--question", "Rotate key F?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    const no = await leader.runBash(`flowryn decide ${decision} yes --by captain --json`, { approve: false });
+    expect(no).toMatchObject({ prompted: true, ran: false });
+
+    // A non-Bash tool (Monitor, Read, PowerShell where enabled): not covered by the Bash(...) ask
+    // rules at all, but its PreToolUse still fires and must still void the stale attempt.
+    await leader.hook("PreToolUse", { tool_name: "Monitor", tool_input: {} }, "*");
+
+    // The attempt is gone before any shell line ever gets a chance to replay it: a direct call with
+    // the leader's own token (as if it somehow ran unprompted) is refused.
+    const reply = await ship.call("decide", { decision, choice: "yes", by: "captain" }, ship.leaderToken());
+    expect(reply.error?.code).toBe("approval_required");
+  });
+
+  test("a declined attempt is voided at Stop, when the decline ends the turn", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "stopvoid", "--question", "Rotate key G?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    const no = await leader.runBash(`flowryn decide ${decision} yes --by captain --json`, { approve: false });
+    expect(no).toMatchObject({ prompted: true, ran: false });
+
+    // The turn ends here (a decline with nothing else to do): Stop must void the stale attempt too,
+    // not leave it live until whatever Bash call happens to come next.
+    await leader.hook("Stop", {});
+
+    const reply = await ship.call("decide", { decision, choice: "yes", by: "captain" }, ship.leaderToken());
+    expect(reply.error?.code).toBe("approval_required");
   });
 });
