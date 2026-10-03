@@ -73,6 +73,13 @@ function asRecord(value: unknown, where: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** Shared by the later milestones' own [section] parsers, which read their table out of [extra]. */
+export function table(value: unknown, where: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new FlowrynError("config_invalid", `${where} must be a table`);
+  return value as Record<string, unknown>;
+}
+
 function asString(value: unknown, where: string): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || value.length === 0) throw new FlowrynError("config_invalid", `${where} must be a non-empty string`);
