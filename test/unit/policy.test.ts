@@ -60,6 +60,19 @@ describe("the Claude PreToolUse gate finds the commands that need your word", ()
     expect(gatedCommands("flowryn decide k1 yes --by captain --body-file -")).toEqual([{ action: "decide", task: "k1" }]);
     expect(gatedCommands("flowryn decide k1 yes --rationale fine")).toEqual([]);
   });
+
+  test("a captain answer is gated under every spelling the CLI parser accepts, never just the verbatim form", () => {
+    expect(gatedCommands("flowryn decide k1 yes --by=captain")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide --by captain k1 yes")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --by 'captain'")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --words 'a;b' --by captain")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes \\\n --by captain")).toEqual([{ action: "decide", task: "k1" }]);
+    expect(gatedCommands("flowryn decide k1 yes --rationale fine")).toEqual([]);
+  });
+
+  test("more than one captain decide in one command is gated but refused by construction (no attempt is ever matchable)", () => {
+    expect(gatedCommands("flowryn decide k1 yes --by captain; flowryn decide k2 no --by captain")).toEqual([{ action: "decide", task: "k1", tooMany: true }]);
+  });
 });
 
 describe("approvals", () => {

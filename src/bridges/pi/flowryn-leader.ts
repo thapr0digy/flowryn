@@ -43,7 +43,12 @@ const BIN = process.env.FLOWRYN_BIN ?? "";
 const INACTIVE_MS = Number(process.env.FLOWRYN_LEADER_INACTIVE_MS ?? "60000") || 60_000;
 const TOOL_PING_MS = 60_000;
 const EXIT_BACKOFF_MS = 10_000;
-export const SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass|decide\b[^\n]*--by\s+captain)\b/;
+// Over-matches by design (the controller's ruling): a precise `decide ... --by captain` anchor
+// misses `--by=captain`, quoted `captain`, reordered flags and a backslash-newline continuation.
+// Not exported: importing this module from a unit test breaks files.ts's `with { type: "file" }`
+// asset import of the same path elsewhere in the same test process (test/helpers/fake-pi-leader.ts
+// drives it through the real extension instead).
+const SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass)\b|flowryn\b[\s\S]*\bdecide\b[\s\S]*captain/;
 
 function runHook(name: string, input: Json): Promise<Json | null> {
   return new Promise((resolve) => {
@@ -422,7 +427,16 @@ export default function flowrynLeader(pi: any): void {
         approvalKey = key;
       }
       if (!key) return text("This session does not hold the leader lease, so it cannot record an answer.");
-      const reply = await runFlowryn(["decide", decision, choice, "--by", "captain", "--words", words, "--key-file", "-", "--json"], key);
+      const decideArgs = ["decide", decision, choice, "--by", "captain", "--words", words, "--key-file", "-", "--json"];
+      let reply = await runFlowryn(decideArgs, key);
+      if (reply?.ok === false && reply.error?.code === "approval_required" && String(reply.error?.message ?? "").includes("key")) {
+        // The lease moved and back, or the key rotated: one fresh key, once.
+        const fresh = await runHook("approval-key", {});
+        if (typeof fresh?.key === "string") {
+          approvalKey = fresh.key;
+          reply = await runFlowryn(decideArgs, fresh.key);
+        }
+      }
       if (!reply) return text(`Flowryn did not answer; ${decision} may still be open. Check: flowryn show ${decision}`);
       if (reply.ok) return text(`Recorded your answer to ${decision}: ${choice}.`);
       return text(`Answer to ${decision} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}`);

@@ -66,6 +66,7 @@ describe("a captain answer needs the user's word", () => {
     const lt = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
 
     expect((await leader.bash(`flowryn decide ${decision} yes --by captain`)).blocked).toBe(true);
+    expect((await leader.bash(`flowryn decide ${decision} yes --by=captain`)).blocked).toBe(true);
     // A leader answer (no --by captain) is not shell-gated; it runs and answers it itself.
     expect((await leader.bash(`flowryn decide ${other} yes --rationale fine`)).blocked).toBe(false);
 
@@ -78,5 +79,53 @@ describe("a captain answer needs the user's word", () => {
     expect(yes).toContain(`Recorded your answer to ${decision}`);
     const shown = await f.json(["show", decision], lt);
     expect(shown.reply.data).toMatchObject({ by: "captain", via: "pi-confirm", answer: "yes" });
+  });
+
+  test("Claude: an alt spelling is prompted too, not silently run; under bypass it is refused", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision } = (await f.json(["decision", "add", "--key", "alt", "--question", "Rotate the deploy key?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    const no = await leader.runBash(`flowryn decide ${decision} yes --by captain --json`, { approve: false });
+    expect(no).toMatchObject({ prompted: true, ran: false });
+    // The `--by=captain` spelling must be gated and prompted too; it is not silently run.
+    const altNo = await leader.runBash(`flowryn decide ${decision} yes --by=captain --json`, { approve: false });
+    expect(altNo).toMatchObject({ prompted: true, ran: false });
+    const lt = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    expect((await f.json(["show", decision], lt)).reply.data).toMatchObject({ state: "open" });
+
+    // Even approved, under bypassPermissions no attempt is ever trusted.
+    leader.permissionMode = "bypassPermissions";
+    const altBypass = await leader.runBash(`flowryn decide ${decision} yes --by=captain --json`, { approve: true });
+    expect(altBypass.code).toBe(2);
+    expect(JSON.parse(altBypass.stdout).error.code).toBe("approval_required");
+  });
+
+  test("an attempt for one decision cannot answer another, and answering it twice refuses the second time", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const token = { env: { FLOWRYN_TOKEN: ship.leaderToken() } };
+    const { decision: d1 } = (await f.json(["decision", "add", "--key", "cross-1", "--question", "Rotate key A?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const { decision: d2 } = (await f.json(["decision", "add", "--key", "cross-2", "--question", "Rotate key B?", "--body-file", "-"], { ...token, stdin: "x" })).reply.data as { decision: string };
+    const leader = await ship.claude();
+    await leader.start();
+
+    // An attempt is recorded for d1 only (declined, so it stays unmatched).
+    await leader.runBash(`flowryn decide ${d1} yes --by captain --json`, { approve: false });
+    // A direct captain answer to d2 has no attempt of its own: d1's cannot cross decisions.
+    const wrong = await ship.call("decide", { decision: d2, choice: "yes", by: "captain" }, ship.leaderToken());
+    expect(wrong.error?.code).toBe("approval_required");
+
+    // d1's own gated answer succeeds.
+    const yes = await leader.runBash(`flowryn decide ${d1} yes --by captain --json`, { approve: true });
+    expect(yes).toMatchObject({ ran: true, code: 0 });
+
+    // A second captain answer to the now-answered d1 is refused: the decision is no longer open.
+    const again = await leader.runBash(`flowryn decide ${d1} yes --by captain --json`, { approve: true });
+    expect(again.code).not.toBe(0);
+    expect(JSON.parse(again.stdout).error.code).toBe("bad_args");
   });
 });
