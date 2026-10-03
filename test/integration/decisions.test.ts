@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
@@ -136,8 +138,50 @@ describe("decide", () => {
     expect((refused.reply as { error: { code: string } }).error.code).toBe("reserved_decision");
   });
 
-  test("answering one a non-auto ship waits on hints the dispatch", async () => {
+  test("dispatching a non-yolo ship that waits on a decision reserves it for a merge", async () => {
     const env = await makeFleetEnv();
+    envs.push(env);
+    const added = await env.json(["decision", "add", "--key", "late-merge", "--question", "Ship this way?", "--body-file", "-"], { stdin: "x" });
+    expect(added.reply.data).toMatchObject({ reserved: "-" });
+    const { decision, task } = added.reply.data as { decision: string; task: string };
+    const filed = await env.json(["dispatch", "web", "--kind", "ship", "--blocked-by", task, "--body-file", "-"], { stdin: "Build it" });
+    expect(filed.code).toBe(0);
+    expect((await env.json(["show", decision])).reply.data).toMatchObject({ reserved: "merge" });
+    const refused = await env.json(["decide", decision, "yes", "--rationale", "x"]);
+    expect((refused.reply as { error: { code: string } }).error.code).toBe("reserved_decision");
+  });
+
+  test("under yolo, only a sensitive dependent reserves a decision for a merge, through dispatch or --blocks", async () => {
+    const env = await makeFleetEnv({ yolo: true });
+    envs.push(env);
+    const plain = (await env.json(["decision", "add", "--key", "plain", "--question", "Ship this way?", "--body-file", "-"], { stdin: "x" })).reply.data as { decision: string; task: string };
+    expect((await env.json(["dispatch", "web", "--kind", "ship", "--blocked-by", plain.task, "--body-file", "-"], { stdin: "Build it" })).code).toBe(0);
+    expect((await env.json(["show", plain.decision])).reply.data).toMatchObject({ reserved: "-" });
+
+    const viaDispatch = (await env.json(["decision", "add", "--key", "via-dispatch", "--question", "Ship this way?", "--body-file", "-"], { stdin: "x" })).reply.data as { decision: string; task: string };
+    expect((await env.json(["dispatch", "web", "--kind", "ship", "--sensitive", "--blocked-by", viaDispatch.task, "--body-file", "-"], { stdin: "Build it" })).code).toBe(0);
+    expect((await env.json(["show", viaDispatch.decision])).reply.data).toMatchObject({ reserved: "merge" });
+    const refused = await env.json(["decide", viaDispatch.decision, "yes", "--rationale", "x"]);
+    expect((refused.reply as { error: { code: string } }).error.code).toBe("reserved_decision");
+
+    const sensitive = await env.json(["dispatch", "web", "--kind", "ship", "--sensitive", "--harness", "claude", "--body-file", "-"], { stdin: "Build\nFAKE: sleep 30000" });
+    const shipTask = (sensitive.reply.data as { task: string }).task;
+    const viaBlocks = await env.json(["decision", "add", "--key", "via-blocks", "--question", "Ship this way?", "--blocks", shipTask, "--body-file", "-"], { stdin: "x" });
+    expect(viaBlocks.reply.data).toMatchObject({ reserved: "merge" });
+  });
+
+  test("dispatch never replaces a decision's existing reserved reason", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const added = (await env.json(["decision", "add", "--key", "keep-reason", "--question", "Delete the old bucket?", "--body-file", "-"], { stdin: "x" })).reply.data as { decision: string; task: string; reserved: string };
+    expect(added.reserved).toBe("destructive");
+    expect((await env.json(["dispatch", "web", "--kind", "ship", "--blocked-by", added.task, "--body-file", "-"], { stdin: "Build it" })).code).toBe(0);
+    expect((await env.json(["show", added.decision])).reply.data).toMatchObject({ reserved: "destructive" });
+  });
+
+  test("answering one a non-auto ship waits on hints the dispatch", async () => {
+    // Under yolo: a non-yolo ship would reserve the decision for the user's merge word.
+    const env = await makeFleetEnv({ yolo: true });
     envs.push(env);
     const added = await env.json(["decision", "add", "--key", "naming", "--question", "Name it Foo or Bar?", "--options", "foo,bar", "--body-file", "-"], { stdin: "x" });
     const { decision, task } = added.reply.data as { decision: string; task: string };
@@ -221,6 +265,42 @@ describe("deliver opens a scout's decisions", () => {
   });
 });
 
+describe("run-scoped and standalone keys", () => {
+  test("a report entry whose key is the run's own question is not folded into it: it is a warning, never lost silently", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const spec = "FAKE: deliver-decisions report.md db-choice:Which database?:sqlite,postgres:sqlite:- ; other:Pick A or B?:a,b:a:-";
+    const { task, run } = await env.dispatch(["Scout", "FAKE: wait-file go", spec, "FAKE: sleep 30000"].join("\n"));
+    const db = env.h.db();
+    db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, created_at) VALUES ('q900', ?1, ?2, 'Which database?', '[\"sqlite\",\"postgres\"]', 0, 'open', ?1, 'db-choice', 1)").run(task, run);
+    db.close();
+    const dir = join(env.h.dataDir, task);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "go"), "");
+    await env.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "landed");
+    const check = env.h.db();
+    const event = check.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'report.decisions'").get(run) as { payload: string };
+    const standalone = check.query("SELECT key FROM decisions WHERE run_id IS NULL").all() as { key: string }[];
+    check.close();
+    const payload = JSON.parse(event.payload) as { opened: string[]; warnings: string[] };
+    expect(payload.opened).toHaveLength(1);
+    expect(standalone).toEqual([{ key: "other" }]);
+    expect(payload.warnings).toEqual([expect.stringContaining("q900")]);
+  });
+
+  test("decision add refuses a key a run's question already holds rather than returning the q id", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const { task, run } = await env.dispatch("Scout\nFAKE: sleep 30000");
+    const db = env.h.db();
+    db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, created_at) VALUES ('q901', ?1, ?2, 'Which?', '[]', 0, 'open', ?1, 'shared', 1)").run(task, run);
+    db.close();
+    const added = await env.json(["decision", "add", "--origin", task, "--key", "shared", "--question", "Which?", "--body-file", "-"], { stdin: "x" });
+    expect(added.code).not.toBe(0);
+    expect(JSON.stringify(added.reply)).toContain("q901");
+  });
+});
+
 describe("C1 end to end", () => {
   test("exit 1: scout decisions, leader decides two, the user answers the reserved one, the waiting ship starts by itself", async () => {
     const ship = await makeShipEnv({ mode: "local-only" });
@@ -289,5 +369,20 @@ describe("ask --key", () => {
     const refused = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(refused.code).toBe(3);
     expect(JSON.stringify(refused.reply)).toContain(`key db already used by ${decisionId}`);
+  });
+
+  test("ask --key refuses a key a standalone decision from its task already holds", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const run = seedRun(h);
+    const db = h.db();
+    const taskId = (db.query("SELECT task_id FROM runs WHERE id = ?1").get(run.runId) as { task_id: string }).task_id;
+    const standalone = tx(db, () => createStandaloneDecision(db, { key: "db", question: "Which database?", options: [], origin: taskId, now: 1 }));
+    db.close();
+    const asked = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "Which database?" });
+    expect(asked.code).toBe(3);
+    expect(JSON.stringify(asked.reply)).toContain(standalone.id);
   });
 });

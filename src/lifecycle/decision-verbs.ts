@@ -26,16 +26,22 @@ function options(raw: string | undefined): string[] {
   return list;
 }
 
-/** Tasks in the backlog that wait on this decision's task. */
-function dependentsOf(ctx: { db: HandlerCtx["db"] }, taskId: string): { id: string; repo: string | null }[] {
-  return (readSnapshot(ctx.db, "backlog")?.tasks ?? []).filter((t) => blockersOf(t).includes(taskId)).map((t) => ({ id: t.id, repo: t.repo }));
+type BacklogTasks = NonNullable<ReturnType<typeof readSnapshot>>["tasks"];
+
+function backlogTasks(ctx: { db: HandlerCtx["db"] }): BacklogTasks {
+  return readSnapshot(ctx.db, "backlog")?.tasks ?? [];
 }
 
-/** Does a blocked task's project merge only with a human record? */
+/** Tasks in the backlog that wait on this decision's task. */
+function dependentsOf(tasks: BacklogTasks, taskId: string): { id: string; repo: string | null }[] {
+  return tasks.filter((t) => blockersOf(t).includes(taskId)).map((t) => ({ id: t.id, repo: t.repo }));
+}
+
+/** Does a blocked task merge only with a human record (its project is not yolo, or it is sensitive)? */
 function blocksYoloOff(ctx: HandlerCtx, blocks: string[]): boolean {
   for (const id of blocks) {
-    const policy = ctx.db.query("SELECT yolo FROM task_policy WHERE task_id = ?1").get(id) as { yolo: number } | null;
-    if (policy && policy.yolo === 0) return true;
+    const policy = ctx.db.query("SELECT yolo, sensitive FROM task_policy WHERE task_id = ?1").get(id) as { yolo: number; sensitive: number } | null;
+    if (policy && (policy.yolo === 0 || policy.sensitive === 1)) return true;
   }
   return false;
 }
@@ -68,7 +74,7 @@ export function answerDecision(ctx: HandlerCtx, d: DecisionRow, a: { choice: str
     const text = `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
     steer = createSteer(ctx.db, run, text, now, d.id).id;
   }
-  return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(ctx, d.task_id).map((t) => t.id) : [] };
+  return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [] };
 }
 
 export function decisionRef(id: string): string {
@@ -229,8 +235,9 @@ export function openDecisions(ctx: { db: ReadCtx["db"]; now: number }, filter: "
   const rows = ctx.db.query(filter === "all" ? "SELECT * FROM decisions ORDER BY created_at" : "SELECT * FROM decisions WHERE state = 'open' ORDER BY created_at").all() as DecisionRow[];
   const deferred = (d: DecisionRow) => d.defer_until !== null && d.defer_until > today;
   const picked = rows.filter((d) => (filter === "deferred" ? deferred(d) : filter === "all" ? true : !deferred(d) && (filter === "open" || d.reserved_reason !== null)));
-  const weight = (d: DecisionRow) => dependentsOf(ctx, d.task_id).length;
-  return picked.toSorted((a, b) => weight(b) - weight(a) || (a.created_at ?? 0) - (b.created_at ?? 0));
+  const tasks = backlogTasks(ctx);
+  const weight = new Map(picked.map((d) => [d.id, dependentsOf(tasks, d.task_id).length]));
+  return picked.toSorted((a, b) => weight.get(b.id)! - weight.get(a.id)! || (a.created_at ?? 0) - (b.created_at ?? 0));
 }
 
 export function decisionView(d: DecisionRow): Record<string, unknown> {

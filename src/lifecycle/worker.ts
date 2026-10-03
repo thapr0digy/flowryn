@@ -114,7 +114,8 @@ const ask: VerbSpec = {
     // unique index as a raw SQLite error, and a spooled ask would fail on replay. Idempotent: an
     // open decision for the same (origin, key) is returned again; an already-settled one refuses.
     if (key) {
-      const existing = ctx.db.query("SELECT id, state, blocking, options FROM decisions WHERE origin = ?1 AND key = ?2").get(run.task_id, key) as { id: string; state: string; blocking: number; options: string } | null;
+      const existing = ctx.db.query("SELECT id, run_id, state, blocking, options FROM decisions WHERE origin = ?1 AND key = ?2").get(run.task_id, key) as { id: string; run_id: string | null; state: string; blocking: number; options: string } | null;
+      if (existing && existing.run_id === null) throw new FlowrynError("bad_args", `key ${key} is already the standalone decision ${existing.id}`, "use another key");
       if (existing) {
         if (existing.state !== "open") throw new FlowrynError("bad_args", `key ${key} already used by ${existing.id}`);
         return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: ["end your turn; the answer arrives as a steer"] };

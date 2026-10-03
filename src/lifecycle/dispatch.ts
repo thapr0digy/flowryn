@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
+import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { findOpenItem, openItem } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { herdrConfig, workersConfig } from "../config/workers.ts";
@@ -17,6 +18,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
+import { reserveDecision } from "./decisions.ts";
 import { mintTaskId } from "./ids.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
@@ -221,6 +223,14 @@ function blockerKind(db: Db, id: string): string | null {
   return task ? (task.kind ?? "ship") : null;
 }
 
+/** A task that merges only with a human record waits on these decisions, so only the user may answer them. */
+function reserveBlockingDecisions(db: Db, blockedBy: string[], now: number): void {
+  for (const id of blockedBy) {
+    const d = db.query("SELECT id, task_id, reserved_reason FROM decisions WHERE task_id = ?1 AND run_id IS NULL AND state = 'open'").get(id) as { id: string; task_id: string; reserved_reason: string | null } | null;
+    if (d) reserveDecision(db, d, "merge", now);
+  }
+}
+
 async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): Promise<DispatchPlan> {
   const projectId = stringArg(args as never, "project")!;
   const project = getProject(ctx.db, projectId);
@@ -315,6 +325,7 @@ export const dispatchVerb: VerbSpec = {
       const taskId = filed.phases[0]!.task_id;
       if (!boolArg(args, "auto")) ctx.db.query("UPDATE task_policy SET auto = 0 WHERE task_id = ?1").run(taskId);
       if (boolArg(args, "sensitive")) ctx.db.query("UPDATE task_policy SET sensitive = 1 WHERE task_id = ?1").run(taskId);
+      if ((plan.project.yolo === 0 || boolArg(args, "sensitive")) && decisionsConfig(config).reserved_classes.includes("merge")) reserveBlockingDecisions(ctx.db, plan.blockedBy, now);
       return {
         data: { task: taskId, plan: filed.id, state: "queued", blocked_by: plan.blockedBy, auto: boolArg(args, "auto") ? "on" : "off" },
         hints: boolArg(args, "auto") ? [`flowryn show ${taskId}`] : [`flowryn dispatch ${plan.project.id} --task ${taskId} (once its blockers land)`],

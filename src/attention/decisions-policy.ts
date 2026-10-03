@@ -39,7 +39,7 @@ export interface ReservedInput {
   context: string | null;
   /** The source's own reason (ask --reserved, a report's Reserved: line). */
   sourceReason: string | null;
-  /** The decision blocks a task whose project merges only with a human record (yolo off). */
+  /** The decision blocks a task that merges only with a human record (yolo off, or sensitive). */
   blocksYoloOff: boolean;
 }
 

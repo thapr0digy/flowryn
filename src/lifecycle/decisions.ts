@@ -51,6 +51,17 @@ function nextStandaloneId(db: Db): string {
   return `k${next}`;
 }
 
+/**
+ * Reserve an open decision for the user, upgrade-only: a decision that already
+ * has a reason keeps it. Call inside a transaction. Returns the row's reason.
+ */
+export function reserveDecision(db: Db, d: { id: string; task_id: string; reserved_reason: string | null }, reason: string, now: number): string {
+  if (d.reserved_reason !== null) return d.reserved_reason;
+  db.query("UPDATE decisions SET reserved_reason = ?2 WHERE id = ?1").run(d.id, reason);
+  appendEvent(db, { source: "cli", kind: "decision.reserved", taskId: d.task_id, payload: { decision: d.id, reserved: reason }, ts: now });
+  return reason;
+}
+
 export interface NewStandalone {
   key: string;
   question: string;
@@ -67,19 +78,15 @@ export interface NewStandalone {
 /** Create a standalone decision and its held task. Call inside a transaction. */
 export function createStandaloneDecision(db: Db, d: NewStandalone): { id: string; taskId: string; created: boolean; reservedReason: string | null } {
   if (!DECISION_KEY.test(d.key)) throw new FlowrynError("bad_args", `decision key ${d.key} must be lowercase letters, digits and dashes`);
-  const existing = db.query("SELECT id, task_id, reserved_reason FROM decisions WHERE origin = ?1 AND key = ?2").get(d.origin, d.key) as { id: string; task_id: string; reserved_reason: string | null } | null;
+  const existing = db.query("SELECT id, task_id, run_id, reserved_reason FROM decisions WHERE origin = ?1 AND key = ?2").get(d.origin, d.key) as { id: string; task_id: string; run_id: string | null; reserved_reason: string | null } | null;
+  if (existing && existing.run_id !== null) throw new FlowrynError("already_exists", `key ${d.key} from ${d.origin} is already the run's question ${existing.id}`, "use another key");
   if (existing) {
     // A repeat decision add names no new question, but block is idempotent: a --blocks target
     // given this time still gets its blocked-by edge, even though the decision itself is not new.
     for (const blocked of d.blocks ?? []) recordIntent(db, { file: "backlog", verb: "block", taskId: blocked, positional: [blocked], flags: { by: existing.task_id }, now: d.now });
     // The leader may add a reserved reason later (a --blocks target that turns out to be a
     // non-yolo merge, a --reserved this time) but never remove or replace one already recorded.
-    let reservedReason = existing.reserved_reason;
-    if (reservedReason === null && d.reservedReason) {
-      reservedReason = d.reservedReason;
-      db.query("UPDATE decisions SET reserved_reason = ?2 WHERE id = ?1").run(existing.id, reservedReason);
-      appendEvent(db, { source: "cli", kind: "decision.reserved", taskId: existing.task_id, payload: { decision: existing.id, reserved: reservedReason }, ts: d.now });
-    }
+    const reservedReason = d.reservedReason ? reserveDecision(db, existing, d.reservedReason, d.now) : existing.reserved_reason;
     return { id: existing.id, taskId: existing.task_id, created: false, reservedReason };
   }
   const question = sanitizeBlock(d.question).trim().slice(0, MAX_QUESTION);
