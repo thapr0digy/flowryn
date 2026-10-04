@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { hashToken, mintToken } from "../../src/api/auth.ts";
+import type { Reply } from "../../src/api/envelope.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { stateFiles } from "../../src/config/paths.ts";
@@ -210,6 +211,11 @@ export async function cliJson(h: TestHome, args: string[], options: CliOptions =
     throw new Error(`not JSON (exit ${result.code}): ${result.stdout}\n${result.stderr}`);
   }
   return { code: result.code, reply, stderr: result.stderr };
+}
+
+/** A daemon call as your own terminal (channel tty) or with a token, the way `flowryn approve` makes it. */
+export async function daemonCall(home: string, verb: string, args: Record<string, unknown>, token: string | null = null): Promise<Reply> {
+  return (await request(join(home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb, token, channel: token ? null : "tty", args }, { connectMs: 1_000, replyMs: 120_000 })) as Reply;
 }
 
 export async function pingSocket(h: TestHome): Promise<boolean> {
