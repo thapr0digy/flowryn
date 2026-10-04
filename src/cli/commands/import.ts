@@ -62,6 +62,13 @@ export async function importFirstmate(args: Parameters<NonNullable<VerbSpec["loc
       rows.push({ item: p.name, kind: "project", action: "refuse", reason: `${old} has no origin` });
       continue;
     }
+    // A hostile old clone's origin could be "-"-prefixed (e.g. --upload-pack=<cmd>), which git would parse
+    // as an option rather than a repository argument; refuse it outright, and also pass "--" below so a
+    // value that slips past this check (or a future caller of `git`) still can't be read as a flag.
+    if (origin.out.startsWith("-")) {
+      rows.push({ item: p.name, kind: "project", action: "refuse", reason: `${old} has an origin that is not a repository URL` });
+      continue;
+    }
     const target = join(cloneRoot, p.name);
     if (existsSync(target)) {
       const there = git(["-C", target, "remote", "get-url", "origin"]);
@@ -72,7 +79,7 @@ export async function importFirstmate(args: Parameters<NonNullable<VerbSpec["loc
     } else {
       rows.push({ item: p.name, kind: "project", action: "clone", reason: `${old} origin into ${target}` });
       if (apply) {
-        const cloned = git(["clone", "-q", origin.out, target]);
+        const cloned = git(["clone", "-q", "--", origin.out, target]);
         if (cloned.code !== 0) {
           rows.push({ item: p.name, kind: "project", action: "refuse", reason: `clone failed: ${cloned.out}` });
           continue;

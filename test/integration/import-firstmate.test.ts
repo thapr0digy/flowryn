@@ -82,6 +82,39 @@ describe("flowryn import firstmate", () => {
     expect(project("beta")!.action).toBe("create");
   });
 
+  test("an old clone origin that looks like a git option is refused, not passed to git", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const marker = join(h.home, "pwned");
+    const configured = Bun.spawnSync(["git", "config", "remote.origin.url", `--upload-pack=touch ${marker}`], { cwd: join(fm, "projects", "alpha"), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    expect(configured.exitCode).toBe(0);
+    const clones = join(h.home, "clones");
+    const run = await runImport({ home: fm, "clone-root": clones, apply: true });
+    const rows = (run.reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+    const alpha = rows.filter((r) => r.kind === "project" && r.item === "alpha").pop();
+    expect(alpha).toMatchObject({ action: "refuse" });
+    expect(alpha!.reason).toContain("not a repository URL");
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(join(clones, "alpha"))).toBe(false);
+    const beta = rows.filter((r) => r.kind === "project" && r.item === "beta").pop();
+    expect(beta).toMatchObject({ action: "create" });
+  });
+
+  test("--only limits the plan to the named project; the other project's work is neither recorded nor imported as open", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const run = await runImport({ home: fm, "clone-root": join(h.home, "clones"), only: ["beta"] });
+    const rows = (run.reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+    expect(rows.some((r) => r.item === "alpha" && (r.kind === "project" || r.kind === "task"))).toBe(false);
+    expect(rows.some((r) => r.item === "alpha-amend-q1")).toBe(false);
+    const alphaDecisions = rows.filter((r) => r.kind === "decision" && r.item.startsWith("alpha"));
+    expect(alphaDecisions.length).toBeGreaterThan(0);
+    for (const d of alphaDecisions) expect(d.action).not.toBe("create");
+    expect(rows.some((r) => r.kind === "project" && r.item === "beta" && r.action === "create")).toBe(true);
+  });
+
   test("a missing old clone is refused", async () => {
     h = makeHome();
     daemon = await startDaemon(h);
