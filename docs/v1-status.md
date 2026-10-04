@@ -94,14 +94,14 @@ The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
 |---|---|
 | C1 standalone decisions, the reserved policy, the user's word for a captain answer, scout open decisions, briefing sections | Done (C1) |
 | C2 mid-run prompt wedges | Done (C2) |
-| C3 `flowryn import firstmate` | Not built yet |
+| C3 `flowryn import firstmate` | Done (C3): `dispatch --mode`, queued tasks outside plans, the Firstmate parser, `import.apply`, `flowryn import firstmate`, and your preferences in the leader's prompt with the one-time import triage (docs/cutover-notes.md) |
 
 ## Not in v1
 
 These are out of v1 by the design itself (section 2's non-goals, section 17's "After v1"), not deferred work:
 
 - The headless triage runner (the first post-v1 addition).
-- Side-by-side running with Firstmate, and backlog import.
+- Side-by-side running with Firstmate.
 - The Obsidian plugin; a Herdr plugin-pane board; the MCP wrapper; Claude Code channels and plugin monitors.
 - Harnesses other than Claude Code and Pi; runtimes other than Herdr; Linux and native Windows hosts (the transport and service seams exist).
 - Desks, quota-aware scheduling and profile routing; focus routing and score formulas; away and quiet modes; Jira; retention compaction; relay, the mail plane and multi-machine fleets.

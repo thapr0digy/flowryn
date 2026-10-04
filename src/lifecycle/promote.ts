@@ -146,7 +146,7 @@ function promoteTask(ctx: HandlerCtx, args: Record<string, unknown>, p: Extract<
     "",
     scout?.body ?? title,
   ].join("\n");
-  const runId = createRun(db, config, { taskId: p.taskId, title, body, project, kind: "ship", harness: p.harness, version: p.version, base: p.base, workflow, sensitive: boolArg(args as never, "sensitive"), existing: true, by: ctx.caller.role, now });
+  const runId = createRun(db, config, { taskId: p.taskId, title, body, project, kind: "ship", harness: p.harness, version: p.version, base: p.base, workflow, sensitive: boolArg(args as never, "sensitive"), existing: true, by: ctx.caller.role, override: null, now });
   resolveRunItems(db, last.id, ["report_ready"], "run.promoted", now);
   appendEvent(db, { source: "cli", kind: "run.promoted", runId, taskId: p.taskId, payload: { from: "scout", scout_run: last.id, workflow: workflow.id, mode: project.delivery_mode, in_place: "task", report: reportPath, by: ctx.caller.role }, ts: now });
   return {

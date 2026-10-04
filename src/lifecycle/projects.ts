@@ -12,7 +12,7 @@ export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as cons
 export const HARNESSES = ["claude", "pi"] as const;
 export const AUTONOMY = ["plan", "manual"] as const;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
-const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+export const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 export interface ProjectRow {
   id: string;
@@ -66,6 +66,15 @@ export function getProject(db: Db, id: string): ProjectRow | null {
   return db.query("SELECT * FROM projects WHERE id = ?1").get(id) as ProjectRow | null;
 }
 
+/** Insert a project row and its event (call inside a transaction); import_source marks one an import created. */
+export function insertProject(db: Db, row: ProjectRow, importSource: string | null = null): void {
+  db.query(
+    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, import_source)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+  ).run(row.id, row.repo_url, row.path, row.default_branch, row.delivery_mode, row.yolo, row.priority, row.harness, row.workflow, row.autonomy, importSource);
+  appendEvent(db, { source: "cli", kind: "project.added", payload: { ...row, import_source: importSource } });
+}
+
 export function listProjects(db: Db): ProjectRow[] {
   return db.query("SELECT * FROM projects ORDER BY priority, id").all() as ProjectRow[];
 }
@@ -85,7 +94,7 @@ function projectView(p: ProjectRow): Record<string, unknown> {
   };
 }
 
-interface RepoFacts {
+export interface RepoFacts {
   path: string;
   repoUrl: string | null;
   defaultBranch: string | null;
@@ -97,7 +106,7 @@ async function git(ctx: HandlerCtx, cwd: string, args: string[]): Promise<string
 }
 
 /** Read what git knows about a checkout: its top level, origin URL and default branch. */
-async function inspectRepo(ctx: HandlerCtx, rawPath: string): Promise<RepoFacts> {
+export async function inspectRepo(ctx: HandlerCtx, rawPath: string): Promise<RepoFacts> {
   if (!isAbsolute(rawPath)) throw new FlowrynError("invalid_project", "project path must be absolute");
   if (!existsSync(rawPath)) throw new FlowrynError("invalid_project", `no such directory: ${rawPath}`);
   const path = realpathSync(rawPath);
@@ -156,13 +165,7 @@ const projectAdd: VerbSpec = {
       workflow: workflowArg(args, ctx.config()) ?? "fix",
       autonomy: oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy") ?? defaultAutonomy(ctx.config()),
     };
-    ctx.db
-      .query(
-        `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
-      )
-      .run(row.id, row.repo_url, row.path, row.default_branch, row.delivery_mode, row.yolo, row.priority, row.harness, row.workflow, row.autonomy);
-    appendEvent(ctx.db, { source: "cli", kind: "project.added", payload: row });
+    insertProject(ctx.db, row);
     return { data: { project: projectView(row) }, hints: ["flowryn project list", `flowryn project set ${id} --mode <mode>`] };
   },
 };

@@ -6,7 +6,7 @@ import type { BacklogTask } from "../journal/tasks-axi.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
-import { mintTaskId } from "./ids.ts";
+import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import type { ProjectRow } from "./projects.ts";
 
 /**
@@ -149,6 +149,8 @@ export interface NewPlan {
   harness?: "claude" | "pi" | null;
   /** Extra blockers phase 1 waits for (a dispatch with --blocked-by). */
   blockedBy?: string[];
+  /** A dispatch's per-task delivery mode (cutover C3), carried into the plan.filed event. */
+  override?: { mode: ProjectRow["delivery_mode"]; reason: string } | null;
   filedBy: string;
   state: "pending" | "approved";
   now: number;
@@ -186,7 +188,7 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
     );
     rows.push(row);
   });
-  appendEvent(db, { source: "cli", kind: "plan.filed", payload: { plan: id, project: p.project.id, phases: rows.map((r) => r.task_id), source: p.sourceTask, gate: p.gateId, by: p.filedBy }, ts: p.now });
+  appendEvent(db, { source: "cli", kind: "plan.filed", payload: { plan: id, project: p.project.id, phases: rows.map((r) => r.task_id), source: p.sourceTask, gate: p.gateId, by: p.filedBy, ...(p.override ? { mode: p.override.mode, mode_reason: p.override.reason } : {}) }, ts: p.now });
   if (p.state === "approved") approvePlan(db, id, p.filedBy, p.now);
   return { id, phases: rows };
 }
@@ -207,8 +209,6 @@ export function fileWorkerPlan(db: Db, p: { project: ProjectRow; sourceTask: str
     now: p.now,
   }).id;
 }
-
-const MAX_BACKLOG_BODY = 4_000;
 
 /**
  * Approve a plan: its phases become ship tasks in Queued, each blocked by the

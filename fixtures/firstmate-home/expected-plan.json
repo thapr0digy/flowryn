@@ -1,0 +1,23 @@
+[
+  { "item": "corp", "kind": "project", "action": "skip", "reason": "local-only, not migrated" },
+  { "item": "alpha", "kind": "project", "action": "clone", "reason": "<home>/fm/projects/alpha origin into <home>/clones/alpha" },
+  { "item": "beta", "kind": "project", "action": "clone", "reason": "<home>/fm/projects/beta origin into <home>/clones/beta" },
+  { "item": "fm-lock-fix", "kind": "task", "action": "skip", "reason": "in flight in Firstmate" },
+  { "item": "corp-cleanup-q1", "kind": "task", "action": "skip", "reason": "repo corp is not imported" },
+  { "item": "beta-release-q3", "kind": "task", "action": "warn", "reason": "blocked-by corp-cleanup-q1 dropped: repo corp is not imported" },
+  { "item": "alpha", "kind": "project", "action": "create", "reason": "clone, then register" },
+  { "item": "beta", "kind": "project", "action": "create", "reason": "clone, then register" },
+  { "item": "alpha-amend-q1", "kind": "task", "action": "create", "reason": "queued scout" },
+  { "item": "beta-docs-z2", "kind": "task", "action": "create", "reason": "queued ship" },
+  { "item": "beta-release-q3", "kind": "task", "action": "create", "reason": "queued ship" },
+  { "item": "alpha-arch-r2-decision-retention", "kind": "decision", "action": "create", "reason": "the leader may decide" },
+  { "item": "alpha-arch-r1-decision-approval", "kind": "decision", "action": "skip", "reason": "resolved (alpha-arch-r2-decision-approval is done)" },
+  { "item": "fm-procevent-x", "kind": "decision", "action": "skip", "reason": "repo firstmate is not imported" },
+  { "item": "alpha-arch-r1-decision-retention", "kind": "decision", "action": "skip", "reason": "superseded by alpha-arch-r2-decision-retention" },
+  { "item": "alpha-design-decisions", "kind": "decision", "action": "review", "reason": "a captain item with no Decision key" },
+  { "item": "alpha-p0-scope", "kind": "decision", "action": "review", "reason": "a held ship, not a decision" },
+  { "item": "captain.md", "kind": "preferences", "action": "create", "reason": "3 lines, 1 for review" },
+  { "item": "learnings.md", "kind": "preferences", "action": "create", "reason": "1 line, 1 for review" },
+  { "item": "captain-shared.md", "kind": "preferences", "action": "skip", "reason": "absent" },
+  { "item": "links", "kind": "links", "action": "review", "reason": "after apply: cd <home>/clones/flowryn && bun install && bun run build && ln -sf <home>/clones/flowryn/dist/flowryn ~/.local/bin/flowryn && ln -sf <home>/clones/flowryn/dist/flowryn ~/.local/bin/flowrynd" }
+]

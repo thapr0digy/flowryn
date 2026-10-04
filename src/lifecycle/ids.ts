@@ -3,6 +3,9 @@ import { randomInt } from "node:crypto";
 const ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
 const MAX_SLUG = 24;
 
+/** tasks-axi keeps the backlog readable; the full text lives in the run's task.md. */
+export const MAX_BACKLOG_BODY = 4_000;
+
 export function slugify(text: string, maxWords = 3): string {
   const words = text
     .toLowerCase()

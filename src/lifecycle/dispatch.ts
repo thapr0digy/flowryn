@@ -19,11 +19,15 @@ import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
 import { reserveDecision } from "./decisions.ts";
-import { mintTaskId } from "./ids.ts";
+import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
-import { getProject, type ProjectRow } from "./projects.ts";
+import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
+import { queuedTaskOf } from "./queued.ts";
 import { openRunForTask } from "./runs.ts";
+
+/** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
+export { MAX_BACKLOG_BODY };
 
 export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
@@ -33,8 +37,6 @@ export const BLOCKER_KINDS = ["ship", "decision"] as const;
 
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
-/** tasks-axi keeps the backlog readable; the full text lives in the run's task.md. */
-export const MAX_BACKLOG_BODY = 4_000;
 const TRAILING_TAG = /\((?:kind|repo|priority|since|done|merged|hold|hold-kind|hold-until|blocked-by|pr|report): [^)]*\)\s*$/i;
 
 /** The first line of the body, as a backlog title tasks-axi accepts. */
@@ -151,6 +153,8 @@ export interface NewRun {
   /** An existing Queued task (a plan phase): started in the backlog, not added. */
   existing: boolean;
   by: string;
+  /** cutover C3: a per-task delivery mode override, carried into the dispatch event's audit trail. */
+  override: ModeOverride | null;
   now: number;
 }
 
@@ -190,7 +194,20 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
     kind: "run.dispatched",
     runId,
     taskId: r.taskId,
-    payload: { project: r.project.id, kind: r.kind, harness: r.harness, version: r.version, title: r.title, body: r.body, base: r.base, worktree, intent: intent.id, by: r.by, workflow_def: r.workflow },
+    payload: {
+      project: r.project.id,
+      kind: r.kind,
+      harness: r.harness,
+      version: r.version,
+      title: r.title,
+      body: r.body,
+      base: r.base,
+      worktree,
+      intent: intent.id,
+      by: r.by,
+      workflow_def: r.workflow,
+      ...(r.override ? { mode: r.override.mode, mode_reason: r.override.reason } : {}),
+    },
     ts: r.now,
   });
   return runId;
@@ -198,15 +215,40 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
 
 // --- dispatch -------------------------------------------------------------------------------
 
+/** A per-task delivery mode override (cutover C3): with a reason, kept in `task_policy.mode_reason`. */
+export interface ModeOverride {
+  mode: ProjectRow["delivery_mode"];
+  reason: string;
+}
+
 type DispatchPlan =
-  | { mode: "now"; project: ProjectRow; harness: HarnessId; version: string; base: string }
-  | { mode: "task"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string }
-  | { mode: "queue"; project: ProjectRow; harness: HarnessId; blockedBy: string[] };
+  | { mode: "now"; project: ProjectRow; harness: HarnessId; version: string; base: string; override: ModeOverride | null }
+  | { mode: "task"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string; override: ModeOverride | null }
+  | { mode: "queued"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
+  | { mode: "queue"; project: ProjectRow; harness: HarnessId; blockedBy: string[]; override: ModeOverride | null };
 
 function harnessArg(args: Record<string, unknown>, fallback: HarnessId): HarnessId {
   const harness = (stringArg(args as never, "harness") ?? fallback) as HarnessId;
   if (!(HARNESS_IDS as readonly string[]).includes(harness)) throw new FlowrynError("bad_args", "--harness must be claude or pi");
   return harness;
+}
+
+/** A per-task delivery mode (cutover C3): with a reason, never local-only on a project that pushes, and never a pushing mode on a project with no remote. */
+function modeOverride(args: Record<string, unknown>, project: ProjectRow): ModeOverride | null {
+  const mode = stringArg(args as never, "mode");
+  if (mode === undefined) return null;
+  if (!(DELIVERY_MODES as readonly string[]).includes(mode)) throw new FlowrynError("bad_args", "--mode must be no-mistakes, direct-PR or local-only");
+  const reason = stringArg(args as never, "mode-reason")?.trim();
+  if (!reason) throw new FlowrynError("bad_args", "--mode needs --mode-reason <why>");
+  if (mode === "local-only" && project.delivery_mode !== "local-only") throw new FlowrynError("delivery_refused", `${project.id} ships through ${project.delivery_mode}; a task cannot switch it to local-only`);
+  if (mode !== "local-only" && project.repo_url === "") throw new FlowrynError("delivery_refused", `${project.id} has no remote, so a task cannot ship it through ${mode}`);
+  return { mode: mode as ProjectRow["delivery_mode"], reason };
+}
+
+/** Applies a per-task mode override (cutover C3) to the task's policy row, once it exists. */
+export function applyModeOverride(db: Db, taskId: string, override: ModeOverride | null): void {
+  if (!override) return;
+  db.query("UPDATE task_policy SET delivery_mode = ?2, mode_reason = ?3 WHERE task_id = ?1").run(taskId, override.mode, override.reason);
 }
 
 /** A blocker's task kind: a plan phase is a ship; null when there is no such task. */
@@ -235,8 +277,18 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const projectId = stringArg(args as never, "project")!;
   const project = getProject(ctx.db, projectId);
   if (!project) throw new FlowrynError("not_found", `no project ${projectId}`, "flowryn project list");
+  const override = modeOverride(args, project);
   const taskId = stringArg(args as never, "task");
   if (taskId) {
+    // A queued task that is not a plan phase (cutover C3: imported work): its blockers must have landed.
+    const queued = queuedTaskOf(ctx.db, taskId);
+    if (queued) {
+      if (queued.project_id !== project.id) throw new FlowrynError("not_found", `${taskId} belongs to project ${queued.project_id}`);
+      const waiting = waitingOn(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, []);
+      if (waiting.length > 0) throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${waiting.join(", ")} to land`);
+      const harness = harnessArg(args, project.harness);
+      return { mode: "queued", project, harness, taskId, kind: queued.kind, title: queued.title, body: queued.body, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+    }
     // Start a Queued task yourself (a plan phase, or a dispatch that waited): its blockers must have landed.
     const phase = phaseOfTask(ctx.db, taskId);
     if (!phase || phase.project_id !== project.id) throw new FlowrynError("not_found", `${taskId} is not a queued task of project ${project.id}`, "flowryn show <plan id>");
@@ -245,7 +297,7 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     const waiting = waitingOn(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, JSON.parse(phase.blocked_by) as string[]);
     if (waiting.length > 0) throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${waiting.join(", ")} to land`, "a phase starts only after its blockers have landed, never on an open PR");
     const harness = harnessArg(args, (phase.harness as HarnessId | null) ?? project.harness);
-    return { mode: "task", project, harness, taskId, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+    return { mode: "task", project, harness, taskId, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
   }
   const kind = stringArg(args as never, "kind");
   if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship or scout");
@@ -260,10 +312,10 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     if (unshipped.length > 0) {
       throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, "wait for the report yourself, then dispatch");
     }
-    return { mode: "queue", project, harness, blockedBy };
+    return { mode: "queue", project, harness, blockedBy, override };
   }
   if (boolArg(args as never, "auto")) throw new FlowrynError("bad_args", "--auto goes with --blocked-by: a task that starts by itself once its blockers land");
-  return { mode: "now", project, harness, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+  return { mode: "now", project, harness, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
 }
 
 /**
@@ -288,6 +340,8 @@ export const dispatchVerb: VerbSpec = {
     "blocked-by": { type: "list", help: "file it Queued until these tasks land (repeatable)", placeholder: "task" },
     auto: { type: "boolean", help: "with --blocked-by: start by itself once its blockers land" },
     task: { type: "string", help: "start this Queued task (a plan phase) now; its blockers must have landed", placeholder: "id" },
+    mode: { type: "string", help: "this task's delivery mode, overriding the project's: no-mistakes, direct-PR or local-only", placeholder: "mode" },
+    "mode-reason": { type: "string", help: "with --mode: why (kept on the task)", placeholder: "text" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -299,8 +353,15 @@ export const dispatchVerb: VerbSpec = {
     if (plan.mode === "task") {
       const phase = phaseOfTask(ctx.db, plan.taskId)!;
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? phase.workflow, "ship");
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, now });
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
+      applyModeOverride(ctx.db, plan.taskId, plan.override);
       return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
+    }
+    if (plan.mode === "queued") {
+      const workflow = workflowFor(config, stringArg(args, "workflow") ?? (plan.kind === "scout" ? "scout" : plan.project.workflow), plan.kind);
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: plan.title, body: plan.body, project: plan.project, kind: plan.kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
+      applyModeOverride(ctx.db, plan.taskId, plan.override);
+      return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`] };
     }
     const kind = stringArg(args, "kind") as TaskKind;
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim();
@@ -318,6 +379,7 @@ export const dispatchVerb: VerbSpec = {
         workflow: workflow.id,
         harness: plan.harness,
         blockedBy: plan.blockedBy,
+        override: plan.override,
         filedBy: ctx.caller.role,
         state: "approved",
         now,
@@ -325,6 +387,7 @@ export const dispatchVerb: VerbSpec = {
       const taskId = filed.phases[0]!.task_id;
       if (!boolArg(args, "auto")) ctx.db.query("UPDATE task_policy SET auto = 0 WHERE task_id = ?1").run(taskId);
       if (boolArg(args, "sensitive")) ctx.db.query("UPDATE task_policy SET sensitive = 1 WHERE task_id = ?1").run(taskId);
+      applyModeOverride(ctx.db, taskId, plan.override);
       if ((plan.project.yolo === 0 || boolArg(args, "sensitive")) && decisionsConfig(config).reserved_classes.includes("merge")) reserveBlockingDecisions(ctx.db, plan.blockedBy, now);
       return {
         data: { task: taskId, plan: filed.id, state: "queued", blocked_by: plan.blockedBy, auto: boolArg(args, "auto") ? "on" : "off" },
@@ -332,9 +395,10 @@ export const dispatchVerb: VerbSpec = {
       };
     }
     const taskId = mintTaskId(title, takenIds(ctx.db));
-    const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, now });
+    const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, override: plan.override, now });
+    applyModeOverride(ctx.db, taskId, plan.override);
     return {
-      data: { task: taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.project.delivery_mode, yolo: plan.project.yolo ? "on" : "off", workflow: workflow.id, state: "launching" },
+      data: { task: taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, yolo: plan.project.yolo ? "on" : "off", workflow: workflow.id, state: "launching" },
       hints: [`flowryn show ${taskId}`, "flowryn fleet"],
     };
   },

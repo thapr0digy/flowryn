@@ -85,6 +85,9 @@ flowryn decision add --key db --question "SQLite or Postgres?" --options sqlite,
 flowryn decide k3 sqlite --rationale "one process"   # the leader's answer; reserved ones need your word
 flowryn decide k3 sqlite --body-file -               # in your own shell: your answer, verbatim
 flowryn decision defer k3 --until 2026-11-01
+flowryn import firstmate ~/projects/firstmate          # the plan: what would be cloned, filed, skipped and why
+flowryn import firstmate ~/projects/firstmate --apply  # do it; safe to run again
+flowryn dispatch web --kind ship --mode direct-PR --mode-reason "internal CI only" --body-file -
 flowryn help                        # every verb; `flowryn <verb> --help` for one
 ```
 
@@ -158,6 +161,17 @@ scripts/lab/v1-live.sh scout promote           # some phases (Pi's contract reco
 ```
 
 Phases: `harness` (the startup check reads the real installed Claude Code and Pi versions and opens a P1 for each untested one; Pi's contract suite passes and settles its P1; a dispatch on Claude refuses; no Claude model is ever called), `scout` (a Pi scout lands with its report and is cleaned up through the cleanup guard, its task done with the report), `promote` (a Pi scout promoted in place mid-task is relaunched into its own session as a ship, which commits, delivers locally, merges under yolo and is cleaned), `divergence` (a hand edit against a live run settled with keep-run; a task put In flight by hand, raised by the invariant pass and settled with accept-edit) and `herdr` (the lab session is stopped through Firstmate's helper under a live run, and one P1 opens for the outage while the retries go on). Pi runs the offline scripted provider with a scratch agent dir; the projects are fresh clones inside a scratch home that is removed at the end. Results print as PASS/FAIL lines and go to `spikes/.runs/v1-live-results.json`. Run it outside any command sandbox.
+
+### The cutover, live
+
+C1's decisions and C2's prompt wedges are covered in `bun test` (`test/integration/decisions-confirm.test.ts` and others, `prompt-wedge.test.ts`). The live run proves both against a real Claude Code worker.
+
+```bash
+scripts/lab/cutover-live.sh                    # both phases
+scripts/lab/cutover-live.sh prompt             # one phase
+```
+
+Phases: `decisions` (a real Claude scout delivers a report whose `## Open decisions` section raises three standalone decisions, one `Reserved: lab`; the leader answers two with `--rationale`, your own shell answers the reserved one, and a `--blocked-by <task> --auto` ship gets a run within 120 s of its blocker landing) and `prompt` (a real Claude worker whose task branch carries an extra `.claude/settings.json`, committed to that worktree's own disposable branch rather than written by Flowryn, with a `PreToolUse` hook that forces an "ask" decision on `git commit --amend`; the run must open one `blocked_prompt` item naming "amend" within 120 s, with no `worker_idle` item alongside). Both phases run on fresh clones of this repository in a scratch Flowryn home with its own scratch daemon, using a linked worktree of this already-trusted checkout against your real `~/.claude` with `[workers.claude] pretrust = "check"`, so nothing here ever touches `~/.flowryn` or writes to `~/.claude.json`; every worker branch carries this run's own `flowryn/contract-<runid>-` prefix. Results print as PASS/FAIL lines and go to `spikes/.runs/cutover-live-results.json`. Run it outside any command sandbox.
 
 ## Running the M0 spikes
 

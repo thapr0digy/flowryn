@@ -358,7 +358,12 @@ const show: VerbSpec = {
       if (phase) return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...planView(ctx.db, phase.plan_id) }, hints: [`flowryn show ${phase.plan_id}`] };
       throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
     }
-    const policy = ctx.db.query("SELECT project_id, kind FROM task_policy WHERE task_id = ?1").get(run.task_id) as { project_id: string; kind: string };
+    const policy = ctx.db.query("SELECT project_id, kind, delivery_mode, mode_reason FROM task_policy WHERE task_id = ?1").get(run.task_id) as {
+      project_id: string;
+      kind: string;
+      delivery_mode: string;
+      mode_reason: string | null;
+    };
     const steers = unackedSteers(ctx.db, run.id).map((m) => ({ id: m.id, rings: m.rings, body: sanitizeLine(m.body, 80) }));
     const decisions = (ctx.db.query("SELECT id, state, question, answer FROM decisions WHERE run_id = ?1 ORDER BY id").all(run.id) as {
       id: string;
@@ -384,6 +389,7 @@ const show: VerbSpec = {
         run: run.id,
         kind: policy.kind,
         project: policy.project_id,
+        mode: policy.mode_reason ? `${policy.delivery_mode} (${policy.mode_reason})` : policy.delivery_mode,
         harness: `${run.harness} ${run.harness_version}`,
         state: run.state,
         liveness: run.liveness,

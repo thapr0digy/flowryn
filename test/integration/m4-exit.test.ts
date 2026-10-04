@@ -26,7 +26,7 @@ afterEach(async () => {
   for (const pty of ptys.splice(0)) pty.kill();
   await env?.cleanup();
   env = null;
-});
+}, 30_000);
 
 function git(cwd: string, args: string[]): string {
   const result = Bun.spawnSync(["git", ...args], { cwd, stdin: "ignore", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } });

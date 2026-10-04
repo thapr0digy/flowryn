@@ -60,6 +60,7 @@ export class FakeHerdr {
   holdStarts = false;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
   private readonly subscribers = new Set<net.Socket>();
+  private readonly connections = new Set<net.Socket>();
   private readonly server: net.Server;
   private readonly options: FakeHerdrOptions;
   private nextWorkspace = 1;
@@ -82,7 +83,8 @@ export class FakeHerdr {
 
   async stop(): Promise<void> {
     for (const pane of this.panes.values()) this.killChild(pane, "SIGKILL");
-    for (const sub of this.subscribers) sub.destroy();
+    // server.close waits for every open connection, so a client still holding one would stall the stop.
+    for (const conn of this.connections) conn.destroy();
     await new Promise<void>((done) => this.server.close(() => done()));
   }
 
@@ -147,7 +149,11 @@ export class FakeHerdr {
     let buffer = "";
     conn.setEncoding("utf8");
     conn.on("error", () => conn.destroy());
-    conn.on("close", () => this.subscribers.delete(conn));
+    this.connections.add(conn);
+    conn.on("close", () => {
+      this.connections.delete(conn);
+      this.subscribers.delete(conn);
+    });
     conn.on("data", (chunk: string) => {
       buffer += chunk;
       let newline: number;

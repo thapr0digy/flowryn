@@ -6,7 +6,7 @@ import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer } fro
 import { composeDigest, DIGEST_HEADER, digestCandidates, openActionable, p0Candidate, p0Line } from "../../src/attention/router.ts";
 import { syncOverdueTodos } from "../../src/attention/todos-due.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
-import { tx, type Db, getMeta } from "../../src/db/db.ts";
+import { tx, type Db, getMeta, setMeta } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
@@ -295,6 +295,17 @@ describe("decisions in the briefing", () => {
     expect(first.text).toContain("[k2] SQLite or Postgres? → sqlite: one process");
     const second = tx(db, () => composeBriefing(db, { session: null, now: 20, morningHour: 99, ageMs: AGE, markMorning: true }));
     expect(second.text).not.toContain("Decided for you");
+  });
+
+  test("the import triage asks the leader to decide what it may, once", () => {
+    tx(db, () => {
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, created_at, import_source) VALUES ('k9', 'decision-r-x9', 'Keep 365 days?', '[]', 1, 'open', 1, 'firstmate:x')").run();
+      setMeta(db, "import_triage", "1");
+    });
+    const first = tx(db, () => composeBriefing(db, { session: "L1", now: 10, morningHour: 99, ageMs: AGE, markMorning: true }));
+    expect(first.text).toContain("Imported from Firstmate: 1 open decision. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.");
+    const second = tx(db, () => composeBriefing(db, { session: "L1", now: 20, morningHour: 99, ageMs: AGE, markMorning: true }));
+    expect(second.text).not.toContain("Imported from Firstmate");
   });
 
   test("decision tasks do not count as queued work", () => {

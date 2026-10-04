@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LEADER_PERMISSIONS } from "../../src/bridges/claude/settings.ts";
+import { writeLeaderFiles } from "../../src/bridges/files.ts";
 import { SKILL_DESCRIPTION } from "../../src/bridges/skill.ts";
 import { claudeLeaderArgs, leaderEnv, piLeaderArgs } from "../../src/cli/commands/lead.ts";
 import { STYLE_BLOCK } from "../../src/harness/contract-text.ts";
@@ -36,8 +38,20 @@ describe("flowryn lead", () => {
     // The skill description is always loaded: about 60 tokens at most (design section 12).
     expect(SKILL_DESCRIPTION.split(/\s+/).length).toBeLessThanOrEqual(45);
     expect(readFileSync(files.piExtension, "utf8")).toContain("export default function flowrynLeader");
-    expect(readFileSync(files.style!, "utf8")).toBe(STYLE_BLOCK + "\n");
+    expect(readFileSync(files.appendPrompt!, "utf8")).toBe(STYLE_BLOCK + "\n");
     expect(statSync(files.bin).mode & 0o777).toBe(0o700);
+  });
+
+  test("the append prompt carries the style block and the user's preferences, and preferences survive terse = false", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fw-"));
+    mkdirSync(join(home, "leader"), { recursive: true });
+    writeFileSync(join(home, "leader", "preferences.md"), "# Your preferences\n- Decide autonomously.\n");
+    const on = await writeLeaderFiles({ home, command: ["flowryn"], socket: "/tmp/s", style: "Be terse." });
+    expect(readFileSync(on.appendPrompt!, "utf8")).toBe("Be terse.\n\n# Your preferences\n- Decide autonomously.\n");
+    const off = await writeLeaderFiles({ home, command: ["flowryn"], socket: "/tmp/s", style: null });
+    expect(readFileSync(off.appendPrompt!, "utf8")).toBe("# Your preferences\n- Decide autonomously.\n");
+    expect(readFileSync(join(home, "leader", "preferences.md"), "utf8")).toContain("Decide autonomously");
+    expect(claudeLeaderArgs(off, [])).toContain(off.appendPrompt!);
   });
 
   test("launches Claude in auto mode with --settings and the plugin, Pi with -e and --skill; your args go last", async () => {
@@ -51,11 +65,11 @@ describe("flowryn lead", () => {
       "--plugin-dir",
       files.claudePlugin,
       "--append-system-prompt-file",
-      files.style!,
+      files.appendPrompt!,
       "--model",
       "haiku",
     ]);
-    expect(piLeaderArgs(files, ["--model", "x/y"])).toEqual(["-e", files.piExtension, "--skill", files.skillDir, "--append-system-prompt", files.style!, "--model", "x/y"]);
+    expect(piLeaderArgs(files, ["--model", "x/y"])).toEqual(["-e", files.piExtension, "--skill", files.skillDir, "--append-system-prompt", files.appendPrompt!, "--model", "x/y"]);
     const launched = leaderEnv({ PATH: "/usr/bin", CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "parent", FLOWRYN_RUN: "r1", HOME: "/h" }, { token: "fwl_x", session: "L7", files, inactiveMs: 60_000 });
     expect(launched).toMatchObject({ FLOWRYN_TOKEN: "fwl_x", FLOWRYN_LEADER_SESSION: "L7", FLOWRYN_BIN: files.bin, PATH: `${files.binDir}:/usr/bin`, HOME: "/h" });
     expect(launched.CLAUDECODE).toBeUndefined();
