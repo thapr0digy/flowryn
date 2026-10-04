@@ -45,6 +45,7 @@ const ITEM_LINE = /^- \[( |x)\] ([A-Za-z0-9][A-Za-z0-9._-]*) - (.+)$/;
 const TAG = /\((repo|kind|since|done|merged|hold|hold-kind|hold-until|priority|pr|report):? ([^)]*)\)/g;
 const BARE_BLOCKED = /\bblocked-by: ([A-Za-z0-9._-]+)/g;
 
+/** Parse `data/projects.md`'s fleet registry lines; a non-matching line (prose, a heading) is ignored. */
 export function parseProjects(text: string): FmProject[] {
   const out: FmProject[] = [];
   for (const line of text.split("\n")) {
@@ -54,10 +55,12 @@ export function parseProjects(text: string): FmProject[] {
   return out;
 }
 
+/** Firstmate's `no-mistakes-prod-only` is Flowryn's plain `no-mistakes`; the other two modes pass through. */
 export function mapMode(mode: FmProject["mode"]): "no-mistakes" | "direct-PR" | "local-only" {
   return mode === "no-mistakes-prod-only" ? "no-mistakes" : mode;
 }
 
+/** Parse `backlog.md` or an archive file: one item parser for both, since tasks-axi's markdown backend writes the same line shape in each. */
 export function parseItems(text: string): FmItem[] {
   const items: FmItem[] = [];
   let section = "archived";
@@ -87,6 +90,7 @@ export function parseItems(text: string): FmItem[] {
   return items;
 }
 
+/** The imported project an item's `(repo: ...)` tag names, or null when it is unset or not among the imported projects (a Firstmate `org/name` tag is matched by its last segment). */
 export function projectOf(repo: string | undefined, projects: Set<string>): string | null {
   if (!repo) return null;
   const name = repo.includes("/") ? repo.split("/").pop()! : repo;
@@ -102,6 +106,16 @@ function keyOf(item: FmItem): string | null {
   return bodyField(item, "Decision key") ?? (/-decision-([a-z0-9-]+)$/.exec(item.id)?.[1] ?? null);
 }
 
+/**
+ * Which Firstmate captain items become decisions. A candidate is a `(kind:
+ * captain)` item with a `Decision key:` body line, keyed by `(project, key)`
+ * rather than its own id, because Firstmate re-raises the same key across
+ * report revisions; a key is resolved the moment any checked `(kind:
+ * captain)` item anywhere shares it (`skip resolved`), and among the
+ * remaining candidates for one key the newest `## Archived <date>` wins
+ * (`skip superseded`). A held item of another kind, or a captain item with
+ * no key, is never silently dropped: it comes back as `review`.
+ */
 export function selectDecisions(backlog: FmItem[], archive: FmItem[], projects: Set<string>): { decisions: FmDecision[]; skipped: { id: string; reason: string }[]; review: FmReview[] } {
   const skipped: { id: string; reason: string }[] = [];
   const review: FmReview[] = [];

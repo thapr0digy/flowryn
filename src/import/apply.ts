@@ -3,7 +3,7 @@ import { stringArg, type Args, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { setMeta } from "../db/db.ts";
 import { defaultAutonomy } from "../config/workflows.ts";
-import { createStandaloneDecision } from "../lifecycle/decisions.ts";
+import { createStandaloneDecision, DECISION_KEY } from "../lifecycle/decisions.ts";
 import { DELIVERY_MODES, getProject, inspectRepo, insertProject, PROJECT_ID, type ProjectRow, type RepoFacts } from "../lifecycle/projects.ts";
 import { takenIds } from "../lifecycle/plans.ts";
 import { queueTask } from "../lifecycle/queued.ts";
@@ -25,7 +25,7 @@ export interface ImportPlan {
 export interface PlanRow {
   item: string;
   kind: "project" | "task" | "decision";
-  action: "create" | "exists" | "refuse";
+  action: "create" | "exists" | "refuse" | "warn";
   reason: string;
 }
 
@@ -157,56 +157,133 @@ export const importApply: VerbSpec = {
     const importableFromPlan = new Set(rows.filter((r) => r.kind === "project" && (r.action === "create" || r.action === "exists")).map((r) => r.item));
     const isImportable = (name: string): boolean => importableFromPlan.has(name) || !!ctx.db.query("SELECT 1 FROM projects WHERE id = ?1 AND import_source = ?2").get(name, source(name));
 
-    const taken = takenIds(ctx.db);
-    for (const t of plan.tasks) {
-      const policy = ctx.db.query("SELECT import_source FROM task_policy WHERE task_id = ?1").get(t.id) as { import_source: string | null } | null;
-      if (policy) {
-        if (policy.import_source === source(t.id)) {
-          rows.push({ item: t.id, kind: "task", action: "exists", reason: "already filed" });
-          continue;
-        }
-        rows.push({ item: t.id, kind: "task", action: "refuse", reason: `task id ${t.id} is already used` });
-        continue;
-      }
-      if (taken(t.id)) {
-        rows.push({ item: t.id, kind: "task", action: "refuse", reason: `task id ${t.id} is already used` });
-        continue;
-      }
-      if (!isImportable(t.project)) {
-        rows.push({ item: t.id, kind: "task", action: "refuse", reason: `project ${t.project} is not imported` });
-        continue;
-      }
-      if (!dry) {
-        const project = getProject(ctx.db, t.project)!;
-        queueTask(ctx.db, { taskId: t.id, title: t.title, body: t.body, kind: t.kind, project, priority: t.priority, blockedBy: t.blockedBy, importSource: source(t.id), now });
-      }
-      rows.push({ item: t.id, kind: "task", action: "create", reason: `queued ${t.kind}` });
-    }
-
+    // Decisions are created before tasks (a task's blocked-by may name a decision's own Firstmate item
+    // id, which only resolves to a real task id once the decision exists), but their rows print after
+    // the task rows (finding 4: projects, tasks, decisions — the order the golden plan fixes).
+    const decisionRows: PlanRow[] = [];
+    const decisionTaskId = new Map<string, string>(); // a decision's plan id -> its real (existing or new) task id
     const cfg = decisionsConfig(ctx.config());
     for (const d of plan.decisions) {
-      if (ctx.db.query("SELECT 1 FROM decisions WHERE import_source = ?1").get(source(d.id))) {
-        rows.push({ item: d.id, kind: "decision", action: "exists", reason: "already imported" });
+      const existing = ctx.db.query("SELECT id, task_id FROM decisions WHERE import_source = ?1").get(source(d.id)) as { id: string; task_id: string } | null;
+      if (existing) {
+        decisionRows.push({ item: d.id, kind: "decision", action: "exists", reason: "already imported" });
+        decisionTaskId.set(d.id, existing.task_id);
         continue;
       }
       if (!isImportable(d.project)) {
-        rows.push({ item: d.id, kind: "decision", action: "refuse", reason: `project ${d.project} is not imported` });
+        decisionRows.push({ item: d.id, kind: "decision", action: "refuse", reason: `project ${d.project} is not imported` });
+        continue;
+      }
+      // A key tasks-axi would refuse (DECISION_KEY) is a refuse row, not a transaction-aborting throw:
+      // `createStandaloneDecision` validates it again, but checking it here first means the plan's
+      // other rows still get recorded even when one decision's key is malformed.
+      if (!DECISION_KEY.test(d.key)) {
+        decisionRows.push({ item: d.id, kind: "decision", action: "refuse", reason: `decision key ${d.key} must be lowercase letters, digits and dashes` });
         continue;
       }
       const collision = ctx.db.query("SELECT id FROM decisions WHERE origin = ?1 AND key = ?2").get(d.origin, d.key) as { id: string } | null;
       if (collision) {
-        rows.push({ item: d.id, kind: "decision", action: "refuse", reason: `decision ${d.origin}/${d.key} already exists (${collision.id})` });
+        decisionRows.push({ item: d.id, kind: "decision", action: "refuse", reason: `decision ${d.origin}/${d.key} already exists (${collision.id})` });
         continue;
       }
       const reserved = reservedReason({ question: d.question, context: d.context, sourceReason: null, blocksYoloOff: false }, cfg);
       if (!dry) {
-        const made = createStandaloneDecision(ctx.db, { key: d.key, question: d.question, options: [], context: d.context, origin: d.origin, reservedReason: reserved, project: d.project, now });
-        ctx.db.query("UPDATE decisions SET import_source = ?2 WHERE id = ?1").run(made.id, source(d.id));
+        const made = createStandaloneDecision(ctx.db, { key: d.key, question: d.question, options: [], context: d.context, origin: d.origin, reservedReason: reserved, project: d.project, importSource: source(d.id), now });
+        decisionTaskId.set(d.id, made.taskId);
       }
-      rows.push({ item: d.id, kind: "decision", action: "create", reason: reserved ? `reserved: ${reserved}` : "the leader may decide" });
+      decisionRows.push({ item: d.id, kind: "decision", action: "create", reason: reserved ? `reserved: ${reserved}` : "the leader may decide" });
     }
 
-    if (!dry && rows.some((r) => r.kind === "decision" && r.action === "create")) setMeta(ctx.db, "import_triage", "1");
+    // Tasks: resolve every task's own outcome first (exists / refuse for a reason that does not depend on
+    // ordering), then create the rest in dependency order over blockers that are themselves plan tasks
+    // (finding 3): a dependent listed before its blocker in the plan must still both create, because
+    // tasks-axi's `add --blocked-by X` fails if X is not yet in the backlog. A blocker that cannot resolve
+    // — refused, or neither a plan task, a decision this apply created, nor an already-imported task — is
+    // dropped from the edge with a `warn` row on its dependent, rather than failing the dependent outright.
+    const taken = takenIds(ctx.db);
+    const taskRow = new Map<string, PlanRow>();
+    const taskWarnings = new Map<string, string[]>();
+    const pending = new Map<string, ImportPlan["tasks"][number]>();
+    const warn = (taskId: string, reason: string) => {
+      const list = taskWarnings.get(taskId) ?? [];
+      list.push(reason);
+      taskWarnings.set(taskId, list);
+    };
+    for (const t of plan.tasks) {
+      const policy = ctx.db.query("SELECT import_source FROM task_policy WHERE task_id = ?1").get(t.id) as { import_source: string | null } | null;
+      if (policy) {
+        taskRow.set(t.id, { item: t.id, kind: "task", action: policy.import_source === source(t.id) ? "exists" : "refuse", reason: policy.import_source === source(t.id) ? "already filed" : `task id ${t.id} is already used` });
+        continue;
+      }
+      if (taken(t.id)) {
+        taskRow.set(t.id, { item: t.id, kind: "task", action: "refuse", reason: `task id ${t.id} is already used` });
+        continue;
+      }
+      if (!isImportable(t.project)) {
+        taskRow.set(t.id, { item: t.id, kind: "task", action: "refuse", reason: `project ${t.project} is not imported` });
+        continue;
+      }
+      pending.set(t.id, t);
+    }
+    const preExistingTask = (id: string): boolean => !!ctx.db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(id);
+    let progress = true;
+    while (progress && pending.size > 0) {
+      progress = false;
+      for (const [id, t] of pending) {
+        // Collected locally, not committed through `warn()` yet: a dep still `pending` abandons this
+        // attempt for another pass, and the warnings already produced in this same attempt must not
+        // double up when the task is retried (and finally resolved) in a later pass.
+        const resolved: string[] = [];
+        const localWarnings: string[] = [];
+        let waiting = false;
+        for (const dep of t.blockedBy) {
+          const decisionId = decisionTaskId.get(dep);
+          if (decisionId) {
+            resolved.push(decisionId);
+            continue;
+          }
+          const row = taskRow.get(dep);
+          if (row && (row.action === "create" || row.action === "exists")) {
+            resolved.push(dep);
+            continue;
+          }
+          if (row) {
+            localWarnings.push(`blocked-by ${dep} dropped: ${row.reason}`);
+            continue;
+          }
+          if (pending.has(dep)) {
+            waiting = true;
+            break;
+          }
+          if (preExistingTask(dep)) {
+            resolved.push(dep);
+            continue;
+          }
+          const decisionRow = decisionRows.find((r) => r.item === dep);
+          localWarnings.push(`blocked-by ${dep} dropped: ${decisionRow ? decisionRow.reason : "not found"}`);
+        }
+        if (waiting) continue;
+        for (const reason of localWarnings) warn(id, reason);
+        if (!dry) {
+          const project = getProject(ctx.db, t.project)!;
+          queueTask(ctx.db, { taskId: id, title: t.title, body: t.body, kind: t.kind, project, priority: t.priority, blockedBy: resolved, importSource: source(id), now });
+        }
+        taskRow.set(id, { item: id, kind: "task", action: "create", reason: `queued ${t.kind}` });
+        pending.delete(id);
+        progress = true;
+      }
+    }
+    // Whatever is left depends, directly or transitively, on another task still stuck in this same set —
+    // a cycle somewhere among them, so none of them can ever land.
+    for (const id of pending.keys()) taskRow.set(id, { item: id, kind: "task", action: "refuse", reason: "blocked-by cycle" });
+
+    for (const t of plan.tasks) {
+      rows.push(taskRow.get(t.id)!);
+      for (const reason of taskWarnings.get(t.id) ?? []) rows.push({ item: t.id, kind: "task", action: "warn", reason });
+    }
+    rows.push(...decisionRows);
+
+    if (!dry && decisionRows.some((r) => r.action === "create")) setMeta(ctx.db, "import_triage", "1");
     return { data: { rows } };
   },
   async settle(ctx, result) {

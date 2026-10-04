@@ -23,6 +23,8 @@ describe("the Firstmate home", () => {
       ["fm-lock-fix", "in flight", false],
       ["alpha-amend-q1", "queued", false],
       ["beta-docs-z2", "queued", false],
+      ["corp-cleanup-q1", "queued", false],
+      ["beta-release-q3", "queued", false],
       ["alpha-arch-r2-decision-approval", "done", true],
     ]);
     expect(backlog[2]!.tags).toMatchObject({ repo: "beta", kind: "ship", priority: "3", "blocked-by": "alpha-amend-q1" });

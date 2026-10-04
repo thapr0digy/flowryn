@@ -3,8 +3,9 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
 import { recordIntent } from "../../src/journal/journal.ts";
+import { readSnapshot } from "../../src/journal/snapshot.ts";
 import { makeOriginRepo } from "../helpers/fleet-env.ts";
-import { daemonCall, makeHome, seedLeader, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { daemonCall, makeHome, seedLeader, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 
 let h: TestHome;
 let daemon: DaemonProc;
@@ -58,6 +59,23 @@ test("dry run reports create; apply creates; a second apply reports exists", asy
   expect(db.query("SELECT COUNT(*) AS n FROM task_policy WHERE task_id = 'alpha-amend-q1'").get()).toEqual({ n: 1 });
   expect(db.query("SELECT COUNT(*) AS n FROM intents WHERE task_id = 'alpha-amend-q1' AND verb = 'add'").get()).toEqual({ n: 1 });
   expect(db.query("SELECT import_source, origin, key FROM decisions").all()).toEqual([{ import_source: "firstmate:alpha-arch-r2-decision-retention", origin: "alpha-arch-r2", key: "retention" }]);
+  // decision.opened carries the import source directly (no separate UPDATE after the insert).
+  const opened = db.query("SELECT payload FROM events WHERE kind = 'decision.opened'").get() as { payload: string };
+  expect(JSON.parse(opened.payload)).toMatchObject({ import_source: "firstmate:alpha-arch-r2-decision-retention" });
+  db.close();
+});
+
+test("omitting dry behaves as a dry run (fail-safe default): nothing is written", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = planFor(alpha.repo);
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan) });
+  expect(reply.ok).toBe(true);
+  expect((reply.data as { rows: { action: string }[] }).rows.map((r) => r.action)).toEqual(["create", "create", "create"]);
+  const db = h.db();
+  expect(db.query("SELECT * FROM projects").all()).toEqual([]);
+  expect(db.query("SELECT * FROM decisions").all()).toEqual([]);
   db.close();
 });
 
@@ -159,6 +177,170 @@ test("a different-named non-imported project registered at the same checkout pat
   const projectRow = rows.find((r) => r.kind === "project");
   expect(projectRow?.action).toBe("refuse");
   expect(projectRow?.reason).toContain("already registered as project other-alpha");
+});
+
+test("a decision key tasks-axi would refuse refuses as a plan row, dry and real, rather than aborting the apply", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = planFor(alpha.repo);
+  plan.decisions[0]!.key = "Not Valid!";
+
+  const dry = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: true });
+  expect(dry.ok).toBe(true);
+  const dryRows = (dry.data as { rows: { kind: string; action: string; reason: string }[] }).rows;
+  const dryDecision = dryRows.find((r) => r.kind === "decision")!;
+  expect(dryDecision.action).toBe("refuse");
+  expect(dryDecision.reason).toContain("must be lowercase letters, digits and dashes");
+
+  const real = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(real.ok).toBe(true);
+  const realRows = (real.data as { rows: { kind: string; action: string }[] }).rows;
+  expect(realRows.find((r) => r.kind === "project")?.action).toBe("create");
+  expect(realRows.find((r) => r.kind === "task")?.action).toBe("create");
+  expect(realRows.find((r) => r.kind === "decision")?.action).toBe("refuse");
+  const db = h.db();
+  expect(db.query("SELECT COUNT(*) AS n FROM decisions").get()).toEqual({ n: 0 });
+  db.close();
+});
+
+test("a dependent task listed before its blocker in the plan still creates both, with the edge intact (cutover C3 fix 3)", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [
+      { id: "alpha-dep-q1", project: "alpha", kind: "scout", title: "The dependent", body: "x", priority: null, blockedBy: ["alpha-blocker-q1"] },
+      { id: "alpha-blocker-q1", project: "alpha", kind: "scout", title: "The blocker", body: "x", priority: null, blockedBy: [] },
+    ],
+    decisions: [],
+  };
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(reply.ok).toBe(true);
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string }[] }).rows;
+  const taskRows = rows.filter((r) => r.kind === "task");
+  expect(taskRows.map((r) => r.item)).toEqual(["alpha-dep-q1", "alpha-blocker-q1"]);
+  expect(taskRows.map((r) => r.action)).toEqual(["create", "create"]);
+  await waitUntil(
+    () => {
+      const row = h.db().query("SELECT state FROM intents WHERE task_id = 'alpha-dep-q1' AND verb = 'add'").get() as { state: string } | null;
+      return row !== null && row.state !== "pending";
+    },
+    10_000,
+    "dependent intent settled",
+  );
+  const settled = h.db().query("SELECT state, last_error FROM intents WHERE task_id = 'alpha-dep-q1' AND verb = 'add'").get();
+  expect(settled).toMatchObject({ state: "applied" });
+});
+
+test("a refused blocker drops the blocked-by edge with a warn row; the dependent still creates", async () => {
+  h = makeHome();
+  const db0 = h.db();
+  tx(db0, () => {
+    recordIntent(db0, { file: "backlog", verb: "add", taskId: "alpha-blocker-q1", positional: ["alpha-blocker-q1", "pre-existing, not imported"], flags: {}, now: Date.now() });
+  });
+  db0.close();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [
+      { id: "alpha-blocker-q1", project: "alpha", kind: "scout", title: "The blocker", body: "x", priority: null, blockedBy: [] },
+      { id: "alpha-dep-q1", project: "alpha", kind: "scout", title: "The dependent", body: "x", priority: null, blockedBy: ["alpha-blocker-q1"] },
+    ],
+    decisions: [],
+  };
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(reply.ok).toBe(true);
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+  const blocker = rows.find((r) => r.item === "alpha-blocker-q1" && r.kind === "task")!;
+  expect(blocker.action).toBe("refuse");
+  const dependent = rows.find((r) => r.item === "alpha-dep-q1" && r.action === "create")!;
+  expect(dependent).toBeTruthy();
+  const warning = rows.find((r) => r.item === "alpha-dep-q1" && r.action === "warn")!;
+  expect(warning.reason).toContain("blocked-by alpha-blocker-q1 dropped");
+  await waitUntil(() => h.db().query("SELECT 1 FROM intents WHERE task_id = 'alpha-dep-q1' AND state = 'applied'").get() !== null, 10_000, "dependent intent applied");
+  const db = h.db();
+  const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === "alpha-dep-q1");
+  db.close();
+  expect(task?.deps.some((d) => d.includes("alpha-blocker-q1"))).toBe(false);
+});
+
+test("a dropped-blocker warning is reported once, even when the dependent's resolution takes several passes", async () => {
+  h = makeHome();
+  const db0 = h.db();
+  tx(db0, () => {
+    recordIntent(db0, { file: "backlog", verb: "add", taskId: "alpha-blocker-bad-q1", positional: ["alpha-blocker-bad-q1", "pre-existing, not imported"], flags: {}, now: Date.now() });
+  });
+  db0.close();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  // alpha-final-q1 is listed first and depends on a refused blocker plus the end of a 3-task chain, so its
+  // own resolution is deliberately deferred across several passes of the while loop in apply.ts.
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [
+      { id: "alpha-final-q1", project: "alpha", kind: "scout", title: "Final", body: "x", priority: null, blockedBy: ["alpha-blocker-bad-q1", "alpha-chain-3-q1"] },
+      { id: "alpha-chain-1-q1", project: "alpha", kind: "scout", title: "Chain 1", body: "x", priority: null, blockedBy: [] },
+      { id: "alpha-chain-2-q1", project: "alpha", kind: "scout", title: "Chain 2", body: "x", priority: null, blockedBy: ["alpha-chain-1-q1"] },
+      { id: "alpha-chain-3-q1", project: "alpha", kind: "scout", title: "Chain 3", body: "x", priority: null, blockedBy: ["alpha-chain-2-q1"] },
+    ],
+    decisions: [],
+  };
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(reply.ok).toBe(true);
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+  expect(rows.filter((r) => r.item === "alpha-final-q1" && r.action === "create")).toHaveLength(1);
+  const warnings = rows.filter((r) => r.item === "alpha-final-q1" && r.action === "warn");
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0]!.reason).toContain("blocked-by alpha-blocker-bad-q1 dropped");
+});
+
+test("two tasks blocking each other refuse with blocked-by cycle; an unrelated task still creates", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [
+      { id: "alpha-cycle-a-q1", project: "alpha", kind: "scout", title: "A", body: "x", priority: null, blockedBy: ["alpha-cycle-b-q1"] },
+      { id: "alpha-cycle-b-q1", project: "alpha", kind: "scout", title: "B", body: "x", priority: null, blockedBy: ["alpha-cycle-a-q1"] },
+      { id: "alpha-plain-q1", project: "alpha", kind: "scout", title: "Plain", body: "x", priority: null, blockedBy: [] },
+    ],
+    decisions: [],
+  };
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(reply.ok).toBe(true);
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+  expect(rows.find((r) => r.item === "alpha-cycle-a-q1")).toMatchObject({ action: "refuse", reason: "blocked-by cycle" });
+  expect(rows.find((r) => r.item === "alpha-cycle-b-q1")).toMatchObject({ action: "refuse", reason: "blocked-by cycle" });
+  expect(rows.find((r) => r.item === "alpha-plain-q1")).toMatchObject({ action: "create" });
+});
+
+test("a task blocked-by a decision's own Firstmate item id is remapped to the decision's real task id (cutover C3 fix 4)", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [{ id: "alpha-dep-q1", project: "alpha", kind: "scout", title: "Waits on the decision", body: "x", priority: null, blockedBy: ["alpha-arch-r2-decision-retention"] }],
+    decisions: [{ id: "alpha-arch-r2-decision-retention", project: "alpha", origin: "alpha-arch-r2", key: "retention", question: "Confirm 365-day retention?", context: "trade-off", archived: "2026-09-20" }],
+  };
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(reply.ok).toBe(true);
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string }[] }).rows;
+  expect(rows.find((r) => r.item === "alpha-dep-q1")).toMatchObject({ action: "create" });
+  expect(rows.find((r) => r.item === "alpha-arch-r2-decision-retention" && r.kind === "decision")).toMatchObject({ action: "create" });
+  expect(rows.some((r) => r.item === "alpha-dep-q1" && r.action === "warn")).toBe(false);
+  await waitUntil(() => h.db().query("SELECT 1 FROM intents WHERE task_id = 'alpha-dep-q1' AND state = 'applied'").get() !== null, 10_000, "dependent intent applied");
+  const db = h.db();
+  const decisionTaskId = (db.query("SELECT task_id FROM decisions WHERE import_source = ?1").get("firstmate:alpha-arch-r2-decision-retention") as { task_id: string }).task_id;
+  const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === "alpha-dep-q1");
+  db.close();
+  // The Firstmate item id never becomes a real blocked-by edge: only the decision's own real task id does.
+  expect(task?.deps.some((d) => d.includes(decisionTaskId))).toBe(true);
+  expect(task?.deps.some((d) => d.includes("alpha-arch-r2-decision-retention"))).toBe(false);
 });
 
 test("a decision (origin, key) already used by another decision refuses, with no relabelling", async () => {

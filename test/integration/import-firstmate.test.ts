@@ -35,6 +35,38 @@ async function runImport(argv: { home: string; "clone-root"?: string; apply?: bo
   return { code, reply: out ? JSON.parse(out) : { data: {} } };
 }
 
+describe("flowryn import firstmate: human only", () => {
+  test("a non-human caller is refused before anything is read or cloned", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const clones = join(h.home, "clones");
+    let out = "";
+    const io: CliIo = { env: { ...h.env, FLOWRYN_TOKEN: "sometoken" }, stdinIsTty: true, stdoutIsTty: true, json: true, stdout: (t) => (out += t), stderr: () => {} };
+    const code = await importFirstmate(validateArgs(IMPORT_VERBS[0]!, { home: fm, "clone-root": clones, apply: true }), io);
+    expect(code).not.toBe(0);
+    const reply = JSON.parse(out) as { ok: boolean; error?: { code: string } };
+    expect(reply.ok).toBe(false);
+    expect(reply.error?.code).toBe("human_only");
+    expect(existsSync(clones)).toBe(false);
+  });
+
+  test("a caller with neither stdin nor stdout a terminal is refused", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const clones = join(h.home, "clones");
+    let out = "";
+    const io: CliIo = { env: h.env, stdinIsTty: false, stdoutIsTty: false, json: true, stdout: (t) => (out += t), stderr: () => {} };
+    const code = await importFirstmate(validateArgs(IMPORT_VERBS[0]!, { home: fm, "clone-root": clones, apply: true }), io);
+    expect(code).not.toBe(0);
+    const reply = JSON.parse(out) as { ok: boolean; error?: { code: string } };
+    expect(reply.ok).toBe(false);
+    expect(reply.error?.code).toBe("human_only");
+    expect(existsSync(clones)).toBe(false);
+  });
+});
+
 describe("flowryn import firstmate", () => {
   test("the dry run matches the golden plan and changes nothing", async () => {
     h = makeHome();
@@ -57,11 +89,12 @@ describe("flowryn import firstmate", () => {
     expect(existsSync(join(clones, "alpha", ".git"))).toBe(true);
     expect(readFileSync(join(h.home, "leader", "preferences.md"), "utf8")).toContain("## Review");
     const second = await runImport({ home: fm, "clone-root": clones, apply: true });
-    // "skip" and "review" decision rows are recomputed from the Firstmate archive on every run (they were
-    // never part of a plan the daemon tracks, so there is nothing for a second run to report as existing);
-    // every row the daemon did track for a project, task or decision must now read exists.
+    // "skip", "review" and "warn" rows (such as a dropped dependency on an unimported repo) are recomputed
+    // from the Firstmate data on every run (they were never part of a plan the daemon tracks, so there is
+    // nothing for a second run to report as existing); every row the daemon did track for a project, task
+    // or decision must now read exists.
     const actions = (second.reply.data as { rows: { kind: string; action: string }[] }).rows
-      .filter((r) => ["project", "task", "decision"].includes(r.kind) && !["skip", "review"].includes(r.action))
+      .filter((r) => ["project", "task", "decision"].includes(r.kind) && !["skip", "review", "warn"].includes(r.action))
       .map((r) => r.action);
     expect(new Set(actions)).toEqual(new Set(["exists"]));
   });
@@ -107,12 +140,48 @@ describe("flowryn import firstmate", () => {
     const fm = fixtureHome();
     const run = await runImport({ home: fm, "clone-root": join(h.home, "clones"), only: ["beta"] });
     const rows = (run.reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
-    expect(rows.some((r) => r.item === "alpha" && (r.kind === "project" || r.kind === "task"))).toBe(false);
-    expect(rows.some((r) => r.item === "alpha-amend-q1")).toBe(false);
+    expect(rows.some((r) => r.item === "alpha" && r.kind === "project")).toBe(false);
+    // alpha's own queued task is never dropped silently (cutover C3 fix 4): --only filters it out of the
+    // plan the same way an unimported repo does, and it shows as its own skip row, naming why.
+    expect(rows.find((r) => r.item === "alpha-amend-q1")).toMatchObject({ kind: "task", action: "skip", reason: "repo alpha is not imported" });
     const alphaDecisions = rows.filter((r) => r.kind === "decision" && r.item.startsWith("alpha"));
     expect(alphaDecisions.length).toBeGreaterThan(0);
     for (const d of alphaDecisions) expect(d.action).not.toBe("create");
     expect(rows.some((r) => r.kind === "project" && r.item === "beta" && r.action === "create")).toBe(true);
+  });
+
+  test("an old clone already copied into --clone-root (a partial earlier run) is adopted, not re-cloned, and an empty database still creates its project, task and decision", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const clones = join(h.home, "clones");
+    cpSync(join(fm, "projects", "alpha"), join(clones, "alpha"), { recursive: true });
+    const run = await runImport({ home: fm, "clone-root": clones, apply: true });
+    expect(run.code).toBe(0);
+    const rows = (run.reply.data as { rows: { item: string; kind: string; action: string }[] }).rows;
+    expect(rows.some((r) => r.item === "alpha" && r.kind === "project" && r.action === "clone")).toBe(false);
+    expect(rows.find((r) => r.item === "alpha" && r.kind === "project")).toMatchObject({ action: "create" });
+    expect(rows.find((r) => r.item === "alpha-amend-q1" && r.kind === "task")).toMatchObject({ action: "create" });
+    expect(rows.find((r) => r.item === "alpha-arch-r2-decision-retention" && r.kind === "decision")).toMatchObject({ action: "create" });
+    expect(existsSync(join(clones, "alpha", ".git"))).toBe(true);
+  });
+
+  test("a queued task held in Firstmate still imports Queued, plus a warn row carrying the hold reason (truncated)", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const longReason = "waiting on the vendor to confirm the contract renewal before we touch any of this, seriously do not touch";
+    const backlogPath = join(fm, "data", "backlog.md");
+    const held = `- [ ] beta-held-q1 - Rework the cache (repo: beta) (kind: ship) (since 2026-09-17) (hold: ${longReason}) (hold-kind: captain)\n`;
+    writeFileSync(backlogPath, readFileSync(backlogPath, "utf8").replace("## Done", `${held}## Done`));
+    const run = await runImport({ home: fm, "clone-root": join(h.home, "clones") });
+    const rows = (run.reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+    expect(rows.find((r) => r.item === "beta-held-q1" && r.kind === "task" && r.action === "create")).toBeTruthy();
+    const warning = rows.find((r) => r.item === "beta-held-q1" && r.action === "warn")!;
+    expect(warning.reason.startsWith("held in Firstmate (")).toBe(true);
+    expect(warning.reason).toContain(longReason.slice(0, 80));
+    expect(warning.reason).not.toContain(longReason); // the full (longer) text never appears, only the 80-char prefix
+    expect(warning.reason.endsWith("); not held here")).toBe(true);
   });
 
   test("a missing old clone is refused", async () => {
@@ -122,6 +191,29 @@ describe("flowryn import firstmate", () => {
     writeFileSync(join(fm, "data", "projects.md"), readFileSync(join(fm, "data", "projects.md"), "utf8") + "- gamma [direct-PR] - No clone (added 2026-09-30)\n");
     const run = await runImport({ home: fm, "clone-root": join(h.home, "clones") });
     expect((run.reply.data as { rows: { item: string; action: string; reason: string }[] }).rows.find((r) => r.item === "gamma")).toMatchObject({ action: "refuse", reason: expect.stringContaining("no old clone") });
+  });
+
+  test("preferences.md is never overwritten once it exists: an edit in between two applies survives, and both runs report exists", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const clones = join(h.home, "clones");
+    const first = await runImport({ home: fm, "clone-root": clones, apply: true });
+    expect(first.code).toBe(0);
+    const prefsPath = join(h.home, "leader", "preferences.md");
+    const firstRows = (first.reply.data as { rows: { item: string; kind: string; action: string }[] }).rows;
+    expect(firstRows.filter((r) => r.kind === "preferences").map((r) => r.action)).toEqual(["create", "create", "skip"]);
+    writeFileSync(prefsPath, `${readFileSync(prefsPath, "utf8")}\n- my own added line\n`);
+    const edited = readFileSync(prefsPath, "utf8");
+    const dryAgain = await runImport({ home: fm, "clone-root": clones });
+    const dryRows = (dryAgain.reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows.filter((r) => r.kind === "preferences");
+    expect(dryRows.find((r) => r.item === "captain.md")).toMatchObject({ action: "exists", reason: "preferences.md already exists; edit it in place" });
+    expect(readFileSync(prefsPath, "utf8")).toBe(edited);
+    const second = await runImport({ home: fm, "clone-root": clones, apply: true });
+    const secondRows = (second.reply.data as { rows: { item: string; kind: string; action: string }[] }).rows.filter((r) => r.kind === "preferences");
+    expect(secondRows.find((r) => r.item === "captain.md")).toMatchObject({ action: "exists" });
+    expect(secondRows.find((r) => r.item === "learnings.md")).toMatchObject({ action: "exists" });
+    expect(readFileSync(prefsPath, "utf8")).toBe(edited);
   });
 
   test("a done-archive.md captain answer resolves an open decision the same way note-archive.md does", async () => {
