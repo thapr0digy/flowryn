@@ -20,4 +20,20 @@ describe("redactSecrets", () => {
   test("ordinary text is kept", () => {
     expect(redactSecrets("Do you want to proceed? git push --force-with-lease")).toBe("Do you want to proceed? git push --force-with-lease");
   });
+
+  test("a multi-word secret value is redacted to end of line, not just its first word", () => {
+    expect(redactSecrets("password: hunter 2 secret phrase")).toBe("password: [redacted]");
+  });
+
+  test("redaction stops at the newline, leaving the next line intact", () => {
+    expect(redactSecrets("token=abc def\nnext line")).toBe("token=[redacted]\nnext line");
+  });
+
+  test("never throws, always returns a string", () => {
+    expect(redactSecrets("")).toBe("");
+    const unterminated = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A".repeat(200_000);
+    expect(typeof redactSecrets(unterminated)).toBe("string");
+    const binaryish = "\u0000\u0001 café 日本語 password: \u0000secret\u0000";
+    expect(typeof redactSecrets(binaryish)).toBe("string");
+  });
 });

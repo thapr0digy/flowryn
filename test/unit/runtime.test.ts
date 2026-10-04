@@ -164,9 +164,11 @@ describe("Herdr runtime", () => {
   });
 
   test("readPane returns the pane's recent text, null for a gone pane", async () => {
+    const seen: Record<string, unknown>[] = [];
     const runtime = new HerdrRuntime(
       scriptedTransport({
         "pane.read": (p) => {
+          seen.push(p);
           if (p.pane_id === "w1:p9") throw new HerdrError("pane_not_found", "gone");
           return { type: "pane_read", read: { text: "line 1\nDo you want to proceed?\n❯ 1. Yes" } };
         },
@@ -174,6 +176,7 @@ describe("Herdr runtime", () => {
     );
     expect(await runtime.readPane("w1:p2", 40)).toBe("line 1\nDo you want to proceed?\n❯ 1. Yes");
     expect(await runtime.readPane("w1:p9", 40)).toBeNull();
+    expect(seen[0]).toMatchObject({ source: "recent-unwrapped" });
   });
 });
 
