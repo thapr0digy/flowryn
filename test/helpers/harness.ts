@@ -111,7 +111,10 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
   // No daemon the tests start ever delivers a notification (FLOWRYN_NOTIFY=off, which startDaemon requires);
   // behind it, the macOS channel only records, never runs osascript.
-  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}` };
+  // TZ=UTC: bun test pins the test file's own clock to UTC regardless of TZ, but a daemon/CLI spawned via
+  // Bun.spawn runs in the box's real local zone unless told otherwise, so every spawned process agrees with
+  // bun test's own "today" at any hour (see test/unit/tz.test.ts).
+  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}`, TZ: "UTC" };
   return {
     home,
     stateDir,

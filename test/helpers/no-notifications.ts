@@ -6,10 +6,17 @@
  * FLOWRYN_NOTIFY=off (it refuses to start one without it) and a recording
  * macOS channel (test/helpers/harness.ts). test/unit/notify-guard.test.ts
  * checks all three.
+ *
+ * It also pins TZ=UTC, explicitly rather than relying on bun test's own
+ * internal UTC default, so a helper that spawns with `process.env` directly
+ * (several tests build git envs this way) still agrees with the daemons and
+ * CLIs spawned through the harness's own env (test/helpers/harness.ts). See
+ * test/unit/tz.test.ts.
  */
 import { afterAll } from "bun:test";
 
 process.env.FLOWRYN_NOTIFY = "off";
+process.env.TZ = "UTC";
 
 export const OSASCRIPT = "/usr/bin/osascript";
 
