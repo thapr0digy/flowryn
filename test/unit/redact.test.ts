@@ -70,6 +70,39 @@ describe("redactSecrets", () => {
     expect(out).not.toContain("bodyB");
   });
 
+  test("an armored PGP private key block is removed whole", () => {
+    expect(redactSecrets("a\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\nb")).toBe("a\n[redacted]\nb");
+  });
+
+  test("an armored PGP private key with a BEGIN but no END redacts from BEGIN to the end of the text", () => {
+    expect(redactSecrets("gpg:\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBFbody")).toBe("gpg:\n[redacted]");
+  });
+
+  test("an armored PGP private key with an END but no BEGIN redacts from the start of the text to END", () => {
+    expect(redactSecrets("lQOYBFbody\n-----END PGP PRIVATE KEY BLOCK-----\nmore text")).toBe("[redacted]\nmore text");
+  });
+
+  test("text between two whole PEM blocks is kept", () => {
+    const key = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----";
+    expect(redactSecrets(`a\n${key}\nmid\n${key}\nb`)).toBe("a\n[redacted]\nmid\n[redacted]\nb");
+  });
+
+  test("a labeled flag's multi-word value is redacted to end of line", () => {
+    expect(redactSecrets("--password my pass phrase\nnext line")).toBe("--password [redacted]\nnext line");
+  });
+
+  test("whitespace after a flag's = does not leave its value exposed", () => {
+    expect(redactSecrets("--token= abc def")).toBe("--token=[redacted]");
+  });
+
+  test("a labeled flag at the end of its line does not redact the next line", () => {
+    expect(redactSecrets("--token\nnext line")).toBe("--token\nnext line");
+  });
+
+  test("an unlabeled flag before a labeled one on the same line does not hide it", () => {
+    expect(redactSecrets("cmd --verbose --token hunter2")).toBe("cmd --verbose --token [redacted]");
+  });
+
   test("never throws, always returns a string", () => {
     expect(redactSecrets("")).toBe("");
     const unterminated = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A".repeat(200_000);
@@ -83,6 +116,9 @@ describe("redactSecrets", () => {
     ["200 KB of \"--token\"", "--token".repeat(28_572)],
     ["200 KB of \"a.\"", "a.".repeat(100_000)],
     ["200 KB random base64url blob", base64urlBlob(200_000)],
+    ["1 MB of repeated PEM BEGIN markers with no END", "-----BEGIN RSA PRIVATE KEY-----\n".repeat(32_768)],
+    ["1 MB of repeated PEM END markers", "-----END RSA PRIVATE KEY-----\n".repeat(34_000)],
+    ["200 KB of \"--token x \"", "--token x ".repeat(20_000)],
   ])("redacts %s in linear time (under 100ms, no catastrophic backtracking)", (_label, input) => {
     const start = performance.now();
     redactSecrets(input);

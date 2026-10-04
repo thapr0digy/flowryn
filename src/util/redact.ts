@@ -13,25 +13,50 @@
  * in the input length regardless of what the screen contains.
  */
 
-const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
-const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
-const PEM_PAIRED = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+const PEM_END = /-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+
+type Span = { start: number; end: number };
+
+function findFrom(pattern: RegExp, text: string, from: number): Span | null {
+  pattern.lastIndex = from;
+  const match = pattern.exec(text);
+  return match ? { start: match.index, end: match.index + match[0].length } : null;
+}
 
 /**
- * A PEM block, whole when both BEGIN and END are present. A lone BEGIN (the
- * END fell off a tailed screen capture) redacts from BEGIN to the end of the
- * text; a lone END (the BEGIN scrolled off) redacts from the start to END.
- * Both rules apply independently and in sequence regardless of which marker
- * comes first: a lone END followed later by an unrelated lone BEGIN (two
- * different keys, both cut, in either order) must not leak either body.
+ * A private key block (PEM, or an armored `PGP PRIVATE KEY BLOCK`), whole
+ * when both BEGIN and END are present. A lone BEGIN (the END fell off a
+ * tailed screen capture) redacts from BEGIN to the end of the text; a lone
+ * END (the BEGIN scrolled off) redacts from the start to END. A lone END
+ * followed later by an unrelated lone BEGIN (two different keys, both cut, in
+ * either order) must not leak either body.
+ *
+ * One forward scan pairing each BEGIN with the next END, remembering the
+ * next match of each marker so no stretch of text is searched more than a
+ * constant number of times: a lazy `BEGIN[\s\S]*?END` regex is quadratic on
+ * repeated BEGIN markers with no END.
  */
 function redactPem(text: string): string {
-  let out = text.replace(PEM_PAIRED, "[redacted]");
-  const end = out.match(PEM_END);
-  if (end && end.index !== undefined) out = `[redacted]${out.slice(end.index + end[0].length)}`;
-  const begin = out.search(PEM_BEGIN);
-  if (begin !== -1) out = `${out.slice(0, begin)}[redacted]`;
-  return out;
+  let out = "";
+  let pos = 0;
+  let nextBegin: Span | null | undefined;
+  let nextEnd: Span | null | undefined;
+  while (pos < text.length) {
+    if (nextBegin === undefined || (nextBegin && nextBegin.start < pos)) nextBegin = findFrom(PEM_BEGIN, text, pos);
+    if (nextEnd === undefined || (nextEnd && nextEnd.start < pos)) nextEnd = findFrom(PEM_END, text, pos);
+    if (nextEnd && (!nextBegin || nextEnd.start < nextBegin.start)) {
+      out = "[redacted]";
+      pos = nextEnd.end;
+      continue;
+    }
+    if (!nextBegin) break;
+    out += `${text.slice(pos, nextBegin.start)}[redacted]`;
+    if (nextEnd && nextEnd.start < nextBegin.end) nextEnd = findFrom(PEM_END, text, nextBegin.end);
+    if (!nextEnd) return out;
+    pos = nextEnd.end;
+  }
+  return out + text.slice(pos);
 }
 
 const PATTERNS: RegExp[] = [
@@ -59,14 +84,18 @@ const URL_USERINFO = /(?<![\w+.-])[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/\s@]+@/g;
 const LABEL = /password|passwd|secret|token|api[_-]?key/i;
 
 /**
- * `--password hunter2` / `--api-key=abc`: keep the flag, redact its value.
- * `FLAG_NAME` matches only the flag's name and separator, not its value:
- * matching the value only after confirming the name is labeled means an
- * unlabeled flag (`--verbose --token hunter2`) can't swallow a labeled one
- * that follows it on the same line into its own unredacted "value".
+ * `--password hunter2` / `--api-key=abc`: keep the flag, redact its value to
+ * the end of the line, like a labeled assignment below, since a passphrase
+ * can run several words. `FLAG_NAME` matches only the flag's name and
+ * separator, not its value: matching the value only after confirming the
+ * name is labeled means an unlabeled flag (`--verbose --token hunter2`) can't
+ * swallow a labeled one that follows it on the same line into its own
+ * unredacted "value". The separator never crosses a newline, and the value
+ * is read with a sticky regex from right after it, so nothing past the line
+ * is redacted and no copy of the rest of the text is made per flag.
  */
-const FLAG_NAME = /(?<![\w-])(--[\w-]+)(=|\s+)/g;
-const TOKEN = /\S+/;
+const FLAG_NAME = /(?<![\w-])(--[\w-]+)(=|[ \t]+)/g;
+const REST_OF_LINE = /[^\n]*/y;
 
 function redactFlags(text: string): string {
   FLAG_NAME.lastIndex = 0;
@@ -74,15 +103,16 @@ function redactFlags(text: string): string {
   let last = 0;
   let match: RegExpExecArray | null;
   while ((match = FLAG_NAME.exec(text))) {
-    const full = match[0];
     const name = match[1]!;
-    const afterSep = match.index + full.length;
+    const afterSep = match.index + match[0].length;
     if (!LABEL.test(name)) continue;
-    const valueMatch = TOKEN.exec(text.slice(afterSep));
-    const valueEnd = valueMatch ? afterSep + valueMatch[0].length : afterSep;
-    result += text.slice(last, afterSep) + (valueMatch ? "[redacted]" : "");
-    last = valueEnd;
-    FLAG_NAME.lastIndex = valueEnd;
+    REST_OF_LINE.lastIndex = afterSep;
+    const value = REST_OF_LINE.exec(text)![0];
+    if (value.trim() === "") continue;
+    const lineEnd = afterSep + value.length;
+    result += `${text.slice(last, afterSep)}[redacted]`;
+    last = lineEnd;
+    FLAG_NAME.lastIndex = lineEnd;
   }
   return result + text.slice(last);
 }
