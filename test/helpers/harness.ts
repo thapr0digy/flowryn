@@ -213,9 +213,13 @@ export async function cliJson(h: TestHome, args: string[], options: CliOptions =
   return { code: result.code, reply, stderr: result.stderr };
 }
 
-/** A daemon call as your own terminal (channel tty) or with a token, the way `flowryn approve` makes it. */
-export async function daemonCall(home: string, verb: string, args: Record<string, unknown>, token: string | null = null): Promise<Reply> {
-  return (await request(join(home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb, token, channel: token ? null : "tty", args }, { connectMs: 1_000, replyMs: 120_000 })) as Reply;
+/**
+ * A daemon call as your own terminal (channel tty) or with a token, the way
+ * `flowryn approve` makes it. Pass `channel: null` explicitly to simulate an
+ * anonymous, token-less, non-tty caller (a gate process, a script).
+ */
+export async function daemonCall(home: string, verb: string, args: Record<string, unknown>, token: string | null = null, channel: "tty" | null = token ? null : "tty"): Promise<Reply> {
+  return (await request(join(home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb, token, channel, args }, { connectMs: 1_000, replyMs: 120_000 })) as Reply;
 }
 
 export async function pingSocket(h: TestHome): Promise<boolean> {

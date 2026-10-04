@@ -12,7 +12,7 @@ export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as cons
 export const HARNESSES = ["claude", "pi"] as const;
 export const AUTONOMY = ["plan", "manual"] as const;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
-const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+export const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 export interface ProjectRow {
   id: string;
