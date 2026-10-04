@@ -93,8 +93,8 @@ describe("claude adapter", () => {
   test("the worker settings wire every hook verb, and the Stop waiter is asyncRewake with an 8 h timeout", () => {
     const settings = workerSettings("/opt/flowryn bin/flowryn") as { hooks: Record<string, { hooks: { command: string; asyncRewake?: boolean; timeout?: number }[] }[]> };
     expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
-    // The usage-limit resume signals only (design section 16): a worker's idle_prompt means nothing to Flowryn.
-    expect((settings.hooks.Notification![0] as unknown as { matcher: string }).matcher).toBe("quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled");
+    // The usage-limit resume signals, and a permission dialog waiting mid-run (cutover C2): a worker's idle_prompt means nothing to Flowryn.
+    expect((settings.hooks.Notification![0] as unknown as { matcher: string }).matcher).toBe("quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled|permission_prompt");
     const stop = settings.hooks.Stop![0]!.hooks;
     expect(stop[1]).toMatchObject({ asyncRewake: true, timeout: 28_800 });
     expect(stop[1]!.command).toBe("'/opt/flowryn bin/flowryn' hook wait-steer --harness claude");
@@ -143,7 +143,15 @@ describe("worker contract text", () => {
     // The style block leads the instructions (design section 11).
     expect(text.startsWith("Reply in the fewest words")).toBe(true);
     expect(text).toContain("$FLOWRYN_BIN stage done [--review <lavish url>]");
-    expect(text.split("\n").length).toBeLessThan(25);
+    expect(text.split("\n").length).toBeLessThan(30);
+  });
+
+  test("the worker contract forbids history rewrites and unguarded rm, and says what to do at a prompt", () => {
+    const text = workerContract("claude", null, { kind: "ship", mode: "direct-PR", defaultBranch: "main" });
+    expect(text).toContain("- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.");
+    expect(text).toContain("  To take main: new commits, git merge origin/main, a plain git push.");
+    expect(text).toContain('- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.');
+    expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking naming it, then end your turn.");
   });
 
   test("the prompt line is one short line that points at the full task", () => {

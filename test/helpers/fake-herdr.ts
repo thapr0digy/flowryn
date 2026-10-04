@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, openSync, closeSync } from "node:fs";
+import { chmodSync, existsSync, openSync, closeSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { join, resolve } from "node:path";
 
@@ -12,6 +12,9 @@ import { join, resolve } from "node:path";
  */
 
 export const FAKE_HARNESS = resolve(import.meta.dir, "fake-harness.ts");
+
+/** Herdr 0.7.5 protocol 17's pane.read source enum: the underscore form, never the CLI's kebab flag. */
+const PANE_READ_SOURCES = new Set(["visible", "recent", "recent_unwrapped", "detection"]);
 
 interface FakePane {
   paneId: string;
@@ -51,6 +54,8 @@ export class FakeHerdr {
   readonly failNext = new Map<string, string[]>();
   /** Agent statuses to report for panes regardless of their process: Herdr's own inference, which can be stale. */
   readonly statusOverride = new Map<string, string>();
+  /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
+  readonly screens = new Map<string, string>();
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
@@ -104,6 +109,16 @@ export class FakeHerdr {
     const paneId = ws.panes[0]!;
     this.statusOverride.set(paneId, status);
     return paneId;
+  }
+
+  /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
+  setScreen(paneId: string, text: string): void {
+    this.screens.set(paneId, text);
+  }
+
+  /** Herdr's own agent_status inference for a pane (M0 c12: "blocked" during a dialog, "working" during a tool). */
+  setStatus(paneId: string, status: string): void {
+    this.statusOverride.set(paneId, status);
   }
 
   /** Add a pane Flowryn did not create, carrying a run's label, to exercise the orphan scan. */
@@ -287,6 +302,15 @@ export class FakeHerdr {
       }
       case "pane.get":
         return { type: "pane_info", pane: this.paneView(this.need(params.pane_id)) };
+      case "pane.read": {
+        const pane = this.need(params.pane_id);
+        const source = String(params.source ?? "recent");
+        if (!PANE_READ_SOURCES.has(source)) throw Object.assign(new Error(`pane.read: source must be one of ${[...PANE_READ_SOURCES].join(", ")}`), { code: "invalid_params" });
+        const file = join(pane.env.FLOWRYN_REPORT_DIR ?? "", "fake-screen.txt");
+        const text = this.screens.get(pane.paneId) ?? (existsSync(file) ? readFileSync(file, "utf8") : "");
+        const lines = typeof params.lines === "number" ? params.lines : 60;
+        return { type: "pane_read", read: { pane_id: pane.paneId, workspace_id: pane.workspaceId, tab_id: "t1", source, format: "text", text: text.split("\n").slice(-lines).join("\n"), revision: pane.revision, truncated: false } };
+      }
       case "agent.get": {
         const pane = this.need(params.target);
         const override = this.statusOverride.get(pane.paneId);

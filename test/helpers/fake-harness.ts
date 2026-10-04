@@ -36,6 +36,9 @@
  *                                    docker's list ($FLOWRYN_HOME/docker-ps.txt), in a compose project if named
  *   FAKE: docker-down <name>         that container stops
  *   FAKE: usage-limit                the turn ends in StopFailure with error rate_limit (a claude.ai usage limit)
+ *   FAKE: prompt <text...>           a permission dialog: the screen shows <text>, hook notify permission_prompt, then
+ *                                    no hook until the screen is cleared (the test clears it), then one tool call
+ *   FAKE: stall                      a turn that goes quiet: no hooks, no Stop, for good
  *
  * Steps run once per session: a resumed session continues after the last step
  * it finished (state kept next to the task file).
@@ -358,6 +361,18 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
     case "usage-limit":
       await hook("stop-failure", { error: "rate_limit", error_details: "429 Too Many Requests" });
       return "continue";
+    case "prompt": {
+      const text = rest.join(" ");
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "fake-screen.txt"), text);
+      await hook("notify", { notification_type: "permission_prompt", message: "Claude needs your permission" });
+      // Wait until the test clears the screen (the user answered), then carry on.
+      while (existsSync(join(dir, "fake-screen.txt"))) await Bun.sleep(200);
+      return "continue";
+    }
+    case "stall":
+      for (;;) await Bun.sleep(60_000);
     case "crash":
       log("crash");
       process.exit(1);

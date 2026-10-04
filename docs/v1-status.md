@@ -93,7 +93,7 @@ The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
 | Item | Status |
 |---|---|
 | C1 standalone decisions, the reserved policy, the user's word for a captain answer, scout open decisions, briefing sections | Done (C1) |
-| C2 mid-run prompt wedges | Not built yet |
+| C2 mid-run prompt wedges | Done (C2) |
 | C3 `flowryn import firstmate` | Not built yet |
 
 ## Not in v1

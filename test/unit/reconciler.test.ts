@@ -2,8 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openItem } from "../../src/attention/items.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import type { SteerBus } from "../../src/lifecycle/steers.ts";
 import { herdrEpisode, noteHerdrDown } from "../../src/reconcile/herdr-health.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
@@ -92,5 +94,36 @@ describe("reconciler", () => {
 
     expect(herdrEpisode(db)).toBeNull();
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'herdr.reachable'").get()).toEqual({ n: 1 });
+  });
+
+  test("a dead run's open blocked_prompt item is resolved on its final death (resume_count already 1: no auto-resume to carry a hook)", async () => {
+    const db = deadRunDb();
+    db.query("UPDATE runs SET resume_count = 1 WHERE id = 'r1'").run();
+    const now = Date.now();
+    tx(db, () => {
+      const event = appendEvent(db, { source: "hook", kind: "run.blocked_prompt", runId: "r1", taskId: "t1", payload: {}, ts: now });
+      openItem(db, { kind: "blocked_prompt", eventSeq: event.seq, line: "waiting on a confirmation", taskId: "t1", runId: "r1", now });
+    });
+    const runtime = {
+      processes: () => Promise.resolve(null),
+      snapshotPanes: () => Promise.resolve([]),
+      agentStatus: () => Promise.resolve(null),
+    } as unknown as HerdrRuntime;
+    const reconciler = new Reconciler({
+      db,
+      runtime: () => runtime,
+      launch: () => {},
+      isLaunching: () => false,
+      bus: { notify() {} } as unknown as SteerBus,
+      timing: () => DEFAULT_TIMING,
+      log: () => {},
+      now: Date.now,
+      ps: () => Promise.resolve(""),
+    });
+
+    await reconciler.passNow("steady");
+    reconciler.stop();
+
+    expect((db.query("SELECT state FROM items WHERE kind = 'blocked_prompt' AND run_id = 'r1'").get() as { state: string }).state).toBe("resolved");
   });
 });

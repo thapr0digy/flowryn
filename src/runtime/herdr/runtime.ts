@@ -207,6 +207,23 @@ export class HerdrRuntime {
     }
   }
 
+  /**
+   * The pane's recent text, ANSI stripped (Herdr pane.read). Requests
+   * source "recent_unwrapped" rather than "recent": a secret can fall
+   * across a soft-wrapped terminal line, and redactSecrets only catches it
+   * whole when the line arrives unwrapped. Null when the pane is gone.
+   */
+  async readPane(paneId: string, lines: number): Promise<string | null> {
+    try {
+      const result = await this.transport.call("pane.read", { pane_id: paneId, source: "recent_unwrapped", lines, strip_ansi: true });
+      const read = result.read as Record<string, unknown> | undefined;
+      return typeof read?.text === "string" ? read.text : null;
+    } catch (error) {
+      if (error instanceof HerdrError && error.code === "pane_not_found") return null;
+      throw error;
+    }
+  }
+
   /** A Herdr notification, for P0 and batched attention (design section 9). */
   async notify(title: string, body: string): Promise<void> {
     await this.transport.call("notification.show", { title, body });

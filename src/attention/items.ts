@@ -17,6 +17,7 @@ export type ItemClass = "actionable" | "info";
  * v1 completion pass the section 16 failure P1s (a harness version with no
  * passing contract, Herdr unreachable, GitHub unavailable while a merge waits).
  * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
+ * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -31,6 +32,7 @@ export const LANE_TABLE = {
   unproven_merge: { lane: "P1", class: "actionable" },
   backlog_out_of_sync: { lane: "P1", class: "actionable" },
   trust_dialog: { lane: "P1", class: "actionable" },
+  blocked_prompt: { lane: "P1", class: "actionable" },
   overdue_todo: { lane: "P1", class: "actionable" },
   steer_unacked: { lane: "P1", class: "actionable" },
   checkout_tangle: { lane: "P1", class: "actionable" },
