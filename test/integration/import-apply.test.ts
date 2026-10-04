@@ -318,6 +318,51 @@ test("two tasks blocking each other refuse with blocked-by cycle; an unrelated t
   expect(rows.find((r) => r.item === "alpha-plain-q1")).toMatchObject({ action: "create" });
 });
 
+test("only the true cycle members refuse; a task merely downstream of a cycle still creates with that edge dropped (residual fix 2)", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [
+      { id: "alpha-cycle-a-q1", project: "alpha", kind: "scout", title: "A", body: "x", priority: null, blockedBy: ["alpha-cycle-b-q1"] },
+      { id: "alpha-cycle-b-q1", project: "alpha", kind: "scout", title: "B", body: "x", priority: null, blockedBy: ["alpha-cycle-a-q1"] },
+      { id: "alpha-downstream-q1", project: "alpha", kind: "scout", title: "C", body: "x", priority: null, blockedBy: ["alpha-cycle-a-q1"] },
+    ],
+    decisions: [],
+  };
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  expect(reply.ok).toBe(true);
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+  expect(rows.find((r) => r.item === "alpha-cycle-a-q1")).toMatchObject({ action: "refuse", reason: "blocked-by cycle" });
+  expect(rows.find((r) => r.item === "alpha-cycle-b-q1")).toMatchObject({ action: "refuse", reason: "blocked-by cycle" });
+  expect(rows.find((r) => r.item === "alpha-downstream-q1" && r.action === "create")).toBeTruthy();
+  const warning = rows.find((r) => r.item === "alpha-downstream-q1" && r.action === "warn")!;
+  expect(warning.reason).toBe("blocked-by alpha-cycle-a-q1 dropped: blocked-by cycle");
+  await waitUntil(() => h.db().query("SELECT 1 FROM intents WHERE task_id = 'alpha-downstream-q1' AND state = 'applied'").get() !== null, 10_000, "downstream intent applied");
+  const db = h.db();
+  const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === "alpha-downstream-q1");
+  db.close();
+  expect(task?.deps.some((d) => d.includes("alpha-cycle-a-q1"))).toBe(false);
+});
+
+test("a dry run agrees with the real run: a task blocked-by a decision that will be created previews create, not a false dropped-blocker warning (residual fix 1)", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const plan = {
+    projects: [{ name: "alpha", path: alpha.repo, mode: "no-mistakes", yolo: true }],
+    tasks: [{ id: "alpha-dep-q1", project: "alpha", kind: "scout", title: "Waits on the decision", body: "x", priority: null, blockedBy: ["alpha-arch-r2-decision-retention"] }],
+    decisions: [{ id: "alpha-arch-r2-decision-retention", project: "alpha", origin: "alpha-arch-r2", key: "retention", question: "Confirm 365-day retention?", context: "trade-off", archived: "2026-09-20" }],
+  };
+  const dry = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: true });
+  expect(dry.ok).toBe(true);
+  const rows = (dry.data as { rows: { item: string; kind: string; action: string }[] }).rows;
+  expect(rows.find((r) => r.item === "alpha-dep-q1")).toMatchObject({ action: "create" });
+  expect(rows.find((r) => r.item === "alpha-arch-r2-decision-retention" && r.kind === "decision")).toMatchObject({ action: "create" });
+  expect(rows.some((r) => r.item === "alpha-dep-q1" && r.action === "warn")).toBe(false);
+});
+
 test("a task blocked-by a decision's own Firstmate item id is remapped to the decision's real task id (cutover C3 fix 4)", async () => {
   h = makeHome();
   daemon = await startDaemon(h);

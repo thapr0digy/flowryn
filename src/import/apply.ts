@@ -82,6 +82,31 @@ function dryArg(args: Args): boolean {
   return args.dry !== false;
 }
 
+/**
+ * residual fix 2: among a set of mutually-stuck ids, which ones can reach themselves again by
+ * following only edges that stay inside that same stuck set? Those are the actual cycle members —
+ * a task merely downstream of a cycle (blocked by a cycle member, but not reachable back from it)
+ * is not one, and resolves normally once its cycle-member blocker is refused and peeled off.
+ */
+function cycleMembers(ids: string[], edgesOf: (id: string) => string[]): Set<string> {
+  const members = new Set<string>();
+  for (const start of ids) {
+    const stack = [...edgesOf(start)];
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const next = stack.pop()!;
+      if (next === start) {
+        members.add(start);
+        break;
+      }
+      if (seen.has(next)) continue;
+      seen.add(next);
+      stack.push(...edgesOf(next));
+    }
+  }
+  return members;
+}
+
 export const importApply: VerbSpec = {
   name: "import.apply",
   summary: "Internal: record a Firstmate import (projects, tasks, decisions)",
@@ -190,6 +215,12 @@ export const importApply: VerbSpec = {
       if (!dry) {
         const made = createStandaloneDecision(ctx.db, { key: d.key, question: d.question, options: [], context: d.context, origin: d.origin, reservedReason: reserved, project: d.project, importSource: source(d.id), now });
         decisionTaskId.set(d.id, made.taskId);
+      } else {
+        // residual fix 1: a dry run never calls createStandaloneDecision, so there is no real task id
+        // yet — but a task blocked-by this decision must still preview as a kept, resolved blocker (the
+        // real apply will remap it), not a false "dropped" warning. The placeholder is never written
+        // anywhere; dry mode never calls queueTask.
+        decisionTaskId.set(d.id, `dry:${d.id}`);
       }
       decisionRows.push({ item: d.id, kind: "decision", action: "create", reason: reserved ? `reserved: ${reserved}` : "the leader may decide" });
     }
@@ -226,9 +257,9 @@ export const importApply: VerbSpec = {
       pending.set(t.id, t);
     }
     const preExistingTask = (id: string): boolean => !!ctx.db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(id);
-    let progress = true;
-    while (progress && pending.size > 0) {
-      progress = false;
+    /** One resolution pass over every still-pending task; returns whether any task resolved. */
+    const resolveOnce = (): boolean => {
+      let progress = false;
       for (const [id, t] of pending) {
         // Collected locally, not committed through `warn()` yet: a dep still `pending` abandons this
         // attempt for another pass, and the warnings already produced in this same attempt must not
@@ -272,10 +303,31 @@ export const importApply: VerbSpec = {
         pending.delete(id);
         progress = true;
       }
+      return progress;
+    };
+    while (pending.size > 0) {
+      while (resolveOnce()) {
+        /* keep resolving until a pass makes no further progress */
+      }
+      if (pending.size === 0) break;
+      // Stuck: peel off exactly the true cycle members (an SCC of size > 1, or a self-blocked task) among
+      // what is left, refuse them, then resume — a task only downstream of the cycle resolves in the next
+      // round through the ordinary dropped-blocker path (its blocker's row is now a `refuse`).
+      const ids = [...pending.keys()];
+      const edgesOf = (id: string): string[] => (pending.get(id)?.blockedBy ?? []).filter((d) => pending.has(d));
+      const cycles = cycleMembers(ids, edgesOf);
+      if (cycles.size === 0) {
+        // Defensive only: a stuck pending set always contains a real cycle (finite graph, every node
+        // still blocked on another pending node); never loop forever if that invariant is somehow wrong.
+        for (const id of ids) taskRow.set(id, { item: id, kind: "task", action: "refuse", reason: "blocked-by cycle" });
+        pending.clear();
+        break;
+      }
+      for (const id of cycles) {
+        taskRow.set(id, { item: id, kind: "task", action: "refuse", reason: "blocked-by cycle" });
+        pending.delete(id);
+      }
     }
-    // Whatever is left depends, directly or transitively, on another task still stuck in this same set —
-    // a cycle somewhere among them, so none of them can ever land.
-    for (const id of pending.keys()) taskRow.set(id, { item: id, kind: "task", action: "refuse", reason: "blocked-by cycle" });
 
     for (const t of plan.tasks) {
       rows.push(taskRow.get(t.id)!);
