@@ -9,10 +9,13 @@ import leaderExtensionAsset from "./pi/flowryn-leader.ts" with { type: "file" };
 
 /**
  * The leader files (design section 15): the Claude settings file, the flowryn
- * skill (as a Claude plugin and as a Pi skill), the Pi leader extension, the
- * terse style block and a `flowryn` command on PATH, all under
- * `<home>/leader/`. `flowryn lead` rewrites them on every launch, so they
- * always match the binary that runs.
+ * skill (as a Claude plugin and as a Pi skill), the Pi leader extension, a
+ * `flowryn` command on PATH, and the appended system prompt (cutover C3: the
+ * terse style block plus your own `preferences.md`, concatenated into
+ * `system-prompt.md`), all under `<home>/leader/`. `flowryn lead` rewrites
+ * them on every launch, so they always match the binary that runs;
+ * `preferences.md` itself is yours, written by `flowryn import` or the
+ * leader, never by `lead`.
  */
 
 export interface LeaderFiles {
