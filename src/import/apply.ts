@@ -121,6 +121,10 @@ export const importApply: VerbSpec = {
         rows.push({ item: p.name, kind: "project", action: "refuse", reason: `mode ${p.mode} must be one of ${DELIVERY_MODES.join(", ")}` });
         continue;
       }
+      if (getProject(ctx.db, p.name)) {
+        rows.push({ item: p.name, kind: "project", action: "refuse", reason: `project ${p.name} already exists and was not imported` });
+        continue;
+      }
       const f = facts[p.name]!;
       if (typeof f === "string") {
         const missingDir = f.startsWith("no such directory:");
@@ -131,10 +135,6 @@ export const importApply: VerbSpec = {
       const byPath = ctx.db.query("SELECT id FROM projects WHERE path = ?1").get(f.path) as { id: string } | null;
       if (byPath && byPath.id !== p.name) {
         rows.push({ item: p.name, kind: "project", action: "refuse", reason: `${f.path} is already registered as project ${byPath.id}` });
-        continue;
-      }
-      if (getProject(ctx.db, p.name)) {
-        rows.push({ item: p.name, kind: "project", action: "refuse", reason: `project ${p.name} already exists and was not imported` });
         continue;
       }
       if ((f.repoUrl ?? "") === "" && p.mode !== "local-only") {

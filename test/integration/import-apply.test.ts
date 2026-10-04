@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
 import { recordIntent } from "../../src/journal/journal.ts";
@@ -115,6 +116,49 @@ test("a task id already used by a non-imported task refuses", async () => {
   const taskRow = rows.find((r) => r.kind === "task");
   expect(taskRow?.action).toBe("refuse");
   expect(taskRow?.reason).toContain("already used");
+});
+
+test("a same-named non-imported project previews refuse, not create, in a dry run against a missing clone target", async () => {
+  h = makeHome();
+  const db0 = h.db();
+  tx(db0, () => {
+    db0
+      .query(
+        `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy)
+         VALUES ('alpha', '', '/some/other/path', 'main', 'local-only', 0, 2, 'claude', 'fix', 'plan')`,
+      )
+      .run();
+  });
+  db0.close();
+  daemon = await startDaemon(h);
+  const plan = planFor(join(h.home, "missing-clone"));
+  const dry = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: true });
+  const rows = (dry.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+  const projectRow = rows.find((r) => r.kind === "project");
+  expect(projectRow?.action).toBe("refuse");
+  expect(projectRow?.reason).toContain("already exists and was not imported");
+});
+
+test("a different-named non-imported project registered at the same checkout path refuses, naming that project", async () => {
+  h = makeHome();
+  daemon = await startDaemon(h);
+  const alpha = makeOriginRepo(join(h.home, "alpha"));
+  const db0 = h.db();
+  tx(db0, () => {
+    db0
+      .query(
+        `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy)
+         VALUES ('other-alpha', '', ?1, 'main', 'local-only', 0, 2, 'claude', 'fix', 'plan')`,
+      )
+      .run(realpathSync(alpha.repo));
+  });
+  db0.close();
+  const plan = planFor(alpha.repo);
+  const reply = await daemonCall(h.home, "import.apply", { plan: JSON.stringify(plan), dry: false });
+  const rows = (reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+  const projectRow = rows.find((r) => r.kind === "project");
+  expect(projectRow?.action).toBe("refuse");
+  expect(projectRow?.reason).toContain("already registered as project other-alpha");
 });
 
 test("a decision (origin, key) already used by another decision refuses, with no relabelling", async () => {
