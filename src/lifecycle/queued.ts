@@ -4,6 +4,7 @@ import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { MAX_BACKLOG_BODY } from "./ids.ts";
 import type { ProjectRow } from "./projects.ts";
+import { openRunForTask } from "./runs.ts";
 
 /**
  * A task filed Queued that is not a plan phase (cutover C3: imported work):
@@ -25,16 +26,22 @@ export function queueTask(
   appendEvent(db, { source: "cli", kind: "task.queued", taskId: q.taskId, payload: { kind: q.kind, project: q.project.id, import_source: q.importSource }, ts: q.now });
 }
 
-/** A Queued task Flowryn filed that is neither a plan phase nor already run. */
+/**
+ * A Queued task Flowryn filed that is neither a plan phase nor already
+ * running: a task whose earlier run failed or was cancelled is terminal, not
+ * open, so it may be started again with `--task` (cutover C3 fix: a prior
+ * version excluded a task with any run at all, which permanently stranded
+ * one whose run had failed).
+ */
 export function queuedTaskOf(db: Db, taskId: string): { task_id: string; kind: "ship" | "scout"; project_id: string; title: string; body: string } | null {
   const policy = db
     .query(
       `SELECT tp.task_id, tp.kind, tp.project_id FROM task_policy tp
-       WHERE tp.task_id = ?1 AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = tp.task_id)
-         AND NOT EXISTS (SELECT 1 FROM plan_phases ph WHERE ph.task_id = tp.task_id)`,
+       WHERE tp.task_id = ?1 AND NOT EXISTS (SELECT 1 FROM plan_phases ph WHERE ph.task_id = tp.task_id)`,
     )
     .get(taskId) as { task_id: string; kind: "ship" | "scout"; project_id: string } | null;
   if (!policy) return null;
+  if (openRunForTask(db, taskId)) return null;
   const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === taskId);
   if (!task || task.state !== "queued") return null;
   return { ...policy, title: task.title, body: task.body };
