@@ -6,7 +6,7 @@ import type { BacklogTask } from "../journal/tasks-axi.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
-import { mintTaskId } from "./ids.ts";
+import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import type { ProjectRow } from "./projects.ts";
 
 /**
@@ -207,8 +207,6 @@ export function fileWorkerPlan(db: Db, p: { project: ProjectRow; sourceTask: str
     now: p.now,
   }).id;
 }
-
-const MAX_BACKLOG_BODY = 4_000;
 
 /**
  * Approve a plan: its phases become ship tasks in Queued, each blocked by the

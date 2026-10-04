@@ -19,11 +19,15 @@ import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
 import { reserveDecision } from "./decisions.ts";
-import { mintTaskId } from "./ids.ts";
+import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
 import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
+import { queuedTaskOf } from "./queued.ts";
 import { openRunForTask } from "./runs.ts";
+
+/** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
+export { MAX_BACKLOG_BODY };
 
 export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
@@ -33,8 +37,6 @@ export const BLOCKER_KINDS = ["ship", "decision"] as const;
 
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
-/** tasks-axi keeps the backlog readable; the full text lives in the run's task.md. */
-export const MAX_BACKLOG_BODY = 4_000;
 const TRAILING_TAG = /\((?:kind|repo|priority|since|done|merged|hold|hold-kind|hold-until|blocked-by|pr|report): [^)]*\)\s*$/i;
 
 /** The first line of the body, as a backlog title tasks-axi accepts. */
@@ -207,6 +209,7 @@ export interface ModeOverride {
 type DispatchPlan =
   | { mode: "now"; project: ProjectRow; harness: HarnessId; version: string; base: string; override: ModeOverride | null }
   | { mode: "task"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string; override: ModeOverride | null }
+  | { mode: "queued"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
   | { mode: "queue"; project: ProjectRow; harness: HarnessId; blockedBy: string[]; override: ModeOverride | null };
 
 function harnessArg(args: Record<string, unknown>, fallback: HarnessId): HarnessId {
@@ -261,6 +264,15 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const override = modeOverride(args, project);
   const taskId = stringArg(args as never, "task");
   if (taskId) {
+    // A queued task that is not a plan phase (cutover C3: imported work): its blockers must have landed.
+    const queued = queuedTaskOf(ctx.db, taskId);
+    if (queued) {
+      if (queued.project_id !== project.id) throw new FlowrynError("not_found", `${taskId} belongs to project ${queued.project_id}`);
+      const waiting = waitingOn(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, []);
+      if (waiting.length > 0) throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${waiting.join(", ")} to land`);
+      const harness = harnessArg(args, project.harness);
+      return { mode: "queued", project, harness, taskId, kind: queued.kind, title: queued.title, body: queued.body, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+    }
     // Start a Queued task yourself (a plan phase, or a dispatch that waited): its blockers must have landed.
     const phase = phaseOfTask(ctx.db, taskId);
     if (!phase || phase.project_id !== project.id) throw new FlowrynError("not_found", `${taskId} is not a queued task of project ${project.id}`, "flowryn show <plan id>");
@@ -328,6 +340,12 @@ export const dispatchVerb: VerbSpec = {
       const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
       return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
+    }
+    if (plan.mode === "queued") {
+      const workflow = workflowFor(config, stringArg(args, "workflow") ?? (plan.kind === "scout" ? "scout" : plan.project.workflow), plan.kind);
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: plan.title, body: plan.body, project: plan.project, kind: plan.kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, now });
+      applyModeOverride(ctx.db, plan.taskId, plan.override);
+      return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`] };
     }
     const kind = stringArg(args, "kind") as TaskKind;
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim();
