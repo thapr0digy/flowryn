@@ -3,7 +3,7 @@ import type { Timing } from "../config/workers.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { openItem, resolveRunItems } from "../attention/items.ts";
+import { findOpenRunItem, openItem, resolveRunItems } from "../attention/items.ts";
 import { identityOf } from "../lifecycle/control.ts";
 import { getRun, isTerminal, openRunItemOnce, openRuns, recordEvidence, setLiveness, taskTitle, type Liveness, type RunRow } from "../lifecycle/runs.ts";
 import { flagUnackedSteers, unackedSteers, type SteerBus } from "../lifecycle/steers.ts";
@@ -11,6 +11,7 @@ import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
 import { isAlive, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
+import { idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
 import { noteHerdrUp } from "./herdr-health.ts";
 import { applyDocker, listLabelled } from "./docker.ts";
 import { checkInvariant } from "./invariant.ts";
@@ -297,13 +298,29 @@ export class Reconciler {
         return;
       }
       const busy = run.busy_until !== null && run.busy_until > t;
+      const lastHook = run.last_hook_at ?? launchedAt;
+      const prompted = findOpenRunItem(db, "blocked_prompt", run.id) !== null;
+      if (prompted) return; // A prompt holds liveness at blocked_dialog until hook activity resolves it; no idle or stale pointer beside it.
+      const leaseLapsedWithoutStop = !busy && run.idle_since === null;
+      /**
+       * The backstop (spike c12, Task 11): Herdr's agent_status reads
+       * "blocked" throughout a Claude permission dialog and "working"
+       * throughout a long tool call; they never overlap, so "blocked" alone
+       * disambiguates a dialog with no screen-marker fallback needed. Pi has
+       * no equivalent spike, so it keeps the more conservative "not working"
+       * rule, worded as a possible stall rather than a confirmation.
+       */
+      const suspectedPrompt = run.harness === "claude" ? herdrStatus === "blocked" : herdrStatus !== "working";
+      if ((busy || leaseLapsedWithoutStop) && run.state === "running" && t - lastHook >= tm.prompt_suspect_ms && !idleByDesign(db, run) && suspectedPrompt) {
+        openBlockedPrompt(db, run, { suspected: true, screen: null, harness: run.harness as "claude" | "pi" }, t);
+        return;
+      }
       setLiveness(db, run, busy ? "busy" : "idle", "reconciler", { lease: busy ? "held" : "expired or released" }, t);
       if (busy) resolveRunItems(db, run.id, ["worker_idle"], "busy again", t);
       if (!busy && run.state === "running" && run.idle_since !== null && t - run.idle_since >= tm.idle_alert_ms) {
         const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload: { idle_ms: t - run.idle_since } });
         openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} has been idle ${Math.round((t - run.idle_since) / 60_000)}m without an outcome`, t);
       }
-      const lastHook = run.last_hook_at ?? launchedAt;
       if (herdrStatus === "working" && t - lastHook >= tm.stale_hook_ms) {
         const event = appendEvent(db, { source: "reconciler", kind: "run.stale_hooks", runId: run.id, taskId: run.task_id, payload: { since: lastHook } });
         openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} looks busy but sent no hook event for ${Math.round((t - lastHook) / 60_000)}m; possibly stuck`, t);

@@ -11,6 +11,7 @@ import { getProject } from "./projects.ts";
 import { gatherFacts } from "../policy/merge.ts";
 import { mergeContext, mergeSummary, runAndProject } from "../policy/verbs.ts";
 import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { idleByDesign, openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
@@ -93,6 +94,7 @@ function markBusy(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
   ctx.db.query("UPDATE runs SET busy_until = ?2, idle_since = NULL, last_hook_at = ?3, updated_at = ?3 WHERE id = ?1").run(run.id, until, now);
   recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "busy", "hook", { signal }, now);
+  resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
 }
 
 function markIdle(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
@@ -100,6 +102,7 @@ function markIdle(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
   ctx.db.query("UPDATE runs SET busy_until = NULL, idle_since = ?2, last_hook_at = ?2, updated_at = ?2 WHERE id = ?1").run(run.id, now);
   recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "idle", "hook", { signal }, now);
+  resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
 }
 
 /** Take the first due steer and mark it rung. Call inside the transaction. */
@@ -249,9 +252,10 @@ type LeaderBody = (ctx: HandlerCtx, input: leader.LeaderHookInput, args: Args, p
 function signalVerb(
   hook: HookName | "notify",
   summary: string,
-  body: (ctx: HandlerCtx, run: RunWithPolicy, args: Args) => HandlerResult,
+  body: (ctx: HandlerCtx, run: RunWithPolicy, args: Args, prepared: unknown) => HandlerResult,
   leaderBody: LeaderBody,
   leaderPrepare?: (ctx: HandlerCtx, args: Args) => Promise<unknown>,
+  workerPrepare?: (ctx: HandlerCtx, args: Args) => Promise<unknown>,
 ): VerbSpec {
   return {
     name: `hook.${hook}`,
@@ -262,13 +266,14 @@ function signalVerb(
     roles: ["worker", "hook"],
     ephemeral: true,
     async prepare(ctx, args) {
-      return isLeaderCall(ctx) && leaderPrepare ? leaderPrepare(ctx, args) : undefined;
+      if (isLeaderCall(ctx)) return leaderPrepare ? leaderPrepare(ctx, args) : undefined;
+      return workerPrepare ? workerPrepare(ctx, args) : undefined;
     },
     apply(ctx, args, prepared) {
       if (isLeaderCall(ctx)) return leaderBody(ctx, parseInput(args) as leader.LeaderHookInput, args, prepared);
       const run = hookRun(ctx);
       if (isTerminal(run.state)) return { data: { run: run.id, state: run.state } };
-      return body(ctx, run, args);
+      return body(ctx, run, args, prepared);
     },
     async settle(ctx, result) {
       if (ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
@@ -425,16 +430,33 @@ const sessionStart = leaderVerb(
 
 /**
  * `hook notify`: a leader's activity (Claude idle_prompt, the Pi extension's
- * check) and, from any Claude session, its usage-limit notifications.
+ * check), from any Claude session its usage-limit notifications, and from a
+ * worker a permission_prompt (cutover C2, spike c12): a confirmation dialog
+ * is waiting mid-run.
  */
 const notify = signalVerb(
   "notify",
-  "Hook: you went inactive or came back (leader); Claude's usage-limit notifications (any Claude session)",
-  (ctx, run, args) => {
+  "Hook: you went inactive or came back (leader); Claude's usage-limit and permission-prompt notifications",
+  (ctx, run, args, prepared) => {
     const input = parseInput(args);
+    if (input.notification_type === "permission_prompt") {
+      const busy = run.busy_until !== null && run.busy_until > ctx.now();
+      if (busy && !idleByDesign(ctx.db, run)) openBlockedPrompt(ctx.db, run, { suspected: false, screen: (prepared as { screen?: string | null } | undefined)?.screen ?? null, harness: "claude" }, ctx.now());
+      return { data: { run: run.id } };
+    }
     return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { notification: input.notification_type ?? null }));
   },
   (ctx, input, args) => withUsage(leader.notify(ctx, input), usageSignal(ctx, harnessOf(args), "the leader", { notification: input.notification_type ?? null })),
+  undefined,
+  async (ctx, args) => {
+    // The screen, read before the transaction; a hook must answer fast, so give up after 1.5 s.
+    if (parseInput(args).notification_type !== "permission_prompt") return undefined;
+    const run = ctx.caller.runId ? getRunWithPolicy(ctx.db, ctx.caller.runId) : null;
+    const runtime = ctx.fleet.runtime();
+    if (!run?.pane_id || !runtime) return { screen: null };
+    const screen = await Promise.race([runtime.readPane(run.pane_id, SCREEN_LINES).catch(() => null), Bun.sleep(1_500).then(() => null)]);
+    return { screen };
+  },
 );
 
 /**

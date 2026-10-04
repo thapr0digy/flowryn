@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tx, type Db } from "../../src/db/db.ts";
 import type { Timing } from "../../src/config/workers.ts";
@@ -38,6 +38,8 @@ export interface FleetEnv {
   /** Herdr goes away (its server stops, and with it every harness in its panes), and comes back on the same socket. */
   stopHerdr(): Promise<void>;
   startHerdr(): Promise<void>;
+  /** The user answered the dialog: the fake screen is gone (the fake worker carries on). */
+  clearScreen(runId: string): void;
   cleanup(): Promise<void>;
 }
 
@@ -209,6 +211,11 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
     async startHerdr() {
       herdr = await FakeHerdr.start(join(home, "herdr.sock"), { env: h.env, logDir });
       herdrUp = true;
+    },
+    clearScreen(runId) {
+      const r = fleet.run(runId);
+      rmSync(join(h.dataDir, r.task_id, "fake-screen.txt"), { force: true });
+      if (r.pane_id) herdr.screens.delete(r.pane_id);
     },
     async cleanup() {
       await daemon.kill9().catch(() => {});

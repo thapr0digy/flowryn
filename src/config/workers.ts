@@ -204,6 +204,8 @@ export interface Timing {
   exit_grace_ms: number;
   /** A waiter's long poll holds the connection this long before asking again. */
   wait_poll_ms: number;
+  /** Busy (or a busy lease lapsed without a Stop) with no hook this long, and Herdr not reading working: a suspected prompt. */
+  prompt_suspect_ms: number;
 }
 
 export const DEFAULT_TIMING: Timing = {
@@ -217,6 +219,7 @@ export const DEFAULT_TIMING: Timing = {
   launch_timeout_ms: 20_000,
   exit_grace_ms: 10_000,
   wait_poll_ms: 25_000,
+  prompt_suspect_ms: 120_000,
 };
 
 export function timingConfig(config: FlowrynConfig): Timing {
