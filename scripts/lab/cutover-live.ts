@@ -107,8 +107,10 @@ function trustedWorktree(): { path: string; branch: string } {
   const branch = `${runPrefix}main`;
   const path = join(home, "wt", "trusted-main");
   mkdirSync(join(home, "wt"), { recursive: true });
-  createdWorktrees.push({ branch, worktree: path });
   mustGit(["worktree", "add", "-q", "-b", branch, path, "HEAD"], ROOT);
+  // Only record it for cleanup once `git worktree add` actually succeeded (mustGit throws otherwise):
+  // recording it first would have removeOwnWorktrees try to remove a worktree/branch that was never made.
+  createdWorktrees.push({ branch, worktree: path });
   mkdirSync(join(path, ".claude"), { recursive: true });
   // spike c12's shape: "ask" only for a git commit --amend command, so no other Bash call in the
   // prompt phase's task is wedged by it. Inline, not a separate script file: this settings.json is
@@ -225,7 +227,7 @@ function query<T>(sql: string, ...params: (string | number | null)[]): T[] {
 }
 const items = (kind: string) => query<{ id: string; state: string; line: string; task_id: string | null }>("SELECT id, state, line, task_id FROM items WHERE kind = ?1 ORDER BY opened_at", kind);
 const decisionsOf = (origin: string) => query<{ id: string; task_id: string; key: string | null; reserved_reason: string | null }>("SELECT id, task_id, key, reserved_reason FROM decisions WHERE origin = ?1 ORDER BY created_at", origin);
-const runOf = (taskId: string) => query<{ id: string; state: string }>("SELECT id, state FROM runs WHERE task_id = ?1", taskId)[0];
+const runOf = (taskId: string) => query<{ id: string; state: string; pending_launch: string | null; worker_started_at: number | null }>("SELECT id, state, pending_launch, worker_started_at FROM runs WHERE task_id = ?1", taskId)[0];
 
 async function waitFor<T>(what: string, timeoutMs: number, check: () => T | null | undefined | false): Promise<T> {
   const until = Date.now() + timeoutMs;
@@ -307,15 +309,25 @@ async function decisions(): Promise<void> {
     const queued = await dispatchPiQueued("scratch", blocker.task_id, "cutover live: starts once its decision lands");
     record("decisions", "a --blocked-by --auto ship was filed, queued", queued.data.state === "queued" && queued.data.auto === "on", JSON.stringify(queued.data));
 
+    let blockerAnsweredAt = 0;
     for (const d of leaderOnes) {
+      const before = Date.now();
       const ans = await call("decide", { decision: d.id, choice: CHOICE[d.key ?? ""] ?? "keep", rationale: "cutover live: the leader answers" });
+      if (d.id === blocker.id) blockerAnsweredAt = before;
       record("decisions", `the leader answered ${d.id}`, ans.ok, ans.ok ? JSON.stringify(ans.data) : `${ans.error?.code}: ${ans.error?.message}`);
     }
     const human = await callHuman("decide", { decision: reserved.id, choice: "hold", body: "cutover live: the user answers a reserved decision" });
     record("decisions", "the user's own shell answered the reserved decision", human.ok && human.data.by === "captain", human.ok ? JSON.stringify(human.data) : `${human.error?.code}: ${human.error?.message}`);
 
-    const started = await waitFor("the blocked ship's run, within 120 s of its blocker landing", 120_000, () => runOf(queued.task));
-    record("decisions", "the --blocked-by --auto ship got a run within 120 s", true, `${queued.task}: run ${started.id} ${started.state}`);
+    // A runs row alone proves nothing (one could in principle exist pending, not yet granted): assert a
+    // real transition out of its pending launch (its worker actually started, pending_launch cleared) and
+    // that this happened strictly after the blocker's own answer landed, not merely that a row exists.
+    const started = await waitFor("the blocked ship's run launched, within 120 s of its blocker landing", 120_000, () => {
+      const r = runOf(queued.task);
+      return r && r.pending_launch === null && r.worker_started_at !== null && r.worker_started_at >= blockerAnsweredAt ? r : null;
+    });
+    const seconds = ((started.worker_started_at! - blockerAnsweredAt) / 1000).toFixed(1);
+    record("decisions", "the --blocked-by --auto ship's worker actually launched within 120 s of its blocker landing", true, `${queued.task}: run ${started.id} ${started.state}, worker started ${seconds}s after the blocker's answer`);
   } catch (error) {
     record("decisions", "the import-decision flow", false, (error as Error).message);
   }
