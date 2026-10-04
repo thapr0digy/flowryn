@@ -329,7 +329,7 @@ async function decisions(): Promise<void> {
     const seconds = ((started.worker_started_at! - blockerAnsweredAt) / 1000).toFixed(1);
     record("decisions", "the --blocked-by --auto ship's worker actually launched within 120 s of its blocker landing", true, `${queued.task}: run ${started.id} ${started.state}, worker started ${seconds}s after the blocker's answer`);
   } catch (error) {
-    record("decisions", "the import-decision flow", false, (error as Error).message);
+    record("decisions", "the decisions flow", false, (error as Error).message);
   }
 }
 

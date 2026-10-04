@@ -101,7 +101,7 @@ The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
 These are out of v1 by the design itself (section 2's non-goals, section 17's "After v1"), not deferred work:
 
 - The headless triage runner (the first post-v1 addition).
-- Side-by-side running with Firstmate, and backlog import.
+- Side-by-side running with Firstmate.
 - The Obsidian plugin; a Herdr plugin-pane board; the MCP wrapper; Claude Code channels and plugin monitors.
 - Harnesses other than Claude Code and Pi; runtimes other than Herdr; Linux and native Windows hosts (the transport and service seams exist).
 - Desks, quota-aware scheduling and profile routing; focus routing and score formulas; away and quiet modes; Jira; retention compaction; relay, the mail plane and multi-machine fleets.

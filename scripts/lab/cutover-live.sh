@@ -10,9 +10,11 @@
 #
 # No Pi model is ever called beyond the offline scripted provider; the real
 # Claude calls are the two phases' own scouts. Everything lives in a scratch
-# Flowryn home with fresh clones of this repository and its own scratch Claude
-# config directory, removed at the end (--keep leaves it). Run it outside any
-# command sandbox: Herdr and the worker hooks need sockets.
+# Flowryn home with fresh clones of this repository, linked into a worktree
+# of this already-trusted checkout against your real ~/.claude (pretrust =
+# "check", so nothing is ever written to ~/.claude.json); the scratch home is
+# removed at the end (--keep leaves it). Run it outside any command sandbox:
+# Herdr and the worker hooks need sockets.
 set -u
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 export FLOWRYN_LAB_LABEL="${FLOWRYN_LAB_LABEL:-flowryn-cutover}"
