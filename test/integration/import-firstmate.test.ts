@@ -237,4 +237,27 @@ describe("flowryn import firstmate", () => {
     const retention = rows.find((r) => r.item === "alpha-arch-r2-decision-retention");
     expect(retention).toMatchObject({ kind: "decision", action: "skip", reason: "resolved (alpha-arch-r3-decision-retention is done)" });
   });
+  test("a blocked-by on a superseded decision follows its winner; one on a captain item it does not create warns", async () => {
+    h = makeHome();
+    daemon = await startDaemon(h);
+    const fm = fixtureHome();
+    const backlogPath = join(fm, "data", "backlog.md");
+    const extra = [
+      "- [ ] alpha-keep-q4 - Apply the retention plan (repo: alpha) (kind: ship) (since 2026-09-21) blocked-by: alpha-arch-r1-decision-retention",
+      "- [ ] alpha-loose-decision - Pick something (repo: alpha) (kind: captain) (since 2026-09-21) (hold: loose)",
+      "- [ ] alpha-after-q5 - Do the thing (repo: alpha) (kind: ship) (since 2026-09-21) blocked-by: alpha-loose-decision",
+      "",
+    ].join("\n");
+    writeFileSync(backlogPath, readFileSync(backlogPath, "utf8").replace("## Done", `${extra}## Done`));
+    const run = await runImport({ home: fm, "clone-root": join(h.home, "clones"), apply: true });
+    expect(run.code).toBe(0);
+    const rows = (run.reply.data as { rows: { item: string; kind: string; action: string; reason: string }[] }).rows;
+    expect(rows.filter((r) => r.item === "alpha-keep-q4" && r.action === "warn")).toEqual([]);
+    expect(rows.find((r) => r.item === "alpha-after-q5" && r.action === "warn")).toMatchObject({ reason: "blocked-by alpha-loose-decision dropped: a Firstmate decision this import does not create" });
+    const db = h.db();
+    const decision = db.query("SELECT task_id FROM decisions WHERE import_source = 'firstmate:alpha-arch-r2-decision-retention'").get() as { task_id: string };
+    const intent = db.query("SELECT args FROM intents WHERE verb = 'add' AND task_id = 'alpha-keep-q4'").get() as { args: string };
+    db.close();
+    expect(intent.args).toContain(decision.task_id);
+  });
 });

@@ -60,4 +60,11 @@ describe("the Firstmate home", () => {
       ]),
     );
   });
+  test("decisions: a live backlog copy of a key wins over any archived copy, and the loser maps to it", () => {
+    const backlog = parseItems(["## Queued", "- [ ] alpha-arch-r3-decision-retention - Keep forever? (repo: alpha) (kind: captain) (hold: live) (hold-kind: captain)", "  Decision key: retention", ""].join("\n"));
+    const { decisions, supersededBy } = selectDecisions(backlog, parseItems(read("note-archive.md")), new Set(["alpha"]));
+    expect(decisions.filter((d) => d.key === "retention").map((d) => d.id)).toEqual(["alpha-arch-r3-decision-retention"]);
+    expect(supersededBy.get("alpha-arch-r1-decision-retention")).toBe("alpha-arch-r3-decision-retention");
+    expect(supersededBy.get("alpha-arch-r2-decision-retention")).toBe("alpha-arch-r3-decision-retention");
+  });
 });

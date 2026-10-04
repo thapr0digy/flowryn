@@ -6,7 +6,7 @@ import { boolArg, stringArg, type CliIo, type VerbSpec } from "../../api/verbs.t
 import { flowrynHome } from "../../config/paths.ts";
 import { leaderDir } from "../../bridges/files.ts";
 import { ensureDir, writeFileAtomic } from "../../util/fsx.ts";
-import { mapMode, parseItems, parseProjects, projectOf, selectDecisions } from "../../import/firstmate.ts";
+import { isDecisionItem, mapMode, parseItems, parseProjects, projectOf, selectDecisions } from "../../import/firstmate.ts";
 import type { ImportPlan, PlanRow } from "../../import/apply.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 import { callServerVerb } from "../client.ts";
@@ -117,12 +117,13 @@ export async function importFirstmate(args: Parameters<NonNullable<VerbSpec["loc
     const blocker = backlog.find((b) => b.id === dep);
     if (!blocker) return "not found";
     if (blocker.checked) return "already done in Firstmate";
+    if (isDecisionItem(blocker)) return "a Firstmate decision this import does not create";
     if (blocker.section !== "queued") return `not queued in Firstmate (${blocker.section})`;
     return `repo ${blocker.tags.repo ?? "-"} is not imported`;
   }
 
   for (const item of backlog) {
-    if (item.checked || item.tags.kind === "captain" || item.tags.kind === "decision") continue;
+    if (item.checked || isDecisionItem(item)) continue;
     if (item.section === "in flight") {
       rows.push({ item: item.id, kind: "task", action: "skip", reason: "in flight in Firstmate" });
       continue;
@@ -135,18 +136,19 @@ export async function importFirstmate(args: Parameters<NonNullable<VerbSpec["loc
     }
     const kind = item.tags.kind === "scout" ? "scout" : "ship";
     const blockedBy: string[] = [];
-    for (const dep of (item.tags["blocked-by"] ?? "").split(",").filter(Boolean)) {
+    for (const raw of (item.tags["blocked-by"] ?? "").split(",").filter(Boolean)) {
+      const dep = picked.supersededBy.get(raw) ?? raw;
       if (decisionIds.has(dep)) {
         // A decision this import creates: import.apply remaps this to the decision's real task id once
         // it exists (its id is only known at apply time), so the raw Firstmate item id passes through.
         blockedBy.push(dep);
-      } else if (backlog.some((b) => b.id === dep && b.section === "queued" && projectOf(b.tags.repo, imported))) {
+      } else if (backlog.some((b) => b.id === dep && !b.checked && !isDecisionItem(b) && b.section === "queued" && projectOf(b.tags.repo, imported))) {
         blockedBy.push(dep); // another plan task; import.apply resolves create/exists/refuse and ordering
       } else if (landedDecisionIds.has(dep)) {
         // Already answered in Firstmate (resolved by another decision's own copy): the blocker has
         // effectively landed, so the edge is simply dropped, same as any other landed blocker — no warning.
       } else {
-        rows.push({ item: item.id, kind: "task", action: "warn", reason: `blocked-by ${dep} dropped: ${blockerDropReason(dep)}` });
+        rows.push({ item: item.id, kind: "task", action: "warn", reason: `blocked-by ${raw} dropped: ${blockerDropReason(dep)}` });
       }
     }
     plan.tasks.push({ id: item.id, project, kind, title: item.title, body: [item.title, ...item.body].join("\n"), priority: item.tags.priority ? Number(item.tags.priority) : null, blockedBy });

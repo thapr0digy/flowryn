@@ -67,31 +67,25 @@ function readOfflineReply(spec: VerbSpec, envelope: Envelope, io: CliIo): { repl
   }
 }
 
-/** Serve a read from SQLite read-only when the daemon is down (WAL allows concurrent readers). */
-function readOffline(spec: VerbSpec, envelope: Envelope, io: CliIo): number {
-  const { reply, banner } = readOfflineReply(spec, envelope, io);
-  return print(io, reply, banner);
-}
+type Outcome = { reply: Reply; banner?: string } | { spooled: string };
 
-/** Write the call to the spool and exit 75, for worker verbs when the daemon cannot take it. */
-function spool(spec: VerbSpec, envelope: Envelope, io: CliIo, why: string): number {
+/** Write the call to the spool, for worker verbs when the daemon cannot take it. */
+function spool(spec: VerbSpec, envelope: Envelope, io: CliIo, why: string): Outcome {
   const runId = io.env.FLOWRYN_RUN;
   if (!runId || !envelope.token) {
-    return print(io, errorReply({ code: "daemon_unavailable", message: `${why}; ${spec.name} can only spool inside a run (FLOWRYN_RUN and FLOWRYN_TOKEN)` }));
+    return { reply: errorReply({ code: "daemon_unavailable", message: `${why}; ${spec.name} can only spool inside a run (FLOWRYN_RUN and FLOWRYN_TOKEN)` }) };
   }
   const { config } = loadConfig(flowrynHome(io.env));
   writeSpoolFile(spoolDir(config.data_dir), runId, envelope);
-  if (io.json) io.stdout(JSON.stringify({ ok: true, spooled: envelope.ulid }) + "\n");
-  else io.stdout(`spooled: ${envelope.ulid}\nhelp: delivered when the daemon is back; do not retry in a loop\n`);
-  return EXIT.spooled;
+  return { spooled: envelope.ulid };
 }
 
 /**
- * Run a server verb: send it over the socket, and when the daemon is down,
- * spool (worker verbs, exit 75), read SQLite read-only (reads, exit 0 with a
- * banner) or refuse (everything else, exit 69).
+ * Send a server verb over the socket, and when the daemon is down, spool
+ * (worker verbs), read SQLite read-only (reads, with a banner) or refuse
+ * (everything else).
  */
-export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown>, io: CliIo): Promise<number> {
+async function sendServerVerb(spec: VerbSpec, args: Record<string, unknown>, io: CliIo): Promise<Outcome> {
   const envelope = buildEnvelope(spec, args, io);
   const sock = socketPath(flowrynHome(io.env), io.env);
   const base = spec.spool ? WORKER_TIMEOUTS : LEADER_TIMEOUTS;
@@ -104,18 +98,33 @@ export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown
     if (spec.spool) return spool(spec, envelope, io, error.message);
     if (spec.kind === "read" && error.kind === "unavailable") {
       try {
-        return readOffline(spec, envelope, io);
+        return readOfflineReply(spec, envelope, io);
       } catch (offlineError) {
-        return print(io, errorReply(toErrorBody(offlineError)));
+        return { reply: errorReply(toErrorBody(offlineError)) };
       }
     }
     const message = error.kind === "timeout" ? `the daemon did not answer in time (${error.message}); the change may still apply` : `the daemon is not running (${error.message})`;
-    return print(io, errorReply({ code: "daemon_unavailable", message, help: "flowryn daemon status" }));
+    return { reply: errorReply({ code: "daemon_unavailable", message, help: "flowryn daemon status" }) };
   }
   if (!reply || typeof reply !== "object" || typeof reply.ok !== "boolean") {
-    return print(io, errorReply({ code: "internal", message: "the daemon sent a malformed reply" }));
+    return { reply: errorReply({ code: "internal", message: "the daemon sent a malformed reply" }) };
   }
-  return print(io, reply);
+  return { reply };
+}
+
+/**
+ * Run a server verb and print its reply: spooled worker verbs exit 75, reads
+ * served read-only while the daemon is down exit 0 with a banner, and
+ * anything else the daemon could not take exits 69.
+ */
+export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown>, io: CliIo): Promise<number> {
+  const outcome = await sendServerVerb(spec, args, io);
+  if ("spooled" in outcome) {
+    if (io.json) io.stdout(JSON.stringify({ ok: true, spooled: outcome.spooled }) + "\n");
+    else io.stdout(`spooled: ${outcome.spooled}\nhelp: delivered when the daemon is back; do not retry in a loop\n`);
+    return EXIT.spooled;
+  }
+  return print(io, outcome.reply, outcome.banner);
 }
 
 export interface ServerVerbResult {
@@ -125,48 +134,16 @@ export interface ServerVerbResult {
   exitCode: ExitCode;
 }
 
-function asResult(reply: Reply): ServerVerbResult {
-  return { ok: reply.ok, data: (reply.data as Record<string, unknown>) ?? {}, error: reply.error, exitCode: exitCodeOf(reply) };
-}
-
 /**
  * Like `runServerVerb`, for a local verb (such as `import firstmate`) that
  * needs the reply's data to keep building its own output, rather than having
- * it printed. Builds and sends the same envelope (so a token-less caller in
- * a real terminal still gets `channel: "tty"`), but returns the result
- * instead of printing it.
+ * it printed. Same envelope and transport (so a token-less caller in a real
+ * terminal still gets `channel: "tty"`), but returns the result instead of
+ * printing it.
  */
 export async function callServerVerb(spec: VerbSpec, args: Record<string, unknown>, io: CliIo): Promise<ServerVerbResult> {
-  const envelope = buildEnvelope(spec, args, io);
-  const sock = socketPath(flowrynHome(io.env), io.env);
-  const base = spec.spool ? WORKER_TIMEOUTS : LEADER_TIMEOUTS;
-  const timeouts = spec.replyMs ? { ...base, replyMs: spec.replyMs } : base;
-  let reply: Reply;
-  try {
-    reply = (await request(sock, envelope, timeouts)) as Reply;
-  } catch (error) {
-    if (!(error instanceof TransportError)) throw error;
-    if (spec.spool) {
-      const runId = io.env.FLOWRYN_RUN;
-      if (!runId || !envelope.token) {
-        return asResult(errorReply({ code: "daemon_unavailable", message: `${error.message}; ${spec.name} can only spool inside a run (FLOWRYN_RUN and FLOWRYN_TOKEN)` }));
-      }
-      const { config } = loadConfig(flowrynHome(io.env));
-      writeSpoolFile(spoolDir(config.data_dir), runId, envelope);
-      return { ok: true, data: { spooled: envelope.ulid }, exitCode: EXIT.spooled };
-    }
-    if (spec.kind === "read" && error.kind === "unavailable") {
-      try {
-        return asResult(readOfflineReply(spec, envelope, io).reply);
-      } catch (offlineError) {
-        return asResult(errorReply(toErrorBody(offlineError)));
-      }
-    }
-    const message = error.kind === "timeout" ? `the daemon did not answer in time (${error.message}); the change may still apply` : `the daemon is not running (${error.message})`;
-    return asResult(errorReply({ code: "daemon_unavailable", message, help: "flowryn daemon status" }));
-  }
-  if (!reply || typeof reply !== "object" || typeof reply.ok !== "boolean") {
-    return asResult(errorReply({ code: "internal", message: "the daemon sent a malformed reply" }));
-  }
-  return asResult(reply);
+  const outcome = await sendServerVerb(spec, args, io);
+  if ("spooled" in outcome) return { ok: true, data: { spooled: outcome.spooled }, exitCode: EXIT.spooled };
+  const { reply } = outcome;
+  return { ok: reply.ok, data: (reply.data as Record<string, unknown>) ?? {}, error: reply.error, exitCode: exitCodeOf(reply) };
 }

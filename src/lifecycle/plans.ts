@@ -149,6 +149,8 @@ export interface NewPlan {
   harness?: "claude" | "pi" | null;
   /** Extra blockers phase 1 waits for (a dispatch with --blocked-by). */
   blockedBy?: string[];
+  /** A dispatch's per-task delivery mode (cutover C3), carried into the plan.filed event. */
+  override?: { mode: ProjectRow["delivery_mode"]; reason: string } | null;
   filedBy: string;
   state: "pending" | "approved";
   now: number;
@@ -186,7 +188,7 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
     );
     rows.push(row);
   });
-  appendEvent(db, { source: "cli", kind: "plan.filed", payload: { plan: id, project: p.project.id, phases: rows.map((r) => r.task_id), source: p.sourceTask, gate: p.gateId, by: p.filedBy }, ts: p.now });
+  appendEvent(db, { source: "cli", kind: "plan.filed", payload: { plan: id, project: p.project.id, phases: rows.map((r) => r.task_id), source: p.sourceTask, gate: p.gateId, by: p.filedBy, ...(p.override ? { mode: p.override.mode, mode_reason: p.override.reason } : {}) }, ts: p.now });
   if (p.state === "approved") approvePlan(db, id, p.filedBy, p.now);
   return { id, phases: rows };
 }

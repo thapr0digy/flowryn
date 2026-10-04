@@ -97,9 +97,19 @@ export function projectOf(repo: string | undefined, projects: Set<string>): stri
   return projects.has(name) ? name : null;
 }
 
+/** A Firstmate captain or decision item: never a task, whatever section it sits in. */
+export function isDecisionItem(item: FmItem): boolean {
+  return item.tags.kind === "captain" || item.tags.kind === "decision";
+}
+
 function bodyField(item: FmItem, name: string): string | null {
   const line = item.body.find((l) => l.toLowerCase().startsWith(`${name.toLowerCase()}:`));
   return line ? line.slice(name.length + 1).trim() : null;
+}
+
+/** A live backlog item (no `## Archived <date>`) is newer than any archived copy. */
+function recency(decision: FmDecision): string {
+  return decision.archived ?? "9999-99-99";
 }
 
 function keyOf(item: FmItem): string | null {
@@ -112,11 +122,12 @@ function keyOf(item: FmItem): string | null {
  * rather than its own id, because Firstmate re-raises the same key across
  * report revisions; a key is resolved the moment any checked `(kind:
  * captain)` item anywhere shares it (`skip resolved`), and among the
- * remaining candidates for one key the newest `## Archived <date>` wins
- * (`skip superseded`). A held item of another kind, or a captain item with
+ * remaining candidates for one key the live backlog copy, else the newest
+ * `## Archived <date>`, wins (`skip superseded`, mapped in `supersededBy` to
+ * the winner's id). A held item of another kind, or a captain item with
  * no key, is never silently dropped: it comes back as `review`.
  */
-export function selectDecisions(backlog: FmItem[], archive: FmItem[], projects: Set<string>): { decisions: FmDecision[]; skipped: { id: string; reason: string }[]; review: FmReview[] } {
+export function selectDecisions(backlog: FmItem[], archive: FmItem[], projects: Set<string>): { decisions: FmDecision[]; skipped: { id: string; reason: string }[]; review: FmReview[]; supersededBy: Map<string, string> } {
   const skipped: { id: string; reason: string }[] = [];
   const review: FmReview[] = [];
   const all = [...backlog, ...archive];
@@ -152,13 +163,20 @@ export function selectDecisions(backlog: FmItem[], archive: FmItem[], projects: 
     candidates.push({ id: item.id, project, origin: bodyField(item, "Origin") ?? item.id, key, question: item.title, context: item.tags.hold ?? "", archived: item.archived });
   }
   const newest = new Map<string, FmDecision>();
+  const losers = new Map<string, string>();
   for (const c of candidates) {
     const k = `${c.project}\n${c.key}`;
     const prev = newest.get(k);
-    if (!prev || (c.archived ?? "") >= (prev.archived ?? "")) {
-      if (prev) skipped.push({ id: prev.id, reason: `superseded by ${c.id}` });
+    if (!prev || recency(c) >= recency(prev)) {
+      if (prev) losers.set(prev.id, k);
       newest.set(k, c);
-    } else skipped.push({ id: c.id, reason: `superseded by ${prev.id}` });
+    } else losers.set(c.id, k);
   }
-  return { decisions: [...newest.values()], skipped, review };
+  const supersededBy = new Map<string, string>();
+  for (const [id, k] of losers) {
+    const winner = newest.get(k)!.id;
+    supersededBy.set(id, winner);
+    skipped.push({ id, reason: `superseded by ${winner}` });
+  }
+  return { decisions: [...newest.values()], skipped, review, supersededBy };
 }

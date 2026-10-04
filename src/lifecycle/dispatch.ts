@@ -233,7 +233,7 @@ function harnessArg(args: Record<string, unknown>, fallback: HarnessId): Harness
   return harness;
 }
 
-/** A per-task delivery mode (cutover C3): with a reason, and never local-only on a project that pushes. */
+/** A per-task delivery mode (cutover C3): with a reason, never local-only on a project that pushes, and never a pushing mode on a project with no remote. */
 function modeOverride(args: Record<string, unknown>, project: ProjectRow): ModeOverride | null {
   const mode = stringArg(args as never, "mode");
   if (mode === undefined) return null;
@@ -241,6 +241,7 @@ function modeOverride(args: Record<string, unknown>, project: ProjectRow): ModeO
   const reason = stringArg(args as never, "mode-reason")?.trim();
   if (!reason) throw new FlowrynError("bad_args", "--mode needs --mode-reason <why>");
   if (mode === "local-only" && project.delivery_mode !== "local-only") throw new FlowrynError("delivery_refused", `${project.id} ships through ${project.delivery_mode}; a task cannot switch it to local-only`);
+  if (mode !== "local-only" && project.repo_url === "") throw new FlowrynError("delivery_refused", `${project.id} has no remote, so a task cannot ship it through ${mode}`);
   return { mode: mode as ProjectRow["delivery_mode"], reason };
 }
 
@@ -378,6 +379,7 @@ export const dispatchVerb: VerbSpec = {
         workflow: workflow.id,
         harness: plan.harness,
         blockedBy: plan.blockedBy,
+        override: plan.override,
         filedBy: ctx.caller.role,
         state: "approved",
         now,

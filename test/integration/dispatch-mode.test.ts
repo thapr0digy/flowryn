@@ -45,4 +45,27 @@ describe("dispatch --mode", () => {
     const refused = await env.json(["dispatch", "web", "--kind", "ship", "--mode", "local-only", "--mode-reason", "x", "--body-file", "-"], { stdin: "x" });
     expect(refused.code).toBe(2);
   });
+  test("a pushing mode on a local-only project with no remote is refused", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    for (const mode of ["direct-PR", "no-mistakes"]) {
+      const refused = await env.json(["dispatch", "web", "--kind", "ship", "--mode", mode, "--mode-reason", "x", "--body-file", "-"], { stdin: "x" });
+      expect(refused.code).toBe(2);
+      expect(JSON.stringify(refused.reply)).toContain("has no remote");
+    }
+  });
+
+  test("a queued dispatch (--blocked-by) carries the override in its plan.filed event", async () => {
+    const env = await makeFleetEnv({ mode: "no-mistakes", origin: true });
+    envs.push(env);
+    const blocker = await env.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { stdin: "first\nFAKE: sleep 60000" });
+    expect(blocker.code).toBe(0);
+    const queued = await env.json(["dispatch", "web", "--kind", "ship", "--blocked-by", (blocker.reply.data as { task: string }).task, "--mode", "direct-PR", "--mode-reason", "docs only", "--body-file", "-"], { stdin: "second" });
+    expect(queued.code).toBe(0);
+    const plan = (queued.reply.data as { plan: string }).plan;
+    const db = env.h.db();
+    const events = (db.query("SELECT payload FROM events WHERE kind = 'plan.filed'").all() as { payload: string }[]).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+    db.close();
+    expect(events.find((e) => e.plan === plan)).toMatchObject({ mode: "direct-PR", mode_reason: "docs only" });
+  });
 });
