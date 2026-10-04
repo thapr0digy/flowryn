@@ -204,7 +204,12 @@ export interface Timing {
   exit_grace_ms: number;
   /** A waiter's long poll holds the connection this long before asking again. */
   wait_poll_ms: number;
-  /** Busy (or a busy lease lapsed without a Stop) with no hook this long, and Herdr not reading working: a suspected prompt. */
+  /**
+   * Busy (or a busy lease lapsed without a Stop) with no hook this long: a
+   * suspected prompt when Herdr reads "blocked" (Claude), or reads a known
+   * status that is neither "working" nor "unknown" (Pi, which has no
+   * dialog-specific status of its own).
+   */
   prompt_suspect_ms: number;
 }
 

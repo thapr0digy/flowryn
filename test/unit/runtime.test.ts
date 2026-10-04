@@ -176,7 +176,7 @@ describe("Herdr runtime", () => {
     );
     expect(await runtime.readPane("w1:p2", 40)).toBe("line 1\nDo you want to proceed?\n❯ 1. Yes");
     expect(await runtime.readPane("w1:p9", 40)).toBeNull();
-    expect(seen[0]).toMatchObject({ source: "recent-unwrapped" });
+    expect(seen[0]).toMatchObject({ source: "recent_unwrapped" });
   });
 });
 

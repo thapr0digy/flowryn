@@ -11,7 +11,7 @@ import { getProject } from "./projects.ts";
 import { gatherFacts } from "../policy/merge.ts";
 import { mergeContext, mergeSummary, runAndProject } from "../policy/verbs.ts";
 import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, taskTitle, type RunWithPolicy } from "./runs.ts";
-import { idleByDesign, openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
+import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
 import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
@@ -441,7 +441,12 @@ const notify = signalVerb(
     const input = parseInput(args);
     if (input.notification_type === "permission_prompt") {
       const busy = run.busy_until !== null && run.busy_until > ctx.now();
-      if (busy && !idleByDesign(ctx.db, run)) openBlockedPrompt(ctx.db, run, { suspected: false, screen: (prepared as { screen?: string | null } | undefined)?.screen ?? null, harness: "claude" }, ctx.now());
+      // A confirmed dialog (this notification) opens the item regardless of idleByDesign: a dialog that is
+      // actually up is never idle by design, review gate or blocking question notwithstanding.
+      if (busy) {
+        const lastHook = run.last_hook_at ?? run.launched_at ?? run.started_at;
+        openBlockedPrompt(ctx.db, run, { suspected: false, screen: (prepared as { screen?: string | null } | undefined)?.screen ?? null, harness: "claude", lastHook }, ctx.now());
+      }
       return { data: { run: run.id } };
     }
     return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { notification: input.notification_type ?? null }));
@@ -454,7 +459,13 @@ const notify = signalVerb(
     const run = ctx.caller.runId ? getRunWithPolicy(ctx.db, ctx.caller.runId) : null;
     const runtime = ctx.fleet.runtime();
     if (!run?.pane_id || !runtime) return { screen: null };
-    const screen = await Promise.race([runtime.readPane(run.pane_id, SCREEN_LINES).catch(() => null), Bun.sleep(1_500).then(() => null)]);
+    const screen = await Promise.race([
+      runtime.readPane(run.pane_id, SCREEN_LINES).catch((error: unknown) => {
+        ctx.log(`hook notify: reading pane ${run.pane_id} failed: ${(error as Error).message}`);
+        return null;
+      }),
+      Bun.sleep(1_500).then(() => null),
+    ]);
     return { screen };
   },
 );

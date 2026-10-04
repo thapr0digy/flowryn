@@ -68,6 +68,11 @@ const WORK_DONE: readonly string[] = ["ready", "validating", "merging", "landed"
 /** Several husks at once at startup mean the Herdr server restarted (design section 6). */
 const HUSK_RESTART_THRESHOLD = 2;
 
+/** "idle" or "done": a run not actively mid-tool, for the dialog-gone two-pass check. */
+function isSettledHerdrStatus(status: string | null): boolean {
+  return status === "idle" || status === "done";
+}
+
 function realOrSelf(path: string): string {
   try {
     return realpathSync(path);
@@ -288,6 +293,9 @@ export class Reconciler {
       herdrStatus = null;
     }
     tx(db, () => {
+      // Read before recordEvidence overwrites run_evidence's one row per (run_id, source) below.
+      const previousHerdr = db.query("SELECT value FROM run_evidence WHERE run_id = ?1 AND source = 'herdr'").get(run.id) as { value: string } | null;
+      const previousHerdrStatus = previousHerdr ? ((JSON.parse(previousHerdr.value) as { agent_status?: string }).agent_status ?? null) : null;
       if (herdrStatus !== null) recordEvidence(db, run.id, "herdr", 5, { agent_status: herdrStatus }, t);
       if (!started) {
         if (t - launchedAt >= tm.trust_wedge_ms) {
@@ -305,15 +313,23 @@ export class Reconciler {
          * Spike c12: Herdr reads "blocked" for exactly the duration of a
          * Claude dialog. An Esc decline interrupts the turn and fires no
          * hook afterwards, so hook activity alone would hold the item open
-         * forever; once agent_status leaves "blocked" the dialog is gone, so
-         * clear it and fall through to the ordinary liveness/pointer logic
-         * below. Herdr unreachable (herdrStatus null) keeps holding, as does
-         * a still-open Pi prompt (released by hook activity only, since Pi
-         * has no equivalent status signal).
+         * forever; agent_status leaving "blocked" means the dialog is gone,
+         * so clear it and fall through to the ordinary liveness/pointer
+         * logic below. "unknown" (Herdr briefly losing the pane) and null
+         * (Herdr unreachable) keep holding, as does a still-open Pi prompt
+         * (released by hook activity only, since Pi has no equivalent status
+         * signal). "working" clears it at once (a dialog and a running tool
+         * never overlap); "idle"/"done" only clear it once the previous
+         * pass's recorded status was also idle/done, so a single status read
+         * mid-flicker right after the Esc can't release a dialog that is
+         * still actually up.
          */
-        if (run.harness === "claude" && herdrStatus !== null && herdrStatus !== "blocked") {
-          resolveRunItems(db, run.id, ["blocked_prompt"], "dialog gone", t);
-          appendEvent(db, { source: "reconciler", kind: "run.prompt_cleared", runId: run.id, taskId: run.task_id, payload: { agent_status: herdrStatus } });
+        if (run.harness === "claude") {
+          const dialogGone = herdrStatus === "working" || (isSettledHerdrStatus(herdrStatus) && isSettledHerdrStatus(previousHerdrStatus));
+          if (dialogGone) {
+            resolveRunItems(db, run.id, ["blocked_prompt"], "dialog gone", t);
+            appendEvent(db, { source: "reconciler", kind: "run.prompt_cleared", runId: run.id, taskId: run.task_id, payload: { agent_status: herdrStatus }, ts: t });
+          } else return;
         } else return;
       }
       const leaseLapsedWithoutStop = !busy && run.idle_since === null;
@@ -327,9 +343,9 @@ export class Reconciler {
        * never opens a stall item), worded as a possible stall rather than a
        * confirmation.
        */
-      const suspectedPrompt = run.harness === "claude" ? herdrStatus === "blocked" : herdrStatus !== null && herdrStatus !== "working";
+      const suspectedPrompt = run.harness === "claude" ? herdrStatus === "blocked" : herdrStatus !== null && herdrStatus !== "working" && herdrStatus !== "unknown";
       if ((busy || leaseLapsedWithoutStop) && run.state === "running" && t - lastHook >= tm.prompt_suspect_ms && !idleByDesign(db, run) && suspectedPrompt) {
-        openBlockedPrompt(db, run, { suspected: true, screen: null, harness: run.harness as "claude" | "pi" }, t);
+        openBlockedPrompt(db, run, { suspected: true, screen: null, harness: run.harness as "claude" | "pi", lastHook }, t);
         return;
       }
       setLiveness(db, run, busy ? "busy" : "idle", "reconciler", { lease: busy ? "held" : "expired or released" }, t);
@@ -361,6 +377,7 @@ export class Reconciler {
     if (WORK_DONE.includes(run.state)) {
       const released = tx(db, () => {
         setLiveness(db, run, "dead", "reconciler", { reason: "the worker exited after delivering", husk }, t);
+        resolveRunItems(db, run.id, ["blocked_prompt"], "run.died", t);
         // Its pane holds no live worker any more; a declined delivery resumes it through the scheduler.
         return releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker exited", t);
       });
@@ -384,6 +401,7 @@ export class Reconciler {
     }
     const freed = tx(db, () => {
       const changed = setLiveness(db, run, "dead", "reconciler", { reason: run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume", husk }, t);
+      resolveRunItems(db, run.id, ["blocked_prompt"], "run.died", t);
       // Nothing holds a slot for a dead worker (design section 11); `flowryn resume` asks for them again.
       const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
       if (released.length > 0 && run.stage_state === "active") db.query("UPDATE runs SET stage_state = 'waiting', waiting_since = NULL, stage_note = NULL WHERE id = ?1").run(run.id);

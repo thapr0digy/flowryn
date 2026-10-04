@@ -29,6 +29,29 @@ describe("redactSecrets", () => {
     expect(redactSecrets("token=abc def\nnext line")).toBe("token=[redacted]\nnext line");
   });
 
+  test.each([
+    ["export DB_PASSWORD=hunter2", "export DB_PASSWORD=[redacted]"],
+    ["AWS_SECRET_ACCESS_KEY=abcdefghij1234567890EXAMPLE", "AWS_SECRET_ACCESS_KEY=[redacted]"],
+    ["OPENAI_API_KEY=abcdefghij1234567890", "OPENAI_API_KEY=[redacted]"],
+    ["GITHUB_TOKEN=notarealtoken1234567890", "GITHUB_TOKEN=[redacted]"],
+    ['{"password": "x"}', '{"password": [redacted]'],
+    ["--password hunter2", "--password [redacted]"],
+    ["https://user:pass@host", "https://[redacted]@host"],
+    ["postgres://app:s3cret@db", "postgres://[redacted]@db"],
+    ["glpat-ABCDEFGHIJKLMNOPQRSTUVWX", "[redacted]"],
+    ["Do you want to proceed? git push --force-with-lease", "Do you want to proceed? git push --force-with-lease"],
+  ])("%s", (input, expected) => {
+    expect(redactSecrets(input)).toBe(expected);
+  });
+
+  test("a PEM with a BEGIN but no END (the tail cut off the close) redacts from BEGIN to the end of the text", () => {
+    expect(redactSecrets("leader:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0B")).toBe("leader:\n[redacted]");
+  });
+
+  test("a PEM with an END but no BEGIN (the head scrolled off) redacts from the start of the text to END", () => {
+    expect(redactSecrets("MIIEvQIBADANBgkqhkiG9w0B\n-----END RSA PRIVATE KEY-----\nmore text")).toBe("[redacted]\nmore text");
+  });
+
   test("never throws, always returns a string", () => {
     expect(redactSecrets("")).toBe("");
     const unterminated = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A".repeat(200_000);

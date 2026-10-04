@@ -13,6 +13,9 @@ import { join, resolve } from "node:path";
 
 export const FAKE_HARNESS = resolve(import.meta.dir, "fake-harness.ts");
 
+/** Herdr 0.7.5 protocol 17's pane.read source enum: the underscore form, never the CLI's kebab flag. */
+const PANE_READ_SOURCES = new Set(["visible", "recent", "recent_unwrapped", "detection"]);
+
 interface FakePane {
   paneId: string;
   workspaceId: string;
@@ -301,10 +304,12 @@ export class FakeHerdr {
         return { type: "pane_info", pane: this.paneView(this.need(params.pane_id)) };
       case "pane.read": {
         const pane = this.need(params.pane_id);
+        const source = String(params.source ?? "recent");
+        if (!PANE_READ_SOURCES.has(source)) throw Object.assign(new Error(`pane.read: source must be one of ${[...PANE_READ_SOURCES].join(", ")}`), { code: "invalid_params" });
         const file = join(pane.env.FLOWRYN_REPORT_DIR ?? "", "fake-screen.txt");
         const text = this.screens.get(pane.paneId) ?? (existsSync(file) ? readFileSync(file, "utf8") : "");
         const lines = typeof params.lines === "number" ? params.lines : 60;
-        return { type: "pane_read", read: { pane_id: pane.paneId, workspace_id: pane.workspaceId, tab_id: "t1", source: params.source ?? "recent", format: "text", text: text.split("\n").slice(-lines).join("\n"), revision: pane.revision, truncated: false } };
+        return { type: "pane_read", read: { pane_id: pane.paneId, workspace_id: pane.workspaceId, tab_id: "t1", source, format: "text", text: text.split("\n").slice(-lines).join("\n"), revision: pane.revision, truncated: false } };
       }
       case "agent.get": {
         const pane = this.need(params.target);

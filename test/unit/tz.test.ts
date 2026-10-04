@@ -26,9 +26,9 @@ describe("spawned test processes agree with bun test's own UTC clock", () => {
         stderr: "pipe",
       });
       const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      if (stderr.trim()) throw new Error(`unexpected stderr: ${stderr}`);
       expect(code).toBe(0);
       expect(stdout.trim()).toBe("UTC");
-      if (stderr.trim()) throw new Error(`unexpected stderr: ${stderr}`);
     } finally {
       h?.cleanup();
     }
