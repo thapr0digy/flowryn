@@ -17,17 +17,18 @@ const DIALOG_QUESTION = /Do you want to proceed\?/i;
 
 /**
  * The prompt as one line. Claude's confirmation dialog always asks "Do you
- * want to proceed?": when that line is on screen, anchor on it and take up
- * to 3 non-empty lines above it too (the command it is confirming), rather
- * than the plain last-lines guess, which can land on the "1. Yes" / "2. No"
- * choices instead of the command. Anything else (Pi, a dialog with no such
- * line) falls back to the last few screen lines, preferring ones that read
- * like a question.
+ * want to proceed?": when that line is on screen, anchor on the LAST one
+ * (an earlier, already-declined dialog can still be in the scrollback) and
+ * take up to 3 non-empty lines above it too (the command it is confirming),
+ * rather than the plain last-lines guess, which can land on the "1. Yes" /
+ * "2. No" choices instead of the command. Anything else (Pi, a dialog with
+ * no such line) falls back to the last few screen lines, preferring ones
+ * that read like a question.
  */
 export function promptLineOf(screen: string | null): string {
   if (!screen) return "";
   const lines = redactSecrets(screen).split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-  const questionAt = lines.findIndex((l) => DIALOG_QUESTION.test(l));
+  const questionAt = lines.findLastIndex((l) => DIALOG_QUESTION.test(l));
   if (questionAt !== -1) return sanitizeLine(lines.slice(Math.max(0, questionAt - 3), questionAt + 1).join(" "), 160);
   const tail = lines.slice(-6);
   const asked = tail.filter((l) => PROMPT_HINT.test(l));

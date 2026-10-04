@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { redactSecrets } from "../../src/util/redact.ts";
 
+/** A deterministic, reproducible stand-in for "a random base64url blob": no real randomness needed. */
+function base64urlBlob(size: number): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  let seed = 42;
+  let out = "";
+  for (let i = 0; i < size; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    out += alphabet[seed % alphabet.length];
+  }
+  return out;
+}
+
 describe("redactSecrets", () => {
   test.each([
     ["export GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789", "export GH_TOKEN=[redacted]"],
@@ -52,11 +64,28 @@ describe("redactSecrets", () => {
     expect(redactSecrets("MIIEvQIBADANBgkqhkiG9w0B\n-----END RSA PRIVATE KEY-----\nmore text")).toBe("[redacted]\nmore text");
   });
 
+  test("an unpaired END that comes before an unpaired BEGIN redacts both (two different cut keys, in either order)", () => {
+    const out = redactSecrets("MIIEbodyA\n-----END RSA PRIVATE KEY-----\nmid\n-----BEGIN RSA PRIVATE KEY-----\nbodyB");
+    expect(out).not.toContain("MIIEbodyA");
+    expect(out).not.toContain("bodyB");
+  });
+
   test("never throws, always returns a string", () => {
     expect(redactSecrets("")).toBe("");
     const unterminated = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "A".repeat(200_000);
     expect(typeof redactSecrets(unterminated)).toBe("string");
     const binaryish = "\u0000\u0001 café 日本語 password: \u0000secret\u0000";
     expect(typeof redactSecrets(binaryish)).toBe("string");
+  });
+
+  test.each([
+    ["200 KB of \"a-token-\"", "a-token-".repeat(25_000)],
+    ["200 KB of \"--token\"", "--token".repeat(28_572)],
+    ["200 KB of \"a.\"", "a.".repeat(100_000)],
+    ["200 KB random base64url blob", base64urlBlob(200_000)],
+  ])("redacts %s in linear time (under 100ms, no catastrophic backtracking)", (_label, input) => {
+    const start = performance.now();
+    redactSecrets(input);
+    expect(performance.now() - start).toBeLessThan(100);
   });
 });

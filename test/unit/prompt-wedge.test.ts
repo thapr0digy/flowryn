@@ -20,4 +20,21 @@ describe("promptLineOf", () => {
   test("a null screen yields no prompt text", () => {
     expect(promptLineOf(null)).toBe("");
   });
+
+  test("uses the LAST dialog question, not a stale one earlier in the scrollback", () => {
+    const screen = [
+      "$ git push --force-with-lease origin HEAD",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. No",
+      "(declined)",
+      "$ rm -rf build",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. No",
+    ].join("\n");
+    const result = promptLineOf(screen);
+    expect(result).toContain("rm -rf build");
+    expect(result).not.toContain("git push");
+  });
 });
