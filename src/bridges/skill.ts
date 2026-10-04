@@ -39,6 +39,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 
 ## Rules
 - Free text goes in through \`--body-file -\` (stdin), never through shell quoting.
+- The user's preferences are in the system prompt (from \`~/.flowryn/leader/preferences.md\`). When they state a new one, read that file, then update it in place; never append blindly.
 - Exit 77 \`not_leader\`: this session is read-only. Ask the user before \`flowryn leader claim\`.
 - Never run \`flowryn approve\` or \`flowryn hook\`: approvals come from the user, hooks from the harness. When a merge needs the user's word or a waiver of one red check, ask them to run \`flowryn approve <task>\` (or \`--allow-red <check>\`) in their shell or press a on \`flowryn board\`.
 - A merge counts only once proven (the PR reads merged); exit 2 \`not_landed\` means flowrynd is still checking.

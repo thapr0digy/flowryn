@@ -23,6 +23,8 @@ export interface LeaderFiles {
   skillDir: string;
   /** The style block file, or null when [style] terse = false. */
   style: string | null;
+  /** The file the harness appends to its system prompt: the style block and your preferences. */
+  appendPrompt: string | null;
   /** A directory holding a `flowryn` command, put first on the leader's PATH. */
   binDir: string;
   /** The absolute flowryn command the hooks and the extension run. */
@@ -90,5 +92,16 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
     style = stylePath;
   } else if (existsSync(stylePath)) rmSync(stylePath, { force: true });
 
-  return { dir, claudeSettings, claudePlugin, piExtension, skillDir, style, binDir, bin };
+  // The user's preferences (cutover C3) are theirs: written by flowryn import or the leader, never by lead.
+  const preferencesPath = join(dir, "preferences.md");
+  const preferences = existsSync(preferencesPath) ? readFileSync(preferencesPath, "utf8").trimEnd() : null;
+  const appendPath = join(dir, "system-prompt.md");
+  const parts = [input.style, preferences].filter((p): p is string => typeof p === "string" && p.length > 0);
+  let appendPrompt: string | null = null;
+  if (parts.length > 0) {
+    writeIfChanged(appendPath, parts.join("\n\n") + "\n");
+    appendPrompt = appendPath;
+  } else if (existsSync(appendPath)) rmSync(appendPath, { force: true });
+
+  return { dir, claudeSettings, claudePlugin, piExtension, skillDir, style, appendPrompt, binDir, bin };
 }
