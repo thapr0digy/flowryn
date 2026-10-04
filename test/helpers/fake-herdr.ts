@@ -51,6 +51,8 @@ export class FakeHerdr {
   readonly failNext = new Map<string, string[]>();
   /** Agent statuses to report for panes regardless of their process: Herdr's own inference, which can be stale. */
   readonly statusOverride = new Map<string, string>();
+  /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
+  readonly screens = new Map<string, string>();
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
@@ -104,6 +106,11 @@ export class FakeHerdr {
     const paneId = ws.panes[0]!;
     this.statusOverride.set(paneId, status);
     return paneId;
+  }
+
+  /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
+  setScreen(paneId: string, text: string): void {
+    this.screens.set(paneId, text);
   }
 
   /** Add a pane Flowryn did not create, carrying a run's label, to exercise the orphan scan. */
@@ -287,6 +294,12 @@ export class FakeHerdr {
       }
       case "pane.get":
         return { type: "pane_info", pane: this.paneView(this.need(params.pane_id)) };
+      case "pane.read": {
+        const pane = this.need(params.pane_id);
+        const text = this.screens.get(pane.paneId) ?? "";
+        const lines = typeof params.lines === "number" ? params.lines : 60;
+        return { type: "pane_read", read: { pane_id: pane.paneId, workspace_id: pane.workspaceId, tab_id: "t1", source: params.source ?? "recent", format: "text", text: text.split("\n").slice(-lines).join("\n"), revision: pane.revision, truncated: false } };
+      }
       case "agent.get": {
         const pane = this.need(params.target);
         const override = this.statusOverride.get(pane.paneId);

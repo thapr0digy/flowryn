@@ -162,6 +162,19 @@ describe("Herdr runtime", () => {
     expect(eventPaneId({ event: "pane_updated", data: { pane: { pane_id: "w1:p3" } } })).toBe("w1:p3");
     expect(eventPaneId({ event: "layout.updated", data: {} })).toBeNull();
   });
+
+  test("readPane returns the pane's recent text, null for a gone pane", async () => {
+    const runtime = new HerdrRuntime(
+      scriptedTransport({
+        "pane.read": (p) => {
+          if (p.pane_id === "w1:p9") throw new HerdrError("pane_not_found", "gone");
+          return { type: "pane_read", read: { text: "line 1\nDo you want to proceed?\n❯ 1. Yes" } };
+        },
+      }),
+    );
+    expect(await runtime.readPane("w1:p2", 40)).toBe("line 1\nDo you want to proceed?\n❯ 1. Yes");
+    expect(await runtime.readPane("w1:p9", 40)).toBeNull();
+  });
 });
 
 async function refuseToList(): Promise<never> {
