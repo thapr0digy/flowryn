@@ -300,7 +300,22 @@ export class Reconciler {
       const busy = run.busy_until !== null && run.busy_until > t;
       const lastHook = run.last_hook_at ?? launchedAt;
       const prompted = findOpenRunItem(db, "blocked_prompt", run.id) !== null;
-      if (prompted) return; // A prompt holds liveness at blocked_dialog until hook activity resolves it; no idle or stale pointer beside it.
+      if (prompted) {
+        /**
+         * Spike c12: Herdr reads "blocked" for exactly the duration of a
+         * Claude dialog. An Esc decline interrupts the turn and fires no
+         * hook afterwards, so hook activity alone would hold the item open
+         * forever; once agent_status leaves "blocked" the dialog is gone, so
+         * clear it and fall through to the ordinary liveness/pointer logic
+         * below. Herdr unreachable (herdrStatus null) keeps holding, as does
+         * a still-open Pi prompt (released by hook activity only, since Pi
+         * has no equivalent status signal).
+         */
+        if (run.harness === "claude" && herdrStatus !== null && herdrStatus !== "blocked") {
+          resolveRunItems(db, run.id, ["blocked_prompt"], "dialog gone", t);
+          appendEvent(db, { source: "reconciler", kind: "run.prompt_cleared", runId: run.id, taskId: run.task_id, payload: { agent_status: herdrStatus } });
+        } else return;
+      }
       const leaseLapsedWithoutStop = !busy && run.idle_since === null;
       /**
        * The backstop (spike c12, Task 11): Herdr's agent_status reads
@@ -308,9 +323,11 @@ export class Reconciler {
        * throughout a long tool call; they never overlap, so "blocked" alone
        * disambiguates a dialog with no screen-marker fallback needed. Pi has
        * no equivalent spike, so it keeps the more conservative "not working"
-       * rule, worded as a possible stall rather than a confirmation.
+       * rule (requiring a real, non-null status so Herdr being unreachable
+       * never opens a stall item), worded as a possible stall rather than a
+       * confirmation.
        */
-      const suspectedPrompt = run.harness === "claude" ? herdrStatus === "blocked" : herdrStatus !== "working";
+      const suspectedPrompt = run.harness === "claude" ? herdrStatus === "blocked" : herdrStatus !== null && herdrStatus !== "working";
       if ((busy || leaseLapsedWithoutStop) && run.state === "running" && t - lastHook >= tm.prompt_suspect_ms && !idleByDesign(db, run) && suspectedPrompt) {
         openBlockedPrompt(db, run, { suspected: true, screen: null, harness: run.harness as "claude" | "pi" }, t);
         return;
@@ -356,7 +373,7 @@ export class Reconciler {
         if (updated.changes === 0) return false;
         setLiveness(db, run, "starting", "reconciler", { reason: "resuming once after the worker died", husk }, t);
         const event = appendEvent(db, { source: "reconciler", kind: "run.auto_resumed", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, pane: run.pane_id } });
-        resolveRunItems(db, run.id, ["worker_idle", "trust_dialog"], "run.auto_resumed", t);
+        resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "blocked_prompt"], "run.auto_resumed", t);
         openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died and was resumed once from its session`, now: t });
         return true;
       });
@@ -403,7 +420,7 @@ export class Reconciler {
       const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
       if (released.length > 0 && run.stage_state === "active") db.query("UPDATE runs SET stage_state = 'waiting', stage_note = NULL WHERE id = ?1").run(run.id);
       const event = appendEvent(db, { source: "reconciler", kind: "run.resume_deferred", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, why } });
-      resolveRunItems(db, run.id, ["worker_idle", "trust_dialog"], "run.resume_deferred", t);
+      resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "blocked_prompt"], "run.resume_deferred", t);
       const waits = gate.state === "missing" ? `waits: ${gate.detail}` : `waits until ${gate.harness} ${gate.version} passes its contract suite (${contractsCommand(gate.harness)})`;
       openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died; its one resume ${waits}`, now: t });
       return true;

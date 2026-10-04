@@ -162,7 +162,7 @@ export function failRun(db: Db, run: RunRow, reason: string, source: EventSource
   parkTask(db, run.task_id, `failed: ${reason}`, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.failed", now);
   const event = appendEvent(db, { source, kind: "run.failed", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
-  resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "steer_unacked"], "run.failed", now);
+  resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "steer_unacked", "blocked_prompt"], "run.failed", now);
   openRunItemOnce(db, "failure_needs_you", run, event.seq, `Run failed for ${taskTitle(db, run.task_id)}: ${reason}`, now);
   run.state = "failed";
   run.liveness = "dead";

@@ -2,6 +2,7 @@ import { appendEvent } from "../db/events.ts";
 import type { Db } from "../db/db.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { redactSecrets } from "../util/redact.ts";
+import { findOpenRunItem } from "../attention/items.ts";
 import { openRunItemOnce, setLiveness, taskTitle, type RunRow } from "./runs.ts";
 
 /**
@@ -29,8 +30,13 @@ export function idleByDesign(db: Db, run: RunRow): boolean {
   return db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open' AND blocking = 1").get(run.id) !== null;
 }
 
-/** Record it and open the one item. Call inside a transaction. */
+/**
+ * Record it and open the one item, only when it is not already open (a
+ * second notification for the same stuck prompt touches nothing). Call
+ * inside a transaction.
+ */
 export function openBlockedPrompt(db: Db, run: RunRow, how: { suspected: boolean; screen: string | null; harness: "claude" | "pi" }, now: number): string | null {
+  if (findOpenRunItem(db, "blocked_prompt", run.id)) return null;
   const screen = how.screen ? redactSecrets(how.screen).split("\n").slice(-SCREEN_LINES).join("\n") : null;
   setLiveness(db, run, "blocked_dialog", how.suspected ? "reconciler" : "hook", { prompt: true }, now);
   const event = appendEvent(db, { source: how.suspected ? "reconciler" : "hook", kind: "run.blocked_prompt", runId: run.id, taskId: run.task_id, payload: { suspected: how.suspected, screen }, ts: now });
