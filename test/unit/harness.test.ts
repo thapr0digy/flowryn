@@ -143,7 +143,15 @@ describe("worker contract text", () => {
     // The style block leads the instructions (design section 11).
     expect(text.startsWith("Reply in the fewest words")).toBe(true);
     expect(text).toContain("$FLOWRYN_BIN stage done [--review <lavish url>]");
-    expect(text.split("\n").length).toBeLessThan(25);
+    expect(text.split("\n").length).toBeLessThan(30);
+  });
+
+  test("the worker contract forbids history rewrites and unguarded rm, and says what to do at a prompt", () => {
+    const text = workerContract("claude", null, { kind: "ship", mode: "direct-PR", defaultBranch: "main" });
+    expect(text).toContain("- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.");
+    expect(text).toContain("  To take main: new commits, git merge origin/main, a plain git push.");
+    expect(text).toContain('- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.');
+    expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking naming it, then end your turn.");
   });
 
   test("the prompt line is one short line that points at the full task", () => {
