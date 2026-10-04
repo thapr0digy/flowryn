@@ -21,8 +21,8 @@ function intents(): { verb: string; task_id: string; args: string }[] {
 }
 
 describe("standalone decisions", () => {
-  test("migration 6 is the latest", () => {
-    expect(LATEST_SCHEMA_VERSION).toBe(6);
+  test("migration 6 landed decisions", () => {
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(6);
   });
 
   test("a standalone decision owns a held decision task, and blocks what it names", () => {

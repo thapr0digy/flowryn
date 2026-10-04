@@ -330,6 +330,20 @@ CREATE UNIQUE INDEX decisions_origin_key ON decisions(origin, key) WHERE origin 
 CREATE INDEX decisions_open ON decisions(state) WHERE state = 'open';
 `;
 
+/**
+ * Cutover C3: what an import created carries its source (firstmate:<id>), so a
+ * second import changes nothing; a dispatch may override its project's
+ * delivery mode for one task, with the reason kept beside it.
+ */
+const IMPORT_SQL = /* sql */ `
+ALTER TABLE projects ADD COLUMN import_source TEXT;
+ALTER TABLE task_policy ADD COLUMN import_source TEXT;
+ALTER TABLE task_policy ADD COLUMN mode_reason TEXT;
+ALTER TABLE decisions ADD COLUMN import_source TEXT;
+CREATE UNIQUE INDEX projects_import ON projects(import_source) WHERE import_source IS NOT NULL;
+CREATE UNIQUE INDEX decisions_import ON decisions(import_source) WHERE import_source IS NOT NULL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -337,6 +351,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 4, name: "delivery", sql: DELIVERY_SQL },
   { version: 5, name: "workflows", sql: WORKFLOW_SQL },
   { version: 6, name: "decisions", sql: DECISIONS_SQL },
+  { version: 7, name: "import", sql: IMPORT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
