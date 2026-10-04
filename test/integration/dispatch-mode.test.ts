@@ -18,6 +18,25 @@ describe("dispatch --mode", () => {
     const task = (ok.reply.data as { task: string }).task;
     const shown = await env.json(["show", task]);
     expect(shown.reply.data).toMatchObject({ mode: "direct-PR (internal CI config only)" });
+    // cutover C3 fix: the override is part of the dispatch event's audit trail, not just the live task_policy row.
+    const run = (ok.reply.data as { run: string }).run;
+    const db = env.h.db();
+    const event = db.query("SELECT payload FROM events WHERE kind = 'run.dispatched' AND run_id = ?1").get(run) as { payload: string };
+    db.close();
+    expect(JSON.parse(event.payload)).toMatchObject({ mode: "direct-PR", mode_reason: "internal CI config only" });
+  });
+
+  test("dispatch with no --mode carries no mode/mode_reason in the dispatch event", async () => {
+    const env = await makeFleetEnv({ mode: "no-mistakes", origin: true });
+    envs.push(env);
+    const ok = await env.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { stdin: "plain task\nFAKE: sleep 60000" });
+    expect(ok.code).toBe(0);
+    const run = (ok.reply.data as { run: string }).run;
+    const db = env.h.db();
+    const event = db.query("SELECT payload FROM events WHERE kind = 'run.dispatched' AND run_id = ?1").get(run) as { payload: string };
+    db.close();
+    expect(JSON.parse(event.payload)).not.toHaveProperty("mode");
+    expect(JSON.parse(event.payload)).not.toHaveProperty("mode_reason");
   });
 
   test("local-only on a project that is not local-only is refused", async () => {

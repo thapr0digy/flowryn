@@ -153,6 +153,8 @@ export interface NewRun {
   /** An existing Queued task (a plan phase): started in the backlog, not added. */
   existing: boolean;
   by: string;
+  /** cutover C3: a per-task delivery mode override, carried into the dispatch event's audit trail. */
+  override: ModeOverride | null;
   now: number;
 }
 
@@ -192,7 +194,20 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
     kind: "run.dispatched",
     runId,
     taskId: r.taskId,
-    payload: { project: r.project.id, kind: r.kind, harness: r.harness, version: r.version, title: r.title, body: r.body, base: r.base, worktree, intent: intent.id, by: r.by, workflow_def: r.workflow },
+    payload: {
+      project: r.project.id,
+      kind: r.kind,
+      harness: r.harness,
+      version: r.version,
+      title: r.title,
+      body: r.body,
+      base: r.base,
+      worktree,
+      intent: intent.id,
+      by: r.by,
+      workflow_def: r.workflow,
+      ...(r.override ? { mode: r.override.mode, mode_reason: r.override.reason } : {}),
+    },
     ts: r.now,
   });
   return runId;
@@ -337,13 +352,13 @@ export const dispatchVerb: VerbSpec = {
     if (plan.mode === "task") {
       const phase = phaseOfTask(ctx.db, plan.taskId)!;
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? phase.workflow, "ship");
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, now });
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
       return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
     }
     if (plan.mode === "queued") {
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? (plan.kind === "scout" ? "scout" : plan.project.workflow), plan.kind);
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: plan.title, body: plan.body, project: plan.project, kind: plan.kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, now });
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: plan.title, body: plan.body, project: plan.project, kind: plan.kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
       return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`] };
     }
@@ -378,7 +393,7 @@ export const dispatchVerb: VerbSpec = {
       };
     }
     const taskId = mintTaskId(title, takenIds(ctx.db));
-    const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, now });
+    const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, override: plan.override, now });
     applyModeOverride(ctx.db, taskId, plan.override);
     return {
       data: { task: taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, yolo: plan.project.yolo ? "on" : "off", workflow: workflow.id, state: "launching" },

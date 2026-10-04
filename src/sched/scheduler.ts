@@ -370,7 +370,7 @@ export class Scheduler {
     const config = this.deps.config();
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
-      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", harness, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", now: t });
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", harness, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, runId, t);
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
       // A plan a design handed in holds the phases after the design's own task, which is phase 1.
