@@ -143,4 +143,23 @@ describe("a due steer for an idle claude worker with no waiter", () => {
     await waitUntil(() => ackedAt(env, id) !== null, 20_000, `steer ${id} acked after the restart`);
     expect(eventPayloads(env, run, "steer.rung").map((p) => p.path)).toEqual(["keys"]);
   }, 40_000);
+  test("flowryn daemon restart never strands a steer: one queued to an idle worker just before the restart is delivered by the new daemon", async () => {
+    // waiter_grace_ms is long enough that the old daemon cannot deliver it before the restart.
+    const env = await fleet({ timing: { waiter_grace_ms: 4_000 }, supervised: true });
+    const { run } = await env.dispatch("Build\nFAKE: no-waiter\nFAKE: sleep 100");
+    const idle = await env.waitRun(run, stopped, "idle after its Stop");
+    env.herdr.setStatus(idle.pane_id!, "idle");
+    const id = await steer(env, run, "a new build is live");
+    const restarted = await env.json(["daemon", "restart"]);
+    expect(restarted.code).toBe(0);
+    expect(ackedAt(env, id)).toBeNull();
+    await waitUntil(() => ackedAt(env, id) !== null, 20_000, `steer ${id} acked after daemon restart`);
+    expect(eventPayloads(env, run, "steer.rung").map((p) => p.path)).toEqual(["keys"]);
+    const db = env.h.db();
+    try {
+      expect((db.query("SELECT payload FROM events WHERE kind = 'daemon.restarted'").all() as { payload: string }[]).map((r) => JSON.parse(r.payload).by)).toEqual(["leader"]);
+    } finally {
+      db.close();
+    }
+  }, 40_000);
 });

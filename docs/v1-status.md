@@ -98,6 +98,7 @@ The features that let Flowryn replace the previous orchestrator (docs/cutover-no
 | C3 the one-time import | Done (C3), then removed once the cutover was over: `dispatch --mode`, queued tasks outside plans and your preferences in the leader's prompt stay; the import command, its parser and `import.apply` are gone, and migration 9 marks what it created `legacy:<id>` (docs/cutover-notes.md) |
 | Steer latency, Tier 0 and Tier 1: the interrupt key refused while a dialog may be open, a wake after an interrupt, the waiter armed at every turn start, seen evidence, fast re-rings of lost carries, a contract suite that measures steers | Done (docs/cutover-notes.md "Steers · latency") |
 | Steer latency, Tier 2: `flowryn steer --urgent` blocks the next tool call and cuts a tool past `steer_preempt_after_ms`, never through a dialog, on Claude and Pi | Done (docs/cutover-notes.md "Steers · urgent") |
+| Leader-safe `flowryn daemon restart`: leader or you, deterministic guards with `--when-idle`, the binary and plist checks, launchd `kickstart -k` asked by the daemon, `daemon.restarted` in the briefing | Done (docs/cutover-notes.md "Leader-safe daemon restart"); `kickstart -k` by the job itself not yet run live |
 | Review questions: a review gate's open questions become decisions reserved for you, asked on the review page (lavish-axi's input playbook) and listed for the leader, the first answer counting; the ask rule (decide autonomously, ask only when blocked) in the worker contract and checked in code | Done: docs/m5-notes.md, "Gate questions" |
 
 ## Not in v1

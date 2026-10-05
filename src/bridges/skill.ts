@@ -19,6 +19,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 - \`flowryn show <task|run|item>\`: one in detail.
 - \`flowryn brief\`: the briefing again.
 - \`flowryn leader status\`: which session leads.
+- \`flowryn daemon status\`: the daemon's version, build and any pending restart.
 
 ## Act
 - \`flowryn dispatch <project> --kind ship|scout [--workflow feature|fix] --body-file - <<'EOF'\` … \`EOF\`: start a worker. It may wait for capacity (\`flowryn capacity\`).
@@ -36,6 +37,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 - \`flowryn cleanup <task>\`: remove a landed, cancelled or failed task's worktree (merges clean up by themselves). \`--discard\` only after the user ran \`flowryn approve <task> --discard\`.
 - \`flowryn todo add "<title>" --due <date>\`, \`todo list\`, \`todo done <id>\`, \`todo due <id> <date>\`, \`todo edit <id> --title <t>\`, \`todo rm <id>\`.
 - \`flowryn project add|set|list\`.
+- \`flowryn daemon restart\`: apply a new build, only once the user wants it applied. It reports the old and new build. \`restart_blocked\` names what a restart would break (a merge, a blocked prompt, a validation): tell the user, and offer \`--when-idle\` (restarts once they clear; \`--cancel\` drops it). \`no_change\`: nothing new is built. \`binary_broken\`, \`plist_drift\` or \`not_supervised\`: tell the user; they fix it in their terminal. Never retry it in a loop; \`daemon stop|start|install\` stay the user's.
 
 ## Rules
 - Free text goes in through \`--body-file -\` (or \`--rationale -\`) on stdin, never through shell quoting.

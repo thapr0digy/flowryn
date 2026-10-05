@@ -2,6 +2,7 @@ import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { isUlid } from "../util/ulid.ts";
 import { PROTO } from "../version.ts";
+import { PROTO_EXEMPT_VERBS } from "../daemon/system-verbs.ts";
 import { authorize, resolveCaller } from "./auth.ts";
 import { errorReply, okReply, parseEnvelope, type Envelope, type Reply } from "./envelope.ts";
 import { FlowrynError, toErrorBody } from "./errors.ts";
@@ -21,7 +22,7 @@ export interface GatewayOptions {
 
 /**
  * The API gateway: the one entry for every socket call and spooled call.
- * Order: protocol check, verb lookup, token to role, role check, argument
+ * Order: protocol check (the handshake and restart verbs are exempt), verb lookup, token to role, role check, argument
  * validation, idempotency, then the verb. It decides no policy and changes no
  * lifecycle state itself.
  */
@@ -36,7 +37,7 @@ export class Gateway {
     const parsed = parseEnvelope(raw);
     if (typeof parsed === "string") return errorReply({ code: "bad_envelope", message: parsed });
     const env = parsed;
-    if (env.proto !== PROTO) {
+    if (env.proto !== PROTO && !PROTO_EXEMPT_VERBS.has(env.verb)) {
       const info = this.opts.services.info();
       return errorReply(
         {
