@@ -20,6 +20,8 @@ export type ItemClass = "actionable" | "info";
  * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
  * restart_dropped: a `flowryn daemon restart` that will not happen (its binary
  * failed the check, its supervisor refused, or `--when-idle` expired).
+ * pass_requested: the user asked on a review page to pass its gate; the
+ * leader confirms it with them through a human channel.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -27,6 +29,7 @@ export const LANE_TABLE = {
   sensitive_action_waiting: { lane: "P0", class: "actionable" },
   pr_ready: { lane: "P1", class: "actionable" },
   gate_ready: { lane: "P1", class: "actionable" },
+  pass_requested: { lane: "P1", class: "actionable" },
   report_ready: { lane: "P1", class: "actionable" },
   worker_question: { lane: "P1", class: "actionable" },
   divergence: { lane: "P1", class: "actionable" },

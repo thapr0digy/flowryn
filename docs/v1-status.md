@@ -101,6 +101,7 @@ The features that let Flowryn replace the previous orchestrator (docs/cutover-no
 | Steer latency, Tier 2: `flowryn steer --urgent` blocks the next tool call and cuts a tool past `steer_preempt_after_ms`, never through a dialog, on Claude and Pi | Done (docs/cutover-notes.md "Steers · urgent") |
 | Leader-safe `flowryn daemon restart`: leader or you, deterministic guards with `--when-idle`, the binary and plist checks, launchd `kickstart -k` asked by the daemon, `daemon.restarted` in the briefing | Done (docs/cutover-notes.md "Leader-safe daemon restart"); `kickstart -k` by the job itself not yet run live |
 | Review questions: a review gate's open questions become decisions reserved for you, asked on the review page (lavish-axi's input playbook) and listed for the leader, the first answer counting; the ask rule (decide autonomously, ask only when blocked) in the worker contract and checked in code | Done: docs/m5-notes.md, "Gate questions" |
+| Clickable review answers: one Send carries every answer, an Other choice with your words, an "anything else" note and a pass request (a leader item; the gate still passes only through a human channel); the design and QA skills never list questions as text | Done: docs/m5-notes.md, "Gate questions", "One Send" |
 
 ## Not in v1
 

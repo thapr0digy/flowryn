@@ -34,7 +34,7 @@ Goal: a design the user reviews and approves in Lavish, and a phase plan when th
      "options": ["db", "file"], "recommend": "db", "blocks": "which store TokenCache writes to", "why": "..."}],
     "decided": [{"choice": "poller home", "picked": "src/lavish/poller.ts", "why": "..."}]}
 
-   kind is single, multi (recommend is a list) or text (recommend is your default answer, no options); at most 5 questions, 2 to 8 short options each, and blocks names what waits on the answer. Mount the form in the page: \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` with \`data-lavish-live-reload-root\` on \`<html>\`. Flowryn writes that script, opens each question as a decision reserved for the user, and reads the answers back; never write your own question form or run \`lavish-axi poll\`.
+   kind is single, multi (recommend is a list) or text (recommend is your default answer, no options); at most 5 questions, 2 to 8 short options each (never "other": every choice already offers Other, with the user's words), and blocks names what waits on the answer. Mount the form in the page: \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` with \`data-lavish-live-reload-root\` on \`<html>\`. Flowryn writes that script: clickable options with your recommendation preselected, a note and an "anything else" box, and one Send for every answer. It opens each question as a decision reserved for the user and reads the answers back. The widget is the only place a question appears: never list questions on the page as text ("A (recommended): …"), never write your own question form, never run \`lavish-axi poll\`.
 4. Host it for review: \`lavish-axi $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL. Without lavish-axi, use the page's file:// URL.
 5. A phased feature: this task is phase 1. Write \`$FLOWRYN_REPORT_DIR/plan.md\` with one section per later phase:
 
@@ -86,7 +86,7 @@ Goal: evidence, reviewed in Lavish, that the change works in the running app, on
 Rules:
 - A project without Docker: run the app the way its README says, capture the same evidence, and say so on the page.
 - Report what you saw, not what you expected: a failed step stays on the page as failed, and the verdict says broken.
-- A question only the user can answer: as in the design skill, write \`$FLOWRYN_REPORT_DIR/qa/questions.json\`, mount the question widget right after the card, say "Answer the questions below." in the card's decisions entry, and add \`--page $FLOWRYN_REPORT_DIR/qa/evidence.html --questions-file $FLOWRYN_REPORT_DIR/qa/questions.json\` to stage done. Decide the rest yourself.
+- A question only the user can answer: write \`$FLOWRYN_REPORT_DIR/qa/questions.json\` in the design skill's shape (at most 5, each with options, a recommendation and what it blocks), mount \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` in evidence.html right after the card (\`data-lavish-live-reload-root\` on \`<html>\`), say "Answer the questions below." in the card's decisions entry, and add \`--page $FLOWRYN_REPORT_DIR/qa/evidence.html --questions-file $FLOWRYN_REPORT_DIR/qa/questions.json\` to stage done. Flowryn renders them as clickable options; never list them on the page as text. Decide the rest yourself.
 `;
 
 export const STAGE_SKILLS: readonly StageSkill[] = [
