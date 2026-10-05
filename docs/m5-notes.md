@@ -215,7 +215,7 @@ A worker that ended its turn without an outcome sat idle until the 15 min `worke
   SELECT json_extract(payload, '$.obeyed') AS obeyed, COUNT(*) FROM events
    WHERE kind = 'run.turn_end_reminder_result' GROUP BY 1;
   ```
-- **Contract.** One worker contract line: "A turn-end reminder: finish with an outcome; if you wait on your own background work, say so in one line and end your turn." Known false positive, bounded by the once-per-episode cap: a worker that ends its turn to wait on its own background job, or that answers a status steer in text, gets one reminder.
+- **Contract.** The worker contract's stage line adds: "A turn ended with no outcome brings one reminder; if you wait on your own background work, say so and end your turn." (on that line: the contract stays under 30 lines). Known false positive, bounded by the once-per-episode cap: a worker that ends its turn to wait on its own background job, or that answers a status steer in text, gets one reminder.
 - Tests: `test/unit/turn-end-guard.test.ts` (each rule, each outcome kind and wait, settling, episodes, assumption A1); `test/unit/pi-worker-extension.test.ts` (the follow-up); `test/integration/turn-end-guard.test.ts` (Claude and Pi end to end: ignored and reworded pointer, obeyed, a new episode after a steer, none at a review gate). The fake worker's `FAKE: stop-no-outcome` ends the turn with no outcome; any other turn end that brings a reminder ignores it.
 
 ## Gate questions

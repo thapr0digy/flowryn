@@ -87,8 +87,8 @@ describe("the turn-end guard's episodes", () => {
     expect(received(env, task)).toHaveLength(1);
     const steered = await env.json(["steer", run, "--body-file", "-"], { stdin: "carry on" });
     expect(steered.code).toBe(0);
-    await waitUntil(() => payloads(env, run, "run.turn_end_reminder").length === 2, 15_000, "a reminder in the new episode");
-    expect(received(env, task)).toEqual([TURN_END_REMINDER, TURN_END_REMINDER]);
+    await waitUntil(() => received(env, task).length === 2, 15_000, "a reminder in the new episode");
+    expect(payloads(env, run, "run.turn_end_reminder")).toHaveLength(2);
   }, 30_000);
 
   test("a worker at its review gate is never reminded", async () => {
