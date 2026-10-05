@@ -53,7 +53,6 @@ main().then(
     setTimeout(() => process.exit(code), 50).unref();
   },
   (error: unknown) => {
-    if (isBrokenPipe(error)) process.exit(0);
     process.stderr.write(`flowryn: ${(error as Error).stack ?? String(error)}\n`);
     process.exit(1);
   },
