@@ -1,6 +1,6 @@
 import type { HarnessId } from "../harness/types.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
-import type { MessageRow } from "../lifecycle/steers.ts";
+import { steerStatus, type MessageRow } from "../lifecycle/steers.ts";
 
 /**
  * The harness contract suite (design section 5, "Contract tests gate every
@@ -11,7 +11,11 @@ import type { MessageRow } from "../lifecycle/steers.ts";
  * hooks or extension, and reconciler as production.
  *
  * The steps are the same for both harnesses; only the worker's instructions
- * differ. Claude gets plain instructions (a real model follows them). Pi gets
+ * differ. Each steer step reports the steer's own carried, seen and acked
+ * times from the scratch database beside the step's seconds, so the numbers
+ * measure the steer rather than the step's other waits or the runner's
+ * polling. Every steer is acknowledged before the worker exits, so the
+ * resumed worker has nothing left over to re-run. Claude gets plain instructions (a real model follows them). Pi gets
  * the same plus, with the offline scripted provider (spikes/pi/lib), a script
  * that plays the model's side deterministically.
  */
@@ -30,6 +34,8 @@ export interface ContractEnv {
   run(): RunRow;
   events(): ContractEvent[];
   steers(): MessageRow[];
+  /** The latest worker hook as the run's hook evidence records it, or null. */
+  lastHook(): { hook: string | null; signal: string; at: number } | null;
   /** Poll `check` until it returns a truthy value, or fail with `what` after `timeoutMs`. */
   waitFor<T>(what: string, timeoutMs: number, check: () => T | null | undefined | false): Promise<T>;
   /** The design's exit: SIGTERM by pid, start time and executable, SIGKILL after the grace period. */
@@ -70,7 +76,10 @@ export function contractBody(harness: HarnessId, scripted: boolean): string {
       "say ONE",
       "bash $FLOWRYN_BIN ack m2",
       "say TWO",
+      "bash $FLOWRYN_BIN ack m3",
       "bash perl -e 'sleep 120'",
+      "bash $FLOWRYN_BIN ack m4",
+      "say FOUR",
       `bash mkdir -p "$FLOWRYN_REPORT_DIR" && echo 'contract ok' > "$FLOWRYN_REPORT_DIR/report.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/report.md"`,
       "say DONE",
     ];
@@ -112,6 +121,20 @@ export function contractEstimateSeconds(harness: HarnessId): number {
   return SETUP_SECONDS + contractSteps(harness).reduce((total, step) => total + step.typicalSeconds, 0);
 }
 
+/** "m1 carried +2ms, seen +2.7s, acked +8.8s": the steer's own timings, after its creation. */
+function timings(env: ContractEnv, id: string): string {
+  const m = env.steers().find((x) => x.id === id);
+  return m ? `${id} ${steerStatus(m, Date.now())}` : `${id} not found`;
+}
+
+/** Wait until the worker starts a tool call after `since`: a steer sent then waits only for that tool. */
+async function waitToolStart(env: ContractEnv, what: string, since: number, timeoutMs: number): Promise<void> {
+  await env.waitFor(what, timeoutMs, () => {
+    const last = env.lastHook();
+    return last !== null && last.hook === "pre-tool" && last.at >= since;
+  });
+}
+
 export function contractSteps(harness: HarnessId): ContractStep[] {
   return [
     {
@@ -151,12 +174,14 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
       name: "deliver while busy",
       typicalSeconds: harness === "claude" ? 15 : 55,
       async run(env, state) {
+        // Sent once the sleep is running, so the expected delivery is the rest of that tool call.
+        await waitToolStart(env, "the worker to start its first tool call", env.run().launched_at ?? 0, MID_MS);
         const id = await sendSteer(env, state, "This steer only needs an acknowledgement; then carry on with your current step.");
         await waitAcked(env, id, LONG_MS);
         const paths = rungPaths(env, id);
         const expected = harness === "claude" ? ["post-tool", "stop"] : ["extension"];
         if (!paths.some((p) => expected.includes(p))) throw new Error(`${id} was carried by ${paths.join(",") || "nothing"}, expected ${expected.join(" or ")}`);
-        return `${id} acknowledged, carried by ${paths.join(",")}`;
+        return `${timings(env, id)}; carried by ${paths.join(",")}`;
       },
     },
     {
@@ -176,23 +201,29 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         const paths = rungPaths(env, id);
         const expected = harness === "claude" ? "waiter" : "extension";
         if (!paths.includes(expected)) throw new Error(`${id} was carried by ${paths.join(",") || "nothing"}, expected ${expected}`);
+        const woke = timings(env, id);
         await env.waitFor("idle again", LONG_MS, () => env.run().liveness === "idle");
-        return `${id} woke the idle worker (${paths.join(",")})`;
+        return `${woke}; woke the idle worker (${paths.join(",")})`;
       },
     },
     {
       name: "interrupt",
       typicalSeconds: 10,
       async run(env, state) {
-        await sendSteer(env, state, "Run exactly this command now and wait for it: perl -e 'sleep 120'");
-        await env.waitFor("the long command to be running", LONG_MS, () => env.run().liveness === "busy" && env.events().filter((e) => e.kind === "steer.rung").length >= 3);
-        // Give the tool call a moment to start inside the turn.
-        await Bun.sleep(6_000);
+        // Acknowledged first, so the interrupted command leaves no open steer for the resumed worker to re-run.
+        const long = await sendSteer(env, state, "First acknowledge this steer. Then run exactly this command and wait for it: perl -e 'sleep 120'");
+        const acked = await waitAcked(env, long, LONG_MS);
+        // Pi pings tool starts at most once a minute, so its sleep may report none: give it a moment instead.
+        if (harness === "claude") await waitToolStart(env, "the long command to start", acked.acked_at!, MID_MS);
+        else await Bun.sleep(3_000);
         const reply = await env.call("interrupt", { target: state.task });
         if (!reply.ok) throw new Error(`interrupt not verified: ${reply.error?.message}`);
         const run = env.run();
         if (!(await env.isAlive(run.proc_pid!, run.proc_start!, run.proc_exe!))) throw new Error("the worker died on interrupt");
-        return `verified by ${String(reply.data.evidence)}; the worker stayed alive`;
+        // An interrupted worker is idle: a steer now must reach it at once, through the waiter armed at its turn start.
+        const after = await sendSteer(env, state, "The 120-second command was only a test of the interrupt and is cancelled; do not run it again. Acknowledge this steer, then reply with the single word FOUR and end your turn.");
+        await waitAcked(env, after, MID_MS);
+        return `verified by ${String(reply.data.evidence)}; the worker stayed alive; then ${timings(env, after)}`;
       },
     },
     {
@@ -224,12 +255,13 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
       name: "deliver",
       typicalSeconds: harness === "claude" ? 15 : 135,
       async run(env, state) {
+        let id: string | null = null;
         if (!(harness === "pi" && env.scripted)) {
-          await sendSteer(env, state, 'Write one line, "contract ok", to $FLOWRYN_REPORT_DIR/report.md, then run $FLOWRYN_BIN deliver --report $FLOWRYN_REPORT_DIR/report.md and end your turn.');
+          id = await sendSteer(env, state, 'Write one line, "contract ok", to $FLOWRYN_REPORT_DIR/report.md, then run $FLOWRYN_BIN deliver --report $FLOWRYN_REPORT_DIR/report.md and end your turn.');
         }
         // A scout lands with its verified report, and the daemon then cleans it up (design section 8).
         const run = await env.waitFor("a verified deliver --report", LONG_MS, () => (["landed", "cleaned"].includes(env.run().state) ? env.run() : null));
-        return `run ${run.id} ${run.state} with ${String(lastEvent(env, "run.delivered")?.payload.report)}`;
+        return `run ${run.id} ${run.state} with ${String(lastEvent(env, "run.delivered")?.payload.report)}${id ? `; ${timings(env, id)}` : ""}`;
       },
     },
   ];

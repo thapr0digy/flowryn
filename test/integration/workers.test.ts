@@ -98,10 +98,10 @@ describe("a scout end to end", () => {
   );
 });
 
-function steers(env: FleetEnv, runId: string): { id: string; rings: number; acked_at: number | null }[] {
+function steers(env: FleetEnv, runId: string): { id: string; rings: number; seen_at: number | null; acked_at: number | null }[] {
   const db = env.h.db();
   try {
-    return db.query("SELECT id, rings, acked_at FROM messages WHERE run_id = ?1 ORDER BY created_at").all(runId) as { id: string; rings: number; acked_at: number | null }[];
+    return db.query("SELECT id, rings, seen_at, acked_at FROM messages WHERE run_id = ?1 ORDER BY created_at").all(runId) as { id: string; rings: number; seen_at: number | null; acked_at: number | null }[];
   } finally {
     db.close();
   }
@@ -152,6 +152,12 @@ describe("steers to a claude worker", () => {
       const events = env.events(run);
       expect(events.filter((e) => e === "steer.rung").length).toBeGreaterThanOrEqual(2);
       expect(steers(env, run).every((m) => m.rings === 1)).toBe(true);
+      // Seen: the hook after the PostToolUse carry, and the woken turn's UserPromptSubmit.
+      expect(steers(env, run).every((m) => m.seen_at !== null && m.seen_at <= m.acked_at!)).toBe(true);
+      const shown = await env.json(["show", run]);
+      const delivery = (shown.reply.data as { steers: { id: string; delivery: string }[] }).steers.map((m) => m.delivery);
+      expect(delivery).toHaveLength(2);
+      for (const line of delivery) expect(line).toMatch(/^carried \+\d+(ms|\.\ds), seen \+.*, acked \+/);
     },
     { timeout: 45_000 },
   );
@@ -396,6 +402,23 @@ describe("questions, cancel and interrupt", () => {
       expect(result.reply.data).toMatchObject({ interrupted: true, evidence: "transcript" });
       expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
       await env.waitRun(run, (r) => r.liveness === "idle", "idle after the interrupt");
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "interrupt on claude is refused while Herdr reads a dialog: Escape would answer it, so no key is sent",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Build\nFAKE: sleep 30000");
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      env.herdr.setStatus(busy.pane_id!, "blocked");
+      const result = await env.json(["interrupt", task]);
+      expect(result.code).not.toBe(0);
+      expect(result.reply).toMatchObject({ ok: false, error: { code: "interrupt_refused" } });
+      expect(env.herdr.calls.some((c) => c.method === "pane.send_keys")).toBe(false);
+      expect(env.events(run)).toContain("run.interrupt_refused");
+      expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
     },
     { timeout: 45_000 },
   );

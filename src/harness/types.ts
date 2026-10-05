@@ -78,7 +78,8 @@ export type HookName = keyof typeof HOOK_SIGNALS;
 
 export interface Verified {
   ok: boolean;
-  evidence: "hook" | "process" | "transcript" | "timeout";
+  /** refused: Flowryn would not act (an interrupt key while a dialog may be open). */
+  evidence: "hook" | "process" | "transcript" | "timeout" | "refused";
   detail?: string;
 }
 

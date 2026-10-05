@@ -8,10 +8,13 @@ import { taskTitle, type RunRow } from "./runs.ts";
 
 /**
  * Steers to workers (design sections 5, 6 and 12). A steer is a messages row.
- * Hooks and the Pi extension carry it; only the worker's `ack` proves it was
- * seen, because no harness can observe that a model read something. A steer
- * not acknowledged within ring_interval_ms rings again, up to max_rings
- * deliveries in all (the first plus three re-rings), and then opens a P1.
+ * Hooks and the Pi extension carry it; it is *seen* once it was provably in a
+ * model request (Claude: the next worker hook after the carry; Pi: the
+ * extension's context event), and only the worker's `ack` proves it was acted
+ * on. A steer not acknowledged within ring_interval_ms rings again, up to
+ * max_rings deliveries in all (the first plus three re-rings), and then opens
+ * a P1. A carry known to be lost (an interrupt or a failed turn before it was
+ * seen, or an idle carry not seen within seen_timeout_ms) rings again at once.
  */
 
 export interface MessageRow {
@@ -24,7 +27,14 @@ export interface MessageRow {
   carried_at: number | null;
   acked_at: number | null;
   decision_id: string | null;
+  seen_at: number | null;
+  /** The latest ring: null before the first, then carried, seen or lost. */
+  ring_state: RingState | null;
+  /** The latest ring went to an idle worker, so it must be seen within seen_timeout_ms. */
+  ring_idle: number;
 }
+
+export type RingState = "carried" | "seen" | "lost";
 
 export const MAX_STEER_CHARS = 8_000;
 
@@ -53,23 +63,155 @@ export function unackedSteers(db: Db, runId: string): MessageRow[] {
   return db.query("SELECT * FROM messages WHERE run_id = ?1 AND acked_at IS NULL ORDER BY created_at, id").all(runId) as MessageRow[];
 }
 
-/** Steers that should be delivered now: never rung, or rung long enough ago and still under the cap. */
+/**
+ * When an unacknowledged steer that has rung becomes due again: a lost carry
+ * at once, an idle carry not seen within seen_timeout_ms, and any carry after
+ * ring_interval_ms. Null when it is not rung, or out of rings.
+ */
+function dueAgainAt(m: MessageRow, timing: Timing): number | null {
+  if (m.last_rung_at === null || m.rings >= timing.max_rings) return null;
+  if (m.ring_state === "lost") return m.last_rung_at;
+  const backstop = m.last_rung_at + timing.ring_interval_ms;
+  return m.ring_state === "carried" && m.ring_idle === 1 ? Math.min(backstop, m.last_rung_at + timing.seen_timeout_ms) : backstop;
+}
+
+/** Steers that should be delivered now: never rung, or due again (above) and still under the cap. */
 export function dueSteers(db: Db, runId: string, now: number, timing: Timing): MessageRow[] {
-  return unackedSteers(db, runId).filter((m) => m.rings < timing.max_rings && (m.last_rung_at === null || now - m.last_rung_at >= timing.ring_interval_ms));
+  return unackedSteers(db, runId).filter((m) => m.rings < timing.max_rings && (m.last_rung_at === null || dueAgainAt(m, timing)! <= now));
 }
 
-/** When the next unacknowledged steer of any run becomes due again, or null. */
-export function nextRingAt(db: Db, timing: Timing): number | null {
-  const row = db
-    .query("SELECT MIN(last_rung_at) AS at FROM messages WHERE acked_at IS NULL AND last_rung_at IS NOT NULL AND rings < ?1")
-    .get(timing.max_rings) as { at: number | null };
-  return row.at === null ? null : row.at + timing.ring_interval_ms;
+/** When the run's next unacknowledged, not yet due steer becomes due, or null: a waiter wakes for it. */
+export function nextDueAt(db: Db, runId: string, timing: Timing): number | null {
+  let next: number | null = null;
+  for (const m of unackedSteers(db, runId)) {
+    const at = dueAgainAt(m, timing);
+    if (at !== null && (next === null || at < next)) next = at;
+  }
+  return next;
 }
 
-/** A hook or the extension carried the steer. Call inside a transaction. */
-export function markRung(db: Db, message: MessageRow, run: RunRow, path: RingPath, now: number): void {
-  db.query("UPDATE messages SET rings = rings + 1, last_rung_at = ?2, carried_at = COALESCE(carried_at, ?2) WHERE id = ?1").run(message.id, now);
-  appendEvent(db, { source: "hook", kind: "steer.rung", runId: run.id, taskId: run.task_id, payload: { steer: message.id, ring: message.rings + 1, path }, ts: now });
+/** Why a steer rings again: a lost carry, an idle carry nobody saw, or the ring interval. */
+function ringReason(m: MessageRow, now: number, timing: Timing): string | null {
+  if (m.last_rung_at === null) return null;
+  if (m.ring_state === "lost") return "lost";
+  if (m.ring_state === "carried" && m.ring_idle === 1 && now - m.last_rung_at < timing.ring_interval_ms) return "unseen";
+  return "interval";
+}
+
+/**
+ * A hook or the extension carried the steer. `idle` says the worker was idle,
+ * so the carry must be seen within seen_timeout_ms. Call inside a transaction.
+ */
+export function markRung(db: Db, message: MessageRow, run: RunRow, path: RingPath, now: number, idle: boolean, timing: Timing): void {
+  db.query("UPDATE messages SET rings = rings + 1, last_rung_at = ?2, carried_at = COALESCE(carried_at, ?2), ring_state = 'carried', ring_idle = ?3 WHERE id = ?1").run(
+    message.id,
+    now,
+    idle ? 1 : 0,
+  );
+  const again = ringReason(message, now, timing);
+  appendEvent(db, {
+    source: "hook",
+    kind: "steer.rung",
+    runId: run.id,
+    taskId: run.task_id,
+    payload: { steer: message.id, ring: message.rings + 1, path, idle, ...(again ? { again } : {}) },
+    ts: now,
+  });
+}
+
+/** Carried steers of a run whose latest ring was not seen yet. */
+function carriedUnseen(db: Db, runId: string): MessageRow[] {
+  return unackedSteers(db, runId).filter((m) => m.ring_state === "carried");
+}
+
+/**
+ * Carried steers reached a model request: `ids` names them (the Pi extension
+ * saw them in its context event), or null means every carried one (a Claude
+ * hook after the carry). Call inside a transaction; returns the ids marked.
+ */
+export function markSeen(db: Db, run: RunRow, ids: string[] | null, via: string, now: number): string[] {
+  const marked: string[] = [];
+  for (const m of carriedUnseen(db, run.id)) {
+    if (ids !== null && !ids.includes(m.id)) continue;
+    db.query("UPDATE messages SET ring_state = 'seen', seen_at = COALESCE(seen_at, ?2) WHERE id = ?1").run(m.id, now);
+    appendEvent(db, {
+      source: "hook",
+      kind: "steer.seen",
+      runId: run.id,
+      taskId: run.task_id,
+      payload: { steer: m.id, ring: m.rings, via, after_carry_ms: m.last_rung_at === null ? null : now - m.last_rung_at },
+      ts: now,
+    });
+    marked.push(m.id);
+  }
+  return marked;
+}
+
+/**
+ * Carried steers that never reached a model request are lost (an interrupt
+ * dropped them, or the turn failed first): each rings again at once. Call
+ * inside a transaction; returns the ids marked.
+ */
+export function markLost(db: Db, run: RunRow, reason: string, now: number): string[] {
+  const lost = carriedUnseen(db, run.id);
+  for (const m of lost) {
+    db.query("UPDATE messages SET ring_state = 'lost' WHERE id = ?1").run(m.id);
+    appendEvent(db, { source: "daemon", kind: "steer.lost", runId: run.id, taskId: run.task_id, payload: { steer: m.id, ring: m.rings, reason }, ts: now });
+  }
+  return lost.map((m) => m.id);
+}
+
+/**
+ * The Pi extension says how it delivered a carried steer: "followUp" to an
+ * idle agent (which starts a turn at once, so it must be seen within
+ * seen_timeout_ms) or "steer" into a busy one (seen after the current tool
+ * batch). Call inside a transaction.
+ */
+export function noteDeliveryMode(db: Db, run: RunRow, id: string, mode: "steer" | "followUp", now: number): boolean {
+  const m = getMessage(db, id);
+  if (!m || m.run_id !== run.id || m.ring_state !== "carried") return false;
+  db.query("UPDATE messages SET ring_idle = ?2 WHERE id = ?1").run(id, mode === "followUp" ? 1 : 0);
+  appendEvent(db, { source: "hook", kind: "steer.delivered", runId: run.id, taskId: run.task_id, payload: { steer: id, ring: m.rings, mode }, ts: now });
+  return true;
+}
+
+/** One steer's delivery, for `show`: queued, carried, seen or lost, with each step's delay after creation. */
+export function steerStatus(m: MessageRow, now: number): string {
+  const after = (at: number) => `+${formatMs(at - m.created_at)}`;
+  const parts: string[] = [];
+  if (m.carried_at !== null) parts.push(`carried ${after(m.carried_at)}`);
+  if (m.seen_at !== null) parts.push(`seen ${after(m.seen_at)}`);
+  if (m.acked_at !== null) parts.push(`acked ${after(m.acked_at)}`);
+  if (m.acked_at === null) {
+    if (m.ring_state === null) parts.push(`queued ${formatMs(now - m.created_at)}`);
+    else if (m.ring_state === "lost") parts.push("lost, ringing again");
+    else if (m.ring_state === "carried") parts.push(`not seen for ${formatMs(now - (m.last_rung_at ?? now))}`);
+  }
+  return parts.join(", ");
+}
+
+/** The fleet's one-word view of a run's oldest unacknowledged steer: "m3 queued", "m3 unseen 12s", "m3 seen", or "-". */
+export function steerBrief(db: Db, runId: string, now: number): string {
+  const m = unackedSteers(db, runId)[0];
+  if (!m) return "-";
+  if (m.ring_state === null) return `${m.id} queued ${formatMs(now - m.created_at)}`;
+  if (m.ring_state === "seen") return `${m.id} seen, not acked`;
+  if (m.ring_state === "lost") return `${m.id} lost, ringing`;
+  return `${m.id} unseen ${formatMs(now - (m.last_rung_at ?? now))}`;
+}
+
+/** A run's latest steers, oldest first: every unacknowledged one and the last few acknowledged, at most `limit`. */
+export function recentSteers(db: Db, runId: string, limit: number): MessageRow[] {
+  const rows = db.query("SELECT * FROM messages WHERE run_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2").all(runId, limit) as MessageRow[];
+  const shown = new Set(rows.map((m) => m.id));
+  const older = unackedSteers(db, runId).filter((m) => !shown.has(m.id));
+  return [...older, ...rows.toReversed()];
+}
+
+export function formatMs(ms: number): string {
+  if (ms < 1_000) return `${Math.max(0, Math.round(ms))}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  return `${Math.round(ms / 1_000)}s`;
 }
 
 /**
@@ -105,7 +247,8 @@ export function flagUnackedSteers(db: Db, now: number, timing: Timing): string[]
 /** The worker acknowledged a steer. Call inside a transaction. */
 export function ackSteer(db: Db, run: RunRow, message: MessageRow, now: number): { already: boolean } {
   if (message.acked_at !== null) return { already: true };
-  db.query("UPDATE messages SET acked_at = ?2 WHERE id = ?1").run(message.id, now);
+  // An ack proves the steer was read, even when no hook reported it seen first.
+  db.query("UPDATE messages SET acked_at = ?2, seen_at = COALESCE(seen_at, ?2), ring_state = CASE WHEN ring_state = 'carried' THEN 'seen' ELSE ring_state END WHERE id = ?1").run(message.id, now);
   const event = appendEvent(db, { source: "cli", kind: "steer.acked", runId: run.id, taskId: run.task_id, payload: { steer: message.id, rings: message.rings }, ts: now });
   if (message.rings > 1) {
     resolveRunItems(db, run.id, ["steer_unacked"], `steer.acked ${message.id}`, now);
