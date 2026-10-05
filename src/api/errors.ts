@@ -42,6 +42,8 @@ export const ERROR_CODES = {
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
   stage_waiting: EXIT.policy,
+  // steers and interrupts
+  interrupt_refused: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,

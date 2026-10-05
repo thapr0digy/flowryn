@@ -7,8 +7,9 @@ import { adapterFor } from "../harness/registry.ts";
 import type { Verified } from "../harness/types.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { isAlive, terminate, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
+import { findOpenRunItem } from "../attention/items.ts";
 import { getRun, type RunRow } from "./runs.ts";
-import type { SteerBus } from "./steers.ts";
+import { markLost, type SteerBus } from "./steers.ts";
 
 export interface ControlDeps {
   db: Db;
@@ -72,11 +73,39 @@ export function transcriptSize(path: string | null): number {
 }
 
 /**
- * Interrupt a busy worker. Claude: the interrupt key through Herdr, verified by
- * the interrupt marker in its transcript, because no hook and no idle_prompt
- * follow an interrupt (M0 c04); busy is then cleared here, since nothing else
- * would clear it before the lease expires. Pi: the extension's abort, verified
- * by the agent_settled it emits within milliseconds (M0 p14).
+ * Why the interrupt key must not be sent now, or null. Flowryn never answers a
+ * dialog with keys: Escape on a permission dialog declines it. So the key goes
+ * only while Herdr reads the agent "working" (a tool or a reply in progress;
+ * "blocked" is a dialog, and a dialog and a running tool never overlap, M0
+ * c12), and never while Flowryn knows of a dialog itself (blocked_dialog, an
+ * open blocked_prompt). Herdr unreachable or unsure ("unknown", null) refuses
+ * too. The status is read right before the key; a dialog that opens in the
+ * milliseconds between is the remaining window.
+ */
+export async function interruptKeyRefusal(deps: Pick<ControlDeps, "db">, run: RunRow, runtime: HerdrRuntime): Promise<string | null> {
+  if (run.liveness === "blocked_dialog") return "the worker is blocked on a dialog; answer it in its pane";
+  if (findOpenRunItem(deps.db, "blocked_prompt", run.id)) return "a permission dialog is open; answer it in the worker's pane";
+  let status: string | null;
+  try {
+    status = await runtime.agentStatus(run.pane_id!);
+  } catch (error) {
+    return `cannot read the worker's status from Herdr (${(error as Error).message})`;
+  }
+  if (status === "blocked") return "Herdr reads the worker blocked on a dialog; answer it in its pane";
+  if (status !== "working") return `Herdr reads the worker ${status ?? "unknown"}, not working; nothing to interrupt`;
+  return null;
+}
+
+/**
+ * Interrupt a busy worker. Claude: the interrupt key through Herdr, only while
+ * no dialog can be open (interruptKeyRefusal), verified by the interrupt
+ * marker in its transcript, because no hook and no idle_prompt follow an
+ * interrupt (M0 c04); busy is then cleared here, since nothing else would
+ * clear it before the lease expires. Pi: the extension's abort, verified by
+ * the agent_settled it emits within milliseconds (M0 p14). After a verified
+ * interrupt, steers carried but not yet seen are lost (Pi's abort drops queued
+ * messages; an interrupted Claude turn never reads its attachment), and the
+ * waiter is woken so an idle steer goes at once.
  */
 export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10_000): Promise<Verified> {
   const run = getRun(deps.db, runId);
@@ -90,6 +119,13 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
   if (adapter.interruptVia === "keys") {
     const runtime = deps.runtime();
     if (!runtime || !run.pane_id) return { ok: false, evidence: "timeout", detail: "Herdr is not reachable" };
+    const refusal = await interruptKeyRefusal(deps, run, runtime);
+    if (refusal) {
+      tx(deps.db, () =>
+        appendEvent(deps.db, { source: "daemon", kind: "run.interrupt_refused", runId, taskId: run.task_id, payload: { reason: refusal, liveness: run.liveness }, ts: deps.now() }),
+      );
+      return { ok: false, evidence: "refused", detail: refusal };
+    }
     const before = transcriptSize(run.transcript_path);
     await runtime.sendInterrupt(run.pane_id);
     // Without a transcript (no worker-start yet) there is nothing to verify against; do not wait long.
@@ -118,6 +154,9 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
       deps.db.query("UPDATE runs SET busy_until = NULL, idle_since = ?2, updated_at = ?2 WHERE id = ?1").run(runId, deps.now());
     }
     appendEvent(deps.db, { source: "daemon", kind: "run.interrupted", runId, taskId: run.task_id, payload: { ok: result.ok, evidence: result.evidence } });
+    if (result.ok) markLost(deps.db, run, "interrupted", deps.now());
   });
+  // Nothing else wakes the waiter after an interrupt: no hook fires (M0 c04), so an idle steer would wait for wait_poll_ms or a pass.
+  if (result.ok) deps.bus.notify(runId);
   return result;
 }

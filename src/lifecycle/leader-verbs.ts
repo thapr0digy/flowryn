@@ -7,7 +7,7 @@ import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
 import { getDecision } from "./decisions.ts";
 import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
-import { createSteer, unackedSteers } from "./steers.ts";
+import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
 import { deliveredOf, prEvidence } from "./delivery.ts";
@@ -199,6 +199,7 @@ const interrupt: VerbSpec = {
   },
   apply(_ctx, _args, prepared) {
     const { run, task, verified } = prepared as { run: string; task: string; verified: { ok: boolean; evidence: string; detail?: string } };
+    if (verified.evidence === "refused") throw new FlowrynError("interrupt_refused", `interrupt refused: ${verified.detail ?? "unsafe now"}`, `flowryn show ${task}`);
     if (!verified.ok) throw new FlowrynError("internal", `the interrupt was not verified (${verified.detail ?? verified.evidence})`, `flowryn show ${task}`);
     return { data: { run, task, interrupted: true, evidence: verified.evidence } };
   },
@@ -301,6 +302,7 @@ const fleet: VerbSpec = {
       stage: stageLabel(r),
       live: r.liveness,
       age: age(ctx.now, r.started_at),
+      steer: steerBrief(ctx.db, r.id, ctx.now),
       needs: needs(ctx, r),
     }));
     const lanes = ctx.db.query("SELECT lane, COUNT(*) AS n FROM items WHERE state IN ('open','presented') GROUP BY lane").all() as { lane: string; n: number }[];
@@ -364,7 +366,8 @@ const show: VerbSpec = {
       delivery_mode: string;
       mode_reason: string | null;
     };
-    const steers = unackedSteers(ctx.db, run.id).map((m) => ({ id: m.id, rings: m.rings, body: sanitizeLine(m.body, 80) }));
+    // Delivery is "seen" (in a model request); the ack is compliance. Times are after the steer was created.
+    const steers = recentSteers(ctx.db, run.id, 5).map((m) => ({ id: m.id, rings: m.rings, delivery: steerStatus(m, ctx.now), body: sanitizeLine(m.body, 60) }));
     const decisions = (ctx.db.query("SELECT id, state, question, answer FROM decisions WHERE run_id = ?1 ORDER BY id").all(run.id) as {
       id: string;
       state: string;

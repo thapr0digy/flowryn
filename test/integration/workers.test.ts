@@ -98,10 +98,20 @@ describe("a scout end to end", () => {
   );
 });
 
-function steers(env: FleetEnv, runId: string): { id: string; rings: number; acked_at: number | null }[] {
+function steers(env: FleetEnv, runId: string): { id: string; rings: number; seen_at: number | null; acked_at: number | null }[] {
   const db = env.h.db();
   try {
-    return db.query("SELECT id, rings, acked_at FROM messages WHERE run_id = ?1 ORDER BY created_at").all(runId) as { id: string; rings: number; acked_at: number | null }[];
+    return db.query("SELECT id, rings, seen_at, acked_at FROM messages WHERE run_id = ?1 ORDER BY created_at").all(runId) as { id: string; rings: number; seen_at: number | null; acked_at: number | null }[];
+  } finally {
+    db.close();
+  }
+}
+
+/** One steer's ring state, as the daemon recorded it. */
+function ringOf(env: FleetEnv, id: string): { ring_state: string; seen_at: number | null; rings: number } {
+  const db = env.h.db();
+  try {
+    return db.query("SELECT ring_state, seen_at, rings FROM messages WHERE id = ?1").get(id) as { ring_state: string; seen_at: number | null; rings: number };
   } finally {
     db.close();
   }
@@ -152,6 +162,50 @@ describe("steers to a claude worker", () => {
       const events = env.events(run);
       expect(events.filter((e) => e === "steer.rung").length).toBeGreaterThanOrEqual(2);
       expect(steers(env, run).every((m) => m.rings === 1)).toBe(true);
+      // Seen: the hook after the PostToolUse carry, and the woken turn's UserPromptSubmit.
+      expect(steers(env, run).every((m) => m.seen_at !== null && m.seen_at <= m.acked_at!)).toBe(true);
+      const shown = await env.json(["show", run]);
+      const delivery = (shown.reply.data as { steers: { id: string; delivery: string }[] }).steers.map((m) => m.delivery);
+      expect(delivery).toHaveLength(2);
+      for (const line of delivery) expect(line).toMatch(/^carried \+\d+(ms|\.\ds), seen \+.*, acked \+/);
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "a woken turn's UserPromptSubmit is not seen: a StopFailure before its first inference loses the steer, a PreToolUse first keeps it seen",
+    async () => {
+      const env = await fleet();
+      // A worker that sends no hooks of its own: the test plays Claude's hooks with the run's token.
+      const { run } = await env.dispatch("Build\nFAKE: no-start");
+      const launched = await env.waitRun(run, (r) => r.pane_id !== null && r.proc_pid !== null, "launched");
+      const pane = env.herdr.panes.get(launched.pane_id!)!;
+      const worker = { env: { FLOWRYN_TOKEN: pane.env.FLOWRYN_TOKEN! } };
+      const hook = (name: string) => env.cli(["hook", name, "--harness", "claude"], { ...worker, stdin: "{}" });
+      const state = (id: string) => ringOf(env, id);
+
+      // The waiter wakes the idle worker; the woken turn starts and fails before the model reads anything.
+      const lost = await steer(env, run, "first");
+      expect((await hook("wait-steer")).code).toBe(2);
+      await hook("prompt");
+      expect(state(lost)).toMatchObject({ ring_state: "carried", seen_at: null });
+      await hook("stop-failure");
+      expect(state(lost)).toMatchObject({ ring_state: "lost", seen_at: null, rings: 1 });
+      // It rings again at once, through the next waiter.
+      const again = await hook("wait-steer");
+      expect(again.code).toBe(2);
+      expect(again.stderr).toContain(lost);
+      expect(state(lost)).toMatchObject({ ring_state: "carried", rings: 2 });
+
+      // This time the model reaches a tool call: the PreToolUse proves it read the wake, so a later failure keeps it seen.
+      await hook("prompt");
+      await hook("pre-tool");
+      expect(state(lost)).toMatchObject({ ring_state: "seen" });
+      await hook("stop-failure");
+      expect(state(lost).ring_state).toBe("seen");
+      const events = env.events(run);
+      expect(events.filter((e) => e === "steer.lost")).toHaveLength(1);
+      expect(events.filter((e) => e === "steer.seen")).toHaveLength(1);
     },
     { timeout: 45_000 },
   );
@@ -396,6 +450,23 @@ describe("questions, cancel and interrupt", () => {
       expect(result.reply.data).toMatchObject({ interrupted: true, evidence: "transcript" });
       expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
       await env.waitRun(run, (r) => r.liveness === "idle", "idle after the interrupt");
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "interrupt on claude is refused while Herdr reads a dialog: Escape would answer it, so no key is sent",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Build\nFAKE: sleep 30000");
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      env.herdr.setStatus(busy.pane_id!, "blocked");
+      const result = await env.json(["interrupt", task]);
+      expect(result.code).not.toBe(0);
+      expect(result.reply).toMatchObject({ ok: false, error: { code: "interrupt_refused" } });
+      expect(env.herdr.calls.some((c) => c.method === "pane.send_keys")).toBe(false);
+      expect(env.events(run)).toContain("run.interrupt_refused");
+      expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
     },
     { timeout: 45_000 },
   );

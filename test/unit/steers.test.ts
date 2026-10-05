@@ -6,7 +6,7 @@ import { DEFAULT_TIMING, type Timing } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { taskTitleFrom } from "../../src/lifecycle/dispatch.ts";
 import { getRun, type RunRow } from "../../src/lifecycle/runs.ts";
-import { ackSteer, createSteer, dueSteers, flagUnackedSteers, getMessage, markRung, SteerBus } from "../../src/lifecycle/steers.ts";
+import { ackSteer, createSteer, dueSteers, flagUnackedSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, recentSteers, steerBrief, steerStatus, SteerBus } from "../../src/lifecycle/steers.ts";
 
 let dir: string;
 let db: Db;
@@ -37,18 +37,18 @@ describe("steer rings", () => {
     const m = tx(db, () => createSteer(db, run, "use the new API", 0));
     expect(m.id).toBe("m1");
     expect(dueSteers(db, "r1", 0, timing).map((x) => x.id)).toEqual(["m1"]);
-    tx(db, () => markRung(db, m, run, "waiter", 0));
+    tx(db, () => markRung(db, m, run, "waiter", 0, false, timing));
     expect(dueSteers(db, "r1", 999, timing)).toEqual([]);
     expect(dueSteers(db, "r1", 1_000, timing).map((x) => x.id)).toEqual(["m1"]);
-    tx(db, () => markRung(db, getMessage(db, "m1")!, run, "waiter", 1_000));
-    tx(db, () => markRung(db, getMessage(db, "m1")!, run, "waiter", 2_000));
+    tx(db, () => markRung(db, getMessage(db, "m1")!, run, "waiter", 1_000, false, timing));
+    tx(db, () => markRung(db, getMessage(db, "m1")!, run, "waiter", 2_000, false, timing));
     expect(getMessage(db, "m1")!.rings).toBe(3);
     expect(dueSteers(db, "r1", 10_000, timing)).toEqual([]);
   });
 
   test("after the last ring and one more interval unacknowledged: one P1 per run", () => {
     const m = tx(db, () => createSteer(db, run, "x", 0));
-    for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at));
+    for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at, false, timing));
     expect(tx(db, () => flagUnackedSteers(db, 2_500, timing))).toEqual([]);
     expect(tx(db, () => flagUnackedSteers(db, 3_000, timing))).toEqual(["r1"]);
     expect(tx(db, () => flagUnackedSteers(db, 9_000, timing))).toEqual([]);
@@ -58,7 +58,7 @@ describe("steer rings", () => {
 
   test("an ack after re-rings resolves the P1 and says so once, as information", () => {
     const m = tx(db, () => createSteer(db, run, "x", 0));
-    for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at));
+    for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at, false, timing));
     tx(db, () => flagUnackedSteers(db, 3_000, timing));
     expect(tx(db, () => ackSteer(db, run, getMessage(db, m.id)!, 4_000))).toEqual({ already: false });
     expect(tx(db, () => ackSteer(db, run, getMessage(db, m.id)!, 5_000))).toEqual({ already: true });
@@ -67,6 +67,87 @@ describe("steer rings", () => {
       { kind: "steer_unacked", class: "actionable", state: "resolved" },
       { kind: "steer_acked", class: "info", state: "open" },
     ]);
+  });
+});
+
+function events(kind: string): Record<string, unknown>[] {
+  return (db.query("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq").all(kind) as { payload: string }[]).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+}
+
+describe("seen and lost carries", () => {
+  const slow: Timing = { ...DEFAULT_TIMING, ring_interval_ms: 300_000, seen_timeout_ms: 5_000, max_rings: 4 };
+
+  test("an idle carry not seen within seen_timeout_ms rings again; a busy carry waits for the ring interval", () => {
+    const idle = tx(db, () => createSteer(db, run, "idle one", 0));
+    const busy = tx(db, () => createSteer(db, run, "busy one", 0));
+    tx(db, () => markRung(db, idle, run, "waiter", 1_000, true, slow));
+    tx(db, () => markRung(db, busy, run, "post-tool", 1_000, false, slow));
+    expect(dueSteers(db, "r1", 5_999, slow)).toEqual([]);
+    expect(nextDueAt(db, "r1", slow)).toBe(6_000);
+    expect(dueSteers(db, "r1", 6_000, slow).map((m) => m.id)).toEqual([idle.id]);
+    tx(db, () => markRung(db, getMessage(db, idle.id)!, run, "waiter", 6_000, true, slow));
+    expect(events("steer.rung").at(-1)).toMatchObject({ steer: idle.id, ring: 2, again: "unseen" });
+    expect(dueSteers(db, "r1", 10_999, slow)).toEqual([]);
+    expect(dueSteers(db, "r1", 301_000, slow).map((m) => m.id)).toContain(busy.id);
+  });
+
+  test("a seen carry is not re-rung early, and seen_at keeps the first time", () => {
+    const m = tx(db, () => createSteer(db, run, "x", 0));
+    tx(db, () => markRung(db, m, run, "waiter", 100, true, slow));
+    expect(tx(db, () => markSeen(db, run, null, "prompt", 150))).toEqual([m.id]);
+    expect(dueSteers(db, "r1", 60_000, slow)).toEqual([]);
+    expect(getMessage(db, m.id)).toMatchObject({ seen_at: 150, ring_state: "seen" });
+    expect(events("steer.seen")).toEqual([{ steer: m.id, ring: 1, via: "prompt", after_carry_ms: 50 }]);
+    tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", 300_100, true, slow));
+    tx(db, () => markSeen(db, run, [m.id], "context", 300_200));
+    expect(getMessage(db, m.id)!.seen_at).toBe(150);
+    expect(steerStatus(getMessage(db, m.id)!, 400_000)).toBe("carried +100ms, seen +150ms");
+  });
+
+  test("markSeen with ids marks only those; markLost makes an unseen carry due at once", () => {
+    const a = tx(db, () => createSteer(db, run, "a", 0));
+    const b = tx(db, () => createSteer(db, run, "b", 0));
+    tx(db, () => markRung(db, a, run, "extension", 10, false, slow));
+    tx(db, () => markRung(db, b, run, "extension", 10, false, slow));
+    expect(tx(db, () => markSeen(db, run, [b.id, "m99"], "context", 20))).toEqual([b.id]);
+    expect(tx(db, () => markLost(db, run, "interrupted", 30))).toEqual([a.id]);
+    expect(dueSteers(db, "r1", 30, slow).map((m) => m.id)).toEqual([a.id]);
+    expect(steerBrief(db, "r1", 30)).toBe(`${a.id} lost, ringing`);
+    tx(db, () => markRung(db, getMessage(db, a.id)!, run, "extension", 40, true, slow));
+    expect(events("steer.rung").at(-1)).toMatchObject({ steer: a.id, ring: 2, again: "lost" });
+  });
+
+  test("a carry seen by the Pi context event is not lost on an interrupt", () => {
+    const m = tx(db, () => createSteer(db, run, "x", 0));
+    tx(db, () => markRung(db, m, run, "extension", 100, true, slow));
+    tx(db, () => markSeen(db, run, [m.id], "context", 150));
+    expect(tx(db, () => markLost(db, run, "interrupted", 200))).toEqual([]);
+  });
+
+  test("the Pi extension's delivery mode decides whether an unseen carry is idle", () => {
+    const m = tx(db, () => createSteer(db, run, "x", 0));
+    tx(db, () => markRung(db, m, run, "extension", 0, true, slow));
+    expect(tx(db, () => noteDeliveryMode(db, run, m.id, "steer", 5))).toBe(true);
+    expect(dueSteers(db, "r1", 10_000, slow)).toEqual([]);
+    expect(events("steer.delivered")).toEqual([{ steer: m.id, ring: 1, mode: "steer" }]);
+    tx(db, () => markSeen(db, run, [m.id], "context", 20));
+    expect(tx(db, () => noteDeliveryMode(db, run, m.id, "followUp", 30))).toBe(false);
+  });
+
+  test("a max_rings cap still holds for fast re-rings", () => {
+    const m = tx(db, () => createSteer(db, run, "x", 0));
+    for (const at of [0, 5_000, 10_000, 15_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at, true, slow));
+    expect(dueSteers(db, "r1", 1_000_000, slow)).toEqual([]);
+    expect(nextDueAt(db, "r1", slow)).toBeNull();
+  });
+
+  test("recentSteers keeps every unacknowledged steer and the latest acknowledged ones", () => {
+    const first = tx(db, () => createSteer(db, run, "old, never acked", 0));
+    for (let i = 1; i <= 6; i++) {
+      const m = tx(db, () => createSteer(db, run, `n${i}`, i));
+      tx(db, () => ackSteer(db, run, m, i + 1));
+    }
+    expect(recentSteers(db, "r1", 3).map((m) => m.id)).toEqual([first.id, "m5", "m6", "m7"]);
   });
 });
 

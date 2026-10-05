@@ -86,6 +86,13 @@ describe("contract suite", () => {
     ]);
   });
 
+  test("the scripted Pi worker acknowledges every steer the suite sends, the long command's before it runs", () => {
+    const script = contractBody("pi", true).split("FLOWRYN-SCRIPT: ")[1]!.split(" ;; ");
+    const acks = script.filter((s) => s.startsWith("bash $FLOWRYN_BIN ack ")).map((s) => s.split(" ").at(-1));
+    expect(acks).toEqual(["m1", "m2", "m3", "m4"]);
+    expect(script.indexOf("bash $FLOWRYN_BIN ack m3")).toBe(script.indexOf("bash perl -e 'sleep 120'") - 1);
+  });
+
   test("only the scripted Pi model gets a script; a real model gets plain instructions", () => {
     expect(contractBody("pi", true)).toContain("FLOWRYN-SCRIPT:");
     expect(contractBody("pi", false)).not.toContain("FLOWRYN-SCRIPT:");

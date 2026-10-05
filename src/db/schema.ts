@@ -344,6 +344,21 @@ CREATE UNIQUE INDEX projects_import ON projects(import_source) WHERE import_sour
 CREATE UNIQUE INDEX decisions_import ON decisions(import_source) WHERE import_source IS NOT NULL;
 `;
 
+/**
+ * Steer latency: when a carried steer was provably in a model request
+ * (seen_at, the first time), and the latest ring's state: carried, seen or
+ * lost (a known-lost carry rings again at once). ring_idle marks a carry to an
+ * idle worker, which must be seen within seconds or it rings again. seen_via
+ * names what marked the latest ring seen (a Claude hook, Pi's context event).
+ */
+const STEER_SEEN_SQL = /* sql */ `
+ALTER TABLE messages ADD COLUMN seen_at INTEGER;
+ALTER TABLE messages ADD COLUMN ring_state TEXT;
+ALTER TABLE messages ADD COLUMN ring_idle INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN seen_via TEXT;
+UPDATE messages SET ring_state = 'carried' WHERE rings > 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -352,6 +367,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 5, name: "workflows", sql: WORKFLOW_SQL },
   { version: 6, name: "decisions", sql: DECISIONS_SQL },
   { version: 7, name: "import", sql: IMPORT_SQL },
+  { version: 8, name: "steer-seen", sql: STEER_SEEN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

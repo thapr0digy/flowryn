@@ -14,7 +14,7 @@ import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, tas
 import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
-import { dueSteers, getMessage, markRung, type RingPath } from "./steers.ts";
+import { dueSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 
@@ -88,11 +88,12 @@ function leaderOnly(ctx: HandlerCtx, name: string): void {
 }
 
 /** Busy is a lease the hooks refresh; nothing fires after an interrupt, so it expires instead (design section 5). */
-function markBusy(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
+function markBusy(ctx: HandlerCtx, run: RunWithPolicy, signal: string, hook?: HookName): void {
   const now = ctx.now();
   const until = now + ctx.fleet.timing().busy_lease_ms;
   ctx.db.query("UPDATE runs SET busy_until = ?2, idle_since = NULL, last_hook_at = ?3, updated_at = ?3 WHERE id = ?1").run(run.id, until, now);
-  recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now }, now);
+  // The hook name tells a tool starting (pre-tool) from one ending (post-tool), which share the signal.
+  recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now, ...(hook ? { hook } : {}) }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "busy", "hook", { signal }, now);
   resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
 }
@@ -105,12 +106,26 @@ function markIdle(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
   resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
 }
 
-/** Take the first due steer and mark it rung. Call inside the transaction. */
+/** Take the first due steer and mark it rung, carried into a busy turn. Call inside the transaction. */
 function takeSteer(ctx: HandlerCtx, run: RunWithPolicy, path: RingPath) {
   const due = dueSteers(ctx.db, run.id, ctx.now(), ctx.fleet.timing())[0];
   if (!due) return null;
-  markRung(ctx.db, due, run, path, ctx.now());
+  markRung(ctx.db, due, run, path, ctx.now(), false, ctx.fleet.timing());
   return due;
+}
+
+/**
+ * A Claude worker hook that follows a model inference proves a carried steer
+ * reached a model request: the next PreToolUse, PostToolUse or Stop after the
+ * carry (the model read the attachment, or the woken turn's prompt, at the
+ * inference in between). UserPromptSubmit is not evidence: it fires before
+ * the model reads anything, so a woken turn that fails or is interrupted
+ * before its first inference leaves the steer carried, and lost. A parallel
+ * sibling tool's hook can mark it a moment early. Pi proves it with its
+ * context event instead (hook steer-seen).
+ */
+function claudeSaw(ctx: HandlerCtx, run: RunWithPolicy, args: Args, hook: "pre-tool" | "post-tool" | "stop"): void {
+  if (harnessOf(args) === "claude") markSeen(ctx.db, run, null, hook, ctx.now());
 }
 
 // --- worker-start and the isolation assertion ---------------------------------------------
@@ -348,8 +363,9 @@ const prompt = signalVerb(
 const preTool = signalVerb(
   "pre-tool",
   "Hook: a tool is about to run (busy lease); a leader's merge or discard asks you first",
-  (ctx, run) => {
-    markBusy(ctx, run, HOOK_SIGNALS["pre-tool"]);
+  (ctx, run, args) => {
+    claudeSaw(ctx, run, args, "pre-tool");
+    markBusy(ctx, run, HOOK_SIGNALS["pre-tool"], "pre-tool");
     return { data: { run: run.id } };
   },
   (ctx, input) => leader.preToolUse(ctx, input),
@@ -360,7 +376,8 @@ const postTool = signalVerb(
   "post-tool",
   "Hook: a tool finished; a worker gets a pending steer as context",
   (ctx, run, args) => {
-    markBusy(ctx, run, HOOK_SIGNALS["post-tool"]);
+    claudeSaw(ctx, run, args, "post-tool");
+    markBusy(ctx, run, HOOK_SIGNALS["post-tool"], "post-tool");
     if (harnessOf(args) !== "claude") return { data: { run: run.id } };
     const steer = takeSteer(ctx, run, "post-tool");
     return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
@@ -370,6 +387,7 @@ const postTool = signalVerb(
 
 /** Stop: a turn ended, unless a pending steer continues it (M0 c06), at most twice in a row. */
 const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer (worker) or a P0 (leader)", (ctx, run, args) => {
+  claudeSaw(ctx, run, args, "stop");
   if (harnessOf(args) === "claude") {
     const used = ctx.fleet.continuations.get(run.id) ?? 0;
     if (used < MAX_CONTINUATIONS) {
@@ -391,6 +409,8 @@ const stopFailure = signalVerb(
   "Hook: a turn ended in an API error",
   (ctx, run, args) => {
     ctx.fleet.continuations.delete(run.id);
+    // The turn ended in an API error before any further inference: what it carried was never read.
+    markLost(ctx.db, run, "turn failed", ctx.now());
     markIdle(ctx, run, HOOK_SIGNALS["stop-failure"]);
     const input = parseInput(args);
     appendEvent(ctx.db, { source: "hook", kind: "run.turn_failed", runId: run.id, taskId: run.task_id, payload: { error: typeof input.error === "string" ? input.error : null } });
@@ -564,11 +584,14 @@ const waitSteer: VerbSpec = {
         if (command) return { command };
       }
       const now = ctx.now();
-      const due = dueSteers(ctx.db, runId, now, ctx.fleet.timing())[0];
+      const timing = ctx.fleet.timing();
+      const due = dueSteers(ctx.db, runId, now, timing)[0];
       if (due && (harness === "pi" || idleNow(run, now))) return { steer: due.id };
       const remaining = deadline - now;
       if (remaining <= 0) return { wait: true };
-      const outcome = await bus.wait(runId, waiter, remaining);
+      // Wake for the next re-ring too (an idle carry nobody saw), not only for the bus.
+      const ringAt = nextDueAt(ctx.db, runId, timing);
+      const outcome = await bus.wait(runId, waiter, ringAt !== null && ringAt > now ? Math.min(remaining, ringAt - now) : remaining);
       if (outcome === "superseded") return { exit: true };
     }
   },
@@ -581,10 +604,53 @@ const waitSteer: VerbSpec = {
     // Another path carried it between the wait and this transaction.
     if (!due) return { data: { wait: true } };
     const harness = harnessOf(args);
-    markRung(ctx.db, due, run, harness === "pi" ? "extension" : "waiter", now);
+    // The Claude waiter fires only while idle; the extension says how it delivered (hook steer-carried).
+    markRung(ctx.db, due, run, harness === "pi" ? "extension" : "waiter", now, harness === "claude" || idleNow(run, now), ctx.fleet.timing());
     const message = getMessage(ctx.db, due.id)!;
     return { data: { fire: { id: message.id, line: harness === "pi" ? steerLine(message.id, message.body) : steerPointer(message.id) } } };
   },
 };
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];
+/** A Pi worker verb's input: steer ids, as the extension reports them. */
+function steerIds(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && /^m\d+$/.test(v)).slice(0, 50) : [];
+}
+
+function piWorkerVerb(name: string, summary: string, body: (ctx: HandlerCtx, run: RunWithPolicy, input: Record<string, unknown>) => HandlerResult): VerbSpec {
+  return {
+    name: `hook.${name}`,
+    summary,
+    positionals: [],
+    flags: hookFlags(),
+    kind: "mutation",
+    roles: ["worker"],
+    ephemeral: true,
+    apply(ctx, args) {
+      workerOnly(ctx, name);
+      const run = hookRun(ctx);
+      if (isTerminal(run.state)) return { data: { run: run.id, state: run.state } };
+      return body(ctx, run, parseInput(args) as Record<string, unknown>);
+    },
+    async settle(ctx, result) {
+      // A changed ring state can make a steer due now or later: the waiter re-checks.
+      if (ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
+      return result;
+    },
+  };
+}
+
+/** `hook steer-carried`: how the Pi extension delivered a steer, followUp (idle) or steer (busy). */
+const steerCarried = piWorkerVerb("steer-carried", "Worker hook (Pi): how the extension delivered a steer", (ctx, run, input) => {
+  const id = steerIds([input.steer])[0];
+  const mode = input.mode === "followUp" ? "followUp" : input.mode === "steer" ? "steer" : null;
+  if (!id || !mode) throw new FlowrynError("bad_args", "steer-carried needs a steer id and a mode of steer or followUp");
+  return { data: { run: run.id, steer: id, noted: noteDeliveryMode(ctx.db, run, id, mode, ctx.now()) } };
+});
+
+/** `hook steer-seen`: the Pi extension's context event showed these steers in a model request. */
+const steerSeen = piWorkerVerb("steer-seen", "Worker hook (Pi): steers that reached a model request", (ctx, run, input) => {
+  const ids = steerIds(input.steers);
+  return { data: { run: run.id, seen: ids.length > 0 ? markSeen(ctx.db, run, ids, "context", ctx.now()) : [] } };
+});
+
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];

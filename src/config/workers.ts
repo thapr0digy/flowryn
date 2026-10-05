@@ -204,6 +204,8 @@ export interface Timing {
   exit_grace_ms: number;
   /** A waiter's long poll holds the connection this long before asking again. */
   wait_poll_ms: number;
+  /** A steer carried to an idle worker and not seen in a model request this long is lost: it rings again. */
+  seen_timeout_ms: number;
   /**
    * Busy (or a busy lease lapsed without a Stop) with no hook this long: a
    * suspected prompt when Herdr reads "blocked" (Claude), or reads a known
@@ -224,6 +226,7 @@ export const DEFAULT_TIMING: Timing = {
   launch_timeout_ms: 20_000,
   exit_grace_ms: 10_000,
   wait_poll_ms: 25_000,
+  seen_timeout_ms: 5_000,
   prompt_suspect_ms: 120_000,
 };
 
