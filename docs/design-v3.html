@@ -547,7 +547,7 @@ type Verified = { ok: boolean;
       <marker id="a4g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-success)"/></marker>
     </defs>
     <g id="ap-lead"><title>The leader asks to merge a task's PR</title><rect class="box" x="8" y="14" width="210" height="58" rx="8"/><text class="lbl" x="113" y="38" text-anchor="middle">Leader</text><text class="small" x="113" y="56" text-anchor="middle">flowryn merge T17</text></g>
-    <g id="ap-harness"><title>Channel 1: the harness prompts you. Claude ask rule plus PreToolUse ask; Pi ctx.ui.confirm in the extension.</title><rect class="human" x="8" y="112" width="210" height="72" rx="8"/><text class="lbl" x="113" y="138" text-anchor="middle">1 · Harness prompt</text><text class="small" x="113" y="156" text-anchor="middle">Claude ask rule</text><text class="small" x="113" y="172" text-anchor="middle">Pi ctx.ui.confirm</text></g>
+    <g id="ap-harness"><title>Channel 1: the harness prompts you. Claude PreToolUse ask; Pi ctx.ui.confirm in the extension.</title><rect class="human" x="8" y="112" width="210" height="72" rx="8"/><text class="lbl" x="113" y="138" text-anchor="middle">1 · Harness prompt</text><text class="small" x="113" y="156" text-anchor="middle">Claude PreToolUse ask</text><text class="small" x="113" y="172" text-anchor="middle">Pi ctx.ui.confirm</text></g>
     <g id="ap-shell"><title>Channel 2: you type flowryn approve in your own shell, or press approve on the board, and enter the challenge code from /dev/tty</title><rect class="human" x="8" y="222" width="210" height="72" rx="8"/><text class="lbl" x="113" y="248" text-anchor="middle">2 · flowryn approve</text><text class="small" x="113" y="266" text-anchor="middle">your shell · board</text><text class="small" x="113" y="282" text-anchor="middle">/dev/tty challenge</text></g>
     <g id="ap-yolo"><title>yolo: a per-project posture you set. Merges green, in-scope, non-sensitive work without a human record.</title><rect class="opt" x="262" y="90" width="180" height="50" rx="8"/><text class="lbl" x="352" y="111" text-anchor="middle">yolo posture</text><text class="small" x="352" y="128" text-anchor="middle">green · not sensitive</text></g>
     <g id="ap-rec"><title>approvals row: bound to task, canonical PR URL and head SHA; single use; expires after 24 hours; void if the head changes</title><rect class="core" x="262" y="150" width="180" height="96" rx="8"/><text class="lbl" x="352" y="176" text-anchor="middle">approvals row</text><text class="small" x="352" y="196" text-anchor="middle">bound to head SHA</text><text class="small" x="352" y="212" text-anchor="middle">single use · 24 h</text><text class="small" x="352" y="228" text-anchor="middle">channel + actor</text></g>
@@ -578,7 +578,7 @@ type Verified = { ok: boolean;
       <h3 class="card-title text-base">Claude leader</h3>
       <ol class="list-decimal ml-5 space-y-1 opacity-90">
         <li>The leader runs in <code>--permission-mode auto</code>. Ask rules that match a command's content still prompt in auto mode.</li>
-        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>. The ask rule <code>Bash(flowryn merge *)</code> is a second layer.</li>
+        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>, which prompts in auto mode too. A routine merge (the task is yolo and not sensitive) is neither asked nor recorded, so it merges under yolo. There is no static merge ask rule: it would prompt for routine merges as well.</li>
         <li>If you approve, the command runs with the leader token. The daemon matches it to the attempt (same session and arguments, under 5 minutes old) and records channel <code>claude-ask</code>.</li>
         <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable. M0 found that the ask rule and the hook's ask both still prompt under bypass, but the leader never runs in bypass, so this refusal stays as defense in depth. The merge returns <code>approval_required</code>.</li>
       </ol>
@@ -1096,7 +1096,7 @@ Be terse: outcomes only, no recaps.
 {
   "permissions": {
     "allow": ["Bash(flowryn *)"],
-    "ask":   ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)",
+    "ask":   ["Bash(flowryn gate pass *)",
               "Bash(flowryn cleanup * --discard*)"],
     "deny":  ["Bash(flowryn approve*)",
               "Bash(flowryn hook *)"]

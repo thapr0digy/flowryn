@@ -34,13 +34,13 @@ function git(cwd: string, args: string[]): string {
   return result.stdout.toString().trim();
 }
 
-async function ship(e: ShipEnv, title: string): Promise<{ task: string; run: string }> {
+async function ship(e: ShipEnv, title: string, flags: string[] = []): Promise<{ task: string; run: string }> {
   const db = e.fleet.h.db();
   const mode = (db.query("SELECT delivery_mode FROM projects WHERE id = 'web'").get() as { delivery_mode: string }).delivery_mode;
   db.close();
   const begin = mode === "no-mistakes" ? "FAKE: verb stage begin ship\n" : "";
   const steps = mode === "local-only" ? `FAKE: commit ${title}.txt ${title}\nFAKE: deliver-local\n` : `FAKE: commit ${title}.txt ${title}\n${begin}FAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\nFAKE: deliver-pr\n`;
-  const dispatched = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: `${title}\n${steps}FAKE: sleep 120000` });
+  const dispatched = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", ...flags, "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: `${title}\n${steps}FAKE: sleep 120000` });
   if (dispatched.code !== 0) throw new Error(`dispatch: ${JSON.stringify(dispatched.reply)}`);
   const shipped = dispatched.reply.data as { task: string; run: string };
   await e.fleet.waitRun(shipped.run, (r) => r.state === "ready", `${title} delivered`);
@@ -104,6 +104,40 @@ describe("M4 exit: dispatch to merged and cleaned, on each leader, approval from
       expect(JSON.parse(bypass.stdout).error.code).toBe("approval_required");
       // And the leader can never run approve or a hook verb itself.
       expect((await leader.runBash(`flowryn approve ${second.task}`, { approve: true })).denied).toBe(true);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "Claude leader on a yolo project: a routine merge runs unprompted and records yolo; a sensitive merge still needs your word",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: true });
+      const e = env;
+      const leader = await e.claude();
+      await leader.start();
+      const routine = await ship(e, "routine");
+      const merged = await leader.runBash(`flowryn merge ${routine.task} --json`, { approve: false });
+      expect(merged).toMatchObject({ prompted: false, ran: true, code: 0 });
+      expect(JSON.parse(merged.stdout).data).toMatchObject({ state: "merged", channel: "yolo" });
+      expect(leader.prompts).toHaveLength(0);
+      await landedAndCleaned(e, routine.run, routine.task);
+      expect(channelOf(e, routine.task)).toBe("yolo");
+      const db = e.fleet.h.db();
+      expect(db.query("SELECT COUNT(*) AS n FROM approval_attempts WHERE task_id = ?1").get(routine.task)).toEqual({ n: 0 });
+      db.close();
+
+      const secret = await ship(e, "secret", ["--sensitive"]);
+      // Run without a prompt (a spelling the hook misses: no attempt), the merge falls back to yolo, which sensitive work refuses.
+      const unprompted = await e.fleet.json(["merge", secret.task], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      expect(unprompted.code).toBe(2);
+      expect((unprompted.reply.error as { code: string; message: string }).message).toContain("sensitive");
+      const no = await leader.runBash(`flowryn merge ${secret.task} --json`, { approve: false });
+      expect(no).toMatchObject({ prompted: true, ran: false });
+      expect(leader.prompts[0]).toContain(secret.task);
+      expect(e.fleet.run(secret.run).state).toBe("ready");
+      const yes = await leader.runBash(`flowryn merge ${secret.task} --json`, { approve: true });
+      expect(yes).toMatchObject({ prompted: true, ran: true, code: 0 });
+      expect(JSON.parse(yes.stdout).data).toMatchObject({ state: "merged", channel: "claude-ask" });
     },
     { timeout: 120_000 },
   );
