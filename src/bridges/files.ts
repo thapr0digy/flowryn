@@ -14,7 +14,7 @@ import leaderExtensionAsset from "./pi/flowryn-leader.ts" with { type: "file" };
  * terse style block plus your own `preferences.md`, concatenated into
  * `system-prompt.md`), all under `<home>/leader/`. `flowryn lead` rewrites
  * them on every launch, so they always match the binary that runs;
- * `preferences.md` itself is yours, written by `flowryn import` or the
+ * `preferences.md` itself is yours, written by the retired cutover import or the
  * leader, never by `lead`.
  */
 
@@ -95,7 +95,7 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
     style = stylePath;
   } else if (existsSync(stylePath)) rmSync(stylePath, { force: true });
 
-  // The user's preferences (cutover C3) are theirs: written by flowryn import or the leader, never by lead.
+  // The user's preferences (cutover C3) are theirs: written by the retired import or the leader, never by lead.
   const preferencesPath = join(dir, "preferences.md");
   const preferences = existsSync(preferencesPath) ? readFileSync(preferencesPath, "utf8").trimEnd() : null;
   const appendPath = join(dir, "system-prompt.md");

@@ -14,7 +14,7 @@ Tool versions tested:
 | no-mistakes | v1.53.0 |
 | Pi | 0.87.1 (`/opt/homebrew/bin/pi-signed`, the Pi Launcher build of `@earendil-works/pi-coding-agent`), with every verdict-bearing turn from the offline scripted provider `flowryn-scripted/scripted` |
 
-How to rerun: see [Running the spikes](../README.md#running-the-m0-spikes). The Herdr and Claude spikes ran in an isolated lab session made by Firstmate's `bin/fm-herdr-lab.sh`, never in the default session and never in a pane they did not create. The design's scratch session name `flowryn-contract` was not used. Each Claude session starts from the repo root with `--setting-sources user` plus its own `--settings` file, and keeps its logs and settings in `spikes/.runs/<id>/` (finding 9 explains why).
+How to rerun: see [Running the spikes](../README.md#running-the-m0-spikes). The Herdr and Claude spikes ran in an isolated lab session made by the previous orchestrator's lab helper (`bin/fm-herdr-lab.sh`, now vendored as `spikes/lib/herdr-lab.sh`), never in the default session and never in a pane they did not create. The design's scratch session name `flowryn-contract` was not used. Each Claude session starts from the repo root with `--setting-sources user` plus its own `--settings` file, and keeps its logs and settings in `spikes/.runs/<id>/` (finding 9 explains why).
 
 ## Claude bridge
 
@@ -45,7 +45,7 @@ How to rerun: see [Running the spikes](../README.md#running-the-m0-spikes). The 
 
 ## tasks-axi
 
-Every tasks-axi spike uses a scratch backlog under `spikes/.runs/<id>/`. None touches Firstmate's `data/backlog.md`.
+Every tasks-axi spike uses a scratch backlog under `spikes/.runs/<id>/`. None touches the previous orchestrator's `data/backlog.md`.
 
 | Spike | Claim | Method | Verdict | Evidence |
 |---|---|---|---|---|
@@ -104,7 +104,7 @@ The p01 smoke evidence printed "sent while busy=0" even though the probe logged 
 
 ## Cleanup-guard fixtures
 
-[`fixtures/cleanup-guard/`](../fixtures/cleanup-guard) ports the 21 landed-work cases from Firstmate's `tests/fm-teardown.test.sh` at commit `a09090d1`. Each case has a `manifest.json` (delivery mode, guard inputs, forge behavior, expected verdict) and a `build.sh` that builds the git state (bare origin, optional fork, fake forge as data). `run.sh` checks the 21 names and verdicts, builds every case, checks that every symbolic ref resolves, and checks each case's topology facts; `run.sh --impl <cmd>` runs any implementation against them. Result: `21 passed, 0 failed; verdicts allow=10 discard=1 record=2 refuse=8`. An optional oracle (`reference/firstmate-oracle.sh`) ran Firstmate's own teardown and PR-check scripts against the built cases, from an isolated copy, and agreed on all 21. One deliberate difference from the design's summary: in `squash_merged_branch_deleted`, the content is *not* on origin/main, matching Firstmate's test. There, the merged PR is the only proof that the work landed.
+[`fixtures/cleanup-guard/`](../fixtures/cleanup-guard) ports the 21 landed-work cases from the previous orchestrator's `tests/fm-teardown.test.sh` at commit `a09090d1`. Each case has a `manifest.json` (delivery mode, guard inputs, forge behavior, expected verdict) and a `build.sh` that builds the git state (bare origin, optional fork, fake forge as data). `run.sh` checks the 21 names and verdicts, builds every case, checks that every symbolic ref resolves, and checks each case's topology facts; `run.sh --impl <cmd>` runs any implementation against them. Result: `21 passed, 0 failed; verdicts allow=10 discard=1 record=2 refuse=8`. An optional oracle (now `reference/reference-oracle.sh`) ran the previous orchestrator's own teardown and PR-check scripts against the built cases, from an isolated copy, and agreed on all 21. One deliberate difference from the design's summary: in `squash_merged_branch_deleted`, the content is *not* on origin/main, matching the previous orchestrator's test. There, the merged PR is the only proof that the work landed.
 
 ## Edits made to design-v3.html
 
