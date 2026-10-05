@@ -168,6 +168,8 @@ describe("urgent steers to a pi worker", () => {
       const env = await fleet();
       const { task, run } = await env.dispatch("Build\nFAKE: sleep 60000", { harness: "pi" });
       await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      // Busy comes with the turn start; give the fake's sleep a moment to start, so the steer finds it running.
+      await Bun.sleep(500);
       const id = await steer(env, task, "stop the migration", true);
       await waitUntil(() => steerRow(env, id).acked_at !== null, 15_000, "the urgent steer acknowledged");
       const row = steerRow(env, id);

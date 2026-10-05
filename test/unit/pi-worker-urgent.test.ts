@@ -65,12 +65,16 @@ beforeAll(async () => {
     bin,
     `#!/bin/sh
 input=$(cat)
+# A preempt's reply is read before the call is logged, so a test that sees the call can change the next reply.
+case "$2" in
+  preempt) reply=$(cat ${JSON.stringify(join(dir, "preempt"))}) ;;
+esac
 echo "$* $input" >> ${JSON.stringify(log)}
 case "$2" in
   wait-steer)
     if [ -f ${JSON.stringify(join(dir, "stop"))} ]; then echo '{"exit":true}'; exit 0; fi
     if [ -f ${next} ]; then cat ${next}; rm -f ${next}; else sleep 0.05; echo '{"wait":true}'; fi ;;
-  preempt) cat ${JSON.stringify(join(dir, "preempt"))} ;;
+  preempt) echo "$reply" ;;
 esac
 `,
   );
@@ -121,8 +125,9 @@ describe("the Pi worker extension's urgent steers", () => {
   test("a tool past the threshold: the extension asks hook preempt, defers while a dialog may be open, and aborts only on go", async () => {
     idle = false;
     preemptReply({ defer: "a permission dialog is open" });
-    await emit("tool_execution_start", { toolCallId: "c1", toolName: "bash" });
+    // Taken before the event: the extension's clock starts inside its handler, a moment later.
     const started = Date.now();
+    await emit("tool_execution_start", { toolCallId: "c1", toolName: "bash" });
     offer("m2");
     await waitUntil(() => calls("hook preempt").length === 1, 5_000, "the first ask");
     expect(Date.now() - started).toBeGreaterThanOrEqual(AFTER_MS);
