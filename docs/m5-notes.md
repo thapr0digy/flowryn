@@ -200,6 +200,24 @@ Two live bugs, both on a Claude worker idle behind a review gate overnight.
 - Tests: `test/integration/idle-worker.test.ts`; the fake worker's `FAKE: no-waiter` never arms a waiter and wakes only on a line the fake Herdr's `pane.send_text` and Enter typed.
 
 
+## Turn-end guard (autonomy spec 2, ship A)
+
+A worker that ended its turn without an outcome sat idle until the 15 min `worker_idle` pointer and a leader turn. Now the turn end itself catches it (`src/lifecycle/turn-end-guard.ts`, called from the worker Stop hook in `src/lifecycle/hooks.ts`). Deterministic: database reads and a fixed string, no model.
+
+- **The rule.** At a worker's turn end with no steer taken, the daemon sends `TURN_END_REMINDER` ("You ended your turn without an outcome. Finish with one of: stage done, deliver, ask --blocking, report blocked, fail.") when all hold: no steer is due (a due steer wins: Claude's Stop continuation takes it first, Pi's long poll delivers it); fewer than `MAX_CONTINUATIONS` (2) Stop continuations used on this turn, the reminder counting as one; nothing the worker waits on (the run is `running`, its stage `active`, no `pending_launch`, no open question of its own, no open `blocked_prompt`: so a scout or stage waiting on a grant never gets one); no outcome event since its last instruction; and no reminder yet in this episode.
+- **Episode and outcome.** The last instruction is the latest of the run's start, its worker start (launch or resume), its current stage's start, and the first carry of any steer to it. An outcome is a `stage.done`, `stage.requested` (stage begin), `stage.delivered`, `run.delivered`, `decision.opened` (ask), `worker.report` (any status, so `report progress` counts) or `worker.failed` event of the run since then.
+- **Delivery.** Claude: the Stop hook's `hookSpecificOutput.additionalContext`, the channel steers already use (M0 c06: non-error feedback, the turn continues), not `decision: "block"`; the run stays busy. Pi: `hook stop --json` returns `context`, and the extension sends it as a `followUp` with `triggerTurn` (M0 p16); the run goes idle meanwhile and the follow-up turn reports busy itself.
+- **No loop, and `stop_hook_active`.** A Stop of a turn the waiter woke reads `stop_hook_active=true` (M0 c14), so skipping those Stops would skip nearly every steer-woken turn. The flag is recorded in the reminder's payload and not used to decide; the once-per-episode record and the continuation cap bound the guard.
+- **Ignored.** A second outcome-less turn end in the episode gets nothing; the `worker_idle` pointer that opens later (same timing and once-per-episode rule) reads "Worker for X ignored the turn-end reminder and has been idle Nm without an outcome", and its `run.idle_alert` payload has `ignored_reminder: true`. A new instruction starts a new episode, which can earn a new reminder.
+- **Recorded.** `run.turn_end_reminder` {episode_from, harness, stop_hook_active} for each one sent; `run.turn_end_reminder_result` {reminder_seq, obeyed, outcome} at the run's next turn end: obeyed when an outcome event or a wait followed it (`outcome` names it), ignored otherwise. A reminder with no result means the run never reached another turn end (interrupted, crashed, ended). These feed the triage-runner decision (k4). Counting them:
+
+  ```sql
+  SELECT json_extract(payload, '$.obeyed') AS obeyed, COUNT(*) FROM events
+   WHERE kind = 'run.turn_end_reminder_result' GROUP BY 1;
+  ```
+- **Contract.** One worker contract line: "A turn-end reminder: finish with an outcome; if you wait on your own background work, say so in one line and end your turn." Known false positive, bounded by the once-per-episode cap: a worker that ends its turn to wait on its own background job, or that answers a status steer in text, gets one reminder.
+- Tests: `test/unit/turn-end-guard.test.ts` (each rule, each outcome kind and wait, settling, episodes, assumption A1); `test/unit/pi-worker-extension.test.ts` (the follow-up); `test/integration/turn-end-guard.test.ts` (Claude and Pi end to end: ignored and reworded pointer, obeyed, a new episode after a steer, none at a review gate). The fake worker's `FAKE: stop-no-outcome` ends the turn with no outcome; any other turn end that brings a reminder ignores it.
+
 ## Gate questions
 
 A review page used to list its open questions as prose that Flowryn never saw: you got a page to pass or send back, and your answers reached the worker only if you typed them again. Now the worker hands its questions in as data, Flowryn makes each one a decision reserved for you as the gate opens, and you answer either on the page or through the leader. The first answer counts. Nothing on this path asks a model to decide anything: a JSON file, a fixed template, a fixed pattern on the poll output, and the database. The worker's own judgement (what is truly a question) is the only model work, and the ask rule below bounds it in code.

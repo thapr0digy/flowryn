@@ -13,6 +13,8 @@
 //   - reports session_start (worker-start), agent_start (busy, idempotent,
 //     since it repeats on retries: M0 p04), tool activity (busy lease, at most
 //     once a minute), agent_settled (turn ended) and session_shutdown;
+//   - on agent_settled, sends the turn-end guard's reminder, when the stop
+//     hook returns one, as a followUp + triggerTurn (the idle delivery, M0 p03);
 //   - holds one `hook wait-steer` long poll and delivers each steer it returns:
 //     deliverAs "steer" while busy, right after the current tool batch
 //     (M0 p13), or followUp + triggerTurn while idle (M0 p03); always with an
@@ -40,6 +42,7 @@ const TOOL_PING_MS = 60_000;
 /** A pause before re-polling after an empty reply, so a misbehaving daemon cannot spin the loop. */
 const REPOLL_MS = 50;
 const STEER_CUSTOM_TYPE = "flowryn-steer";
+const REMINDER_CUSTOM_TYPE = "flowryn-reminder";
 /** A deferred preemption (a dialog may be open) asks again this often. */
 const PREEMPT_RECHECK_MS = 1_000;
 
@@ -212,8 +215,25 @@ export default function flowrynWorker(pi: any): void {
     if (urgent) unseen.delete(urgent.id);
     urgent = null;
     clearPreemptTimer();
-    void runHook("stop", {});
+    void turnEnded();
   });
+
+  // The turn-end guard: a turn that ended without an outcome may get one reminder, sent as a follow-up turn.
+  async function turnEnded(): Promise<void> {
+    const reply = await runHook("stop", {}, ["--json"]);
+    let data: Json;
+    try {
+      data = JSON.parse(reply.stdout.trim().split("\n").pop() ?? "");
+    } catch {
+      return;
+    }
+    if (typeof data.context !== "string" || stopped) return;
+    try {
+      pi.sendMessage({ customType: REMINDER_CUSTOM_TYPE, content: data.context, display: true }, { deliverAs: "followUp", triggerTurn: true });
+    } catch {
+      // Not delivered; the worker_idle pointer covers a worker left idle.
+    }
+  }
 
   pi.on("session_shutdown", async () => {
     stopped = true;

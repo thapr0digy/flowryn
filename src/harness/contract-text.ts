@@ -84,6 +84,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     "  act on it, then redo the call if it still applies.",
     ...deliveryLines(delivery),
     "- Cannot finish: $FLOWRYN_BIN fail --body-file -",
+    "- A turn-end reminder: finish with an outcome; if you wait on your own background work, say so in one line and end your turn.",
     "- Exit 75 means spooled. Do not retry in a loop.",
     "- Never merge, clean up, or approve anything.",
   ];
@@ -110,6 +111,9 @@ export function steerLine(id: string, body: string): string {
 export function urgentBlockLine(id: string, body: string): string {
   return `${steerLine(id, body)} This tool call was blocked so you read this first; redo it if it still applies.`;
 }
+
+/** The turn-end guard's one reminder per episode (src/lifecycle/turn-end-guard.ts). */
+export const TURN_END_REMINDER = "You ended your turn without an outcome. Finish with one of: stage done, deliver, ask --blocking, report blocked, fail.";
 
 /** The one-line pointer an idle-wake waiter prints: a fact that stands on its own (M0 finding 5). */
 export function steerPointer(id: string): string {

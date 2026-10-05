@@ -49,6 +49,12 @@
  *   FAKE: dialog-tool <ms> <text...> a tool call whose PreToolUse raises a permission dialog: pre-tool, the screen
  *                                    shows <text>, hook notify permission_prompt, then (once the test clears the
  *                                    screen) the tool runs <ms> and post-tool follows
+ *   FAKE: stop-no-outcome            end the turn with no outcome. A turn-end reminder (appended to
+ *                                    $FLOWRYN_REPORT_DIR/fake-reminders.txt) continues it: the steps after it run
+ *                                    at once, so a report or stage-done next obeys it. With none, the turn ends and
+ *                                    the steps after it run when the next steer arrives
+ *
+ * Any other turn end that brings a turn-end reminder ignores it: the continued turn ends again at once.
  *
  * Tool calls carry a tool_use_id. A PreToolUse that denies (an urgent steer) skips the tool and hands the
  * steer to the model. The fake Pi plays its extension's urgent steers: one that arrives while a tool runs
@@ -61,6 +67,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { QA_PLACEHOLDERS, QA_TEMPLATE } from "../../src/skills/qa-template.ts";
+import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
 const env = process.env;
@@ -233,6 +240,9 @@ function slug(text: string): string {
 function dockerFile(): string {
   return join(env.FLOWRYN_HOME ?? ".", "docker-ps.txt");
 }
+
+/** A stop-no-outcome step already ended the turn: the pause after it must not end it again. */
+let turnEnded = false;
 
 async function runStep(step: string): Promise<"continue" | "end-turn" | "await-steer"> {
   const [verb = "", ...rest] = step.split(/\s+/);
@@ -444,6 +454,13 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       );
       return interrupted ? "end-turn" : "continue";
     }
+    case "stop-no-outcome": {
+      if ((await stopOnce()) === "reminded") return "continue";
+      awaitingStage = true;
+      woken = false;
+      turnEnded = true;
+      return "await-steer";
+    }
     case "crash":
       log("crash");
       process.exit(1);
@@ -452,14 +469,40 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
   }
 }
 
-async function endTurn(): Promise<void> {
-  // Stop may continue the turn with a steer, at most twice in a row (design section 5).
+/**
+ * One turn end. Stop may continue the turn with a steer, at most twice in a
+ * row (design section 5), or answer it with the turn-end reminder: a Claude
+ * continuation, a Pi follow-up (its stop hook prints JSON).
+ */
+async function stopOnce(): Promise<"reminded" | "ended"> {
   for (;;) {
-    const stop = await hook("stop");
-    const context = contextOf(stop.stdout);
-    if (!context) return;
+    const stop = harness === "pi" ? await hook("stop", {}, ["--json"]) : await hook("stop");
+    const context = harness === "pi" ? piContextOf(stop.stdout) : contextOf(stop.stdout);
+    if (!context) return "ended";
+    if (context === TURN_END_REMINDER) {
+      log(`reminded: ${context}`);
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, "fake-reminders.txt"), `${context}\n`);
+      return "reminded";
+    }
     await onSteer(context);
   }
+}
+
+/** The data.context a Pi stop hook printed with --json, if any. */
+function piContextOf(stdout: string): string | null {
+  try {
+    const value = JSON.parse(stdout.trim().split("\n").pop() ?? "") as { context?: unknown };
+    return typeof value.context === "string" ? value.context : null;
+  } catch {
+    return null;
+  }
+}
+
+/** End the turn; a reminder is ignored: the continued (or followed-up) turn ends again at once. */
+async function endTurn(): Promise<void> {
+  for (let i = 0; i < 3 && (await stopOnce()) === "reminded"; i++);
 }
 
 let typedSeen = 0;
@@ -593,7 +636,8 @@ async function main(): Promise<void> {
     if (paused === null) break;
     // A stage done: end the turn; a steer (often the Stop continuation itself) starts the next stage.
     resumeAt = paused;
-    await endTurn();
+    if (!turnEnded) await endTurn();
+    turnEnded = false;
     await awaitWake();
     from = resumeAt;
     resumeAt = null;

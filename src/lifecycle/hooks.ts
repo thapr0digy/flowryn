@@ -17,6 +17,7 @@ import { pendingPlanLine } from "./plans.ts";
 import { gateQuestionsLine } from "./gate-questions.ts";
 import { dueSteers, dueUrgent, getMessage, loseUnseenUrgent, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { piPreempt } from "./urgent.ts";
+import { guardTurnEnd } from "./turn-end-guard.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 
@@ -444,26 +445,51 @@ const toolFailed = signalVerb(
   (ctx) => leader.toolActivity(ctx),
 );
 
-/** Stop: a turn ended, unless a pending steer continues it (M0 c06), at most twice in a row. */
-const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer (worker) or a P0 (leader)", (ctx, run, args) => {
+/**
+ * Stop: a turn ended, unless a pending steer continues it (M0 c06), at most
+ * twice in a row. With no steer taken, the turn-end guard may answer a turn
+ * that ended without an outcome with its one reminder per episode: a Claude
+ * continuation, or for Pi a follow-up the extension sends (the Pi worker goes
+ * idle meanwhile; its follow-up turn reports busy itself).
+ */
+const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer or a turn-end reminder (worker) or a P0 (leader)", (ctx, run, args) => {
+  const harness = harnessOf(args);
   claudeSaw(ctx, run, args, "stop");
   ctx.fleet.urgent.tools.clear(run.id);
   // Pi settled: an urgent steer it queued into the turn and never showed the model (its abort dropped it) goes again, idle.
-  if (harnessOf(args) === "pi") loseUnseenUrgent(ctx.db, run, ctx.now());
-  if (harnessOf(args) === "claude") {
-    const used = ctx.fleet.continuations.get(run.id) ?? 0;
-    if (used < MAX_CONTINUATIONS) {
-      const steer = takeSteer(ctx, run, "stop");
-      if (steer) {
-        ctx.fleet.continuations.set(run.id, used + 1);
-        markBusy(ctx, run, "continued");
-        return { data: { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } };
-      }
+  if (harness === "pi") loseUnseenUrgent(ctx.db, run, ctx.now());
+  const used = ctx.fleet.continuations.get(run.id) ?? 0;
+  if (harness === "claude" && used < MAX_CONTINUATIONS) {
+    const steer = takeSteer(ctx, run, "stop");
+    if (steer) {
+      ctx.fleet.continuations.set(run.id, used + 1);
+      markBusy(ctx, run, "continued");
+      return { data: { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } };
     }
+  }
+  // No steer taken: the turn-end guard may continue it once per episode (Claude) or follow it up (Pi).
+  const reminder = guardTurnEnd(
+    ctx.db,
+    run,
+    {
+      harness,
+      stopHookActive: parseInput(args).stop_hook_active === true,
+      continuationsUsed: harness === "claude" ? used : 0,
+      maxContinuations: MAX_CONTINUATIONS,
+      // Pi's steers come through its long poll: one due now goes as a follow-up, so the guard stands aside.
+      steerDue: dueSteers(ctx.db, run.id, ctx.now(), ctx.fleet.timing()).length > 0,
+    },
+    ctx.now(),
+  );
+  if (reminder !== null && harness === "claude") {
+    ctx.fleet.continuations.set(run.id, used + 1);
+    markBusy(ctx, run, "reminded");
+    return { data: { run: run.id, reminder: true, context: reminder } };
   }
   ctx.fleet.continuations.delete(run.id);
   markIdle(ctx, run, HOOK_SIGNALS.stop);
-  return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { stop: true }));
+  const data = reminder !== null ? { run: run.id, reminder: true, context: reminder } : { run: run.id };
+  return withUsage({ data }, usageSignal(ctx, harness, `worker ${run.task_id}`, { stop: true }));
 }, (ctx, _input, args) => withUsage(leader.stop(ctx), usageSignal(ctx, harnessOf(args), "the leader", { stop: true })));
 
 const stopFailure = signalVerb(
