@@ -44,6 +44,23 @@ function events(h: TestHome, kind: string): Record<string, unknown>[] {
   }
 }
 
+/**
+ * A validation lease held by a run in a pane. The pane matters: with Herdr
+ * unreachable the reconciler reads the run as unknown and leaves its lease,
+ * where a run with no pane and no process is dead and its lease released.
+ */
+function seedValidation(h: TestHome, runId: string): void {
+  const db = h.db();
+  try {
+    tx(db, () => {
+      db.query("UPDATE runs SET pane_id = 'w1:p1' WHERE id = ?1").run(runId);
+      db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', ?1, 'ship', ?2)").run(runId, Date.now());
+    });
+  } finally {
+    db.close();
+  }
+}
+
 describe("flowryn daemon restart", () => {
   test("the leader restarts the daemon: the old one exits cleanly, the new one answers and records who asked", async () => {
     const { h, env } = supervisedHome();
@@ -82,9 +99,7 @@ describe("flowryn daemon restart", () => {
     const { h, env } = supervisedHome();
     const token = seedLeader(h);
     const run = seedRun(h);
-    const seeded = h.db();
-    tx(seeded, () => seeded.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', ?1, 'ship', ?2)").run(run.runId, Date.now()));
-    seeded.close();
+    seedValidation(h, run.runId);
     const old = await daemon(h, env);
     const asLeader = { env: { ...env, FLOWRYN_TOKEN: token } };
 
@@ -111,9 +126,7 @@ describe("flowryn daemon restart", () => {
     const { h, env } = supervisedHome();
     const token = seedLeader(h);
     const run = seedRun(h);
-    const seeded = h.db();
-    tx(seeded, () => seeded.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', ?1, 'ship', ?2)").run(run.runId, Date.now()));
-    seeded.close();
+    seedValidation(h, run.runId);
     await daemon(h, env);
     const asLeader = { env: { ...env, FLOWRYN_TOKEN: token } };
     expect((await cliJson(h, ["daemon", "restart", "--when-idle"], asLeader)).reply.data).toMatchObject({ restart: "pending" });
