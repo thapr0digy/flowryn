@@ -279,7 +279,7 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
 function gatesView(ctx: ReadCtx, runId: string): string[] | null {
   const gates = gatesOf(ctx.db, runId);
   if (gates.length === 0) return null;
-  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
+  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
 }
 
 function planLine(ctx: ReadCtx, taskId: string): string {

@@ -195,6 +195,8 @@ export interface GateRow {
   stage: string;
   kind: "review" | "merge";
   review_url: string | null;
+  /** The review page's .html file (`stage done --page`), which Flowryn listens on. */
+  page_path?: string | null;
   state: "open" | "passed" | "changes";
   approval_id: string | null;
   feedback: string | null;
