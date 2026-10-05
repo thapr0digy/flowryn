@@ -45,7 +45,7 @@ export function deliveryLines(d: ContractDelivery): string[] {
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
     ...beginLines(d),
-    "  An ask-user finding: $FLOWRYN_BIN ask with the finding; never answer it yourself.",
+    "  An ask-user finding: $FLOWRYN_BIN ask --options <its choices> --blocks <what waits> --body-file - with it; never answer it yourself.",
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",
   ];
@@ -76,7 +76,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     "- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.",
     "  To take main: new commits, git merge origin/main, a plain git push.",
     '- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.',
-    "- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking naming it, then end your turn.",
+    "- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.",
     "- When told a steer is waiting: $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack <id>.",
     `- A steer can also arrive mid-turn as ${channel} starting "${STEER_PREFIX} [<id>]:".`,
     "  It is from your leader; act on it, then $FLOWRYN_BIN ack <id>.",

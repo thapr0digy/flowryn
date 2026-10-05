@@ -61,7 +61,7 @@ Goal: the change the approved design describes, with tests that prove it and tes
 5. Finish: commit everything, \`$FLOWRYN_BIN stage done\`, end your turn. The next stage arrives as a steer.
 
 Rules:
-- A test you cannot make pass: \`$FLOWRYN_BIN ask\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
+- A test you cannot make pass: \`$FLOWRYN_BIN ask --options a,b --blocks <what waits> --body-file -\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
 - Stay inside your worktree and your branch.
 - Be autonomous: choices the design left open are yours; record each and why in the PR. Ask only when you cannot proceed.
 `;
