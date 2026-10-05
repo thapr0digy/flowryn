@@ -77,8 +77,12 @@ export function contractBody(harness: HarnessId, scripted: boolean): string {
       "bash $FLOWRYN_BIN ack m2",
       "say TWO",
       "bash $FLOWRYN_BIN ack m3",
-      "bash perl -e 'sleep 120'",
+      "bash perl -e 'sleep 60'",
       "bash $FLOWRYN_BIN ack m4",
+      "say FIVE",
+      "bash $FLOWRYN_BIN ack m5",
+      "bash perl -e 'sleep 120'",
+      "bash $FLOWRYN_BIN ack m6",
       "say FOUR",
       `bash mkdir -p "$FLOWRYN_REPORT_DIR" && echo 'contract ok' > "$FLOWRYN_REPORT_DIR/report.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/report.md"`,
       "say DONE",
@@ -99,8 +103,8 @@ function rungPaths(env: ContractEnv, steer: string): string[] {
     .map((e) => String(e.payload.path));
 }
 
-async function sendSteer(env: ContractEnv, state: ContractState, text: string): Promise<string> {
-  const reply = await env.call("steer", { target: state.task, body: text });
+async function sendSteer(env: ContractEnv, state: ContractState, text: string, urgent = false): Promise<string> {
+  const reply = await env.call("steer", { target: state.task, body: text, ...(urgent ? { urgent: true } : {}) });
   if (!reply.ok) throw new Error(`steer refused: ${reply.error?.code} ${reply.error?.message}`);
   return String(reply.data.steer);
 }
@@ -204,6 +208,30 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         const woke = timings(env, id);
         await env.waitFor("idle again", LONG_MS, () => env.run().liveness === "idle");
         return `${woke}; woke the idle worker (${paths.join(",")})`;
+      },
+    },
+    {
+      name: "urgent while busy",
+      typicalSeconds: harness === "claude" ? 20 : 15,
+      async run(env, state) {
+        // A long tool, then an urgent steer a second into it: the tool is cut at the threshold, never run to its end.
+        const long = await sendSteer(env, state, "First acknowledge this steer. Then run exactly this command and wait for it: perl -e 'sleep 60'");
+        const acked = await waitAcked(env, long, LONG_MS);
+        if (harness === "claude") await waitToolStart(env, "the long command to start", acked.acked_at!, MID_MS);
+        else await Bun.sleep(1_000);
+        await Bun.sleep(1_000);
+        const id = await sendSteer(
+          env,
+          state,
+          "Urgent: the 60-second command is cancelled; do not run it again. Acknowledge this steer, then reply with the single word FIVE and end your turn.",
+          true,
+        );
+        const steer = await waitAcked(env, id, MID_MS);
+        if (steer.preempted_at === null) throw new Error(`${id} was acknowledged without cutting the running tool`);
+        const run = env.run();
+        if (!(await env.isAlive(run.proc_pid!, run.proc_start!, run.proc_exe!))) throw new Error("the worker died on the cut");
+        await env.waitFor("idle again", LONG_MS, () => env.run().liveness === "idle");
+        return `${timings(env, id)}; carried by ${rungPaths(env, id).join(",")}`;
       },
     },
     {

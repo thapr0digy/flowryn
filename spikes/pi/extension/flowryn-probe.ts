@@ -42,6 +42,8 @@
 //     {"id":"c7","op":"status"}           isIdle, pending messages, session id/file, usage
 //     {"id":"c8","op":"system_prompt"}    marker check on ctx.getSystemPrompt()
 //     {"id":"c9","op":"shutdown"}         ctx.shutdown()
+//     {"id":"c10","op":"block_tools","reason":"..."}  block every later tool_call with that reason
+//                                         (an urgent steer's block, p15); "reason":null stops it
 //   "when" defaults to "now". Event-bound commands run inside the next matching event
 //   handler, with that handler's ctx.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
@@ -71,6 +73,8 @@ const CTL = env.FLOWRYN_PROBE_CTL ?? "";
 const INSTANCE = env.FLOWRYN_PROBE_INSTANCE ?? "pi";
 const MARKER_PATTERN = /FLOWRYN-(?:MARK|DRAFT)-[A-Za-z0-9_-]+/g;
 const SHELL_GATE_PATTERN = /\bflowryn\s+(merge|approve)\b/;
+/** Set by the block_tools control: every tool_call is blocked with this reason. */
+let blockAllReason: string | null = null;
 const EVENT_WHENS: When[] = [
   "agent_start",
   "tool_execution_start",
@@ -293,6 +297,10 @@ export default function flowrynProbe(pi: ExtensionAPI) {
           log("ctl_exec", { ...base, ok: true, ...sysPromptMarkers(prompt), systemPromptTail: truncate(prompt.slice(-400), 400) });
           return;
         }
+        case "block_tools":
+          blockAllReason = command.reason === null || command.reason === undefined ? null : String(command.reason);
+          log("ctl_exec", { ...base, ok: true, blocking: blockAllReason !== null });
+          return;
         case "shutdown":
           // ExtensionContext.shutdown(): types.d.ts; deferred until idle in interactive mode (CHANGELOG).
           if (!c) throw new Error("no extension context captured yet");
@@ -577,8 +585,9 @@ export default function flowrynProbe(pi: ExtensionAPI) {
     const toolName = String(event?.toolName ?? "");
     const command = toolName === "bash" || toolName === "powershell" ? String(event?.input?.command ?? "") : "";
     const gated = command !== "" && SHELL_GATE_PATTERN.test(command) && env.FLOWRYN_PROBE_BLOCK_SHELL !== "0";
-    log("tool_call", { toolCallId: event?.toolCallId ?? null, toolName, command: truncate(command), blocked: gated });
+    log("tool_call", { toolCallId: event?.toolCallId ?? null, toolName, command: truncate(command), blocked: gated || blockAllReason !== null });
     await runPending("tool_call", ctx);
+    if (blockAllReason !== null) return { block: true, reason: blockAllReason };
     if (gated) {
       return { block: true, reason: "flowryn: shell merge/approve is blocked; use the flowryn_merge tool" };
     }
