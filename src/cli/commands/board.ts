@@ -9,6 +9,8 @@ import { openDb, type Db } from "../../db/db.ts";
 import { describeSession, getLease, getSession } from "../../lease/lease.ts";
 import { localDate } from "../../lifecycle/dates.ts";
 import { todoViews } from "../../lifecycle/todos.ts";
+import { queuedWork, waitsCell } from "../../lifecycle/queue-view.ts";
+import { sanitizeLine } from "../../util/sanitize.ts";
 import { agentIdentity } from "../human.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 import { ping } from "./daemon.ts";
@@ -25,7 +27,7 @@ import { runApprovalFlow, type Tty } from "./approve.ts";
  */
 
 const REFRESH_MS = 2_000;
-const MAX_ROWS = { needs: 12, fleet: 12, updates: 6, todos: 8 };
+const MAX_ROWS = { needs: 12, fleet: 12, queued: 6, updates: 6, todos: 8 };
 
 function age(now: number, since: number): string {
   const s = Math.max(0, Math.round((now - since) / 1000));
@@ -88,6 +90,16 @@ export function boardFrame(db: Db, facts: BoardFacts, ageMs: number): string[] {
   for (const r of runs.slice(0, MAX_ROWS.fleet)) {
     lines.push(`  ${pad(r.task_id, 28)} ${pad(r.kind, 6)} ${pad(r.project_id, 12)} ${pad(r.state, 10)} ${pad(r.liveness, 14)} ${age(now, r.started_at)}`);
   }
+
+  // The same queued set as `flowryn fleet` and the briefing's count.
+  const queued = queuedWork(db);
+  lines.push("", `QUEUED (${queued.length})`);
+  if (queued.length === 0) lines.push("  nothing queued");
+  for (const q of queued.slice(0, MAX_ROWS.queued)) {
+    const waits = q.status === "ready" ? q.next : sanitizeLine(waitsCell(q), 60);
+    lines.push(`  ${pad(q.id, 28)} ${pad(q.kind, 6)} ${pad(q.project, 12)} ${pad(q.status, 8)} auto ${q.auto} · ${waits}`);
+  }
+  if (queued.length > MAX_ROWS.queued) lines.push(`  +${queued.length - MAX_ROWS.queued} more (flowryn fleet)`);
 
   const updates = db
     .query("SELECT id, lane, line, state, opened_at FROM items WHERE class = 'info' AND opened_at > ?1 ORDER BY opened_at DESC LIMIT ?2")
