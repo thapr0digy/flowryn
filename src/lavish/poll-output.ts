@@ -121,11 +121,10 @@ export function parsePollOutput(stdout: string): PollOutput {
     if ((plural === "s") !== (version === "2")) continue;
     if (seen.has(token)) continue;
     seen.add(token);
-    if (answers.length >= MAX_ANSWERS) break;
     if (version === "1") {
       const answer = decodeV1(token);
       if (answer) {
-        answers.push(answer);
+        if (answers.length < MAX_ANSWERS) answers.push(answer);
         tokens += 1;
       } else malformed += 1;
       continue;

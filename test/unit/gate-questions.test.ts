@@ -10,8 +10,11 @@ import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetSt
 import { LavishPoller } from "../../src/lavish/poller.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
-import { cancelRun, failRun, getRun } from "../../src/lifecycle/runs.ts";
+import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, recordGateComment, recordGateNotes, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
+import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
+import { insertApproval } from "../../src/policy/approvals.ts";
 import { createRun } from "../../src/lifecycle/dispatch.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
 import { defaultConfig } from "../../src/config/config.ts";
@@ -181,6 +184,20 @@ describe("what lavish-axi poll printed", () => {
     const v1 = encodeAnswer({ gate: "g1", decision: "q1", choice: ["db"], note: null });
     expect(parsePollOutput(`status: feedback\nprompts[1]:\n  - prompt: "flowryn-answer v2 ${v1}"\n`)).toMatchObject({ answers: [], malformed: 0, otherPrompts: 1 });
   });
+
+  test("past the answer cap a later Send still keeps its comment and pass request", () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ decision: `q${i + 1}`, choice: ["db"], note: null }));
+    const full = encodeSend({ gate: "g1", comment: null, pass: false }, many);
+    const late = encodeSend({ gate: "g1", comment: "ship it small", pass: true }, [{ decision: "q51", choice: ["db"], note: null }]);
+    const v1 = encodeAnswer({ gate: "g1", decision: "q52", choice: ["db"], note: null });
+    const parsed = parsePollOutput(`status: feedback\nprompts[3]:\n  - prompt: "${ANSWER_MARK} ${full}"\n  - prompt: "${ANSWER_MARK} ${late}"\n  - prompt: "flowryn-answer v1 ${v1}"\n`);
+    expect(parsed.answers).toHaveLength(50);
+    expect(parsed.sends).toEqual([
+      { gate: "g1", comment: null, pass: false },
+      { gate: "g1", comment: "ship it small", pass: true },
+    ]);
+    expect(parsed).toMatchObject({ malformed: 0, otherPrompts: 0 });
+  });
 });
 
 // --- the widget, run against a small DOM stand-in -----------------------------------------------
@@ -191,6 +208,12 @@ class StubEl {
   textContent = "";
   listeners: Record<string, (event: { preventDefault(): void }) => void> = {};
   constructor(readonly tag: string) {}
+  get value(): string {
+    return this.attrs.value ?? "";
+  }
+  set value(v: string) {
+    this.attrs.value = v;
+  }
   setAttribute(k: string, v: string) {
     this.attrs[k] = v;
   }
@@ -328,6 +351,23 @@ describe("the question widget", () => {
     expect(parsed.sends).toEqual([{ gate: "g7", comment: "Keep it small.\nThanks", pass: false }]);
     expect(parsed.otherPrompts).toBe(0);
     expect(run.status()).toContain("Still open: q3");
+  });
+
+  test("the comment box clears once its Send is queued, so the next Send does not carry it again; a failed queue keeps it", () => {
+    const run = runWidget(STATE);
+    run.field("fq-comment").value = "Keep it small";
+    run.submit();
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: "Keep it small", pass: false }]);
+    expect(run.field("fq-comment").value).toBe("");
+    run.submit();
+    expect(run.queued).toHaveLength(2);
+    expect(decodeQueued(run.queued.slice(1)).sends).toEqual([{ gate: "g7", comment: null, pass: false }]);
+    run.field("fq-comment").value = "Not lost";
+    ((globalThis as Record<string, unknown>).window as { lavish: { queuePrompt: () => void } }).lavish.queuePrompt = () => {
+      throw new Error("the frame is gone");
+    };
+    expect(() => run.submit()).toThrow("the frame is gone");
+    expect(run.field("fq-comment").value).toBe("Not lost");
   });
 
   test("Other needs its note: without one nothing is sent; with one it is the answer, the note its words", () => {
@@ -560,6 +600,35 @@ describe("a gate's questions as decisions", () => {
     expect((db.query("SELECT payload FROM events WHERE kind = 'gate.comment' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).text)).toEqual(['keep "it" small\n\nthanks', "and one more"]);
     db.query("UPDATE gates SET state = 'passed' WHERE id = 'g1'").run();
     expect(tx(db, () => recordGateComment(db, "g1", "too late", NOW))).toBe("late");
+  });
+
+  test("a long comment is cut in the verdict steer, which still ends with the next stage's instructions", () => {
+    db.query("UPDATE runs SET workflow = 'feature', stage = 'design' WHERE id = ?1").run(runId);
+    open();
+    tx(db, () => {
+      lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null });
+      lavishAnswer(ctx(), { gate: "g1", decision: "q2", choice: ["claude"], note: null });
+      lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: ["flowryn tokens"], note: null });
+    });
+    expect(tx(db, () => recordGateComment(db, "g1", "a".repeat(3_000), NOW))).toBe("recorded");
+    expect(tx(db, () => recordGateComment(db, "g1", "b".repeat(3_000), NOW))).toBe("recorded");
+    expect((db.query("SELECT comment FROM gates WHERE id = 'g1'").get() as { comment: string }).comment).toHaveLength(4_000);
+    const texts = (db.query("SELECT payload FROM events WHERE kind = 'gate.comment' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).text);
+    expect(texts).toEqual(["a".repeat(3_000), "b".repeat(3_000)]);
+    const notes = join(reportDir, "design", "lavish-notes-g1.txt");
+    tx(db, () => recordGateNotes(db, "g1", notes, 1, NOW));
+    const config = { ...defaultConfig(h.home), state_dir: h.home };
+    const steer = tx(db, () => {
+      const approval = insertApproval(db, { task: taskId, ref: "gate:g1", head: "abc123", channel: "cli-tty", actor: "captain", action: "gate", now: NOW });
+      passReviewGate(db, getRunWithPolicy(db, runId)!, db.query("SELECT * FROM gates WHERE id = 'g1'").get() as GateRow, approval, NOW);
+      return activateStage(db, config, getRunWithPolicy(db, runId)!, NOW).steer;
+    });
+    const body = getMessage(db, steer!)!.body;
+    const run = getRunWithPolicy(db, runId)!;
+    expect(body.length).toBeLessThan(MAX_STEER_CHARS);
+    expect(body).toContain(`"""${"a".repeat(2_000)}""" [cut; the full text is in the gate.comment events: flowryn show ${runId}]`);
+    expect(body).toContain(`read ${notes}`);
+    expect(body.endsWith(stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run)))).toBe(true);
   });
 
   test("a pass request from the page never passes the gate: once every question is answered it opens one P1 for the leader", () => {

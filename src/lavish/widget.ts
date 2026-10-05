@@ -133,9 +133,10 @@ const RENDERER = String.raw`
     form.appendChild(box);
   });
   var status = el("div", { "class": "fq-status", role: "status" });
+  var commentBox = null;
   if (asking) {
     form.appendChild(el("label", { "class": "fq-meta", "for": "fq-comment-" + S.gate, text: "Anything else for the worker (optional)" }));
-    form.appendChild(el("textarea", { id: "fq-comment-" + S.gate, name: "fq-comment", rows: "3", "aria-label": "Anything else for the worker" }));
+    commentBox = form.appendChild(el("textarea", { id: "fq-comment-" + S.gate, name: "fq-comment", rows: "3", "aria-label": "Anything else for the worker" }));
     form.appendChild(el("div", { "class": "fq-actions" }, [
       el("button", { type: "submit", value: "send", text: "Send answers" }),
       el("button", { type: "submit", value: "pass", "data-pass": true, text: "Send and request pass" }),
@@ -171,6 +172,7 @@ const RENDERER = String.raw`
     window.lavish.queuePrompt(text, {
       tag: "choice", text: (shown.length ? shown.join("; ") : "No answers") + (pass ? " · pass requested" : ""), queueKey: "flowryn:" + S.gate, target: { type: "flowryn-answers", gate: S.gate },
     });
+    if (commentBox) commentBox.value = "";
     if (window.lavish.sendQueuedPrompts) window.lavish.sendQueuedPrompts();
     status.textContent = "Sent to Flowryn: " + (shown.length ? shown.join("; ") : "no answers") + (comment ? "; your note for the worker" : "") +
       (pass ? "; a pass request (your leader asks you to confirm it)" : "") + ". Each question locks here once recorded." + (empty.length ? " Still open: " + empty.join(", ") + "." : "");

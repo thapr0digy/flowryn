@@ -26,7 +26,9 @@ import { taskTitle, type RunRow } from "./runs.ts";
 export const GATE_QUESTION_RESERVED = "a review question for the user";
 const MAX_PAGE_BYTES = 5 * 1024 * 1024;
 /** What the gate keeps of the user's "anything else" box, all Sends together. */
-const MAX_GATE_COMMENT = 16_000;
+const MAX_GATE_COMMENT = 4_000;
+/** What the verdict steer quotes of it, so the steer keeps its pointers and the next stage's instructions. */
+const MAX_QUOTED_COMMENT = 2_000;
 
 export interface GateRef {
   id: string;
@@ -134,8 +136,11 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   }
   const dismissed = all.filter((d) => d.state === "dismissed").map((d) => d.id);
   if (dismissed.length > 0) parts.push(`Closed unanswered: ${dismissed.join(", ")}.`);
-  const comment = (db.query("SELECT comment FROM gates WHERE id = ?1").get(gateId) as { comment: string | null } | null)?.comment ?? null;
-  if (comment) parts.push(`The user also wrote on the review page: """${comment}"""`);
+  const gate = db.query("SELECT comment, run_id FROM gates WHERE id = ?1").get(gateId) as { comment: string | null; run_id: string } | null;
+  const comment = gate?.comment ?? null;
+  if (comment && comment.length > MAX_QUOTED_COMMENT) {
+    parts.push(`The user also wrote on the review page: """${comment.slice(0, MAX_QUOTED_COMMENT)}""" [cut; the full text is in the gate.comment events: flowryn show ${gate!.run_id}]`);
+  } else if (comment) parts.push(`The user also wrote on the review page: """${comment}"""`);
   if (notes) parts.push(`The user also left notes on the review page: read ${notes}.`);
   return parts.length > 0 ? parts.join(" ") : null;
 }
