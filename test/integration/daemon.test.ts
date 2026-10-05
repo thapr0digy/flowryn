@@ -97,16 +97,20 @@ describe("flowrynd lifecycle", () => {
     expect(result.stderr).toMatch(/doctor --restore|not a database/);
   });
 
-  test("a protocol mismatch is refused with code protocol_mismatch (exit 76)", async () => {
+  test("a protocol mismatch is refused with code protocol_mismatch (exit 76); the handshake still answers", async () => {
     const h = home();
     await daemon(h);
-    const reply = (await request(join(h.home, "run", "flowrynd.sock"), { proto: PROTO + 1, ulid: ulid(), verb: PING_VERB, args: {} }, { connectMs: 300, replyMs: 2_000 })) as {
+    const sock = join(h.home, "run", "flowrynd.sock");
+    const reply = (await request(sock, { proto: PROTO + 1, ulid: ulid(), verb: "fleet", args: {} }, { connectMs: 300, replyMs: 2_000 })) as {
       ok: boolean;
       proto: number;
       error: { code: string };
     };
     expect(reply).toMatchObject({ ok: false, proto: PROTO, error: { code: "protocol_mismatch" } });
     expect(exitCodeFor(reply.error.code)).toBe(76);
+    // A new CLI after a protocol bump must still recognize the daemon it talks to (flowryn daemon restart).
+    const ping = (await request(sock, { proto: PROTO + 1, ulid: ulid(), verb: PING_VERB, args: {} }, { connectMs: 300, replyMs: 2_000 })) as { ok: boolean; data: { proto: number } };
+    expect(ping).toMatchObject({ ok: true, data: { proto: PROTO } });
   });
 
   test("daemon status exits 69 when nothing answers", async () => {

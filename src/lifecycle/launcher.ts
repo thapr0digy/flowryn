@@ -145,6 +145,11 @@ export class Launcher {
     return this.active.has(runId);
   }
 
+  /** Runs with a launch in progress. */
+  activeRuns(): string[] {
+    return [...this.active];
+  }
+
   /** Launch in the background; failures are recorded on the run, never thrown. */
   start(runId: string, mode: LaunchMode = "fresh"): void {
     void this.launch(runId, mode);

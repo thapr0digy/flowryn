@@ -4,7 +4,7 @@ import { flowrynHome, socketPath, spoolDir, stateFiles } from "../config/paths.t
 import { openDb } from "../db/db.ts";
 import { authorize, resolveCaller } from "../api/auth.ts";
 import { errorReply, okReply, type Envelope, type Reply } from "../api/envelope.ts";
-import { EXIT, FlowrynError, toErrorBody } from "../api/errors.ts";
+import { EXIT, FlowrynError, toErrorBody, type ErrorBody, type ExitCode } from "../api/errors.ts";
 import { writeSpoolFile } from "../api/spool.ts";
 import { validateArgs, type CliIo, type VerbSpec } from "../api/verbs.ts";
 import { request, TransportError, type RequestTimeouts } from "../transport/unix.ts";
@@ -125,4 +125,24 @@ export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown
     return EXIT.spooled;
   }
   return print(io, outcome.reply, outcome.banner);
+}
+
+export interface ServerVerbResult {
+  ok: boolean;
+  data: Record<string, unknown>;
+  error?: ErrorBody;
+  exitCode: ExitCode;
+}
+
+/**
+ * Like `runServerVerb`, for a local verb (`daemon restart`) that needs the
+ * reply's data to keep going, rather than having it printed. Same envelope
+ * and transport, so a token-less caller in a real terminal still gets
+ * `channel: "tty"`.
+ */
+export async function callServerVerb(spec: VerbSpec, args: Record<string, unknown>, io: CliIo): Promise<ServerVerbResult> {
+  const outcome = await sendServerVerb(spec, args, io);
+  if ("spooled" in outcome) return { ok: true, data: { spooled: outcome.spooled }, exitCode: EXIT.spooled };
+  const { reply } = outcome;
+  return { ok: reply.ok, data: (reply.data as Record<string, unknown>) ?? {}, error: reply.error, exitCode: exitCodeOf(reply) };
 }

@@ -92,7 +92,9 @@ describe("claude adapter", () => {
 
   test("the worker settings wire every hook verb, and the Stop waiter is asyncRewake with an 8 h timeout", () => {
     const settings = workerSettings("/opt/flowryn bin/flowryn") as { hooks: Record<string, { hooks: { command: string; asyncRewake?: boolean; timeout?: number }[] }[]> };
-    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    // A failed tool fires PostToolUseFailure instead of PostToolUse: it must end the tool's urgent-steer clock.
+    expect(settings.hooks.PostToolUseFailure![0]!.hooks[0]!.command).toBe("'/opt/flowryn bin/flowryn' hook tool-failed --harness claude");
     // The usage-limit resume signals, and a permission dialog waiting mid-run (cutover C2): a worker's idle_prompt means nothing to Flowryn.
     expect((settings.hooks.Notification![0] as unknown as { matcher: string }).matcher).toBe("quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled|permission_prompt");
     const stop = settings.hooks.Stop![0]!.hooks;

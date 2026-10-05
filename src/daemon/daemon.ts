@@ -22,6 +22,7 @@ import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
 import { herdrConfig, timingConfig, workerConfigProblems } from "../config/workers.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
+import { UrgentPreempter } from "../lifecycle/urgent.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
 import { Launcher } from "../lifecycle/launcher.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
@@ -48,6 +49,8 @@ import type { SchedServices } from "../sched/services.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
 import { checkHarnessesAtStartup, gateHarness } from "../lifecycle/harness-gate.ts";
 import { alertHerdrIfDue, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
+import { PENDING_POLL_MS, RestartController, buildIdOf, recordRestarted, scriptSupervisor } from "./restart.ts";
+import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -151,12 +154,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     }
     const migrated = migrate(db);
     const database = db;
-    const instance = tx(database, () => {
-      const id = ensureInstanceId(database);
-      appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, migrated, instance: id } });
-      return id;
-    });
+    const build = buildIdOf(selfCommand());
     const startedAt = Date.now();
+    const { instance, restarted } = tx(database, () => {
+      const id = ensureInstanceId(database);
+      appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, build, migrated, instance: id } });
+      // A restart the old daemon asked for: record who asked, with the build before and after.
+      return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build }, startedAt) };
+    });
 
     const journalFiles = (): Record<JournalFile, string> => ({ backlog: config.tasks.backlog, todos: config.tasks.todos });
     const runner = (): TasksAxiRunner | null => {
@@ -182,7 +187,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
     };
-    const info: DaemonInfo = { pid: process.pid, version: VERSION, proto: PROTO, instance, startedAt, execPath: process.execPath, socket: sock, stateDir: config.state_dir };
+    const info: DaemonInfo = { pid: process.pid, version: VERSION, proto: PROTO, instance, startedAt, execPath: process.execPath, build, socket: sock, stateDir: config.state_dir };
 
     // M2: the Herdr runtime, launcher and reconciler (design sections 5 and 6).
     const herdrSocket = await resolveHerdrSocket(config);
@@ -220,6 +225,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
     });
     const control: ControlDeps = { db: database, runtime: () => runtime, bus, timing, now: Date.now };
+    const urgent = new UrgentPreempter({ db: database, timing, now: Date.now, runtime: () => runtime, interrupt: (runId) => interruptRun(control, runId, undefined, { recordRefusal: false }), log });
     const fleet: FleetServices = {
       runtime: () => runtime,
       bus,
@@ -229,9 +235,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       flowrynBin: async () => workerBinary(config.state_dir),
       harnessVersion,
       exitRun: (runId) => exitRun(control, runId),
-      interruptRun: (runId, waitMs) => interruptRun(control, runId, waitMs),
+      interruptRun: async (runId, waitMs) => {
+        const result = await interruptRun(control, runId, waitMs);
+        // No hook follows an interrupt (M0 c04): the tools it cut end here.
+        if (result.ok) urgent.tools.clear(runId);
+        return result;
+      },
       reconcile: (runId) => reconciler?.schedule(runId),
       continuations: new Map(),
+      urgent,
     };
     reconciler = new Reconciler({
       db: database,
@@ -391,6 +403,23 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     });
     const sched: SchedServices = { kick: () => scheduler?.kick(), passNow: async () => scheduler?.passNow(), grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false };
 
+    // Leader-safe restart: the guards read this daemon's in-memory work; launchd (or a test's script) restarts it.
+    const supervisorFile = env.FLOWRYN_SUPERVISOR;
+    const restart = new RestartController({
+      db: database,
+      env,
+      now: Date.now,
+      log,
+      info: () => info,
+      work: () => ({
+        mergesInFlight: delivery.inFlight,
+        cleanups: cleanups.keys(),
+        launching: launcher.activeRuns(),
+        approvalTasks: delivery.challenges.openTasks(Date.now()),
+      }),
+      supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
+    });
+
     const services: DaemonServices = {
       db: database,
       config: () => config,
@@ -405,12 +434,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       attention,
       delivery,
       sched,
+      restart,
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
     listener = await listen(sock, (message) => gateway.handle(message), (error) => log(`socket: ${error.message}`));
     boundSocket = true;
-    log(`started pid=${process.pid} version=${VERSION} proto=${PROTO} socket=${sock} state=${config.state_dir}`);
+    log(`started pid=${process.pid} version=${VERSION} proto=${PROTO} build=${build ?? "dev"} socket=${sock} state=${config.state_dir}`);
+    if (restarted) log(`restart: asked by ${String(restarted.by)}; ${JSON.stringify(restarted.old)} → this daemon`);
     const missing = missingTools(config);
     if (missing.length > 0) log(`configured tools missing: ${missing.join(", ")}`);
 
@@ -460,6 +491,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       void notifyPump.tick();
     }, ATTENTION_TICK_MS);
 
+    const pendingRestart = setInterval(() => void restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`)), PENDING_POLL_MS);
+
     let passing = false;
     const pass = setInterval(() => {
       if (passing) return;
@@ -500,11 +533,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(pass);
     clearInterval(steady);
     clearInterval(attentionTick);
+    clearInterval(pendingRestart);
     reconciler.stop();
     scheduler.stop();
     deliveryWatcher.stop();
     herdrWatcher.stop();
     bus.close();
+    urgent.close();
     attention.bus.close();
     removeSignals?.();
     process.off("SIGHUP", onHup);

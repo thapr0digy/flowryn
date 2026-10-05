@@ -18,7 +18,9 @@ case "$1 \${2:-}" in
   "session list") cat "$state" ;;
   "session stop") jq --arg n "$3" '.sessions |= map(if .name == $n then .running = false else . end)' "$state" > "$state.tmp" && mv "$state.tmp" "$state"; echo '{}' ;;
   "session delete") jq --arg n "$3" '.sessions |= map(select(.name != $n))' "$state" > "$state.tmp" && mv "$state.tmp" "$state"; echo '{}' ;;
-  "status --json") jq --arg n "\${HERDR_SESSION}" '{server: {running: any(.sessions[]; .name == $n and .running)}}' "$state" ;;
+  "status --json")
+    if jq -e --arg n "\${HERDR_SESSION:-}" '.sessions[] | select(.name == $n)' "$state" >/dev/null; then running=true; else running=false; fi
+    echo '{"server":{"running":'"$running"'}}' ;;
   "server "*)
     name=\${HERDR_SESSION}
     jq --arg n "$name" '.sessions += [{"name": $n, "default": false, "running": true, "socket_path": "/tmp/lab.sock"}]' "$state" > "$state.tmp" && mv "$state.tmp" "$state" ;;
