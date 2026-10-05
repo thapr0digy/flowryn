@@ -10,6 +10,7 @@ import { isAlive, terminate, type ProcIdentity, type PsRunner } from "../runtime
 import { findOpenRunItem } from "../attention/items.ts";
 import { getRun, type RunRow } from "./runs.ts";
 import { markLost, type SteerBus } from "./steers.ts";
+import { DIALOG_QUESTION } from "./prompt-wedge.ts";
 
 export interface ControlDeps {
   db: Db;
@@ -18,7 +19,14 @@ export interface ControlDeps {
   timing(): Timing;
   now(): number;
   ps?: PsRunner;
+  /** The gap between the interrupt gate's two Herdr status reads (default SECOND_READ_MS). */
+  secondReadMs?: number;
 }
+
+/** A dialog that opened a moment before the first status read shows by the second (Herdr's detection lag). */
+export const SECOND_READ_MS = 500;
+/** Screen lines the gate reads for a dialog's question. */
+const GATE_SCREEN_LINES = 20;
 
 export function identityOf(run: RunRow): ProcIdentity | null {
   if (run.proc_pid === null || run.proc_start === null || run.proc_exe === null) return null;
@@ -79,15 +87,41 @@ export function transcriptSize(path: string | null): number {
  * "blocked" is a dialog, and a dialog and a running tool never overlap, M0
  * c12), and never while Flowryn knows of a dialog itself (blocked_dialog, an
  * open blocked_prompt). Herdr unreachable or unsure ("unknown", null) refuses
- * too. The status is read right before the key; a dialog that opens in the
- * milliseconds between is the remaining window.
+ * too. Because a dialog that just opened may not read "blocked" yet, the
+ * status is read twice, secondReadMs apart, and the screen must not show a
+ * dialog's question in between. The status is read right before the key; a
+ * dialog that opens in the milliseconds after the second read is the
+ * remaining window.
  */
-export async function interruptKeyRefusal(deps: Pick<ControlDeps, "db">, run: RunRow, runtime: HerdrRuntime): Promise<string | null> {
-  if (run.liveness === "blocked_dialog") return "the worker is blocked on a dialog; answer it in its pane";
-  if (findOpenRunItem(deps.db, "blocked_prompt", run.id)) return "a permission dialog is open; answer it in the worker's pane";
+export async function interruptKeyRefusal(deps: Pick<ControlDeps, "db" | "secondReadMs">, run: RunRow, runtime: HerdrRuntime): Promise<string | null> {
+  const known = knownDialogRefusal(deps.db, run);
+  if (known) return known;
+  const first = await herdrStatusRefusal(runtime, run.pane_id!);
+  if (first) return first;
+  await Bun.sleep(deps.secondReadMs ?? SECOND_READ_MS);
+  let screen: string | null;
+  try {
+    screen = await runtime.readPane(run.pane_id!, GATE_SCREEN_LINES);
+  } catch (error) {
+    return `cannot read the worker's screen from Herdr (${(error as Error).message})`;
+  }
+  if (screen === null) return "Herdr has no screen for the worker's pane; nothing to interrupt";
+  if (DIALOG_QUESTION.test(screen)) return "the worker's screen shows a confirmation dialog; answer it in its pane";
+  return (await herdrStatusRefusal(runtime, run.pane_id!)) ?? knownDialogRefusal(deps.db, run);
+}
+
+/** A dialog Flowryn itself knows of: the run's liveness, or an open blocked_prompt item. */
+export function knownDialogRefusal(db: Db, run: RunRow): string | null {
+  const current = getRun(db, run.id) ?? run;
+  if (current.liveness === "blocked_dialog") return "the worker is blocked on a dialog; answer it in its pane";
+  if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog is open; answer it in the worker's pane";
+  return null;
+}
+
+async function herdrStatusRefusal(runtime: HerdrRuntime, paneId: string): Promise<string | null> {
   let status: string | null;
   try {
-    status = await runtime.agentStatus(run.pane_id!);
+    status = await runtime.agentStatus(paneId);
   } catch (error) {
     return `cannot read the worker's status from Herdr (${(error as Error).message})`;
   }

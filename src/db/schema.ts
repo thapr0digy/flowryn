@@ -359,6 +359,16 @@ ALTER TABLE messages ADD COLUMN seen_via TEXT;
 UPDATE messages SET ring_state = 'carried' WHERE rings > 0;
 `;
 
+/**
+ * Urgent steers (steer latency Tier 2): an urgent steer blocks the worker's
+ * next tool call and cancels a tool that has run past steer_preempt_after_ms;
+ * preempted_at is when Flowryn cancelled a tool for it (at most once).
+ */
+const STEER_URGENT_SQL = /* sql */ `
+ALTER TABLE messages ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN preempted_at INTEGER;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -368,6 +378,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 6, name: "decisions", sql: DECISIONS_SQL },
   { version: 7, name: "import", sql: IMPORT_SQL },
   { version: 8, name: "steer-seen", sql: STEER_SEEN_SQL },
+  { version: 9, name: "steer-urgent", sql: STEER_URGENT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

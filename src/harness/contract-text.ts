@@ -79,6 +79,8 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     "- When told a steer is waiting: $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack <id>.",
     `- A steer can also arrive mid-turn as ${channel} starting "${STEER_PREFIX} [<id>]:".`,
     "  It is from your leader; act on it, then $FLOWRYN_BIN ack <id>.",
+    "- A tool call may be blocked or cut short to deliver an urgent steer:",
+    "  act on it, then redo the call if it still applies.",
     ...deliveryLines(delivery),
     "- Cannot finish: $FLOWRYN_BIN fail --body-file -",
     "- Exit 75 means spooled. Do not retry in a loop.",
@@ -101,6 +103,11 @@ export function promptLine(kind: "ship" | "scout", taskId: string, instructionsF
 /** A steer as the worker sees it mid-turn or in its inbox. */
 export function steerLine(id: string, body: string): string {
   return `${STEER_PREFIX} [${id}]: ${body.replace(/\s+/g, " ").trim()} (when done: $FLOWRYN_BIN ack ${id})`;
+}
+
+/** Why a Claude worker's tool call was denied: the urgent steer itself, as the reason it reads (Tier 2). */
+export function urgentBlockLine(id: string, body: string): string {
+  return `${steerLine(id, body)} This tool call was blocked so you read this first; redo it if it still applies.`;
 }
 
 /** The one-line pointer an idle-wake waiter prints: a fact that stands on its own (M0 finding 5). */

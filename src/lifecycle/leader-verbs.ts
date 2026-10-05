@@ -1,5 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
-import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
+import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
@@ -28,26 +28,35 @@ function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
 }
 
 /**
- * `flowryn steer <task|run> --body-file -`: words for a worker. Delivered by
- * its hooks or extension, mid-turn or on the next idle wake, and re-rung until
- * the worker acknowledges it (design section 6).
+ * `flowryn steer <task|run> [--urgent] --body-file -`: words for a worker.
+ * Delivered by its hooks or extension, mid-turn or on the next idle wake, and
+ * re-rung until the worker acknowledges it (design section 6). An urgent one
+ * also blocks the worker's next tool call and cuts a tool that has run past
+ * steer_preempt_after_ms (never while a dialog may be open): the cut tool's
+ * work is lost, so keep it for "stop doing that now".
  */
 const steer: VerbSpec = {
   name: "steer",
-  summary: "Send a worker a steer; it is delivered at its next tool call or idle wake",
+  summary: "Send a worker a steer; it is delivered at its next tool call or idle wake (--urgent: sooner, may cut a running tool)",
   positionals: [{ name: "target", required: true, help: "task or run id" }],
-  flags: { "body-file": { type: "string", help: "the steer, from a file or - for stdin", fileFor: "body" } },
+  flags: {
+    "body-file": { type: "string", help: "the steer, from a file or - for stdin", fileFor: "body" },
+    urgent: { type: "boolean", help: "block the worker's next tool call with it, and cut a tool running over 3s (its work is lost)" },
+  },
   kind: "mutation",
   roles: ["leader", "human"],
   apply(ctx, args) {
     const run = activeRunFor(ctx.db, stringArg(args, "target")!);
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim();
     if (body.length === 0) throw new FlowrynError("bad_args", "the steer goes in --body-file -");
-    const message = createSteer(ctx.db, run, body, ctx.now());
-    return { data: { steer: message.id, run: run.id, task: run.task_id, liveness: run.liveness }, hints: [`flowryn show ${run.task_id}`] };
+    const urgent = boolArg(args, "urgent");
+    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent);
+    return { data: { steer: message.id, run: run.id, task: run.task_id, liveness: run.liveness, urgent }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
-    ctx.fleet.bus.notify(String(result.data.run));
+    const runId = String(result.data.run);
+    ctx.fleet.bus.notify(runId);
+    if (result.data.urgent === true) ctx.fleet.urgent.kick(runId);
     return result;
   },
 };

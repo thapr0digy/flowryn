@@ -7,6 +7,7 @@ import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { ensureDir } from "../util/fsx.ts";
 import { SteerBus } from "./steers.ts";
+import { inertUrgent, type UrgentServices } from "./urgent.ts";
 
 /**
  * What the M2 verbs need from the running daemon beyond the database: the
@@ -28,6 +29,8 @@ export interface FleetServices {
   reconcile(runId?: string): void;
   /** Consecutive Stop continuations per run (design section 5: at most two). */
   continuations: Map<string, number>;
+  /** Urgent steers: the main agent's running tools, and the timer that cuts a long one. */
+  urgent: UrgentServices;
 }
 
 /** A fleet with no Herdr: verbs that only touch the database still work. */
@@ -44,6 +47,7 @@ export function inertFleet(overrides: Partial<FleetServices> = {}): FleetService
     interruptRun: async () => ({ ok: false, evidence: "timeout", detail: "no runtime" }),
     reconcile: () => {},
     continuations: new Map(),
+    urgent: inertUrgent(),
     ...overrides,
   };
 }

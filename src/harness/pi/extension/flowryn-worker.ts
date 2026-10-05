@@ -22,7 +22,14 @@
 //     event, which fires before every model request, shows it in the request;
 //   - aborts the current run when the daemon asks for an interrupt (ctx.abort,
 //     M0 p14). A steer queued before an abort is dropped by Pi, so the daemon
-//     counts delivery only by the worker's ack and re-rings otherwise.
+//     counts delivery only by the worker's ack and re-rings otherwise;
+//   - for an urgent steer (Tier 2) delivered into a busy turn: blocks every
+//     tool call until the steer is seen (tool_call {block}, M0 p08), so the
+//     batch ends and the queued steer goes into the next request; and once the
+//     oldest running tool has run preempt_after_ms, asks the daemon (hook
+//     preempt, which refuses while a dialog may be open) and on go aborts. The
+//     stop after the abort tells the daemon the queued copy was dropped, and it
+//     rings again to the idle agent.
 import { spawn } from "node:child_process";
 
 type Json = Record<string, any>;
@@ -33,6 +40,8 @@ const TOOL_PING_MS = 60_000;
 /** A pause before re-polling after an empty reply, so a misbehaving daemon cannot spin the loop. */
 const REPOLL_MS = 50;
 const STEER_CUSTOM_TYPE = "flowryn-steer";
+/** A deferred preemption (a dialog may be open) asks again this often. */
+const PREEMPT_RECHECK_MS = 1_000;
 
 function runHook(name: string, input: Json, extra: string[] = []): Promise<{ code: number; stdout: string }> {
   return new Promise((resolve) => {
@@ -71,6 +80,62 @@ export default function flowrynWorker(pi: any): void {
   let lastToolPing = 0;
   /** Steers delivered and not yet seen in a model request. */
   const unseen = new Set<string>();
+  /** The main agent's running tools: tool call id → start time. */
+  const running = new Map<string, number>();
+  /** The urgent steer delivered into the busy turn and not yet seen, or null. */
+  let urgent: { id: string; afterMs: number; asked: boolean } | null = null;
+  let preemptTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function oldestTool(): number | null {
+    let oldest: number | null = null;
+    for (const at of running.values()) if (oldest === null || at < oldest) oldest = at;
+    return oldest;
+  }
+
+  function clearPreemptTimer(): void {
+    if (preemptTimer) clearTimeout(preemptTimer);
+    preemptTimer = null;
+  }
+
+  /** Time the cut: when the oldest running tool reaches the threshold, ask the daemon. */
+  function planPreempt(delayMs?: number): void {
+    clearPreemptTimer();
+    const started = oldestTool();
+    if (!urgent || urgent.asked || started === null) return;
+    const wait = delayMs ?? Math.max(0, started + urgent.afterMs - Date.now());
+    preemptTimer = setTimeout(() => void askPreempt(), wait);
+  }
+
+  async function askPreempt(): Promise<void> {
+    preemptTimer = null;
+    const started = oldestTool();
+    if (!urgent || urgent.asked || started === null) return;
+    const toolMs = Date.now() - started;
+    if (toolMs < urgent.afterMs) return planPreempt();
+    const id = urgent.id;
+    const reply = await runHook("preempt", { steer: id, tool_ms: toolMs }, ["--json"]);
+    if (!urgent || urgent.id !== id) return;
+    let answer: Json = {};
+    try {
+      answer = JSON.parse(reply.stdout.trim().split("\n").pop() ?? "{}");
+    } catch {
+      // No answer (the daemon is down): never cut without one; try again.
+    }
+    if (answer.go === true) {
+      urgent.asked = true;
+      try {
+        ctx?.abort?.();
+      } catch {
+        // no run to abort
+      }
+      return;
+    }
+    if (answer.go === false) {
+      urgent.asked = true;
+      return;
+    }
+    planPreempt(PREEMPT_RECHECK_MS);
+  }
 
   const remember = (c: any) => {
     if (c) ctx = c;
@@ -95,8 +160,23 @@ export default function flowrynWorker(pi: any): void {
     void runHook("prompt", {});
   });
 
-  pi.on("tool_execution_start", async (_event: any, c: any) => {
+  // While an urgent steer is unseen, no tool starts: the batch ends and the queued steer goes next (M0 p08, p13).
+  pi.on("tool_call", async (_event: any, c: any) => {
     remember(c);
+    if (!urgent) return undefined;
+    return { block: true, reason: `Blocked by Flowryn: urgent steer [${urgent.id}] is waiting; read it, then redo this call if it still applies.` };
+  });
+
+  pi.on("tool_execution_end", async (event: any, c: any) => {
+    remember(c);
+    running.delete(String(event?.toolCallId ?? ""));
+    planPreempt();
+  });
+
+  pi.on("tool_execution_start", async (event: any, c: any) => {
+    remember(c);
+    running.set(String(event?.toolCallId ?? ""), Date.now());
+    planPreempt();
     const now = Date.now();
     if (now - lastToolPing < TOOL_PING_MS) return;
     lastToolPing = now;
@@ -116,6 +196,10 @@ export default function flowrynWorker(pi: any): void {
     }
     if (seen.length > 0) {
       for (const id of seen) unseen.delete(id);
+      if (urgent && seen.includes(urgent.id)) {
+        urgent = null;
+        clearPreemptTimer();
+      }
       void runHook("steer-seen", { steers: seen });
     }
     return undefined;
@@ -123,15 +207,21 @@ export default function flowrynWorker(pi: any): void {
 
   pi.on("agent_settled", async (_event: any, c: any) => {
     remember(c);
+    // The turn is over: nothing runs, and an unseen urgent steer goes again to the idle agent (the daemon re-rings it).
+    running.clear();
+    if (urgent) unseen.delete(urgent.id);
+    urgent = null;
+    clearPreemptTimer();
     void runHook("stop", {});
   });
 
   pi.on("session_shutdown", async () => {
     stopped = true;
+    clearPreemptTimer();
     await runHook("session-end", {});
   });
 
-  function deliver(id: string, line: string): void {
+  function deliver(id: string, line: string, urgentAfterMs: number | null): void {
     const idle = ctx?.isIdle?.() !== false;
     const message = { customType: STEER_CUSTOM_TYPE, content: line, display: true };
     try {
@@ -143,6 +233,11 @@ export default function flowrynWorker(pi: any): void {
     if (id === "") return;
     unseen.add(id);
     void runHook("steer-carried", { steer: id, mode: idle ? "followUp" : "steer" });
+    // An idle agent reads it at once; a busy one is cut short for it.
+    if (!idle && urgentAfterMs !== null && !urgent) {
+      urgent = { id, afterMs: urgentAfterMs, asked: false };
+      planPreempt();
+    }
   }
 
   async function steerLoop(): Promise<void> {
@@ -169,7 +264,10 @@ export default function flowrynWorker(pi: any): void {
           }
           continue;
         }
-        if (message.steer?.line) deliver(String(message.steer.id ?? ""), String(message.steer.line));
+        if (message.steer?.line) {
+          const after = message.steer.urgent === true && typeof message.steer.preempt_after_ms === "number" ? message.steer.preempt_after_ms : null;
+          deliver(String(message.steer.id ?? ""), String(message.steer.line), after);
+        }
         else await sleep(REPOLL_MS);
       }
     } finally {

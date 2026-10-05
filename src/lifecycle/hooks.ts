@@ -5,7 +5,7 @@ import { intArg, stringArg, type Args, type HandlerCtx, type HandlerResult, type
 import * as leader from "../leader/hooks.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
-import { steerLine, steerPointer } from "../harness/contract-text.ts";
+import { steerLine, steerPointer, urgentBlockLine } from "../harness/contract-text.ts";
 import { HOOK_SIGNALS, type HookName } from "../harness/types.ts";
 import { getProject } from "./projects.ts";
 import { gatherFacts } from "../policy/merge.ts";
@@ -14,7 +14,8 @@ import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, tas
 import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
-import { dueSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
+import { dueSteers, dueUrgent, getMessage, loseUnseenUrgent, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
+import { piPreempt } from "./urgent.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 
@@ -40,6 +41,10 @@ export interface HookInput {
   error_details?: string | null;
   /** Claude Notification: its type (quota_auto_resume_fired after a usage limit reset). */
   notification_type?: string | null;
+  /** Claude PreToolUse/PostToolUse: the tool call's id, which pairs a start with its end. */
+  tool_use_id?: string | null;
+  /** Claude tool hooks inside a subagent carry the subagent's id; the main agent's carry none. */
+  agent_id?: string | null;
 }
 
 /** At most two consecutive Stop continuations, far below Claude's cap of 8 (design section 5). */
@@ -126,6 +131,18 @@ function takeSteer(ctx: HandlerCtx, run: RunWithPolicy, path: RingPath) {
  */
 function claudeSaw(ctx: HandlerCtx, run: RunWithPolicy, args: Args, hook: "pre-tool" | "post-tool" | "stop"): void {
   if (harnessOf(args) === "claude") markSeen(ctx.db, run, null, hook, ctx.now());
+}
+
+/**
+ * A Claude tool hook of the main agent, by its tool id: the urgent-steer
+ * tracker times the main agent's tools only. A subagent's tool runs inside
+ * the main agent's Task call, which is the one that counts (and is cut).
+ */
+function mainTool(args: Args): string | null {
+  if (harnessOf(args) !== "claude") return null;
+  const input = parseInput(args);
+  if (typeof input.agent_id === "string" && input.agent_id.length > 0) return null;
+  return typeof input.tool_use_id === "string" && input.tool_use_id.length > 0 ? input.tool_use_id : "tool";
 }
 
 // --- worker-start and the isolation assertion ---------------------------------------------
@@ -291,7 +308,10 @@ function signalVerb(
       return body(ctx, run, args, prepared);
     },
     async settle(ctx, result) {
-      if (ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
+      if (ctx.caller.runId) {
+        ctx.fleet.bus.notify(ctx.caller.runId);
+        ctx.fleet.urgent.kick(ctx.caller.runId);
+      }
       if (isLeaderCall(ctx)) ctx.attention.bus.notify(ctx.caller.session!);
       if (result.data.usage === "paused" || result.data.usage === "resumed") ctx.sched.kick();
       return result;
@@ -353,6 +373,8 @@ const prompt = signalVerb(
   "Hook: a turn started (busy); a leader gets its P1 digest",
   (ctx, run) => {
     ctx.fleet.continuations.delete(run.id);
+    // A new turn: no tool of the last one is still running (an interrupt fires no hook to end them).
+    ctx.fleet.urgent.tools.clear(run.id);
     markBusy(ctx, run, HOOK_SIGNALS.prompt);
     return { data: { run: run.id } };
   },
@@ -360,12 +382,26 @@ const prompt = signalVerb(
   async (ctx, args) => leader.digestDeadline(ctx, intArg(args, "started-at")),
 );
 
+/**
+ * PreToolUse: busy. For a Claude worker's main agent, an urgent steer that is
+ * due blocks this tool call with the steer as the deny reason, the model's
+ * next read (Tier 2; a hook reply, never a key, so it is safe even with a
+ * dialog about); otherwise the tool starts its clock for the preempter.
+ */
 const preTool = signalVerb(
   "pre-tool",
-  "Hook: a tool is about to run (busy lease); a leader's merge or discard asks you first",
+  "Hook: a tool is about to run (busy lease); an urgent steer blocks it; a leader's merge or discard asks you first",
   (ctx, run, args) => {
     claudeSaw(ctx, run, args, "pre-tool");
     markBusy(ctx, run, HOOK_SIGNALS["pre-tool"], "pre-tool");
+    const tool = mainTool(args);
+    if (tool === null) return { data: { run: run.id } };
+    const urgent = dueUrgent(ctx.db, run.id, ctx.now(), ctx.fleet.timing());
+    if (urgent) {
+      markRung(ctx.db, urgent, run, "pre-tool", ctx.now(), false, ctx.fleet.timing());
+      return { data: { run: run.id, steer: urgent.id, permission: "deny", reason: urgentBlockLine(urgent.id, urgent.body) } };
+    }
+    ctx.fleet.urgent.tools.start(run.id, tool, ctx.now());
     return { data: { run: run.id } };
   },
   (ctx, input) => leader.preToolUse(ctx, input),
@@ -378,6 +414,8 @@ const postTool = signalVerb(
   (ctx, run, args) => {
     claudeSaw(ctx, run, args, "post-tool");
     markBusy(ctx, run, HOOK_SIGNALS["post-tool"], "post-tool");
+    const tool = mainTool(args);
+    if (tool !== null) ctx.fleet.urgent.tools.end(run.id, tool);
     if (harnessOf(args) !== "claude") return { data: { run: run.id } };
     const steer = takeSteer(ctx, run, "post-tool");
     return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
@@ -388,6 +426,9 @@ const postTool = signalVerb(
 /** Stop: a turn ended, unless a pending steer continues it (M0 c06), at most twice in a row. */
 const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer (worker) or a P0 (leader)", (ctx, run, args) => {
   claudeSaw(ctx, run, args, "stop");
+  ctx.fleet.urgent.tools.clear(run.id);
+  // Pi settled: an urgent steer it queued into the turn and never showed the model (its abort dropped it) goes again, idle.
+  if (harnessOf(args) === "pi") loseUnseenUrgent(ctx.db, run, ctx.now());
   if (harnessOf(args) === "claude") {
     const used = ctx.fleet.continuations.get(run.id) ?? 0;
     if (used < MAX_CONTINUATIONS) {
@@ -409,6 +450,7 @@ const stopFailure = signalVerb(
   "Hook: a turn ended in an API error",
   (ctx, run, args) => {
     ctx.fleet.continuations.delete(run.id);
+    ctx.fleet.urgent.tools.clear(run.id);
     // The turn ended in an API error before any further inference: what it carried was never read.
     markLost(ctx.db, run, "turn failed", ctx.now());
     markIdle(ctx, run, HOOK_SIGNALS["stop-failure"]);
@@ -424,6 +466,7 @@ const sessionEnd = signalVerb(
   "Hook: the harness session ended",
   (ctx, run) => {
     const now = ctx.now();
+    ctx.fleet.urgent.tools.clear(run.id);
     ctx.db.query("UPDATE runs SET busy_until = NULL, last_hook_at = ?2, updated_at = ?2 WHERE id = ?1").run(run.id, now);
     recordEvidence(ctx.db, run.id, "hook", 3, { signal: HOOK_SIGNALS["session-end"], at: now }, now);
     appendEvent(ctx.db, { source: "hook", kind: "run.session_ended", runId: run.id, taskId: run.task_id, payload: {} });
@@ -607,7 +650,10 @@ const waitSteer: VerbSpec = {
     // The Claude waiter fires only while idle; the extension says how it delivered (hook steer-carried).
     markRung(ctx.db, due, run, harness === "pi" ? "extension" : "waiter", now, harness === "claude" || idleNow(run, now), ctx.fleet.timing());
     const message = getMessage(ctx.db, due.id)!;
-    return { data: { fire: { id: message.id, line: harness === "pi" ? steerLine(message.id, message.body) : steerPointer(message.id) } } };
+    if (harness === "claude") return { data: { fire: { id: message.id, line: steerPointer(message.id) } } };
+    // An urgent steer: the extension blocks the next tool call and cuts a tool past the threshold (asking hook preempt).
+    const urgent = message.urgent === 1 ? { urgent: true, preempt_after_ms: ctx.fleet.timing().steer_preempt_after_ms } : {};
+    return { data: { fire: { id: message.id, line: steerLine(message.id, message.body), ...urgent } } };
   },
 };
 
@@ -653,4 +699,16 @@ const steerSeen = piWorkerVerb("steer-seen", "Worker hook (Pi): steers that reac
   return { data: { run: run.id, seen: ids.length > 0 ? markSeen(ctx.db, run, ids, "context", ctx.now()) : [] } };
 });
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];
+/**
+ * `hook preempt`: the Pi extension's oldest tool has run past the threshold
+ * with an urgent steer unseen; may it abort? Go, defer (a dialog may be open;
+ * ask again), or no (seen already, cut once already, the tool too young).
+ */
+const preempt = piWorkerVerb("preempt", "Worker hook (Pi): may the extension cut its running tool for an urgent steer", (ctx, run, input) => {
+  const id = steerIds([input.steer])[0];
+  const toolMs = typeof input.tool_ms === "number" && Number.isFinite(input.tool_ms) ? Math.max(0, Math.floor(input.tool_ms)) : null;
+  if (!id || toolMs === null) throw new FlowrynError("bad_args", "preempt needs a steer id and tool_ms");
+  return { data: { run: run.id, steer: id, ...piPreempt(ctx.db, run, id, toolMs, ctx.fleet.timing(), ctx.fleet.urgent.deferrals, ctx.now()) } };
+});
+
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];

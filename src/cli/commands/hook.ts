@@ -219,7 +219,7 @@ const waitP0: VerbSpec = {
 export const HOOK_CLI_VERBS: VerbSpec[] = [
   signalHook("worker-start", "Worker hook: session start; reports the session id and cwd for the isolation check"),
   signalHook("prompt", "Hook: a turn started; a leader gets its P1 digest"),
-  signalHook("pre-tool", "Hook: a tool is about to run"),
+  signalHook("pre-tool", "Hook: a tool is about to run; an urgent steer may block it"),
   signalHook("post-tool", "Hook: a tool finished; may print a pending steer as context"),
   signalHook("stop", "Hook: a turn ended; may continue it with a steer (worker) or a P0 (leader)"),
   signalHook("stop-failure", "Hook: a turn ended in an API error"),
@@ -227,6 +227,7 @@ export const HOOK_CLI_VERBS: VerbSpec[] = [
   waitSteer,
   signalHook("steer-carried", "Worker hook (Pi): how the extension delivered a steer"),
   signalHook("steer-seen", "Worker hook (Pi): steers that reached a model request"),
+  signalHook("preempt", "Worker hook (Pi): may the extension cut its running tool for an urgent steer"),
   signalHook("session-start", "Leader hook: session start or compaction; prints the briefing"),
   signalHook("notify", "Hook: you went inactive or came back (leader); Claude's usage-limit notifications"),
   signalHook("delivered", "Leader hook (Pi): a pushed P0 was delivered or declined"),
