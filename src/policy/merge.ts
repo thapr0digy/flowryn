@@ -243,6 +243,9 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
       red.length === 1 ? waiveHint(task, red[0]!) : red.length === 0 ? `merge without --allow-red: flowryn merge ${task}` : "fix them; at most one check can be waived",
     );
   }
+  if (asked !== null && !chosen.choice) {
+    throw new FlowrynError("approval_required", `merge refused: ${chosen.why}`, `approve in your shell: flowryn approve ${task} --allow-red ${shellWord(asked)}`);
+  }
   if (checks && checks.state !== "green" && checks.state !== "none") {
     const pending = checks.checks.filter((c) => c.state === "pending").map((c) => c.name);
     const waiver = waiverOf(chosen.choice);
@@ -251,7 +254,7 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
       else {
         throw new FlowrynError(
           "red_checks",
-          `merge refused: ${red.length} red check${red.length === 1 ? "" : "s"}: ${red.join(", ")}${waiver ? ` (your waiver names ${waiver}, and only one may be waived)` : ""}${asked !== null && !chosen.choice ? ` (${chosen.why})` : ""}`,
+          `merge refused: ${red.length} red check${red.length === 1 ? "" : "s"}: ${red.join(", ")}${waiver ? ` (your waiver names ${waiver}, and only one may be waived)` : ""}`,
           red.length === 1 ? waiveHint(task, red[0]!) : "fix them; at most one check can be waived",
         );
       }

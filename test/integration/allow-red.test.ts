@@ -56,6 +56,15 @@ function mergedApproval(e: ShipEnv, task: string): { channel: string; allow_red_
   }
 }
 
+function approvalKeyEvents(e: ShipEnv): number {
+  const db = e.fleet.h.db();
+  try {
+    return (db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'leader.approval_key'").get() as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
+
 function errorOf(stdout: string): { code: string; message: string; help?: string } {
   return (JSON.parse(stdout) as { error: { code: string; message: string; help?: string } }).error;
 }
@@ -114,6 +123,7 @@ describe("merge --allow-red through the leader's approval channels", () => {
       leader.permissionMode = "bypassPermissions";
       const bypass = await leader.runBash(`flowryn merge ${first.task} --allow-red ${QUOTED} --json`, { approve: true });
       expect(bypass).toMatchObject({ prompted: true, ran: true, code: 2 });
+      expect(errorOf(bypass.stdout).code).toBe("approval_required");
       expect(errorOf(bypass.stdout).message).toContain("yolo never waives");
       expect(e.fleet.run(first.run).state).toBe("ready");
 
@@ -168,7 +178,16 @@ describe("merge --allow-red through the leader's approval channels", () => {
       expect(leader.confirms[0]!.message).toContain("https://github.com/acme/web/pull/1");
       expect(e.fleet.run(run).state).toBe("ready");
 
+      // The lease's key rotated under the extension: the refusal asks for approval, so it fetches a fresh key once.
+      const keysBefore = approvalKeyEvents(e);
+      const db = e.fleet.h.db();
+      try {
+        db.query("UPDATE leader_lease SET approval_key_hash = 'rotated' WHERE id = 1").run();
+      } finally {
+        db.close();
+      }
       const yes = await leader.callTool("flowryn_merge", { task, allow_red: RED }, true);
+      expect(approvalKeyEvents(e)).toBeGreaterThan(keysBefore);
       expect(yes).toContain(`Merged ${task}`);
       expect(yes).toContain(`waiving ${JSON.stringify(RED)}`);
       expect(mergedApproval(e, task)).toMatchObject({ channel: "pi-confirm", allow_red_check: RED });

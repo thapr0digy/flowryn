@@ -176,7 +176,13 @@ describe("the merge gate with a waiver from the leader's channels", () => {
 
   test("assumption: yolo never waives, even when the merge asks for it", () => {
     expect(code(() => checkGate(facts(), asked({ kind: "yolo" }, NAME)))).toBe("red_checks");
-    expect(code(() => checkGate(facts(), asked(null, NAME, "waiving needs your word")))).toBe("red_checks");
+  });
+
+  test("a waiver for the one failing check with no approval asks for one, carrying why", () => {
+    const refused = thrown(() => checkGate(facts(), asked(null, NAME, "the approval key is not this lease's; waiving needs your word")));
+    expect(refused.code).toBe("approval_required");
+    expect(refused.message).toContain("the approval key is not this lease's");
+    expect(refused.help).toContain(`flowryn approve t --allow-red '${NAME}'`);
   });
 
   test("the named check must be the only one failing now", () => {
