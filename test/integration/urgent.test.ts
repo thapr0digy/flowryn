@@ -139,9 +139,10 @@ describe("urgent steers to a claude worker", () => {
     async () => {
       const env = await fleet();
       const { task, run } = await env.dispatch("Ship\nFAKE: dialog-tool 60000 Bash command: git commit --amend Do you want to proceed?", { kind: "ship" });
-      await waitUntil(() => items(env, run).some((i) => i.kind === "blocked_prompt" && i.state !== "resolved"), 15_000, "the dialog");
-      const pane = env.run(run).pane_id!;
+      // Herdr reads a dialog "blocked" while it is up (spike c12); without that, the reconciler would clear it at once.
+      const pane = (await env.waitRun(run, (r) => r.pane_id !== null, "the pane")).pane_id!;
       env.herdr.setStatus(pane, "blocked");
+      await waitUntil(() => items(env, run).some((i) => i.kind === "blocked_prompt" && i.state !== "resolved"), 15_000, "the dialog");
       const id = await steer(env, task, "stop the migration", true);
       await Bun.sleep(AFTER_MS * 3);
       expect(keysSent(env)).toBe(0);
