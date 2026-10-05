@@ -23,7 +23,7 @@ import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
 import { PROTO } from "../version.ts";
-import { contractBody, contractSteps, type ContractEnv, type ContractEvent, type ContractState } from "./suite.ts";
+import { contractBody, contractSteps, type ContractEnv, type ContractEvent, type ContractState, type ContractStep } from "./suite.ts";
 
 export interface ContractOptions {
   harness: HarnessId;
@@ -222,18 +222,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       isAlive: (pid, start, exe) => isAlive({ pid, start, exe }),
       log: options.log,
     };
-    for (const step of contractSteps(options.harness)) {
-      const started = Date.now();
-      try {
-        const detail = await step.run(contractEnv, state);
-        steps.push({ step: step.name, ok: true, detail, seconds: Math.round((Date.now() - started) / 1000) });
-        options.log(`ok ${step.name}: ${detail}`);
-      } catch (error) {
-        steps.push({ step: step.name, ok: false, detail: (error as Error).message, seconds: Math.round((Date.now() - started) / 1000) });
-        options.log(`FAILED ${step.name}: ${(error as Error).message}`);
-        break;
-      }
-    }
+    steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log)));
   } finally {
     await cleanup();
     process.off("SIGINT", onSignal);
@@ -241,6 +230,28 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
   return { harness: options.harness, version, passed, steps, scratch: home };
+}
+
+/** Run the steps in order, logging step N/M as each starts and ends; stop at the first failure. */
+export async function runContractSteps(steps: ContractStep[], env: ContractEnv, state: ContractState, log: (line: string) => void): Promise<StepResult[]> {
+  const results: StepResult[] = [];
+  for (const [index, step] of steps.entries()) {
+    const position = `step ${index + 1}/${steps.length}`;
+    log(`${position} ${step.name} (usually ~${step.typicalSeconds}s)`);
+    const started = Date.now();
+    try {
+      const detail = await step.run(env, state);
+      const seconds = Math.round((Date.now() - started) / 1000);
+      results.push({ step: step.name, ok: true, detail, seconds });
+      log(`${position} ok ${step.name} (${seconds}s): ${detail}`);
+    } catch (error) {
+      const seconds = Math.round((Date.now() - started) / 1000);
+      results.push({ step: step.name, ok: false, detail: (error as Error).message, seconds });
+      log(`${position} FAILED ${step.name} (${seconds}s): ${(error as Error).message}`);
+      break;
+    }
+  }
+  return results;
 }
 
 function createdWorkspaces(stateDir: string): string[] {

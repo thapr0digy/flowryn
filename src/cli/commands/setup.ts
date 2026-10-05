@@ -19,7 +19,20 @@ import { HARNESS_IDS, type HarnessId } from "../../harness/types.ts";
 import { resolveTool } from "../../config/config.ts";
 import { resolveHerdrSocket } from "../../runtime/herdr/socket.ts";
 import { dataDirReport } from "../../contracts/report.ts";
+import { contractEstimateSeconds, contractSteps } from "../../contracts/suite.ts";
 import type { Check } from "../../doctor/doctor.ts";
+
+function minutes(seconds: number): string {
+  return `${Math.max(1, Math.round(seconds / 60))} min`;
+}
+
+/** The up-front line: what will run, how many steps, and roughly how long it takes. */
+export function contractPlan(harnesses: readonly HarnessId[]): string {
+  if (harnesses.length === 0) return "contracts: no harness installed to test";
+  const steps = harnesses.reduce((total, h) => total + contractSteps(h).length, 0);
+  const seconds = harnesses.reduce((total, h) => total + contractEstimateSeconds(h), 0);
+  return `contracts: ${harnesses.join(", ")}; ${steps} steps, about ${minutes(seconds)} (each step's own timeout is the real bound)`;
+}
 
 /**
  * `flowryn doctor --contracts`: run each harness's contract suite in a
@@ -34,8 +47,10 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
   const harnesses = (wanted ? [wanted] : HARNESS_IDS.filter((h) => resolveTool(config, h))) as HarnessId[];
   const socket = stringArg(args, "herdr-socket") ?? (await resolveHerdrSocket(config)).socket;
   if (!socket) return [{ check: "contracts", status: "fail", detail: "no Herdr session to run in; pass --herdr-socket or set [herdr]" }];
+  io.stderr(`${contractPlan(harnesses)}\n`);
   const checks: Check[] = [];
-  for (const harness of harnesses) {
+  for (const [index, harness] of harnesses.entries()) {
+    io.stderr(`contract ${harness} (${index + 1}/${harnesses.length}): ${contractSteps(harness).length} steps, about ${minutes(contractEstimateSeconds(harness))}\n`);
     try {
       const result = await runContract({
         harness,
