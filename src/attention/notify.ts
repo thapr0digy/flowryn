@@ -11,7 +11,10 @@ import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
  * within p0_coalesce_s and repeated after p0_renotify_min while unresolved;
  * at most one batched non-P0 notification per min_interval_min for new
  * actionable P1 items and for actionable items open over a day (once a day);
- * never one for P2. Each send is a notifications row and an event.
+ * never one for P2. A non-blocking worker question, and what you sent from
+ * a review page, are not notified: the leader is woken with them instead (a
+ * blocking question is a P0, notified at once).
+ * Each send is a notifications row and an event.
  */
 
 export type MacNotify = (title: string, body: string) => Promise<void>;
@@ -115,7 +118,7 @@ export class NotifyPump {
       }
       const batch = db
         .query(
-          `SELECT id, lane, line FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented')
+          `SELECT id, lane, line FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented') AND kind NOT IN ('worker_question','review_feedback')
              AND (last_notified_at IS NULL OR (opened_at <= ?1 AND last_notified_at <= ?2)) ORDER BY opened_at`,
         )
         .all(now - ageMs, now - DAY_MS) as Pending[];

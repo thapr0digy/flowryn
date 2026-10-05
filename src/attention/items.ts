@@ -20,6 +20,7 @@ export type ItemClass = "actionable" | "info";
  * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
  * restart_dropped: a `flowryn daemon restart` that will not happen (its binary
  * failed the check, its supervisor refused, or `--when-idle` expired).
+ * review_feedback: what you sent from a review page the daemon polls.
  * pass_requested: the user asked on a review page to pass its gate; the
  * leader confirms it with them through a human channel.
  */
@@ -32,6 +33,7 @@ export const LANE_TABLE = {
   pass_requested: { lane: "P1", class: "actionable" },
   report_ready: { lane: "P1", class: "actionable" },
   worker_question: { lane: "P1", class: "actionable" },
+  review_feedback: { lane: "P1", class: "actionable" },
   divergence: { lane: "P1", class: "actionable" },
   worker_idle: { lane: "P1", class: "actionable" },
   unproven_merge: { lane: "P1", class: "actionable" },
@@ -62,6 +64,14 @@ export const LANE_TABLE = {
 } as const satisfies Record<string, { lane: Lane; class: ItemClass }>;
 
 export type ItemKind = keyof typeof LANE_TABLE;
+
+/**
+ * A worker's questions for you, blocking (P0) or not (P1), a review gate's,
+ * and what you sent from a review page: they reach the leader as a batch
+ * (questionBatch in router.ts), never one push each, so the P0 push path
+ * leaves them alone.
+ */
+export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_question_blocking", "review_feedback"];
 
 export interface ItemRow {
   id: string;

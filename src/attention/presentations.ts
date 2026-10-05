@@ -1,4 +1,5 @@
 import type { Db } from "../db/db.ts";
+import { QUESTION_KINDS } from "./items.ts";
 
 /**
  * Presentations (design section 9). No harness can observe that the leader
@@ -69,19 +70,34 @@ export function offer(db: Db, c: Carry): boolean {
   return record(db, c, "offered");
 }
 
-/** The extension delivered an offered P0 by `path`: it is carried for `turn` from now on. */
-export function acceptOffer(db: Db, itemId: string, session: string, path: PresentationPath, turn: number, now: number): boolean {
-  const moved = db
-    .query("UPDATE presentations SET state = 'carried', path = ?3, turn_no = ?4, carried_at = ?5 WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'")
-    .run(itemId, session, path, turn, now).changes;
-  if (moved === 0) return carry(db, { itemId, session, turn, path, now });
-  db.query("UPDATE items SET attempts = attempts + 1 WHERE id = ?1").run(itemId);
-  return true;
+/**
+ * The extension delivered an offered push by `path`: it is carried for `turn`
+ * from now on, with every item offered in the same push (one transaction, so
+ * the same carried_at). Returns the items recorded.
+ */
+export function acceptOffer(db: Db, itemId: string, session: string, path: PresentationPath, turn: number, now: number): string[] {
+  const batch = offeredWith(db, itemId, session);
+  if (batch.length === 0) return carry(db, { itemId, session, turn, path, now }) ? [itemId] : [];
+  for (const id of batch) {
+    db.query("UPDATE presentations SET state = 'carried', path = ?3, turn_no = ?4, carried_at = ?5 WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'").run(id, session, path, turn, now);
+    db.query("UPDATE items SET attempts = attempts + 1 WHERE id = ?1").run(id);
+  }
+  return batch;
 }
 
-/** A push path declined the item (a Pi leader went idle, or you started typing); the lease is free again. */
+/** A push path declined the item (a Pi leader went idle, or you started typing); the lease is free again, for every item of the same push. */
 export function releaseOffer(db: Db, itemId: string, session: string): void {
-  db.query("DELETE FROM presentations WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'").run(itemId, session);
+  for (const id of offeredWith(db, itemId, session)) db.query("DELETE FROM presentations WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'").run(id, session);
+}
+
+/** The items offered to `session` in the same push as `itemId` (itself first), or none when it holds no offer. */
+function offeredWith(db: Db, itemId: string, session: string): string[] {
+  const lead = db.query("SELECT carried_at FROM presentations WHERE item_id = ?1 AND session_id = ?2 AND state = 'offered'").get(itemId, session) as { carried_at: number } | null;
+  if (!lead) return [];
+  const rest = db
+    .query("SELECT item_id FROM presentations WHERE session_id = ?1 AND state = 'offered' AND carried_at = ?2 AND item_id != ?3 ORDER BY rowid")
+    .all(session, lead.carried_at, itemId) as { item_id: string }[];
+  return [itemId, ...rest.map((r) => r.item_id)];
 }
 
 /**
@@ -132,10 +148,19 @@ export function presentationsOf(db: Db, itemId: string): { session_id: string; t
   }[];
 }
 
-/** Turns a P0 started in this session in the last hour (waiter wakes and Pi triggers), for the cap of design section 9. */
-export function startedTurnsLastHour(db: Db, session: string, now: number): number {
+/**
+ * Turns a push started in this session in the last hour (waiter wakes and Pi
+ * triggers), for the caps of design section 9: a question batch is one turn
+ * however many questions it carries, and counts against its own budget, not
+ * the P0 one.
+ */
+export function startedTurnsLastHour(db: Db, session: string, now: number, budget: "p0" | "questions" = "p0"): number {
+  const kinds = QUESTION_KINDS.map((k) => `'${k}'`).join(", ");
   const row = db
-    .query("SELECT COUNT(*) AS n FROM presentations WHERE session_id = ?1 AND path IN ('waiter','trigger') AND carried_at > ?2")
+    .query(
+      `SELECT COUNT(DISTINCT s.turn_no) AS n FROM presentations s JOIN items i ON i.id = s.item_id
+       WHERE s.session_id = ?1 AND s.path IN ('waiter','trigger') AND s.carried_at > ?2 AND i.kind ${budget === "questions" ? "IN" : "NOT IN"} (${kinds})`,
+    )
     .get(session, now - 3_600_000) as { n: number };
   return row.n;
 }

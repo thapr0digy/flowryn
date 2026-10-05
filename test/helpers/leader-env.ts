@@ -5,7 +5,9 @@ import { STYLE_BLOCK } from "../../src/harness/contract-text.ts";
 import { writeLeaderFiles, type LeaderFiles } from "../../src/bridges/files.ts";
 import { leaderEnv } from "../../src/cli/commands/lead.ts";
 import type { BridgeDriver, BridgeEnv, LeaderHarness, PresentationView } from "../../src/contracts/bridge-suite.ts";
-import type { Db } from "../../src/db/db.ts";
+import { openItem } from "../../src/attention/items.ts";
+import { tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
@@ -47,6 +49,8 @@ export interface LeaderEnv {
   pi(): Promise<FakePiLeader>;
   openP0(text: string): Promise<string>;
   openP1(text: string): Promise<string>;
+  /** A P1 that is not a question (a PR ready), so only a digest or a briefing carries it. */
+  openPlainP1(text: string): string;
   withDb<T>(fn: (db: Db) => T): T;
   bridgeEnv(harness: LeaderHarness, drivers: [BridgeDriver, BridgeDriver]): BridgeEnv;
   cleanup(): Promise<void>;
@@ -151,6 +155,14 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
     async openP1(text) {
       await workerCall(["ask", "--options", "yes,no", "--blocks", "the next step of the task", "--body-file", "-"], text);
       return withDb((db) => (db.query("SELECT id FROM items WHERE kind = 'worker_question' ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id);
+    },
+    openPlainP1(text) {
+      return withDb((db) =>
+        tx(db, () => {
+          const event = appendEvent(db, { source: "cli", kind: "test.item", payload: {} });
+          return openItem(db, { kind: "pr_ready", eventSeq: event.seq, line: `PR ready: ${text}`, taskId: worker.taskId, runId: worker.runId });
+        }),
+      );
     },
     bridgeEnv(harness, drivers) {
       return {

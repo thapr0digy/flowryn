@@ -2,7 +2,8 @@ import { FlowrynError } from "../api/errors.ts";
 import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
 import { composeBriefing, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
-import { composeDigest, digestCandidates, isWakePrompt, p0Candidate, p0Line, type RankedItem } from "../attention/router.ts";
+import { QUESTION_KINDS } from "../attention/items.ts";
+import { composeDigest, digestCandidates, isQuestionWake, isWakePrompt, p0Candidate, p0Line, questionBatch, questionsText, questionWakeLine, type RankedItem } from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
@@ -136,27 +137,71 @@ function interruptedByTranscript(ctx: HandlerCtx, s: LeaderSessionRow): boolean 
   return offset !== undefined && transcriptShowsInterrupt(s.transcript_path, offset);
 }
 
+/** How a push would reach this session now, or null when nothing may be pushed to it. */
+function pushMode(s: LeaderSessionRow, now: number): PushMode | null {
+  if (busyNow(s, now)) return s.harness === "pi" ? "continuation" : null;
+  if (s.user_inactive_since === null) return null;
+  if (s.harness === "pi" && s.has_ui !== 1) return null;
+  return s.harness === "pi" ? "trigger" : "waiter";
+}
+
+export interface Push {
+  /** What the push carries: one P0, or a batch of worker questions. */
+  items: RankedItem[];
+  mode: PushMode;
+  questions: boolean;
+  /** Questions left for the next push. */
+  more: number;
+}
+
 /**
- * Should a P0 be pushed to this session now, and how (design section 9)?
+ * Should something be pushed to this session now, and how (design section 9)?
  * Busy: Claude's Stop continuation takes it (not a waiter), Pi's extension
  * follows up. Idle and you inactive: a Claude waiter wakes the session, a Pi
  * extension triggers a turn if it has the TUI. Idle and you active: nothing
- * is pushed; it tops your next digest. Started turns are capped per hour.
+ * is pushed; it tops your next digest. A P0 goes first, one at a time. Worker
+ * questions go as a batch, and start a turn only once the oldest has waited
+ * question_batch_ms (`dueAt` says when, so the waiter wakes then). Started
+ * turns are capped per hour, P0s and question batches each on their own budget.
  */
-export function p0Push(ctx: HandlerCtx, s: LeaderSessionRow, now: number): { item: RankedItem; mode: PushMode } | null {
-  if (!isHolder(ctx.db, s.session_id)) return null;
-  const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx));
-  if (!item) return null;
-  const busy = busyNow(s, now);
-  if (busy) return s.harness === "pi" ? { item, mode: "continuation" } : null;
-  if (s.user_inactive_since === null) return null;
-  if (s.harness === "pi" && s.has_ui !== 1) return null;
-  if (startedTurnsLastHour(ctx.db, s.session_id, now) >= ctx.attention.notify().max_triggered_turns_per_hour) return null;
-  return { item, mode: s.harness === "pi" ? "trigger" : "waiter" };
+export function leaderPush(ctx: HandlerCtx, s: LeaderSessionRow, now: number): { push: Push | null; dueAt: number | null } {
+  if (!isHolder(ctx.db, s.session_id)) return { push: null, dueAt: null };
+  const mode = pushMode(s, now);
+  const startsTurn = mode === "waiter" || mode === "trigger";
+  const budgets = ctx.attention.notify();
+  if (mode) {
+    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx));
+    if (item && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") >= budgets.max_triggered_turns_per_hour)) {
+      return { push: { items: [item], mode, questions: false, more: 0 }, dueAt: null };
+    }
+  }
+  const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
+  if (!batch) return { push: null, dueAt: null };
+  if (!mode) return { push: null, dueAt: batch.dueAt };
+  if (startsTurn && now < batch.dueAt) return { push: null, dueAt: batch.dueAt };
+  if (startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "questions") >= budgets.max_question_wakes_per_hour) return { push: null, dueAt: null };
+  return { push: { items: batch.items, mode, questions: true, more: batch.more }, dueAt: null };
 }
 
 function pushTurn(s: LeaderSessionRow, mode: PushMode): number {
   return mode === "continuation" ? s.turn_no : s.turn_no + 1;
+}
+
+/** The text a push hands over: the P0 line, or for questions the wake line (Claude's waiter) or every question's line. */
+function pushText(push: Push, items: RankedItem[], harness: string): string {
+  if (!push.questions) return p0Line(items[0]!);
+  return push.mode === "waiter" && harness === "claude" ? questionWakeLine(items) : questionsText(items, push.more);
+}
+
+/** The questions a question wake carried into `turn`, for that turn's prompt hook. */
+function wokenQuestions(db: Db, session: string, turn: number): RankedItem[] {
+  return db
+    .query(
+      `SELECT i.* FROM presentations s JOIN items i ON i.id = s.item_id
+       WHERE s.session_id = ?1 AND s.turn_no = ?2 AND s.path = 'waiter' AND s.state = 'carried' AND i.kind IN (${QUESTION_KINDS.map((k) => `'${k}'`).join(", ")})
+       ORDER BY i.opened_at, i.rowid`,
+    )
+    .all(session, turn) as RankedItem[];
 }
 
 /** Compose the holder's briefing and carry every item it lists for `turn`. Inside a transaction. */
@@ -276,6 +321,11 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
   if (isHolder(ctx.db, s.session_id)) {
     // Taken over mid-conversation: the full briefing first, then whatever it does not list.
     if (s.brief_pending === 1) lines.push(brief(ctx, s, turn, now).text);
+    // A question wake's line names the questions; the woken turn gets each one in full.
+    if (isQuestionWake(input.prompt)) {
+      const woken = wokenQuestions(ctx.db, s.session_id, turn);
+      if (woken.length > 0) lines.push(questionsText(woken));
+    }
     const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx)));
     if (digest) {
       for (const item of digest.shown) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "digest", now });
@@ -547,6 +597,14 @@ export function stop(ctx: HandlerCtx): HandlerResult {
       appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: item.id, path: "continuation", turn: s.turn_no }, ts: now });
       return { data: { context: p0Line(item), item: item.id, presented } };
     }
+    // Worker questions ride the turn that is ending at once: the batch window only holds back a wake.
+    const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
+    const carried = (batch?.items ?? []).filter((q) => carry(ctx.db, { itemId: q.id, session: s.session_id, turn: s.turn_no, path: "continuation", now }));
+    if (carried.length > 0) {
+      setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
+      appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: carried.map((q) => q.id), path: "continuation", turn: s.turn_no }, ts: now });
+      return { data: { context: questionsText(carried, batch!.more), item: carried[0]!.id, presented } };
+    }
   }
   markIdle(ctx, s, now, "stop");
   return { data: { presented } };
@@ -629,12 +687,14 @@ export async function waitForP0(ctx: HandlerCtx, waiter: string): Promise<WaitOu
         s.busy_until = now;
         expireBusy(ctx.db, s, now, "interrupt marker in the transcript");
       } else expireBusy(ctx.db, s, now, "busy lease expired");
-      return p0Push(ctx, s, now);
+      return leaderPush(ctx, s, now);
     });
     beat = false;
-    if (push) return { push: { item: push.item.id, mode: push.mode } };
+    if (push.push) return { push: { item: push.push.items[0]!.id, mode: push.push.mode } };
     let remaining = deadline - now;
     if (remaining <= 0) return { wait: true };
+    // Wake when a batch of questions comes due.
+    if (push.dueAt !== null && push.dueAt > now) remaining = Math.min(remaining, push.dueAt - now);
     // Wake for the lease expiry, and poll the transcript while a Claude turn runs.
     if (s.busy === 1 && s.busy_until !== null) remaining = Math.min(remaining, Math.max(50, s.busy_until - now));
     if (s.busy === 1 && s.harness === "claude") remaining = Math.min(remaining, 2_000);
@@ -655,14 +715,20 @@ export function takeP0(ctx: HandlerCtx, outcome: WaitOutcome): HandlerResult {
   if (!outcome.push) return { data: { ...outcome } };
   const s = leaderSession(ctx);
   const now = ctx.now();
-  const push = p0Push(ctx, s, now);
-  if (!push || push.item.id !== outcome.push.item) return { data: { wait: true } };
+  const { push } = leaderPush(ctx, s, now);
+  if (!push || push.items[0]!.id !== outcome.push.item) return { data: { wait: true } };
   const path: PresentationPath = push.mode;
-  const c = { itemId: push.item.id, session: s.session_id, turn: pushTurn(s, push.mode), path, now };
+  const turn = pushTurn(s, push.mode);
   // Claude's waiter wakes the session by itself; the Pi extension decides after it looks at Pi, so it gets an offer.
-  if (!(s.harness === "pi" ? offer(ctx.db, c) : carry(ctx.db, c))) return { data: { wait: true } };
-  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: push.item.id, path, turn: c.turn }, ts: now });
-  return { data: { fire: { id: push.item.id, line: p0Line(push.item), mode: push.mode } } };
+  const taken = push.items.filter((item) => {
+    const c = { itemId: item.id, session: s.session_id, turn, path, now };
+    return s.harness === "pi" ? offer(ctx.db, c) : carry(ctx.db, c);
+  });
+  if (taken.length === 0) return { data: { wait: true } };
+  const ids = taken.map((item) => item.id);
+  if (push.questions) appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: ids, path, turn }, ts: now });
+  else appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: ids[0], path, turn }, ts: now });
+  return { data: { fire: { id: ids[0], items: ids, line: pushText(push, taken, s.harness), mode: push.mode } } };
 }
 
 /**
@@ -682,7 +748,8 @@ export function delivered(ctx: HandlerCtx, input: LeaderHookInput): HandlerResul
   // The extension reports before it sends, in order with its other hooks, so the session's turn is Pi's turn now:
   // a followUp rides in the running turn, a triggered turn is the next one.
   const mode: PushMode = input.mode === "trigger" ? "trigger" : "continuation";
-  const recorded = acceptOffer(ctx.db, item, s.session_id, mode, pushTurn(s, mode), now);
-  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_delivered", payload: { session: s.session_id, item, path: mode, recorded }, ts: now });
+  const items = acceptOffer(ctx.db, item, s.session_id, mode, pushTurn(s, mode), now);
+  const recorded = items.length > 0;
+  appendEvent(ctx.db, { source: "hook", kind: "leader.p0_delivered", payload: { session: s.session_id, item, items, path: mode, recorded }, ts: now });
   return { data: { item, recorded } };
 }

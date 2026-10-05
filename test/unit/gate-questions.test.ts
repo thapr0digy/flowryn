@@ -5,12 +5,13 @@ import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { ANSWER_MARK, encodeAnswer, encodeSend, parsePollOutput } from "../../src/lavish/poll-output.ts";
+import { readsAsPass } from "../../src/lifecycle/gate-questions.ts";
 import { normalizeAnswer, parseGateQuestions } from "../../src/lavish/questions.ts";
 import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetState } from "../../src/lavish/widget.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateFeedback, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
 import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
 import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
@@ -156,6 +157,19 @@ describe("what lavish-axi poll printed", () => {
     expect(parsePollOutput(ENDED)).toMatchObject({ status: "ended", ended: true, answers: [], otherPrompts: 0 });
   });
 
+  test("assumption: the TOON decoder reads lavish-axi 0.1.65's list and table layouts, giving the user's own words for every prompt that is not an answer", () => {
+    expect(parsePollOutput(FEEDBACK).feedback).toEqual(['make the header bigger, "please"']);
+    expect(parsePollOutput(LAST_BATCH).feedback).toEqual(["bye"]);
+    expect(parsePollOutput(ENDED).feedback).toEqual([]);
+    expect(parsePollOutput("not toon at all: [").feedback).toEqual([]);
+  });
+
+  test("feedback reads as a pass only when it opens with a pass word and asks for no changes after it", () => {
+    for (const text of ["pass", "Approved, ship it", "LGTM", "looks good to me", "go ahead"]) expect(readsAsPass(text)).toBe(true);
+    for (const text of ["do not pass yet", "passing thought: rename it", "not approved", "make the header bigger"]) expect(readsAsPass(text)).toBe(false);
+    for (const text of ["Looks good, but the header is wrong", "Approve once the colors are fixed", "LGTM except the footer", "ship it after the copy is fixed", "go ahead until the logo lands"]) expect(readsAsPass(text)).toBe(false);
+  });
+
   test("a token that does not decode to an answer is counted, never recorded", () => {
     const bogus = Buffer.from(JSON.stringify({ g: "g1", d: "k1", c: ["db"] })).toString("base64url");
     const out = parsePollOutput(`status: feedback\nprompts[2]:\n  - prompt: "flowryn-answer v1 ${bogus}"\n  - prompt: "flowryn-answer v1 !!!!"\n`);
@@ -176,6 +190,8 @@ describe("what lavish-axi poll printed", () => {
     ]);
     expect(out.sends).toEqual([{ gate: "g4", comment: 'line one\nline "two"', pass: true }]);
     expect(out).toMatchObject({ malformed: 0, otherPrompts: 1 });
+    // The Send's prompt is not the user's own feedback; the chat beside it is.
+    expect(out.feedback).toEqual(["chat"]);
   });
 
   test("a Send with one bad answer is malformed whole; the marks and versions go together", () => {
@@ -693,7 +709,8 @@ describe("a gate's questions as decisions", () => {
     writeFileSync(output, `session:\n  status: feedback\nprompts[1]:\n  - uid: ""\n    prompt: ${JSON.stringify(`Answers\n${ANSWER_MARK} ${token}`)}\n    tag: choice\n`);
     const calls = join(h.home, "calls.log");
     const logs: string[] = [];
-    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`echo "$@" >> ${JSON.stringify(calls)}; case "$*" in *agent-reply*) exit 0;; esac; cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    // Lavish delivers a queued Send once; the daemon keeps polling the open gate after it.
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`echo "$@" >> ${JSON.stringify(calls)}; case "$*" in *agent-reply*) exit 0;; esac; cat ${JSON.stringify(output)} && rm ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
     try {
       poller.pass();
       await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
@@ -717,6 +734,16 @@ describe("a gate's questions as decisions", () => {
     tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: [answer], note }));
     const verdict = gateAnswersNote(db, "g1")!;
     expect(verdict).toContain(`q3 (verb-name) = ${answer} [their note: ${note}]`);
+  });
+
+  test("a poll return with only notes kept (nothing decoded, nothing recorded) still opens a review_feedback item", () => {
+    open();
+    expect(tx(db, () => openGateFeedback(db, "g1", { recorded: [], feedback: [], notes: null }, NOW))).toBeNull();
+    const id = tx(db, () => openGateFeedback(db, "g1", { recorded: [], feedback: [], notes: "/tmp/lavish-notes-g1.txt" }, NOW));
+    expect(id).not.toBeNull();
+    const item = db.query("SELECT kind, line FROM items WHERE id = ?1").get(id) as { kind: string; line: string };
+    expect(item.kind).toBe("review_feedback");
+    expect(item.line).toBe(`Review feedback on ${taskId} (design gate g1): the user left notes beside the page`);
   });
 
   test("a cancelled run's open questions close unanswered, labelled as such, and its page is neither polled nor rewritten", () => {

@@ -41,11 +41,12 @@ function isInside(path: string, root: string): boolean {
 }
 
 /**
- * Check the review page a gate's questions go on: a regular .html file (no
- * symlink) under the run's report directory, mounting the widget. Returns its
- * real path, beside which the daemon writes the widget.
+ * Check a gate's review page: a regular .html file (no symlink) under the
+ * run's report directory, mounting the widget when the gate carries
+ * questions. Returns its real path, which the daemon polls and beside which
+ * it writes the widget.
  */
-export function checkReviewPage(page: string, reportDir: string): string {
+export function checkReviewPage(page: string, reportDir: string, opts: { widget: boolean } = { widget: true }): string {
   let real: string;
   let root: string;
   try {
@@ -60,7 +61,7 @@ export function checkReviewPage(page: string, reportDir: string): string {
   if (extname(real).toLowerCase() !== ".html") throw new FlowrynError("bad_args", "--page must be the review page's .html file");
   const st = statSync(real);
   if (!st.isFile() || st.size > MAX_PAGE_BYTES) throw new FlowrynError("bad_args", `--page ${page} is not a regular file of at most 5 MB`);
-  if (!pageMountsWidget(readFileSync(real, "utf8"))) throw new FlowrynError("bad_args", "the review page does not mount the question widget", `add ${MOUNT_SNIPPET}`);
+  if (opts.widget && !pageMountsWidget(readFileSync(real, "utf8"))) throw new FlowrynError("bad_args", "the review page does not mount the question widget", `add ${MOUNT_SNIPPET}`);
   return real;
 }
 
@@ -296,18 +297,76 @@ export interface PolledGate {
 
 const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
 
-/** Gates whose page the daemon polls: open on a live run, carrying an open question, and the user has not ended the session. */
+/**
+ * Gates whose page the daemon polls: open on a live run with a known page,
+ * and the user has not ended the session. Every review page is listened to
+ * while its gate is open, with or without questions, so Lavish never shows
+ * the page's agent as not listening while the review waits.
+ */
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
     .query(
-      `SELECT DISTINCT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id JOIN decisions d ON d.gate_id = g.id
-       WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 AND d.state = 'open' ORDER BY g.opened_at`,
+      `SELECT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id
+       WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
     )
     .all() as PolledGate[];
 }
 
-/** Gates with a widget whose state may still change, for the widget writer. */
+/** Feedback that opens with one of these words may read as the user passing the review; it is surfaced, never acted on. */
+const PASS_WORDS = /^\s*(pass(ed)?|approved?|lgtm|looks good|ship it|go ahead)\b/i;
+/** A clause after the pass word that still asks for changes makes the feedback changes, not a pass. */
+const CHANGES_CLAUSE = /\b(but|once|except|until|after)\b/i;
+
+export function readsAsPass(text: string): boolean {
+  return PASS_WORDS.test(text) && !CHANGES_CLAUSE.test(text);
+}
+
+export interface GateFeedback {
+  /** Answers the poll recorded, as decision ids. */
+  recorded: string[];
+  /** The user's own words from the page, one per prompt that is not an answer. */
+  feedback: string[];
+  /** Where the raw feedback was kept, if it was. */
+  notes: string | null;
+}
+
+/**
+ * What the user sent from a gate's review page, as one item for the leader
+ * (review_feedback, batched with worker questions so it wakes the leader).
+ * A pass in their words is named as one, for the leader to put to them; the
+ * gate still passes only through a human channel. Call inside a transaction.
+ */
+export function openGateFeedback(db: Db, gateId: string, input: GateFeedback, now: number): string | null {
+  if (input.recorded.length === 0 && input.feedback.length === 0 && input.notes === null) return null;
+  const gate = db.query("SELECT g.stage, r.id AS run_id, r.task_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gateId) as { stage: string; run_id: string; task_id: string } | null;
+  if (!gate) return null;
+  const parts: string[] = [];
+  if (input.recorded.length > 0) {
+    const answers = input.recorded.map((id) => {
+      const answer = (db.query("SELECT answer FROM decisions WHERE id = ?1").get(id) as { answer: string | null } | null)?.answer ?? "-";
+      return `${id} = ${sanitizeLine(answer, 40)}`;
+    });
+    parts.push(`answered ${answers.join(", ")}`);
+  }
+  if (input.feedback.length > 0) {
+    const more = input.feedback.length > 1 ? ` (+${input.feedback.length - 1} more)` : "";
+    parts.push(`wrote "${sanitizeLine(input.feedback[0]!, 60)}"${more}`);
+  }
+  // An item line is one short line: the task id, not its title, and the pass first, so a long quote is what gets cut.
+  const pass = input.feedback.some(readsAsPass) ? " may read as a pass (ask the user; only flowryn gate pass passes it)" : "";
+  const notes = input.notes ? (parts.length > 0 ? "; notes beside the page" : "") : "";
+  if (parts.length === 0) parts.push("left notes beside the page");
+  const line = `Review feedback on ${gate.task_id} (${gate.stage} gate ${gateId})${pass}: the user ${parts.join(" and ")}${notes}`;
+  const event = appendEvent(db, { source: "daemon", kind: "gate.feedback", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, recorded: input.recorded, prompts: input.feedback.length, pass: pass.length > 0 }, ts: now });
+  return openItem(db, { kind: "review_feedback", eventSeq: event.seq, taskId: gate.task_id, runId: gate.run_id, line, now });
+}
+
+/** Gates with a widget (a page carrying questions) whose state may still change, for the widget writer. */
 export function gatesWithWidget(db: Db, alsoIds: Iterable<string>): string[] {
-  const open = (db.query(`SELECT g.id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL`).all() as { id: string }[]).map((g) => g.id);
+  const open = (
+    db
+      .query(`SELECT g.id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL AND EXISTS (SELECT 1 FROM decisions d WHERE d.gate_id = g.id)`)
+      .all() as { id: string }[]
+  ).map((g) => g.id);
   return [...new Set([...open, ...alsoIds])];
 }

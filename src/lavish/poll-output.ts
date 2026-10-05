@@ -12,8 +12,12 @@
  * quoting the encoder applies, so the answers never depend on the TOON layout.
  */
 
+import { decode as decodeToon } from "@toon-format/toon";
+
 export const ANSWER_MARK = "flowryn-answers v2";
 const ANSWER_LINE = /flowryn-answer(s?) v([12]) ([A-Za-z0-9_-]{4,60000})/g;
+/** A prompt carrying either answer line (v2 Send or v1 answer), which is not the user's own feedback. */
+const ANSWER_PROMPT = /flowryn-answer(s v2| v1) /;
 const PROMPT_COUNT = /^prompts\[(\d+)\]/m;
 const MAX_ANSWERS = 50;
 const MAX_CHOICES = 20;
@@ -48,6 +52,32 @@ export interface PollOutput {
   malformed: number;
   /** Prompts that are not answers: annotations, chat, layout fixes. */
   otherPrompts: number;
+  /** The text of each prompt that is not an answer, as the user wrote it (empty when the output does not decode). */
+  feedback: string[];
+}
+
+const MAX_FEEDBACK = 20;
+const MAX_FEEDBACK_CHARS = 2_000;
+
+/** The user's own words in each prompt that is not an answer, read through the TOON decoder; nothing when it does not decode. */
+function feedbackTexts(stdout: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = decodeToon(stdout);
+  } catch {
+    return [];
+  }
+  const prompts = (parsed as { prompts?: unknown } | null)?.prompts;
+  if (!Array.isArray(prompts)) return [];
+  const texts: string[] = [];
+  for (const p of prompts) {
+    const text = (p as { prompt?: unknown } | null)?.prompt;
+    if (typeof text !== "string" || ANSWER_PROMPT.test(text)) continue;
+    const trimmed = text.trim();
+    if (trimmed.length > 0) texts.push(trimmed.slice(0, MAX_FEEDBACK_CHARS));
+    if (texts.length >= MAX_FEEDBACK) break;
+  }
+  return texts;
 }
 
 const GATE_ID = /^g\d{1,9}$/;
@@ -139,5 +169,5 @@ export function parsePollOutput(stdout: string): PollOutput {
     tokens += 1;
   }
   const count = Number(PROMPT_COUNT.exec(stdout)?.[1] ?? "0");
-  return { status, ended, answers, sends, malformed, otherPrompts: Math.max(0, count - tokens - malformed) };
+  return { status, ended, answers, sends, malformed, otherPrompts: Math.max(0, count - tokens - malformed), feedback: feedbackTexts(stdout) };
 }
