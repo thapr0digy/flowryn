@@ -8,7 +8,7 @@ import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { recordPlan } from "../../src/lifecycle/plans.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
-import { queuedSummary, queuedTask, queuedWork, waitsCell } from "../../src/lifecycle/queue-view.ts";
+import { queuedAge, queuedSummary, queuedTask, queuedWork, waitsCell } from "../../src/lifecycle/queue-view.ts";
 import { makeHome, type TestHome } from "../helpers/harness.ts";
 
 let h: TestHome;
@@ -77,10 +77,26 @@ describe("what counts as queued", () => {
   });
 });
 
+/** A stand-in for the fleet's age(): whole hours. */
+function hoursAge(n: number, since: number): string {
+  return `${Math.round((n - since) / 3_600_000)}h`;
+}
+
 describe("each queued task's status", () => {
   test("a hand-added backlog task is listed with auto - and next -", () => {
     backlog(task("hand-made", { kind: null, repo: "web", created: "2026-09-01" }));
-    expect(queuedTask(db, "hand-made")).toMatchObject({ kind: "-", project: "web", status: "ready", auto: "-", next: "-", filed: "backlog", createdAt: Date.parse("2026-09-01") });
+    expect(queuedTask(db, "hand-made")).toMatchObject({ kind: "-", project: "web", status: "ready", auto: "-", next: "-", filed: "backlog", createdAt: new Date(2026, 8, 1).getTime(), createdDay: "2026-09-01" });
+  });
+
+  test("a backlog date is a local day, so a hand task's age is whole days, never UTC hours", () => {
+    const now = new Date(2026, 9, 4, 23, 30).getTime();
+    backlog(task("today", { created: "2026-10-04" }), task("older", { created: "2026-10-01" }), task("undated"));
+    expect(queuedAge(now, queuedTask(db, "today")!, hoursAge)).toBe("today");
+    expect(queuedAge(now, queuedTask(db, "older")!, hoursAge)).toBe("3d");
+    expect(queuedAge(now, queuedTask(db, "undated")!, hoursAge)).toBe("-");
+    policy("filed", { createdAt: now - 7_200_000 });
+    backlog(task("filed"));
+    expect(queuedAge(now, queuedTask(db, "filed")!, hoursAge)).toBe("2h");
   });
 
   test("an imported queued scout is ready to dispatch by hand", () => {

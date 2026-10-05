@@ -19,7 +19,7 @@ import { flowLine, gatesOf, runWorkflow } from "./stages.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
 import { latestMerge } from "../policy/merge.ts";
-import { queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
+import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
   const run = findRun(db, ref);
@@ -288,7 +288,7 @@ function queuedRow(ctx: ReadCtx, q: QueuedTask): Record<string, unknown> {
     auto: q.auto,
     waits: sanitizeLine(waitsCell(q), 80),
     next: q.next,
-    age: q.createdAt === null ? "-" : age(ctx.now, q.createdAt),
+    age: queuedAge(ctx.now, q, age),
   };
 }
 
@@ -368,7 +368,7 @@ function queuedHints(q: QueuedTask): string[] {
 }
 
 function filedLine(ctx: ReadCtx, q: QueuedTask): string {
-  if (q.filed === "backlog") return "by hand in backlog.md";
+  if (q.filed === "backlog") return `by hand in backlog.md${q.createdDay ? ` on ${q.createdDay}` : ""}`;
   const when = q.createdAt === null ? "" : `${age(ctx.now, q.createdAt)} ago, `;
   return q.filed === "imported" ? `${when}imported (${q.importSource})` : `${when}by flowryn`;
 }

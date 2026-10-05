@@ -129,7 +129,7 @@ test("show describes a waiting task and a hand-added one; fleet lists both", asy
   });
   db.close();
   await waitUntil(() => (readSnapshot(env.h.db(), "backlog")?.tasks ?? []).some((t) => t.id === "web-second-q1"), 10_000, "both in the snapshot");
-  const added = Bun.spawnSync([realTasksAxi(), "add", "hand-note", "Tidy the docs", "--repo", "web", "--file", env.h.backlog, "--json"], { stdin: "ignore", env: process.env });
+  const added = Bun.spawnSync([realTasksAxi(), "add", "hand-note", "Tidy the docs", "--repo", "web", "--file", env.h.backlog, "--json"], { stdin: "ignore", env: { ...process.env, TZ: env.h.env.TZ } });
   expect(added.exitCode).toBe(0);
   await waitUntil(() => (readSnapshot(env.h.db(), "backlog")?.tasks ?? []).some((t) => t.id === "hand-note"), 10_000, "hand-added task in the snapshot");
   const waiting = await env.json(["show", "web-second-q1"]);
@@ -137,7 +137,7 @@ test("show describes a waiting task and a hand-added one; fleet lists both", asy
   expect((waiting.reply.data as { filed: string }).filed).toContain("by flowryn");
   expect(waiting.reply.hints).toEqual(["flowryn show web-first-q1"]);
   const hand = await env.json(["show", "hand-note"]);
-  expect(hand.reply.data).toMatchObject({ task: "hand-note", title: "Tidy the docs", state: "queued", status: "ready", auto: "-", next: "-", filed: "by hand in backlog.md" });
+  expect(hand.reply.data).toMatchObject({ task: "hand-note", title: "Tidy the docs", state: "queued", status: "ready", auto: "-", next: "-", filed: expect.stringMatching(/^by hand in backlog\.md on \d{4}-\d{2}-\d{2}$/) });
   expect(hand.reply.hints ?? []).toEqual([]);
   const queued = ((await env.json(["fleet"])).reply.data as FleetData).queued!;
   // Ready rows come first; between the two ready ones, age decides (the hand task's backlog date is day-precise).
@@ -146,4 +146,6 @@ test("show describes a waiting task and a hand-added one; fleet lists both", asy
     ["web-first-q1", "ready", "-"],
   ]);
   expect(queued[2]).toMatchObject({ id: "web-second-q1", status: "waiting", waits: "web-first-q1" });
+  // A hand-added task's backlog date is a local day: added just now, it is "today", not hours old.
+  expect(queued.find((q) => q.id === "hand-note")!.age).toBe("today");
 });

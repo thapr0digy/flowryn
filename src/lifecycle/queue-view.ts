@@ -24,8 +24,10 @@ export interface QueuedTask {
   kind: string;
   project: string;
   priority: number | null;
-  /** When it was filed (its policy row, else the backlog's created date); null when neither says. */
+  /** When it was filed (its policy row, else local midnight of the backlog's created date); null when neither says. */
   createdAt: number | null;
+  /** The backlog's created date (YYYY-MM-DD) when that is all there is: the age is then day-precise. */
+  createdDay: string | null;
   status: QueuedStatus;
   /** on | off | "on (autonomy off)" | - (hand-added: Flowryn did not file it). */
   auto: string;
@@ -64,10 +66,14 @@ function policyOf(db: Db, taskId: string): QueuedPolicy | null {
     .get(taskId) as QueuedPolicy | null;
 }
 
-function createdOf(policy: QueuedPolicy | null, task: BacklogTask): number | null {
-  if (policy) return policy.created_at;
-  const parsed = task.created ? Date.parse(task.created) : Number.NaN;
-  return Number.isNaN(parsed) ? null : parsed;
+const DAY_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** A backlog date is a local calendar day (tasks-axi writes the local date), not UTC midnight. */
+function createdOf(policy: QueuedPolicy | null, task: BacklogTask): { at: number | null; day: string | null } {
+  if (policy) return { at: policy.created_at, day: null };
+  const day = task.created ? DAY_ONLY.exec(task.created) : null;
+  if (!day) return { at: null, day: null };
+  return { at: new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3])).getTime(), day: task.created };
 }
 
 function isQueued(db: Db, task: BacklogTask): boolean {
@@ -85,6 +91,7 @@ function describe(db: Db, task: BacklogTask, backlog: BacklogTask[]): QueuedTask
   // The scheduler's own rule (autoDispatch): an approved plan's phase with auto on, in a project whose autonomy is plan.
   const autonomous = policy !== null && policy.auto === 1 && getProject(db, project)?.autonomy === "plan";
   const startsByItself = autonomous && phase !== null && phase.plan_state === "approved";
+  const created = createdOf(policy, task);
   const auto = policy === null ? "-" : policy.auto === 0 ? "off" : autonomous ? "on" : "on (autonomy off)";
   return {
     id: task.id,
@@ -92,7 +99,8 @@ function describe(db: Db, task: BacklogTask, backlog: BacklogTask[]): QueuedTask
     kind: policy?.kind ?? task.kind ?? "-",
     project,
     priority: task.priority,
-    createdAt: createdOf(policy, task),
+    createdAt: created.at,
+    createdDay: created.day,
     status,
     auto,
     blockedBy,
@@ -144,6 +152,15 @@ export function queuedSummary(queued: QueuedTask[]): string {
   if (queued.length === 0) return "0";
   const parts = (["ready", "waiting", "held"] as const).map((s) => [s, queued.filter((q) => q.status === s).length] as const).filter(([, n]) => n > 0);
   return `${queued.length} (${parts.map(([s, n]) => `${n} ${s}`).join(", ")})`;
+}
+
+/** How long it has been queued: "4m", "2h", "3d"; for a day-precise backlog date, "today" or whole days. */
+export function queuedAge(now: number, q: QueuedTask, age: (now: number, since: number) => string): string {
+  if (q.createdAt === null) return "-";
+  if (q.createdDay === null) return age(now, q.createdAt);
+  const today = new Date(now);
+  const days = Math.round((new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() - q.createdAt) / 86_400_000);
+  return days <= 0 ? "today" : `${days}d`;
 }
 
 /** The fleet's and board's `waits` cell: the unlanded blockers, the hold, or "-". */
