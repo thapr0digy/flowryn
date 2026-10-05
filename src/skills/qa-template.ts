@@ -29,7 +29,8 @@ export const QA_TEMPLATE = `<!doctype html>
   WHAT_CHECKED   what was tried, in words: "All 792 tests pass; every combination of the new rules was tried."
   VERDICT        exactly one of: works | works-with-caveats | broken (the label is drawn from it).
   VERDICT_DETAIL each caveat or failure spelled out, or "No caveats."
-  DECISIONS      each question with your recommendation (an <ol> of <li>), or "Nothing to decide."
+  DECISIONS      each question with your recommendation (an <ol> of <li>), or "Nothing to decide."; for questions
+                 only the user can answer, "Answer the questions below." and the gate-question widget right after the card
   Everything else goes in the folded sections below the card. A section with nothing in it says "None."
 -->
 <style>
@@ -75,8 +76,8 @@ table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:4px 8p
 </body></html>
 `;
 
-/** The page is read whole; anything larger is not a review page. */
-export const QA_PAGE_MAX_BYTES = 8 * 1024 * 1024;
+/** The page is read whole; anything larger is not a review page (the gate-question page limit too). */
+export const QA_PAGE_MAX_BYTES = 5 * 1024 * 1024;
 
 /** Markup that belongs below the card; any of it above the card means the card is not first. */
 const DETAIL_MARKUP = /<(?:details|table|pre|img|figure|iframe)\b/i;
@@ -108,8 +109,8 @@ export function qaPageProblems(html: string): string[] {
   if (left.length > 0) problems.push(`fill the template's slots: ${left.join(", ")} still blank`);
   const start = html.search(/<section\b[^>]*\bdata-flowryn-card\b/i);
   if (start === -1) return [...problems, `the page has no summary card (<section data-flowryn-card>); start from ${QA_TEMPLATE_FILE}`];
-  const close = html.indexOf("</section>", start);
-  const card = close === -1 ? html.slice(start) : html.slice(start, close);
+  const close = html.indexOf("</dl>", start);
+  const card = close === -1 ? html.slice(start) : html.slice(start, close + "</dl>".length);
   const bodyStart = html.search(/<body\b/i);
   if (DETAIL_MARKUP.test(html.slice(Math.max(bodyStart, 0), start))) problems.push("the summary card must open the page; move tables, screenshots, raw output and folded sections below it");
   for (const slot of QA_CARD_SLOTS) {

@@ -27,20 +27,28 @@ const DESIGN_BODY = `# Flowryn design stage
 Goal: a design the user reviews and approves in Lavish, and a phase plan when the feature is bigger than one change. No product code in this stage.
 
 1. Read the task file and the project: its AGENTS.md or CLAUDE.md, the README, and the code the task touches. Note the constraints you find.
-2. Write the design as one HTML page in \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree, so the branch stays clean): the problem, the approach and why, what changes (files, APIs, data, screens), the assumptions the build must test, the risks, and open questions. Show, don't tell: diagrams, tables, before and after.
-3. Host it for review: \`lavish-axi $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL. Without lavish-axi, use the page's file:// URL.
-4. A phased feature: this task is phase 1. Write \`$FLOWRYN_REPORT_DIR/plan.md\` with one section per later phase:
+2. Write the design as one HTML page in \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree, so the branch stays clean): the problem, the approach and why, what changes (files, APIs, data, screens), the assumptions the build must test, the risks, and every choice you made yourself with why. Show, don't tell: diagrams, tables, before and after.
+3. Questions for the user: only what you truly cannot proceed without (a real decision that changes what you build); decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/design/questions.json\`:
+
+   {"questions": [{"key": "token-store", "kind": "single", "question": "Where do cached tokens live?",
+     "options": ["db", "file"], "recommend": "db", "blocks": "which store TokenCache writes to", "why": "..."}],
+    "decided": [{"choice": "poller home", "picked": "src/lavish/poller.ts", "why": "..."}]}
+
+   kind is single, multi (recommend is a list) or text (recommend is your default answer, no options); at most 5 questions, 2 to 8 short options each, and blocks names what waits on the answer. Mount the form in the page: \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` with \`data-lavish-live-reload-root\` on \`<html>\`. Flowryn writes that script, opens each question as a decision reserved for the user, and reads the answers back; never write your own question form or run \`lavish-axi poll\`.
+4. Host it for review: \`lavish-axi $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL. Without lavish-axi, use the page's file:// URL.
+5. A phased feature: this task is phase 1. Write \`$FLOWRYN_REPORT_DIR/plan.md\` with one section per later phase:
 
    ## Phase 2: <title>
    workflow: fix
    <what the phase does, and how to tell it is done>
 
    The \`workflow:\` line is optional. Approving the design approves the plan; each later phase starts by itself once the phase before it has landed (merged and cleaned up).
-5. Finish: \`$FLOWRYN_BIN stage done --review <url> [--plan-file $FLOWRYN_REPORT_DIR/plan.md]\`, then end your turn. The user reviews in Lavish; do not hold a \`lavish-axi poll\` open. A steer brings the verdict: approved (the next stage starts), or changes with the user's words (revise, then run stage done again).
+6. Finish: \`$FLOWRYN_BIN stage done --review <url> [--plan-file $FLOWRYN_REPORT_DIR/plan.md] [--page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json]\`, then end your turn. The user reviews in Lavish; do not hold a \`lavish-axi poll\` open. A steer brings the verdict with the user's answers: approved (the next stage starts), or changes with the user's words (revise, then run stage done again).
 
 Rules:
 - Only the user passes a review gate. Never say or assume the design was approved until the steer says so.
 - Keep the page honest: mark guesses as guesses, and list what you could not check.
+- Be autonomous: a question the user could answer but you could decide is a choice you record, not a question.
 `;
 
 const BUILD_BODY = `# Flowryn build and test stage
@@ -57,8 +65,9 @@ Goal: the change the approved design describes, with tests that prove it and tes
 5. Finish: commit everything, \`$FLOWRYN_BIN stage done\`, end your turn. The next stage arrives as a steer.
 
 Rules:
-- A test you cannot make pass: \`$FLOWRYN_BIN ask\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
+- A test you cannot make pass: \`$FLOWRYN_BIN ask --options a,b --blocks <what waits> --body-file -\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
 - Stay inside your worktree and your branch.
+- Be autonomous: choices the design left open are yours; record each and why in the PR. Ask only when you cannot proceed.
 `;
 
 const QA_BODY = `# Flowryn visual QA stage
@@ -77,6 +86,7 @@ Goal: evidence, reviewed in Lavish, that the change works in the running app, on
 Rules:
 - A project without Docker: run the app the way its README says, capture the same evidence, and say so on the page.
 - Report what you saw, not what you expected: a failed step stays on the page as failed, and the verdict says broken.
+- A question only the user can answer: as in the design skill, write \`$FLOWRYN_REPORT_DIR/qa/questions.json\`, mount the question widget right after the card, say "Answer the questions below." in the card's decisions entry, and add \`--page $FLOWRYN_REPORT_DIR/qa/evidence.html --questions-file $FLOWRYN_REPORT_DIR/qa/questions.json\` to stage done. Decide the rest yourself.
 `;
 
 export const STAGE_SKILLS: readonly StageSkill[] = [

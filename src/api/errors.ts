@@ -38,10 +38,21 @@ export const ERROR_CODES = {
   merge_in_flight: EXIT.policy,
   cleanup_refused: EXIT.policy,
   not_ready: EXIT.policy,
+  // daemon restart (leader-safe restart)
+  restart_blocked: EXIT.policy,
+  restart_cooldown: EXIT.policy,
+  restart_in_progress: EXIT.policy,
+  no_change: EXIT.policy,
+  plist_drift: EXIT.policy,
+  not_supervised: EXIT.policy,
+  binary_broken: EXIT.policy,
+  restart_dropped: EXIT.policy,
   // M5: workflows and autonomy
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
   stage_waiting: EXIT.policy,
+  // a review gate whose own questions are still open
+  questions_open: EXIT.policy,
   // steers and interrupts
   interrupt_refused: EXIT.policy,
   // validation

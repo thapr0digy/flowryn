@@ -14,6 +14,9 @@ import { inertFleet } from "../../src/lifecycle/fleet-services.ts";
 import { inertAttention } from "../../src/attention/services.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
 import { inertSched } from "../../src/sched/services.ts";
+import { inertRestart } from "../../src/daemon/restart.ts";
+import { PING_VERB, PROTO_EXEMPT_VERBS, RESTART_VERB, systemVerbs } from "../../src/daemon/system-verbs.ts";
+import { inertLavish } from "../../src/lavish/services.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { parseArgv } from "../../src/cli/argv.ts";
 import { notHumanReason } from "../../src/cli/human.ts";
@@ -44,7 +47,7 @@ const counterVerb: VerbSpec = {
 const readVerb: VerbSpec = { name: "test read", summary: "", positionals: [], flags: {}, kind: "read", roles: ["leader", "human"], read: (ctx) => ({ data: { role: ctx.caller.role } }) };
 const humanVerb: VerbSpec = { name: "test human", summary: "", positionals: [], flags: {}, kind: "read", roles: ["human"], read: () => ({ data: {} }) };
 const workerVerb: VerbSpec = { name: "test worker", summary: "", positionals: [], flags: {}, kind: "read", roles: ["worker"], read: () => ({ data: {} }) };
-const VERBS = new Map([counterVerb, readVerb, humanVerb, workerVerb].map((v) => [v.name, v]));
+const VERBS = new Map([counterVerb, readVerb, humanVerb, workerVerb, ...systemVerbs()].map((v) => [v.name, v]));
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "fw-gw-"));
@@ -66,6 +69,7 @@ beforeEach(() => {
   const config = defaultConfig(dir);
   const journal = new Journal({ db, files: () => ({ backlog: join(dir, "b.md"), todos: join(dir, "t.md") }), runner: () => null });
   const watcher = new BacklogWatcher({ db, journal, files: () => ({ backlog: join(dir, "b.md"), todos: join(dir, "t.md") }), runner: () => null });
+  const info = () => ({ pid: 1, version: "t", proto: PROTO, instance: "i", startedAt: 0, execPath: "/bin/flowryn", socket: "/s", stateDir: dir });
   const services: DaemonServices = {
     db,
     config: () => config,
@@ -73,13 +77,15 @@ beforeEach(() => {
     watcher,
     now: Date.now,
     log: () => {},
-    info: () => ({ pid: 1, version: "t", proto: PROTO, instance: "i", startedAt: 0, execPath: "/bin/flowryn", socket: "/s", stateDir: dir }),
+    info,
     requestShutdown: () => {},
     runTool: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
     fleet: inertFleet(),
     attention: inertAttention(),
     delivery: inertDelivery(),
     sched: inertSched(),
+    restart: inertRestart(db, info),
+    lavish: inertLavish(),
   };
   gateway = new Gateway({ services, lookup: (v) => VERBS.get(v) });
 });
@@ -98,6 +104,43 @@ describe("gateway", () => {
     const reply = await gateway.handle(env("no such verb", { proto: PROTO + 1 }));
     expect(reply).toMatchObject({ ok: false, proto: PROTO, error: { code: "protocol_mismatch" } });
     expect(reply.error!.help).toContain("/bin/flowryn");
+  });
+
+  test("the handshake and the restart are served across a protocol bump; nothing else is", async () => {
+    expect([...PROTO_EXEMPT_VERBS].toSorted()).toEqual([RESTART_VERB, PING_VERB].toSorted());
+    const ping = await gateway.handle(env(PING_VERB, { proto: PROTO + 1 }));
+    expect(ping).toMatchObject({ ok: true, data: { proto: PROTO, pid: 1 } });
+    // The restart gets past the protocol check to its own rules (here: no supervisor in this process).
+    const restart = await gateway.handle(env(RESTART_VERB, { proto: PROTO + 1 }));
+    expect(restart.error!.code).toBe("not_supervised");
+    expect((await gateway.handle(env("test read", { proto: PROTO + 1 }))).error!.code).toBe("protocol_mismatch");
+  });
+
+  test("the restart verb's arguments are frozen: an older or newer CLI must still be understood", () => {
+    const restart = systemVerbs().find((v) => v.name === RESTART_VERB)!;
+    expect(restart.positionals).toEqual([]);
+    expect(Object.fromEntries(Object.entries(restart.flags).map(([k, f]) => [k, f.type]))).toEqual({ "when-idle": "boolean", "wait-min": "int", cancel: "boolean", force: "boolean" });
+    expect(systemVerbs().find((v) => v.name === PING_VERB)!.flags).toEqual({});
+  });
+
+  test("restart: the leader and a human reach its rules; a worker, a reader and an anonymous caller are refused", async () => {
+    expect((await gateway.handle(env(RESTART_VERB))).error!.code).toBe("not_supervised");
+    expect((await gateway.handle(env(RESTART_VERB, { token: null, channel: "tty" }))).error!.code).toBe("not_supervised");
+    expect((await gateway.handle(env(RESTART_VERB, { token: runToken }))).error!.code).toBe("worker_token");
+    expect((await gateway.handle(env(RESTART_VERB, { token: null }))).error!.code).toBe("role_refused");
+    const readerToken = mintToken("leader");
+    tx(db, () => db.query("INSERT INTO leader_sessions (session_id, harness, token_hash, started_at) VALUES ('L9', 'claude', ?1, 1)").run(hashToken(readerToken)));
+    expect((await gateway.handle(env(RESTART_VERB, { token: readerToken }))).error!.code).toBe("not_leader");
+  });
+
+  test("restart is never taken from the spool (ephemeral: no stored reply can kick a later daemon)", async () => {
+    expect((await gateway.handle(env(RESTART_VERB), "spool")).error!.code).toBe("bad_envelope");
+    expect(db.query("SELECT COUNT(*) AS n FROM idempotency WHERE verb = ?1").get(RESTART_VERB)).toEqual({ n: 0 });
+  });
+
+  test("restart --wait-min is bounded", async () => {
+    expect((await gateway.handle(env(RESTART_VERB, { args: { "when-idle": true, "wait-min": 0 } }))).error!.code).toBe("bad_args");
+    expect((await gateway.handle(env(RESTART_VERB, { args: { "when-idle": true, "wait-min": 241 } }))).error!.code).toBe("bad_args");
   });
 
   test("rejects malformed envelopes and unknown verbs", async () => {

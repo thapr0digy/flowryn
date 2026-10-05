@@ -61,6 +61,15 @@ describe("the QA page's plain-language card", () => {
     expect(qaPageProblems(leading)).toEqual(["the summary card must open the page; move tables, screenshots, raw output and folded sections below it"]);
   });
 
+  test("the gate-question widget may follow the card or sit inside its decisions entry", () => {
+    const widget = '<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>';
+    const after = filled("works", { "{{DECISIONS}}": "Answer the questions below." }).replace("</section>\n<details>", `</section>\n${widget}\n<details>`);
+    expect(after).toContain(widget);
+    expect(qaPageProblems(after)).toEqual([]);
+    const inside = filled("works", { "{{DECISIONS}}": `Answer the questions here. ${widget}` });
+    expect(qaPageProblems(inside)).toEqual([]);
+  });
+
   test("a card missing a slot names it", () => {
     const page = filled().replace(/<dt>For you to decide<\/dt>\s*<dd data-slot="decisions">[^<]*<\/dd>/, "");
     expect(qaPageProblems(page)).toEqual(['the card has no decisions entry (<dd data-slot="decisions">)']);

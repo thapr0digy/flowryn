@@ -11,7 +11,7 @@ import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
 import { isAlive, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
-import { idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
+import { clearPrompt, idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
 import { idleAlertDue, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
 import { carryIdleSteer, idleCarryBlocker } from "../lifecycle/idle-carry.ts";
 import { noteHerdrUp } from "./herdr-health.ts";
@@ -332,8 +332,7 @@ export class Reconciler {
         if (run.harness === "claude") {
           const dialogGone = herdrStatus === "working" || (isSettledHerdrStatus(herdrStatus) && isSettledHerdrStatus(previousHerdrStatus));
           if (dialogGone) {
-            resolveRunItems(db, run.id, ["blocked_prompt"], "dialog gone", t);
-            appendEvent(db, { source: "reconciler", kind: "run.prompt_cleared", runId: run.id, taskId: run.task_id, payload: { agent_status: herdrStatus }, ts: t });
+            clearPrompt(db, run, herdrStatus, "reconciler", t);
           } else return;
         } else return;
       }

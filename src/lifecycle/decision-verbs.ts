@@ -2,21 +2,23 @@ import { hashToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type Args, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
-import { resolveItems } from "../attention/items.ts";
+import { resolveDecisionItems } from "../attention/items.ts";
+import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
+import { normalizeAnswer } from "../lavish/questions.ts";
 import { getLease, getSession } from "../lease/lease.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { createStandaloneDecision, getDecision, type DecisionRow } from "./decisions.ts";
+import { createStandaloneDecision, DECISION_OPTION, getDecision, type DecisionRow } from "./decisions.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject } from "./projects.ts";
 import { getRun, isTerminal } from "./runs.ts";
 import { createSteer } from "./steers.ts";
 
-const OPTION = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
+const OPTION = DECISION_OPTION;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function options(raw: string | undefined): string[] {
@@ -57,24 +59,60 @@ function blockTargetExists(ctx: HandlerCtx, id: string): boolean {
  * Record an answer (call inside the verb's transaction): the decision row,
  * its item, the hold (a blocking question holds its own task; a standalone
  * decision's task is unheld and done, so what waits on it can land), and a
- * steer to the asking worker if its run is still going.
+ * steer to the asking worker if its run is still going. A review gate's
+ * question is held instead while its gate is open: the verdict steer carries
+ * every answer at once (gate-questions.ts).
  */
-export function answerDecision(ctx: HandlerCtx, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader"; via: string }): { steer: string | null; run: string | null; dependents: string[] } {
+export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
   const now = ctx.now();
   ctx.db
     .query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = ?5, rationale = ?6 WHERE id = ?1")
     .run(d.id, a.choice, a.via, now, a.by, a.words);
-  appendEvent(ctx.db, { source: "cli", kind: "decision.answered", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, choice: a.choice, by: a.by, via: a.via }, ts: now });
-  resolveItems(ctx.db, d.blocking ? "worker_question_blocking" : "worker_question", d.task_id, `decision.answered ${d.id}`, now);
+  appendEvent(ctx.db, { source: "cli", kind: "decision.answered", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, choice: a.choice, by: a.by, via: a.via, ...(d.gate_id ? { gate: d.gate_id } : {}) }, ts: now });
+  resolveDecisionItems(ctx.db, d.id, `decision.answered ${d.id}`, now);
   if (d.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: d.task_id, positional: [d.task_id], now });
   if (d.run_id === null) recordIntent(ctx.db, { file: "backlog", verb: "done", taskId: d.task_id, positional: [d.task_id], now });
   const run = d.run_id ? getRun(ctx.db, d.run_id) : null;
+  const held = d.gate_id !== null && (ctx.db.query("SELECT state FROM gates WHERE id = ?1").get(d.gate_id) as { state: string } | null)?.state === "open";
   let steer: string | null = null;
-  if (run && !isTerminal(run.state)) {
+  if (run && !isTerminal(run.state) && !held) {
     const text = `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
     steer = createSteer(ctx.db, run, text, now, d.id).id;
   }
-  return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [] };
+  return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [], held };
+}
+
+/**
+ * The review page's answers (src/lavish/poller.ts): the daemon's lavish-axi
+ * poll returned what the user submitted on a gate's question widget. Next to
+ * captainChannel, this is the only other path that records answered_by =
+ * captain (via lavish): the user's own submit on the page Flowryn rendered.
+ * An answer counts only for an open question of that gate while the gate is
+ * open; anything else (answered meanwhile by the leader's relay, a stale page
+ * of an earlier gate, a choice the question does not offer) is recorded as an
+ * event and changes nothing. Call inside a transaction.
+ */
+export function lavishAnswer(ctx: { db: Db; now(): number }, answer: { gate: string; decision: string; choice: string[]; note: string | null }): "recorded" | "late" | "stale" | "invalid" {
+  const d = getDecision(ctx.db, answer.decision);
+  const gate = ctx.db.query("SELECT state FROM gates WHERE id = ?1").get(answer.gate) as { state: string } | null;
+  let outcome: "recorded" | "late" | "stale" | "invalid";
+  let detail: string | null = null;
+  if (!d || d.gate_id !== answer.gate || !gate) outcome = "stale";
+  else if (d.state !== "open" || gate.state !== "open") outcome = "late";
+  else {
+    try {
+      const choice = normalizeAnswer(d.kind ?? "single", JSON.parse(d.options) as string[], answer.choice);
+      const words = answer.note ? sanitizeBlock(answer.note).trim().slice(0, 2_000) || null : null;
+      answerDecision(ctx, d, { choice, words, by: "captain", via: "lavish" });
+      return "recorded";
+    } catch (error) {
+      if (!(error instanceof FlowrynError)) throw error;
+      outcome = "invalid";
+      detail = error.message;
+    }
+  }
+  appendEvent(ctx.db, { source: "daemon", kind: "decision.lavish_ignored", runId: d?.run_id ?? null, taskId: d?.task_id ?? null, payload: { decision: answer.decision, gate: answer.gate, outcome, detail }, ts: ctx.now() });
+  return outcome;
 }
 
 export function decisionRef(id: string): string {
@@ -154,7 +192,7 @@ const decide: VerbSpec = {
   summary: "Answer a decision: the leader with --rationale; a reserved one only with the user's word (--by captain)",
   positionals: [
     { name: "decision", required: true, help: "decision id, such as k3 or q2" },
-    { name: "choice", required: true, help: "one of its options, or a short answer when it has none" },
+    { name: "choice", required: true, help: "one of its options (a multi choice: \"a, b\"), or the answer when it has none" },
   ],
   flags: {
     rationale: { type: "string", help: "the leader's reason (required for a leader answer); - reads it from stdin", stdin: true, placeholder: "text" },
@@ -167,13 +205,15 @@ const decide: VerbSpec = {
   roles: ["leader", "human"],
   apply(ctx, args) {
     const id = stringArg(args, "decision")!;
-    const choice = stringArg(args, "choice")!;
+    const typed = stringArg(args, "choice")!;
     const d = getDecision(ctx.db, id);
     if (!d) throw new FlowrynError("not_found", `no decision ${id}`, "flowryn decision list");
     if (d.state !== "open") throw new FlowrynError("bad_args", `decision ${id} is already ${d.state}`);
     const opts = JSON.parse(d.options) as string[];
-    if (opts.length > 0 && !opts.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${opts.join(", ")}`);
-    if (opts.length === 0 && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
+    // A review gate's question may take several choices ("a, b") or free text; the rest take one short choice.
+    const choice = d.kind === "multi" || d.kind === "text" ? normalizeAnswer(d.kind, opts, d.kind === "multi" ? typed.split(",") : [typed]) : typed;
+    if (opts.length > 0 && d.kind !== "multi" && !opts.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${opts.join(", ")}`);
+    if (opts.length === 0 && d.kind !== "text" && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const words = sanitizeBlock(stringArg(args, "body") ?? stringArg(args, "words") ?? "").trim() || null;
     const rationale = sanitizeBlock(stringArg(args, "rationale") ?? "").trim() || null;
     const asCaptain = stringArg(args, "by") === "captain" || ctx.caller.role === "human";
@@ -197,6 +237,7 @@ const decide: VerbSpec = {
     ctx.journal.kick();
     if (result.data.run !== "-") ctx.fleet.bus.notify(String(result.data.run));
     ctx.sched.kick();
+    ctx.lavish.kick();
     return result;
   },
 };
@@ -207,7 +248,8 @@ function reply(ctx: HandlerCtx, d: DecisionRow, choice: string, by: string, done
     const auto = ctx.db.query("SELECT auto, project_id FROM task_policy WHERE task_id = ?1").get(dep) as { auto: number; project_id: string } | null;
     if (auto && auto.auto === 0) hints.push(`flowryn dispatch ${auto.project_id} --task ${dep}`);
   }
-  return { data: { decision: d.id, answer: choice, by, steer: done.steer ?? "-", run: done.run ?? "-", unblocks: done.dependents }, hints };
+  if (done.held) hints.push("the answer reaches the worker with the review's verdict");
+  return { data: { decision: d.id, answer: choice, by, steer: done.steer ?? (done.held ? "held for the verdict" : "-"), run: done.run ?? "-", unblocks: done.dependents }, hints };
 }
 
 const decisionDefer: VerbSpec = {
@@ -256,6 +298,10 @@ export function decisionView(d: DecisionRow): Record<string, unknown> {
     by: d.answered_by ?? "-",
     via: d.answered_via ?? "-",
     rationale: d.rationale ?? "-",
+    ...(d.kind ? { kind: d.kind } : {}),
+    ...(d.gate_id ? { gate: d.gate_id } : {}),
+    ...(d.blocks ? { blocks: sanitizeLine(d.blocks, 200) } : {}),
+    ...(d.note ? { why: sanitizeLine(d.note, 400) } : {}),
     ...(d.context ? { context: sanitizeLine(d.context, 400) } : {}),
   };
 }
@@ -273,7 +319,7 @@ const decisionList: VerbSpec = {
   roles: ["leader", "reader", "human"],
   read(ctx, args) {
     const filter = boolArg(args, "all") ? "all" : boolArg(args, "deferred") ? "deferred" : boolArg(args, "reserved") ? "reserved" : "open";
-    const decisions = openDecisions(ctx, filter).map((d) => ({ id: d.id, task: d.task_id, reserved: d.reserved_reason ?? "-", question: sanitizeLine(d.question, 100), state: d.state }));
+    const decisions = openDecisions(ctx, filter).map((d) => ({ id: d.id, task: d.task_id, reserved: d.reserved_reason ?? "-", gate: d.gate_id ?? "-", question: sanitizeLine(d.question, 100), state: d.state }));
     return { data: { decisions }, hints: decisions.length > 0 ? ["flowryn show <id>", "flowryn decide <id> <choice> --rationale <why>"] : [] };
   },
 };

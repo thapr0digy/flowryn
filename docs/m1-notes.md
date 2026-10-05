@@ -7,7 +7,7 @@ M1 builds section 17's "M1 · Core" of [`design-v3.html`](design-v3.html). This 
 - **Your own terminal is a role.** The design lists `todo` and `project` as leader verbs, and `init` registers projects. In M1 there is no lease manager yet (M3), so a token-less call from your own terminal is the `human` role and may run the to-do and project verbs as well as the human-only ones. "Your own terminal" means no `FLOWRYN_TOKEN` or `FLOWRYN_RUN` in the environment, and stdin or stdout is a TTY. Like the approve challenge, this is confused-agent-grade: a Claude Code Bash tool has neither. A token-less caller that fails the check is `anonymous` and may only ping (`src/api/auth.ts`, `src/cli/human.ts`).
 - **An unknown token is refused (`bad_token`, exit 77), never downgraded to human.** A stale leader token must not act as you.
 - **`report` is the first worker verb and the first spooling verb.** It records a `worker.report` event and nothing else. The other worker verbs (`ask`, `deliver`, `fail`) arrive with the runs that use them in M2 (`src/lifecycle/worker.ts`).
-- The socket also serves two internal verbs the CLI uses: `daemon.ping` (the handshake, allowed for every role) and `daemon.stop` (human only).
+- The socket also serves two internal verbs the CLI uses: `daemon.ping` (the handshake, allowed for every role) and `daemon.stop` (human only). A third, `daemon.restart` (leader or human), came later: docs/cutover-notes.md, "Leader-safe daemon restart".
 
 ## The intent journal
 

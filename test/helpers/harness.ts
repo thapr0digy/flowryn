@@ -27,6 +27,40 @@ esac
 exit 0
 `;
 
+/**
+ * The test homes' lavish-axi: every call is logged to $FLOWRYN_HOME/lavish-calls.log; `poll` waits for
+ * the first file in $FLOWRYN_HOME/lavish-queue/*.out (a test writes what the user "sent", in the poll's
+ * own output format), claims it by renaming and prints it, or prints `status: waiting` once its
+ * --timeout-ms runs out; a queued file named *.fail.out makes the poll
+ * fail the way a missing session does. Nothing reaches a real Lavish server or browser.
+ */
+const FAKE_LAVISH = `#!/bin/sh
+echo "$*" >> "$FLOWRYN_HOME/lavish-calls.log"
+[ "$1" = "poll" ] || exit 0
+q="$FLOWRYN_HOME/lavish-queue"
+mkdir -p "$q"
+parent=$PPID
+ticks=-1
+prev=""
+for a in "$@"; do [ "$prev" = "--timeout-ms" ] && ticks=$((a / 50)); prev="$a"; done
+while :; do
+  if [ "$ticks" -eq 0 ]; then printf 'session:\n  status: waiting\n'; exit 0; fi
+  [ "$ticks" -gt 0 ] && ticks=$((ticks - 1))
+  # Unlike the real one, it ends with its daemon (or its home), so tests leave no process behind.
+  kill -0 "$parent" 2>/dev/null || exit 0
+  [ -d "$FLOWRYN_HOME" ] || exit 0
+  for f in "$q"/*.out; do
+    [ -e "$f" ] || continue
+    if mv "$f" "$f.taken" 2>/dev/null; then
+      cat "$f.taken"
+      case "$f" in *.fail.out) exit 1 ;; esac
+      exit 0
+    fi
+  done
+  sleep 0.05
+done
+`;
+
 /** The real tasks-axi. The journal tests run against it, never a reimplementation. */
 export function realTasksAxi(): string {
   const found = process.env.FLOWRYN_TEST_TASKS_AXI ?? Bun.which("tasks-axi");
@@ -77,6 +111,9 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   const noMistakes = join(bin, "no-mistakes");
   writeFileSync(noMistakes, FAKE_NO_MISTAKES);
   chmodSync(noMistakes, 0o755);
+  const lavish = join(bin, "lavish-axi");
+  writeFileSync(lavish, FAKE_LAVISH);
+  chmodSync(lavish, 0o755);
   const gh = join(bin, "gh-absent");
   writeFileSync(gh, "#!/bin/sh\necho 'gh is not available in tests' >&2\nexit 1\n");
   chmodSync(gh, 0o755);
@@ -98,6 +135,7 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     ...(git ? [`git = ${JSON.stringify(git)}`] : []),
     `no_mistakes = ${JSON.stringify(noMistakes)}`,
     `gh = ${JSON.stringify(gh)}`,
+    ...(/^lavish_axi\s*=/m.test(extraConfig) ? [] : [`lavish_axi = ${JSON.stringify(lavish)}`]),
     ...harnessStandIns,
     extraConfig,
   ];
@@ -319,4 +357,40 @@ export function readText(path: string): string {
 
 export function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
+}
+
+/**
+ * Supervise a home's daemon with a script instead of launchd (FLOWRYN_SUPERVISOR,
+ * for `flowryn daemon restart`): it stops the old daemon with SIGTERM, as
+ * `launchctl kickstart -k` does, and starts the next one in the background,
+ * recording its pid in next-daemon.pid (`killNextDaemon` stops it). `program`
+ * is the launchd target the binary check runs. Returns the daemon's env.
+ */
+export function superviseWithScript(h: TestHome, program: string[] = ["bun", MAIN, "daemon", "run"]): Record<string, string> {
+  const script = join(h.home, "supervisor.sh");
+  writeFileSync(
+    script,
+    `#!/bin/sh
+kill -TERM "$FLOWRYN_DAEMON_PID"
+while kill -0 "$FLOWRYN_DAEMON_PID" 2>/dev/null; do sleep 0.05; done
+cd ${JSON.stringify(REPO_ROOT)}
+FLOWRYN_LOG_STDERR=1 bun ${JSON.stringify(MAIN)} daemon run >> ${JSON.stringify(join(h.home, "next-daemon.log"))} 2>&1 &
+echo $! > ${JSON.stringify(join(h.home, "next-daemon.pid"))}
+`,
+  );
+  chmodSync(script, 0o755);
+  const file = join(h.home, "supervisor.json");
+  writeFileSync(file, JSON.stringify({ program, restart: [script] }));
+  return { FLOWRYN_SUPERVISOR: file };
+}
+
+/** Stop a daemon the script supervisor started, if any. */
+export function killNextDaemon(h: TestHome): void {
+  const file = join(h.home, "next-daemon.pid");
+  if (!existsSync(file)) return;
+  try {
+    process.kill(Number(readFileSync(file, "utf8").trim()), "SIGKILL");
+  } catch {
+    // already gone
+  }
 }

@@ -6,7 +6,7 @@ import { defaultConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING, timingConfig, workerConfigProblems, workersConfig } from "../../src/config/workers.ts";
 import { claudeAdapter, workerSettings } from "../../src/harness/claude/adapter.ts";
 import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude/trust.ts";
-import { promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
+import { type ContractDelivery, promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
 import { shipGitAccess } from "../../src/harness/git-access.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
 import type { RunContext } from "../../src/harness/types.ts";
@@ -92,7 +92,9 @@ describe("claude adapter", () => {
 
   test("the worker settings wire every hook verb, and the Stop waiter is asyncRewake with an 8 h timeout", () => {
     const settings = workerSettings("/opt/flowryn bin/flowryn") as { hooks: Record<string, { hooks: { command: string; asyncRewake?: boolean; timeout?: number }[] }[]> };
-    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    // A failed tool fires PostToolUseFailure instead of PostToolUse: it must end the tool's urgent-steer clock.
+    expect(settings.hooks.PostToolUseFailure![0]!.hooks[0]!.command).toBe("'/opt/flowryn bin/flowryn' hook tool-failed --harness claude");
     // The usage-limit resume signals, and a permission dialog waiting mid-run (cutover C2): a worker's idle_prompt means nothing to Flowryn.
     expect((settings.hooks.Notification![0] as unknown as { matcher: string }).matcher).toBe("quota_auto_resume_fired|quota_auto_resume_stale|quota_auto_resume_disabled|permission_prompt");
     const stop = settings.hooks.Stop![0]!.hooks;
@@ -151,7 +153,28 @@ describe("worker contract text", () => {
     expect(text).toContain("- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.");
     expect(text).toContain("  To take main: new commits, git merge origin/main, a plain git push.");
     expect(text).toContain('- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.');
-    expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking naming it, then end your turn.");
+    expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.");
+  });
+
+  test("every ask the contract shows carries the flags ask requires, in every delivery mode", () => {
+    const deliveries: ContractDelivery[] = [
+      { kind: "scout", mode: "local-only", defaultBranch: "main" },
+      { kind: "ship", mode: "local-only", defaultBranch: "main" },
+      { kind: "ship", mode: "direct-PR", defaultBranch: "main" },
+      { kind: "ship", mode: "no-mistakes", defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] } },
+    ];
+    for (const delivery of deliveries) {
+      const text = workerContract("claude", STYLE_BLOCK, delivery);
+      const asks = text.split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"));
+      expect(asks.length).toBeGreaterThan(0);
+      for (const line of asks) {
+        const call = line.slice(line.indexOf("$FLOWRYN_BIN ask"));
+        expect(call).toMatch(/--blocks \S/);
+        expect(call).toMatch(/--options \S/);
+        expect(call).toContain("--body-file -");
+      }
+    }
+    expect(workerContract("pi", null, deliveries[3]).split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"))).toHaveLength(3);
   });
 
   test("the prompt line is one short line that points at the full task", () => {

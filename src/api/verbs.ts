@@ -6,7 +6,9 @@ import type { FleetServices } from "../lifecycle/fleet-services.ts";
 import type { AttentionServices } from "../attention/services.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import type { SchedServices } from "../sched/services.ts";
+import type { LavishServices } from "../lavish/services.ts";
 import { FlowrynError } from "./errors.ts";
+import type { RestartController } from "../daemon/restart.ts";
 
 /**
  * Who is calling, resolved from the token (design section 12). `human` is a
@@ -59,6 +61,8 @@ export interface DaemonInfo {
   instance: string;
   startedAt: number;
   execPath: string;
+  /** The build this daemon runs (src/daemon/restart.ts buildIdOf); null for a development command. */
+  build?: string | null;
   socket: string;
   stateDir: string;
 }
@@ -81,6 +85,10 @@ export interface DaemonServices {
   delivery: DeliveryServices;
   /** The scheduler: capacity grants and auto-dispatch (M5). */
   sched: SchedServices;
+  /** `flowryn daemon restart`: the guards, the binary check and the supervisor. */
+  restart: RestartController;
+  /** The review pages' question widgets and their lavish-axi polls. */
+  lavish: LavishServices;
 }
 
 export interface HandlerCtx extends DaemonServices {

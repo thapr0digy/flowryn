@@ -18,6 +18,8 @@ export type ItemClass = "actionable" | "info";
  * passing contract, Herdr unreachable, GitHub unavailable while a merge waits).
  * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
  * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
+ * restart_dropped: a `flowryn daemon restart` that will not happen (its binary
+ * failed the check, its supervisor refused, or `--when-idle` expired).
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -48,6 +50,7 @@ export const LANE_TABLE = {
   harness_unverified: { lane: "P1", class: "actionable" },
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
+  restart_dropped: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
@@ -121,6 +124,13 @@ export function resolveItems(db: Db, kind: ItemKind, taskId: string | null, reso
     )
     .run(kind, taskId, resolvedBy, now);
   return result.changes;
+}
+
+/** Resolve the open items that carry one decision. */
+export function resolveDecisionItems(db: Db, decisionId: string, resolvedBy: string, now = Date.now()): number {
+  return db
+    .query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE decision_id = ?1 AND state IN ('open','presented')")
+    .run(decisionId, resolvedBy, now).changes;
 }
 
 /** Open items of a kind for one run. */

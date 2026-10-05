@@ -362,10 +362,10 @@ describe("ask --key", () => {
     daemons.push(d);
     const run = seedRun(h);
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
-    const first = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const first = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(first.code).toBe(0);
     const decisionId = (first.reply.data as { decision: string }).decision;
-    const again = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const again = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(again.code).toBe(0);
     expect(again.reply.data).toMatchObject({ decision: decisionId, already: true });
     const db = h.db();
@@ -377,9 +377,29 @@ describe("ask --key", () => {
     const answered = await cliJson(h, ["decide", decisionId, "sqlite", "--rationale", "fine"], { env: { FLOWRYN_TOKEN: leader } });
     expect(answered.code).toBe(0);
 
-    const refused = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const refused = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(refused.code).toBe(3);
     expect(JSON.stringify(refused.reply)).toContain(`key db already used by ${decisionId}`);
+  });
+
+  test("ask refuses a question that names no choice it blocks, and opens no decision", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const missing = await cliJson(h, ["ask", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(missing.code).toBe(3);
+    expect(JSON.stringify(missing.reply)).toContain("bad_args");
+    expect(JSON.stringify(missing.reply)).toContain("--blocks <what waits on the answer> is required");
+    const vague = await cliJson(h, ["ask", "--options", "sqlite,postgres", "--blocks", "stuff", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(vague.code).toBe(3);
+    expect(JSON.stringify(vague.reply)).toContain("--blocks <what waits on the answer> is required");
+    const db = h.db();
+    const count = db.query("SELECT COUNT(*) AS n FROM decisions").get() as { n: number };
+    db.close();
+    expect(count.n).toBe(0);
   });
 
   test("ask --key refuses a key a standalone decision from its task already holds", async () => {
@@ -392,7 +412,7 @@ describe("ask --key", () => {
     const taskId = (db.query("SELECT task_id FROM runs WHERE id = ?1").get(run.runId) as { task_id: string }).task_id;
     const standalone = tx(db, () => createStandaloneDecision(db, { key: "db", question: "Which database?", options: [], origin: taskId, now: 1 }));
     db.close();
-    const asked = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "Which database?" });
+    const asked = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "Which database?" });
     expect(asked.code).toBe(3);
     expect(JSON.stringify(asked.reply)).toContain(standalone.id);
   });

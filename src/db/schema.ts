@@ -374,6 +374,38 @@ UPDATE decisions SET import_source = 'legacy:' || substr(import_source, instr(im
   WHERE import_source IS NOT NULL AND import_source NOT LIKE 'legacy:%';
 `;
 
+/**
+ * Urgent steers (steer latency Tier 2): an urgent steer blocks the worker's
+ * next tool call and cancels a tool that has run past steer_preempt_after_ms;
+ * preempted_at is when Flowryn cancelled a tool for it (at most once).
+ */
+const STEER_URGENT_SQL = /* sql */ `
+ALTER TABLE messages ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN preempted_at INTEGER;
+`;
+
+/**
+ * Gate questions: a review gate may carry the worker's questions for the user
+ * (`stage done --questions-file`), each a run-scoped decision bound to the
+ * gate (gate_id) with its kind (single, multi or text; NULL is a plain
+ * single choice), the choice it blocks and the worker's why (note). The gate
+ * keeps the page Flowryn writes the question widget beside (page_path), the
+ * worker's own decisions (decided, JSON), whether the user ended the Lavish
+ * session (lavish_ended) and where the Lavish notes the poll took went
+ * (notes_path). A worker's `ask` records what it blocks too.
+ */
+const GATE_QUESTIONS_SQL = /* sql */ `
+ALTER TABLE decisions ADD COLUMN kind TEXT;
+ALTER TABLE decisions ADD COLUMN gate_id TEXT;
+ALTER TABLE decisions ADD COLUMN note TEXT;
+ALTER TABLE decisions ADD COLUMN blocks TEXT;
+CREATE INDEX decisions_gate ON decisions(gate_id) WHERE gate_id IS NOT NULL;
+ALTER TABLE gates ADD COLUMN page_path TEXT;
+ALTER TABLE gates ADD COLUMN decided TEXT;
+ALTER TABLE gates ADD COLUMN lavish_ended INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gates ADD COLUMN notes_path TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -384,6 +416,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 7, name: "import", sql: IMPORT_SQL },
   { version: 8, name: "steer-seen", sql: STEER_SEEN_SQL },
   { version: 9, name: "legacy-source", sql: LEGACY_SOURCE_SQL },
+  { version: 10, name: "steer-urgent", sql: STEER_URGENT_SQL },
+  { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -2,14 +2,13 @@ import { constants, copyFileSync, lstatSync, mkdirSync, readFileSync, realpathSy
 import { join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
-import { getMeta, setMeta } from "../db/db.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
-import { createStandaloneDecision, DECISION_KEY } from "./decisions.ts";
+import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, nextRunDecisionId } from "./decisions.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
@@ -23,7 +22,9 @@ const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
 const MAX_QUESTION_CHARS = 2_000;
 const MAX_REPORT_BYTES = 1024 * 1024;
-const OPTION = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
+const OPTION = DECISION_OPTION;
+const MIN_BLOCKS_CHARS = 10;
+const MAX_BLOCKS_CHARS = 200;
 
 /** The caller's run. Worker verbs are bound to one run by the token (design section 12). */
 function callerRun(ctx: { db: HandlerCtx["db"]; caller: HandlerCtx["caller"] }): RunWithPolicy {
@@ -68,14 +69,9 @@ const report: VerbSpec = {
   },
 };
 
-function nextDecisionId(ctx: HandlerCtx): string {
-  const next = Number(getMeta(ctx.db, "next_decision_no") ?? "1");
-  setMeta(ctx.db, "next_decision_no", String(next + 1));
-  return `q${next}`;
-}
-
 /**
- * `flowryn ask --options a,b [--blocking] --body-file -`: a question for you.
+ * `flowryn ask --options a,b --blocks <what waits> [--blocking] --body-file -`:
+ * a question for you, only when the worker cannot proceed without it.
  * It never holds the call open (design section 12): it returns a decision id,
  * the worker ends its turn, and the answer arrives as a steer. A blocking
  * question is a P0 and puts a captain hold on the task.
@@ -90,6 +86,7 @@ const ask: VerbSpec = {
     key: { type: "string", help: "a short slug for this question, for show", placeholder: "key" },
     recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
     reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
+    blocks: { type: "string", help: "required: the choice in your work that waits on the answer", placeholder: "text" },
     "body-file": { type: "string", help: "the question, from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -104,6 +101,9 @@ const ask: VerbSpec = {
       .map((o) => o.trim())
       .filter((o) => o.length > 0);
     if (options.length < 2) throw new FlowrynError("bad_args", "--options needs at least two choices, such as yes,no");
+    // Ask only when you cannot proceed (the worker contract): name the choice the answer unblocks.
+    const blocks = sanitizeLine(stringArg(args, "blocks") ?? "", MAX_BLOCKS_CHARS);
+    if (blocks.length < MIN_BLOCKS_CHARS) throw new FlowrynError("bad_args", "--blocks <what waits on the answer> is required: ask only when you cannot proceed; decide the rest yourself and record it");
     const bad = options.find((o) => !OPTION.test(o));
     if (bad) throw new FlowrynError("bad_args", `option "${bad}" must be short: letters, digits, spaces, _ . -`);
     const blocking = boolArg(args, "blocking");
@@ -121,18 +121,18 @@ const ask: VerbSpec = {
         return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: ["end your turn; the answer arrives as a steer"] };
       }
     }
-    const id = nextDecisionId(ctx);
+    const id = nextRunDecisionId(ctx.db);
     const reserved = reservedReason({ question, context: null, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: false }, decisionsConfig(ctx.config()));
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11)")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, now);
-    const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, via: ctx.via } });
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at, blocks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, now, blocks);
+    const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via } });
     const item = openItem(ctx.db, {
       kind: blocking ? "worker_question_blocking" : "worker_question",
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Worker question ${id} on ${taskTitle(ctx.db, run.task_id)}${blocking ? ", blocking" : ""}: "${sanitizeLine(question, 120)}" [${options.join(" | ")}]`,
+      line: `Worker question ${id} on ${taskTitle(ctx.db, run.task_id)}${blocking ? ", blocking" : ""}: "${sanitizeLine(question, 120)}" [${options.join(" | ")}] blocks: ${sanitizeLine(blocks, 80)}`,
       now,
     });
     ctx.db.query("UPDATE items SET decision_id = ?2 WHERE id = ?1").run(item, id);

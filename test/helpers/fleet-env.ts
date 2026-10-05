@@ -4,7 +4,7 @@ import { tx, type Db } from "../../src/db/db.ts";
 import type { Timing } from "../../src/config/workers.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { FakeHerdr } from "./fake-herdr.ts";
-import { cli, cliJson, makeHome, seedLeader, startDaemon, waitUntil, type CliOptions, type DaemonProc, type RunResult, type TestHome } from "./harness.ts";
+import { cli, cliJson, killNextDaemon, makeHome, seedLeader, startDaemon, superviseWithScript, waitUntil, type CliOptions, type DaemonProc, type RunResult, type TestHome } from "./harness.ts";
 
 /** Fast clocks for the reconciler, so recovery paths finish in seconds. */
 export const FAST_TIMING: Partial<Timing> = {
@@ -108,6 +108,8 @@ export interface FleetOptions {
   yolo?: boolean;
   /** [herdr] unreachable_alert_ms: how long Herdr may be away before its P1. */
   herdrAlertMs?: number;
+  /** Supervise the daemon with a script, so `flowryn daemon restart` works (superviseWithScript). */
+  supervised?: boolean;
 }
 
 export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv> {
@@ -151,7 +153,8 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   }
   const origin = options.origin ? makeOriginRepo(join(home, "proj")) : null;
   const repo = origin ? origin.repo : makeRepo(join(home, "repo"));
-  let daemon = await startDaemon(h);
+  const daemonEnv = options.supervised ? superviseWithScript(h) : {};
+  let daemon = await startDaemon(h, daemonEnv);
   const env = { FLOWRYN_TOKEN: leader };
   const addArgs = ["project", "add", repo, "--id", "web", "--mode", options.mode ?? "local-only"];
   if (origin) addArgs.push("--repo-url", "https://github.com/acme/web.git");
@@ -202,7 +205,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
       return last!;
     },
     async restartDaemon() {
-      daemon = await startDaemon(h);
+      daemon = await startDaemon(h, daemonEnv);
     },
     async stopHerdr() {
       herdrUp = false;
@@ -219,6 +222,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
     },
     async cleanup() {
       await daemon.kill9().catch(() => {});
+      killNextDaemon(h);
       if (herdrUp) await herdr.stop().catch(() => {});
       if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
       else h.cleanup();
