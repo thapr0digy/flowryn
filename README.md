@@ -53,8 +53,8 @@ flowryn project set web --mode direct-PR --yolo on
 flowryn dispatch web --kind scout --body-file - <<'EOF'
 Find where the login redirect loop comes from.
 EOF
-flowryn fleet                       # every worker: state, liveness, what it needs
-flowryn show <task>                 # one run in detail
+flowryn fleet                       # every worker: state, liveness, what it needs; then queued work: blockers, --auto, what starts it
+flowryn show <task>                 # one run in detail, or a Queued task: its blockers, hold and the command that starts it
 flowryn steer <task> --body-file -  # words for a worker, delivered at its next tool call or idle wake
 flowryn answer <decision> <choice>  # answer a worker's question; it arrives as a steer
 flowryn interrupt <task>            # stop the current turn (verified); cancel <task>; resume <task>
