@@ -139,6 +139,10 @@ describe("a review gate's questions", () => {
       expect(rows(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE 'Answer to your question%'", run)).toEqual([]);
       await waitUntil(() => readFileSync(widget, "utf8").includes('"answer":"claude, pi"'), 10_000, "the widget shows q2 answered");
       expect(readFileSync(widget, "utf8")).toContain('"via":"your leader"');
+      // Lavish's conversation hears what Flowryn recorded: the next poll carries it, and once nothing is
+      // left to poll for, one short poll does.
+      await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Your other notes reach the worker with the verdict. 2 questions still open."), 10_000, "the reply after q1");
+      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Every question is answered; the review now waits for your pass in Flowryn\. --timeout-ms 1500/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
 
       // Every question answered: the gate passes, and the verdict steer carries the answers and the notes.
       const passed = await e.approve(task, { gate: "design" });

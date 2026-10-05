@@ -90,7 +90,7 @@ const RENDERER = String.raw`
 
   var form = el("form", { "class": "fq", "data-lavish-question": "flowryn-" + S.gate });
   var openCount = S.questions.filter(function (q) { return q.state === "open"; }).length;
-  form.appendChild(el("h3", { text: "Open questions (" + S.stage + " review, gate " + S.gate + ")" }));
+  form.appendChild(el("h3", { text: (S.gateState !== "open" ? "Questions, review closed" : openCount > 0 ? "Open questions" : "Questions, all answered") + " (" + S.stage + " review, gate " + S.gate + ")" }));
   form.appendChild(el("div", { "class": "fq-meta", text: "Each is a Flowryn decision reserved for you. Answer here, or tell your leader (flowryn decide <id> <choice> --by captain); the first answer counts." }));
   if (S.decided.length) {
     form.appendChild(el("div", { "class": "fq-meta", text: "Decided by the worker (send the review back if you disagree):" }));

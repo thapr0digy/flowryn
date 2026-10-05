@@ -30,7 +30,8 @@ exit 0
 /**
  * The test homes' lavish-axi: every call is logged to $FLOWRYN_HOME/lavish-calls.log; `poll` waits for
  * the first file in $FLOWRYN_HOME/lavish-queue/*.out (a test writes what the user "sent", in the poll's
- * own output format), claims it by renaming and prints it; a queued file named *.fail.out makes the poll
+ * own output format), claims it by renaming and prints it, or prints `status: waiting` once its
+ * --timeout-ms runs out; a queued file named *.fail.out makes the poll
  * fail the way a missing session does. Nothing reaches a real Lavish server or browser.
  */
 const FAKE_LAVISH = `#!/bin/sh
@@ -38,7 +39,12 @@ echo "$*" >> "$FLOWRYN_HOME/lavish-calls.log"
 [ "$1" = "poll" ] || exit 0
 q="$FLOWRYN_HOME/lavish-queue"
 mkdir -p "$q"
+ticks=-1
+prev=""
+for a in "$@"; do [ "$prev" = "--timeout-ms" ] && ticks=$((a / 50)); prev="$a"; done
 while :; do
+  if [ "$ticks" -eq 0 ]; then printf 'session:\n  status: waiting\n'; exit 0; fi
+  [ "$ticks" -gt 0 ] && ticks=$((ticks - 1))
   for f in "$q"/*.out; do
     [ -e "$f" ] || continue
     if mv "$f" "$f.taken" 2>/dev/null; then
