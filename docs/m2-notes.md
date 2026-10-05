@@ -37,7 +37,7 @@ M2 builds section 17's "M2 · Runtime, workers, reconciler" of [`design-v3.html`
 
 ## Steers
 
-- A steer is a `messages` row `m<N>` (`src/lifecycle/steers.ts`). Only the worker's `ack` proves it was seen. It rings at most `max_rings` times in all: the first delivery plus three re-rings, 5 minutes apart. After the last ring plus one interval it opens one P1 (`steer_unacked`). An acknowledgement after re-rings resolves that P1 and opens an informational one.
+- A steer is a `messages` row `m<N>` (`src/lifecycle/steers.ts`). Only the worker's `ack` proves it was seen. It rings at most `max_rings` times in all: the first delivery plus three re-rings, 5 minutes apart. After the last ring plus one interval it opens one P1 (`steer_unacked`). An acknowledgement after re-rings resolves that P1 and opens an informational one. The cutover adds seen evidence and fast re-rings of lost carries (docs/cutover-notes.md "Steers · latency").
 - Claude channels: PostToolUse returns a due steer beside the next tool result (M0 c07). Stop continues the turn with one, at most twice in a row (M0 c06). The asyncRewake waiter fires only while the worker is idle, so a busy worker gets its steers mid-turn.
 - Waiter supersession: each waiter mints a ULID when armed; the daemon keeps the newest per run and answers older ones "exit 0". The latest id is kept only in memory: after a restart the first waiter to reconnect is adopted. A waiter keeps reconnecting while the daemon is down, because Claude re-arms one only at the next Stop.
 - Hook verbs are `ephemeral`: never kept for idempotency (a PostToolUse on every tool call would fill the 7-day reply table), never spooled. They step aside silently when the daemon is slow or down.
