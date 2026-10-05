@@ -14,7 +14,7 @@ import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, tas
 import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
-import { dueSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
+import { confirmPromptSeen, dueSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 
@@ -119,10 +119,13 @@ function takeSteer(ctx: HandlerCtx, run: RunWithPolicy, path: RingPath) {
  * a woken turn's UserPromptSubmit, or the next PreToolUse, PostToolUse or Stop
  * after a PostToolUse or Stop carry (the model read the attachment at its
  * inference in between). A parallel sibling tool's hook can mark it a moment
- * early. Pi proves it with its context event instead (hook steer-seen).
+ * early. Pi proves it with its context event instead (hook steer-seen). What
+ * only UserPromptSubmit saw stays losable until a later hook in the turn.
  */
 function claudeSaw(ctx: HandlerCtx, run: RunWithPolicy, args: Args, hook: string): void {
-  if (harnessOf(args) === "claude") markSeen(ctx.db, run, null, hook, ctx.now());
+  if (harnessOf(args) !== "claude") return;
+  if (hook !== "prompt") confirmPromptSeen(ctx.db, run, hook);
+  markSeen(ctx.db, run, null, hook, ctx.now());
 }
 
 // --- worker-start and the isolation assertion ---------------------------------------------

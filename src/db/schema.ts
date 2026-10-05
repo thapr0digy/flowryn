@@ -348,12 +348,16 @@ CREATE UNIQUE INDEX decisions_import ON decisions(import_source) WHERE import_so
  * Steer latency: when a carried steer was provably in a model request
  * (seen_at, the first time), and the latest ring's state: carried, seen or
  * lost (a known-lost carry rings again at once). ring_idle marks a carry to an
- * idle worker, which must be seen within seconds or it rings again.
+ * idle worker, which must be seen within seconds or it rings again. seen_via
+ * names the hook that marked the latest ring seen: one seen only by a Claude
+ * turn's UserPromptSubmit ('prompt') is still lost if the turn fails or is
+ * interrupted before any later hook.
  */
 const STEER_SEEN_SQL = /* sql */ `
 ALTER TABLE messages ADD COLUMN seen_at INTEGER;
 ALTER TABLE messages ADD COLUMN ring_state TEXT;
 ALTER TABLE messages ADD COLUMN ring_idle INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN seen_via TEXT;
 UPDATE messages SET ring_state = 'carried' WHERE rings > 0;
 `;
 

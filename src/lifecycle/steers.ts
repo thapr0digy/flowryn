@@ -15,6 +15,8 @@ import { taskTitle, type RunRow } from "./runs.ts";
  * max_rings deliveries in all (the first plus three re-rings), and then opens
  * a P1. A carry known to be lost (an interrupt or a failed turn before it was
  * seen, or an idle carry not seen within seen_timeout_ms) rings again at once.
+ * A Claude turn's UserPromptSubmit marks a carry seen, but until a later
+ * worker hook confirms it, a failed or interrupted turn still loses it.
  */
 
 export interface MessageRow {
@@ -32,6 +34,8 @@ export interface MessageRow {
   ring_state: RingState | null;
   /** The latest ring went to an idle worker, so it must be seen within seen_timeout_ms. */
   ring_idle: number;
+  /** The hook that marked the latest ring seen, or null. */
+  seen_via: string | null;
 }
 
 export type RingState = "carried" | "seen" | "lost";
@@ -103,7 +107,7 @@ function ringReason(m: MessageRow, now: number, timing: Timing): string | null {
  * so the carry must be seen within seen_timeout_ms. Call inside a transaction.
  */
 export function markRung(db: Db, message: MessageRow, run: RunRow, path: RingPath, now: number, idle: boolean, timing: Timing): void {
-  db.query("UPDATE messages SET rings = rings + 1, last_rung_at = ?2, carried_at = COALESCE(carried_at, ?2), ring_state = 'carried', ring_idle = ?3 WHERE id = ?1").run(
+  db.query("UPDATE messages SET rings = rings + 1, last_rung_at = ?2, carried_at = COALESCE(carried_at, ?2), ring_state = 'carried', ring_idle = ?3, seen_via = NULL WHERE id = ?1").run(
     message.id,
     now,
     idle ? 1 : 0,
@@ -133,7 +137,7 @@ export function markSeen(db: Db, run: RunRow, ids: string[] | null, via: string,
   const marked: string[] = [];
   for (const m of carriedUnseen(db, run.id)) {
     if (ids !== null && !ids.includes(m.id)) continue;
-    db.query("UPDATE messages SET ring_state = 'seen', seen_at = COALESCE(seen_at, ?2) WHERE id = ?1").run(m.id, now);
+    db.query("UPDATE messages SET ring_state = 'seen', seen_at = COALESCE(seen_at, ?2), seen_via = ?3 WHERE id = ?1").run(m.id, now, via);
     appendEvent(db, {
       source: "hook",
       kind: "steer.seen",
@@ -148,15 +152,25 @@ export function markSeen(db: Db, run: RunRow, ids: string[] | null, via: string,
 }
 
 /**
+ * A later Claude worker hook in the turn confirms what its UserPromptSubmit
+ * marked seen: the turn went on past its first inference. Call inside a
+ * transaction.
+ */
+export function confirmPromptSeen(db: Db, run: RunRow, via: string): void {
+  db.query("UPDATE messages SET seen_via = ?2 WHERE run_id = ?1 AND acked_at IS NULL AND ring_state = 'seen' AND seen_via = 'prompt'").run(run.id, via);
+}
+
+/**
  * Carried steers that never reached a model request are lost (an interrupt
- * dropped them, or the turn failed first): each rings again at once. Call
+ * dropped them, or the turn failed first): each rings again at once. So is
+ * one only a Claude turn's UserPromptSubmit saw, with no later hook. Call
  * inside a transaction; returns the ids marked.
  */
 export function markLost(db: Db, run: RunRow, reason: string, now: number): string[] {
-  const lost = carriedUnseen(db, run.id);
+  const lost = unackedSteers(db, run.id).filter((m) => m.ring_state === "carried" || (m.ring_state === "seen" && m.seen_via === "prompt"));
   for (const m of lost) {
     db.query("UPDATE messages SET ring_state = 'lost' WHERE id = ?1").run(m.id);
-    appendEvent(db, { source: "daemon", kind: "steer.lost", runId: run.id, taskId: run.task_id, payload: { steer: m.id, ring: m.rings, reason }, ts: now });
+    appendEvent(db, { source: "daemon", kind: "steer.lost", runId: run.id, taskId: run.task_id, payload: { steer: m.id, ring: m.rings, reason, ...(m.ring_state === "seen" ? { seen_via: m.seen_via } : {}) }, ts: now });
   }
   return lost.map((m) => m.id);
 }
