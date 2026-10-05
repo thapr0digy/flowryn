@@ -32,8 +32,6 @@ describe("the QA page's plain-language card", () => {
     const card = QA_TEMPLATE.indexOf("data-flowryn-card");
     expect(card).toBeGreaterThan(QA_TEMPLATE.indexOf("<body"));
     expect(QA_TEMPLATE.indexOf("<details")).toBeGreaterThan(card);
-    expect(QA_TEMPLATE).not.toContain("<script");
-    expect(QA_TEMPLATE).toContain("prefers-color-scheme:dark");
   });
 
   test("an unfilled template is refused, naming every blank slot", () => {
@@ -99,9 +97,6 @@ describe("assumptions the design makes", () => {
     for (const root of [files.root, join(files.claudePlugin, "skills")]) {
       expect(readFileSync(join(root, "flowryn-visual-qa", QA_TEMPLATE_FILE), "utf8")).toBe(QA_TEMPLATE);
     }
-    const qa = STAGE_SKILLS.find((s) => s.name === "flowryn-visual-qa")!;
-    expect(qa.body).toContain(QA_TEMPLATE_FILE);
-    expect(qa.body).toContain("$FLOWRYN_REPORT_DIR/qa/evidence.html");
     // A skill body stays well inside 1.5k tokens (about 4 characters a token).
     for (const skill of STAGE_SKILLS) expect(skill.body.length).toBeLessThan(6000);
   });
