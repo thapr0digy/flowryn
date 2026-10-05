@@ -154,6 +154,14 @@ describe("plan phases and --auto", () => {
     expect(queuedTask(db, two)).toMatchObject({ status: "waiting", auto: "on", next: "starts when unblocked", waits: [one] });
   });
 
+  test("a phase with an earlier run does not start by itself: the scheduler skips it, so dispatch --task", () => {
+    const [one, two] = phases();
+    run(one, "failed");
+    run(two, "cancelled");
+    expect(queuedTask(db, one)).toMatchObject({ status: "ready", auto: "on", next: `flowryn dispatch web --task ${one}` });
+    expect(queuedTask(db, two)).toMatchObject({ status: "waiting", auto: "on", next: "dispatch when unblocked" });
+  });
+
   test("a ready phase that cannot start names its phase_blocked item", () => {
     const [one] = phases();
     const item = tx(db, () => {

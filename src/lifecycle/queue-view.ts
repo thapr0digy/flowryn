@@ -76,6 +76,10 @@ function createdOf(policy: QueuedPolicy | null, task: BacklogTask): { at: number
   return { at: new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3])).getTime(), day: task.created };
 }
 
+function hasAnyRun(db: Db, taskId: string): boolean {
+  return db.query("SELECT 1 FROM runs WHERE task_id = ?1 LIMIT 1").get(taskId) !== null;
+}
+
 function isQueued(db: Db, task: BacklogTask): boolean {
   return task.state === "queued" && task.kind !== "decision" && openRunForTask(db, task.id) === null;
 }
@@ -88,9 +92,9 @@ function describe(db: Db, task: BacklogTask, backlog: BacklogTask[]): QueuedTask
   const blockedBy = blockersOf(task);
   const waits = blockedBy.filter((dep) => !hasLanded(db, dep, backlog));
   const status: QueuedStatus = task.hold ? "held" : waits.length > 0 ? "waiting" : "ready";
-  // The scheduler's own rule (autoDispatch): an approved plan's phase with auto on, in a project whose autonomy is plan.
+  // The scheduler's own rule (autoDispatch): an approved plan's phase with auto on and no run ever, in a project whose autonomy is plan.
   const autonomous = policy !== null && policy.auto === 1 && getProject(db, project)?.autonomy === "plan";
-  const startsByItself = autonomous && phase !== null && phase.plan_state === "approved";
+  const startsByItself = autonomous && phase !== null && phase.plan_state === "approved" && !hasAnyRun(db, task.id);
   const created = createdOf(policy, task);
   const auto = policy === null ? "-" : policy.auto === 0 ? "off" : autonomous ? "on" : "on (autonomy off)";
   return {
