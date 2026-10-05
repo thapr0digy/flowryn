@@ -102,6 +102,16 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   return guards;
 }
 
+/** "2026-10-05 14:32" in local time, for a person reading a deadline. */
+function two(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+export function localStamp(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
 /** One line per guard, for a refusal or a status. */
 export function guardLines(guards: readonly Guard[]): string[] {
   return guards.map((g) => `${g.kind}: ${g.task ?? "-"} (${g.detail})`);
@@ -365,7 +375,7 @@ export interface Preflight {
 
 export type RequestOutcome =
   | { restart: "restarting"; supervisor: string; old: DaemonSnapshot; target: Preflight["target"] }
-  | { restart: "pending"; waiting_on: string[]; expires_at: number }
+  | { restart: "pending"; waiting_on: string[]; expires_at: number; expires: string }
   | { restart: "cancelled"; had_pending: boolean };
 
 /**
@@ -436,7 +446,7 @@ export class RestartController {
       const pending: PendingRestart = { ...who, requested_at: now, expires_at: expires, force: opts.force };
       setMeta(db, PENDING_KEY, JSON.stringify(pending));
       appendEvent(db, { source: "daemon", kind: "daemon.restart_requested", payload: { ...who, when_idle: true, waiting_on: guardLines(guards), expires_at: expires }, ts: now });
-      return { restart: "pending", waiting_on: guardLines(guards), expires_at: expires };
+      return { restart: "pending", waiting_on: guardLines(guards), expires_at: expires, expires: localStamp(expires) };
     }
     // The guards cleared between the check and this transaction: the binary check has not run yet.
     if (!opts.preflight) throw new FlowrynError("restart_blocked", "what blocked the restart cleared a moment ago", "run flowryn daemon restart again");

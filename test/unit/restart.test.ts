@@ -13,6 +13,7 @@ import {
   RestartController,
   buildIdOf,
   commandOf,
+  localStamp,
   readPending,
   recordRestarted,
   restartGuards,
@@ -288,7 +289,8 @@ describe("restart controller", () => {
     let now = 1_000_000;
     const c = controller({ now: () => now });
     const first = tx(db, () => c.request(LEADER, { ...BASE, whenIdle: true, waitMin: 10, preflight: null }));
-    expect(first).toMatchObject({ restart: "pending", expires_at: 1_000_000 + 600_000 });
+    expect(first).toMatchObject({ restart: "pending", expires_at: 1_000_000 + 600_000, expires: localStamp(1_600_000) });
+    expect(localStamp(new Date(2026, 9, 5, 14, 32).getTime())).toBe("2026-10-05 14:32");
     expect(first.restart === "pending" && first.waiting_on[0]).toContain("merging: t1");
     now += 60_000;
     tx(db, () => c.request({ role: "human", runId: null, taskId: null }, { ...BASE, whenIdle: true, waitMin: 200, preflight: null }));
