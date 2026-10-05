@@ -578,7 +578,7 @@ type Verified = { ok: boolean;
       <h3 class="card-title text-base">Claude leader</h3>
       <ol class="list-decimal ml-5 space-y-1 opacity-90">
         <li>The leader runs in <code>--permission-mode auto</code>. Ask rules that match a command's content still prompt in auto mode.</li>
-        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>. The ask rule <code>Bash(flowryn merge *)</code> is a second layer.</li>
+        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>, which prompts in auto mode too. A routine merge (the task is yolo and not sensitive) is neither asked nor recorded, so it merges under yolo. There is no static merge ask rule: it would prompt for routine merges as well.</li>
         <li>If you approve, the command runs with the leader token. The daemon matches it to the attempt (same session and arguments, under 5 minutes old) and records channel <code>claude-ask</code>.</li>
         <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable. M0 found that the ask rule and the hook's ask both still prompt under bypass, but the leader never runs in bypass, so this refusal stays as defense in depth. The merge returns <code>approval_required</code>.</li>
       </ol>
@@ -1096,7 +1096,7 @@ Be terse: outcomes only, no recaps.
 {
   "permissions": {
     "allow": ["Bash(flowryn *)"],
-    "ask":   ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)",
+    "ask":   ["Bash(flowryn gate pass *)",
               "Bash(flowryn cleanup * --discard*)"],
     "deny":  ["Bash(flowryn approve*)",
               "Bash(flowryn hook *)"]

@@ -16,6 +16,13 @@ The work that lets Flowryn replace Firstmate: decisions (C1), prompt wedges (C2)
   (b) a leader shell can itself fake a "human" caller — run with no token and a pty (for example `script`) — and answer as captain, since the human path has no approve-style code challenge of its own;
   (c) the Pi shell gate can be dodged by mid-word quoting (for example `fl''owryn hook approval-key`), so the approval key's secrecy, not the shell gate, is the real protection on Pi.
 
+## Approval channels · routine merges
+
+- The Claude leader's settings no longer carry the static ask rule `Bash(flowryn merge *)` (`src/bridges/claude/settings.ts`); the other three ask rules (`gate pass`, `cleanup --discard`, `decide *captain*`) are unchanged. The PreToolUse hook (`src/leader/hooks.ts`) is now the only merge prompt, and its own `ask` prompts in auto mode as well (M0 c08).
+- The hook skips a routine merge, one whose task policy is yolo and not `--sensitive` (`isRoutineMerge` in `src/policy/approvals.ts`): no prompt and no attempt recorded, so the merge gate takes the yolo posture and records channel `yolo`. It can never record `claude-ask` for it, since there is no attempt to match.
+- Every other merge (a project that is not yolo, a `--sensitive` task, or an unknown task) still gets the hook's prompt and attempt, exactly as before. Sensitive work is refused under yolo by the gate itself (`checkGate` in `src/policy/merge.ts`), so a sensitive merge run without a prompt is refused `approval_required` until you answer a Claude prompt, a Pi confirm, `flowryn approve` or the board.
+- The Pi leader is unchanged: `flowryn_merge` still confirms every merge.
+
 ## C2 · Prompt wedges
 
 - Spike `c12-permission-prompt` (`docs/m0-verdicts.md`): Claude's `Notification` `permission_prompt` fires about 6 s after a `PreToolUse` hook raises a confirmation dialog, in both `bypassPermissions` and default mode; Herdr's `agent_status` reads `blocked` for the whole dialog and `working` for a long tool call, with no overlap — one signal tells the two apart, no screen-marker fallback needed.

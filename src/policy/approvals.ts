@@ -129,6 +129,17 @@ export function voidApprovals(db: Db, task: string, now: number, why: string): n
   return rows.length;
 }
 
+/**
+ * A routine merge: the task's policy is yolo and not sensitive, so the merge
+ * gate takes the yolo posture and no human word is needed. The Claude leader
+ * neither prompts for it nor records an attempt, so it can never be counted
+ * as claude-ask. Anything else (no policy, not yolo, or sensitive) still asks.
+ */
+export function isRoutineMerge(db: Db, task: string): boolean {
+  const policy = db.query("SELECT yolo, sensitive FROM task_policy WHERE task_id = ?1").get(task) as { yolo: number; sensitive: number } | null;
+  return policy?.yolo === 1 && policy.sensitive === 0;
+}
+
 export interface NewAttempt {
   session: string;
   toolUseId: string;
