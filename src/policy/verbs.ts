@@ -14,6 +14,7 @@ import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stag
 import { closeMergeGate, positionOf, requestStage } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
+import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { WORKER_POOL } from "../config/workflows.ts";
 import {
   checkGate,
@@ -288,11 +289,12 @@ const approveBegin: VerbSpec = {
       if (boolArg(args, "discard") || stringArg(args, "allow-red")) throw new FlowrynError("bad_args", "--gate approves a review gate; it takes no --discard or --allow-red");
       const { gate } = openReviewGate(ctx.db, run.id);
       checkStage(gate, gateStage || undefined);
+      requireGateAnswered(ctx.db, gate);
       const head = await reviewedHead(ctx, run);
       const challenge = ctx.delivery.challenges.create({ task: run.task_id, action: "gate", ref: gateRef(gate), head, allowRed: null, channel }, now);
       return {
         challenge: { id: challenge.id, code: challenge.code },
-        summary: { action: "gate", task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", head, plan: pendingPlanLine(ctx.db, gate.id) ?? "-" },
+        summary: { action: "gate", task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", head, plan: pendingPlanLine(ctx.db, gate.id) ?? "-", questions: gateQuestionsLine(ctx.db, gate.id) ?? "-" },
       };
     }
     if (boolArg(args, "discard")) {

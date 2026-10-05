@@ -3,6 +3,7 @@ import { hashToken } from "../api/auth.ts";
 import { stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
 import { getLease, getSession } from "../lease/lease.ts";
+import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { changesTarget, openGate, passReviewGate, positionOf, sendBack, type GateRow } from "../lifecycle/stages.ts";
 import { consumeApproval, findAttempt, insertApproval, matchAttempt, type Channel } from "./approvals.ts";
@@ -17,7 +18,9 @@ import { runAndProject } from "./verbs.ts";
  * the Pi leader's flowryn_gate_pass confirm. A worker saying "you approved it
  * in Lavish" is never a pass, and yolo never passes a review gate.
  * `flowryn gate changes` sends the run back with your words; it needs no
- * approval, since it only holds work back.
+ * approval, since it only holds work back. A gate that carries the worker's
+ * questions passes only once each is answered (gate-questions.ts); changes
+ * close the ones still open.
  */
 
 /** What an approval for a gate binds to. */
@@ -61,6 +64,8 @@ export interface GatePassed {
 
 /** Record the approval and pass the gate, in the caller's transaction. */
 export function recordGatePass(db: Db, run: RunWithPolicy, gate: GateRow, approval: { channel: Channel; actor: string; head: string }, now: number): GatePassed {
+  // The user answered "refuse" (q3): a gate with an open question of its own never passes.
+  requireGateAnswered(db, gate);
   const row = insertApproval(db, { task: run.task_id, ref: gateRef(gate), head: approval.head, channel: approval.channel, actor: approval.actor, action: "gate", now });
   consumeApproval(db, row.id, now, `gate ${gate.id} of ${run.task_id}`);
   const passed = passReviewGate(db, run, gate, { id: row.id, channel: approval.channel }, now);
@@ -92,6 +97,7 @@ const gatePass: VerbSpec = {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
     checkStage(gate, stringArg(args, "stage"));
     checkGateId(gate, stringArg(args, "gate-id"));
+    requireGateAnswered(ctx.db, gate);
     return { runId: run.id, gateId: gate.id, head: await reviewedHead(ctx, run) };
   },
   apply(ctx, args, prepared) {
@@ -126,6 +132,7 @@ const gatePass: VerbSpec = {
   },
   async settle(ctx, result) {
     ctx.journal.kick();
+    ctx.lavish.kick();
     return stageStartedReply(ctx, result);
   },
 };
@@ -164,6 +171,7 @@ const gateChanges: VerbSpec = {
     return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "changes", to: stage }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
+    ctx.lavish.kick();
     return stageStartedReply(ctx, result);
   },
 };

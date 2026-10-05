@@ -123,6 +123,13 @@ export function resolveItems(db: Db, kind: ItemKind, taskId: string | null, reso
   return result.changes;
 }
 
+/** Resolve the open items that carry one decision. */
+export function resolveDecisionItems(db: Db, decisionId: string, resolvedBy: string, now = Date.now()): number {
+  return db
+    .query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE decision_id = ?1 AND state IN ('open','presented')")
+    .run(decisionId, resolvedBy, now).changes;
+}
+
 /** Open items of a kind for one run. */
 export function findOpenRunItem(db: Db, kind: ItemKind, runId: string): ItemRow | null {
   return db

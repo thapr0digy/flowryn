@@ -14,6 +14,7 @@ import { inertFleet } from "../../src/lifecycle/fleet-services.ts";
 import { inertAttention } from "../../src/attention/services.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
 import { inertSched } from "../../src/sched/services.ts";
+import { inertLavish } from "../../src/lavish/services.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { parseArgv } from "../../src/cli/argv.ts";
 import { notHumanReason } from "../../src/cli/human.ts";
@@ -80,6 +81,7 @@ beforeEach(() => {
     attention: inertAttention(),
     delivery: inertDelivery(),
     sched: inertSched(),
+    lavish: inertLavish(),
   };
   gateway = new Gateway({ services, lookup: (v) => VERBS.get(v) });
 });

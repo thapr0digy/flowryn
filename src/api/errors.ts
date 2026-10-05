@@ -42,6 +42,8 @@ export const ERROR_CODES = {
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
   stage_waiting: EXIT.policy,
+  // a review gate whose own questions are still open
+  questions_open: EXIT.policy,
   // steers and interrupts
   interrupt_refused: EXIT.policy,
   // validation
