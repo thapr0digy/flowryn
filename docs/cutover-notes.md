@@ -70,6 +70,14 @@ From the steer latency investigation (the 2026-10-04 spec in the superpowers vau
 - **What you see.** `show` adds `urgent` and `cut a tool +0.1s` to a steer's delivery line, and `fleet`'s steer column reads `m7 urgent unseen 2s`. The worker contract gains one line: "A tool call may be blocked or cut short to deliver an urgent steer: act on it, then redo the call if it still applies."
 - **Contract suite.** A new step, "urgent while busy", sends a normal steer that asks for `perl -e 'sleep 60'` and then an urgent steer a second into it. It requires the tool to be cut (`preempted_at`), the worker to stay alive, and the steer to be acknowledged, and it reports the steer's carried, seen and acked times. The scripted Pi worker's script gained the two acks (m3, m4), so the interrupt step's steers are now m5 and m6.
 - **The design's assumptions, live** (2026-10-05, Herdr lab sessions, `docs/m0-verdicts.md` c13 and p15, both **confirmed**). On Claude Code 2.1.289 with Sonnet, a `deny` under `bypassPermissions` stopped the tool and the model read its reason (A1). Herdr already read `blocked` 395 ms after a hook's `ask` (A2), well inside the gate's 3 s threshold and second read. A subagent's Bash hook carried `agent_id` while the main agent's `Agent` call did not (A3). On Pi 0.87.1 (scripted model), a steer queued at a blocked `tool_call` was in the very next request (A4). One queued at a tool-free turn end was delivered before `agent_settled` (A5), so the settle re-ring is only a backstop. `ctx.abort()` killed a bash command's backgrounded child too (A6), so the bash override is not needed. The Pi probe gained a `block_tools` control for p15.
+- **Live, 2026-10-05** (`scripts/lab/m2-live.sh --claude-project <this checkout> contracts`, lab `fm-lab-flowryn-m2-76545-14944`, scratch home removed): **24/24**. In the urgent step, the steer is sent about a second into `perl -e 'sleep 60'`, so the tool reaches its 3 s mark about 2 s later.
+
+  | Harness | Urgent while busy |
+  |---|---|
+  | Pi 0.87.1, scripted model | cut a tool +1.1s, carried +1ms, seen +1.2s, acked +1.3s (the queued copy, then the re-ring after the abort) |
+  | Claude 2.1.289, haiku, effort low | cut a tool +2.6s, carried +2.6s (waiter, after the verified Escape), seen +4.0s, acked +6.2s |
+
+  Both meet the agreed targets: Pi seen within 3 s, and Claude carried within 3 s, then seen one inference later. Without urgency the same tool would have held the steer for about 58 s.
 - **Determinism.** Nothing here asks a model to decide. The block, the cut, the threshold, the dialog gate and the re-ring are plain rules and timers. The only model in the loop is the worker reading the steer, which is the point of a steer.
 
 ## Live runs
