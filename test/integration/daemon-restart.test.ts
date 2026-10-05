@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
-import { cliJson, makeHome, REPO_ROOT, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { cliJson, killNextDaemon, makeHome, REPO_ROOT, seedLeader, seedRun, startDaemon, superviseWithScript, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 
 /**
  * `flowryn daemon restart` end to end, with the script supervisor standing in
@@ -17,15 +17,7 @@ const daemons: DaemonProc[] = [];
 afterEach(async () => {
   for (const d of daemons.splice(0)) await d.kill9().catch(() => {});
   for (const h of homes.splice(0)) {
-    const next = join(h.home, "next-daemon.pid");
-    if (existsSync(next)) {
-      const pid = Number(readFileSync(next, "utf8").trim());
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // already gone
-      }
-    }
+    killNextDaemon(h);
     h.cleanup();
   }
 });
@@ -34,21 +26,7 @@ afterEach(async () => {
 function supervisedHome(program: string[] = ["bun", MAIN, "daemon", "run"]): { h: TestHome; env: Record<string, string> } {
   const h = makeHome();
   homes.push(h);
-  const script = join(h.home, "supervisor.sh");
-  writeFileSync(
-    script,
-    `#!/bin/sh
-kill -TERM "$FLOWRYN_DAEMON_PID"
-while kill -0 "$FLOWRYN_DAEMON_PID" 2>/dev/null; do sleep 0.05; done
-cd ${JSON.stringify(REPO_ROOT)}
-FLOWRYN_LOG_STDERR=1 bun ${JSON.stringify(MAIN)} daemon run >> ${JSON.stringify(join(h.home, "next-daemon.log"))} 2>&1 &
-echo $! > ${JSON.stringify(join(h.home, "next-daemon.pid"))}
-`,
-  );
-  chmodSync(script, 0o755);
-  const file = join(h.home, "supervisor.json");
-  writeFileSync(file, JSON.stringify({ program, restart: [script] }));
-  return { h, env: { FLOWRYN_SUPERVISOR: file } };
+  return { h, env: superviseWithScript(h, program) };
 }
 
 async function daemon(h: TestHome, env: Record<string, string>): Promise<DaemonProc> {

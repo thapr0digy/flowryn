@@ -320,3 +320,39 @@ export function readText(path: string): string {
 export function countOccurrences(text: string, needle: string): number {
   return text.split(needle).length - 1;
 }
+
+/**
+ * Supervise a home's daemon with a script instead of launchd (FLOWRYN_SUPERVISOR,
+ * for `flowryn daemon restart`): it stops the old daemon with SIGTERM, as
+ * `launchctl kickstart -k` does, and starts the next one in the background,
+ * recording its pid in next-daemon.pid (`killNextDaemon` stops it). `program`
+ * is the launchd target the binary check runs. Returns the daemon's env.
+ */
+export function superviseWithScript(h: TestHome, program: string[] = ["bun", MAIN, "daemon", "run"]): Record<string, string> {
+  const script = join(h.home, "supervisor.sh");
+  writeFileSync(
+    script,
+    `#!/bin/sh
+kill -TERM "$FLOWRYN_DAEMON_PID"
+while kill -0 "$FLOWRYN_DAEMON_PID" 2>/dev/null; do sleep 0.05; done
+cd ${JSON.stringify(REPO_ROOT)}
+FLOWRYN_LOG_STDERR=1 bun ${JSON.stringify(MAIN)} daemon run >> ${JSON.stringify(join(h.home, "next-daemon.log"))} 2>&1 &
+echo $! > ${JSON.stringify(join(h.home, "next-daemon.pid"))}
+`,
+  );
+  chmodSync(script, 0o755);
+  const file = join(h.home, "supervisor.json");
+  writeFileSync(file, JSON.stringify({ program, restart: [script] }));
+  return { FLOWRYN_SUPERVISOR: file };
+}
+
+/** Stop a daemon the script supervisor started, if any. */
+export function killNextDaemon(h: TestHome): void {
+  const file = join(h.home, "next-daemon.pid");
+  if (!existsSync(file)) return;
+  try {
+    process.kill(Number(readFileSync(file, "utf8").trim()), "SIGKILL");
+  } catch {
+    // already gone
+  }
+}
