@@ -21,8 +21,8 @@ function shellQuote(text: string): string {
  * still prompts in auto mode, M0 c08), and it can never run approve or a hook
  * verb itself. Merges have no static ask rule: the PreToolUse hook asks for
  * every merge that needs your word (its own ask prompts in auto mode too,
- * M0 c08) and lets a routine yolo, non-sensitive merge run unprompted. Deny beats ask beats allow. The captain-answer rule is
- * deliberately wide (`*captain*`, not `--by captain*`): a PreToolUse hook is
+ * M0 c08) and lets a routine yolo, non-sensitive merge run unprompted. Deny
+ * beats ask beats allow. The captain-answer rule is deliberately wide (`*captain*`, not `--by captain*`): a PreToolUse hook is
  * the real gate (it over-matches `--by=captain`, reordered flags and quoting,
  * and never trusts an attempt it did not itself record), and this static rule
  * is only the defense-in-depth prompt Claude's own permission engine shows.
