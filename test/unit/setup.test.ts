@@ -37,12 +37,15 @@ describe("launchd agent", () => {
     const xml = renderPlist(spec);
     expect(xml).toContain("<key>SuccessfulExit</key>\n    <false/>");
     expect(xml).toContain(join(config.state_dir, "logs", "launchd.err.log"));
-    if (process.platform === "darwin") {
-      const path = join(home, "agent.plist");
-      writeFileSync(path, xml);
-      const lint = Bun.spawnSync(["/usr/bin/plutil", "-lint", path]);
-      expect(lint.exitCode).toBe(0);
-    }
+  });
+
+  // macOS only: plutil ships with macOS; CI on Linux has no plist linter.
+  test.skipIf(process.platform !== "darwin")("renders a plist that plutil accepts", () => {
+    const home = tempDir();
+    const config = { ...defaultConfig(home), tools: { tasks_axi: "/opt/tools/bin/tasks-axi", node: "/opt/node/bin/node" } };
+    const path = join(home, "agent.plist");
+    writeFileSync(path, renderPlist(plistSpecFor(config, home)));
+    expect(Bun.spawnSync(["/usr/bin/plutil", "-lint", path]).exitCode).toBe(0);
   });
 
   test("the default home uses the base label; others get their own", () => {

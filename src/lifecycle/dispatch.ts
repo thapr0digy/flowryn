@@ -339,7 +339,7 @@ export const dispatchVerb: VerbSpec = {
     title: { type: "string", help: "backlog title (default: the body's first line)", placeholder: "text" },
     harness: { type: "string", help: "claude or pi (default: the project's)", placeholder: "harness" },
     sensitive: { type: "boolean", help: "security-relevant: merges need a human record even under yolo" },
-    workflow: { type: "string", help: "the workflow: feature, fix, or one from [workflows] (default: the project's; scouts: scout)", placeholder: "id" },
+    workflow: { type: "string", help: "the workflow: feature, feature-ui (with visual QA), fix, or one from [workflows] (default: the project's; scouts: scout)", placeholder: "id" },
     "blocked-by": { type: "list", help: "file it Queued until these tasks land (repeatable)", placeholder: "task" },
     auto: { type: "boolean", help: "with --blocked-by: start by itself once its blockers land" },
     task: { type: "string", help: "start this Queued task (a plan phase) now; its blockers must have landed", placeholder: "id" },

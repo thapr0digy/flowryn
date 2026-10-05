@@ -107,6 +107,11 @@ export class FakeHerdr {
     return [...this.panes.values()].filter((p) => this.harnessPid(p.paneId) !== null).map((p) => p.paneId);
   }
 
+  /** How many event subscriptions are open (the daemon's HerdrWatcher holds one while connected). */
+  subscriberCount(): number {
+    return this.subscribers.size;
+  }
+
   /** A pane for a process this fake did not start (a leader in your terminal), reporting `status`. */
   addPaneWithStatus(cwd: string, status: string): string {
     const ws = this.createWorkspace(cwd, "leader");

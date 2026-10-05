@@ -24,13 +24,16 @@ afterEach(() => {
 });
 
 describe("workflows (design section 11)", () => {
-  test("the design's three workflows are the defaults; a ship's ends in the merge gate", () => {
+  test("the built-in workflows; only feature-ui carries visual QA, and a ship's ends in the merge gate", () => {
     const wf = workflowsConfig(cfg(""));
-    expect(flowLine(wf.feature!)).toBe("design (review) → build → qa (review) → ship (merge)");
+    expect(Object.keys(wf).toSorted()).toEqual(["feature", "feature-ui", "fix", "scout"]);
+    expect(flowLine(wf.feature!)).toBe("design (review) → build → ship (merge)");
+    expect(flowLine(wf["feature-ui"]!)).toBe("design (review) → build → qa (review) → ship (merge)");
     expect(flowLine(wf.fix!)).toBe("build → ship (merge)");
     expect(flowLine(wf.scout!)).toBe("investigate");
-    expect(wf.feature!.stages[2]).toMatchObject({ id: "qa", skill: "flowryn-visual-qa", pools: ["docker_env", "browser"] });
+    expect(wf["feature-ui"]!.stages[2]).toMatchObject({ id: "qa", skill: "flowryn-visual-qa", pools: ["docker_env", "browser"] });
     expect(workflowFor(cfg(""), "feature", "ship").id).toBe("feature");
+    expect(workflowFor(cfg(""), "feature-ui", "ship").id).toBe("feature-ui");
     expect(() => workflowFor(cfg(""), "scout", "ship")).toThrow("cannot ship");
     expect(() => workflowFor(cfg(""), "fix", "scout")).toThrow("delivers a report");
     expect(() => workflowFor(cfg(""), "nope", "ship")).toThrow("no workflow nope");
@@ -191,10 +194,10 @@ describe("stage text", () => {
     const files = writeStageSkills(dir);
     for (const skill of STAGE_SKILLS) expect(Bun.file(skillPath(dir, skill.name)!).size).toBeGreaterThan(100);
     expect(Bun.file(join(files.claudePlugin, ".claude-plugin", "plugin.json")).size).toBeGreaterThan(10);
-    const feature = DEFAULT_WORKFLOWS.feature!;
+    const feature = DEFAULT_WORKFLOWS["feature-ui"]!;
     const delivery = { kind: "ship" as const, mode: "local-only" as const, defaultBranch: "main" };
     const qa = stageInstructions({ def: feature, index: 2, stage: feature.stages[2]!, last: false }, { stateDir: dir, delivery });
-    expect(qa).toContain("Flowryn stage qa (3 of 4; workflow feature");
+    expect(qa).toContain("Flowryn stage qa (3 of 4; workflow feature-ui");
     expect(qa).toContain(`read ${join(dir, "skills", "flowryn-visual-qa", "SKILL.md")} first`);
     expect(qa).toContain("slot of docker_env and browser");
     expect(qa).toContain("stage done --review <lavish url>");
@@ -228,7 +231,7 @@ describe("stage text", () => {
 
   test("a run with no frozen workflow falls back to its workflow's default, and an unknown stage to the first", () => {
     const db = scratchDb();
-    const pos = positionOf(db, { id: "r1", workflow: "feature", stage: "qa" }, "ship");
+    const pos = positionOf(db, { id: "r1", workflow: "feature-ui", stage: "qa" }, "ship");
     expect(pos).toMatchObject({ index: 2, last: false });
     expect(positionOf(db, { id: "r1", workflow: "nope", stage: "zzz" }, "scout").stage.id).toBe("investigate");
     db.close();

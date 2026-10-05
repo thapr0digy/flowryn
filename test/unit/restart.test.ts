@@ -450,13 +450,14 @@ describe("launchd supervisor", () => {
     expect(await agentPid("x", scripted({ exitCode: 113, output: "Could not find service" }))).toBeNull();
   });
 
-  test("assumption: launchctl print reports the running pid as `pid = N` (live, when this machine runs the agent)", async () => {
-    if (process.platform !== "darwin") return;
+  // macOS only: it reads the live launchd on this machine.
+  test.skipIf(process.platform !== "darwin")("assumption: launchctl print reports the running pid as `pid = N` (live, when this machine runs the agent)", async () => {
     const live = await agentPid("dev.flowryn.flowrynd");
     if (live !== null) expect(Number.isInteger(live) && live > 0).toBe(true);
   });
 
-  test("supervised only when this process is the agent's running pid", async () => {
+  // macOS only: launchdSupervisor answers "launchd is macOS only" on any other platform.
+  test.skipIf(process.platform !== "darwin")("supervised only when this process is the agent's running pid", async () => {
     const plist = join(dir, "agent.plist");
     writeFileSync(plist, "");
     const mine = launchdSupervisor(spec, {}, scripted({ exitCode: 0, output: `pid = ${process.pid}` }), plist);
@@ -476,8 +477,8 @@ describe("launchd supervisor", () => {
     expect(plistDrift({ ...same, workingDir: "/x" }, spec)).toEqual(["WorkingDirectory differs"]);
   });
 
-  test("target reads the installed plist through plutil and refuses a stale one", async () => {
-    if (process.platform !== "darwin") return;
+  // macOS only: target() reads the plist through plutil, which ships with macOS.
+  test.skipIf(process.platform !== "darwin")("target reads the installed plist through plutil and refuses a stale one", async () => {
     const plist = join(dir, "agent.plist");
     const { renderPlist } = await import("../../src/service/launchd.ts");
     writeFileSync(plist, renderPlist(spec));
