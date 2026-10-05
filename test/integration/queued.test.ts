@@ -17,7 +17,7 @@ test("a queued scout starts with dispatch --task", async () => {
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-amend-q1", title: "Amend the design", body: "Fold in the model\nFAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: 2, blockedBy: [], importSource: "firstmate:web-amend-q1", now: Date.now() }));
+  tx(db, () => queueTask(db, { taskId: "web-amend-q1", title: "Amend the design", body: "Fold in the model\nFAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: 2, blockedBy: [], now: Date.now() }));
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-amend-q1' AND state = 'applied'").get() !== null, 10_000, "added");
   const started = await env.json(["dispatch", "web", "--task", "web-amend-q1"]);
@@ -33,7 +33,7 @@ test("dispatch --task against the wrong project refuses, naming the task's real 
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-mismatch-q1", title: "Mismatched", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: "firstmate:web-mismatch-q1", now: Date.now() }));
+  tx(db, () => queueTask(db, { taskId: "web-mismatch-q1", title: "Mismatched", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() }));
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-mismatch-q1' AND state = 'applied'").get() !== null, 10_000, "added");
   const otherRepo = makeRepo(join(env.h.home, "other-repo"));
@@ -49,12 +49,12 @@ test("dispatch --task on a queued task still waiting for its blocker refuses, na
   envs.push(env);
   const db = env.h.db();
   tx(db, () => {
-    queueTask(db, { taskId: "web-blocker-q1", title: "The blocker", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: "firstmate:web-blocker-q1", now: Date.now() });
+    queueTask(db, { taskId: "web-blocker-q1", title: "The blocker", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() });
   });
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-blocker-q1' AND state = 'applied'").get() !== null, 10_000, "blocker added");
   const db2 = env.h.db();
-  tx(db2, () => queueTask(db2, { taskId: "web-dependent-q1", title: "The dependent", body: "x", kind: "scout", project: getProject(db2, "web")!, priority: null, blockedBy: ["web-blocker-q1"], importSource: "firstmate:web-dependent-q1", now: Date.now() }));
+  tx(db2, () => queueTask(db2, { taskId: "web-dependent-q1", title: "The dependent", body: "x", kind: "scout", project: getProject(db2, "web")!, priority: null, blockedBy: ["web-blocker-q1"], now: Date.now() }));
   db2.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-dependent-q1' AND state = 'applied'").get() !== null, 10_000, "dependent added");
   const result = await env.json(["dispatch", "web", "--task", "web-dependent-q1"]);
@@ -66,7 +66,7 @@ test("a queued task whose run failed can be started again with --task (cutover C
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-retry-q1", title: "Retry me", body: "FAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: "firstmate:web-retry-q1", now: Date.now() }));
+  tx(db, () => queueTask(db, { taskId: "web-retry-q1", title: "Retry me", body: "FAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() }));
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-retry-q1' AND state = 'applied'").get() !== null, 10_000, "added");
   const first = await env.json(["dispatch", "web", "--task", "web-retry-q1"]);

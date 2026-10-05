@@ -72,8 +72,6 @@ export interface NewStandalone {
   reservedReason?: string | null;
   blocks?: string[];
   project?: string | null;
-  /** cutover C3: marks a decision an import created, so a re-run finds it and reports `exists`. */
-  importSource?: string | null;
   now: number;
 }
 
@@ -97,16 +95,15 @@ export function createStandaloneDecision(db: Db, d: NewStandalone): { id: string
   const id = nextStandaloneId(db);
   const taskId = mintTaskId(`decision ${d.key}`, takenIds(db));
   const reservedReason = d.reservedReason ?? null;
-  const importSource = d.importSource ?? null;
   db.query(
-    `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, created_at, import_source)
-     VALUES (?1, ?2, NULL, ?3, ?4, 1, 'open', ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
-  ).run(id, taskId, question, JSON.stringify(d.options), d.origin, d.key, context, d.recommendation ?? null, reservedReason, d.now, importSource);
+    `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, created_at)
+     VALUES (?1, ?2, NULL, ?3, ?4, 1, 'open', ?5, ?6, ?7, ?8, ?9, ?10)`,
+  ).run(id, taskId, question, JSON.stringify(d.options), d.origin, d.key, context, d.recommendation ?? null, reservedReason, d.now);
   const flags: Record<string, string> = { kind: "decision", body: context ?? question };
   if (d.project) flags.repo = d.project;
   recordIntent(db, { file: "backlog", verb: "add", taskId, positional: [taskId, sanitizeLine(question, 120)], flags, now: d.now });
   recordIntent(db, { file: "backlog", verb: "hold", taskId, positional: [taskId], flags: { reason: holdReason(`decision ${id}`), kind: "captain" }, now: d.now });
   for (const blocked of d.blocks ?? []) recordIntent(db, { file: "backlog", verb: "block", taskId: blocked, positional: [blocked], flags: { by: taskId }, now: d.now });
-  appendEvent(db, { source: "cli", kind: "decision.opened", taskId, payload: { decision: id, origin: d.origin, key: d.key, reserved: reservedReason, blocks: d.blocks ?? [], import_source: importSource }, ts: d.now });
+  appendEvent(db, { source: "cli", kind: "decision.opened", taskId, payload: { decision: id, origin: d.origin, key: d.key, reserved: reservedReason, blocks: d.blocks ?? [] }, ts: d.now });
   return { id, taskId, created: true, reservedReason };
 }

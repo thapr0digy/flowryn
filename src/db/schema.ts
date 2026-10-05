@@ -331,7 +331,7 @@ CREATE INDEX decisions_open ON decisions(state) WHERE state = 'open';
 `;
 
 /**
- * Cutover C3: what an import created carries its source (firstmate:<id>), so a
+ * Cutover C3: what an import created carries its source (<prefix>:<id>), so a
  * second import changes nothing; a dispatch may override its project's
  * delivery mode for one task, with the reason kept beside it.
  */
@@ -359,6 +359,21 @@ ALTER TABLE messages ADD COLUMN seen_via TEXT;
 UPDATE messages SET ring_state = 'carried' WHERE rings > 0;
 `;
 
+/**
+ * The cutover import is retired: every source it recorded, whatever the old
+ * orchestrator's prefix, becomes legacy:<id>. Only that import ever wrote the
+ * column, so "not yet legacy" is exactly its rows. The swap is one-to-one, so
+ * the unique import indexes still hold.
+ */
+const LEGACY_SOURCE_SQL = /* sql */ `
+UPDATE projects SET import_source = 'legacy:' || substr(import_source, instr(import_source, ':') + 1)
+  WHERE import_source IS NOT NULL AND import_source NOT LIKE 'legacy:%';
+UPDATE task_policy SET import_source = 'legacy:' || substr(import_source, instr(import_source, ':') + 1)
+  WHERE import_source IS NOT NULL AND import_source NOT LIKE 'legacy:%';
+UPDATE decisions SET import_source = 'legacy:' || substr(import_source, instr(import_source, ':') + 1)
+  WHERE import_source IS NOT NULL AND import_source NOT LIKE 'legacy:%';
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -368,6 +383,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 6, name: "decisions", sql: DECISIONS_SQL },
   { version: 7, name: "import", sql: IMPORT_SQL },
   { version: 8, name: "steer-seen", sql: STEER_SEEN_SQL },
+  { version: 9, name: "legacy-source", sql: LEGACY_SOURCE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
