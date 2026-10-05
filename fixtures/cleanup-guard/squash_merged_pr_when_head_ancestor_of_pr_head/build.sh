@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # squash_merged_pr_when_head_ancestor_of_pr_head - builds the git state and fake forge for this cleanup-guard case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_squash_merged_pr_allows_when_head_ancestor_of_pr_head (matrix row m).
+# Ported from the reference's tests/fm-teardown.test.sh:test_squash_merged_pr_allows_when_head_ancestor_of_pr_head (matrix row m).
 # Usage: build.sh <out-dir>
 # shellcheck source=../lib/build-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/build-common.sh"

@@ -10,8 +10,8 @@ import { ForgeError, type Forge, type PullRequest, type RepoRef } from "../forge
  * branch (a squash merge whose branch was deleted). Uncommitted changes never
  * count. An unreachable forge with the content absent refuses. Discarding
  * needs a human-channel approval with action discard. The rules are ported
- * from Firstmate's bin/fm-teardown.sh at a09090d1 and checked against the 21
- * fixtures in fixtures/cleanup-guard, which keep Firstmate's case names.
+ * from the previous orchestrator's bin/fm-teardown.sh at a09090d1 and checked against the 21
+ * fixtures in fixtures/cleanup-guard, which keep the previous orchestrator's case names.
  */
 
 export type Verdict = "allow" | "refuse" | "discard";
@@ -99,7 +99,7 @@ async function patchId(deps: GuardDeps, cwd: string, commit: string): Promise<st
   return id.stdout.trim().split(/\s+/)[0] || null;
 }
 
-/** Firstmate's unpushed_patches_are_in_pr_head: every commit on no remote has its patch in merge-base..prHead. */
+/** The previous orchestrator's unpushed_patches_are_in_pr_head: every commit on no remote has its patch in merge-base..prHead. */
 async function patchesIn(deps: GuardDeps, cwd: string, tip: string, prHead: string): Promise<boolean> {
   const base = await out(deps, cwd, ["merge-base", tip, prHead]);
   if (!base) return false;
@@ -240,7 +240,7 @@ export async function judgeCleanup(input: GuardInput, deps: GuardDeps): Promise<
 }
 
 /**
- * Record a PR's head (Firstmate's fm-pr-check.sh): always the forge's head,
+ * Record a PR's head (the previous orchestrator's fm-pr-check.sh): always the forge's head,
  * never the local HEAD, which can lag (a pipeline pushed follow-ups) or lead
  * (local commits the PR never got).
  */

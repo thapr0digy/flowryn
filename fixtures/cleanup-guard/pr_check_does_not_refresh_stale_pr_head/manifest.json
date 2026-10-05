@@ -1,8 +1,8 @@
 {
   "name": "pr_check_does_not_refresh_stale_pr_head",
   "ported_from": "tests/fm-teardown.test.sh:test_pr_check_does_not_refresh_stale_pr_head",
-  "firstmate_matrix_row": "o",
-  "description": "PR-head recording (Firstmate fm-pr-check.sh), re-run after the worktree moved. The PR was first recorded at the feature commit (the forge head). The worktree then gained a local commit (later.txt). Re-recording the PR must take the head from the forge, so it keeps pr_head and must NOT record the newer local HEAD (exactly one head recorded). A follow-up cleanup with that record must refuse, because the later commit is not in the merged PR head.",
+  "reference_matrix_row": "o",
+  "description": "PR-head recording (the reference's fm-pr-check.sh), re-run after the worktree moved. The PR was first recorded at the feature commit (the forge head). The worktree then gained a local commit (later.txt). Re-recording the PR must take the head from the forge, so it keeps pr_head and must NOT record the newer local HEAD (exactly one head recorded). A follow-up cleanup with that record must refuse, because the later commit is not in the merged PR head.",
   "delivery_mode": "no-mistakes",
   "inputs": {
     "operation": "record_pr",

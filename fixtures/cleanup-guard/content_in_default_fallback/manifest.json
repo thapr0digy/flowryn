@@ -1,8 +1,8 @@
 {
   "name": "content_in_default_fallback",
   "ported_from": "tests/fm-teardown.test.sh:test_content_in_default_fallback_allows",
-  "firstmate_matrix_row": "h",
-  "description": "No PR recorded and the forge knows no PR, so the merged-PR path cannot fire. The branch adds feature.txt and the same net change landed independently on origin/main as a squash commit. The primary clone has NOT fetched since, so its origin/main is stale: the guard must fetch the default branch before the content check. Allowed via content-in-default (Firstmate also asserts the destructive cleanup step was reached).",
+  "reference_matrix_row": "h",
+  "description": "No PR recorded and the forge knows no PR, so the merged-PR path cannot fire. The branch adds feature.txt and the same net change landed independently on origin/main as a squash commit. The primary clone has NOT fetched since, so its origin/main is stale: the guard must fetch the default branch before the content check. Allowed via content-in-default (the reference also asserts the destructive cleanup step was reached).",
   "delivery_mode": "no-mistakes",
   "inputs": {
     "operation": "cleanup",

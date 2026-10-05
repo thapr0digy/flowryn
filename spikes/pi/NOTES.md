@@ -6,7 +6,7 @@ All 14 ran live against **Pi 0.87.1** (`/opt/homebrew/bin/pi-signed`, the Pi Lau
 
 ## Files
 
-- `lib/scripted-provider.ts` is a deterministic Pi model that needs no network and no credentials. It is registered with `pi.registerProvider` as `flowryn-scripted/scripted` (32k context window). Its API shape follows Pi's `docs/custom-provider.md` and Firstmate's offline test providers.
+- `lib/scripted-provider.ts` is a deterministic Pi model that needs no network and no credentials. It is registered with `pi.registerProvider` as `flowryn-scripted/scripted` (32k context window). Its API shape follows Pi's `docs/custom-provider.md` and the previous orchestrator's offline test providers.
   - A spike scripts the model inside the prompt. Everything after `FLOWRYN-SCRIPT:` is a list of steps separated by ` ;; `: `say <text>`, `bash <command>`, `tool <name> <json>`, `error <message>` (fails every attempt) and `overflow` (fails once with `context_length_exceeded`).
   - Step N answers the request that already has N assistant replies after the script message. Tool results, steers and follow-ups therefore advance the script the way a real turn would.
   - `say {markers}` echoes every `FLOWRYN-MARK-*` in the request, which proves what context the model received.

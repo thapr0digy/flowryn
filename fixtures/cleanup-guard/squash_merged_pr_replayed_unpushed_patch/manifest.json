@@ -1,7 +1,7 @@
 {
   "name": "squash_merged_pr_replayed_unpushed_patch",
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_pr_allows_replayed_unpushed_patch",
-  "firstmate_matrix_row": "n",
+  "reference_matrix_row": "n",
   "description": "A local parent commit was pushed as origin/fm/task-x1; the next local commit (feature.txt) was never pushed. The merged PR head is a different commit on origin branch pr-head that replays the same patch on main. Local HEAD is not an ancestor of the PR head, but every unpushed local commit has a patch-id present in merge-base..pr_head, so the work is contained: allowed.",
   "delivery_mode": "no-mistakes",
   "inputs": {

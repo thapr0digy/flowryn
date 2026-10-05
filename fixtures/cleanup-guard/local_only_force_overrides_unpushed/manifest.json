@@ -1,8 +1,8 @@
 {
   "name": "local_only_force_overrides_unpushed",
   "ported_from": "tests/fm-teardown.test.sh:test_local_only_force_overrides_unpushed",
-  "firstmate_matrix_row": "f",
-  "description": "Same state as local_only_truly_unpushed (one unpushed empty commit, not on local main), but a human-channel approval with action discard is present. Firstmate's --force escape hatch becomes Flowryn's discard: allowed ONLY because of that approval. Without it the verdict is the local_only_truly_unpushed refusal.",
+  "reference_matrix_row": "f",
+  "description": "Same state as local_only_truly_unpushed (one unpushed empty commit, not on local main), but a human-channel approval with action discard is present. The reference's --force escape hatch becomes Flowryn's discard: allowed ONLY because of that approval. Without it the verdict is the local_only_truly_unpushed refusal.",
   "delivery_mode": "local-only",
   "inputs": {
     "operation": "cleanup",

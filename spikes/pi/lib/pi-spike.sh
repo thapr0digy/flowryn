@@ -247,7 +247,7 @@ ctl_now() { # <instance> <op-json>
 }
 
 # --- pane input ----------------------------------------------------------------------
-# Herdr key names follow Firstmate docs/verification/runtime-backends.md
+# Herdr key names follow the previous orchestrator's docs/verification/runtime-backends.md
 # ("pane send-keys <pane> enter|escape|ctrl+c"); "down" and "ctrl+u" are
 # assumed to follow the same naming.
 

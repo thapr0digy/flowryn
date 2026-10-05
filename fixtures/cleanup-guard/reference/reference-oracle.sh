@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# reference/firstmate-oracle.sh - run ORIGINAL Firstmate logic against a built
+# reference/reference-oracle.sh - run the ORIGINAL reference logic (the previous
+# orchestrator's teardown) against a built
 # cleanup-guard scenario, as a cross-check of the expected verdicts.
 #
-# Usage: run.sh --impl reference/firstmate-oracle.sh
-#    or: firstmate-oracle.sh <built-scenario-dir>
+# Usage: REFERENCE_REPO=<checkout> run.sh --impl reference/reference-oracle.sh
+#    or: REFERENCE_REPO=<checkout> reference-oracle.sh <built-scenario-dir>
 #
 # Speaks the run.sh implementation contract: prints
 # {"verdict": ..., "recorded_pr_head": ..., "pr_url": ...} on stdout.
@@ -12,31 +13,31 @@
 #                exit 1 with a REFUSED line = refuse.
 #   record_pr -> bin/fm-pr-check.sh task-x1 <url>; the pr_head= it wrote.
 #
-# Isolation (never touches Firstmate's real home, state, data or processes):
-#   * Firstmate is exported with `git archive` at FIRSTMATE_REV (default HEAD)
+# Isolation (never touches the reference's real home, state, data or processes):
+#   * The reference is exported with `git archive` at REFERENCE_REV (default HEAD)
 #     into a cache under $TMPDIR, and run from that copy. Its host-wide
 #     fm-remote-job-reap-orphans.sh sweep is replaced by a no-op there.
 #   * FM_HOME/state/data/config all point into a per-run temp world.
 #   * treehouse, tmux, no-mistakes and lsof are stubbed on PATH; gh is the
 #     scenario's fake (bin/gh); gh-axi is a shim over the same forge.json.
-# FIRSTMATE_REPO overrides the source checkout (default ~/projects/firstmate).
+# REFERENCE_REPO names the reference checkout; it is required.
 set -uo pipefail
 
-dir=$(cd "${1:?usage: firstmate-oracle.sh <scenario-dir>}" && pwd -P)
+dir=$(cd "${1:?usage: reference-oracle.sh <scenario-dir>}" && pwd -P)
 sc="$dir/scenario.json"
-FIRSTMATE_REPO=${FIRSTMATE_REPO:-$HOME/projects/firstmate}
-FIRSTMATE_REV=${FIRSTMATE_REV:-HEAD}
+REFERENCE_REV=${REFERENCE_REV:-HEAD}
 
-die() { printf 'firstmate-oracle: %s\n' "$*" >&2; exit 3; }
+die() { printf 'reference-oracle: %s\n' "$*" >&2; exit 3; }
+[ -n "${REFERENCE_REPO:-}" ] || die "set REFERENCE_REPO to the reference checkout"
 command -v jq >/dev/null || die "jq is required"
 [ -f "$sc" ] || die "no scenario.json in $dir"
 
-rev=$(git -C "$FIRSTMATE_REPO" rev-parse --verify "$FIRSTMATE_REV^{commit}" 2>/dev/null) \
-  || die "cannot resolve $FIRSTMATE_REV in $FIRSTMATE_REPO"
+rev=$(git -C "$REFERENCE_REPO" rev-parse --verify "$REFERENCE_REV^{commit}" 2>/dev/null) \
+  || die "cannot resolve $REFERENCE_REV in $REFERENCE_REPO"
 FM_COPY="${TMPDIR:-/tmp}/flowryn-fm-oracle-${rev:0:12}"
 if [ ! -x "$FM_COPY/bin/fm-teardown.sh" ]; then
   staging=$(mktemp -d "${TMPDIR:-/tmp}/flowryn-fm-oracle-staging.XXXXXX") || die "mktemp failed"
-  git -C "$FIRSTMATE_REPO" archive "$rev" | tar -x -C "$staging" || die "git archive failed"
+  git -C "$REFERENCE_REPO" archive "$rev" | tar -x -C "$staging" || die "git archive failed"
   printf '#!/usr/bin/env bash\n# oracle: host-wide orphan sweep disabled\nexit 0\n' \
     > "$staging/bin/fm-remote-job-reap-orphans.sh"
   mv "$staging" "$FM_COPY" 2>/dev/null || rm -rf "$staging"   # lost a race: reuse the winner
@@ -52,14 +53,14 @@ fakebin="$world/fakebin"
 for stub in treehouse tmux no-mistakes; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$stub"
 done
-# lsof: nothing holds anything open (Firstmate's add_lsof_no_holder).
+# lsof: nothing holds anything open (the reference's add_lsof_no_holder).
 cat > "$fakebin/lsof" <<'SH'
 #!/usr/bin/env bash
 case " $* " in *" -d cwd "*) exit 0 ;; esac
 exit 1
 SH
 ln -s "$dir/bin/gh" "$fakebin/gh"
-# gh-axi shim in Firstmate's TOON-ish list format, answered from forge.json.
+# gh-axi shim in the reference's TOON-ish list format, answered from forge.json.
 cat > "$fakebin/gh-axi" <<SH
 #!/usr/bin/env bash
 forge="$dir/forge.json"
@@ -87,13 +88,13 @@ chmod +x "$fakebin"/*
 wt=$(jq -r '.paths.worktree' "$sc")
 primary=$(jq -r '.paths.primary' "$sc")
 mode=$(jq -r '.delivery_mode' "$sc")
-[ "$mode" != direct-PR ] || mode=pr   # Firstmate treats every non-local-only mode alike here
+[ "$mode" != direct-PR ] || mode=pr   # the reference treats every non-local-only mode alike here
 operation=$(jq -r '.operation' "$sc")
 pr_url=$(jq -r '.inputs.recorded_pr_url // empty' "$sc")
 pr_head=$(jq -r '.inputs.recorded_pr_head // empty' "$sc")
 meta="$world/state/task-x1.meta"
 {
-  printf '%s\n' "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+  printf '%s\n' "window=oracle:fm-task-x1" "endpoint_task_id=task-x1" \
     "worktree=$wt" "project=$primary" "kind=ship" "mode=$mode" "spawn_gen=oracle-task-x1"
   [ -z "$pr_url" ] || printf 'pr=%s\n' "$pr_url"
   [ -z "$pr_head" ] || printf 'pr_head=%s\n' "$pr_head"

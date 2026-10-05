@@ -1,7 +1,7 @@
 {
   "name": "live_index_lock_is_never_removed",
   "ported_from": "tests/fm-teardown.test.sh:test_live_index_lock_is_never_removed_and_teardown_refuses",
-  "firstmate_matrix_row": "s",
+  "reference_matrix_row": "s",
   "description": "The index.lock is old, but lsof says a live process holds it. A live holder always wins over age: the lock stays and the cleanup refuses with the worktree intact.",
   "delivery_mode": "no-mistakes",
   "inputs": {

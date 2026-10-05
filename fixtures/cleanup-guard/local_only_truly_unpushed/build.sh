@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # local_only_truly_unpushed - builds the git state and fake forge for this cleanup-guard case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_local_only_truly_unpushed_refuses (matrix row b).
+# Ported from the reference's tests/fm-teardown.test.sh:test_local_only_truly_unpushed_refuses (matrix row b).
 # Usage: build.sh <out-dir>
 # shellcheck source=../lib/build-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/build-common.sh"

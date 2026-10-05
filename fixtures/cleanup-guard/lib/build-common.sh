@@ -2,17 +2,17 @@
 # fixtures/cleanup-guard/lib/build-common.sh - shared builders for the
 # cleanup-guard fixtures.
 #
-# Sourced by every <case>/build.sh. Mirrors the helpers in Firstmate's
+# Sourced by every <case>/build.sh. Mirrors the helpers in the reference's
 # tests/fm-teardown.test.sh (make_case, wt_commit, wt_commit_file,
 # add_fork_with_pushed_branch, land_on_origin_main, commit_tree_from_wt_head,
 # land_equivalent_patch_on_origin_branch, setup_squash_rebased_history) so each
-# case reproduces the same git topology. Firstmate's gh/gh-axi shell mocks are
+# case reproduces the same git topology. The reference's gh/gh-axi shell mocks are
 # replaced by DATA: fx_finish renders the manifest's "forge" block into
 # forge.json, and bin/gh is a tiny gh-compatible server over that file.
 #
 # Scenario layout under <out-dir>:
 #   origin.git/    bare upstream ("origin"), HEAD -> refs/heads/main
-#   primary/       clone of origin (Firstmate's "project" checkout)
+#   primary/       clone of origin (the reference's "project" checkout)
 #   worktree/      linked worktree of primary on the task branch fm/task-x1
 #   fork.git/      optional second bare remote, registered as "fork" on primary
 #   scenario.json  concrete paths, inputs and symbolic-ref -> SHA table
@@ -48,7 +48,7 @@ FX_TASK_BRANCH=fm/task-x1
 FX_DEFAULT_BRANCH=main
 FX_PR_NUMBER=7
 FX_PR_URL="https://github.com/example/repo/pull/$FX_PR_NUMBER"
-FX_CLOCK_BASE=1782432000   # 2026-06-26T00:00:00Z, Firstmate's fake mergedAt
+FX_CLOCK_BASE=1782432000   # 2026-06-26T00:00:00Z, the reference's fake mergedAt
 
 fx_die() {
   printf 'build error: %s\n' "$*" >&2
@@ -72,7 +72,7 @@ fx_git() {
   GIT_AUTHOR_DATE="@$t +0000" GIT_COMMITTER_DATE="@$t +0000" git "$@"
 }
 
-# fx_init <out-dir> <case-dir>: Firstmate's make_case, git part only.
+# fx_init <out-dir> <case-dir>: the reference's make_case, git part only.
 fx_init() {
   local out=$1 case_dir=$2 seed
   [ -n "$out" ] || fx_die "usage: build.sh <out-dir>"
@@ -111,12 +111,12 @@ fx_ref() {
   printf '%s\t%s\n' "$name" "$sha" >> "$FX_ROOT/.fx/refs.tsv"
 }
 
-# Empty commit on the task branch (Firstmate's wt_commit).
+# Empty commit on the task branch (the reference's wt_commit).
 fx_wt_commit() {
   fx_git -C "$FX_WT" commit -q --allow-empty -m "${1:-wt work}"
 }
 
-# Commit a real file change on the task branch (Firstmate's wt_commit_file).
+# Commit a real file change on the task branch (the reference's wt_commit_file).
 fx_wt_commit_file() {
   local file=$1 content=$2 msg=${3:-add $1}
   printf '%s\n' "$content" > "$FX_WT/$file"
@@ -124,7 +124,7 @@ fx_wt_commit_file() {
   fx_git -C "$FX_WT" commit -q -m "$msg"
 }
 
-# Firstmate's add_fork_with_pushed_branch: a second bare remote holding the
+# The reference's add_fork_with_pushed_branch: a second bare remote holding the
 # task branch, fetched so refs/remotes/fork/fm/task-x1 exists.
 fx_add_fork_with_pushed_branch() {
   FX_FORK="$FX_ROOT/fork.git"
@@ -134,9 +134,9 @@ fx_add_fork_with_pushed_branch() {
   git -C "$FX_PRIMARY" fetch -q fork
 }
 
-# Firstmate's land_on_origin_main: a single "squash" commit on origin's default
+# The reference's land_on_origin_main: a single "squash" commit on origin's default
 # branch carrying <file>=<content>. The primary clone is NOT fetched afterwards,
-# exactly as in Firstmate, so its origin/main is stale until the guard fetches.
+# exactly as in the reference, so its origin/main is stale until the guard fetches.
 fx_land_on_origin_main() {
   local file=$1 content=$2 tmp="$FX_ROOT/_land"
   git clone -q "$FX_ORIGIN" "$tmp"
@@ -147,7 +147,7 @@ fx_land_on_origin_main() {
   rm -rf "$tmp"
 }
 
-# Firstmate's commit_tree_from_wt_head: a commit with <parent>'s tree whose
+# The reference's commit_tree_from_wt_head: a commit with <parent>'s tree whose
 # parent is <parent>. It exists only as an unreferenced object in the shared
 # object store (a forge-side follow-up commit the worktree never pulled).
 fx_commit_tree_from_wt_head() {
@@ -156,7 +156,7 @@ fx_commit_tree_from_wt_head() {
   printf '%s\n' "$msg" | fx_git -C "$FX_WT" commit-tree "$tree" -p "$parent"
 }
 
-# Firstmate's land_equivalent_patch_on_origin_branch: an origin branch whose
+# The reference's land_equivalent_patch_on_origin_branch: an origin branch whose
 # tip replays <file>=<content> on origin's default branch; fetched into primary.
 # Echoes the new branch tip.
 fx_land_equivalent_patch_on_origin_branch() {
@@ -179,7 +179,7 @@ fx_publish_pull_head() {
   git -C "$FX_PRIMARY" push -q origin "$sha:refs/pull/$FX_PR_NUMBER/head"
 }
 
-# Firstmate's setup_squash_rebased_history. The pipeline rebased the task onto
+# The reference's setup_squash_rebased_history. The pipeline rebased the task onto
 # a main that also edited shared.txt, then squash-merged it; refs/pull/7/head
 # holds the rebased PR head. local_mode picks what the worktree is left at:
 #   rebased                the rebased PR head itself

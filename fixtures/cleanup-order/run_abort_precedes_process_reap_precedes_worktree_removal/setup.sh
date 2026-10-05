@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run_abort_precedes_process_reap_precedes_worktree_removal - starts the runtime state (locks, processes, no-mistakes answers) for this cleanup-order case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_run_abort_precedes_process_reap_precedes_worktree_removal.
+# Ported from the reference's tests/fm-teardown.test.sh:test_run_abort_precedes_process_reap_precedes_worktree_removal.
 # Usage: setup.sh <scenario-dir>
 # shellcheck source=../lib/order-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/order-common.sh"

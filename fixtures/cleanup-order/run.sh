@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fixtures/cleanup-order/run.sh - the second cleanup-guard fixture set (design
-# section 14, "a second fixture set, for M4"): Firstmate's index-lock,
+# section 14, "a second fixture set, for M4"): the reference's index-lock,
 # parked-run-abort, process-reap and ordering cases.
 #
 # Usage:
