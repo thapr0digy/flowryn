@@ -301,7 +301,7 @@
       <text class="small" x="622" y="490" text-anchor="middle">runs · items · decisions · approvals · lease · intents · messages</text>
     </g>
 
-    <g id="p-herdr"><title>Herdr runtime: worktree.create, pane.split (with env), agent.start, pane.process_info, agent.get, events.subscribe</title>
+    <g id="p-herdr"><title>Herdr runtime: worktree.create, workspace.create (with env), agent.start, pane.process_info, agent.get, events.subscribe</title>
       <rect class="box" x="100" y="580" width="200" height="84" rx="10"/>
       <text class="lbl" x="200" y="606" text-anchor="middle">Herdr runtime</text>
       <text class="small" x="200" y="626" text-anchor="middle">worktree · pane · agent</text>
@@ -384,7 +384,7 @@ interface HarnessAdapter {
   // Lifecycle
   launch(spec: LaunchSpec): LaunchPlan;
     // args for Herdr agent.start; env goes on
-    // pane.split, whose params include env
+    // workspace.create, whose params include env
   preTrust(worktree: string): Promise&lt;Trust&gt;;
     // register trust before launch;
     // never answer a dialog with keys
@@ -449,7 +449,7 @@ type Verified = { ok: boolean;
   <table class="table table-sm">
     <thead><tr><th>Capability</th><th>Claude Code worker</th><th>Pi worker</th></tr></thead>
     <tbody>
-      <tr><td>launch</td><td>Herdr <code>pane.split</code> with the run's environment, then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks (<code>--settings</code> scoping <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>)</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run with <code>-e</code> <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>. The user's global Pi extensions load too unless the launch passes <code>--no-extensions</code>, which still keeps explicit <code>-e</code> paths <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
+      <tr><td>launch</td><td>Herdr <code>workspace.create</code> with the run's environment (the workspace's one pane is the worker's), then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks (<code>--settings</code> scoping <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>)</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run with <code>-e</code> <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>. The user's global Pi extensions load too unless the launch passes <code>--no-extensions</code>, which still keeps explicit <code>-e</code> paths <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
       <tr><td>preTrust</td><td>Register workspace trust for the worktree path before launch (Firstmate does this in <code>~/.claude.json</code>). Claude has three dialogs that can wedge a fresh pane (workspace trust, external CLAUDE.md imports, bypass confirmation); none may be answered with keys.</td><td>Pi asks for trust only when the worktree has project resources (<code>.pi/settings.json</code>, <code>.pi/extensions</code> and the like, or <code>.agents/skills</code>). The Flowryn extension answers Pi's <code>project_trust</code> event for that one process without remembering it (equivalent to <code>--approve</code>), so no dialog appears and nothing is written to <code>&lt;agent-dir&gt;/trust.json</code> <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
       <tr><td>sessionId + isolation proof</td><td><code>SessionStart</code> runs <code>flowryn hook worker-start</code>: reports <code>session_id</code>, cwd, git top-level, git common dir and branch</td><td><code>session_start</code> in the extension reports the same</td></tr>
       <tr><td>busySource</td><td>Hooks: <code>UserPromptSubmit</code>, <code>Pre/PostToolUse</code>, <code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code></td><td>Extension: <code>agent_start</code>, <code>agent_settled</code></td></tr>
@@ -1046,7 +1046,7 @@ run: r01J8Z… harness: claude mode: no-mistakes yolo: off</code></pre>
     <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-sm">Identity and transport</h3>
       <ul class="list-disc ml-5 space-y-1 opacity-90">
-        <li>At launch, the daemon sets <code>FLOWRYN_RUN</code>, <code>FLOWRYN_TOKEN</code> (a per-run capability), <code>FLOWRYN_BIN</code> (absolute path, so workers never depend on <code>PATH</code>), <code>FLOWRYN_SOCK</code> and <code>FLOWRYN_PROTO</code> on the Herdr <code>pane.split</code> call.</li>
+        <li>At launch, the daemon sets <code>FLOWRYN_RUN</code>, <code>FLOWRYN_TOKEN</code> (a per-run capability), <code>FLOWRYN_BIN</code> (absolute path, so workers never depend on <code>PATH</code>), <code>FLOWRYN_SOCK</code> and <code>FLOWRYN_PROTO</code> on the Herdr <code>workspace.create</code> call.</li>
         <li>The leader token comes from the lease (<a class="link" href="#adapters">section 5</a>). Tokens are stored only as hashes.</li>
         <li>Commands never infer a task from the working directory.</li>
         <li>JSON over a local socket. On macOS: a Unix socket at <code>~/.flowryn/run/flowrynd.sock</code> in a mode-0700 directory; the path is fixed and short because macOS limits socket paths to 104 bytes. All socket code sits behind <code>src/transport/</code> (see Portability below).</li>
