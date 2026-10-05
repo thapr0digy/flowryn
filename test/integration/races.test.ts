@@ -75,7 +75,8 @@ describe("design section 9 races", () => {
       env = await makeLeaderEnv();
       const opened = await env.openSession("claude");
       await hook(env, opened.token, "session-start", { source: "startup" });
-      const item = await env.openP1("FLOWRYN-MARK-R2 go ahead?");
+      // Not a question: a question would ride the Stop below (worker-questions-wake), and this race is the digest's.
+      const item = env.openPlainP1("FLOWRYN-MARK-R2 go ahead?");
       // The hook process started 40 s ago: past the budget, Claude would already have dropped its context.
       const late = await hook(env, opened.token, "prompt", { prompt: "hi" }, { "started-at": Date.now() - 40_000 });
       expect(late.context).toBeUndefined();

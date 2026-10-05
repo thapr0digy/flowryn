@@ -63,7 +63,7 @@ export interface BridgeEnv {
   driver(index: 0 | 1): BridgeDriver;
   /** Open a P0 (a worker that cannot finish) whose line carries `marker`; returns the item id. */
   openP0(marker: string): Promise<string>;
-  /** Open a P1 (a worker's non-blocking question) whose line carries `marker`; returns the item id. */
+  /** Open a P1 (a worker's non-blocking question) whose line carries `marker`; returns the item id. A question is pushed only after question_batch_ms or at a busy turn's Stop, so a step that prompts at once still sees it in the digest. */
   openP1(marker: string): Promise<string>;
   lease(): LeaseView;
   presentations(item: string): PresentationView[];

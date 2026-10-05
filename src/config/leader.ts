@@ -22,6 +22,8 @@ export interface LeaderTiming {
   digest_budget_ms: number;
   /** An actionable item open this long moves to the top of its lane (design section 9). */
   age_ms: number;
+  /** Worker questions opened within this long of the first one wake an idle leader once, together. */
+  question_batch_ms: number;
 }
 
 export const DEFAULT_LEADER_TIMING: LeaderTiming = {
@@ -30,6 +32,7 @@ export const DEFAULT_LEADER_TIMING: LeaderTiming = {
   inactive_ms: 60_000,
   digest_budget_ms: 2_000,
   age_ms: 24 * 60 * 60_000,
+  question_batch_ms: 30_000,
 };
 
 export interface NotifyConfig {
@@ -45,6 +48,8 @@ export interface NotifyConfig {
   max_triggered_turns_per_hour: number;
   /** An unresolved P0 notifies again after this long. */
   p0_renotify_min: number;
+  /** Turns a batch of worker questions may start in a leader per hour, apart from the P0 budget; beyond that, your next message carries them. */
+  max_question_wakes_per_hour: number;
 }
 
 export const DEFAULT_NOTIFY: NotifyConfig = {
@@ -54,6 +59,7 @@ export const DEFAULT_NOTIFY: NotifyConfig = {
   p0_coalesce_s: 60,
   max_triggered_turns_per_hour: 3,
   p0_renotify_min: 240,
+  max_question_wakes_per_hour: 6,
 };
 
 function table(value: unknown, where: string): Record<string, unknown> {
@@ -86,7 +92,7 @@ export function notifyConfig(config: FlowrynConfig): NotifyConfig {
   for (const key of Object.keys(raw)) {
     if (!(key in DEFAULT_NOTIFY)) throw new FlowrynError("config_invalid", `[notify] ${key} is not a known setting`);
   }
-  const ints = ["min_interval_min", "p0_coalesce_s", "max_triggered_turns_per_hour", "p0_renotify_min"] as const;
+  const ints = ["min_interval_min", "p0_coalesce_s", "max_triggered_turns_per_hour", "p0_renotify_min", "max_question_wakes_per_hour"] as const;
   const out = positiveInts(raw, DEFAULT_NOTIFY, "[notify]", ints);
   for (const key of ["macos", "herdr"] as const) {
     const value = raw[key];

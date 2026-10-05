@@ -60,6 +60,13 @@ export const LANE_TABLE = {
 
 export type ItemKind = keyof typeof LANE_TABLE;
 
+/**
+ * A worker's questions for you, blocking (P0) or not (P1), and a review
+ * gate's: they reach the leader as a batch (questionBatch in router.ts),
+ * never one push per question, so the P0 push path leaves them alone.
+ */
+export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_question_blocking"];
+
 export interface ItemRow {
   id: string;
   event_seq: number;
