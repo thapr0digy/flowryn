@@ -10,3 +10,10 @@ export const PROTO = 5;
 
 /** tasks-axi version the intent journal was verified against (docs/m0-verdicts.md). */
 export const PINNED_TASKS_AXI = "0.2.5";
+
+/**
+ * lavish-axi version whose `poll` output and prompt fields the review
+ * questions were verified against (docs/m5-notes.md, "Gate questions"):
+ * `flowryn doctor` warns on any other.
+ */
+export const VERIFIED_LAVISH_AXI = "0.1.65";

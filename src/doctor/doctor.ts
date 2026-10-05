@@ -1,5 +1,5 @@
 import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { configProblems, loadConfig, resolveTool, TOOL_NAMES, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
 import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion } from "../db/db.ts";
@@ -8,7 +8,7 @@ import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.
 import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
 import { isLockHeld, tryExclusiveLock } from "../util/flock.ts";
 import { canCreateOrWrite } from "../util/fsx.ts";
-import { PINNED_TASKS_AXI, PROTO, VERSION } from "../version.ts";
+import { PINNED_TASKS_AXI, PROTO, VERIFIED_LAVISH_AXI, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
 import { workerConfigProblems } from "../config/workers.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
@@ -70,6 +70,26 @@ function toolChecks(config: FlowrynConfig): Check[] {
     }
   }
   return checks;
+}
+
+/** lavish-axi's version against the one the review questions' poll was verified on; nothing when it is not installed. */
+async function lavishCheck(config: FlowrynConfig): Promise<Check[]> {
+  const lavish = resolveTool(config, "lavish_axi");
+  if (!lavish || !existsSync(lavish)) return [];
+  const node = resolveTool(config, "node");
+  const path = [node ? dirname(node) : null, dirname(lavish), process.env.PATH ?? "/usr/bin:/bin"].filter(Boolean).join(":");
+  let version = "";
+  try {
+    const proc = Bun.spawn([lavish, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { ...process.env, PATH: path } });
+    const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
+    version = (await new Response(proc.stdout).text()).trim();
+    clearTimeout(timer);
+  } catch {
+    version = "";
+  }
+  if (!/^\d+\.\d+\.\d+/.test(version)) return [{ check: "lavish-axi version", status: "warn", detail: `cannot read the version from ${lavish} --version` }];
+  if (version !== VERIFIED_LAVISH_AXI) return [{ check: "lavish-axi version", status: "warn", detail: `${version}; review questions were verified against ${VERIFIED_LAVISH_AXI} (its poll output and prompt fields)` }];
+  return [{ check: "lavish-axi version", status: "ok", detail: version }];
 }
 
 async function tasksChecks(config: FlowrynConfig): Promise<Check[]> {
@@ -253,6 +273,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   if (binary) checks.push(binary);
   checks.push(...toolChecks(config));
   checks.push(...(await tasksChecks(config)));
+  checks.push(...(await lavishCheck(config)));
   checks.push(...databaseChecks(config));
   checks.push(...(await daemonChecks(home, config, env)));
   checks.push(...workerConfigProblems(config).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
