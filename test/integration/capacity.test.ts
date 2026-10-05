@@ -171,8 +171,16 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       const holdingQa = () => query<{ task_id: string }>(e, "SELECT r.task_id FROM runs r JOIN pool_leases l ON l.run_id = r.id WHERE l.pool = 'docker_env' AND l.released_at IS NULL").map((r) => r.task_id);
       const done = new Set<string>();
       for (let wave = 0; wave < 4; wave++) {
-        await waitUntil(() => holdingQa().length === 5 && holdingQa().every((t) => !done.has(t)), 90_000, `QA wave ${wave + 1}`);
-        const qa = holdingQa();
+        // One snapshot for both the check and the wave: a slot freed between two queries would let a wave of 4 through.
+        let qa: string[] = [];
+        await waitUntil(
+          () => {
+            qa = holdingQa();
+            return qa.length === 5 && qa.every((t) => !done.has(t));
+          },
+          90_000,
+          `QA wave ${wave + 1}`,
+        );
         for (const task of qa) {
           done.add(task);
           release(e, task, "go-qa");
