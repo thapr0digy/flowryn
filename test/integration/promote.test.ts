@@ -158,3 +158,38 @@ describe("a scout whose run is over", () => {
     { timeout: 60_000 },
   );
 });
+
+describe("a scout in a review with questions", () => {
+  test(
+    "is promoted: its open review questions close unanswered and its page is no longer polled",
+    async () => {
+      const page = '<html><body><section id="flowryn-questions"></section><script src="flowryn-questions.js"></script></body></html>';
+      const questions = JSON.stringify({ questions: [{ key: "store", kind: "single", question: "Where?", options: ["db", "file"], recommend: "db", blocks: "which store the cache writes to" }] });
+      const env = await fleet({ extraConfig: ["[workflows.scout-review]", 'stages = [ { id = "design", gate = "review" }, { id = "investigate" } ]'].join("\n") });
+      const dispatched = await env.json(["dispatch", "web", "--kind", "scout", "--workflow", "scout-review", "--body-file", "-"], {
+        stdin: [
+          "Scout the cache",
+          `FAKE: write design/design.html ${page}`,
+          `FAKE: write design/questions.json ${questions}`,
+          "FAKE: stage-done --review https://lavish.test/p/design --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json",
+          "FAKE: sleep 60000",
+        ].join("\n"),
+      });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await env.waitRun(run, (r) => r.stage_state === "review", "the scout's design review");
+      const decisions = () => {
+        const db = env.h.db();
+        try {
+          return db.query("SELECT d.id, d.state, (SELECT COUNT(*) FROM items i WHERE i.decision_id = d.id AND i.state = 'open') AS items FROM decisions d WHERE d.run_id = ?1").all(run);
+        } finally {
+          db.close();
+        }
+      };
+      expect(decisions()).toEqual([{ id: "q1", state: "open", items: 1 }]);
+      expect((await env.json(["promote", task])).code).toBe(0);
+      expect(decisions()).toEqual([{ id: "q1", state: "dismissed", items: 0 }]);
+    },
+    { timeout: 60_000 },
+  );
+});

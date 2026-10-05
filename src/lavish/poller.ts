@@ -1,11 +1,11 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
 import { gatesToPoll, gatesWithWidget, recordGateNotes, recordLavishEnded, widgetState } from "../lifecycle/gate-questions.ts";
 import { parsePollOutput, type PollOutput } from "./poll-output.ts";
-import { writeWidget } from "./widget.ts";
+import { requirePageDir, writeWidget } from "./widget.ts";
 
 /**
  * The daemon's side of a review page's questions. Each pass rewrites the
@@ -44,6 +44,22 @@ interface Running {
 
 /** How long the last poll that carries a reply waits for anything else the user sends. */
 const FINAL_POLL_MS = 1_500;
+
+/**
+ * Append to a gate's notes beside its page, never through a symlink: the
+ * worker can write the page's directory, and the daemon writes outside its
+ * sandbox.
+ */
+function appendNotes(page: string, path: string, text: string): void {
+  requirePageDir(page);
+  const fd = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`${path} is not a regular file`);
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 const BACKOFF_MIN_MS = 2_000;
 const BACKOFF_MAX_MS = 60_000;
@@ -180,11 +196,16 @@ export class LavishPoller {
     this.running.set(gate, entry);
     this.keepPid(gate, proc.pid, page);
     void (async () => {
-      const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
-      this.dropPid(gate, proc.pid);
-      if (this.running.get(gate) === entry) this.running.delete(gate);
-      if (entry.stopped || this.closed) return;
-      this.finished(gate, page, code, stdout, stderr);
+      try {
+        const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
+        this.dropPid(gate, proc.pid);
+        if (this.running.get(gate) === entry) this.running.delete(gate);
+        if (entry.stopped || this.closed) return;
+        this.finished(gate, page, code, stdout, stderr);
+      } catch (error) {
+        if (this.running.get(gate) === entry) this.running.delete(gate);
+        this.deps.log(`lavish: the poll of gate ${gate} could not be recorded: ${(error as Error).stack ?? String(error)}`);
+      }
       this.kick();
     })();
   }
@@ -214,12 +235,14 @@ export class LavishPoller {
   }
 
   private record(gate: string, page: string, out: PollOutput, raw: string): void {
-    const notes = out.otherPrompts > 0 || out.malformed > 0 ? join(dirname(page), `lavish-notes-${gate}.txt`) : null;
-    if (notes) {
+    let notes: string | null = null;
+    if (out.otherPrompts > 0 || out.malformed > 0) {
+      const path = join(dirname(page), `lavish-notes-${gate}.txt`);
       try {
-        appendFileSync(notes, `--- ${new Date(this.deps.now()).toISOString()}\n${raw}\n`, { mode: 0o600 });
+        appendNotes(page, path, `--- ${new Date(this.deps.now()).toISOString()}\n${raw}\n`);
+        notes = path;
       } catch (error) {
-        this.deps.log(`lavish: cannot keep gate ${gate}'s notes in ${notes}: ${(error as Error).message}`);
+        this.deps.log(`lavish: cannot keep gate ${gate}'s notes in ${path}: ${(error as Error).message}`);
       }
     }
     const ctx = { db: this.deps.db, now: this.deps.now };

@@ -16,6 +16,7 @@ import { checkStart, createRun, startDepsOf } from "./dispatch.ts";
 import { dispatchedTask, reportDirFor } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { dismissGateQuestions } from "./gate-questions.ts";
 import { discardPlansOfGate } from "./plans.ts";
 import { flowLine, openGate, requestStage } from "./stages.ts";
 
@@ -109,6 +110,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
   if (open) {
     db.query("UPDATE gates SET state = 'changes', feedback = 'promoted to a ship', closed_at = ?2 WHERE id = ?1").run(open.id, now);
     discardPlansOfGate(db, open.id, now);
+    dismissGateQuestions(db, run, open.id, now, "promoted to a ship");
     resolveRunItems(db, run.id, ["gate_ready"], "run.promoted", now);
   }
   // A worker that runs is stopped and its session resumed under the ship contract; one not launched yet starts as a ship.

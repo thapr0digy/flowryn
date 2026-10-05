@@ -124,7 +124,7 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   const parts: string[] = [];
   const answered = all.filter((d) => d.state === "answered");
   if (answered.length > 0) {
-    const list = answered.map((d) => `${d.id} (${d.key ?? "-"}) = ${sanitizeLine(d.answer ?? "-", 300)}${d.rationale ? ` [their note: ${sanitizeLine(d.rationale, 300)}]` : ""}`);
+    const list = answered.map((d) => `${d.id} (${d.key ?? "-"}) = ${sanitizeLine(d.answer ?? "-", 1_000)}${d.rationale ? ` [their note: ${sanitizeLine(d.rationale, 2_000)}]` : ""}`);
     parts.push(`The user's answers to your review questions: ${list.join("; ")}.`);
   }
   const dismissed = all.filter((d) => d.state === "dismissed").map((d) => d.id);
@@ -133,15 +133,21 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-/** Changes sent the run back: the questions still open close unanswered. Call inside a transaction. */
-export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: number): string[] {
+/** The gate closed without them (changes, a promotion): the questions still open close unanswered. Call inside a transaction. */
+export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: number, why = "the review was sent back"): string[] {
   const open = openIds(db, gateId);
   for (const id of open) {
     db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2, answered_via = 'gate changes' WHERE id = ?1").run(id, now);
-    appendEvent(db, { source: "cli", kind: "decision.dismissed", runId: run.id, taskId: run.task_id, payload: { decision: id, gate: gateId, why: "the review was sent back" }, ts: now });
+    appendEvent(db, { source: "cli", kind: "decision.dismissed", runId: run.id, taskId: run.task_id, payload: { decision: id, gate: gateId, why }, ts: now });
     resolveDecisionItems(db, id, `gate.changes ${gateId}`, now);
   }
   return open;
+}
+
+/** The run ended (cancelled, failed): its open review questions close unanswered. Call inside a transaction. */
+export function dismissRunGateQuestions(db: Db, run: RunRow, why: string, now: number): string[] {
+  const gates = db.query("SELECT DISTINCT gate_id FROM decisions WHERE run_id = ?1 AND gate_id IS NOT NULL AND state = 'open'").all(run.id) as { gate_id: string }[];
+  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, why));
 }
 
 /** Record where the notes a poll took from the review page went. Call inside a transaction. */
@@ -195,18 +201,20 @@ export interface PolledGate {
   page_path: string;
 }
 
-/** Gates whose page the daemon polls: open, carrying an open question, and the user has not ended the session. */
+const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
+
+/** Gates whose page the daemon polls: open on a live run, carrying an open question, and the user has not ended the session. */
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
     .query(
-      `SELECT DISTINCT g.id, g.page_path FROM gates g JOIN decisions d ON d.gate_id = g.id
-       WHERE g.state = 'open' AND g.page_path IS NOT NULL AND g.lavish_ended = 0 AND d.state = 'open' ORDER BY g.opened_at`,
+      `SELECT DISTINCT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id JOIN decisions d ON d.gate_id = g.id
+       WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 AND d.state = 'open' ORDER BY g.opened_at`,
     )
     .all() as PolledGate[];
 }
 
 /** Gates with a widget whose state may still change, for the widget writer. */
 export function gatesWithWidget(db: Db, alsoIds: Iterable<string>): string[] {
-  const open = (db.query("SELECT id FROM gates WHERE state = 'open' AND page_path IS NOT NULL").all() as { id: string }[]).map((g) => g.id);
+  const open = (db.query(`SELECT g.id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL`).all() as { id: string }[]).map((g) => g.id);
   return [...new Set([...open, ...alsoIds])];
 }

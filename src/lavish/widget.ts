@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../util/fsx.ts";
 import { ANSWER_MARK } from "./poll-output.ts";
@@ -159,8 +159,20 @@ export function renderWidget(state: WidgetState): string {
   return `// Written by Flowryn for gate ${state.gate}; it is rewritten when a question's state changes.\n${RENDERER.trim()}(${JSON.stringify(state)}, ${JSON.stringify(ANSWER_MARK)});\n`;
 }
 
+/**
+ * The page's directory is still the real one checked when the gate opened
+ * (checkReviewPage stores the page's real path): the worker can write there,
+ * so a directory swapped for a symlink must not move the daemon's writes.
+ */
+export function requirePageDir(pagePath: string): string {
+  const dir = dirname(pagePath);
+  if (realpathSync(dir) !== dir) throw new Error(`${dir} now resolves elsewhere (a symlink); not writing there`);
+  return dir;
+}
+
 /** Write the widget next to the page when its content changed. Returns whether it wrote. */
 export function writeWidget(pagePath: string, state: WidgetState): boolean {
+  requirePageDir(pagePath);
   const path = widgetPath(pagePath);
   const content = renderWidget(state);
   if (existsSync(path) && readFileSync(path, "utf8") === content) return false;

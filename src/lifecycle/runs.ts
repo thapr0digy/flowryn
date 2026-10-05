@@ -6,6 +6,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import { normalizedTitle } from "../journal/diff.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { releaseLeases } from "../sched/pools.ts";
+import { dismissRunGateQuestions } from "./gate-questions.ts";
 
 /** Design section 13: runs.state, owned by the lifecycle engine. */
 export const RUN_STATES = ["launching", "running", "validating", "ready", "merging", "landed", "cleaned", "failed", "cancelled"] as const;
@@ -161,6 +162,7 @@ export function failRun(db: Db, run: RunRow, reason: string, source: EventSource
   db.query("UPDATE runs SET state = 'failed', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL, pending_launch = NULL WHERE id = ?1").run(run.id, now);
   parkTask(db, run.task_id, `failed: ${reason}`, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.failed", now);
+  dismissRunGateQuestions(db, run, "the run failed", now);
   const event = appendEvent(db, { source, kind: "run.failed", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "steer_unacked", "blocked_prompt"], "run.failed", now);
   openRunItemOnce(db, "failure_needs_you", run, event.seq, `Run failed for ${taskTitle(db, run.task_id)}: ${reason}`, now);
@@ -178,6 +180,7 @@ export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSour
   db.query("UPDATE runs SET state = 'cancelled', liveness = 'dead', ended_at = ?2, updated_at = ?2, busy_until = NULL, pending_launch = NULL WHERE id = ?1").run(run.id, now);
   if (opts.park !== false) parkTask(db, run.task_id, `cancelled: ${reason}`, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.cancelled", now);
+  dismissRunGateQuestions(db, run, "the run was cancelled", now);
   appendEvent(db, { source, kind: "run.cancelled", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, null, "run.cancelled", now);
   run.state = "cancelled";

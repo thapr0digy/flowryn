@@ -2,7 +2,7 @@ import { hashToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type Args, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
-import { resolveDecisionItems, resolveItems } from "../attention/items.ts";
+import { resolveDecisionItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { normalizeAnswer } from "../lavish/questions.ts";
@@ -69,8 +69,7 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
     .query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = ?5, rationale = ?6 WHERE id = ?1")
     .run(d.id, a.choice, a.via, now, a.by, a.words);
   appendEvent(ctx.db, { source: "cli", kind: "decision.answered", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, choice: a.choice, by: a.by, via: a.via, ...(d.gate_id ? { gate: d.gate_id } : {}) }, ts: now });
-  if (d.gate_id) resolveDecisionItems(ctx.db, d.id, `decision.answered ${d.id}`, now);
-  else resolveItems(ctx.db, d.blocking ? "worker_question_blocking" : "worker_question", d.task_id, `decision.answered ${d.id}`, now);
+  resolveDecisionItems(ctx.db, d.id, `decision.answered ${d.id}`, now);
   if (d.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: d.task_id, positional: [d.task_id], now });
   if (d.run_id === null) recordIntent(ctx.db, { file: "backlog", verb: "done", taskId: d.task_id, positional: [d.task_id], now });
   const run = d.run_id ? getRun(ctx.db, d.run_id) : null;

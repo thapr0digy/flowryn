@@ -1,16 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { encodeAnswer, parsePollOutput } from "../../src/lavish/poll-output.ts";
 import { normalizeAnswer, parseGateQuestions } from "../../src/lavish/questions.ts";
 import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetState } from "../../src/lavish/widget.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
-import { lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
+import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, openGateQuestions, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
-import { getRun } from "../../src/lifecycle/runs.ts";
-import { makeHome, seedRun, type TestHome } from "../helpers/harness.ts";
+import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { cancelRun, failRun, getRun } from "../../src/lifecycle/runs.ts";
+import { makeHome, seedRun, waitUntil, type TestHome } from "../helpers/harness.ts";
 
 /**
  * A review gate's questions (design: "A design's open questions become
@@ -299,8 +301,8 @@ beforeEach(() => {
   runId = seeded.runId;
   taskId = seeded.taskId;
   db = h.db();
-  reportDir = join(h.dataDir, taskId);
-  mkdirSync(join(reportDir, "design"), { recursive: true });
+  mkdirSync(join(h.dataDir, taskId, "design"), { recursive: true });
+  reportDir = realpathSync(join(h.dataDir, taskId));
   page = join(reportDir, "design", "design.html");
   writeFileSync(page, `<html data-lavish-live-reload-root><body><section id="flowryn-questions"></section><script src="${WIDGET_FILE}"></script></body></html>`);
   db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at) VALUES ('g1', ?1, 'design', 'review', 'http://127.0.0.1:4387/session/x', 'open', ?2)").run(runId, NOW);
@@ -437,5 +439,111 @@ describe("a gate's questions as decisions", () => {
     writeFileSync(bare, "<html></html>");
     expect(() => checkReviewPage(bare, reportDir)).toThrow(/does not mount/);
     expect(() => checkReviewPage(join(reportDir, "nope.html"), reportDir)).toThrow(/cannot read/);
+  });
+
+  test("answering a plain question closes only its own item, not the gate's questions on the same task", () => {
+    open();
+    db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, created_at) VALUES ('q9', ?1, ?2, 'Plain?', '[\"a\",\"b\"]', 0, 'open', ?3)").run(taskId, runId, NOW);
+    tx(db, () => {
+      const event = appendEvent(db, { source: "cli", kind: "decision.opened", runId, taskId, payload: { decision: "q9" }, ts: NOW });
+      const item = openItem(db, { kind: "worker_question", eventSeq: event.seq, taskId, runId, line: "Worker question q9", now: NOW });
+      db.query("UPDATE items SET decision_id = 'q9' WHERE id = ?1").run(item);
+    });
+    tx(db, () => answerDecision(ctx(), getDecision(db, "q9")!, { choice: "a", words: null, by: "leader", via: "cli" }));
+    expect((db.query("SELECT decision_id FROM items WHERE state = 'open' ORDER BY decision_id").all() as { decision_id: string }[]).map((i) => i.decision_id)).toEqual(["q1", "q2", "q3"]);
+  });
+
+  test("a long free answer and note reach the verdict whole", () => {
+    open();
+    const answer = "a".repeat(900);
+    const note = "n".repeat(1_800);
+    tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: [answer], note }));
+    const verdict = gateAnswersNote(db, "g1")!;
+    expect(verdict).toContain(`q3 (verb-name) = ${answer} [their note: ${note}]`);
+  });
+
+  for (const [how, end] of [
+    ["cancelled", (run: ReturnType<typeof getRun> & object) => cancelRun(db, run, "stop", "cli", NOW)],
+    ["failed", (run: ReturnType<typeof getRun> & object) => failRun(db, run, "dead", "daemon", NOW)],
+  ] as const) {
+    test(`a ${how} run's open questions close unanswered and its page is neither polled nor rewritten`, () => {
+      open();
+      tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null }));
+      tx(db, () => end(getRun(db, runId)!));
+      expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["answered", "dismissed", "dismissed"]);
+      expect(db.query("SELECT COUNT(*) AS n FROM items WHERE decision_id IS NOT NULL AND state = 'open'").get()).toEqual({ n: 0 });
+      expect(gatesToPoll(db)).toEqual([]);
+      expect(gatesWithWidget(db, [])).toEqual([]);
+    });
+  }
+
+  function scriptedLavish(body: string): string {
+    const bin = join(h.home, "scripted-lavish");
+    writeFileSync(bin, `#!/bin/sh\n${body}\n`);
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  test("notes are never appended through a symlink the worker put beside the page", async () => {
+    open();
+    const victim = join(h.home, "victim.txt");
+    writeFileSync(victim, "untouched\n");
+    symlinkSync(victim, join(reportDir, "design", "lavish-notes-g1.txt"));
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, FEEDBACK);
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+    } finally {
+      poller.stop();
+    }
+    expect(readFileSync(victim, "utf8")).toBe("untouched\n");
+    expect(logs.some((l) => l.includes("cannot keep gate g1's notes"))).toBe(true);
+    expect(getDecision(db, "q1")!.state).toBe("answered");
+    expect(db.query("SELECT notes_path FROM gates WHERE id = 'g1'").get()).toEqual({ notes_path: null });
+  });
+
+  test("notes are kept beside the page, and the verdict points at them", async () => {
+    open();
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, FEEDBACK);
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+    } finally {
+      poller.stop();
+    }
+    const notes = join(reportDir, "design", "lavish-notes-g1.txt");
+    expect(readFileSync(notes, "utf8")).toContain("make the header bigger");
+    expect(gateAnswersNote(db, "g1")).toContain(`read ${notes}`);
+  });
+
+  test("a poll whose answers cannot be recorded is logged, not left as an unhandled rejection", async () => {
+    open();
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, FEEDBACK);
+    const go = join(h.home, "go");
+    const logs: string[] = [];
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`while [ ! -f ${JSON.stringify(go)} ]; do sleep 0.05; done; cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      expect(poller.polling()).toEqual(["g1"]);
+      db.query("UPDATE decisions SET options = 'not json' WHERE id = 'q1'").run();
+      writeFileSync(go, "");
+      await waitUntil(() => logs.some((l) => l.includes("the poll of gate g1 could not be recorded")), 5_000, "the failure logged");
+      await Bun.sleep(50);
+    } finally {
+      poller.stop();
+      process.off("unhandledRejection", onRejection);
+    }
+    expect(rejections).toEqual([]);
+    expect(getDecision(db, "q1")!.state).toBe("open");
   });
 });
