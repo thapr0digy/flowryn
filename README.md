@@ -12,7 +12,7 @@ M3 (leaders and attention) is built: `flowryn lead` starts a Claude Code or Pi l
 
 M4 (delivery and policy) is built: ships deliver through no-mistakes, direct-PR or local-only, checked by the named-head gate; a GitHub watcher follows every delivered PR and its checks; merges go through the merge gate (red checks refused, one check waivable by you, the approval bound to the head) and count only once proven; your approval comes from Claude's own prompt, Pi's confirm, `flowryn approve` in your shell (a code read from `/dev/tty`) or the board's approve key; and landed work is cleaned up through the cleanup guard.
 
-M5 (workflows, capacity and autonomy) is built, and with it v1: runs move through workflow stages (the `feature` workflow is design, build, visual QA and ship) with review gates only your word passes (Claude's prompt, Pi's confirm, `flowryn approve --gate` or the board); capacity pools (20 workers, 5 validation, 5 Docker environments, 5 browsers by default) with a host check before every grant and Docker label evidence; phased plans whose next phase starts by itself once the previous one has landed; a configurable terse style block; the Claude usage-limit pause; and the three stage skills.
+M5 (workflows, capacity and autonomy) is built, and with it v1: runs move through workflow stages (the `feature` workflow is design, build and ship; `feature-ui`, for work with screens, adds a visual QA review before ship) with review gates only your word passes (Claude's prompt, Pi's confirm, `flowryn approve --gate` or the board); capacity pools (20 workers, 5 validation, 5 Docker environments, 5 browsers by default) with a host check before every grant and Docker label evidence; phased plans whose next phase starts by itself once the previous one has landed; a configurable terse style block; the Claude usage-limit pause; and the three stage skills.
 
 The v1 completion pass built the items M1 to M5 left open: the harness version checked at daemon startup and before every resume or launch; `flowryn divergence resolve <id> keep-run|accept-edit`; the reconciler's invariant pass (a task is In flight if and only if it has a live run); scouts that land with their report and are cleaned up through the cleanup guard; `flowryn promote`, a scout promoted to a ship in place; and the section 16 P1s for Herdr unreachable and for GitHub unavailable while a merge waits. [`docs/v1-status.md`](docs/v1-status.md) lists every v1 item: done, with the pull request that delivered it, or not built, with the reason.
 
@@ -75,7 +75,8 @@ flowryn approve <task> --allow-red lint   # waive exactly one failing check; --d
 flowryn merge <task>                # through the merge gate; it counts only once GitHub (or local main) proves it
 flowryn decline <task> --body-file -  # send a delivered ship back with your words
 flowryn cleanup <task> [--discard]  # remove a landed, cancelled or failed task's worktree, through the cleanup guard
-flowryn dispatch web --kind ship --workflow feature --body-file -   # design, review, build, visual QA, review, ship
+flowryn dispatch web --kind ship --workflow feature --body-file -   # design, review, build, ship
+flowryn dispatch web --kind ship --workflow feature-ui --body-file -   # the same plus visual QA and its review (work with screens)
 flowryn plan web --body-file plan.md  # a phased feature: one "## Phase" section each; each starts once the one before lands
 flowryn show p1                     # a plan's phases and where each is
 flowryn approve <task> --gate design  # pass a review gate in your terminal (the board's a key lists reviews too)

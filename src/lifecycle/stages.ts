@@ -1,3 +1,5 @@
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
@@ -8,9 +10,11 @@ import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines, type ContractDelivery } from "../harness/contract-text.ts";
 import { grantLeases, holdsLease, releaseLeases, runLeases } from "../sched/pools.ts";
+import { QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaPageProblems } from "../skills/qa-template.ts";
 import { skillPath } from "../skills/stages.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { approvePlan, discardPlansOfGate, fileWorkerPlan, parsePlan } from "./plans.ts";
+import { reportDirFor } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type PendingLaunch, type RunRow, type RunWithPolicy } from "./runs.ts";
 import { createSteer } from "./steers.ts";
@@ -450,6 +454,28 @@ function workerRun(ctx: { db: Db; caller: HandlerCtx["caller"] }): RunWithPolicy
   return run;
 }
 
+const QA_SKILL = "flowryn-visual-qa";
+
+/**
+ * A QA stage's review page must open with its filled plain-language card
+ * (src/skills/qa-template.ts). It lives at `$FLOWRYN_REPORT_DIR/qa/evidence.html`,
+ * as the skill says; a symlink there is refused rather than followed.
+ */
+export function checkQaPage(reportDir: string): void {
+  const path = join(reportDir, "qa", "evidence.html");
+  const hint = `copy ${QA_TEMPLATE_FILE} from the flowryn-visual-qa skill to ${path} and fill it`;
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    throw new FlowrynError("qa_page_invalid", `no QA page at ${path}`, hint);
+  }
+  if (!st.isFile()) throw new FlowrynError("qa_page_invalid", `${path} is not a regular file`, hint);
+  if (st.size > QA_PAGE_MAX_BYTES) throw new FlowrynError("qa_page_invalid", `${path} is over ${QA_PAGE_MAX_BYTES / 1024 / 1024} MB`);
+  const problems = qaPageProblems(readFileSync(path, "utf8"));
+  if (problems.length > 0) throw new FlowrynError("qa_page_invalid", `${path}: ${problems.join("; ")}`, "fix the page, host it again, then run stage done");
+}
+
 /**
  * `flowryn stage done [--review <url>] [--plan-file <path>]`: the worker
  * finished its stage. A review gate opens (a P1 with the link) and waits for
@@ -478,6 +504,7 @@ const stageDone: VerbSpec = {
     const review = stringArg(args, "review");
     const planText = stringArg(args, "plan");
     const title = taskTitle(ctx.db, run.task_id);
+    if (pos.stage.gate === "review" && pos.stage.skill === QA_SKILL) checkQaPage(reportDirFor(ctx.config(), run.task_id));
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
     if (pos.stage.gate === "review") {
       if (!review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has a review gate: pass --review <lavish url>`);

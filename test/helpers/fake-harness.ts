@@ -31,6 +31,8 @@
  *   FAKE: stage-done [args...]       flowryn stage done <args> ($FLOWRYN_REPORT_DIR expands); the reply goes to
  *                                    fake-replies.jsonl; on success the turn ends and the steps after it run
  *                                    when the next steer arrives (the stage start, or the review's verdict)
+ *   FAKE: qa-page [verdict]          write $FLOWRYN_REPORT_DIR/qa/evidence.html: the QA template, every slot filled
+ *                                    (verdict works unless named), as the visual QA skill asks
  *   FAKE: plan-phase <title...>      append a "## <title>" phase (workflow fix) to $FLOWRYN_REPORT_DIR/plan.md
  *   FAKE: docker-up <name> [project] a running container labelled flowryn.run=$FLOWRYN_RUN, in the fake
  *                                    docker's list ($FLOWRYN_HOME/docker-ps.txt), in a compose project if named
@@ -48,6 +50,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { QA_PLACEHOLDERS, QA_TEMPLATE } from "../../src/skills/qa-template.ts";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
 const env = process.env;
@@ -344,6 +347,14 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
         awaitingStage = ok;
       });
       return ok ? "await-steer" : "continue";
+    }
+    case "qa-page": {
+      const dir = join(env.FLOWRYN_REPORT_DIR ?? ".", "qa");
+      mkdirSync(dir, { recursive: true });
+      let page = QA_TEMPLATE.replace("{{VERDICT}}", rest[0] ?? "works");
+      for (const slot of QA_PLACEHOLDERS) page = page.replaceAll(slot, "Filled by the fake worker.");
+      writeFileSync(join(dir, "evidence.html"), page);
+      return "continue";
     }
     case "plan-phase": {
       const dir = env.FLOWRYN_REPORT_DIR ?? ".";

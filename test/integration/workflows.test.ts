@@ -54,6 +54,7 @@ const FEATURE = (name: string) =>
     `FAKE: docker-up ${name}-web flowryn-${name}`,
     "FAKE: sleep 1500",
     `FAKE: docker-down ${name}-web`,
+    "FAKE: qa-page",
     `FAKE: stage-done --review https://lavish.test/${name}/qa`,
     "FAKE: deliver-local",
     "FAKE: sleep 120000",
@@ -66,7 +67,7 @@ describe("workflow stages and review gates", () => {
       ship = await makeShipEnv({ mode: "local-only" });
       const e = ship;
       const f = e.fleet;
-      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      expect((await f.json(["project", "set", "web", "--workflow", "feature-ui"])).code).toBe(0);
       const leader = await e.claude();
       await leader.start();
       const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: FEATURE("one") });
@@ -125,21 +126,24 @@ describe("workflow stages and review gates", () => {
   );
 
   test(
-    "changes at the QA review send the run back to build with your words; a worker cannot skip a gate",
+    "changes at the QA review send the run back to build with your words; a worker cannot skip a gate or its QA page",
     async () => {
       ship = await makeShipEnv({ mode: "local-only" });
       const e = ship;
       const f = e.fleet;
-      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      expect((await f.json(["project", "set", "web", "--workflow", "feature-ui"])).code).toBe(0);
       const steps = [
         "Feature two",
         "FAKE: verb deliver --local",
         "FAKE: stage-done --review https://lavish.test/two/design",
         "FAKE: commit two.txt first try",
         "FAKE: stage-done",
+        "FAKE: verb stage done --review https://lavish.test/two/qa-0",
+        "FAKE: qa-page",
         "FAKE: stage-done --review https://lavish.test/two/qa-1",
         "FAKE: commit two.txt second try",
         "FAKE: stage-done",
+        "FAKE: qa-page works-with-caveats",
         "FAKE: stage-done --review https://lavish.test/two/qa-2",
         "FAKE: deliver-local",
         "FAKE: sleep 120000",
@@ -153,6 +157,10 @@ describe("workflow stages and review gates", () => {
       await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
       expect((await e.approve(task, { gate: "design" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.stage === "qa" && r.stage_state === "review", "the first QA review");
+      // The QA review needs its page: without qa/evidence.html and its filled card, stage done is refused.
+      const noPage = (await e.replies(task, 5)).find((r) => r.args.includes("https://lavish.test/two/qa-0"))!;
+      expect(noPage.code).toBe(3);
+      expect((noPage.reply.error as { code: string }).code).toBe("qa_page_invalid");
       const changes = await f.json(["gate", "changes", task, "--body-file", "-"], { stdin: "The button is off-screen on a phone." });
       expect(changes.code).toBe(0);
       expect(changes.reply.data).toMatchObject({ state: "changes", to: "build" });
@@ -176,7 +184,7 @@ describe("workflow stages and review gates", () => {
       ship = await makeShipEnv({ mode: "local-only" });
       const e = ship;
       const f = e.fleet;
-      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      expect((await f.json(["project", "set", "web", "--workflow", "feature-ui"])).code).toBe(0);
       const leader = await e.claude();
       await leader.start();
       const steps = ["Feature three", "FAKE: stage-done --review https://lavish.test/three/design-1", "FAKE: stage-done --review https://lavish.test/three/design-2", "FAKE: sleep 120000"].join("\n");

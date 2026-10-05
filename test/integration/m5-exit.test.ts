@@ -48,13 +48,14 @@ const PHASE_ONE = (name: string) =>
     `FAKE: docker-up ${name}-web flowryn-${name}`,
     "FAKE: sleep 500",
     `FAKE: docker-down ${name}-web`,
+    "FAKE: qa-page",
     `FAKE: stage-done --review https://lavish.test/${name}/qa`,
     "FAKE: deliver-local",
     "FAKE: sleep 600000",
   ].join("\n");
 
 async function dispatchPhaseOne(e: ShipEnv, name: string): Promise<{ task: string; run: string }> {
-  expect((await e.fleet.json(["project", "set", "web", "--workflow", "feature"], { env: { FLOWRYN_TOKEN: e.leaderToken() } })).code).toBe(0);
+  expect((await e.fleet.json(["project", "set", "web", "--workflow", "feature-ui"], { env: { FLOWRYN_TOKEN: e.leaderToken() } })).code).toBe(0);
   const r = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: PHASE_ONE(name) });
   expect(r.code).toBe(0);
   return r.reply.data as { task: string; run: string };

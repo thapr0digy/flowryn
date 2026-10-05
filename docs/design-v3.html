@@ -874,7 +874,13 @@ Done since yesterday: 3 tasks</code></pre>
 
   <div class="grid lg:grid-cols-2 gap-4">
 <pre class="code"><code># config.toml — workflows are data; stage know-how is skills
-[workflows.feature]
+[workflows.feature]     # no screens: no QA review
+stages = [
+  { id = "design", skill = "flowryn-design", gate = "review" },
+  { id = "build",  skill = "flowryn-build-test" },
+  { id = "ship",   pools = ["validation"], gate = "merge" },
+]
+[workflows.feature-ui]  # work with screens
 stages = [
   { id = "design", skill = "flowryn-design", gate = "review" },
   { id = "build",  skill = "flowryn-build-test" },
