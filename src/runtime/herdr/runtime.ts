@@ -114,23 +114,19 @@ export class HerdrRuntime {
     await this.transport.call("ping", {}, 3_000);
   }
 
-  /** A new workspace rooted at `cwd`; its root pane is a plain shell. */
-  async openWorkspace(cwd: string, label: string): Promise<{ workspaceId: string; rootPaneId: string }> {
-    const result = await this.transport.call("workspace.create", { cwd, label, focus: false });
+  /**
+   * A new workspace rooted at `cwd`; its root pane is a plain shell. `env`
+   * reaches that shell and whatever it launches, the harness and its hooks
+   * included (M0 h04, h06), so a worker workspace holds one pane.
+   */
+  async openWorkspace(cwd: string, label: string, env: Record<string, string> = {}): Promise<{ workspaceId: string; rootPaneId: string }> {
+    const result = await this.transport.call("workspace.create", { cwd, label, env, focus: false });
     const workspace = result.workspace as Record<string, unknown> | undefined;
     const root = (result.root_pane ?? result.pane) as Record<string, unknown> | undefined;
     const workspaceId = str(workspace?.workspace_id);
     const rootPaneId = str(root?.pane_id);
     if (!workspaceId || !rootPaneId) throw new HerdrError("protocol", "workspace.create returned no workspace or root pane");
     return { workspaceId, rootPaneId };
-  }
-
-  /** Split a pane; `env` reaches the harness and its hooks (M0 h04). */
-  async splitPane(targetPaneId: string, cwd: string, env: Record<string, string>): Promise<string> {
-    const result = await this.transport.call("pane.split", { target_pane_id: targetPaneId, direction: "right", cwd, env, focus: false });
-    const paneId = str((result.pane as Record<string, unknown> | undefined)?.pane_id);
-    if (!paneId) throw new HerdrError("protocol", "pane.split returned no pane");
-    return paneId;
   }
 
   /**

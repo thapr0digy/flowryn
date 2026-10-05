@@ -55,6 +55,11 @@ From the steer latency investigation (the 2026-10-04 spec in the superpowers vau
 
   The Claude interrupt row is the live check of the turn-start waiter: the woken turn's waiter, armed at `UserPromptSubmit`, fired and woke the worker 64 ms after the steer once the interrupt cleared busy. This run still counted a woken turn's `UserPromptSubmit` as seen, so the Claude idle "seen" times above are the wake (`UserPromptSubmit`), not a model request; the leader then ruled that hook out as evidence (above), so a Claude idle steer is now seen at its first `PreToolUse` or `Stop`, one inference later and shortly before the ack (about +3 s here). Pi's idle steers are seen inside the 1 s target; Claude's are woken inside it and seen one inference later. The lost-carry re-ring (5 s) is covered by tests, not this run: nothing was lost.
 
+## Worker workspaces
+
+- **One pane per worker workspace.** The launcher used to open a workspace and split its root shell to set the run's environment, which left a useless shell beside every worker. `workspace.create` takes `env` too (protocol 17 schema, confirmed live by spike `h06-workspace-env`: the root pane's shell saw the env, a blanked variable as set-but-empty, and the cwd), so the worker now runs in the root pane and nothing splits. `pane.split` left `ALLOWED_METHODS`. Liveness, resume (the same pane, reused while its shell is idle) and cleanup (`workspace.close` by `runs.workspace_id`) are unchanged.
+- **The workspace label is the task id alone** (`show-queued-work-m6`, the branch without `flowryn/`), not `flowryn <task>`, which Herdr's sidebar truncated to `flowryn show-…`. The pane's metadata title stays `flowryn <task>`.
+
 ## Live runs
 
 ### The cutover live run
