@@ -11,7 +11,7 @@ import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetSt
 import { LavishPoller } from "../../src/lavish/poller.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { checkReviewPage, dismissGateQuestions, openGateFeedback, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
 import { cancelRun, failRun, getRun } from "../../src/lifecycle/runs.ts";
 import { createRun } from "../../src/lifecycle/dispatch.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
@@ -150,9 +150,10 @@ describe("what lavish-axi poll printed", () => {
     expect(parsePollOutput("not toon at all: [").feedback).toEqual([]);
   });
 
-  test("feedback reads as a pass only when it opens with a pass word", () => {
+  test("feedback reads as a pass only when it opens with a pass word and asks for no changes after it", () => {
     for (const text of ["pass", "Approved, ship it", "LGTM", "looks good to me", "go ahead"]) expect(readsAsPass(text)).toBe(true);
     for (const text of ["do not pass yet", "passing thought: rename it", "not approved", "make the header bigger"]) expect(readsAsPass(text)).toBe(false);
+    for (const text of ["Looks good, but the header is wrong", "Approve once the colors are fixed", "LGTM except the footer", "ship it after the copy is fixed", "go ahead until the logo lands"]) expect(readsAsPass(text)).toBe(false);
   });
 
   test("a token that does not decode to an answer is counted, never recorded", () => {
@@ -485,6 +486,16 @@ describe("a gate's questions as decisions", () => {
     tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: [answer], note }));
     const verdict = gateAnswersNote(db, "g1")!;
     expect(verdict).toContain(`q3 (verb-name) = ${answer} [their note: ${note}]`);
+  });
+
+  test("a poll return with only notes kept (nothing decoded, nothing recorded) still opens a review_feedback item", () => {
+    open();
+    expect(tx(db, () => openGateFeedback(db, "g1", { recorded: [], feedback: [], notes: null }, NOW))).toBeNull();
+    const id = tx(db, () => openGateFeedback(db, "g1", { recorded: [], feedback: [], notes: "/tmp/lavish-notes-g1.txt" }, NOW));
+    expect(id).not.toBeNull();
+    const item = db.query("SELECT kind, line FROM items WHERE id = ?1").get(id) as { kind: string; line: string };
+    expect(item.kind).toBe("review_feedback");
+    expect(item.line).toBe(`Review feedback on ${taskId} (design gate g1): the user left notes beside the page`);
   });
 
   test("a cancelled run's open questions close unanswered, labelled as such, and its page is neither polled nor rewritten", () => {

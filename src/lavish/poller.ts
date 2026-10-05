@@ -269,7 +269,7 @@ export class LavishPoller {
     if (said("invalid").length > 0) parts.push(`${said("invalid").join(", ")}: the choice was not one the question offers; answer again.`);
     if (said("stale").length > 0) parts.push("An answer from an earlier version of this page was ignored.");
     if (notes) parts.push("Your leader has your notes now, and they reach the worker with the verdict.");
-    if (pass) parts.push("Your leader will ask you to confirm the pass in Flowryn.");
+    if (pass) parts.push("If you meant to pass the review, your leader will ask you to confirm it in Flowryn.");
     const { total, open } = this.deps.db.query("SELECT COUNT(*) AS total, COALESCE(SUM(state = 'open'), 0) AS open FROM decisions WHERE gate_id = ?1").get(gate) as { total: number; open: number };
     if (open > 0) parts.push(`${open} question${open === 1 ? "" : "s"} still open.`);
     else if (total > 0) parts.push("Every question is answered; the review now waits for your pass in Flowryn.");

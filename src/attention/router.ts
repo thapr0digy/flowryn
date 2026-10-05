@@ -121,7 +121,7 @@ export function questionBatch(db: Db, session: string, batchMs: number): Questio
 /** What a question push hands the model: a header and one line per question, like the digest. */
 export function questionsText(items: Pick<RankedItem, "id" | "lane" | "line">[], more = 0): string {
   const lines = [QUESTIONS_HEADER, ...items.map((i) => itemLine(i))];
-  if (more > 0) lines.push(`+${more} more: flowryn decision list`);
+  if (more > 0) lines.push(`+${more} more: flowryn fleet`);
   const text = lines.join("\n");
   return text.length >= DIGEST_MAX_CHARS ? `${text.slice(0, DIGEST_MAX_CHARS - 2)}…` : text;
 }
@@ -133,13 +133,15 @@ const QUESTION_WAKE = "Flowryn questions [";
  * and their decisions, at most P0_LINE_MAX characters. The woken turn's
  * prompt hook then adds each question's full line (questionsText).
  */
-export function questionWakeLine(items: Pick<RankedItem, "id" | "decision_id">[]): string {
+export function questionWakeLine(items: Pick<RankedItem, "id" | "kind" | "decision_id">[]): string {
   const ids = items.map((i) => i.id).join(",");
   const decisions = items.map((i) => i.decision_id).filter((d): d is string => d !== null);
   const head = `${QUESTION_WAKE}${ids}]: `;
-  const count = `${items.length} worker question${items.length === 1 ? "" : "s"} for the user`;
-  const line = `${head}${count}${decisions.length > 0 ? ` (${decisions.join(", ")})` : ""}. Details: flowryn decision list`;
-  return line.length <= P0_LINE_MAX ? line : `${head}${count}. Details: flowryn decision list`.slice(0, P0_LINE_MAX);
+  const onlyQuestions = items.every((i) => i.kind !== "review_feedback");
+  const count = `${items.length} ${onlyQuestions ? "worker question" : "item"}${items.length === 1 ? "" : "s"} for the user`;
+  const details = `. Details: flowryn ${onlyQuestions ? "decision list" : "fleet"}`;
+  const line = `${head}${count}${decisions.length > 0 ? ` (${decisions.join(", ")})` : ""}${details}`;
+  return line.length <= P0_LINE_MAX ? line : `${head}${count}${details}`.slice(0, P0_LINE_MAX);
 }
 
 function itemLine(item: Pick<RankedItem, "id" | "lane" | "line">): string {

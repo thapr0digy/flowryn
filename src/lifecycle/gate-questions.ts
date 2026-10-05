@@ -241,11 +241,13 @@ export function gatesToPoll(db: Db): PolledGate[] {
     .all() as PolledGate[];
 }
 
-/** Feedback that opens with one of these words reads as the user passing the review; it is surfaced, never acted on. */
+/** Feedback that opens with one of these words may read as the user passing the review; it is surfaced, never acted on. */
 const PASS_WORDS = /^\s*(pass(ed)?|approved?|lgtm|looks good|ship it|go ahead)\b/i;
+/** A clause after the pass word that still asks for changes makes the feedback changes, not a pass. */
+const CHANGES_CLAUSE = /\b(but|once|except|until|after)\b/i;
 
 export function readsAsPass(text: string): boolean {
-  return PASS_WORDS.test(text);
+  return PASS_WORDS.test(text) && !CHANGES_CLAUSE.test(text);
 }
 
 export interface GateFeedback {
@@ -264,7 +266,7 @@ export interface GateFeedback {
  * gate still passes only through a human channel. Call inside a transaction.
  */
 export function openGateFeedback(db: Db, gateId: string, input: GateFeedback, now: number): string | null {
-  if (input.recorded.length === 0 && input.feedback.length === 0) return null;
+  if (input.recorded.length === 0 && input.feedback.length === 0 && input.notes === null) return null;
   const gate = db.query("SELECT g.stage, r.id AS run_id, r.task_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gateId) as { stage: string; run_id: string; task_id: string } | null;
   if (!gate) return null;
   const parts: string[] = [];
@@ -280,8 +282,9 @@ export function openGateFeedback(db: Db, gateId: string, input: GateFeedback, no
     parts.push(`wrote "${sanitizeLine(input.feedback[0]!, 60)}"${more}`);
   }
   // An item line is one short line: the task id, not its title, and the pass first, so a long quote is what gets cut.
-  const pass = input.feedback.some(readsAsPass) ? " reads as a pass (put flowryn gate pass to the user)" : "";
-  const notes = input.notes ? "; notes beside the page" : "";
+  const pass = input.feedback.some(readsAsPass) ? " may read as a pass (ask the user; only flowryn gate pass passes it)" : "";
+  const notes = input.notes ? (parts.length > 0 ? "; notes beside the page" : "") : "";
+  if (parts.length === 0) parts.push("left notes beside the page");
   const line = `Review feedback on ${gate.task_id} (${gate.stage} gate ${gateId})${pass}: the user ${parts.join(" and ")}${notes}`;
   const event = appendEvent(db, { source: "daemon", kind: "gate.feedback", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, recorded: input.recorded, prompts: input.feedback.length, pass: pass.length > 0 }, ts: now });
   return openItem(db, { kind: "review_feedback", eventSeq: event.seq, taskId: gate.task_id, runId: gate.run_id, line, now });

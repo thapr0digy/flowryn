@@ -279,12 +279,12 @@ describe("the daemon listens on every review page", () => {
       queuePoll(f, 1, gate.id, [], ["approved, ship it"]);
       await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run) !== null, 10_000, "the review feedback item");
       const line = one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.line;
-      expect(line).toBe(`Review feedback on ${task} (design gate ${gate.id}) reads as a pass (put flowryn gate pass to the user): the user wrote "approved, ship it"; notes beside the page`);
+      expect(line).toBe(`Review feedback on ${task} (design gate ${gate.id}) may read as a pass (ask the user; only flowryn gate pass passes it): the user wrote "approved, ship it"; notes beside the page`);
       // It wakes the idle leader with the worker questions' batch; the gate passes only through a human channel.
       await waitUntil(async () => (await leader.saw(`Review feedback on ${task}`)) > 0, 15_000, "the leader woken with the feedback");
       expect(leader.seen.some((s) => s.via === "waiter" && s.text.includes("Flowryn questions ["))).toBe(true);
       expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)!.state).toBe("open");
-      await waitUntil(() => readFileSync(calls, "utf8").includes("Your leader will ask you to confirm the pass in Flowryn."), 10_000, "the reply on the page");
+      await waitUntil(() => readFileSync(calls, "utf8").includes("If you meant to pass the review, your leader will ask you to confirm it in Flowryn."), 10_000, "the reply on the page");
 
       const passed = await e.approve(task, { gate: "design" });
       expect(passed.ok).toBe(true);

@@ -65,7 +65,7 @@ describe("the question batch", () => {
     const batch = questionBatch(db, "L1", WINDOW)!;
     expect(batch.items).toHaveLength(QUESTION_BATCH_MAX);
     expect(batch.more).toBe(2);
-    expect(questionsText(batch.items, batch.more).split("\n").at(-1)).toBe("+2 more: flowryn decision list");
+    expect(questionsText(batch.items, batch.more).split("\n").at(-1)).toBe("+2 more: flowryn fleet");
   });
 
   test("what the user sent from a review page rides in the same batch as the worker questions", () => {
@@ -87,8 +87,8 @@ describe("the question batch", () => {
 describe("the wake line", () => {
   test("is one line of at most P0_LINE_MAX characters naming the items and decisions, and counts as a wake", () => {
     const items = [
-      { id: "i12", decision_id: "q7" },
-      { id: "i13", decision_id: "q10" },
+      { id: "i12", kind: "worker_question" as const, decision_id: "q7" },
+      { id: "i13", kind: "worker_question" as const, decision_id: "q10" },
     ];
     const line = questionWakeLine(items);
     expect(line).toBe("Flowryn questions [i12,i13]: 2 worker questions for the user (q7, q10). Details: flowryn decision list");
@@ -98,7 +98,18 @@ describe("the wake line", () => {
     expect(isWakePrompt(framed)).toBe(true);
     expect(isQuestionWake(framed)).toBe(true);
     expect(isQuestionWake("Flowryn P0 [i1]: x")).toBe(false);
-    const many = Array.from({ length: QUESTION_BATCH_MAX }, (_, n) => ({ id: `i${100_000 + n}`, decision_id: `q${100_000 + n}` }));
+    const many = Array.from({ length: QUESTION_BATCH_MAX }, (_, n) => ({ id: `i${100_000 + n}`, kind: "worker_question" as const, decision_id: `q${100_000 + n}` }));
+    expect(questionWakeLine(many).length).toBeLessThanOrEqual(P0_LINE_MAX);
+  });
+
+  test("names a batch holding review feedback as items, pointing at the fleet", () => {
+    const line = questionWakeLine([
+      { id: "i12", kind: "worker_question", decision_id: "q7" },
+      { id: "i13", kind: "review_feedback", decision_id: null },
+    ]);
+    expect(line).toBe("Flowryn questions [i12,i13]: 2 items for the user (q7). Details: flowryn fleet");
+    expect(isQuestionWake(line)).toBe(true);
+    const many = Array.from({ length: QUESTION_BATCH_MAX }, (_, n) => ({ id: `i${100_000 + n}`, kind: "review_feedback" as const, decision_id: null }));
     expect(questionWakeLine(many).length).toBeLessThanOrEqual(P0_LINE_MAX);
   });
 
