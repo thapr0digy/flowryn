@@ -128,6 +128,30 @@ describe("migrations", () => {
     expect(db.query("SELECT workflow_def FROM runs WHERE id = 'r3'").get()).toEqual({ workflow_def: null });
     db.close();
   });
+
+  test("every import source the retired cutover import stored becomes legacy:<id>, in all three tables", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 8));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, import_source) VALUES ('alpha', 'u', '/a', 'main', 'no-mistakes', 'cutover:alpha')");
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('mine', 'u', '/m', 'main', 'no-mistakes')");
+    db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at, import_source) VALUES ('alpha-q1', 'alpha', 'ship', 'no-mistakes', 0, 'fix', 1, 'cutover:alpha-q1')");
+    db.exec("INSERT INTO decisions (id, task_id, question, options, blocking, state, import_source) VALUES ('k1', 'decision-k1', 'Keep it?', '[]', 1, 'open', 'cutover:alpha-r2:with-colon')");
+    db.exec("INSERT INTO decisions (id, task_id, question, options, blocking, state, import_source) VALUES ('k2', 'decision-k2', 'Already?', '[]', 1, 'open', 'legacy:beta')");
+    expect(migrate(db, MIGRATIONS.slice(0, 9))).toEqual([9]);
+
+    expect(db.query("SELECT id, import_source FROM projects ORDER BY id").all()).toEqual([
+      { id: "alpha", import_source: "legacy:alpha" },
+      { id: "mine", import_source: null },
+    ]);
+    expect(db.query("SELECT import_source FROM task_policy").all()).toEqual([{ import_source: "legacy:alpha-q1" }]);
+    // Only the first colon ends the prefix; an id with its own colon keeps it, and a legacy row is left as is.
+    expect(db.query("SELECT id, import_source FROM decisions ORDER BY id").all()).toEqual([
+      { id: "k1", import_source: "legacy:alpha-r2:with-colon" },
+      { id: "k2", import_source: "legacy:beta" },
+    ]);
+    expect(migrate(db, MIGRATIONS.slice(0, 9))).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {

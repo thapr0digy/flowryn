@@ -111,7 +111,7 @@ NM
 # --- fake ps (written at setup time: it needs the pid) ----------------------
 # The fakes answer both forms a guard may use for a process's start time:
 # `ps -o pid=,lstart=,comm= -p <pids>` (Flowryn) and `ps -p <pid> -o lstart=`
-# (Firstmate). Calls about other pids go to the real /bin/ps untouched.
+# (the reference). Calls about other pids go to the real /bin/ps untouched.
 oc_write_fake_ps() {  # <pid> <mode>: flip:<n> | ghost | mark:<file>
   printf '%s\n' "$1" > "$OC_DIR/runtime/ps-pid"
   printf '%s\n' "$2" > "$OC_DIR/runtime/ps-mode"

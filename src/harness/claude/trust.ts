@@ -6,12 +6,12 @@ import type { Trust } from "../types.ts";
 
 /**
  * Claude Code's workspace trust (design section 5, preTrust), ported from
- * Firstmate's bin/fm-claude-trust.sh. Claude gates a folder it has never seen
+ * the previous orchestrator's bin/fm-claude-trust.sh. Claude gates a folder it has never seen
  * behind an interactive trust dialog that --permission-mode does not skip, and
  * Flowryn never answers a dialog with keys. So trust is checked, and in
  * `register` mode written, before launch.
  *
- * Firstmate's disassembly (2026-09-06) found Claude reads the canonical project
+ * The previous orchestrator's disassembly (2026-09-06) found Claude reads the canonical project
  * entry first, and canonicalizes a linked worktree to its PRIMARY CHECKOUT;
  * the external-CLAUDE.md-imports check reads only that canonical entry. A
  * linked worktree of a checkout that is already trusted therefore needs no

@@ -6,7 +6,6 @@ import { HOOK_CLI_VERBS } from "./commands/hook.ts";
 import { LEAD_VERBS } from "./commands/lead.ts";
 import { BOARD_VERBS } from "./commands/board.ts";
 import { APPROVE_VERBS } from "./commands/approve.ts";
-import { IMPORT_VERBS } from "./commands/import.ts";
 
 /**
  * The one command registry (design section 12): every verb the CLI accepts,
@@ -21,5 +20,4 @@ export const CLI_VERBS: readonly VerbSpec[] = [
   ...LEAD_VERBS,
   ...BOARD_VERBS,
   ...APPROVE_VERBS,
-  ...IMPORT_VERBS,
 ];

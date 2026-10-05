@@ -6,7 +6,7 @@ import { runCommand } from "./command.ts";
  * "never delete a live git index.lock"). A lock is provably stale only when
  * it exists, lsof proves nothing holds it or the worktree open, and it is at
  * least lock_age_ms old. Any doubt (lsof missing or failing, an unreadable
- * mtime) is "not provably stale", and the lock stays. Ported from Firstmate's
+ * mtime) is "not provably stale", and the lock stays. Ported from the previous orchestrator's
  * bin/fm-lock-lib.sh (fm_lock_is_provably_stale) at a09090d1.
  */
 

@@ -61,7 +61,7 @@
     <div class="stat bg-base-200 rounded-box"><div class="stat-title">Harnesses in v1</div><div class="stat-value text-primary">2</div><div class="stat-desc">Claude Code · Pi</div></div>
     <div class="stat bg-base-200 rounded-box"><div class="stat-title">Active leaders</div><div class="stat-value text-primary">1</div><div class="stat-desc">lease + handover</div></div>
   </div>
-  <div class="alert alert-soft text-sm"><span><span class="m0">M0</span> marks a claim that depends on platform behavior not yet proven on this machine. Each one is a test in the <a class="link link-primary" href="#milestones">M0 contract spikes</a>. Build nothing that depends on it until the spike passes. Unmarked platform facts were checked against the docs, the installed tools, or Firstmate's code during the v2 review. After the M0 spikes (<code>docs/m0-verdicts.md</code>): <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span> is confirmed on the tested version, <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span> means the text now says what the spike found The Pi marks were resolved by a later live run against Pi 0.87.1, driven by a deterministic scripted model.</span></div>
+  <div class="alert alert-soft text-sm"><span><span class="m0">M0</span> marks a claim that depends on platform behavior not yet proven on this machine. Each one is a test in the <a class="link link-primary" href="#milestones">M0 contract spikes</a>. Build nothing that depends on it until the spike passes. Unmarked platform facts were checked against the docs, the installed tools, or the previous orchestrator's code during the v2 review. After the M0 spikes (<code>docs/m0-verdicts.md</code>): <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span> is confirmed on the tested version, <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span> means the text now says what the spike found The Pi marks were resolved by a later live run against Pi 0.87.1, driven by a deterministic scripted model.</span></div>
 </header>
 
 <!-- ============ TOC ============ -->
@@ -81,7 +81,7 @@
     <li><a class="link" href="#workflows">Workflows, capacity and autonomy</a></li>
     <li><a class="link" href="#cli">CLI design</a></li>
     <li><a class="link" href="#schema">SQLite schema</a></li>
-    <li><a class="link" href="#safeguards">Safeguards carried from Firstmate</a></li>
+    <li><a class="link" href="#safeguards">Safeguards carried from the previous orchestrator</a></li>
     <li><a class="link" href="#setup">Setup and init</a></li>
     <li><a class="link" href="#failures">Failure modes and recovery</a></li>
     <li><a class="link" href="#milestones">Milestones</a></li>
@@ -105,7 +105,7 @@
       <tr><td>Outbox rows with <code>delivered_at</code>/<code>seen_at</code>; score formula; focus; age bump</td><td>Two delivery classes (actionable stays open until you resolve it; informational is at-least-once, confirmed by turn end) and an explicit lane table.</td><td><a class="link" href="#delivery">9</a></td></tr>
       <tr><td>Nothing about concurrent leaders</td><td>One active leader, held by a lease with explicit handover.</td><td><a class="link" href="#lease">10</a></td></tr>
       <tr><td>Claude idle wake through Herdr <code>agent.prompt</code> when the pane is unfocused</td><td>An <code>asyncRewake</code> Stop-hook waiter, one per session, gated on the harness's own idle signal plus <code>idle_prompt</code>. No keystroke delivery in v1.</td><td><a class="link" href="#adapters">5</a></td></tr>
-      <tr><td>"Never-discard guard", "merge authority" as names</td><td>Each safeguard has an invariant, an owning module, and fixtures ported from Firstmate.</td><td><a class="link" href="#safeguards">14</a></td></tr>
+      <tr><td>"Never-discard guard", "merge authority" as names</td><td>Each safeguard has an invariant, an owning module, and fixtures ported from the previous orchestrator.</td><td><a class="link" href="#safeguards">14</a></td></tr>
       <tr><td>Workers buffer MCP calls and retry</td><td>The CLI spools to disk when the daemon is down; hooks step aside; read verbs fall back to read-only SQLite.</td><td><a class="link" href="#cli">12</a></td></tr>
       <tr><td>Reattach runs by pane metadata</td><td>The <code>runs</code> row is the authority; metadata is only a correlator. Mismatch means orphaned, never adopted.</td><td><a class="link" href="#reconciler">6</a></td></tr>
       <tr><td>Scheduler with a priority queue, quota budget and profile routing</td><td>Capacity pools with hard caps and a host check. Phases of an approved plan start by themselves when their blockers land.</td><td><a class="link" href="#workflows">11</a></td></tr>
@@ -129,7 +129,7 @@
         <li><strong>Never lose what needs you.</strong> An actionable item stays open until you resolve it, and it is re-listed after every session start and compaction.</li>
         <li><strong>Rules in code, approval from a human.</strong> Merge, cleanup and destructive actions go through the policy engine, and "your word" is a recorded human approval, not the leader's claim.</li>
         <li><strong>Restart is a non-event.</strong> Durable state, a reconciler, an intent journal and a spool make a crash of the daemon, a worker or Herdr recoverable without chat memory.</li>
-        <li><strong>Small.</strong> Two harnesses, one runtime, one database. Target about a quarter of Firstmate's surface while keeping its hard-won safeguards.</li>
+        <li><strong>Small.</strong> Two harnesses, one runtime, one database. Target about a quarter of the previous orchestrator's surface while keeping its hard-won safeguards.</li>
         <li><strong>Personal to-dos.</strong> Stored and shown; items due today appear in the morning briefing; overdue items are P1. No separate reminders.</li>
         <li><strong>Autonomous within limits.</strong> Many workers at once, with hard caps on heavy stages. The next phase starts by itself when the previous one lands. You are needed only at review gates and merges (<a class="link" href="#workflows">section 11</a>).</li>
         <li><strong>Terse.</strong> The leader and workers answer in as few words as carry the outcome.</li>
@@ -154,9 +154,9 @@
   <h3 class="text-lg font-semibold">Premises, corrected</h3>
   <div class="overflow-x-auto rounded-box border border-base-content/10">
   <table class="table table-sm">
-    <thead><tr><th>Firstmate pain</th><th>Real cause</th><th>Flowryn's answer</th></tr></thead>
+    <thead><tr><th>Pain in the previous orchestrator</th><th>Real cause</th><th>Flowryn's answer</th></tr></thead>
     <tbody>
-      <tr><td>Supervision floods the main chat</td><td>The main agent is the supervisor. Firstmate's fix is a second LLM conversation that only exists on Pi (the supervision-branch extension is 2,330 lines).</td><td>Deterministic supervision in <code>flowrynd</code> for every harness; judgment work goes to the leader as pointers.</td></tr>
+      <tr><td>Supervision floods the main chat</td><td>The main agent is the supervisor. The previous orchestrator's fix is a second LLM conversation that only exists on Pi (the supervision-branch extension is 2,330 lines).</td><td>Deterministic supervision in <code>flowrynd</code> for every harness; judgment work goes to the leader as pointers.</td></tr>
       <tr><td>40+ state-file kinds, locks, cursors, generation acks</td><td>Files as the coordination medium. 98 of 739 commit subjects touch wake/ack/cursor handling.</td><td>One SQLite database in WAL mode; event row and state change in one transaction.</td></tr>
       <tr><td>Harness support is expensive</td><td>Lifecycle and push, not reporting: launch flags, three Claude trust dialogs, per-harness busy truth, eight turn-end mechanisms, composer typing (1,826 lines), version drift (126 commit subjects name a harness).</td><td>Two harnesses, integrated through their own plugin and extension APIs, behind a typed adapter with contract tests. No keystroke typing in v1.</td></tr>
       <tr><td>Wrong stale or wedged verdicts</td><td>Liveness is inferred everywhere, including in Herdr's own agent status, which is wrong in documented cases.</td><td>A reconciler with a ranked evidence hierarchy, and divergence events instead of silent choices.</td></tr>
@@ -301,7 +301,7 @@
       <text class="small" x="622" y="490" text-anchor="middle">runs · items · decisions · approvals · lease · intents · messages</text>
     </g>
 
-    <g id="p-herdr"><title>Herdr runtime: worktree.create, pane.split (with env), agent.start, pane.process_info, agent.get, events.subscribe</title>
+    <g id="p-herdr"><title>Herdr runtime: worktree.create, workspace.create (with env), agent.start, pane.process_info, agent.get, events.subscribe</title>
       <rect class="box" x="100" y="580" width="200" height="84" rx="10"/>
       <text class="lbl" x="200" y="606" text-anchor="middle">Herdr runtime</text>
       <text class="small" x="200" y="626" text-anchor="middle">worktree · pane · agent</text>
@@ -375,7 +375,7 @@
 <!-- ============ ADAPTERS ============ -->
 <section class="space-y-5" id="adapters">
   <h2 class="text-2xl font-bold">5 · The harness adapter interface</h2>
-  <p class="opacity-80 max-w-3xl">Supporting a harness costs lifecycle and push, not reporting. So the adapter is a typed interface covering exactly those, and v1 implements it twice: Claude Code and Pi. Each capability uses the harness's own hooks or extension API. Herdr keystroke delivery is not a v1 path; the only keystroke v1 sends is the interrupt key.</p>
+  <p class="opacity-80 max-w-3xl">Supporting a harness costs lifecycle and push, not reporting. So the adapter is a typed interface covering exactly those, and v1 implements it twice: Claude Code and Pi. Each capability uses the harness's own hooks or extension API. Herdr keystroke delivery is not a v1 steer path; v1 sends the interrupt key, and one fallback: the fixed steer pointer typed into an idle Claude worker whose waiter is gone, only while Herdr reads it settled (docs/m5-notes.md, "Idle workers").</p>
 
   <div class="grid lg:grid-cols-2 gap-4">
 <pre class="code"><code>// src/harness/types.ts — one adapter per harness
@@ -384,7 +384,7 @@ interface HarnessAdapter {
   // Lifecycle
   launch(spec: LaunchSpec): LaunchPlan;
     // args for Herdr agent.start; env goes on
-    // pane.split, whose params include env
+    // workspace.create, whose params include env
   preTrust(worktree: string): Promise&lt;Trust&gt;;
     // register trust before launch;
     // never answer a dialog with keys
@@ -449,8 +449,8 @@ type Verified = { ok: boolean;
   <table class="table table-sm">
     <thead><tr><th>Capability</th><th>Claude Code worker</th><th>Pi worker</th></tr></thead>
     <tbody>
-      <tr><td>launch</td><td>Herdr <code>pane.split</code> with the run's environment, then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks (<code>--settings</code> scoping <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>)</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run with <code>-e</code> <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>. The user's global Pi extensions load too unless the launch passes <code>--no-extensions</code>, which still keeps explicit <code>-e</code> paths <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
-      <tr><td>preTrust</td><td>Register workspace trust for the worktree path before launch (Firstmate does this in <code>~/.claude.json</code>). Claude has three dialogs that can wedge a fresh pane (workspace trust, external CLAUDE.md imports, bypass confirmation); none may be answered with keys.</td><td>Pi asks for trust only when the worktree has project resources (<code>.pi/settings.json</code>, <code>.pi/extensions</code> and the like, or <code>.agents/skills</code>). The Flowryn extension answers Pi's <code>project_trust</code> event for that one process without remembering it (equivalent to <code>--approve</code>), so no dialog appears and nothing is written to <code>&lt;agent-dir&gt;/trust.json</code> <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
+      <tr><td>launch</td><td>Herdr <code>workspace.create</code> with the run's environment (the workspace's one pane is the worker's), then <code>agent.start</code> with args: instructions as the positional prompt, model, effort, permission mode (<code>bypass</code> by default, <code>auto</code> per project; decided in review), and a per-run settings file carrying the worker hooks (<code>--settings</code> scoping <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>)</td><td>Same pane setup; exactly one positional argument (the instructions); the Flowryn extension loaded for the run with <code>-e</code> <span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span>. The user's global Pi extensions load too unless the launch passes <code>--no-extensions</code>, which still keeps explicit <code>-e</code> paths <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
+      <tr><td>preTrust</td><td>Register workspace trust for the worktree path before launch (the previous orchestrator does this in <code>~/.claude.json</code>). Claude has three dialogs that can wedge a fresh pane (workspace trust, external CLAUDE.md imports, bypass confirmation); none may be answered with keys.</td><td>Pi asks for trust only when the worktree has project resources (<code>.pi/settings.json</code>, <code>.pi/extensions</code> and the like, or <code>.agents/skills</code>). The Flowryn extension answers Pi's <code>project_trust</code> event for that one process without remembering it (equivalent to <code>--approve</code>), so no dialog appears and nothing is written to <code>&lt;agent-dir&gt;/trust.json</code> <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
       <tr><td>sessionId + isolation proof</td><td><code>SessionStart</code> runs <code>flowryn hook worker-start</code>: reports <code>session_id</code>, cwd, git top-level, git common dir and branch</td><td><code>session_start</code> in the extension reports the same</td></tr>
       <tr><td>busySource</td><td>Hooks: <code>UserPromptSubmit</code>, <code>Pre/PostToolUse</code>, <code>Stop</code>, <code>StopFailure</code>, <code>SessionEnd</code></td><td>Extension: <code>agent_start</code>, <code>agent_settled</code></td></tr>
       <tr><td>deliverWhileBusy</td><td><code>PostToolUse</code> returns pending steers as <code>additionalContext</code> beside the next tool result, the documented mid-turn channel; if the turn is ending, <code>Stop</code> continues with the steer. The worker contract must name this channel: without it, Sonnet 5 flagged a steer as prompt injection and ignored it <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td><td><code>sendMessage(…, {deliverAs: "steer"})</code>: delivered right after the current tool batch, mid-run, where <code>followUp</code> waits for the run to end <span class="m0rev" title="Revised after M0; see docs/m0-verdicts.md">M0 revised</span></td></tr>
@@ -469,7 +469,7 @@ type Verified = { ok: boolean;
     </div></div>
     <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-sm">Adding a harness after v1</h3>
-      <p class="opacity-85">Write the adapter and its contract suite, pinned to the installed version. A harness without native push would use Herdr <code>agent.prompt</code> only after proving the composer is empty, which is the costly subsystem Firstmate carries (1,826 lines). The interface keeps that fallback possible without v1 building it.</p>
+      <p class="opacity-85">Write the adapter and its contract suite, pinned to the installed version. A harness without native push would use Herdr <code>agent.prompt</code> only after proving the composer is empty, which is the costly subsystem the previous orchestrator carries (1,826 lines). The interface keeps that fallback possible without v1 building it.</p>
     </div></div>
   </div>
 </section>
@@ -508,7 +508,7 @@ type Verified = { ok: boolean;
     <g id="r6"><title>Reconcile every non-terminal run against the evidence hierarchy</title><rect class="core" x="686" y="30" width="122" height="84" rx="8"/><text class="lbl" x="747" y="60" text-anchor="middle">6 Reconcile</text><text class="small" x="747" y="80" text-anchor="middle">every open run</text><text class="small" x="747" y="96" text-anchor="middle">rank 1 → 5</text></g>
     <path class="edge" d="M810,72 L820,72" marker-end="url(#a3)"/>
     <g id="r7"><title>Re-read every pane named in a buffered event (Herdr events carry no revision or state_change_seq), then run steady state: every event plus a 60-second pass</title><rect class="box" x="822" y="30" width="132" height="84" rx="8"/><text class="lbl" x="888" y="60" text-anchor="middle">7 Steady</text><text class="small" x="888" y="80" text-anchor="middle">re-read buffered</text><text class="small" x="888" y="96" text-anchor="middle">event + 60 s pass</text></g>
-    <text class="small" x="480" y="148" text-anchor="middle">Steps 4–7 repeat on every Herdr reconnect. Firstmate's Herdr adapter already uses subscribe-then-snapshot.</text>
+    <text class="small" x="480" y="148" text-anchor="middle">Steps 4–7 repeat on every Herdr reconnect. The previous orchestrator's Herdr adapter already uses subscribe-then-snapshot.</text>
   </svg>
 
   <div class="grid md:grid-cols-2 gap-4 text-sm">
@@ -547,7 +547,7 @@ type Verified = { ok: boolean;
       <marker id="a4g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-success)"/></marker>
     </defs>
     <g id="ap-lead"><title>The leader asks to merge a task's PR</title><rect class="box" x="8" y="14" width="210" height="58" rx="8"/><text class="lbl" x="113" y="38" text-anchor="middle">Leader</text><text class="small" x="113" y="56" text-anchor="middle">flowryn merge T17</text></g>
-    <g id="ap-harness"><title>Channel 1: the harness prompts you. Claude ask rule plus PreToolUse ask; Pi ctx.ui.confirm in the extension.</title><rect class="human" x="8" y="112" width="210" height="72" rx="8"/><text class="lbl" x="113" y="138" text-anchor="middle">1 · Harness prompt</text><text class="small" x="113" y="156" text-anchor="middle">Claude ask rule</text><text class="small" x="113" y="172" text-anchor="middle">Pi ctx.ui.confirm</text></g>
+    <g id="ap-harness"><title>Channel 1: the harness prompts you. Claude PreToolUse ask; Pi ctx.ui.confirm in the extension.</title><rect class="human" x="8" y="112" width="210" height="72" rx="8"/><text class="lbl" x="113" y="138" text-anchor="middle">1 · Harness prompt</text><text class="small" x="113" y="156" text-anchor="middle">Claude PreToolUse ask</text><text class="small" x="113" y="172" text-anchor="middle">Pi ctx.ui.confirm</text></g>
     <g id="ap-shell"><title>Channel 2: you type flowryn approve in your own shell, or press approve on the board, and enter the challenge code from /dev/tty</title><rect class="human" x="8" y="222" width="210" height="72" rx="8"/><text class="lbl" x="113" y="248" text-anchor="middle">2 · flowryn approve</text><text class="small" x="113" y="266" text-anchor="middle">your shell · board</text><text class="small" x="113" y="282" text-anchor="middle">/dev/tty challenge</text></g>
     <g id="ap-yolo"><title>yolo: a per-project posture you set. Merges green, in-scope, non-sensitive work without a human record.</title><rect class="opt" x="262" y="90" width="180" height="50" rx="8"/><text class="lbl" x="352" y="111" text-anchor="middle">yolo posture</text><text class="small" x="352" y="128" text-anchor="middle">green · not sensitive</text></g>
     <g id="ap-rec"><title>approvals row: bound to task, canonical PR URL and head SHA; single use; expires after 24 hours; void if the head changes</title><rect class="core" x="262" y="150" width="180" height="96" rx="8"/><text class="lbl" x="352" y="176" text-anchor="middle">approvals row</text><text class="small" x="352" y="196" text-anchor="middle">bound to head SHA</text><text class="small" x="352" y="212" text-anchor="middle">single use · 24 h</text><text class="small" x="352" y="228" text-anchor="middle">channel + actor</text></g>
@@ -578,7 +578,7 @@ type Verified = { ok: boolean;
       <h3 class="card-title text-base">Claude leader</h3>
       <ol class="list-decimal ml-5 space-y-1 opacity-90">
         <li>The leader runs in <code>--permission-mode auto</code>. Ask rules that match a command's content still prompt in auto mode.</li>
-        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>. The ask rule <code>Bash(flowryn merge *)</code> is a second layer.</li>
+        <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>, which prompts in auto mode too. A routine merge (the task is yolo and not sensitive) is neither asked nor recorded, so it merges under yolo. There is no static merge ask rule: it would prompt for routine merges as well.</li>
         <li>If you approve, the command runs with the leader token. The daemon matches it to the attempt (same session and arguments, under 5 minutes old) and records channel <code>claude-ask</code>.</li>
         <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable. M0 found that the ask rule and the hook's ask both still prompt under bypass, but the leader never runs in bypass, so this refusal stays as defense in depth. The merge returns <code>approval_required</code>.</li>
       </ol>
@@ -631,7 +631,7 @@ type Verified = { ok: boolean;
 <!-- ============ STORES ============ -->
 <section class="space-y-5" id="stores">
   <h2 class="text-2xl font-bold">8 · tasks-axi vs SQLite, and the intent journal</h2>
-  <p class="opacity-80 max-w-3xl">Two stores share one lifecycle, with no shared transaction and a human who may hand-edit the backlog. Firstmate spends 1,255 lines of <code>bin/fm-backlog-transition-lib.sh</code> keeping such a pair coherent. Flowryn keeps it small with three rules: each fact lives in one store, only the intent journal calls tasks-axi, and your hand edits win unless they contradict a live run.</p>
+  <p class="opacity-80 max-w-3xl">Two stores share one lifecycle, with no shared transaction and a human who may hand-edit the backlog. The previous orchestrator spends 1,255 lines of <code>bin/fm-backlog-transition-lib.sh</code> keeping such a pair coherent. Flowryn keeps it small with three rules: each fact lives in one store, only the intent journal calls tasks-axi, and your hand edits win unless they contradict a live run.</p>
 
   <div class="overflow-x-auto rounded-box border border-base-content/10">
   <table class="table table-sm">
@@ -780,7 +780,7 @@ Needs you (3):
 - [i41] PR ready: auth fix (web) checks green
 - [i44] Worker question: cache scout, blocking
 - [i47] Overdue to-do: renew passport (Sep 20)
-In flight: 4 ships, 1 scout. Queued: 6.
+In flight: 4 ships, 1 scout. Queued: 6 (2 ready, 3 waiting, 1 held).
 Due today: call bank · book dentist
 Commands: flowryn fleet · flowryn show &lt;id&gt;
   · flowryn answer &lt;id&gt; &lt;choice&gt;</code></pre>
@@ -908,7 +908,7 @@ default = "plan"       # plan | manual
       <h3 class="card-title text-base">Stages and gates</h3>
       <ul class="list-disc ml-5 space-y-1 opacity-90">
         <li>A run moves through its workflow's stages in order. The lifecycle engine owns <code>runs.stage</code>. By default one worker and one worktree carry the whole run, so context survives. A stage with <code>fresh = true</code> gets a new worker, for example for an independent QA pass.</li>
-        <li>The worker finishes a stage with <code>flowryn stage done [--review &lt;url&gt;]</code>. It hosts the Lavish page itself, as Firstmate's workers do.</li>
+        <li>The worker finishes a stage with <code>flowryn stage done [--review &lt;url&gt;]</code>. It hosts the Lavish page itself, as the previous orchestrator's workers did.</li>
         <li>A <code>review</code> gate opens a P1 item: "design ready for review" with the link. You iterate with the worker inside Lavish. You pass the gate with a human channel: <code>flowryn approve &lt;task&gt; --gate design</code> or the board. The leader can also ask through its confirmation prompt with <code>flowryn gate pass</code>, which carries an ask rule. <code>flowryn gate changes &lt;task&gt; --body-file -</code> sends the run back to the named stage with your words.</li>
         <li>Gates are human-bound like merges (<a class="link" href="#approval">section 7</a>). A worker saying "you approved it in Lavish" is not a pass.</li>
       </ul>
@@ -980,6 +980,9 @@ fleet[4]{id,kind,project,state,age,needs}:
   api-flaky-p7,scout,api,ready,40m,read
   billing-mig-q4,ship,billing,blocked,5m,answer
   web-docs-z1,ship,web,running,12m,-
+queued[2]{id,kind,project,status,auto,waits,next,age}:
+  web-cart-api,ship,web,ready,off,-,flowryn dispatch web --task web-cart-api,1d
+  web-cart-page,ship,web,waiting,on,web-cart-api,starts when unblocked,1d
 open: P0 1 · P1 2
 hints[2]:
   flowryn show &lt;id&gt;
@@ -1043,7 +1046,7 @@ run: r01J8Z… harness: claude mode: no-mistakes yolo: off</code></pre>
     <div class="card bg-base-200"><div class="card-body py-4 space-y-2">
       <h3 class="card-title text-sm">Identity and transport</h3>
       <ul class="list-disc ml-5 space-y-1 opacity-90">
-        <li>At launch, the daemon sets <code>FLOWRYN_RUN</code>, <code>FLOWRYN_TOKEN</code> (a per-run capability), <code>FLOWRYN_BIN</code> (absolute path, so workers never depend on <code>PATH</code>), <code>FLOWRYN_SOCK</code> and <code>FLOWRYN_PROTO</code> on the Herdr <code>pane.split</code> call.</li>
+        <li>At launch, the daemon sets <code>FLOWRYN_RUN</code>, <code>FLOWRYN_TOKEN</code> (a per-run capability), <code>FLOWRYN_BIN</code> (absolute path, so workers never depend on <code>PATH</code>), <code>FLOWRYN_SOCK</code> and <code>FLOWRYN_PROTO</code> on the Herdr <code>workspace.create</code> call.</li>
         <li>The leader token comes from the lease (<a class="link" href="#adapters">section 5</a>). Tokens are stored only as hashes.</li>
         <li>Commands never infer a task from the working directory.</li>
         <li>JSON over a local socket. On macOS: a Unix socket at <code>~/.flowryn/run/flowrynd.sock</code> in a mode-0700 directory; the path is fixed and short because macOS limits socket paths to 104 bytes. All socket code sits behind <code>src/transport/</code> (see Portability below).</li>
@@ -1093,7 +1096,7 @@ Be terse: outcomes only, no recaps.
 {
   "permissions": {
     "allow": ["Bash(flowryn *)"],
-    "ask":   ["Bash(flowryn merge *)", "Bash(flowryn gate pass *)",
+    "ask":   ["Bash(flowryn gate pass *)",
               "Bash(flowryn cleanup * --discard*)"],
     "deny":  ["Bash(flowryn approve*)",
               "Bash(flowryn hook *)"]
@@ -1259,8 +1262,8 @@ CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
 
 <!-- ============ SAFEGUARDS ============ -->
 <section class="space-y-5" id="safeguards">
-  <h2 class="text-2xl font-bold">14 · Safeguards carried over from Firstmate</h2>
-  <p class="opacity-80 max-w-3xl">These took Firstmate the longest to get right. Each has a named invariant, one owning module, and tests ported from Firstmate before the module is written.</p>
+  <h2 class="text-2xl font-bold">14 · Safeguards carried over from the previous orchestrator</h2>
+  <p class="opacity-80 max-w-3xl">These took the previous orchestrator the longest to get right. Each has a named invariant, one owning module, and tests ported from it before the module is written.</p>
   <div class="overflow-x-auto rounded-box border border-base-content/10">
   <table class="table table-sm">
     <thead><tr><th>Safeguard</th><th>Invariant</th><th>Owner</th></tr></thead>
@@ -1288,7 +1291,7 @@ CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
   </div>
 
   <h3 class="text-lg font-semibold">Cleanup-guard fixtures, ported from <code>tests/fm-teardown.test.sh</code></h3>
-  <p class="text-sm opacity-80 max-w-3xl">Each case becomes a language-neutral fixture: a JSON manifest (delivery mode, forge answers, expected verdict) plus a shell script that builds the git state with a bare "origin", optionally a fork remote, and a fake forge. Flowryn's TypeScript guard must pass all of them before it is used. Names are kept from Firstmate so the two can be compared.</p>
+  <p class="text-sm opacity-80 max-w-3xl">Each case becomes a language-neutral fixture: a JSON manifest (delivery mode, forge answers, expected verdict) plus a shell script that builds the git state with a bare "origin", optionally a fork remote, and a fake forge. Flowryn's TypeScript guard must pass all of them before it is used. Names are kept from the previous orchestrator so the two can be compared.</p>
   <div class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
     <div><span class="badge badge-success badge-soft badge-xs">allow</span> <code>local_only_fork_remote</code></div>
     <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>local_only_truly_unpushed</code></div>
@@ -1312,7 +1315,7 @@ CREATE TABLE harness_contracts (harness TEXT NOT NULL, version TEXT NOT NULL,
     <div><span class="badge badge-error badge-soft badge-xs">refuse</span> <code>gh_error_and_content_absent</code></div>
     <div><span class="badge badge-warning badge-soft badge-xs">discard</span> <code>local_only_force_overrides_unpushed</code> → only with a human <code>discard</code> approval</div>
   </div>
-  <p class="text-sm opacity-75">A second fixture set, for M4, ports the index-lock cases (stale lock cleared, live lock never removed, lookup errors refuse) and the process-reap and parked-run-abort ordering cases. Firstmate's legacy-record, secondmate and Herdr-projection cases have no Flowryn counterpart and are not ported.</p>
+  <p class="text-sm opacity-75">A second fixture set, for M4, ports the index-lock cases (stale lock cleared, live lock never removed, lookup errors refuse) and the process-reap and parked-run-abort ordering cases. The previous orchestrator's legacy-record, secondmate and Herdr-projection cases have no Flowryn counterpart and are not ported.</p>
 </section>
 
 <!-- ============ SETUP ============ -->
@@ -1404,7 +1407,7 @@ max_triggered_turns_per_hour = 3</code></pre>
   <div class="card card-border border-warning/60"><div class="card-body py-4 space-y-3">
     <h3 class="card-title">M0 · Contract spikes and fixtures <span class="badge badge-warning badge-soft badge-sm">before any product code</span></h3>
     <p class="text-sm opacity-85">Throwaway harnesses in a scratch Herdr session named <code>flowryn-contract</code>. Each spike ends with a recorded verdict and the exact version tested. A failed spike changes this document before M1 starts.</p>
-    <p class="text-sm opacity-85"><strong>Result (2026-09-23).</strong> Every Claude, Herdr, tasks-axi and no-mistakes spike has a verdict in <code>docs/m0-verdicts.md</code>, and this document was edited to match. The Pi spikes ran later against Pi 0.87.1 in the same kind of lab session, with every model turn from a deterministic scripted provider (no credentials, no network), and their marks are now confirmed or revised. The spikes ran in an isolated lab session created by Firstmate's <code>fm-herdr-lab.sh</code>, not in <code>flowryn-contract</code>. The cleanup-guard fixtures are in <code>fixtures/cleanup-guard/</code>.</p>
+    <p class="text-sm opacity-85"><strong>Result (2026-09-23).</strong> Every Claude, Herdr, tasks-axi and no-mistakes spike has a verdict in <code>docs/m0-verdicts.md</code>, and this document was edited to match. The Pi spikes ran later against Pi 0.87.1 in the same kind of lab session, with every model turn from a deterministic scripted provider (no credentials, no network), and their marks are now confirmed or revised. The spikes ran in an isolated lab session created by the previous orchestrator's lab helper (now vendored as <code>spikes/lib/herdr-lab.sh</code>), not in <code>flowryn-contract</code>. The cleanup-guard fixtures are in <code>fixtures/cleanup-guard/</code>.</p>
     <div class="grid md:grid-cols-2 gap-4 text-sm">
       <div>
         <h4 class="font-semibold">Claude bridge (Claude Code 2.1.281)</h4>
@@ -1433,7 +1436,7 @@ max_triggered_turns_per_hour = 3</code></pre>
         </ul>
       </div>
     </div>
-    <div class="text-sm"><strong>Fixtures:</strong> port the 21 landed-work cases from Firstmate's <code>tests/fm-teardown.test.sh</code> as cleanup-guard fixtures (<a class="link" href="#safeguards">section 14</a>), with expected verdicts, runnable against any implementation.</div>
+    <div class="text-sm"><strong>Fixtures:</strong> port the 21 landed-work cases from the previous orchestrator's <code>tests/fm-teardown.test.sh</code> as cleanup-guard fixtures (<a class="link" href="#safeguards">section 14</a>), with expected verdicts, runnable against any implementation.</div>
     <div class="text-sm opacity-80"><strong>Exit:</strong> every spike has a verdict; every <span class="m0">M0</span> mark in this document is either confirmed or replaced.</div>
   </div></div>
 
@@ -1443,7 +1446,7 @@ max_triggered_turns_per_hour = 3</code></pre>
     <li class="step step-primary"><div class="text-left py-2"><strong>M3 · Leaders and attention.</strong> <span class="opacity-80 text-sm">M3a Claude bridge, M3b Pi bridge, both passing one shared bridge contract suite. Lane table, items, presentations, notifications; briefing with the morning section and to-dos; lease and handover; read-only <code>flowryn board</code>. Exit: the nine races in section 9 each have a passing test.</span></div></li>
     <li class="step step-primary"><div class="text-left py-2"><strong>M4 · Delivery and policy.</strong> <span class="opacity-80 text-sm">no-mistakes, direct-PR, local-only; GitHub watcher; named-head gate; approval channel (all four channels); merge gate with red refusal and proof; cleanup guard with both fixture sets green; board approve. Exit: a ship goes from dispatch to merged and cleaned on each leader, with approval from each channel.</span></div></li>
     <li class="step step-primary"><div class="text-left py-2"><strong>M5 · Workflows, capacity, autonomy. v1.</strong> <span class="opacity-80 text-sm">Workflow stages and review gates; capacity pools with the host check and Docker label evidence; <code>plan</code> and auto-dispatch on landing; the terse style block; the three stage skills (<code>flowryn-design</code>, <code>flowryn-build-test</code>, <code>flowryn-visual-qa</code>). Exit: a two-phase feature runs design, review, build, visual QA, review, ship and merge, and phase 2 starts by itself, with 20 workers under the caps on a real machine.</span></div></li>
-    <li class="step"><div class="text-left py-2"><strong>After v1.</strong> <span class="opacity-80 text-sm">The headless triage runner first. Then side-by-side running with Firstmate (split by project, in a separate named Herdr session) and backlog import; the Obsidian plugin, status out first; a Herdr plugin-pane board; more harnesses, each through the adapter and its contract suite; Claude channels or plugin monitors once they leave preview.</span></div></li>
+    <li class="step"><div class="text-left py-2"><strong>After v1.</strong> <span class="opacity-80 text-sm">The headless triage runner first. Then side-by-side running with the previous orchestrator (split by project, in a separate named Herdr session) and backlog import; the Obsidian plugin, status out first; a Herdr plugin-pane board; more harnesses, each through the adapter and its contract suite; Claude channels or plugin monitors once they leave preview.</span></div></li>
   </ul>
 </section>
 
@@ -1460,7 +1463,7 @@ max_triggered_turns_per_hour = 3</code></pre>
 </section>
 
 <footer class="text-xs opacity-60 pt-6 border-t border-base-content/10 space-y-2">
-  <p>Evidence base: the v2 design and its principal-engineer review (2026-09-23), both in this task's data directory. That review checked Firstmate at <code>fdd36879</code> (AGENTS.md 634 lines; 739 commits), Claude Code 2.1.281 and its official hooks, permission, channels and plugin docs, Pi's README and extension docs plus Firstmate's live Pi extensions, Herdr 0.7.5 / protocol 17 through <code>herdr api schema --json</code>, tasks-axi 0.2.5, and a Bun 1.3.8 compile experiment.</p>
+  <p>Evidence base: the v2 design and its principal-engineer review (2026-09-23), both in this task's data directory. That review checked the previous orchestrator at <code>fdd36879</code> (AGENTS.md 634 lines; 739 commits), Claude Code 2.1.281 and its official hooks, permission, channels and plugin docs, Pi's README and extension docs plus the previous orchestrator's live Pi extensions, Herdr 0.7.5 / protocol 17 through <code>herdr api schema --json</code>, tasks-axi 0.2.5, and a Bun 1.3.8 compile experiment.</p>
   <p>Rechecked for v3: tasks-axi 0.2.5 help (caller-supplied ids on <code>add</code>, per-command <code>--file</code>, <code>hold --until</code> and <code>--kind</code>, priority 0–4, no due-date field); the Herdr schema (<code>AgentStartParams</code> has <code>args</code>, <code>kind</code>, <code>name</code>, <code>pane_id</code>, <code>timeout_ms</code> and no env; <code>PaneSplitParams</code> has <code>env</code>; <code>revision</code>, <code>state_change_seq</code> and <code>agent_session</code> present; no replay or cursor field); the cleanup cases in <code>tests/fm-teardown.test.sh</code>.</p>
 </footer>
 </main>

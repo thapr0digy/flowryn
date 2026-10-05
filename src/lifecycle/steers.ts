@@ -45,7 +45,7 @@ export type RingState = "carried" | "seen" | "lost";
 
 export const MAX_STEER_CHARS = 8_000;
 
-export type RingPath = "post-tool" | "pre-tool" | "stop" | "waiter" | "extension";
+export type RingPath = "post-tool" | "pre-tool" | "stop" | "waiter" | "extension" | "keys";
 
 function nextMessageId(db: Db): string {
   const next = Number(getMeta(db, "next_message_no") ?? "1");

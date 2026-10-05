@@ -14,7 +14,7 @@ import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
-import { recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
+import { isRoutineMerge, recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -372,13 +372,20 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
   return { line: `merge ${run.task_id} (${title}): ${where}`, prUrl: approvalRef(shipped), head };
 }
 
+/** A yolo, non-sensitive merge: no prompt and no attempt, so the merge gate records yolo. */
+function routineMerge(ctx: HandlerCtx, ref: string): boolean {
+  const run = findRun(ctx.db, ref);
+  return run !== null && isRoutineMerge(ctx.db, run.task_id);
+}
+
 /**
  * Claude PreToolUse (design section 7): a Bash call that runs `flowryn
  * merge` (or a cleanup --discard) is recorded as an attempt (session, tool
  * use id, arguments, permission mode, and the PR and head the prompt names)
  * and answered with "ask", so Claude puts it in front of you even in auto
  * mode (M0 c08). The merge that follows matches this attempt; without one,
- * it is refused.
+ * it is refused. A routine merge (yolo, not sensitive) is the exception: it
+ * is neither asked nor recorded, and the gate takes the yolo posture.
  *
  * Fail-closed root cause fix: every tool call of a Claude leader session,
  * gated or not and whatever the tool, first voids every one of this
@@ -405,6 +412,7 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResu
   if (gated.length === 0) return result;
   const lines: string[] = [];
   for (const g of gated) {
+    if (g.action === "merge" && routineMerge(ctx, g.task)) continue;
     const facts = promptFacts(ctx, g, command);
     // Refusal by construction: a line naming more than one captain decide is gated and prompted, but
     // no attempt is ever recorded for it, so the decide calls it runs can never find one to match.
@@ -413,6 +421,7 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResu
     }
     lines.push(facts.line);
   }
+  if (lines.length === 0) return result;
   return { data: { permission: "ask", reason: `Flowryn needs your word: ${lines.join("; ")}. Approve only if you want this.` } };
 }
 

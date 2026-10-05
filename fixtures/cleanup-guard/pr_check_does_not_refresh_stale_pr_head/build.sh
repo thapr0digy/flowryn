@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pr_check_does_not_refresh_stale_pr_head - builds the git state and fake forge for this cleanup-guard case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_pr_check_does_not_refresh_stale_pr_head (matrix row o).
+# Ported from the reference's tests/fm-teardown.test.sh:test_pr_check_does_not_refresh_stale_pr_head (matrix row o).
 # Usage: build.sh <out-dir>
 # shellcheck source=../lib/build-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/build-common.sh"

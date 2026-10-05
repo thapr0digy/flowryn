@@ -6,7 +6,7 @@
 //
 // API source of truth: Pi 0.87.1 docs/custom-provider.md ("Implement custom streaming")
 // and examples/extensions/custom-provider-anthropic; the legacy ProviderConfig form with
-// streamSimple matches Firstmate's live offline providers (tests/fm-calm-pi-extension.test.sh,
+// streamSimple matches the previous orchestrator's live offline providers (tests/fm-calm-pi-extension.test.sh,
 // tests/fm-sessionstart-hook-live-e2e.test.sh).
 //
 // A spike scripts the model inside its prompt. The newest user message whose text contains

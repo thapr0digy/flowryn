@@ -196,6 +196,8 @@ export interface Timing {
   max_rings: number;
   /** Idle this long without an outcome: a P1 pointer. */
   idle_alert_ms: number;
+  /** That pointer (or the stale-hook one) opens once per episode; dismissed, it comes back only this long after it opened. */
+  idle_realert_ms: number;
   /** Busy with no hook event this long: a P1 pointer. */
   stale_hook_ms: number;
   /** How long a launch waits for the harness process to appear in its pane. */
@@ -206,6 +208,13 @@ export interface Timing {
   wait_poll_ms: number;
   /** A steer carried to an idle worker and not seen in a model request this long is lost: it rings again. */
   seen_timeout_ms: number;
+  /**
+   * An idle Claude worker with a due steer and no waiter for this long (and
+   * at least two passes): the reconciler types the steer pointer into its
+   * pane instead (src/lifecycle/idle-carry.ts). Covers a waiter that expired
+   * (8 h) or died with an old daemon; a live waiter reconnects well within it.
+   */
+  waiter_grace_ms: number;
   /**
    * Busy (or a busy lease lapsed without a Stop) with no hook this long: a
    * suspected prompt when Herdr reads "blocked" (Claude), or reads a known
@@ -228,11 +237,13 @@ export const DEFAULT_TIMING: Timing = {
   ring_interval_ms: 5 * 60_000,
   max_rings: 4,
   idle_alert_ms: 15 * 60_000,
+  idle_realert_ms: 4 * 60 * 60_000,
   stale_hook_ms: 30 * 60_000,
   launch_timeout_ms: 20_000,
   exit_grace_ms: 10_000,
   wait_poll_ms: 25_000,
   seen_timeout_ms: 5_000,
+  waiter_grace_ms: 20_000,
   prompt_suspect_ms: 120_000,
   steer_preempt_after_ms: 3_000,
 };

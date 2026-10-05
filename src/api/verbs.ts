@@ -36,6 +36,8 @@ export interface FlagSpec {
   help: string;
   /** Name of the argument a `--<flag>-file <path|->` flag fills; the CLI reads the file (or stdin) and sends the text. */
   fileFor?: string;
+  /** A free-text flag: a lone `-` value makes the CLI read the text from stdin instead. */
+  stdin?: boolean;
   placeholder?: string;
 }
 
@@ -213,7 +215,7 @@ export function usage(spec: VerbSpec): string {
   for (const p of spec.positionals) parts.push(p.required ? `<${p.name}>` : `[<${p.name}>]`);
   for (const [name, flag] of Object.entries(spec.flags)) {
     if (flag.type === "boolean") parts.push(`[--${name}]`);
-    else parts.push(`[--${name} <${flag.placeholder ?? (flag.fileFor ? "path|-" : name)}>]`);
+    else parts.push(`[--${name} <${flag.placeholder ?? (flag.fileFor ? "path|-" : name)}${flag.stdin ? "|-" : ""}>]`);
   }
   if (spec.rest) parts.push(`[-- <${spec.rest.name}...>]`);
   return parts.join(" ");

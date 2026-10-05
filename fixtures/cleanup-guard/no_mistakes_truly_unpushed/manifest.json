@@ -1,7 +1,7 @@
 {
   "name": "no_mistakes_truly_unpushed",
   "ported_from": "tests/fm-teardown.test.sh:test_no_mistakes_truly_unpushed_refuses",
-  "firstmate_matrix_row": "e",
+  "reference_matrix_row": "e",
   "description": "no-mistakes task with real content (feature.txt) that is not pushed, has no PR (the forge knows no PR for the branch), and never landed on origin/main. Genuinely unlanded work: refused.",
   "delivery_mode": "no-mistakes",
   "inputs": {

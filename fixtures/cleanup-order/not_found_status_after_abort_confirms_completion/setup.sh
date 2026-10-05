@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # not_found_status_after_abort_confirms_completion - starts the runtime state (locks, processes, no-mistakes answers) for this cleanup-order case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_not_found_status_after_abort_confirms_completion.
+# Ported from the reference's tests/fm-teardown.test.sh:test_not_found_status_after_abort_confirms_completion.
 # Usage: setup.sh <scenario-dir>
 # shellcheck source=../lib/order-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/order-common.sh"

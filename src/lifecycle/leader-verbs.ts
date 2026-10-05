@@ -19,6 +19,7 @@ import { flowLine, gatesOf, runWorkflow } from "./stages.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
 import { latestMerge } from "../policy/merge.ts";
+import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
   const run = findRun(db, ref);
@@ -286,8 +287,26 @@ function planLine(ctx: ReadCtx, taskId: string): string {
 
 const MAX_FLEET_ROWS = 20;
 const MAX_NEEDS_ROWS = 10;
+const MAX_QUEUED_ROWS = 10;
 
-/** `flowryn fleet`: every open run and today's finished ones, at most 20 rows (design section 12). */
+function queuedRow(ctx: ReadCtx, q: QueuedTask): Record<string, unknown> {
+  return {
+    id: q.id,
+    kind: q.kind,
+    project: q.project,
+    status: q.status,
+    auto: q.auto,
+    waits: sanitizeLine(waitsCell(q), 80),
+    next: q.next,
+    age: queuedAge(ctx.now, q, age),
+  };
+}
+
+/**
+ * `flowryn fleet`: every open run and today's finished ones, at most 20 rows
+ * (design section 12), then the queued work no run has started yet, ready
+ * first, at most 10 rows.
+ */
 const fleet: VerbSpec = {
   name: "fleet",
   summary: "Every worker: task, kind, project, state, liveness, age and what it needs",
@@ -318,13 +337,20 @@ const fleet: VerbSpec = {
     const count = (lane: string) => lanes.find((l) => l.lane === lane)?.n ?? 0;
     const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}`, capacity: capacityLine(ctx) };
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;
+    const queued = queuedWork(ctx.db);
+    if (queued.length > 0) {
+      data.queued = queued.slice(0, MAX_QUEUED_ROWS).map((q) => queuedRow(ctx, q));
+      if (queued.length > MAX_QUEUED_ROWS) data.queued_more = `${queued.length - MAX_QUEUED_ROWS} more queued: backlog.md`;
+    }
     // Every open actionable item, P0 first: fleet lists what needs you, like every briefing (design section 9).
     const waiting = openActionable(ctx.db, ctx.now, leaderTiming(ctx.config).age_ms);
     if (waiting.length > 0) {
       data.needs = waiting.slice(0, MAX_NEEDS_ROWS).map((i) => ({ id: i.id, lane: i.lane, line: sanitizeLine(i.line, 120) }));
       if (waiting.length > MAX_NEEDS_ROWS) data.needs_more = `${waiting.length - MAX_NEEDS_ROWS} more: flowryn board`;
     }
-    return { data, hints: list.length > 0 ? ["flowryn show <id>", "flowryn steer <id> --body-file -"] : ["flowryn dispatch <project> --kind scout --body-file -"] };
+    if (list.length > 0) return { data, hints: ["flowryn show <id>", "flowryn steer <id> --body-file -"] };
+    if (queued.length > 0) return { data, hints: ["flowryn show <id>", "flowryn dispatch <project> --task <id>"] };
+    return { data, hints: ["flowryn dispatch <project> --kind scout --body-file -"] };
   },
 };
 
@@ -340,6 +366,62 @@ export function capacityLine(ctx: ReadCtx): string {
   const counts = liveCounts(ctx.db);
   const waiting = (ctx.db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead')").get() as { n: number }).n;
   return `${Object.entries(caps).map(([pool, cap]) => `${pool} ${counts[pool] ?? 0}/${cap}`).join(" · ")}${waiting > 0 ? ` · waiting ${waiting}` : ""}`;
+}
+
+const QUEUED_BODY_LINES = 6;
+
+/** What `show` hints for a queued task: the command that starts it, or its first blocker. */
+function queuedHints(q: QueuedTask): string[] {
+  if (q.next.startsWith("flowryn ")) return [q.next];
+  if (q.status === "waiting" && q.waits[0]) return [`flowryn show ${q.waits[0]}`];
+  if (q.status === "ready" && q.plan) return [`flowryn show ${q.plan.id}`];
+  return [];
+}
+
+function filedLine(ctx: ReadCtx, q: QueuedTask): string {
+  if (q.filed === "backlog") return `by hand in backlog.md${q.createdDay ? ` on ${q.createdDay}` : ""}`;
+  const when = q.createdAt === null ? "" : `${age(ctx.now, q.createdAt)} ago, `;
+  return q.filed === "imported" ? `${when}imported (${q.importSource})` : `${when}by flowryn`;
+}
+
+/** `show` for a Queued task no run has started: what it is, what it waits for, and what starts it. */
+function queuedView(ctx: ReadCtx, q: QueuedTask): { data: Record<string, unknown>; hints: string[] } {
+  const policy = q.policy;
+  const runs = (ctx.db.query("SELECT id, state, started_at FROM runs WHERE task_id = ?1 ORDER BY started_at").all(q.id) as { id: string; state: string; started_at: number }[]).map(
+    (r) => `${r.id} ${r.state} ${age(ctx.now, r.started_at)} ago`,
+  );
+  const events = (ctx.db.query("SELECT ts, kind FROM events WHERE task_id = ?1 ORDER BY seq DESC LIMIT 8").all(q.id) as { ts: number; kind: string }[])
+    .toReversed()
+    .map((e) => `${age(ctx.now, e.ts)} ago ${e.kind}`);
+  const body = q.body
+    .split("\n")
+    .slice(0, QUEUED_BODY_LINES)
+    .map((line) => sanitizeLine(line, 120))
+    .join("\n");
+  const hold = q.hold ? [q.hold.kind, q.hold.reason, q.hold.until ? `until ${q.hold.until}` : null].filter((s) => s).join(" · ") : "-";
+  return {
+    data: {
+      task: q.id,
+      title: sanitizeLine(q.title, 120),
+      state: "queued",
+      status: q.status,
+      next: q.next,
+      kind: q.kind,
+      project: q.project,
+      ...(policy ? { mode: policy.mode_reason ? `${policy.delivery_mode} (${policy.mode_reason})` : policy.delivery_mode, workflow: policy.workflow } : {}),
+      priority: q.priority ?? "-",
+      auto: q.auto,
+      blocked_by: q.blockedBy,
+      waits: q.waits,
+      hold: sanitizeLine(hold, 120),
+      ...(q.plan ? { plan: `${q.plan.id} phase ${q.plan.phase} of ${q.plan.of}: ${sanitizeLine(q.plan.title, 80)}` } : {}),
+      filed: filedLine(ctx, q),
+      body,
+      runs,
+      events,
+    },
+    hints: queuedHints(q),
+  };
 }
 
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines. */
@@ -365,6 +447,8 @@ const show: VerbSpec = {
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
       if (item) return { data: { item: target, lane: item.lane, state: item.state, line: item.line } };
+      const queued = queuedTask(ctx.db, target);
+      if (queued) return queuedView(ctx, queued);
       const phase = phaseOfTask(ctx.db, target);
       if (phase) return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...planView(ctx.db, phase.plan_id) }, hints: [`flowryn show ${phase.plan_id}`] };
       throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
@@ -375,6 +459,8 @@ const show: VerbSpec = {
       delivery_mode: string;
       mode_reason: string | null;
     };
+    // A task Queued again after its run failed or was cancelled: the run's evidence, and what starts it again.
+    const requeued = isTerminal(run.state) ? queuedTask(ctx.db, run.task_id) : null;
     // Delivery is "seen" (in a model request); the ack is compliance. Times are after the steer was created.
     const steers = recentSteers(ctx.db, run.id, 5).map((m) => ({ id: m.id, rings: m.rings, delivery: steerStatus(m, ctx.now), body: sanitizeLine(m.body, 60) }));
     const decisions = (ctx.db.query("SELECT id, state, question, answer FROM decisions WHERE run_id = ?1 ORDER BY id").all(run.id) as {
@@ -407,6 +493,7 @@ const show: VerbSpec = {
         liveness: run.liveness,
         workflow: `${run.workflow}: ${flowLine(runWorkflow(ctx.db, run, policy.kind as "ship" | "scout"))}`,
         stage: stageLabel(run),
+        ...(requeued ? { queued: `${requeued.status} · ${requeued.next}` } : {}),
         ...(gatesView(ctx, run.id) ? { gates: gatesView(ctx, run.id) } : {}),
         leases: runLeases(ctx.db, run.id).map((l) => l.pool).join(" ") || "-",
         ...(phaseOfTask(ctx.db, run.task_id) ? { plan: planLine(ctx, run.task_id) } : {}),

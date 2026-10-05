@@ -1,7 +1,7 @@
 {
   "name": "local_only_truly_unpushed",
   "ported_from": "tests/fm-teardown.test.sh:test_local_only_truly_unpushed_refuses",
-  "firstmate_matrix_row": "b",
+  "reference_matrix_row": "b",
   "description": "Local-only task with one empty commit that exists nowhere else: not on any remote, not merged into the local default branch. Cleanup would destroy it, so it is refused.",
   "delivery_mode": "local-only",
   "inputs": {

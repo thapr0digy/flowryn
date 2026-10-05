@@ -12,6 +12,8 @@ import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/her
 import { isAlive, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
 import { clearPrompt, idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
+import { idleAlertDue, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
+import { carryIdleSteer, idleCarryBlocker } from "../lifecycle/idle-carry.ts";
 import { noteHerdrUp } from "./herdr-health.ts";
 import { applyDocker, listLabelled } from "./docker.ts";
 import { checkInvariant } from "./invariant.ts";
@@ -29,8 +31,9 @@ import { contractsCommand, type HarnessCheck } from "../lifecycle/harness-gate.t
  *
  * The only automatic actions (design section 6): resume a dead run once from
  * its stored session; re-ring an unacknowledged steer (the rings themselves
- * happen in the hooks, which see a steer due again); re-arm monitoring after a
- * restart. Everything else is a pointer for the leader.
+ * happen in the hooks, which see a steer due again); type a due steer's
+ * pointer into an idle Claude worker whose waiter is gone (idleCarry); re-arm
+ * monitoring after a restart. Everything else is a pointer for the leader.
  */
 
 export interface ReconcilerDeps {
@@ -92,6 +95,8 @@ export class Reconciler {
   private readonly deps: ReconcilerDeps;
   /** Runs whose live process was matched since this daemon started: reattached once, then just watched. */
   private readonly attached = new Set<string>();
+  /** Idle Claude runs seen with a due steer and no waiter: since when, over how many passes (idleCarry). */
+  private readonly waiterless = new Map<string, { since: number; passes: number }>();
   private readonly queued = new Set<string>();
   private queuedAll: PassReason | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -348,16 +353,51 @@ export class Reconciler {
         return;
       }
       setLiveness(db, run, busy ? "busy" : "idle", "reconciler", { lease: busy ? "held" : "expired or released" }, t);
-      if (busy) resolveRunItems(db, run.id, ["worker_idle"], "busy again", t);
-      if (!busy && run.state === "running" && run.idle_since !== null && t - run.idle_since >= tm.idle_alert_ms) {
-        const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload: { idle_ms: t - run.idle_since } });
-        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} has been idle ${Math.round((t - run.idle_since) / 60_000)}m without an outcome`, t);
+      const waiting = !busy && waitingOnOthers(db, run);
+      if (busy || waiting) resolveRunItems(db, run.id, ["worker_idle"], busy ? "busy again" : "waiting on you", t);
+      const idleFrom = !busy && !waiting && run.state === "running" && run.idle_since !== null ? idleEpisodeStart(db, run) : null;
+      if (idleFrom !== null && t - idleFrom >= tm.idle_alert_ms && idleAlertDue(db, run.id, idleFrom, t, tm.idle_realert_ms)) {
+        const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload: { idle_ms: t - idleFrom } });
+        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} has been idle ${Math.round((t - idleFrom) / 60_000)}m without an outcome`, t);
       }
-      if (herdrStatus === "working" && t - lastHook >= tm.stale_hook_ms) {
+      if (herdrStatus === "working" && t - lastHook >= tm.stale_hook_ms && idleAlertDue(db, run.id, lastHook, t, tm.idle_realert_ms)) {
         const event = appendEvent(db, { source: "reconciler", kind: "run.stale_hooks", runId: run.id, taskId: run.task_id, payload: { since: lastHook } });
         openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} looks busy but sent no hook event for ${Math.round((t - lastHook) / 60_000)}m; possibly stuck`, t);
       }
     });
+    await this.idleCarry(run, runtime, herdrStatus, t);
+  }
+
+  /**
+   * A due steer for an idle Claude worker with no waiter: once that held for
+   * waiter_grace_ms over at least two passes, type its pointer into the pane
+   * (src/lifecycle/idle-carry.ts). A live waiter reconnecting to a restarted
+   * daemon registers well within the grace and takes it instead.
+   */
+  private async idleCarry(run: RunRow, runtime: HerdrRuntime, herdrStatus: string | null, t: number): Promise<void> {
+    const tm = this.deps.timing();
+    if (idleCarryBlocker(this.deps.db, this.deps.bus, run, herdrStatus, t, tm) !== null) {
+      this.waiterless.delete(run.id);
+      return;
+    }
+    const seen = this.waiterless.get(run.id);
+    if (!seen) {
+      this.waiterless.set(run.id, { since: t, passes: 1 });
+      // Look again once the grace is over, not only at the next steady pass.
+      setTimeout(() => this.schedule(run.id), tm.waiter_grace_ms + 50).unref?.();
+      return;
+    }
+    seen.passes += 1;
+    if (seen.passes < 2 || t - seen.since < tm.waiter_grace_ms) return;
+    this.waiterless.delete(run.id);
+    try {
+      const steer = await carryIdleSteer(this.deps, run.id, runtime);
+      if (steer) this.deps.log(`reconciler: no waiter for idle run ${run.id}; typed steer ${steer}'s pointer into pane ${run.pane_id}`);
+    } catch (error) {
+      const detail = (error as Error).message;
+      this.deps.log(`reconciler: idle carry to ${run.id} failed: ${detail}`);
+      tx(this.deps.db, () => appendEvent(this.deps.db, { source: "reconciler", kind: "steer.idle_carry_failed", runId: run.id, taskId: run.task_id, payload: { detail }, ts: this.deps.now() }));
+    }
   }
 
   /**

@@ -58,7 +58,7 @@ const { values, positionals } = parseArgs({
 });
 const herdrSocket = values["herdr-socket"];
 const labSession = values.session ?? "";
-if (!herdrSocket || !labSession.startsWith("fm-lab-")) {
+if (!herdrSocket || !labSession.startsWith("fl-lab-")) {
   console.error("cutover-live: run me through scripts/lab/cutover-live.sh (a lab session socket is required)");
   process.exit(2);
 }

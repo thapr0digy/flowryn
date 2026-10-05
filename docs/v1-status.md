@@ -79,7 +79,7 @@ The milestone lists name the main work. These are the other v1 items in sections
 | 12 | Human verbs: approve [--gate], board, init, doctor, daemon, lead, leader claim --session, config | Done (M1 to M5) |
 | 12 | Spool when the daemon is down; read-only reads; exit 69 for leader mutations | Done (M1 #3) |
 | 13 | The SQLite schema (every table of section 13) | Done (M1 #3 to M5) |
-| 14 | Every safeguard in the table, with Firstmate's fixtures ported | Done (M1 #3 to M5; capacity caps and human-bound gates in M5) |
+| 14 | Every safeguard in the table, with the previous orchestrator's fixtures ported | Done (M1 #3 to M5; capacity caps and human-bound gates in M5) |
 | 15 | `flowryn init`: preflight, data and state directories, tasks-axi files, tool paths, leaders, workers, service | Done (M1 #3; the leader files are written by `flowryn lead` on every launch, M3 #5) |
 | 16 | Failure modes with their recovery: daemon crash, second daemon, Herdr restart, worker death, never-reporting worker, trust wedge, stuck busy, hook timeout, compaction, tasks-axi failure, hand edits, unproven merge, no-mistakes down, usage limit, stale CLI, corrupt database, host pressure, leftover Docker environments, a sleeping laptop | Done (M1 to M5) |
 | 16 | Herdr unreachable: "P1 once" | Done (v1 completion): one P1 per outage, once it has lasted `[herdr] unreachable_alert_ms` (60 s) while a run is open or something it refused waits; it resolves when Herdr answers; the daemon also finds a Herdr that starts after it |
@@ -88,13 +88,14 @@ The milestone lists name the main work. These are the other v1 items in sections
 
 ## Cutover
 
-The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
+The features that let Flowryn replace the previous orchestrator (docs/cutover-notes.md).
 
 | Item | Status |
 |---|---|
 | C1 standalone decisions, the reserved policy, the user's word for a captain answer, scout open decisions, briefing sections | Done (C1) |
 | C2 mid-run prompt wedges | Done (C2) |
-| C3 `flowryn import firstmate` | Done (C3): `dispatch --mode`, queued tasks outside plans, the Firstmate parser, `import.apply`, `flowryn import firstmate`, and your preferences in the leader's prompt with the one-time import triage (docs/cutover-notes.md) |
+| Queued work in fleet, show, the board and the briefing | Done: one shared definition of Queued (docs/cutover-notes.md, C3) |
+| C3 the one-time import | Done (C3), then removed once the cutover was over: `dispatch --mode`, queued tasks outside plans and your preferences in the leader's prompt stay; the import command, its parser and `import.apply` are gone, and migration 9 marks what it created `legacy:<id>` (docs/cutover-notes.md) |
 | Steer latency, Tier 0 and Tier 1: the interrupt key refused while a dialog may be open, a wake after an interrupt, the waiter armed at every turn start, seen evidence, fast re-rings of lost carries, a contract suite that measures steers | Done (docs/cutover-notes.md "Steers · latency") |
 | Steer latency, Tier 2: `flowryn steer --urgent` blocks the next tool call and cuts a tool past `steer_preempt_after_ms`, never through a dialog, on Claude and Pi | Done (docs/cutover-notes.md "Steers · urgent") |
 
@@ -103,7 +104,7 @@ The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
 These are out of v1 by the design itself (section 2's non-goals, section 17's "After v1"), not deferred work:
 
 - The headless triage runner (the first post-v1 addition).
-- Side-by-side running with Firstmate.
+- Side-by-side running with the previous orchestrator.
 - The Obsidian plugin; a Herdr plugin-pane board; the MCP wrapper; Claude Code channels and plugin monitors.
 - Harnesses other than Claude Code and Pi; runtimes other than Herdr; Linux and native Windows hosts (the transport and service seams exist).
 - Desks, quota-aware scheduling and profile routing; focus routing and score formulas; away and quiet modes; Jira; retention compaction; relay, the mail plane and multi-machine fleets.

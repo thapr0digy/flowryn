@@ -4,7 +4,7 @@
 #   spikes/run-all.sh [group...]     groups: tasks-axi no-mistakes herdr claude pi
 #
 # Herdr and Claude spikes share one isolated lab session provisioned here (and
-# torn down on exit) through Firstmate's fm-herdr-lab.sh; they run
+# torn down on exit) through spikes/lib/herdr-lab.sh; they run
 # SPIKE_JOBS at a time (default 4), each in its own lab workspace. Results land
 # in spikes/.runs/results/<id>.json; docs/m0-verdicts.md is the curated record.
 # Exits non-zero if any spike exited non-zero or recorded no result.

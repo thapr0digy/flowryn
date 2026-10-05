@@ -1,7 +1,7 @@
 {
   "name": "stale_index_lock_cleared_and_cleanup_succeeds",
   "ported_from": "tests/fm-teardown.test.sh:test_stale_index_lock_cleared_and_teardown_succeeds",
-  "firstmate_matrix_row": "r",
+  "reference_matrix_row": "r",
   "description": "The landed worktree carries a git index.lock a year-2000 mtime and nothing holds (lsof proves no holder). It is provably stale: the implementation removes it, takes the verdict again, and removes the worktree.",
   "delivery_mode": "no-mistakes",
   "inputs": {

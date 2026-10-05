@@ -54,7 +54,7 @@ const { values, positionals } = parseArgs({
   allowPositionals: true,
 });
 const herdrSocket = values["herdr-socket"];
-if (!herdrSocket || !values.session?.startsWith("fm-lab-")) {
+if (!herdrSocket || !values.session?.startsWith("fl-lab-")) {
   console.error("m4-live: run me through scripts/lab/m4-live.sh (a lab session socket is required)");
   process.exit(2);
 }

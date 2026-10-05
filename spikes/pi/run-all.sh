@@ -3,7 +3,7 @@
 # verdict table from spikes/.runs/results/<id>.json.
 #
 # All spikes share one isolated Herdr lab session, provisioned here through
-# Firstmate's fm-herdr-lab.sh and torn down on exit, unless FLOWRYN_LAB_SESSION
+# spikes/lib/herdr-lab.sh and torn down on exit, unless FLOWRYN_LAB_SESSION
 # already names one (spikes/lib/lab-hold.sh). Every model turn comes from the
 # offline scripted provider (lib/scripted-provider.ts), so a run needs no
 # credentials.

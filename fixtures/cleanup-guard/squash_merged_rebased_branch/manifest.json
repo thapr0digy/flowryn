@@ -1,7 +1,7 @@
 {
   "name": "squash_merged_rebased_branch",
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_rebased_branch_allows",
-  "firstmate_matrix_row": "q2",
+  "reference_matrix_row": "q2",
   "description": "The pipeline rebased the task onto a main that also edited shared.txt, then squash-merged it (refs/pull/7/head holds the rebased head). The worktree followed the rebase and sits exactly at the merged PR head, which is on no remote-tracking branch. Allowed via the merged PR.",
   "delivery_mode": "no-mistakes",
   "inputs": {

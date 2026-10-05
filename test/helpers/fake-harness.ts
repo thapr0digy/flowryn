@@ -39,6 +39,9 @@
  *   FAKE: prompt <text...>           a permission dialog: the screen shows <text>, hook notify permission_prompt, then
  *                                    no hook until the screen is cleared (the test clears it), then one tool call
  *   FAKE: stall                      a turn that goes quiet: no hooks, no Stop, for good
+ *   FAKE: no-waiter                  (Claude) never arm the wait-steer waiter, as if it expired or died with an old
+ *                                    daemon: an idle wake comes only from a line the fake Herdr's pane.send_text and
+ *                                    Enter typed ($FLOWRYN_REPORT_DIR/fake-typed.txt)
  *   FAKE: dialog-tool <ms> <text...> a tool call whose PreToolUse raises a permission dialog: pre-tool, the screen
  *                                    shows <text>, hook notify permission_prompt, then (once the test clears the
  *                                    screen) the tool runs <ms> and post-tool follows
@@ -76,6 +79,7 @@ const steps = taskText
 const stateFile = join(dirname(taskFile || "."), `fake-state-${session}.json`);
 const transcript = join(dirname(taskFile || "."), `fake-transcript-${session}.jsonl`);
 const ignoreSteers = steps.includes("ignore-steers");
+const noWaiter = steps.includes("no-waiter");
 const cwdOverride = steps.find((s) => s.startsWith("cwd "))?.slice(4) ?? null;
 
 function log(message: string): void {
@@ -438,15 +442,34 @@ async function endTurn(): Promise<void> {
   }
 }
 
+let typedSeen = 0;
+
+/** What wakes an idle Claude session: the asyncRewake waiter's line (exit 2), or with no-waiter a typed prompt; null for neither yet. */
+async function idleWake(): Promise<string | null> {
+  if (noWaiter) {
+    const file = join(env.FLOWRYN_REPORT_DIR ?? ".", "fake-typed.txt");
+    const lines = existsSync(file) ? readFileSync(file, "utf8").split("\n").filter((l) => l.length > 0) : [];
+    if (lines.length > typedSeen) {
+      typedSeen = lines.length;
+      log(`typed: ${lines[lines.length - 1]}`);
+      return lines[lines.length - 1]!;
+    }
+    await Bun.sleep(200);
+    return null;
+  }
+  const waiter = await hook("wait-steer");
+  if (waiter.code === 2) return waiter.stderr;
+  await Bun.sleep(200);
+  return null;
+}
+
 async function claudeIdle(): Promise<never> {
-  // The asyncRewake waiter: exit 2 with a line on stderr wakes the session.
   for (;;) {
-    const waiter = await hook("wait-steer");
-    if (waiter.code === 2) {
-      await hook("prompt");
-      await onSteer(waiter.stderr);
-      await endTurn();
-    } else await Bun.sleep(200);
+    const line = await idleWake();
+    if (line === null) continue;
+    await hook("prompt");
+    await onSteer(line);
+    await endTurn();
   }
 }
 
@@ -528,12 +551,11 @@ async function awaitWake(): Promise<void> {
     return;
   }
   while (!woken) {
-    const waiter = await hook("wait-steer");
-    if (waiter.code === 2) {
-      await hook("prompt");
-      await onSteer(waiter.stderr);
-      if (!woken) await endTurn();
-    } else await Bun.sleep(200);
+    const line = await idleWake();
+    if (line === null) continue;
+    await hook("prompt");
+    await onSteer(line);
+    if (!woken) await endTurn();
   }
 }
 
