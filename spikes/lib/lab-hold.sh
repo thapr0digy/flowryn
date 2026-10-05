@@ -2,7 +2,7 @@
 # Holds one isolated Herdr lab session open so several spikes can share it.
 # Writes the session name to $SPIKES_RUNS/lab-session and waits until
 # $SPIKES_RUNS/lab-release exists (or a signal arrives), then tears the session
-# down through the Firstmate helper, which verifies the default session is
+# down through the lab helper (herdr-lab.sh), which verifies the default session is
 # unchanged.
 #
 #   spikes/lib/lab-hold.sh &            # start

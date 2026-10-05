@@ -87,8 +87,6 @@ flowryn decision add --key db --question "SQLite or Postgres?" --options sqlite,
 flowryn decide k3 sqlite --rationale "one process"   # the leader's answer; reserved ones need your word
 flowryn decide k3 sqlite --body-file -               # in your own shell: your answer, verbatim
 flowryn decision defer k3 --until 2026-11-01
-flowryn import firstmate ~/projects/firstmate          # the plan: what would be cloned, filed, skipped and why
-flowryn import firstmate ~/projects/firstmate --apply  # do it; safe to run again
 flowryn dispatch web --kind ship --mode direct-PR --mode-reason "internal CI only" --body-file -
 flowryn help                        # every verb; `flowryn <verb> --help` for one
 ```
@@ -118,7 +116,7 @@ scripts/lab/m2-live.sh --claude-project "$PWD"               # every phase
 scripts/lab/m2-live.sh contracts                              # one phase: contracts, scouts, kill-worker or kill-daemon
 ```
 
-It provisions a Herdr lab session through Firstmate's `fm-herdr-lab.sh` (or reuses `FLOWRYN_LAB_SESSION`), builds a scratch Flowryn home and daemon, and removes both at the end. `--keep` leaves the home for inspection. Pi works in a fresh clone of this repository inside that home, with a scratch agent dir and the offline scripted provider; set `M2_PI_MODEL` to use another model. Claude runs only with `--claude-project <checkout>`: a checkout Claude already trusts, whose linked worktrees inherit that trust. `pretrust = "check"` means `~/.claude.json` is never written. Every branch the run creates is named `flowryn/contract-<runid>-…`, and the run removes exactly those branches and their worktrees on exit, including on failure or a signal. Results print as PASS/FAIL lines and go to `spikes/.runs/m2-live-results.json`. Run it outside any command sandbox. [`docs/m2-notes.md`](docs/m2-notes.md) records the latest results.
+It provisions a Herdr lab session through `spikes/lib/herdr-lab.sh` (or reuses `FLOWRYN_LAB_SESSION`), builds a scratch Flowryn home and daemon, and removes both at the end. `--keep` leaves the home for inspection. Pi works in a fresh clone of this repository inside that home, with a scratch agent dir and the offline scripted provider; set `M2_PI_MODEL` to use another model. Claude runs only with `--claude-project <checkout>`: a checkout Claude already trusts, whose linked worktrees inherit that trust. `pretrust = "check"` means `~/.claude.json` is never written. Every branch the run creates is named `flowryn/contract-<runid>-…`, and the run removes exactly those branches and their worktrees on exit, including on failure or a signal. Results print as PASS/FAIL lines and go to `spikes/.runs/m2-live-results.json`. Run it outside any command sandbox. [`docs/m2-notes.md`](docs/m2-notes.md) records the latest results.
 
 ### The M3 leader bridges, live
 
@@ -129,7 +127,7 @@ scripts/lab/m3-live.sh --claude-project "$PWD"               # Claude Code and P
 scripts/lab/m3-live.sh pi                                     # Pi only (the offline scripted provider)
 ```
 
-It provisions a Herdr lab session through Firstmate's `fm-herdr-lab.sh` (or reuses `FLOWRYN_LAB_SESSION`), builds a scratch Flowryn home and daemon, starts two leaders of each harness in lab panes, types into them as you would, and removes everything at the end (`--keep` leaves the home). Claude leads from a linked worktree of the checkout you name, which Claude must already trust, on a `flowryn/contract-<runid>-leader` branch removed with its worktree on exit; `M3_CLAUDE_MODEL` defaults to `haiku`. Pi leads from a scratch directory with a scratch agent dir and the offline scripted provider; set `M3_PI_MODEL` (and `M3_PI_AGENT_DIR` with a copy of its `auth.json`) to use another model. Results print as PASS/FAIL lines and go to `spikes/.runs/m3-live-results.json`. Run it outside any command sandbox.
+It provisions a Herdr lab session through `spikes/lib/herdr-lab.sh` (or reuses `FLOWRYN_LAB_SESSION`), builds a scratch Flowryn home and daemon, starts two leaders of each harness in lab panes, types into them as you would, and removes everything at the end (`--keep` leaves the home). Claude leads from a linked worktree of the checkout you name, which Claude must already trust, on a `flowryn/contract-<runid>-leader` branch removed with its worktree on exit; `M3_CLAUDE_MODEL` defaults to `haiku`. Pi leads from a scratch directory with a scratch agent dir and the offline scripted provider; set `M3_PI_MODEL` (and `M3_PI_AGENT_DIR` with a copy of its `auth.json`) to use another model. Results print as PASS/FAIL lines and go to `spikes/.runs/m3-live-results.json`. Run it outside any command sandbox.
 
 ### The M4 exit, live
 
@@ -162,7 +160,7 @@ scripts/lab/v1-live.sh                         # every phase; the last stops its
 scripts/lab/v1-live.sh scout promote           # some phases (Pi's contract record is seeded without the harness phase)
 ```
 
-Phases: `harness` (the startup check reads the real installed Claude Code and Pi versions and opens a P1 for each untested one; Pi's contract suite passes and settles its P1; a dispatch on Claude refuses; no Claude model is ever called), `scout` (a Pi scout lands with its report and is cleaned up through the cleanup guard, its task done with the report), `promote` (a Pi scout promoted in place mid-task is relaunched into its own session as a ship, which commits, delivers locally, merges under yolo and is cleaned), `divergence` (a hand edit against a live run settled with keep-run; a task put In flight by hand, raised by the invariant pass and settled with accept-edit) and `herdr` (the lab session is stopped through Firstmate's helper under a live run, and one P1 opens for the outage while the retries go on). Pi runs the offline scripted provider with a scratch agent dir; the projects are fresh clones inside a scratch home that is removed at the end. Results print as PASS/FAIL lines and go to `spikes/.runs/v1-live-results.json`. Run it outside any command sandbox.
+Phases: `harness` (the startup check reads the real installed Claude Code and Pi versions and opens a P1 for each untested one; Pi's contract suite passes and settles its P1; a dispatch on Claude refuses; no Claude model is ever called), `scout` (a Pi scout lands with its report and is cleaned up through the cleanup guard, its task done with the report), `promote` (a Pi scout promoted in place mid-task is relaunched into its own session as a ship, which commits, delivers locally, merges under yolo and is cleaned), `divergence` (a hand edit against a live run settled with keep-run; a task put In flight by hand, raised by the invariant pass and settled with accept-edit) and `herdr` (the lab session is stopped through the lab helper under a live run, and one P1 opens for the outage while the retries go on). Pi runs the offline scripted provider with a scratch agent dir; the projects are fresh clones inside a scratch home that is removed at the end. Results print as PASS/FAIL lines and go to `spikes/.runs/v1-live-results.json`. Run it outside any command sandbox.
 
 ### The cutover, live
 
@@ -179,7 +177,7 @@ Phases: `decisions` (a real Claude scout delivers a report whose `## Open decisi
 
 The spikes are throwaway shell scripts under [`spikes/`](spikes), grouped as `claude/`, `herdr/`, `tasks-axi/`, `no-mistakes/` and `pi/`. Each script prints one `VERDICT <id>: <verdict>` line and writes `spikes/.runs/results/<id>.json`. `spikes/.runs/` is gitignored and holds every log, probe event and transcript pointer.
 
-Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; Pi for the Pi group, found as `PI_BIN`, then `/opt/homebrew/bin/pi-signed`, then `pi` on `PATH`). Herdr and Claude spikes need Firstmate's lab helper at `${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh`; set `FIRSTMATE_REPO` or `HERDR_LAB_HELPER` to point elsewhere.
+Requirements: macOS, `bash`, `jq`, `perl`, and the tools under test (`claude`, `herdr`, `tasks-axi`, `no-mistakes`; Pi for the Pi group, found as `PI_BIN`, then `/opt/homebrew/bin/pi-signed`, then `pi` on `PATH`). Herdr and Claude spikes use the vendored lab helper `spikes/lib/herdr-lab.sh`; set `HERDR_LAB_HELPER` to use another one.
 
 The Herdr and Claude spikes start Claude Code from the repo root, so the checkout must be a directory Claude Code already trusts. In an untrusted checkout (a fresh worktree, for example) Claude stops at its workspace-trust dialog before any hook runs, and the spike fails with `blocked: untrusted path <dir>`. The spikes never accept that dialog, because doing so edits `~/.claude.json`. `spikes/run-all.sh` exits non-zero when any spike exits non-zero or records no result.
 
@@ -200,7 +198,7 @@ touch spikes/.runs/lab-release       # tears the session down
 
 Safety rules the scripts follow:
 
-- Every Herdr call goes through `fm-herdr-lab.sh`, which pins a named `fm-lab-*` session and checks that the default session is unchanged at teardown. No spike touches the default session or a pane it did not create.
+- Every Herdr call goes through `spikes/lib/herdr-lab.sh`, which pins a named `fl-lab-*` session and checks that the default session is unchanged at teardown. No spike touches the default session or a pane it did not create.
 - Each Claude spike passes a per-spike settings file with `--settings` and runs in its own lab workspace. Sessions start from the repo root with `--setting-sources user`, so the repo's `CLAUDE.md` import raises no dialog and no project or local settings load. No spike edits `~/.claude/settings.json`, project settings or `~/.claude.json`.
 - tasks-axi spikes use scratch backlogs under `spikes/.runs/`.
 - `spikes/no-mistakes/n01-gate-env.sh` is read-only; `--watch <seconds>` scans a live gate run's processes for worker-only variable names.

@@ -2,7 +2,7 @@
 # M2 exit, live (docs/m2-notes.md "Live runs"): the harness contract suites,
 # a real scout on each harness, and recovery after killing a worker and,
 # separately, the daemon mid-run. Everything Herdr-side happens in an isolated
-# lab session from Firstmate's fm-herdr-lab.sh, never the default session; the
+# lab session from spikes/lib/herdr-lab.sh, never the default session; the
 # helper tears it down on exit and checks the default session is unchanged.
 #
 #   scripts/lab/m2-live.sh [--claude-project <checkout>] [--keep] [phase ...]

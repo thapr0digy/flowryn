@@ -2,7 +2,7 @@
 # M5 exit, live (docs/m5-notes.md "Live runs"): two two-phase features run side
 # by side, each through design, review, build, visual QA, review, ship and
 # merge, and each phase 2 starts by itself once its phase 1 has landed, on a real leader started with `flowryn lead`
-# in a pane of an isolated Herdr lab session from Firstmate's fm-herdr-lab.sh,
+# in a pane of an isolated Herdr lab session from spikes/lib/herdr-lab.sh,
 # never the default session. The helper tears the session down on exit and
 # checks the default session is unchanged.
 #

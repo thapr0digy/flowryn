@@ -48,7 +48,7 @@ const { values, positionals } = parseArgs({
 const herdrSocket = values["herdr-socket"];
 const labSession = values.session ?? "";
 const labHelper = process.env.HERDR_LAB_HELPER ?? "";
-if (!herdrSocket || !labSession.startsWith("fm-lab-") || !labHelper) {
+if (!herdrSocket || !labSession.startsWith("fl-lab-") || !labHelper) {
   console.error("v1-live: run me through scripts/lab/v1-live.sh (a lab session and its helper are required)");
   process.exit(2);
 }

@@ -3,8 +3,8 @@
 # the harness version check at startup, a scout that lands with its report and
 # is cleaned up, a scout promoted to a ship in place, divergences settled with
 # keep-run and accept-edit, and Herdr unreachable as one P1. Everything
-# Herdr-side happens in an isolated lab session from Firstmate's
-# fm-herdr-lab.sh, never the default session; the last phase stops that
+# Herdr-side happens in an isolated lab session from
+# spikes/lib/herdr-lab.sh, never the default session; the last phase stops that
 # session through the helper, which also tears it down on exit and checks the
 # default session is unchanged.
 #
