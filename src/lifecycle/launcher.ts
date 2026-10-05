@@ -60,8 +60,8 @@ export interface LauncherDeps {
 /**
  * Inherited Claude Code session identity reaches every pane of a Herdr server
  * started from inside a Claude session (M0 finding 1), and a Claude launched
- * there runs as that session's child. pane.split cannot unset a variable, so
- * each is blanked, which Claude treats as unset.
+ * there runs as that session's child. workspace.create cannot unset a
+ * variable, so each is blanked, which Claude treats as unset.
  */
 export const BLANKED_ENV = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET"] as const;
 
@@ -128,9 +128,9 @@ export function dispatchedBody(db: Db, runId: string): string {
 
 /**
  * Starts and resumes workers (design section 5, lifecycle engine side): the
- * worktree with git, the run's private files, a Herdr pane split with the
- * run's environment, agent.start, and the harness identity from the process
- * table. Each step's result is recorded before the next, so a daemon crash
+ * worktree with git, the run's private files, a one-pane Herdr workspace
+ * with the run's environment, agent.start, and the harness identity from
+ * the process table. Each step's result is recorded before the next, so a daemon crash
  * mid-launch leaves a run the reconciler can finish or fail.
  */
 export class Launcher {
@@ -370,15 +370,19 @@ export class Launcher {
     return dir;
   }
 
-  /** Reuse the run's pane when its shell is idle at the prompt; otherwise open a new workspace and split it. */
+  /**
+   * Reuse the run's pane when its shell is idle at the prompt; otherwise open
+   * a new workspace whose one pane is the worker's, labelled with the task id
+   * alone so Herdr's sidebar names the work.
+   */
   private async ensurePane(runtime: HerdrRuntime, run: RunWithPolicy, worktree: string, env: Record<string, string>): Promise<string> {
     const { db, now } = this.deps;
     if (run.pane_id) {
       const info = await runtime.processes(run.pane_id);
       if (info && info.foregroundGroup === info.shellPid) return run.pane_id;
     }
-    const workspace = await runtime.openWorkspace(worktree, `flowryn ${run.task_id}`);
-    const paneId = await runtime.splitPane(workspace.rootPaneId, worktree, env);
+    const workspace = await runtime.openWorkspace(worktree, run.task_id, env);
+    const paneId = workspace.rootPaneId;
     await runtime.tagPane(paneId, run.id, `flowryn ${run.task_id}`);
     tx(db, () => {
       db.query("UPDATE runs SET pane_id = ?2, workspace_id = ?3, herdr_session = ?4, updated_at = ?5 WHERE id = ?1").run(

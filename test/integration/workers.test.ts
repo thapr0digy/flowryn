@@ -6,7 +6,7 @@
  * in scripts/lab/ (docs/m2-notes.md).
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
@@ -64,10 +64,11 @@ describe("a scout end to end", () => {
       await waitUntil(async () => (await backlogTask(env, task))?.state === "done", 10_000, "the backlog task done");
       expect((await backlogTask(env, task))?.links ?? []).toContain(`report:data/${task}/report.md`);
       expect(readFileSync(join(env.h.dataDir, task, "report.md"), "utf8")).toContain("auth is fine");
-      // The pane got the run's identity through pane.split env (M0 h04), and Herdr never saw a control character.
-      const split = env.herdr.calls.find((c) => c.method === "pane.split")!;
-      expect((split.params.env as Record<string, string>).FLOWRYN_RUN).toBe(run);
-      expect((split.params.env as Record<string, string>).CLAUDECODE).toBe("");
+      // The pane got the run's identity through workspace.create env (M0 h04, h06), and Herdr never saw a control character.
+      const create = env.herdr.calls.find((c) => c.method === "workspace.create")!;
+      expect((create.params.env as Record<string, string>).FLOWRYN_RUN).toBe(run);
+      expect((create.params.env as Record<string, string>).CLAUDECODE).toBe("");
+      expect(env.herdr.calls.some((c) => c.method === "pane.split")).toBe(false);
       const start = env.herdr.calls.find((c) => c.method === "agent.start")!;
       expect((start.params.args as string[]).every((a) => !/[\n\t]/.test(a))).toBe(true);
       expect(start.params.kind).toBe("claude");
@@ -142,6 +143,23 @@ describe("pi worker", () => {
       const args = start.params.args as string[];
       expect(args[args.indexOf("-e") + 1]).toMatch(/flowryn-worker\.ts$/);
       expect(args).toContain("--append-system-prompt");
+    },
+    { timeout: 45_000 },
+  );
+});
+
+describe("a worker workspace", () => {
+  test(
+    "holds exactly one pane, the agent's, labelled with the task id alone",
+    async () => {
+      const env = await fleet();
+      const { task, run } = await env.dispatch("Build\nFAKE: sleep 30000");
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      const workspace = env.herdr.workspaces.get(busy.workspace_id!)!;
+      expect(workspace.panes).toEqual([busy.pane_id!]);
+      expect(workspace.label).toBe(task);
+      expect(workspace.cwd).toBe(realpathSync(busy.worktree_path));
+      expect(env.herdr.harnessPid(busy.pane_id!)).toBe(busy.proc_pid);
     },
     { timeout: 45_000 },
   );
@@ -285,6 +303,9 @@ describe("recovery", () => {
       expect(items(env, run).find((i) => i.kind === "auto_resumed")).toMatchObject({ lane: "P1" });
       const start = env.herdr.calls.filter((c) => c.method === "agent.start").at(-1)!;
       expect(start.params.args as string[]).toContain("--resume");
+      // The resume reused the run's one pane: no second workspace, no extra pane.
+      expect(ready.pane_id).toBe(busy.pane_id);
+      expect(env.herdr.calls.filter((c) => c.method === "workspace.create")).toHaveLength(1);
     },
     { timeout: 45_000 },
   );

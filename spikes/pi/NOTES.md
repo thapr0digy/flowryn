@@ -20,7 +20,7 @@ All 14 ran live against **Pi 0.87.1** (`/opt/homebrew/bin/pi-signed`, the Pi Lau
   - It sends the briefing and the numbered re-brief. `FLOWRYN_PROBE_REBRIEF_DELIVER=auto` steers when `willRetry` is set or the agent is busy.
   - It also provides the `flowryn_merge` tool with `ctx.ui.confirm`, the shell block, and `project_trust` answers.
 - `lib/pi-spike.sh` holds the shared helpers: launch, JSONL queries, probe control, pane input and the verdict. All Herdr traffic goes through `lab_herdr` in `spikes/lib/lab.sh`. Each launch command is written to `<instance>.command.sh`, and the pane runs that file, because the full command line overflowed what Herdr types into the pane shell.
-- `p01`–`p14` are the spikes. `run-all.sh` provisions one lab session (`fm-herdr-lab.sh name flowryn-m0-pi`), runs them in order and prints the verdict table. It exits non-zero when a spike exits non-zero, records no result, records "not run", or records an inconclusive verdict. A refuted or partial verdict backed by evidence is a finding, not a failure.
+- `p01`–`p14` are the spikes. `run-all.sh` provisions one lab session (`herdr-lab.sh name flowryn-m0-pi`), runs them in order and prints the verdict table. It exits non-zero when a spike exits non-zero, records no result, records "not run", or records an inconclusive verdict. A refuted or partial verdict backed by evidence is a finding, not a failure.
 
 ## Isolation
 

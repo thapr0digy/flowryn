@@ -157,7 +157,7 @@ const decide: VerbSpec = {
     { name: "choice", required: true, help: "one of its options, or a short answer when it has none" },
   ],
   flags: {
-    rationale: { type: "string", help: "the leader's reason (required for a leader answer)", placeholder: "text" },
+    rationale: { type: "string", help: "the leader's reason (required for a leader answer); - reads it from stdin", stdin: true, placeholder: "text" },
     by: { type: "string", help: "captain: record the user's own answer (needs their word)", placeholder: "captain" },
     words: { type: "string", help: "the user's words, verbatim (the Pi tool passes them here)", placeholder: "text" },
     "body-file": { type: "string", help: "the user's words, verbatim, or more reasoning", fileFor: "body" },
@@ -175,7 +175,7 @@ const decide: VerbSpec = {
     if (opts.length > 0 && !opts.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${opts.join(", ")}`);
     if (opts.length === 0 && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const words = sanitizeBlock(stringArg(args, "body") ?? stringArg(args, "words") ?? "").trim() || null;
-    const rationale = stringArg(args, "rationale")?.trim() || null;
+    const rationale = sanitizeBlock(stringArg(args, "rationale") ?? "").trim() || null;
     const asCaptain = stringArg(args, "by") === "captain" || ctx.caller.role === "human";
     if (stringArg(args, "by") !== undefined && stringArg(args, "by") !== "captain") throw new FlowrynError("bad_args", "--by takes only captain");
     let via: string;

@@ -55,14 +55,14 @@ flowryn project set web --mode direct-PR --yolo on
 flowryn dispatch web --kind scout --body-file - <<'EOF'
 Find where the login redirect loop comes from.
 EOF
-flowryn fleet                       # every worker: state, liveness, its oldest open steer, what it needs
-flowryn show <task>                 # one run in detail, with each steer's carried, seen and acked times
+flowryn fleet                       # every worker: state, liveness, its oldest open steer, what it needs; then queued work: blockers, --auto, what starts it
+flowryn show <task>                 # one run in detail, with each steer's carried, seen and acked times; or a Queued task: its blockers, hold and what starts it
 flowryn steer <task> --body-file -  # words for a worker, delivered at its next tool call or idle wake
 flowryn answer <decision> <choice>  # answer a worker's question; it arrives as a steer
 flowryn interrupt <task>            # stop the current turn (verified; refused while a dialog may be open); cancel <task>; resume <task>
 flowryn doctor --contracts          # run the harness contract suites (steps and a time estimate up front, then step N/M) and record each passing version
 flowryn lead                        # start a Claude Code leader here; --pi for Pi; harness args after --
-flowryn board                       # a live, read-only view: what needs you, the fleet, updates, to-dos (--once)
+flowryn board                       # a live, read-only view: what needs you, the fleet, queued work, updates, to-dos (--once)
 flowryn brief                       # the briefing again
 flowryn dismiss <item>              # close an item that needs nothing more
 flowryn show d3                     # a divergence: which sources disagree, and how to settle it
@@ -85,6 +85,7 @@ flowryn capacity resume --harness claude  # lift the Claude usage-limit pause no
 flowryn decision list               # open decisions; --reserved (only you may answer), --deferred, --all
 flowryn decision add --key db --question "SQLite or Postgres?" --options sqlite,postgres --body-file -
 flowryn decide k3 sqlite --rationale "one process"   # the leader's answer; reserved ones need your word
+flowryn decide k3 sqlite --rationale -              # the same, the rationale read from stdin
 flowryn decide k3 sqlite --body-file -               # in your own shell: your answer, verbatim
 flowryn decision defer k3 --until 2026-11-01
 flowryn dispatch web --kind ship --mode direct-PR --mode-reason "internal CI only" --body-file -

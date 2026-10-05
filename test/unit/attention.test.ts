@@ -182,7 +182,7 @@ describe("the briefing", () => {
     expect(lines[2]).toBe("Needs you (2):");
     expect(lines[3]).toBe(`- [${p0}] P0 · Worker question q1`);
     expect(lines[4]).toBe(`- [${p1}] PR ready: auth fix (web) checks green`);
-    expect(briefing.text).toContain("In flight: 0 ships, 0 scouts. Queued: 2.");
+    expect(briefing.text).toContain("In flight: 0 ships, 0 scouts. Queued: 2 (2 ready).");
     expect(briefing.text).toContain("Due today: call bank");
     expect(briefing.text).toContain("Morning: 1 to-do due today · 1 overdue · 1 task done since yesterday.");
     expect(lines.at(-1)).toStartWith("Commands: flowryn fleet");
@@ -313,6 +313,6 @@ describe("decisions in the briefing", () => {
       { id: "decision-a-x1", title: "Delete?", state: "queued", kind: "decision", repo: null, priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] },
       { id: "web-x-q1", title: "Ship", state: "queued", kind: "ship", repo: "hot", priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] },
     ] as BacklogTask[], 1);
-    expect(composeBriefing(db, { session: null, now: 10, morningHour: 99, ageMs: AGE, markMorning: false }).text).toContain("Queued: 1.");
+    expect(composeBriefing(db, { session: null, now: 10, morningHour: 99, ageMs: AGE, markMorning: false }).text).toContain("Queued: 1 (1 ready).");
   });
 });
