@@ -57,8 +57,8 @@ M3 builds section 17's "M3 · Leaders and attention" of [`design-v3.html`](desig
 
 ## Config
 
-- `[leader]`: `busy_lease_ms`, `stale_ms`, `inactive_ms`, `digest_budget_ms`, `age_ms`. The defaults are the design's numbers; the section exists for tests and the lab (`src/config/leader.ts`).
-- `[notify]`: `macos`, `herdr`, `min_interval_min`, `p0_coalesce_s`, `max_triggered_turns_per_hour`, `p0_renotify_min`.
+- `[leader]`: `busy_lease_ms`, `stale_ms`, `inactive_ms`, `digest_budget_ms`, `age_ms`, `question_batch_ms` (added later; see the M5 notes' "Worker questions wake the leader"). The defaults are the design's numbers; the section exists for tests and the lab (`src/config/leader.ts`).
+- `[notify]`: `macos`, `herdr`, `min_interval_min`, `p0_coalesce_s`, `max_triggered_turns_per_hour`, `p0_renotify_min`, `max_question_wakes_per_hour`.
 
 ## Tests
 
