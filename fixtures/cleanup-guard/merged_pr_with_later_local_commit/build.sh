@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # merged_pr_with_later_local_commit - builds the git state and fake forge for this cleanup-guard case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_merged_pr_with_later_local_commit_refuses (matrix row k).
+# Ported from the reference's tests/fm-teardown.test.sh:test_merged_pr_with_later_local_commit_refuses (matrix row k).
 # Usage: build.sh <out-dir>
 # shellcheck source=../lib/build-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/build-common.sh"

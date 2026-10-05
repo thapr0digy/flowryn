@@ -4,6 +4,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
 import { todoViews } from "../lifecycle/todos.ts";
+import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { openActionable, type RankedItem } from "./router.ts";
@@ -77,8 +78,8 @@ function fleetLine(db: Db): string {
     .all() as { kind: string; n: number }[];
   const ships = kinds.find((k) => k.kind === "ship")?.n ?? 0;
   const scouts = kinds.find((k) => k.kind === "scout")?.n ?? 0;
-  const queued = (readSnapshot(db, "backlog")?.tasks ?? []).filter((t) => t.state === "queued" && t.kind !== "decision").length;
-  return `In flight: ${plural(ships, "ship")}, ${plural(scouts, "scout")}. Queued: ${queued}.`;
+  // The same set `flowryn fleet` lists under queued, so the count can be traced to a list.
+  return `In flight: ${plural(ships, "ship")}, ${plural(scouts, "scout")}. Queued: ${queuedSummary(queuedWork(db))}.`;
 }
 
 interface TodoFacts {
@@ -112,7 +113,7 @@ function decisionLines(db: Db, now: number, mark: boolean): string[] {
   }
   if (getMeta(db, "import_triage") === "1") {
     const open = (db.query("SELECT COUNT(*) AS n FROM decisions WHERE state = 'open' AND import_source IS NOT NULL AND reserved_reason IS NULL").get() as { n: number }).n;
-    if (open > 0) lines.push(`Imported from Firstmate: ${plural(open, "open decision")}. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.`);
+    if (open > 0) lines.push(`Imported earlier: ${plural(open, "open decision")}. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.`);
     if (mark) setMeta(db, "import_triage", "0");
   }
   if (mark) setMeta(db, "last_briefing_at", String(now));

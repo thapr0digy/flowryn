@@ -1,8 +1,8 @@
 {
   "name": "squash_merged_branch_deleted",
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_branch_deleted_allows",
-  "firstmate_matrix_row": "g",
-  "description": "Squash-merge-then-delete-branch: the task commit (feature.txt) is on no remote-tracking branch and the head branch is gone. The recorded PR (pr= and pr_head= the current HEAD) reads MERGED with head equal to the local HEAD, which is the ONLY landed signal: as in Firstmate, origin/main does not carry the content, so the content fallback cannot rescue this case. Allowed via the merged PR.",
+  "reference_matrix_row": "g",
+  "description": "Squash-merge-then-delete-branch: the task commit (feature.txt) is on no remote-tracking branch and the head branch is gone. The recorded PR (pr= and pr_head= the current HEAD) reads MERGED with head equal to the local HEAD, which is the ONLY landed signal: as in the reference, origin/main does not carry the content, so the content fallback cannot rescue this case. Allowed via the merged PR.",
   "delivery_mode": "no-mistakes",
   "inputs": {
     "operation": "cleanup",

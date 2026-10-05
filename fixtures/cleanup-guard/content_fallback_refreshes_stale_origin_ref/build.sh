@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # content_fallback_refreshes_stale_origin_ref - builds the git state and fake forge for this cleanup-guard case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_content_fallback_refreshes_stale_origin_ref (matrix row l).
+# Ported from the reference's tests/fm-teardown.test.sh:test_content_fallback_refreshes_stale_origin_ref (matrix row l).
 # Usage: build.sh <out-dir>
 # shellcheck source=../lib/build-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/build-common.sh"

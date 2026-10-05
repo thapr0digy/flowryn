@@ -8,26 +8,27 @@ implementation can be checked against them too.
 
 ## Where they come from
 
-The cases are ported from Firstmate's `tests/fm-teardown.test.sh` at commit
+The cases are ported from the previous orchestrator's `tests/fm-teardown.test.sh`
+("the reference" below) at commit
 **`a09090d1`** (`a09090d13ef24ce3cf71d171ade119896d6db301`, 2026-09-19). Each
-case keeps its Firstmate name, so the two suites can be compared. Its
+case keeps its reference name, so the two suites can be compared. Its
 `manifest.json` names the source test (`ported_from`) and the row in that
-file's header matrix (`firstmate_matrix_row`).
+file's header matrix (`reference_matrix_row`).
 
-Each fixture uses the same git topology and forge answers as its Firstmate
+Each fixture uses the same git topology and forge answers as its reference
 test. The deliberate differences:
 
-- **The forge is data.** Firstmate faked the forge with `gh` and `gh-axi` shell
+- **The forge is data.** The reference faked the forge with `gh` and `gh-axi` shell
   mocks. Here the answers live in `forge.json`, and `bin/gh` is a small
-  gh-compatible reader of that file. Firstmate's `pr list` mock returned PR 7
+  gh-compatible reader of that file. The reference's `pr list` mock returned PR 7
   whatever `--head` was asked for. Here PR 7 is returned only for
   `--head fm/task-x1`. All 21 cases ask for that branch, so no answer changes.
 - **`refs/pull/7/head` exists on origin** whenever the forge reports PR 7, as
   it would on GitHub. The primary checkout never fetches `refs/pull/*`, so no
   commit becomes reachable from a remote-tracking branch because of it.
-  Firstmate's `commit_tree_from_wt_head` PR heads still exist as unreferenced
-  objects in the local object store, exactly as in Firstmate.
-- **Guard inputs replace Firstmate's `state/task-x1.meta`.** `pr=` becomes
+  The reference's `commit_tree_from_wt_head` PR heads still exist as unreferenced
+  objects in the local object store, exactly as in the reference.
+- **Guard inputs replace the reference's `state/task-x1.meta`.** `pr=` becomes
   `inputs.recorded_pr_url` and `pr_head=` becomes `inputs.recorded_pr_head`.
   `--force` becomes a human-channel discard approval
   (`inputs.discard_approval`). Running `fm-pr-check.sh` becomes the
@@ -36,7 +37,7 @@ test. The deliberate differences:
   fixed, signing is off, and a per-scenario clock sets commit dates. Every
   build produces the same SHAs, wherever it is built.
 
-Firstmate applies the same landed-work rules to every mode except local-only.
+The reference applies the same landed-work rules to every mode except local-only.
 None of its 21 cases uses the direct-PR mode, so no fixture does. A direct-PR
 task should get the no-mistakes verdicts.
 
@@ -46,7 +47,7 @@ task should get the no-mistakes verdicts.
 run.sh                     runner (validation, and --impl mode)
 lib/build-common.sh        shared builders (fx_init, fx_wt_commit_file, ...)
 lib/fake-gh.sh             gh-compatible fake forge, copied to <scenario>/bin/gh
-reference/firstmate-oracle.sh   runs ORIGINAL Firstmate logic in the --impl contract
+reference/reference-oracle.sh   runs ORIGINAL reference logic in the --impl contract
 <case>/manifest.json       what the guard is told, the forge, the expected verdict
 <case>/build.sh            build.sh <out-dir>: builds the scenario
 ```
@@ -56,7 +57,7 @@ A built scenario (`<case>/build.sh <out-dir>`) contains:
 | Path | What it is |
 |---|---|
 | `origin.git/` | bare upstream with `HEAD -> refs/heads/main` |
-| `primary/` | clone of origin (Firstmate's "project" checkout) |
+| `primary/` | clone of origin (the reference's "project" checkout) |
 | `worktree/` | linked worktree of `primary` on the task branch `fm/task-x1`; the tree the guard judges |
 | `fork.git/` | only in `local_only_fork_remote`; registered as remote `fork` |
 | `scenario.json` | concrete paths, operation, inputs, and the table that maps each symbol to a SHA (`refs`) |
@@ -70,7 +71,7 @@ A built scenario (`<case>/build.sh <out-dir>`) contains:
 {
   "name": "squash_merged_branch_deleted",        // must equal the directory name
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_branch_deleted_allows",
-  "firstmate_matrix_row": "g",
+  "reference_matrix_row": "g",
   "description": "...",
   "delivery_mode": "no-mistakes",                // local-only | no-mistakes | direct-PR
   "inputs": {                                    // what the guard is told
@@ -119,7 +120,7 @@ their own symbols: `pr_head`, `fork_branch_head`, `local_parent`,
 | `ancestor` | `ref` is an ancestor of `of` |
 | `same` | `a` and `b` are the same commit |
 | `content_in` | a 3-way `merge-tree` of `ref` with `local_head` produces `ref`'s tree, so `local_head` adds nothing new; a conflict counts as false |
-| `patches_in` | every commit in `local_head` that is not on a remote has a patch-id in `merge-base..ref` (Firstmate's replay check) |
+| `patches_in` | every commit in `local_head` that is not on a remote has a patch-id in `merge-base..ref` (the reference's replay check) |
 | `dirty` | the worktree has uncommitted changes |
 
 **Reason classes**:
@@ -191,7 +192,7 @@ cases a second time:
 ```sh
 fixtures/cleanup-guard/run.sh                                  # validate all 21 fixtures
 fixtures/cleanup-guard/run.sh --impl 'node dist/guard-cli.js'  # check an implementation
-fixtures/cleanup-guard/run.sh --impl "$PWD/fixtures/cleanup-guard/reference/firstmate-oracle.sh"
+REFERENCE_REPO=<checkout> fixtures/cleanup-guard/run.sh --impl "$PWD/fixtures/cleanup-guard/reference/reference-oracle.sh"
 fixtures/cleanup-guard/run.sh --case dirty_worktree --keep     # one case, keep the build
 ```
 
@@ -208,10 +209,10 @@ The default mode checks, for every case:
 The runner needs bash, jq, and git 2.38 or newer (for
 `merge-tree --write-tree`).
 
-`reference/firstmate-oracle.sh` runs Firstmate's own `fm-teardown.sh` and
-`fm-pr-check.sh` against the built scenarios. It runs from a `git archive`
+`reference/reference-oracle.sh` runs the reference's (the previous orchestrator's)
+own `fm-teardown.sh` and `fm-pr-check.sh` against the built scenarios. It runs from a `git archive`
 copy under `$TMPDIR` with every home, state, data and config path redirected,
 and with treehouse, tmux, no-mistakes and lsof stubbed. Its host-wide orphan
 sweep is replaced by a no-op. At `a09090d1` it agrees with all 21 expected
-verdicts. Set `FIRSTMATE_REPO` or `FIRSTMATE_REV` to check another Firstmate
-checkout or commit.
+verdicts. `REFERENCE_REPO` names the reference checkout and is required;
+`REFERENCE_REV` picks a commit (default `HEAD`).

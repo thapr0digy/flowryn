@@ -1,7 +1,7 @@
 {
   "name": "gh_error_and_content_absent",
   "ported_from": "tests/fm-teardown.test.sh:test_gh_error_and_content_absent_refuses",
-  "firstmate_matrix_row": "j",
+  "reference_matrix_row": "j",
   "description": "A PR URL is recorded and real content (feature.txt) is unpushed, but every forge call fails and origin/main never gained the content. A transient forge failure must not allow cleanup: refused (fail-safe).",
   "delivery_mode": "no-mistakes",
   "inputs": {

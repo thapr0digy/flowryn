@@ -11,7 +11,7 @@ import { runCommand } from "./command.ts";
  * Another branch's run, or one still executing, is never touched. The abort is
  * confirmed by re-reading that exact run: a terminal outcome, or the CLI's
  * exact "not found", confirms it; anything else refuses the cleanup. Ported
- * from Firstmate's conclude_task_no_mistakes_run (bin/fm-teardown.sh,
+ * from the previous orchestrator's conclude_task_no_mistakes_run (bin/fm-teardown.sh,
  * a09090d1) without its runs-ledger fallback: a head this copy cannot resolve
  * is never aborted.
  */

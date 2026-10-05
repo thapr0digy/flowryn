@@ -1,7 +1,7 @@
 {
   "name": "content_fallback_refreshes_stale_origin_ref",
   "ported_from": "tests/fm-teardown.test.sh:test_content_fallback_refreshes_stale_origin_ref",
-  "firstmate_matrix_row": "l",
+  "reference_matrix_row": "l",
   "description": "As content_in_default_fallback, but the primary clone's remote.origin.fetch refspec is replaced with +refs/heads/not-main:refs/remotes/origin/not-main, so a plain 'git fetch origin' never refreshes origin/main. The guard must fetch the default branch explicitly (+refs/heads/main:refs/remotes/origin/main) before comparing trees. Allowed via content-in-default.",
   "delivery_mode": "no-mistakes",
   "inputs": {

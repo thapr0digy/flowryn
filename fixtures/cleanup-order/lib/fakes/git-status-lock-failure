@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # git wrapper: `git status --porcelain` fails while the worktree's index.lock
-# exists (as a crashed git can make it), like Firstmate's
+# exists (as a crashed git can make it), like the reference's
 # add_git_status_lock_failure; everything else is the real git.
 self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 real=""

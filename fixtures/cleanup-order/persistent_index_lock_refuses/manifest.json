@@ -1,7 +1,7 @@
 {
   "name": "persistent_index_lock_refuses",
   "ported_from": "tests/fm-teardown.test.sh:test_persistent_index_lock_exhausts_retries_and_refuses_loudly",
-  "firstmate_matrix_row": "y",
+  "reference_matrix_row": "y",
   "description": "A fresh index.lock held by a live process never clears. After the bounded waits it is still not provably stale: it stays and the cleanup refuses.",
   "delivery_mode": "no-mistakes",
   "inputs": {

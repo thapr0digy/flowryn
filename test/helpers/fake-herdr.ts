@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, openSync, closeSync, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, openSync, closeSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { join, resolve } from "node:path";
 
@@ -28,6 +28,8 @@ interface FakePane {
   kind: string | null;
   args: string[];
   starts: number;
+  /** Text pane.send_text typed into the composer, not yet submitted with Enter. */
+  typed: string;
 }
 
 interface FakeWorkspace {
@@ -222,16 +224,17 @@ export class FakeHerdr {
     return pane;
   }
 
-  private createWorkspace(cwd: string, label: string): FakeWorkspace {
+  /** workspace.create's env reaches the root pane's shell, so a worker workspace has one pane (M0 h06). */
+  private createWorkspace(cwd: string, label: string, env: Record<string, string> = {}): FakeWorkspace {
     const workspaceId = `w${this.nextWorkspace++}`;
     const ws: FakeWorkspace = { workspaceId, cwd, label, panes: [], nextPane: 1 };
     this.workspaces.set(workspaceId, ws);
-    this.addPane(ws, cwd, {});
+    this.addPane(ws, cwd, env);
     return ws;
   }
 
   private addPane(ws: FakeWorkspace, cwd: string, env: Record<string, string>): FakePane {
-    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0 };
+    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "" };
     this.panes.set(pane.paneId, pane);
     ws.panes.push(pane.paneId);
     return pane;
@@ -270,7 +273,7 @@ export class FakeHerdr {
       case "ping":
         return { type: "pong" };
       case "workspace.create": {
-        const ws = this.createWorkspace(String(params.cwd ?? "/"), String(params.label ?? ""));
+        const ws = this.createWorkspace(String(params.cwd ?? "/"), String(params.label ?? ""), (params.env as Record<string, string>) ?? {});
         return { type: "workspace_created", workspace: { workspace_id: ws.workspaceId }, root_pane: this.paneView(this.panes.get(ws.panes[0]!)!) };
       }
       case "workspace.close": {
@@ -279,12 +282,6 @@ export class FakeHerdr {
         for (const id of ws.panes) this.closePane(this.panes.get(id)!);
         this.workspaces.delete(ws.workspaceId);
         return { type: "ok" };
-      }
-      case "pane.split": {
-        const target = this.need(params.target_pane_id);
-        const ws = this.workspaces.get(target.workspaceId)!;
-        const pane = this.addPane(ws, String(params.cwd ?? target.cwd), (params.env as Record<string, string>) ?? {});
-        return { type: "pane_info", pane: this.paneView(pane) };
       }
       case "agent.start": {
         const pane = this.need(params.pane_id);
@@ -328,6 +325,16 @@ export class FakeHerdr {
         const pane = this.need(params.pane_id);
         const pid = this.harnessPid(pane.paneId);
         if (pid !== null && (params.keys as string[]).includes("Escape")) process.kill(pid, "SIGINT");
+        if ((params.keys as string[]).includes("Enter")) {
+          // A submitted prompt: the fake harness (FAKE: no-waiter) reads it as the line typed into its composer.
+          appendFileSync(join(pane.env.FLOWRYN_REPORT_DIR ?? "", "fake-typed.txt"), pane.typed + "\n");
+          pane.typed = "";
+        }
+        return { type: "ok" };
+      }
+      case "pane.send_text": {
+        const pane = this.need(params.pane_id);
+        pane.typed += String(params.text ?? "");
         return { type: "ok" };
       }
       case "pane.report_metadata": {

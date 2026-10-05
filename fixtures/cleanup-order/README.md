@@ -28,10 +28,10 @@ were.
 
 ## Where they come from
 
-The cases are ported from Firstmate's `tests/fm-teardown.test.sh` at commit
+The cases are ported from the reference's `tests/fm-teardown.test.sh` at commit
 `a09090d1`, the same revision as the first set. Each `manifest.json` names its
 source test (`ported_from`) and, for the lock cases, the row of that file's
-header matrix. Firstmate returns its worktree through `treehouse return
+header matrix. The reference returns its worktree through `treehouse return
 --force`, which fails on a present `index.lock`; Flowryn removes a linked
 worktree with `git worktree remove`, which would delete a lock silently (the
 lock lives in the worktree's admin directory). So a Flowryn guard checks the
@@ -40,11 +40,11 @@ retry around the removal.
 
 Not ported, deliberately:
 
-| Firstmate test | Why |
+| Reference test | Why |
 |---|---|
 | `test_non_linked_index_lock_path_is_checked_from_worktree` | Flowryn worktrees are always linked worktrees. |
-| `test_index_lock_mtime_read_failure_refuses` | Firstmate skips it on macOS (its fault injection cannot reach `/usr/bin/stat`). |
-| `test_empty_retry_wait_uses_default_without_aborting`, `test_fractional_legacy_retry_wait_refuses_without_arithmetic_error` | Firstmate's environment-variable parsing; Flowryn's clocks are typed config. |
+| `test_index_lock_mtime_read_failure_refuses` | The reference skips it on macOS (its fault injection cannot reach `/usr/bin/stat`). |
+| `test_empty_retry_wait_uses_default_without_aborting`, `test_fractional_legacy_retry_wait_refuses_without_arithmetic_error` | The reference's environment-variable parsing; Flowryn's clocks are typed config. |
 | the runs-ledger family (`test_parked_run_advanced_past_unfetched_head_is_still_aborted` and the eleven "never aborted" ledger cases) | Flowryn does not port the `no-mistakes runs` ledger fallback: a parked run whose head this copy cannot resolve is left alone, never aborted, which is the conservative side of every one of those cases. |
 | `test_leaked_tasktmp_process_is_reaped` | Flowryn has no per-task tmp directory. |
 | `test_lsof_absent_reaps_tmux_process_group` | Flowryn stops the worker's own process group by its recorded identity before the reap; there is no tmux pane group. |
@@ -73,7 +73,7 @@ A built scenario is the first set's layout (`origin.git/`, `primary/`,
 
 The fake `ps` answers the forms a guard may use for a start time:
 `ps -o pid=,lstart=,comm= -p <pids>` (Flowryn) and `ps -p <pid> -o lstart=`
-(Firstmate).
+(the reference).
 
 ## Implementation contract (`run.sh --impl '<command>'`)
 

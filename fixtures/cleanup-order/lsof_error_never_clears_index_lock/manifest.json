@@ -1,7 +1,7 @@
 {
   "name": "lsof_error_never_clears_index_lock",
   "ported_from": "tests/fm-teardown.test.sh:test_lsof_error_never_clears_index_lock",
-  "firstmate_matrix_row": "t",
+  "reference_matrix_row": "t",
   "description": "The index.lock is old and every lsof call fails. Nothing proves the lock stale, so it stays and the cleanup refuses.",
   "delivery_mode": "no-mistakes",
   "inputs": {

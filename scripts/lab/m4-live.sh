@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # M4 exit, live (docs/m4-notes.md "Live runs"): ships from dispatch to merged
 # and cleaned on a real Claude Code leader and a real Pi leader started with
-# `flowryn lead` in panes of an isolated Herdr lab session from Firstmate's
-# fm-herdr-lab.sh, never the default session. Approval comes from each channel:
+# `flowryn lead` in panes of an isolated Herdr lab session from
+# spikes/lib/herdr-lab.sh, never the default session. Approval comes from each channel:
 # Claude's own prompt, Pi's confirm, `flowryn approve` typed in a lab pane (the
 # code read back from /dev/tty), and the board's approve key. Local-only ships
 # land for real; direct-PR and no-mistakes ships go through a fake GitHub that

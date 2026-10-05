@@ -182,7 +182,7 @@ describe("the briefing", () => {
     expect(lines[2]).toBe("Needs you (2):");
     expect(lines[3]).toBe(`- [${p0}] P0 · Worker question q1`);
     expect(lines[4]).toBe(`- [${p1}] PR ready: auth fix (web) checks green`);
-    expect(briefing.text).toContain("In flight: 0 ships, 0 scouts. Queued: 2.");
+    expect(briefing.text).toContain("In flight: 0 ships, 0 scouts. Queued: 2 (2 ready).");
     expect(briefing.text).toContain("Due today: call bank");
     expect(briefing.text).toContain("Morning: 1 to-do due today · 1 overdue · 1 task done since yesterday.");
     expect(lines.at(-1)).toStartWith("Commands: flowryn fleet");
@@ -299,13 +299,13 @@ describe("decisions in the briefing", () => {
 
   test("the import triage asks the leader to decide what it may, once", () => {
     tx(db, () => {
-      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, created_at, import_source) VALUES ('k9', 'decision-r-x9', 'Keep 365 days?', '[]', 1, 'open', 1, 'firstmate:x')").run();
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, created_at, import_source) VALUES ('k9', 'decision-r-x9', 'Keep 365 days?', '[]', 1, 'open', 1, 'legacy:x')").run();
       setMeta(db, "import_triage", "1");
     });
     const first = tx(db, () => composeBriefing(db, { session: "L1", now: 10, morningHour: 99, ageMs: AGE, markMorning: true }));
-    expect(first.text).toContain("Imported from Firstmate: 1 open decision. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.");
+    expect(first.text).toContain("Imported earlier: 1 open decision. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.");
     const second = tx(db, () => composeBriefing(db, { session: "L1", now: 20, morningHour: 99, ageMs: AGE, markMorning: true }));
-    expect(second.text).not.toContain("Imported from Firstmate");
+    expect(second.text).not.toContain("Imported earlier");
   });
 
   test("decision tasks do not count as queued work", () => {
@@ -313,6 +313,6 @@ describe("decisions in the briefing", () => {
       { id: "decision-a-x1", title: "Delete?", state: "queued", kind: "decision", repo: null, priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] },
       { id: "web-x-q1", title: "Ship", state: "queued", kind: "ship", repo: "hot", priority: null, body: "", created: null, closed: null, deps: [], hold: null, links: [] },
     ] as BacklogTask[], 1);
-    expect(composeBriefing(db, { session: null, now: 10, morningHour: 99, ageMs: AGE, markMorning: false }).text).toContain("Queued: 1.");
+    expect(composeBriefing(db, { session: null, now: 10, morningHour: 99, ageMs: AGE, markMorning: false }).text).toContain("Queued: 1 (1 ready).");
   });
 });

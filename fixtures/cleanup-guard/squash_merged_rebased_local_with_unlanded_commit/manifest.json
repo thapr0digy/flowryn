@@ -1,7 +1,7 @@
 {
   "name": "squash_merged_rebased_local_with_unlanded_commit",
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_rebased_local_with_unlanded_commit_refuses",
-  "firstmate_matrix_row": "q4",
+  "reference_matrix_row": "q4",
   "description": "Identical to squash_merged_rebased_branch except the worktree has one extra local commit (later.txt) on top of the merged PR head. That unlanded follow-up is the sole difference and must be the sole reason for refusal; the worktree, task branch and HEAD must be retained.",
   "delivery_mode": "no-mistakes",
   "inputs": {

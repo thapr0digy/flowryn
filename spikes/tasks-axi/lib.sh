@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Helpers for the tasks-axi spikes. Every call targets a scratch backlog under
-# spikes/.runs/<spike>/ via --file; Firstmate's data/backlog.md is never read
+# spikes/.runs/<spike>/ via --file; the previous orchestrator's data/backlog.md is never read
 # or written.
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/lab.sh"
 

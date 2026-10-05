@@ -2,7 +2,7 @@
 # M3 leader bridges, live (docs/m3-notes.md "Live runs"): the shared leader
 # bridge contract suite (src/contracts/bridge-suite.ts) against real Claude
 # Code and Pi leaders started with `flowryn lead` in panes of an isolated Herdr
-# lab session from Firstmate's fm-herdr-lab.sh, never the default session. The
+# lab session from spikes/lib/herdr-lab.sh, never the default session. The
 # helper tears the session down on exit and checks the default session is
 # unchanged.
 #

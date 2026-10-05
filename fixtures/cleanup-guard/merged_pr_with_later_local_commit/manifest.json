@@ -1,7 +1,7 @@
 {
   "name": "merged_pr_with_later_local_commit",
   "ported_from": "tests/fm-teardown.test.sh:test_merged_pr_with_later_local_commit_refuses",
-  "firstmate_matrix_row": "k",
+  "reference_matrix_row": "k",
   "description": "The PR was recorded (pr=, pr_head=) at the first commit and later reads MERGED with that head, but the worktree then gained another commit (later.txt) that is in neither the PR head nor origin/main. The merged PR no longer covers the local work: refused.",
   "delivery_mode": "no-mistakes",
   "inputs": {
