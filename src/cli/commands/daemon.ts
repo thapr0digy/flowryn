@@ -200,11 +200,19 @@ const restart: VerbSpec = {
     const old = asked.data.old as DaemonSnapshot;
     const started = Date.now();
     let fresh: Reply | null = null;
+    let dropped: { reason: string } | null = null;
     const up = await waitFor(async () => {
       const reply = await ping(io.env);
-      if (reply?.ok && (reply.data as { pid?: number }).pid !== old.pid) fresh = reply;
-      return fresh !== null;
+      if (!reply?.ok) return false;
+      const data = reply.data as { pid?: number; restart_handoff?: boolean; restart_dropped?: { reason: string; ts: number } | null };
+      if (data.pid !== old.pid) fresh = reply;
+      // The old daemon still answers and withdrew its handoff: its supervisor refused, so no new daemon is coming.
+      else if (data.restart_handoff === false) dropped = { reason: data.restart_dropped && data.restart_dropped.ts >= started - 1_000 ? data.restart_dropped.reason : "the old daemon withdrew it" };
+      return fresh !== null || dropped !== null;
     }, RESTART_WAIT_MS);
+    if (dropped) {
+      return print(io, errorReply({ code: "restart_dropped", message: `the restart was dropped and the old daemon (pid ${old.pid}) still runs: ${(dropped as { reason: string }).reason}`, help: "flowryn daemon status; tell the user" }));
+    }
     if (!up || !fresh) {
       const { config } = loadConfig(flowrynHome(io.env));
       return print(io, errorReply({ code: "daemon_unavailable", message: `the old daemon (pid ${old.pid}) was asked to restart, but no new daemon answered within ${RESTART_WAIT_MS / 1000} s`, help: `launchd keeps retrying it; see ${stateFiles(config.state_dir).logs}` }));

@@ -2,7 +2,7 @@ import { appendEvent } from "../db/events.ts";
 import { pendingIntents } from "../journal/journal.ts";
 import { boolArg, intArg, type VerbSpec } from "../api/verbs.ts";
 import { FlowrynError } from "../api/errors.ts";
-import { DEFAULT_WAIT_MIN, MAX_WAIT_MIN, readPending, type Preflight } from "./restart.ts";
+import { DEFAULT_WAIT_MIN, MAX_WAIT_MIN, handoffPending, lastDropped, readPending, type Preflight } from "./restart.ts";
 
 /**
  * Socket verbs the CLI uses under the hood. `daemon.ping` is the handshake:
@@ -50,6 +50,8 @@ export function systemVerbs(): VerbSpec[] {
             failed_intents: failed,
             build: info?.build ?? null,
             restart_pending: readPending(ctx.db),
+            restart_handoff: handoffPending(ctx.db),
+            restart_dropped: lastDropped(ctx.db),
           },
         };
       },
@@ -82,6 +84,8 @@ export function systemVerbs(): VerbSpec[] {
       },
       kind: "mutation",
       roles: ["leader", "human"],
+      // Never replayed from the idempotency table or the spool: a stored "restarting" reply must not kick a later daemon.
+      ephemeral: true,
       // The binary check runs the target's version (and codesign) with a 10 s limit each.
       replyMs: 30_000,
       async prepare(ctx, args): Promise<RestartPrepared> {

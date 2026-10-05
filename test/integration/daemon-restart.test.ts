@@ -138,6 +138,29 @@ describe("flowryn daemon restart", () => {
     expect((await cliJson(h, ["daemon", "status"])).reply.data).toMatchObject({ daemon: "up", pid: d.pid });
   }, 60_000);
 
+  test("a supervisor that refuses: the CLI reports restart_dropped at once, the old daemon stays, a P1 says why", async () => {
+    const { h, env } = supervisedHome();
+    const refusing = join(h.home, "refusing.sh");
+    writeFileSync(refusing, "#!/bin/sh\necho 'Could not find service in domain' >&2\nexit 113\n");
+    chmodSync(refusing, 0o755);
+    writeFileSync(env.FLOWRYN_SUPERVISOR!, JSON.stringify({ program: ["bun", MAIN, "daemon", "run"], restart: [refusing] }));
+    const token = seedLeader(h);
+    const d = await daemon(h, env);
+    const started = Date.now();
+    const { code, reply } = await cliJson(h, ["daemon", "restart"], { env: { ...env, FLOWRYN_TOKEN: token } });
+    expect(code).toBe(2);
+    expect(reply.error).toMatchObject({ code: "restart_dropped" });
+    expect((reply.error as { message: string }).message).toContain("Could not find service in domain");
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect((await cliJson(h, ["daemon", "status"])).reply.data).toMatchObject({ daemon: "up", pid: d.pid, restart_handoff: false });
+    const db = h.db();
+    try {
+      expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'restart_dropped' AND state = 'open'").get()).toEqual({ n: 1 });
+    } finally {
+      db.close();
+    }
+  }, 60_000);
+
   test("a daemon not under launchd (started in the background) is refused as not_supervised", async () => {
     const h = makeHome();
     homes.push(h);

@@ -46,6 +46,7 @@ export const ERROR_CODES = {
   plist_drift: EXIT.policy,
   not_supervised: EXIT.policy,
   binary_broken: EXIT.policy,
+  restart_dropped: EXIT.policy,
   // M5: workflows and autonomy
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,

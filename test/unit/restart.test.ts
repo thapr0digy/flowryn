@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { composeBriefing } from "../../src/attention/briefing.ts";
@@ -294,10 +294,17 @@ describe("restart controller", () => {
     expect(first.restart === "pending" && first.waiting_on[0]).toContain("merging: t1");
     now += 60_000;
     tx(db, () => c.request({ role: "human", runId: null, taskId: null }, { ...BASE, whenIdle: true, waitMin: 200, preflight: null }));
-    expect(readPending(db)).toMatchObject({ by: "human", expires_at: 1_600_000 });
+    // The second request keeps the first one's deadline and its start, so an expiry reports the real wait.
+    expect(readPending(db)).toMatchObject({ by: "human", requested_at: 1_000_000, expires_at: 1_600_000 });
     expect(tx(db, () => c.request(LEADER, { ...BASE, cancel: true, preflight: null }))).toEqual({ restart: "cancelled", had_pending: true });
     expect(readPending(db)).toBeNull();
     expect(events("daemon.restart_cancelled")).toEqual([{ by: "leader", session: "L3", had_pending: true }]);
+  });
+
+  test("--when-idle never gets restart_blocked: guards that cleared before the binary check park it for tryPending", () => {
+    const outcome = tx(db, () => controller().request(LEADER, { ...BASE, whenIdle: true, preflight: null }));
+    expect(outcome).toMatchObject({ restart: "pending", waiting_on: [] });
+    expect(getMeta(db, "restart_handoff")).toBeNull();
   });
 
   test("cooldown: a second restart within a minute of the last is refused", () => {
@@ -461,7 +468,8 @@ describe("launchd supervisor", () => {
     // kickstart -k stops the daemon (and launchd may signal its process group); the helper runs in its own group.
     const marker = join(dir, "helper-done");
     const helper = join(dir, "helper.sh");
-    writeFileSync(helper, `#!/bin/sh\nsleep 0.3\ntouch ${JSON.stringify(marker)}\n`);
+    const spawned = join(dir, "helper-spawned");
+    writeFileSync(helper, `#!/bin/sh\ntouch ${JSON.stringify(spawned)}\nsleep 0.3\ntouch ${JSON.stringify(marker)}\n`);
     chmodSync(helper, 0o755);
     // The parent leads its own process group, as launchd's job does; the signal goes to that whole group.
     const parent = spawn("bun", ["-e", `const { detached } = await import(${JSON.stringify(join(import.meta.dir, "../../src/daemon/restart.ts"))}); void detached(${JSON.stringify(helper)}, [], process.env); setTimeout(() => {}, 5000);`], {
@@ -469,7 +477,10 @@ describe("launchd supervisor", () => {
       stdio: "ignore",
     });
     const exited = new Promise((resolve) => parent.on("exit", resolve));
-    await Bun.sleep(150);
+    // Signal only once the helper is running: launchd stops the daemon only after launchctl has asked.
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(spawned) && Date.now() < deadline) await Bun.sleep(20);
+    expect(existsSync(spawned)).toBe(true);
     process.kill(-parent.pid!, "SIGTERM");
     await exited;
     await Bun.sleep(500);

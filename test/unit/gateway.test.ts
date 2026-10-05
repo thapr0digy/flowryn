@@ -131,6 +131,11 @@ describe("gateway", () => {
     expect((await gateway.handle(env(RESTART_VERB, { token: readerToken }))).error!.code).toBe("not_leader");
   });
 
+  test("restart is never taken from the spool (ephemeral: no stored reply can kick a later daemon)", async () => {
+    expect((await gateway.handle(env(RESTART_VERB), "spool")).error!.code).toBe("bad_envelope");
+    expect(db.query("SELECT COUNT(*) AS n FROM idempotency WHERE verb = ?1").get(RESTART_VERB)).toEqual({ n: 0 });
+  });
+
   test("restart --wait-min is bounded", async () => {
     expect((await gateway.handle(env(RESTART_VERB, { args: { "when-idle": true, "wait-min": 0 } }))).error!.code).toBe("bad_args");
     expect((await gateway.handle(env(RESTART_VERB, { args: { "when-idle": true, "wait-min": 241 } }))).error!.code).toBe("bad_args");

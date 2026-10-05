@@ -310,6 +310,17 @@ export interface Handoff {
   old: DaemonSnapshot;
 }
 
+/** Is a handoff waiting for the next daemon? The old daemon clears it when its supervisor refuses. */
+export function handoffPending(db: Db): boolean {
+  return getMeta(db, HANDOFF_KEY) !== null;
+}
+
+/** The newest restart that will not happen: why, and when. */
+export function lastDropped(db: Db): { reason: string; ts: number } | null {
+  const row = db.query("SELECT ts, payload FROM events WHERE kind IN ('daemon.restart_dropped','daemon.restart_expired') ORDER BY seq DESC LIMIT 1").get() as { ts: number; payload: string } | null;
+  return row ? { reason: String((JSON.parse(row.payload) as { reason?: unknown }).reason ?? ""), ts: row.ts } : null;
+}
+
 export function readPending(db: Db): PendingRestart | null {
   const raw = getMeta(db, PENDING_KEY);
   return raw ? (JSON.parse(raw) as PendingRestart) : null;
@@ -433,7 +444,8 @@ export class RestartController {
       throw new FlowrynError("restart_cooldown", `flowrynd restarted ${Math.round((now - last.ts) / 1000)} s ago; a second restart waits ${RESTART_COOLDOWN_MS / 1000} s`, "do not retry in a loop; flowryn daemon status");
     }
     const guards = this.guards();
-    if (guards.length > 0) {
+    // --when-idle never gets restart_blocked: guards that cleared after the check skipped the binary check, so park it and let tryPending run it.
+    if (guards.length > 0 || (opts.whenIdle && !opts.preflight)) {
       if (!opts.whenIdle) {
         throw new FlowrynError(
           "restart_blocked",
@@ -443,7 +455,7 @@ export class RestartController {
       }
       const earlier = readPending(db);
       const expires = earlier ? earlier.expires_at : now + opts.waitMin * 60_000;
-      const pending: PendingRestart = { ...who, requested_at: now, expires_at: expires, force: opts.force };
+      const pending: PendingRestart = { ...who, requested_at: earlier ? earlier.requested_at : now, expires_at: expires, force: opts.force };
       setMeta(db, PENDING_KEY, JSON.stringify(pending));
       appendEvent(db, { source: "daemon", kind: "daemon.restart_requested", payload: { ...who, when_idle: true, waiting_on: guardLines(guards), expires_at: expires }, ts: now });
       return { restart: "pending", waiting_on: guardLines(guards), expires_at: expires, expires: localStamp(expires) };
