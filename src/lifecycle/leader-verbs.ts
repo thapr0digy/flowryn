@@ -136,6 +136,7 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
   const run = findRun(db, target);
   if (!run) throw new FlowrynError("not_found", `no run or task ${target}`);
   if (run.state === "cancelled" || run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
+  if (run.cleanup === "done") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is cleaned up: its worktree is gone`, `dispatch ${run.task_id} again`);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
   if (!run.agent_session) throw new FlowrynError("bad_args", "the run has no stored session to resume");
   return run;

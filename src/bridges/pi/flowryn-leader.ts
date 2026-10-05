@@ -356,6 +356,7 @@ export default function flowrynLeader(pi: any): void {
       if (typeof summary.error === "string") return text(`Cannot pass a gate of ${task}: ${summary.error}`);
       const lines = [`${summary.title ?? task} (${summary.project ?? "?"})`, `review: ${summary.review ?? "-"}`];
       if (typeof summary.plan === "string" && summary.plan !== "-") lines.push(`also approves ${summary.plan}`);
+      if (typeof summary.questions === "string" && summary.questions !== "-") lines.push(`its questions: ${summary.questions}`);
       lines.push(`gate ${summary.gate ?? "?"}; the next stage starts at once`);
       let yes = false;
       try {

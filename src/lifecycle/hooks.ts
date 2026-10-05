@@ -14,6 +14,7 @@ import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, tas
 import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
+import { gateQuestionsLine } from "./gate-questions.ts";
 import { dueSteers, dueUrgent, getMessage, loseUnseenUrgent, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { piPreempt } from "./urgent.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
@@ -590,7 +591,7 @@ const gateSummaryHook = leaderVerb(
     const input = parseInput(args) as leader.LeaderHookInput;
     try {
       const { run, gate } = openReviewGate(ctx.db, String(input.task ?? ""));
-      return { task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", plan: pendingPlanLine(ctx.db, gate.id) ?? "-" };
+      return { task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", plan: pendingPlanLine(ctx.db, gate.id) ?? "-", questions: gateQuestionsLine(ctx.db, gate.id) ?? "-" };
     } catch (error) {
       return { error: (error as Error).message };
     }

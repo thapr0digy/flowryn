@@ -95,7 +95,7 @@ describe("leader verbs", () => {
     await e.call("hook.session-start", { harness: "claude", input: JSON.stringify({ source: "startup" }) }, a.token);
     const question = await e.openP1("which colour?");
     const brief = await cliJson(e.h, ["brief"], { env: { FLOWRYN_TOKEN: a.token } });
-    expect((brief.reply.data as { briefing: string[] }).briefing).toContain(`- [${question}] Worker question q1 on web-billing-q4: "which colour?" [yes | no]`);
+    expect((brief.reply.data as { briefing: string[] }).briefing).toContain(`- [${question}] Worker question q1 on web-billing-q4: "which colour?" [yes | no] blocks: the next step of the task`);
     const readOnly = await cliJson(e.h, ["brief"], { env: { FLOWRYN_TOKEN: b.token } });
     expect((readOnly.reply.data as { briefing: string[] }).briefing[0]).toContain("read-only: leader is claude");
     const fleet = await cliJson(e.h, ["fleet"], { env: { FLOWRYN_TOKEN: b.token } });

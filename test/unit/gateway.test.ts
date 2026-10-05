@@ -16,6 +16,7 @@ import { inertDelivery } from "../../src/policy/services.ts";
 import { inertSched } from "../../src/sched/services.ts";
 import { inertRestart } from "../../src/daemon/restart.ts";
 import { PING_VERB, PROTO_EXEMPT_VERBS, RESTART_VERB, systemVerbs } from "../../src/daemon/system-verbs.ts";
+import { inertLavish } from "../../src/lavish/services.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { parseArgv } from "../../src/cli/argv.ts";
 import { notHumanReason } from "../../src/cli/human.ts";
@@ -84,6 +85,7 @@ beforeEach(() => {
     delivery: inertDelivery(),
     sched: inertSched(),
     restart: inertRestart(db, info),
+    lavish: inertLavish(),
   };
   gateway = new Gateway({ services, lookup: (v) => VERBS.get(v) });
 });
