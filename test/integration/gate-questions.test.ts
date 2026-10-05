@@ -172,6 +172,13 @@ describe("a review gate's questions", () => {
       const { task, run } = await f.dispatch(steps("c", after), { kind: "ship" });
       await f.waitRun(run, (r) => r.stage_state === "review", "the first design review");
       const first = one<{ id: string }>(f, "SELECT id FROM gates WHERE run_id = ?1 AND state = 'open'", run)!.id;
+      // Dismissing a review question's item is refused: only the user answers it.
+      const q2Item = one<{ id: string }>(f, "SELECT id FROM items WHERE decision_id = 'q2'")!.id;
+      const refused = await f.json(["dismiss", q2Item]);
+      expect(refused.code).not.toBe(0);
+      expect((refused.reply.error as { message: string }).message).toContain("only the user answers it");
+      expect(one<{ decision: string; item: string }>(f, "SELECT d.state AS decision, i.state AS item FROM decisions d JOIN items i ON i.decision_id = d.id WHERE d.id = 'q2'")).toEqual({ decision: "open", item: "open" });
+      expect(rows(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE '%was dismissed%'", run)).toEqual([]);
       // You answer q1 in your own shell (a human channel).
       expect((await e.call("decide", { decision: "q1", choice: "db", by: "captain" })).ok).toBe(true);
 

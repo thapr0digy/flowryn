@@ -133,21 +133,35 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-/** The gate closed without them (changes, a promotion): the questions still open close unanswered. Call inside a transaction. */
-export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: number, why = "the review was sent back"): string[] {
+/** What closes a gate's questions unanswered: the review sent back, the run cancelled, or the scout promoted. */
+export type GateQuestionsCloser = "gate changes" | "run cancelled" | "promoted";
+
+const CLOSERS: Record<GateQuestionsCloser, { why: string; resolvedBy: string }> = {
+  "gate changes": { why: "the review was sent back", resolvedBy: "gate.changes" },
+  "run cancelled": { why: "the run was cancelled", resolvedBy: "run.cancelled" },
+  promoted: { why: "the scout was promoted to a ship", resolvedBy: "run.promoted" },
+};
+
+/** The gate closed without them: the questions still open close unanswered. Call inside a transaction. */
+export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: number, by: GateQuestionsCloser = "gate changes"): string[] {
+  const { why, resolvedBy } = CLOSERS[by];
   const open = openIds(db, gateId);
   for (const id of open) {
-    db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2, answered_via = 'gate changes' WHERE id = ?1").run(id, now);
+    db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2, answered_via = ?3 WHERE id = ?1").run(id, now, by);
     appendEvent(db, { source: "cli", kind: "decision.dismissed", runId: run.id, taskId: run.task_id, payload: { decision: id, gate: gateId, why }, ts: now });
-    resolveDecisionItems(db, id, `gate.changes ${gateId}`, now);
+    resolveDecisionItems(db, id, `${resolvedBy} ${gateId}`, now);
   }
   return open;
 }
 
-/** The run ended (cancelled, failed): its open review questions close unanswered. Call inside a transaction. */
-export function dismissRunGateQuestions(db: Db, run: RunRow, why: string, now: number): string[] {
+/**
+ * The run was cancelled: its open review questions close unanswered. A
+ * failed run keeps them open, since a resume brings its gate back and the
+ * gate still refuses a pass until the user answers. Call inside a transaction.
+ */
+export function dismissCancelledRunQuestions(db: Db, run: RunRow, now: number): string[] {
   const gates = db.query("SELECT DISTINCT gate_id FROM decisions WHERE run_id = ?1 AND gate_id IS NOT NULL AND state = 'open'").all(run.id) as { gate_id: string }[];
-  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, why));
+  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, "run cancelled"));
 }
 
 /** Record where the notes a poll took from the review page went. Call inside a transaction. */

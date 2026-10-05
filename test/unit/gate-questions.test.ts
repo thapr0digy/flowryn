@@ -370,7 +370,8 @@ describe("a gate's questions as decisions", () => {
     tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null }));
     const run = getRun(db, runId)!;
     expect(tx(db, () => dismissGateQuestions(db, run, "g1", NOW))).toEqual(["q2", "q3"]);
-    expect(getDecision(db, "q2")!.state).toBe("dismissed");
+    expect(getDecision(db, "q2")!).toMatchObject({ state: "dismissed", answered_via: "gate changes" });
+    expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q2'").get()).toEqual({ resolved_by: "gate.changes g1" });
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE state = 'open'").get()).toEqual({ n: 0 });
     expect(gateAnswersNote(db, "g1")).toBe("The user's answers to your review questions: q1 (token-store) = db. Closed unanswered: q2, q3.");
   });
@@ -462,20 +463,38 @@ describe("a gate's questions as decisions", () => {
     expect(verdict).toContain(`q3 (verb-name) = ${answer} [their note: ${note}]`);
   });
 
-  for (const [how, end] of [
-    ["cancelled", (run: ReturnType<typeof getRun> & object) => cancelRun(db, run, "stop", "cli", NOW)],
-    ["failed", (run: ReturnType<typeof getRun> & object) => failRun(db, run, "dead", "daemon", NOW)],
-  ] as const) {
-    test(`a ${how} run's open questions close unanswered and its page is neither polled nor rewritten`, () => {
-      open();
-      tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null }));
-      tx(db, () => end(getRun(db, runId)!));
-      expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["answered", "dismissed", "dismissed"]);
-      expect(db.query("SELECT COUNT(*) AS n FROM items WHERE decision_id IS NOT NULL AND state = 'open'").get()).toEqual({ n: 0 });
-      expect(gatesToPoll(db)).toEqual([]);
-      expect(gatesWithWidget(db, [])).toEqual([]);
-    });
-  }
+  test("a cancelled run's open questions close unanswered, labelled as such, and its page is neither polled nor rewritten", () => {
+    open();
+    tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null }));
+    tx(db, () => cancelRun(db, getRun(db, runId)!, "stop", "cli", NOW));
+    expect(["q1", "q2", "q3"].map((id) => [getDecision(db, id)!.state, getDecision(db, id)!.answered_via])).toEqual([
+      ["answered", "lavish"],
+      ["dismissed", "run cancelled"],
+      ["dismissed", "run cancelled"],
+    ]);
+    expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q2'").get()).toEqual({ resolved_by: "run.cancelled g1" });
+    expect(gatesToPoll(db)).toEqual([]);
+    expect(gatesWithWidget(db, [])).toEqual([]);
+  });
+
+  test("a failed run keeps its questions open: not polled while it is down, and its gate still refuses once it is resumed", () => {
+    open();
+    tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
+    expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["open", "open", "open"]);
+    expect(gatesToPoll(db)).toEqual([]);
+    expect(gatesWithWidget(db, [])).toEqual([]);
+    db.query("UPDATE runs SET state = 'running', liveness = 'busy', ended_at = NULL WHERE id = ?1").run(runId);
+    expect(() => requireGateAnswered(db, { id: "g1", stage: "design" })).toThrow(/3 open questions/);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
+  });
+
+  test("questions closed by a promotion or by changes say so", () => {
+    open();
+    const run = getRun(db, runId)!;
+    tx(db, () => dismissGateQuestions(db, run, "g1", NOW, "promoted"));
+    expect(getDecision(db, "q1")!.answered_via).toBe("promoted");
+    expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q1'").get()).toEqual({ resolved_by: "run.promoted g1" });
+  });
 
   function scriptedLavish(body: string): string {
     const bin = join(h.home, "scripted-lavish");
