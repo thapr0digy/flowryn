@@ -23,7 +23,7 @@ import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
 import { PROTO } from "../version.ts";
-import { contractBody, contractSteps, type ContractEnv, type ContractEvent, type ContractState } from "./suite.ts";
+import { contractBody, contractSteps, type ContractEnv, type ContractEvent, type ContractState, type ContractStep } from "./suite.ts";
 
 export interface ContractOptions {
   harness: HarnessId;
@@ -53,8 +53,15 @@ export interface ContractResult {
   scratch: string;
 }
 
-/** Contract runs are slower than the design's clock needs to be, but never re-ring a steer mid-suite. */
-const CONTRACT_TIMING = { pass_ms: 1_000, ring_interval_ms: 600_000, wait_poll_ms: 5_000, launch_timeout_ms: 30_000 };
+/**
+ * Contract runs never re-ring a steer on the ring interval mid-suite; the
+ * waiter's long poll and the fast re-ring of a lost or unseen carry keep the
+ * design's clock, so the steer timings are what production sees.
+ */
+const CONTRACT_TIMING = { pass_ms: 1_000, ring_interval_ms: 600_000, launch_timeout_ms: 30_000 };
+
+/** How often the runner re-reads the scratch database while it waits; step seconds carry at most this much slack. */
+const WAIT_POLL_MS = 100;
 
 /**
  * The suite launches the one worker you asked for, so the host check that
@@ -204,13 +211,19 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
           (e): ContractEvent => ({ kind: e.kind, payload: JSON.parse(e.payload) as Record<string, unknown> }),
         ),
       steers: () => readDb.query("SELECT * FROM messages WHERE run_id = ?1 ORDER BY created_at, id").all(runId) as MessageRow[],
+      lastHook: () => {
+        const row = readDb.query("SELECT value FROM run_evidence WHERE run_id = ?1 AND source = 'hook'").get(runId) as { value: string } | null;
+        if (!row) return null;
+        const value = JSON.parse(row.value) as { hook?: string; signal?: string; at?: number };
+        return { hook: value.hook ?? null, signal: String(value.signal ?? ""), at: Number(value.at ?? 0) };
+      },
       async waitFor(what, timeoutMs, check) {
         const until = Date.now() + timeoutMs;
         for (;;) {
           const value = check();
           if (value) return value;
           if (Date.now() > until) throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${what}`);
-          await Bun.sleep(500);
+          await Bun.sleep(WAIT_POLL_MS);
         }
       },
       async exitWorker() {
@@ -222,18 +235,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       isAlive: (pid, start, exe) => isAlive({ pid, start, exe }),
       log: options.log,
     };
-    for (const step of contractSteps(options.harness)) {
-      const started = Date.now();
-      try {
-        const detail = await step.run(contractEnv, state);
-        steps.push({ step: step.name, ok: true, detail, seconds: Math.round((Date.now() - started) / 1000) });
-        options.log(`ok ${step.name}: ${detail}`);
-      } catch (error) {
-        steps.push({ step: step.name, ok: false, detail: (error as Error).message, seconds: Math.round((Date.now() - started) / 1000) });
-        options.log(`FAILED ${step.name}: ${(error as Error).message}`);
-        break;
-      }
-    }
+    steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log)));
   } finally {
     await cleanup();
     process.off("SIGINT", onSignal);
@@ -241,6 +243,28 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
   return { harness: options.harness, version, passed, steps, scratch: home };
+}
+
+/** Run the steps in order, logging step N/M as each starts and ends; stop at the first failure. */
+export async function runContractSteps(steps: ContractStep[], env: ContractEnv, state: ContractState, log: (line: string) => void): Promise<StepResult[]> {
+  const results: StepResult[] = [];
+  for (const [index, step] of steps.entries()) {
+    const position = `step ${index + 1}/${steps.length}`;
+    log(`${position} ${step.name} (usually ~${step.typicalSeconds}s)`);
+    const started = Date.now();
+    try {
+      const detail = await step.run(env, state);
+      const seconds = Math.round((Date.now() - started) / 100) / 10;
+      results.push({ step: step.name, ok: true, detail, seconds });
+      log(`${position} ok ${step.name} (${seconds}s): ${detail}`);
+    } catch (error) {
+      const seconds = Math.round((Date.now() - started) / 100) / 10;
+      results.push({ step: step.name, ok: false, detail: (error as Error).message, seconds });
+      log(`${position} FAILED ${step.name} (${seconds}s): ${(error as Error).message}`);
+      break;
+    }
+  }
+  return results;
 }
 
 function createdWorkspaces(stateDir: string): string[] {

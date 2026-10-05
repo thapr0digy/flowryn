@@ -10,7 +10,7 @@ export const USAGE_NOTIFICATIONS = "quota_auto_resume_fired|quota_auto_resume_st
 /** Claude's Notification type when a permission dialog waits for an answer (cutover C2, spike c12). */
 export const PROMPT_NOTIFICATIONS = "permission_prompt";
 
-/** The asyncRewake waiter's timeout: 8 h, re-armed by every Stop (design section 5, M0 c01). */
+/** The asyncRewake waiter's timeout: 8 h, re-armed by every turn start and Stop (design section 5, M0 c01). */
 export const WAITER_TIMEOUT_S = 28_800;
 
 function shellQuote(text: string): string {
@@ -36,13 +36,18 @@ function hookCommand(bin: string, hook: string): string {
  */
 export function workerSettings(bin: string, access: { socket: string; writable: string[]; readOnly?: string[] } = { socket: "", writable: [] }): Record<string, unknown> {
   const command = (hook: string) => ({ type: "command", command: hookCommand(bin, hook) });
+  const waiter = { ...command("wait-steer"), asyncRewake: true, timeout: WAITER_TIMEOUT_S };
   return {
     hooks: {
       SessionStart: [{ hooks: [command("worker-start")] }],
-      UserPromptSubmit: [{ hooks: [command("prompt")] }],
+      // The waiter is armed at every turn start as well as every Stop: Claude fires no hook on an
+      // interrupt (M0 c04), so a turn a waiter woke and Flowryn then interrupted would otherwise
+      // leave no waiter to deliver an idle steer. The newest waiter supersedes the older ones, and
+      // the daemon fires one only while the worker is idle.
+      UserPromptSubmit: [{ hooks: [command("prompt"), waiter] }],
       PreToolUse: [{ matcher: "*", hooks: [command("pre-tool")] }],
       PostToolUse: [{ matcher: "*", hooks: [command("post-tool")] }],
-      Stop: [{ hooks: [command("stop"), { ...command("wait-steer"), asyncRewake: true, timeout: WAITER_TIMEOUT_S }] }],
+      Stop: [{ hooks: [command("stop"), waiter] }],
       StopFailure: [{ hooks: [command("stop-failure")] }],
       SessionEnd: [{ hooks: [command("session-end")] }],
       // Claude continued after a usage limit reset: Flowryn's pause on Claude work lifts (design section 16).

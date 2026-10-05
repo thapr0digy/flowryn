@@ -107,19 +107,79 @@ export function plistSpecFor(config: FlowrynConfig, home: string): PlistSpec {
   };
 }
 
-async function launchctl(args: string[]): Promise<{ exitCode: number; output: string }> {
+export interface LaunchctlResult {
+  exitCode: number;
+  output: string;
+}
+
+/** What loading and unloading the agent needs, injectable so tests can script launchctl's asynchronous bootout. */
+export interface LaunchdDeps {
+  launchctl(args: string[]): Promise<LaunchctlResult>;
+  sleep(ms: number): Promise<void>;
+  /** How long to wait for a bootout to finish before bootstrapping anyway. */
+  unloadTimeoutMs: number;
+  unloadPollMs: number;
+  /** The waits between bootstrap attempts; its length is the number of retries. */
+  bootstrapBackoffMs: number[];
+}
+
+async function launchctl(args: string[]): Promise<LaunchctlResult> {
   const proc = Bun.spawn(["/bin/launchctl", ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   return { exitCode, output: (stdout + stderr).trim() };
 }
 
+export const LAUNCHD_DEPS: LaunchdDeps = {
+  launchctl,
+  sleep: (ms) => Bun.sleep(ms),
+  unloadTimeoutMs: 5_000,
+  unloadPollMs: 100,
+  bootstrapBackoffMs: [250, 500, 1_000, 2_000],
+};
+
 function domain(): string {
   return `gui/${userInfo().uid}`;
 }
 
+async function loaded(label: string, deps: LaunchdDeps): Promise<boolean> {
+  return (await deps.launchctl(["print", `${domain()}/${label}`])).exitCode === 0;
+}
+
 export async function isLoaded(label: string): Promise<boolean> {
   if (process.platform !== "darwin") return false;
-  return (await launchctl(["print", `${domain()}/${label}`])).exitCode === 0;
+  return loaded(label, LAUNCHD_DEPS);
+}
+
+/**
+ * Boot the agent out and wait until launchd has actually unloaded it: bootout
+ * returns before the service is gone, and a bootstrap in that window fails
+ * with "5: Input/output error". Returns false when it was still loaded at the timeout.
+ */
+export async function unloadAgent(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<boolean> {
+  await deps.launchctl(["bootout", `${domain()}/${label}`]);
+  for (let waited = 0; waited < deps.unloadTimeoutMs; waited += deps.unloadPollMs) {
+    if (!(await loaded(label, deps))) return true;
+    await deps.sleep(deps.unloadPollMs);
+  }
+  return !(await loaded(label, deps));
+}
+
+/** Bootstrap the plist, unloading any earlier copy first and retrying with a bounded backoff while launchd catches up. */
+export async function loadAgent(label: string, path: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<void> {
+  if (await loaded(label, deps)) await unloadAgent(label, deps);
+  const attempts = deps.bootstrapBackoffMs.length + 1;
+  let last: LaunchctlResult = { exitCode: 0, output: "" };
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    last = await deps.launchctl(["bootstrap", domain(), path]);
+    if (last.exitCode === 0) return;
+    const wait = deps.bootstrapBackoffMs[attempt];
+    if (wait !== undefined) await deps.sleep(wait);
+  }
+  const stillLoaded = await loaded(label, deps);
+  const hint = stillLoaded
+    ? `; the previous agent ${label} is still loaded, so run flowryn daemon uninstall, then flowryn daemon install again`
+    : `; check the plist with plutil -lint ${path} and launchctl print ${domain()}/${label}`;
+  throw new Error(`launchctl bootstrap ${domain()} ${path} failed after ${attempts} attempts (exit ${last.exitCode}: ${last.output || "no output"})${hint}`);
 }
 
 /** Write the plist and (re)load it; launchd then starts the daemon (RunAtLoad). */
@@ -130,17 +190,16 @@ export async function installService(spec: PlistSpec, path: string): Promise<voi
   writeFileAtomic(path, renderPlist(spec), 0o644);
   const lint = Bun.spawnSync(["/usr/bin/plutil", "-lint", path]);
   if (lint.exitCode !== 0) throw new Error(`plutil rejected ${path}: ${lint.stdout.toString()}${lint.stderr.toString()}`);
-  if (await isLoaded(spec.label)) await launchctl(["bootout", `${domain()}/${spec.label}`]);
-  const boot = await launchctl(["bootstrap", domain(), path]);
-  if (boot.exitCode !== 0) throw new Error(`launchctl bootstrap failed: ${boot.output}`);
+  await loadAgent(spec.label, path);
 }
 
+/** Unload and remove the agent; a following install still retries if launchd has not finished the bootout. */
 export async function uninstallService(label: string, path: string): Promise<boolean> {
   if (process.platform !== "darwin") return false;
-  const loaded = await isLoaded(label);
-  if (loaded) await launchctl(["bootout", `${domain()}/${label}`]);
+  const wasLoaded = await isLoaded(label);
+  if (wasLoaded) await unloadAgent(label);
   if (existsSync(path)) unlinkSync(path);
-  return loaded;
+  return wasLoaded;
 }
 
 /** Start (or restart) an installed agent. */

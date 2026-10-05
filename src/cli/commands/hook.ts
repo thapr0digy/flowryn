@@ -225,6 +225,8 @@ export const HOOK_CLI_VERBS: VerbSpec[] = [
   signalHook("stop-failure", "Hook: a turn ended in an API error"),
   signalHook("session-end", "Hook: the harness session ended"),
   waitSteer,
+  signalHook("steer-carried", "Worker hook (Pi): how the extension delivered a steer"),
+  signalHook("steer-seen", "Worker hook (Pi): steers that reached a model request"),
   signalHook("session-start", "Leader hook: session start or compaction; prints the briefing"),
   signalHook("notify", "Hook: you went inactive or came back (leader); Claude's usage-limit notifications"),
   signalHook("delivered", "Leader hook (Pi): a pushed P0 was delivered or declined"),

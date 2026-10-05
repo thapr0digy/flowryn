@@ -16,7 +16,10 @@
 //   - holds one `hook wait-steer` long poll and delivers each steer it returns:
 //     deliverAs "steer" while busy, right after the current tool batch
 //     (M0 p13), or followUp + triggerTurn while idle (M0 p03); always with an
-//     explicit deliverAs (M0 finding 14);
+//     explicit deliverAs (M0 finding 14); then says which (hook steer-carried),
+//     because only a followUp to an idle agent must be seen within seconds;
+//   - reports each delivered steer as seen (hook steer-seen) once a context
+//     event, which fires before every model request, shows it in the request;
 //   - aborts the current run when the daemon asks for an interrupt (ctx.abort,
 //     M0 p14). A steer queued before an abort is dropped by Pi, so the daemon
 //     counts delivery only by the worker's ack and re-rings otherwise.
@@ -27,6 +30,9 @@ type Json = Record<string, any>;
 const BIN = process.env.FLOWRYN_BIN ?? "";
 const WORKTREE = process.env.FLOWRYN_WORKTREE ?? "";
 const TOOL_PING_MS = 60_000;
+/** A pause before re-polling after an empty reply, so a misbehaving daemon cannot spin the loop. */
+const REPOLL_MS = 50;
+const STEER_CUSTOM_TYPE = "flowryn-steer";
 
 function runHook(name: string, input: Json, extra: string[] = []): Promise<{ code: number; stdout: string }> {
   return new Promise((resolve) => {
@@ -63,6 +69,8 @@ export default function flowrynWorker(pi: any): void {
   let looping = false;
   let stopped = false;
   let lastToolPing = 0;
+  /** Steers delivered and not yet seen in a model request. */
+  const unseen = new Set<string>();
 
   const remember = (c: any) => {
     if (c) ctx = c;
@@ -95,6 +103,24 @@ export default function flowrynWorker(pi: any): void {
     void runHook("pre-tool", {});
   });
 
+  // context fires before each model request with the messages it carries (M0 p13).
+  pi.on("context", async (event: any, c: any) => {
+    remember(c);
+    if (unseen.size === 0) return undefined;
+    const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
+    const seen: string[] = [];
+    for (const message of messages) {
+      if (message?.customType !== STEER_CUSTOM_TYPE) continue;
+      const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "");
+      for (const id of unseen) if (text.includes(`[${id}]`)) seen.push(id);
+    }
+    if (seen.length > 0) {
+      for (const id of seen) unseen.delete(id);
+      void runHook("steer-seen", { steers: seen });
+    }
+    return undefined;
+  });
+
   pi.on("agent_settled", async (_event: any, c: any) => {
     remember(c);
     void runHook("stop", {});
@@ -105,14 +131,18 @@ export default function flowrynWorker(pi: any): void {
     await runHook("session-end", {});
   });
 
-  function deliver(line: string): void {
+  function deliver(id: string, line: string): void {
     const idle = ctx?.isIdle?.() !== false;
-    const message = { customType: "flowryn-steer", content: line, display: true };
+    const message = { customType: STEER_CUSTOM_TYPE, content: line, display: true };
     try {
       pi.sendMessage(message, idle ? { deliverAs: "followUp", triggerTurn: true } : { deliverAs: "steer" });
     } catch {
       // Not delivered; the daemon re-rings an unacknowledged steer.
+      return;
     }
+    if (id === "") return;
+    unseen.add(id);
+    void runHook("steer-carried", { steer: id, mode: idle ? "followUp" : "steer" });
   }
 
   async function steerLoop(): Promise<void> {
@@ -139,8 +169,8 @@ export default function flowrynWorker(pi: any): void {
           }
           continue;
         }
-        if (message.steer?.line) deliver(String(message.steer.line));
-        else await sleep(1_000);
+        if (message.steer?.line) deliver(String(message.steer.id ?? ""), String(message.steer.line));
+        else await sleep(REPOLL_MS);
       }
     } finally {
       looping = false;

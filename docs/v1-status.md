@@ -96,6 +96,7 @@ The features that let Flowryn replace Firstmate (docs/cutover-notes.md).
 | C2 mid-run prompt wedges | Done (C2) |
 | Queued work in fleet, show, the board and the briefing | Done: one shared definition of Queued (docs/cutover-notes.md, C3) |
 | C3 `flowryn import firstmate` | Done (C3): `dispatch --mode`, queued tasks outside plans, the Firstmate parser, `import.apply`, `flowryn import firstmate`, and your preferences in the leader's prompt with the one-time import triage (docs/cutover-notes.md) |
+| Steer latency, Tier 0 and Tier 1: the interrupt key refused while a dialog may be open, a wake after an interrupt, the waiter armed at every turn start, seen evidence, fast re-rings of lost carries, a contract suite that measures steers | Done (docs/cutover-notes.md "Steers · latency"); Tier 2, urgent steers, not built: it needs your approval |
 
 ## Not in v1
 

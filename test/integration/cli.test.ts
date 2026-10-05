@@ -222,3 +222,21 @@ describe("output", () => {
     expect(version.reply.data).toMatchObject({ proto: PROTO });
   });
 });
+
+describe("a stdout consumer that closes early", () => {
+  test("flowryn doctor | true exits quietly, with no EPIPE stack trace", async () => {
+    const h = makeHome();
+    homes.push(h);
+    // `true` exits before flowryn has started, so its first write meets a closed pipe.
+    const proc = Bun.spawn(["bash", "-c", '"$0" "$1" doctor | true; echo "${PIPESTATUS[0]}"', "bun", join(REPO_ROOT, "src/main.ts")], {
+      cwd: REPO_ROOT,
+      env: h.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [status, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    expect(stderr).toBe("");
+    expect(status.trim()).toBe("0");
+  });
+});

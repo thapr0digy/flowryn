@@ -3,6 +3,20 @@ import { basename } from "node:path";
 import { cliMain } from "./cli/main.ts";
 import type { CliIo } from "./api/verbs.ts";
 
+function isBrokenPipe(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "EPIPE";
+}
+
+/**
+ * A consumer that closes early (`flowryn doctor | head`) has read all it
+ * wants: exit quietly instead of crashing with an EPIPE stack trace. Bun
+ * raises it as an error event on stdout, or from the write itself.
+ */
+process.stdout.on("error", (error) => {
+  if (isBrokenPipe(error)) process.exit(0);
+  throw error;
+});
+
 /**
  * One binary serves as both `flowryn` and `flowrynd` (design section 3):
  * invoked as flowrynd (a symlink), it runs the daemon; otherwise it is the CLI.
@@ -12,7 +26,14 @@ async function main(): Promise<number> {
   const invokedAs = basename(process.argv0);
   const args = invokedAs === "flowrynd" ? ["daemon", "run", ...argv] : argv;
   const io: CliIo = {
-    stdout: (text) => process.stdout.write(text),
+    stdout: (text) => {
+      try {
+        process.stdout.write(text);
+      } catch (error) {
+        if (isBrokenPipe(error)) process.exit(0);
+        throw error;
+      }
+    },
     stderr: (text) => process.stderr.write(text),
     json: false,
     env: process.env,
