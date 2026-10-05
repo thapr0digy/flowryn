@@ -22,6 +22,7 @@ export const ALLOWED_METHODS = new Set([
   "pane.process_info",
   "pane.read",
   "pane.send_keys",
+  "pane.send_text",
   "pane.report_metadata",
   "pane.close",
   "agent.start",
@@ -59,8 +60,8 @@ const MAX_LINE = 8 * 1024 * 1024;
 let nextId = 0;
 
 /**
- * Methods only lab tooling may add (never the daemon): typing into a test
- * leader's composer is how a live bridge contract run plays you.
+ * Methods only lab tooling may add. pane.send_text is also allowed now (the
+ * idle-carry fallback, HerdrRuntime.typeLine); the lab scripts still name it.
  */
 export const LAB_ONLY_METHODS = ["pane.send_text"] as const;
 

@@ -375,7 +375,7 @@
 <!-- ============ ADAPTERS ============ -->
 <section class="space-y-5" id="adapters">
   <h2 class="text-2xl font-bold">5 · The harness adapter interface</h2>
-  <p class="opacity-80 max-w-3xl">Supporting a harness costs lifecycle and push, not reporting. So the adapter is a typed interface covering exactly those, and v1 implements it twice: Claude Code and Pi. Each capability uses the harness's own hooks or extension API. Herdr keystroke delivery is not a v1 path; the only keystroke v1 sends is the interrupt key.</p>
+  <p class="opacity-80 max-w-3xl">Supporting a harness costs lifecycle and push, not reporting. So the adapter is a typed interface covering exactly those, and v1 implements it twice: Claude Code and Pi. Each capability uses the harness's own hooks or extension API. Herdr keystroke delivery is not a v1 steer path; v1 sends the interrupt key, and one fallback: the fixed steer pointer typed into an idle Claude worker whose waiter is gone, only while Herdr reads it settled (docs/m5-notes.md, "Idle workers").</p>
 
   <div class="grid lg:grid-cols-2 gap-4">
 <pre class="code"><code>// src/harness/types.ts — one adapter per harness

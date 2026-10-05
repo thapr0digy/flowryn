@@ -50,7 +50,7 @@ M2 builds section 17's "M2 · Runtime, workers, reconciler" of [`design-v3.html`
 - A trust wedge (no worker-start `trust_wedge_ms` after the latest launch) is `blocked_dialog` with a P1, and no keystroke. A run idle for `idle_alert_ms` without an outcome gets a P1. So does one Herdr calls `working` that has sent no hook event for `stale_hook_ms`.
 - The orphan scan reads the snapshot's pane labels. A pane labelled for a live run that is not its pane of record is a divergence, left alone.
 - Not in M2: the section 8 invariant pass ("In flight if and only if a non-terminal run"; M1's watcher already flags hand edits against live runs) and Docker label evidence (M5).
-- `[reconcile]` sets every clock (`pass_ms`, `trust_wedge_ms`, `busy_lease_ms`, `ring_interval_ms`, `max_rings`, `idle_alert_ms`, `stale_hook_ms`, `launch_timeout_ms`, `exit_grace_ms`, `wait_poll_ms`). The defaults are the design's numbers; the section exists for tests and the lab.
+- `[reconcile]` sets every clock (`pass_ms`, `trust_wedge_ms`, `busy_lease_ms`, `ring_interval_ms`, `max_rings`, `idle_alert_ms`, `idle_realert_ms`, `stale_hook_ms`, `launch_timeout_ms`, `exit_grace_ms`, `wait_poll_ms`, `seen_timeout_ms`, `waiter_grace_ms`, `prompt_suspect_ms`). The defaults are the design's numbers; the section exists for tests and the lab.
 
 ## Contract suites
 

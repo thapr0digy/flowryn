@@ -225,9 +225,22 @@ export class HerdrRuntime {
     await this.transport.call("notification.show", { title, body });
   }
 
-  /** The only keystroke v1 sends is the interrupt key (design section 5). */
+  /** The interrupt key (design section 5). */
   async sendInterrupt(paneId: string): Promise<void> {
     await this.transport.call("pane.send_keys", { pane_id: paneId, keys: ["Escape"] });
+  }
+
+  /**
+   * Type one line into an idle harness's composer and submit it: the
+   * idle-carry fallback for a Claude worker whose waiter is gone
+   * (src/lifecycle/idle-carry.ts decides when). The line is Flowryn's own
+   * fixed steer pointer, never a steer body; control characters are refused.
+   */
+  async typeLine(paneId: string, line: string): Promise<void> {
+    // oxlint-disable-next-line no-control-regex -- one line of plain text, nothing the terminal would interpret
+    if (/[\u0000-\u001f\u007f]/.test(line)) throw new HerdrError("invalid_params", "typeLine takes one line of plain text");
+    await this.transport.call("pane.send_text", { pane_id: paneId, text: line });
+    await this.transport.call("pane.send_keys", { pane_id: paneId, keys: ["Enter"] });
   }
 
   async closePane(paneId: string): Promise<void> {
