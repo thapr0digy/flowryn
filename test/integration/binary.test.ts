@@ -27,6 +27,7 @@ function run(path: string, args: string[], env: Record<string, string> = {}) {
 }
 
 describe("compiled binary", () => {
+  // macOS only: codesign is a macOS tool, and only the macOS build is signed.
   test.skipIf(process.platform !== "darwin")("carries a valid ad-hoc signature", () => {
     expect(Bun.spawnSync(["/usr/bin/codesign", "--verify", "--strict", bin]).exitCode).toBe(0);
   });

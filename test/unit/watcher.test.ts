@@ -308,7 +308,9 @@ describe("backlog watcher (fake hand edits)", () => {
     expect(intents(env.db).length).toBe(2);
   });
 
-  test("the file watch notices an edit without waiting for the periodic check", async () => {
+  // macOS only: Bun's Linux directory watch goes quiet once tasks-axi renames its temp file over
+  // todos.md, so the edit raises no event there; the periodic hash check still catches it.
+  test.skipIf(process.platform !== "darwin")("the file watch notices an edit without waiting for the periodic check", async () => {
     env = makeJournalEnv({ eraseWindowMs: 0 });
     await env.watcher.start();
     addTodo("a-a1", "task");

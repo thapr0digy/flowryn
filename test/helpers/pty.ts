@@ -5,8 +5,10 @@ import { join } from "node:path";
 /**
  * A command in a real pseudo-terminal, for the human-only verbs that insist
  * on one: `flowryn approve` reads its code from /dev/tty and the board reads
- * raw keys. macOS's script(1) gives the child a pty; what the test writes is
- * what you would type, and script's output is the screen.
+ * raw keys. On macOS script(1) gives the child a pty; on Linux (CI) Python's
+ * pty.spawn does, since util-linux's script waits for EOF on its stdin after
+ * the child exits. What the test writes is what you would type, and the
+ * output is the screen.
  *
  * script refuses a socket on its stdin (tcgetattr fails with "Operation not
  * supported on socket"), and Bun's stdin pipe is a socketpair, as is a FIFO
@@ -14,6 +16,11 @@ import { join } from "node:path";
  * pipe (bash process substitution). Everything runs in its own process
  * group, killed as one.
  */
+
+const IN_PTY =
+  process.platform === "darwin"
+    ? 'exec script -q /dev/null "$@" < <(cat "$0")'
+    : `exec python3 -c 'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))' "$@" < <(cat "$0")`;
 
 // Matching escape sequences is the point.
 // oxlint-disable-next-line no-control-regex
@@ -48,8 +55,8 @@ export class Pty {
     const fifo = join(dir, "keys");
     const made = Bun.spawnSync(["mkfifo", fifo]);
     if (made.exitCode !== 0) throw new Error(`mkfifo failed: ${made.stderr.toString()}`);
-    // script is the process the test waits on (exec), its stdin a real pipe from `cat` of the FIFO.
-    const proc = Bun.spawn(["perl", "-e", "setpgrp(0, 0); exec @ARGV", "bash", "-c", 'exec script -q /dev/null "$@" < <(cat "$0")', fifo, ...argv], {
+    // The pty wrapper is the process the test waits on (exec), its stdin a real pipe from `cat` of the FIFO.
+    const proc = Bun.spawn(["perl", "-e", "setpgrp(0, 0); exec @ARGV", "bash", "-c", IN_PTY, fifo, ...argv], {
       env,
       cwd,
       stdin: "ignore",
