@@ -35,13 +35,17 @@ export interface MessageRow {
   ring_idle: number;
   /** The hook that marked the latest ring seen, or null. */
   seen_via: string | null;
+  /** 1 for an urgent steer: it blocks the next tool call and may cancel a long one. */
+  urgent: number;
+  /** When Flowryn cancelled a running tool for it, or null. */
+  preempted_at: number | null;
 }
 
 export type RingState = "carried" | "seen" | "lost";
 
 export const MAX_STEER_CHARS = 8_000;
 
-export type RingPath = "post-tool" | "stop" | "waiter" | "extension" | "keys";
+export type RingPath = "post-tool" | "pre-tool" | "stop" | "waiter" | "extension" | "keys";
 
 function nextMessageId(db: Db): string {
   const next = Number(getMeta(db, "next_message_no") ?? "1");
@@ -49,12 +53,19 @@ function nextMessageId(db: Db): string {
   return `m${next}`;
 }
 
-/** Record a steer. Call inside a transaction; notify the bus after commit. */
-export function createSteer(db: Db, run: RunRow, body: string, now: number, decisionId: string | null = null): MessageRow {
+/** Record a steer. Call inside a transaction; notify the bus (and, for an urgent one, the preempter) after commit. */
+export function createSteer(db: Db, run: RunRow, body: string, now: number, decisionId: string | null = null, urgent = false): MessageRow {
   const text = sanitizeBlock(body).trim().slice(0, MAX_STEER_CHARS);
   const id = nextMessageId(db);
-  db.query("INSERT INTO messages (id, run_id, body, created_at, decision_id) VALUES (?1, ?2, ?3, ?4, ?5)").run(id, run.id, text, now, decisionId);
-  appendEvent(db, { source: "cli", kind: "steer.created", runId: run.id, taskId: run.task_id, payload: { steer: id, decision: decisionId, chars: text.length }, ts: now });
+  db.query("INSERT INTO messages (id, run_id, body, created_at, decision_id, urgent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)").run(id, run.id, text, now, decisionId, urgent ? 1 : 0);
+  appendEvent(db, {
+    source: "cli",
+    kind: "steer.created",
+    runId: run.id,
+    taskId: run.task_id,
+    payload: { steer: id, decision: decisionId, chars: text.length, ...(urgent ? { urgent: true } : {}) },
+    ts: now,
+  });
   return getMessage(db, id)!;
 }
 
@@ -91,6 +102,51 @@ export function nextDueAt(db: Db, runId: string, timing: Timing): number | null 
     if (at !== null && (next === null || at < next)) next = at;
   }
   return next;
+}
+
+/** The first due urgent steer: the one a Claude PreToolUse blocks the tool call with. */
+export function dueUrgent(db: Db, runId: string, now: number, timing: Timing): MessageRow | null {
+  return dueSteers(db, runId, now, timing).find((m) => m.urgent === 1) ?? null;
+}
+
+/**
+ * The urgent steer a running tool may be cancelled for: unacknowledged, not
+ * yet seen in a model request, and not cancelled for before. Oldest first.
+ */
+export function preemptCandidate(db: Db, runId: string): MessageRow | null {
+  return unackedSteers(db, runId).find((m) => m.urgent === 1 && m.preempted_at === null && m.ring_state !== "seen") ?? null;
+}
+
+/**
+ * Flowryn cancelled a running tool for this urgent steer: `via` is "escape"
+ * (Claude's interrupt key) or "abort" (Pi's extension); `verified` is false
+ * when the key went but its interrupt was never confirmed. Call inside a transaction.
+ */
+export function markPreempted(db: Db, run: RunRow, message: MessageRow, via: "escape" | "abort", toolMs: number, now: number, verified: boolean): void {
+  db.query("UPDATE messages SET preempted_at = ?2 WHERE id = ?1 AND preempted_at IS NULL").run(message.id, now);
+  appendEvent(db, {
+    source: "daemon",
+    kind: "steer.preempted",
+    runId: run.id,
+    taskId: run.task_id,
+    payload: { steer: message.id, harness: run.harness, via, tool_ms: toolMs, verified },
+    ts: now,
+  });
+}
+
+/**
+ * A Pi turn settled with urgent steers it queued into the busy turn
+ * ("steer" mode) still unseen: the preempting abort dropped them (M0 p14), or
+ * the turn ended without the next model request. Each rings again at once,
+ * now to the idle agent. Call inside a transaction; returns the ids marked.
+ */
+export function loseUnseenUrgent(db: Db, run: RunRow, now: number): string[] {
+  const lost = unackedSteers(db, run.id).filter((m) => m.urgent === 1 && m.ring_state === "carried" && m.ring_idle === 0);
+  for (const m of lost) {
+    db.query("UPDATE messages SET ring_state = 'lost' WHERE id = ?1").run(m.id);
+    appendEvent(db, { source: "hook", kind: "steer.lost", runId: run.id, taskId: run.task_id, payload: { steer: m.id, ring: m.rings, reason: "turn settled unseen" }, ts: now });
+  }
+  return lost.map((m) => m.id);
 }
 
 /** Why a steer rings again: a lost carry, an idle carry nobody saw, or the ring interval. */
@@ -182,6 +238,8 @@ export function noteDeliveryMode(db: Db, run: RunRow, id: string, mode: "steer" 
 export function steerStatus(m: MessageRow, now: number): string {
   const after = (at: number) => `+${formatMs(at - m.created_at)}`;
   const parts: string[] = [];
+  if (m.urgent === 1) parts.push("urgent");
+  if (m.preempted_at !== null) parts.push(`cut a tool ${after(m.preempted_at)}`);
   if (m.carried_at !== null) parts.push(`carried ${after(m.carried_at)}`);
   if (m.seen_at !== null) parts.push(`seen ${after(m.seen_at)}`);
   if (m.acked_at !== null) parts.push(`acked ${after(m.acked_at)}`);
@@ -197,6 +255,7 @@ export function steerStatus(m: MessageRow, now: number): string {
 export function steerBrief(db: Db, runId: string, now: number): string {
   const m = unackedSteers(db, runId)[0];
   if (!m) return "-";
+  if (m.urgent === 1 && m.ring_state !== "seen") return `${m.id} urgent ${m.ring_state === null ? "queued" : m.ring_state === "lost" ? "lost, ringing" : "unseen"} ${formatMs(now - (m.last_rung_at ?? m.created_at))}`;
   if (m.ring_state === null) return `${m.id} queued ${formatMs(now - m.created_at)}`;
   if (m.ring_state === "seen") return `${m.id} seen, not acked`;
   if (m.ring_state === "lost") return `${m.id} lost, ringing`;

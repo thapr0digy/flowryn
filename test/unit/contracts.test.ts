@@ -71,7 +71,7 @@ describe("contract cleanup", () => {
 });
 
 describe("contract suite", () => {
-  test("walks the design's list in order: launch, session, busy, both deliveries, interrupt, exit, resume, deliver", () => {
+  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, exit, resume, deliver", () => {
     expect(contractSteps("claude").map((s) => s.name)).toEqual([
       "launch",
       "session id",
@@ -79,6 +79,7 @@ describe("contract suite", () => {
       "deliver while busy",
       "idle",
       "deliver while idle",
+      "urgent while busy",
       "interrupt",
       "exit",
       "resume",
@@ -86,11 +87,12 @@ describe("contract suite", () => {
     ]);
   });
 
-  test("the scripted Pi worker acknowledges every steer the suite sends, the long command's before it runs", () => {
+  test("the scripted Pi worker acknowledges every steer the suite sends, each long command's before it runs", () => {
     const script = contractBody("pi", true).split("FLOWRYN-SCRIPT: ")[1]!.split(" ;; ");
     const acks = script.filter((s) => s.startsWith("bash $FLOWRYN_BIN ack ")).map((s) => s.split(" ").at(-1));
-    expect(acks).toEqual(["m1", "m2", "m3", "m4"]);
-    expect(script.indexOf("bash $FLOWRYN_BIN ack m3")).toBe(script.indexOf("bash perl -e 'sleep 120'") - 1);
+    expect(acks).toEqual(["m1", "m2", "m3", "m4", "m5", "m6"]);
+    expect(script.indexOf("bash $FLOWRYN_BIN ack m3")).toBe(script.indexOf("bash perl -e 'sleep 60'") - 1);
+    expect(script.indexOf("bash $FLOWRYN_BIN ack m5")).toBe(script.indexOf("bash perl -e 'sleep 120'") - 1);
   });
 
   test("only the scripted Pi model gets a script; a real model gets plain instructions", () => {
@@ -129,7 +131,7 @@ describe("contract progress", () => {
     expect(contractEstimateSeconds("claude")).toBeGreaterThan(60);
     expect(contractEstimateSeconds("pi")).toBeGreaterThan(contractEstimateSeconds("claude"));
     const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
-    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 20 steps, about ${minutes} min`);
+    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 22 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");
   });
 });

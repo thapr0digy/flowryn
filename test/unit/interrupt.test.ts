@@ -26,18 +26,22 @@ let db: Db;
 let transcript: string;
 let keys: string[];
 let status: string | null;
+/** Herdr's status reads in order; once used up, `status` holds. */
+let statusReads: (string | null)[];
+let screen: string | null;
 let bus: SteerBus;
 
 function deps(): ControlDeps {
   const runtime = {
-    agentStatus: async () => status,
+    agentStatus: async () => (statusReads.length > 0 ? statusReads.shift()! : status),
+    readPane: async () => screen,
     sendInterrupt: async (pane: string) => {
       keys.push(pane);
       // The worker's transcript records the interrupt at once (M0 c04).
       appendFileSync(transcript, `${JSON.stringify({ type: "user", message: "[Request interrupted by user for tool use]" })}\n`);
     },
   } as unknown as HerdrRuntime;
-  return { db, runtime: () => runtime, bus, timing: () => DEFAULT_TIMING, now: () => Date.now(), ps: async () => PS_LINE };
+  return { db, runtime: () => runtime, bus, timing: () => DEFAULT_TIMING, now: () => Date.now(), ps: async () => PS_LINE, secondReadMs: 20 };
 }
 
 beforeEach(() => {
@@ -48,6 +52,8 @@ beforeEach(() => {
   writeFileSync(transcript, "");
   keys = [];
   status = "working";
+  statusReads = [];
+  screen = "$ perl -e 'sleep 60'";
   bus = new SteerBus();
   const me = parsePsLine(PS_LINE)!;
   tx(db, () => {
@@ -99,6 +105,33 @@ describe("the Claude interrupt key never answers a dialog", () => {
       throw new Error("socket closed");
     };
     expect(await interruptRun(d, "r1", 1_000)).toMatchObject({ ok: false, evidence: "refused" });
+    expect(keys).toEqual([]);
+  });
+
+  test("a dialog that opened just before the first read: the second read sees blocked, so no key", async () => {
+    statusReads = ["working", "blocked"];
+    expect(await interruptRun(deps(), "r1", 1_000)).toMatchObject({ ok: false, evidence: "refused" });
+    expect(keys).toEqual([]);
+    expect(refusals()[0]).toContain("blocked on a dialog");
+  });
+
+  test("the screen shows a dialog's question while Herdr still reads working: no key", async () => {
+    screen = "Bash command\n  git commit --amend\nDo you want to proceed?\n❯ 1. Yes\n  2. No";
+    expect(await interruptRun(deps(), "r1", 1_000)).toMatchObject({ ok: false, evidence: "refused" });
+    expect(keys).toEqual([]);
+    expect(refusals()[0]).toContain("confirmation dialog");
+  });
+
+  test("the urgent preempter's retries leave the refusal to its own deferral record: no run.interrupt_refused", async () => {
+    status = "blocked";
+    expect(await interruptRun(deps(), "r1", 1_000, { recordRefusal: false })).toMatchObject({ ok: false, evidence: "refused" });
+    expect(keys).toEqual([]);
+    expect(refusals()).toEqual([]);
+  });
+
+  test("the screen unreadable refuses rather than guessing", async () => {
+    screen = null;
+    expect(await interruptRun(deps(), "r1", 1_000)).toMatchObject({ ok: false, evidence: "refused" });
     expect(keys).toEqual([]);
   });
 

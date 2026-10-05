@@ -70,6 +70,7 @@ export const HOOK_SIGNALS = {
   prompt: "busy",
   "pre-tool": "tool",
   "post-tool": "tool",
+  "tool-failed": "tool",
   stop: "turn_ended",
   "stop-failure": "failed",
   "session-end": "ended",

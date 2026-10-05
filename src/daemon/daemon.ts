@@ -22,6 +22,7 @@ import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
 import { herdrConfig, timingConfig, workerConfigProblems } from "../config/workers.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
+import { UrgentPreempter } from "../lifecycle/urgent.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
 import { Launcher } from "../lifecycle/launcher.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
@@ -220,6 +221,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
     });
     const control: ControlDeps = { db: database, runtime: () => runtime, bus, timing, now: Date.now };
+    const urgent = new UrgentPreempter({ db: database, timing, now: Date.now, runtime: () => runtime, interrupt: (runId) => interruptRun(control, runId, undefined, { recordRefusal: false }), log });
     const fleet: FleetServices = {
       runtime: () => runtime,
       bus,
@@ -229,9 +231,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       flowrynBin: async () => workerBinary(config.state_dir),
       harnessVersion,
       exitRun: (runId) => exitRun(control, runId),
-      interruptRun: (runId, waitMs) => interruptRun(control, runId, waitMs),
+      interruptRun: async (runId, waitMs) => {
+        const result = await interruptRun(control, runId, waitMs);
+        // No hook follows an interrupt (M0 c04): the tools it cut end here.
+        if (result.ok) urgent.tools.clear(runId);
+        return result;
+      },
       reconcile: (runId) => reconciler?.schedule(runId),
       continuations: new Map(),
+      urgent,
     };
     reconciler = new Reconciler({
       db: database,
@@ -505,6 +513,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     deliveryWatcher.stop();
     herdrWatcher.stop();
     bus.close();
+    urgent.close();
     attention.bus.close();
     removeSignals?.();
     process.off("SIGHUP", onHup);
