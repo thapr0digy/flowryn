@@ -85,6 +85,7 @@ flowryn capacity resume --harness claude  # lift the Claude usage-limit pause no
 flowryn decision list               # open decisions; --reserved (only you may answer), --deferred, --all
 flowryn decision add --key db --question "SQLite or Postgres?" --options sqlite,postgres --body-file -
 flowryn decide k3 sqlite --rationale "one process"   # the leader's answer; reserved ones need your word
+flowryn decide k3 sqlite --rationale -              # the same, the rationale read from stdin
 flowryn decide k3 sqlite --body-file -               # in your own shell: your answer, verbatim
 flowryn decision defer k3 --until 2026-11-01
 flowryn import firstmate ~/projects/firstmate          # the plan: what would be cloned, filed, skipped and why

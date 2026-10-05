@@ -75,6 +75,17 @@ describe("decide", () => {
     expect(shown.reply.data).toMatchObject({ decision, state: "answered", answer: "sqlite", by: "leader", rationale: "one process, no server" });
   });
 
+  test("decide --rationale - reads the rationale from stdin", async () => {
+    const env = await makeFleetEnv();
+    envs.push(env);
+    const added = await env.json(["decision", "add", "--key", "cache-store", "--question", "SQLite or Postgres?", "--options", "sqlite,postgres"]);
+    const { decision } = added.reply.data as { decision: string };
+    const decided = await env.json(["decide", decision, "sqlite", "--rationale", "-"], { stdin: "one process,\nno server\n" });
+    expect(decided.code).toBe(0);
+    const shown = await env.json(["show", decision]);
+    expect(shown.reply.data).toMatchObject({ decision, answer: "sqlite", by: "leader", rationale: "one process,\nno server" });
+  });
+
   test("a reserved decision refuses the leader", async () => {
     const env = await makeFleetEnv();
     envs.push(env);

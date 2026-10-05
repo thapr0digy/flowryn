@@ -177,6 +177,16 @@ describe("argv", () => {
     expect(dashed.command!.args).toEqual({ title: "--not-a-flag" });
   });
 
+  test("a stdin flag reads - from stdin and keeps any other value literal", () => {
+    const piped = parseArgv(["decide", "k3", "sqlite", "--rationale", "-"], CLI_VERBS);
+    expect(piped.command!.files).toEqual({ rationale: "-" });
+    expect(piped.command!.args).toEqual({ decision: "k3", choice: "sqlite" });
+    const literal = parseArgv(["decide", "k3", "sqlite", "--rationale=one process"], CLI_VERBS);
+    expect(literal.command!.files).toEqual({});
+    expect(literal.command!.args).toMatchObject({ rationale: "one process" });
+    expect(() => parseArgv(["decide", "k3", "sqlite", "--rationale", "-", "--body-file", "-"], CLI_VERBS)).toThrow("only one flag can read stdin");
+  });
+
   test("rejects unknown flags and extra arguments", () => {
     expect(() => parseArgv(["todo", "list", "--bogus"], CLI_VERBS)).toThrow("unknown flag");
     expect(() => parseArgv(["todo", "done", "a", "b"], CLI_VERBS)).toThrow("too many arguments");
