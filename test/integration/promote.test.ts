@@ -134,6 +134,51 @@ describe("a scout whose run is over", () => {
   );
 
   test(
+    "has not landed as a blocker until its ship run lands: the scout's landed report does not count",
+    async () => {
+      const env = await fleet({ yolo: true, extraConfig: "[sched]\npass_ms = 250" });
+      // Steps run once per session, so the ship's new session replays them: its --report is refused, and
+      // it waits for `go` (the scout never gets there, its worker stops at cleanup) before it ships.
+      const { task, run } = await env.dispatch("Scout the cache\nFAKE: deliver notes.md the cache evicts too early\nFAKE: wait-file go\nFAKE: commit fix.txt the fix\nFAKE: deliver-local\nFAKE: sleep 60000");
+      await env.waitRun(run, (r) => r.state === "cleaned", "the scout cleaned");
+      await waitUntil(async () => (await backlogTask(env, task))?.state === "done", 10_000, "the scout's task done");
+      const promoted = await env.json(["promote", task]);
+      expect(promoted.code).toBe(0);
+      const ship = (promoted.reply.data as { run: string }).run;
+      await env.waitRun(ship, (r) => r.worker_started_at !== null, "the ship's worker started", 20_000);
+
+      const filed = await env.json(["dispatch", "web", "--kind", "ship", "--blocked-by", task, "--auto", "--body-file", "-"], { stdin: "After the cache fix\nFAKE: sleep 60000" });
+      expect(filed.code).toBe(0);
+      const dependent = (filed.reply.data as { task: string }).task;
+      expect(filed.reply.data).toMatchObject({ state: "queued", blocked_by: [task], auto: "on" });
+      const runsOf = (taskId: string) => {
+        const db = env.h.db();
+        try {
+          return db.query("SELECT id FROM runs WHERE task_id = ?1").all(taskId) as { id: string }[];
+        } finally {
+          db.close();
+        }
+      };
+      await waitUntil(async () => (await backlogTask(env, dependent)) !== null, 10_000, "the dependent in the backlog");
+      await Bun.sleep(1_500);
+      expect(runsOf(dependent)).toEqual([]);
+      const refused = await env.json(["dispatch", "web", "--task", dependent]);
+      expect(refused.code).toBe(2);
+      expect(refused.reply.error).toMatchObject({ code: "blockers_not_landed" });
+
+      // The ship lands (yolo merge of its local delivery): only now does the dependent start by itself.
+      writeFileSync(join(env.h.dataDir, task, "go"), "");
+      await env.waitRun(ship, (r) => r.state === "ready", "the ship's local delivery", 30_000);
+      await Bun.sleep(500);
+      expect(runsOf(dependent)).toEqual([]);
+      expect((await env.json(["merge", task])).code).toBe(0);
+      await env.waitRun(ship, (r) => r.state === "cleaned", "the ship landed and cleaned", 30_000);
+      await waitUntil(() => runsOf(dependent).length === 1, 15_000, "the dependent started");
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
     "refusals: a ship is not promoted; a landed scout waits for its cleanup; a kept worktree is cleaned up first",
     async () => {
       const env = await fleet();

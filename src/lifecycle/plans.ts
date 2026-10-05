@@ -276,12 +276,16 @@ export function getPlan(db: Db, id: string): PlanRow | null {
 }
 
 /**
- * Has a blocker landed? A task Flowryn ran has landed once a run of it is
- * cleaned (merge proven, then cleanup done; design section 11). A task
+ * Has a blocker landed? A task Flowryn ran has landed once its latest run is
+ * cleaned (merge proven, then cleanup done; design section 11). Only the
+ * latest run counts: a scout promoted to a ship keeps its cleaned scout run,
+ * whose report landed, but the promotion starts the ship run in the same
+ * transaction, so the task has landed only once that ship run lands. A task
  * Flowryn never ran has landed when the backlog shows it done.
  */
 export function hasLanded(db: Db, taskId: string, backlog: BacklogTask[] | null): boolean {
-  if (db.query("SELECT 1 FROM runs WHERE task_id = ?1 AND state = 'cleaned'").get(taskId)) return true;
+  const latest = db.query("SELECT state FROM runs WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as { state: string } | null;
+  if (latest) return latest.state === "cleaned";
   if (db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(taskId)) return false;
   return (backlog ?? []).some((t) => t.id === taskId && t.state === "done");
 }
