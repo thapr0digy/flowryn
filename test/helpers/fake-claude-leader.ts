@@ -54,6 +54,12 @@ export class FakeClaudeLeader implements BridgeDriver {
   readonly prompts: string[] = [];
   /** The session's permission mode, as its hooks see it (M0 c09). */
   permissionMode = "auto";
+  /**
+   * Fail-open: the PreToolUse hooks still run (so flowrynd records what they
+   * report), but their decisions never reach Claude, as when the hook's reply
+   * times out after the daemon answered. Only the settings' rules apply.
+   */
+  hookDecisionsLost = false;
   private readonly opts: FakeClaudeOptions;
   private readonly transcript: string;
   private readonly sessionId = crypto.randomUUID();
@@ -241,6 +247,10 @@ export class FakeClaudeLeader implements BridgeDriver {
       } catch {
         // no decision
       }
+    }
+    if (this.hookDecisionsLost) {
+      decision = null;
+      reason = "";
     }
     const perms = this.settings.permissions ?? {};
     if (decision === "deny" || this.matches(perms.deny, command)) return { denied: true, prompted: false, ran: false, code: -1, stdout: "", stderr: "" };

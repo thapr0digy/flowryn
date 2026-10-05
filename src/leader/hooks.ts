@@ -17,6 +17,7 @@ import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { gateQuestionsLine } from "../lifecycle/gate-questions.ts";
 import { isRoutineMerge, recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
+import { readShellWords } from "../util/shell-word.ts";
 
 /**
  * The leader side of the hook verbs (design sections 5, 9 and 10). The
@@ -299,6 +300,53 @@ export interface GatedCommand {
   task: string;
   /** decide only: more than one captain answer appears in this one command; refuse all of them by construction (no attempt is ever recorded for it). */
   tooMany?: boolean;
+  /** merge only: the one red check this merge asks to waive, exactly as the shell will pass it. */
+  allowRed?: string;
+  /** merge only: a waiver is asked but its check cannot be read exactly; refused by construction (no attempt is recorded). */
+  unreadable?: string;
+}
+
+export type WaiverArg = { kind: "none" } | { kind: "check"; check: string } | { kind: "unreadable"; why: string };
+
+const ALLOW_RED = "--allow-red";
+// oxlint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
+/**
+ * The `--allow-red <check>` of the merge whose arguments start at `from`, read
+ * the way the shell will pass it (src/util/shell-word.ts). The prompt shows
+ * this name and the attempt binds it, so anything that could reach the verb
+ * as a different string is unreadable instead: an expansion or glob, a value
+ * that looks like a flag (the CLI strips a bare --json or --help first), a
+ * repeat, an empty name or a control character. A misread can only refuse:
+ * the verb matches the attempt by the name it actually received.
+ */
+export function mergeWaiver(command: string, from: number): WaiverArg {
+  const words = readShellWords(command, from);
+  const found: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    if (word.exact && word.text === "--") break;
+    if (word.text === ALLOW_RED) {
+      const value = words[i + 1];
+      if (!word.exact || !value) return { kind: "unreadable", why: "--allow-red has no value" };
+      if (!value.exact) return { kind: "unreadable", why: "the check name has shell expansion or unsafe characters" };
+      if (value.text.startsWith("-")) return { kind: "unreadable", why: "a check name starting with - must be given as --allow-red=<check>" };
+      found.push(value.text);
+      i++;
+    } else if (word.text.startsWith(`${ALLOW_RED}=`)) {
+      if (!word.exact) return { kind: "unreadable", why: "the check name has shell expansion or unsafe characters" };
+      found.push(word.text.slice(ALLOW_RED.length + 1));
+    } else if (word.text.includes("allow-red") && !word.exact) {
+      return { kind: "unreadable", why: "--allow-red is built from shell expansion" };
+    }
+  }
+  if (found.length === 0) return { kind: "none" };
+  if (found.length > 1) return { kind: "unreadable", why: "--allow-red is given more than once" };
+  const check = found[0]!;
+  if (check.length === 0) return { kind: "unreadable", why: "the check name is empty" };
+  if (CONTROL.test(check)) return { kind: "unreadable", why: "the check name has a control character" };
+  return { kind: "check", check };
 }
 
 const MERGE_COMMAND = /(?:^|[\s;&|()`'"])(?:[^\s;&|()`'"]*\/)?flowryn\s+merge\s+([A-Za-z0-9][\w.-]*)/g;
@@ -338,7 +386,11 @@ function captainDecideIds(command: string): string[] {
 /** The Flowryn commands in a shell line that need your word: merges, discards, review gate passes and captain answers. */
 export function gatedCommands(command: string): GatedCommand[] {
   const found: GatedCommand[] = [];
-  for (const match of command.matchAll(MERGE_COMMAND)) found.push({ action: "merge", task: match[1]! });
+  for (const match of command.matchAll(MERGE_COMMAND)) {
+    const waiver = mergeWaiver(command, match.index + match[0].length);
+    const extra = waiver.kind === "check" ? { allowRed: waiver.check } : waiver.kind === "unreadable" ? { unreadable: waiver.why } : {};
+    found.push({ action: "merge", task: match[1]!, ...extra });
+  }
   for (const match of command.matchAll(DISCARD_COMMAND)) found.push({ action: "discard", task: match[1]! });
   for (const match of command.matchAll(GATE_COMMAND)) found.push({ action: "gate", task: match[1]! });
   const decideIds = captainDecideIds(command);
@@ -366,12 +418,29 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
     const questions = gateQuestionsLine(ctx.db, gate.id);
     return { line: `PASS the ${gate.stage} review of ${run.task_id} (${title}), review page ${gate.review_url ?? "none"}${plan ? `; it also approves ${plan}` : ""}${questions ? `; its questions: ${questions}` : ""}; the next stage starts at once`, prUrl: `gate:${gate.id}`, head: null };
   }
+  if (gated.unreadable !== undefined) {
+    return { line: `merge ${run.task_id} (${title}) waiving a red check Flowryn cannot read exactly (${gated.unreadable}): it will be refused; name the check as one quoted word`, prUrl: null, head: null };
+  }
+  const waive = gated.allowRed !== undefined ? `WAIVE the red check ${JSON.stringify(gated.allowRed)} and ` : "";
   const shipped = deliveredOf(ctx.db, run.task_id);
-  if (!shipped) return { line: `merge ${run.task_id} (${title}): nothing delivered yet; it will be refused`, prUrl: null, head: null };
+  if (!shipped) return { line: `${waive}merge ${run.task_id} (${title}): nothing delivered yet; it will be refused`, prUrl: null, head: null };
   const evidence = shipped.kind === "pr" ? prEvidence(ctx.db, run.id) : null;
   const head = evidence?.head ?? shipped.head;
   const where = shipped.kind === "pr" ? `PR ${shipped.ref} at ${head.slice(0, 8)}, checks ${evidence?.checks?.line ?? "unknown"}` : `branch ${run.branch} at ${head.slice(0, 8)} into local main`;
-  return { line: `merge ${run.task_id} (${title}): ${where}`, prUrl: approvalRef(shipped), head };
+  const agrees = gated.allowRed === undefined ? "" : waiverAgreement(gated.allowRed, shipped.kind === "pr" ? (evidence?.checks?.red ?? null) : []);
+  return { line: `${waive}merge ${run.task_id} (${title}): ${where}${agrees}`, prUrl: approvalRef(shipped), head };
+}
+
+/**
+ * Whether the checks flowrynd last read agree with the waiver the prompt
+ * names. Advice only: the merge gate reads the checks fresh and refuses
+ * unless the named check is the only one failing then.
+ */
+function waiverAgreement(check: string, red: string[] | null): string {
+  if (red === null) return `; flowrynd has not read the checks yet, so it is refused unless ${JSON.stringify(check)} is the only failing check when it runs`;
+  if (red.length === 1 && red[0] === check) return "";
+  const failing = red.length > 0 ? red.map((name) => JSON.stringify(name)).join(", ") : "none";
+  return `; flowrynd last read failing: ${failing}, so it is refused unless ${JSON.stringify(check)} is the only failing check when it runs`;
 }
 
 /** A yolo, non-sensitive merge: no prompt and no attempt, so the merge gate records yolo. */
@@ -414,12 +483,25 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResu
   if (gated.length === 0) return result;
   const lines: string[] = [];
   for (const g of gated) {
-    if (g.action === "merge" && routineMerge(ctx, g.task)) continue;
+    // A waiver is never routine: only your word can make one, so it is always asked.
+    const waiverAsked = g.allowRed !== undefined || g.unreadable !== undefined;
+    if (g.action === "merge" && !waiverAsked && routineMerge(ctx, g.task)) continue;
     const facts = promptFacts(ctx, g, command);
-    // Refusal by construction: a line naming more than one captain decide is gated and prompted, but
-    // no attempt is ever recorded for it, so the decide calls it runs can never find one to match.
-    if (!(g.action === "decide" && g.tooMany)) {
-      recordAttempt(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), action: g.action, task: g.task, permissionMode: String(input.permission_mode ?? "unknown"), prUrl: facts.prUrl, head: facts.head, now });
+    // Refusal by construction: a line naming more than one captain decide, or a waiver whose check
+    // cannot be read exactly, is gated and prompted, but no attempt is ever recorded for it, so the
+    // calls it runs can never find one to match.
+    if (!(g.action === "decide" && g.tooMany) && g.unreadable === undefined) {
+      recordAttempt(ctx.db, {
+        session: s.session_id,
+        toolUseId: String(input.tool_use_id ?? ""),
+        action: g.action,
+        task: g.task,
+        permissionMode: String(input.permission_mode ?? "unknown"),
+        prUrl: facts.prUrl,
+        head: facts.head,
+        allowRed: g.allowRed ?? null,
+        now,
+      });
     }
     lines.push(facts.line);
   }

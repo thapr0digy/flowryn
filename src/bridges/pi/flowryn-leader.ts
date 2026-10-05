@@ -284,31 +284,48 @@ export default function flowrynLeader(pi: any): void {
   /**
    * flowryn_merge: the one way this leader merges (the shell is blocked). You
    * see what would land and say yes or no; the daemon still applies the whole
-   * merge gate, and binds the merge to the head you saw.
+   * merge gate, and binds the merge to the head you saw. With allow_red, the
+   * confirm also names the one red check your yes waives, and the merge
+   * carries exactly that name.
    */
   pi.registerTool({
     name: "flowryn_merge",
     label: "Flowryn merge",
     description:
-      "Merge a Flowryn task's delivered pull request (or local-only branch). The user confirms it here first; flowrynd then checks the merge gate (approval, checks, head) and proves the merge. Never run `flowryn merge` in the shell.",
-    promptSnippet: "flowryn_merge: merge a delivered Flowryn ship after the user confirms it.",
-    parameters: { type: "object", properties: { task: { type: "string", description: "the Flowryn task id, for example web-login-loop-q4" } }, required: ["task"] },
+      "Merge a Flowryn task's delivered pull request (or local-only branch). The user confirms it here first; flowrynd then checks the merge gate (approval, checks, head) and proves the merge. To merge with exactly one failing check, pass its exact name as allow_red; the user's confirm waives it. Never run `flowryn merge` in the shell.",
+    promptSnippet: "flowryn_merge: merge a delivered Flowryn ship after the user confirms it (allow_red: waive its one failing check).",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "the Flowryn task id, for example web-login-loop-q4" },
+        allow_red: { type: "string", description: "optional: the exact name of the one failing check to waive" },
+      },
+      required: ["task"],
+    },
     async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, c: any) {
       remember(c);
       const task = String(params?.task ?? "").trim();
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(task)) return text("flowryn_merge needs a task id.");
+      const allowRed = params?.allow_red === undefined || params?.allow_red === null ? null : String(params.allow_red);
+      // oxlint-disable-next-line no-control-regex
+      if (allowRed !== null && (allowRed.length === 0 || /[\u0000-\u001f\u007f]/.test(allowRed))) return text("allow_red needs the exact name of the one failing check.");
       const summary = await runHook("merge-summary", { task });
       if (!summary) return text("Flowryn is not reachable; nothing was merged.");
       if (typeof summary.error === "string") return text(`Cannot merge ${task}: ${summary.error}`);
+      const red: string[] = Array.isArray(summary.red) ? summary.red.map(String) : [];
+      if (allowRed !== null && !(red.length === 1 && red[0] === allowRed)) {
+        return text(`Cannot waive ${JSON.stringify(allowRed)} on ${task}: ${red.length > 0 ? `failing now: ${red.map((name) => JSON.stringify(name)).join(", ")}` : "no check is failing"}; only the one failing check can be waived. Nothing was asked or merged.`);
+      }
       const head = String(summary.head ?? "");
       const lines = [
         `${summary.title ?? task} (${summary.project ?? "?"})`,
         `${summary.kind === "local" ? "branch" : "PR"}: ${summary.target ?? "?"}`,
         `head: ${head.slice(0, 12)}  checks: ${summary.checks ?? "unknown"}${summary.sensitive ? "  SENSITIVE" : ""}`,
       ];
+      if (allowRed !== null) lines.push(`WAIVE red check: ${JSON.stringify(allowRed)}`);
       let yes = false;
       try {
-        yes = Boolean(await ctx?.ui?.confirm?.(`Merge ${task}?`, lines.join("\n")));
+        yes = Boolean(await ctx?.ui?.confirm?.(allowRed === null ? `Merge ${task}?` : `Merge ${task}, waiving red check ${JSON.stringify(allowRed)}?`, lines.join("\n")));
       } catch {
         yes = false;
       }
@@ -320,17 +337,22 @@ export default function flowrynLeader(pi: any): void {
         approvalKey = key;
       }
       if (!key) return text("This session does not hold the leader lease, so it cannot merge.");
-      let reply = await runFlowryn(["merge", task, "--head", head, "--key-file", "-", "--json"], key);
+      // --allow-red=<name> as one argument: the CLI never mistakes a name for a flag.
+      const mergeArgs = ["merge", task, "--head", head, ...(allowRed === null ? [] : [`--allow-red=${allowRed}`]), "--key-file", "-", "--json"];
+      let reply = await runFlowryn(mergeArgs, key);
       if (reply?.ok === false && reply.error?.code === "approval_required" && String(reply.error?.message ?? "").includes("key")) {
         // The lease moved and back, or the key rotated: one fresh key, once.
         const fresh = await runHook("approval-key", {});
         if (typeof fresh?.key === "string") {
           approvalKey = fresh.key;
-          reply = await runFlowryn(["merge", task, "--head", head, "--key-file", "-", "--json"], fresh.key);
+          reply = await runFlowryn(mergeArgs, fresh.key);
         }
       }
       if (!reply) return text(`Flowryn did not answer; ${task} may not be merged. Check: flowryn show ${task}`);
-      if (reply.ok) return text(`Merged ${task}: ${reply.data?.state ?? "merged"} at ${String(reply.data?.sha ?? "?").slice(0, 12)} (approved in this confirm; cleanup follows).`);
+      if (reply.ok) {
+        const waived = allowRed === null ? "" : `, waiving ${JSON.stringify(allowRed)}`;
+        return text(`Merged ${task}: ${reply.data?.state ?? "merged"} at ${String(reply.data?.sha ?? "?").slice(0, 12)} (approved in this confirm${waived}; cleanup follows).`);
+      }
       return text(`Merge of ${task} refused (${reply.error?.code ?? "error"}): ${reply.error?.message ?? ""}${reply.error?.help ? ` Help: ${reply.error.help}` : ""}`);
     },
   });

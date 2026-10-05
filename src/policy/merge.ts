@@ -26,6 +26,7 @@ import {
 } from "./approvals.ts";
 import type { GitRunner } from "./landed.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-health.ts";
+import { shellWord } from "../util/shell-word.ts";
 
 /**
  * The merge gate (design section 7, policy/merge), in order: the canonical PR
@@ -114,7 +115,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
 export type ApprovalChoice =
   | { kind: "row"; row: ApprovalRow }
   | { kind: "attempt"; attempt: AttemptRow; session: string }
-  | { kind: "key"; session: string }
+  | { kind: "key"; session: string; allowRed: string | null }
   | { kind: "yolo" };
 
 export interface MergeAsk {
@@ -123,22 +124,34 @@ export interface MergeAsk {
   approvalKey?: string;
   /** The head the Pi confirm showed you. */
   head?: string;
+  /** `merge --allow-red`: the one red check this merge asks to waive. */
+  allowRed?: string;
 }
 
 export interface ChoiceResult {
   choice: ApprovalChoice | null;
   /** Why no approval applies, for the refusal. */
   why: string;
+  /** The red check the merge asked to waive (`merge --allow-red`), if any. */
+  allowRed?: string | null;
 }
 
 /**
  * Which approval allows this merge. A standing human record for this head
  * comes first (it can carry a waiver); then the harness channel the caller
- * brought (Claude's prompt, Pi's confirm); then the yolo posture.
+ * brought (Claude's prompt, Pi's confirm); then the yolo posture. A merge
+ * that asks to waive a red check takes only a record waiving that check, a
+ * Claude prompt that named it, or a Pi confirm that showed it; never yolo.
  */
 export function chooseApproval(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "discard", now: number): ChoiceResult {
+  const chosen = chooseFor(db, facts, ask, action, now);
+  return ask.allowRed === undefined ? chosen : { ...chosen, allowRed: ask.allowRed };
+}
+
+function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "discard", now: number): ChoiceResult {
   const task = facts.run.task_id;
-  const row = findHumanApproval(db, { task, action, ref: facts.ref, head: facts.head, now });
+  const allowRed = ask.allowRed ?? null;
+  const row = findHumanApproval(db, { task, action, ref: facts.ref, head: facts.head, now, allowRed });
   if (row) return { choice: { kind: "row", row }, why: "" };
   const reasons: string[] = [];
   // A head you confirmed is a precondition: another head is never merged in its place, not even under yolo.
@@ -146,19 +159,24 @@ export function chooseApproval(db: Db, facts: MergeFacts, ask: MergeAsk, action:
   const session = ask.caller.role === "leader" ? (ask.caller.session ?? null) : null;
   const leader = session ? getSession(db, session) : null;
   if (leader?.harness === "claude") {
-    const attempt = findAttempt(db, { session: leader.session_id, action, task, now });
+    const attempt = findAttempt(db, { session: leader.session_id, action, task, now, allowRed });
     if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) return { choice: { kind: "attempt", attempt, session: leader.session_id }, why: "" };
     if (attempt) return { choice: null, why: `the head moved from ${attempt.head_sha?.slice(0, 8)} since your prompt; it is now ${facts.head.slice(0, 8)}` };
-    reasons.push("no confirmed Claude prompt for this command (under bypassPermissions there is none to trust)");
+    reasons.push(
+      allowRed === null
+        ? "no confirmed Claude prompt for this command (under bypassPermissions there is none to trust)"
+        : `no confirmed Claude prompt waiving ${JSON.stringify(allowRed)} for this command (under bypassPermissions there is none to trust)`,
+    );
   }
   if (leader?.harness === "pi") {
     const lease = getLease(db);
     if (!ask.approvalKey) reasons.push("no approval key: merge through the flowryn_merge tool, which asks you first");
     else if (lease.session_id !== leader.session_id || !lease.approval_key_hash || hashToken(ask.approvalKey) !== lease.approval_key_hash) reasons.push("the approval key is not this lease's");
-    else return { choice: { kind: "key", session: leader.session_id }, why: "" };
+    else return { choice: { kind: "key", session: leader.session_id, allowRed }, why: "" };
   }
+  if (allowRed !== null) reasons.push(`waiving ${JSON.stringify(allowRed)} needs your word; yolo never waives a check`);
   const policy = db.query("SELECT yolo FROM task_policy WHERE task_id = ?1").get(task) as { yolo: number } | null;
-  if (action === "merge" && policy?.yolo === 1) return { choice: { kind: "yolo" }, why: "" };
+  if (action === "merge" && allowRed === null && policy?.yolo === 1) return { choice: { kind: "yolo" }, why: "" };
   const stale = staleApprovals(db, { task, action, head: facts.head, now });
   if (stale.length > 0) reasons.unshift(`your approval ${stale[0]!.id} was for head ${stale[0]!.head_sha.slice(0, 8)}; the head is now ${facts.head.slice(0, 8)}`);
   return { choice: null, why: reasons.join("; ") || `no approval for head ${facts.head.slice(0, 8)}` };
@@ -169,6 +187,21 @@ export interface GateResult {
   waived: string | null;
   /** The PR already reads merged: nothing to ask of GitHub, only the landing to record. */
   alreadyMerged: boolean;
+}
+
+/** The red check an approval waives: a human record's, a Claude prompt's or a Pi confirm's; yolo never waives. */
+export function waiverOf(choice: ApprovalChoice | null): string | null {
+  if (!choice) return null;
+  if (choice.kind === "row") return choice.row.allow_red_check;
+  if (choice.kind === "attempt") return choice.attempt.allow_red_check;
+  if (choice.kind === "key") return choice.allowRed;
+  return null;
+}
+
+/** How to waive one red check: through the leader (it asks you) or in your shell. */
+function waiveHint(task: string, check: string): string {
+  const word = shellWord(check);
+  return `fix it, or waive it: the leader runs flowryn merge ${task} --allow-red ${word} and asks you, or in your shell: flowryn approve ${task} --allow-red ${word}`;
 }
 
 /** The gate, in the design's order; throws the first refusal. */
@@ -199,17 +232,27 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   // 3 · every check green, or exactly one red check waived by a human.
   let waived: string | null = null;
   const checks = facts.checks;
+  const asked = chosen.allowRed ?? null;
+  const red = checks ? checks.checks.filter((c) => c.state === "red").map((c) => c.name) : [];
+  // A merge that names a check to waive goes ahead only when that check is the one failing now.
+  if (asked !== null && !(red.length === 1 && red[0] === asked)) {
+    const failing = red.length > 0 ? `failing now: ${red.map((name) => JSON.stringify(name)).join(", ")}` : checks ? "no check is failing" : "there are no checks to waive";
+    throw new FlowrynError(
+      "red_checks",
+      `merge refused: the waiver names ${JSON.stringify(asked)}, but ${failing}; one check may be waived, and only while it is the only one failing`,
+      red.length === 1 ? waiveHint(task, red[0]!) : red.length === 0 ? `merge without --allow-red: flowryn merge ${task}` : "fix them; at most one check can be waived",
+    );
+  }
   if (checks && checks.state !== "green" && checks.state !== "none") {
-    const red = checks.checks.filter((c) => c.state === "red").map((c) => c.name);
     const pending = checks.checks.filter((c) => c.state === "pending").map((c) => c.name);
-    const waiver = chosen.choice?.kind === "row" ? chosen.choice.row.allow_red_check : null;
+    const waiver = waiverOf(chosen.choice);
     if (red.length > 0) {
       if (red.length === 1 && waiver === red[0]) waived = red[0]!;
       else {
         throw new FlowrynError(
           "red_checks",
-          `merge refused: ${red.length} red check${red.length === 1 ? "" : "s"}: ${red.join(", ")}${waiver ? ` (your waiver names ${waiver}, and only one may be waived)` : ""}`,
-          red.length === 1 ? `fix it, or waive it in your shell: flowryn approve ${task} --allow-red ${red[0]}` : "fix them; at most one check can be waived",
+          `merge refused: ${red.length} red check${red.length === 1 ? "" : "s"}: ${red.join(", ")}${waiver ? ` (your waiver names ${waiver}, and only one may be waived)` : ""}${asked !== null && !chosen.choice ? ` (${chosen.why})` : ""}`,
+          red.length === 1 ? waiveHint(task, red[0]!) : "fix them; at most one check can be waived",
         );
       }
     }
@@ -249,7 +292,7 @@ export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, 
     matchAttempt(db, choice.attempt.id, now);
   }
   const actor = choice.kind === "attempt" ? `${user()} (Claude prompt, leader ${choice.session})` : choice.kind === "key" ? `${user()} (Pi confirm, leader ${choice.session})` : "yolo posture";
-  const row = insertApproval(db, { task, ref: facts.ref, head: facts.head, channel: channelOf(choice), actor, action, now });
+  const row = insertApproval(db, { task, ref: facts.ref, head: facts.head, channel: channelOf(choice), actor, action, allowRed: waiverOf(choice), now });
   consumeApproval(db, row.id, now, `${action} ${task}`);
   return row.id;
 }

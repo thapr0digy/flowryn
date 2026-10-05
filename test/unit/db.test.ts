@@ -152,6 +152,16 @@ describe("migrations", () => {
     expect(migrate(db, MIGRATIONS.slice(0, 9))).toEqual([]);
     db.close();
   });
+
+  test("a Claude prompt's attempt gains a waiver column; attempts recorded before it carry none", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 12));
+    db.exec("INSERT INTO approval_attempts (id, session_id, tool_use_id, args_hash, permission_mode, created_at) VALUES ('a1', 'L1', 't1', 'h', 'auto', 1)");
+    expect(migrate(db)).toEqual([13]);
+    expect(db.query("SELECT id, allow_red_check FROM approval_attempts").all()).toEqual([{ id: "a1", allow_red_check: null }]);
+    expect(migrate(db)).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {

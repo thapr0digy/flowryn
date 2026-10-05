@@ -83,6 +83,7 @@ export function parseArgv(argv: string[], verbs: readonly VerbSpec[]): ParsedArg
     const name = token.slice(2, eq === -1 ? undefined : eq);
     const flag = spec.flags[name];
     if (!flag) throw new FlowrynError("bad_args", `unknown flag --${name} for ${spec.name}`, `usage: ${usage(spec)}`);
+    if (flag.once && name in args) throw new FlowrynError("bad_args", `--${name} may be given only once`, `usage: ${usage(spec)}`);
     let value: string | undefined = eq === -1 ? undefined : token.slice(eq + 1);
     if (flag.type === "boolean") {
       if (value !== undefined) throw new FlowrynError("bad_args", `--${name} takes no value`);
