@@ -77,6 +77,7 @@ flowryn todo edit <id> --title <t>  # or --body-file -; the due date stays. todo
 flowryn approve <task>              # your word for a merge: shows the PR, head and checks, reads a code from /dev/tty
 flowryn approve <task> --allow-red lint   # waive exactly one failing check; --discard approves throwing work away
 flowryn merge <task>                # through the merge gate; it counts only once GitHub (or local main) proves it
+flowryn merge <task> --allow-red 'CI / build'  # the leader's waiver: Claude's prompt (or Pi's confirm) names the check, your yes waives it
 flowryn decline <task> --body-file -  # send a delivered ship back with your words
 flowryn cleanup <task> [--discard]  # remove a landed, cancelled or failed task's worktree, through the cleanup guard
 flowryn dispatch web --kind ship --workflow feature --body-file -   # design, review, build, ship

@@ -105,6 +105,7 @@ const merge: VerbSpec = {
   flags: {
     head: { type: "string", help: "Pi leader extension: the head its confirm showed you", placeholder: "sha" },
     "key-file": { type: "string", help: "Pi leader extension only: its approval key, from stdin", fileFor: "approval_key" },
+    "allow-red": { type: "string", help: "waive exactly this one failing check (quote it as one word); needs your word: Claude's prompt, Pi's confirm or flowryn approve --allow-red", placeholder: "check", once: true },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -112,12 +113,14 @@ const merge: VerbSpec = {
   replyMs: 120_000,
   async prepare(ctx, args): Promise<MergePrepared> {
     const task = stringArg(args, "task")!;
+    const allowRed = stringArg(args, "allow-red");
+    if (allowRed !== undefined && allowRed.length === 0) throw new FlowrynError("bad_args", "--allow-red needs the name of the one failing check to waive");
     const { run, project } = await mergeable(ctx, task);
     const facts = await gatherFacts(mergeContext(ctx), run, project);
-    const chosen = chooseApproval(ctx.db, facts, { caller: ctx.caller, approvalKey: stringArg(args, "approval_key")?.trim(), head: stringArg(args, "head") }, "merge", ctx.now());
+    const chosen = chooseApproval(ctx.db, facts, { caller: ctx.caller, approvalKey: stringArg(args, "approval_key")?.trim(), head: stringArg(args, "head"), allowRed }, "merge", ctx.now());
     // The attempt the Claude hook recorded is matched by the task as you typed it.
     if (!chosen.choice && ctx.caller.role === "leader" && ctx.caller.session && task !== run.task_id) {
-      const attempt = findAttempt(ctx.db, { session: ctx.caller.session, action: "merge", task, now: ctx.now() });
+      const attempt = findAttempt(ctx.db, { session: ctx.caller.session, action: "merge", task, now: ctx.now(), allowRed: allowRed ?? null });
       if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) chosen.choice = { kind: "attempt", attempt, session: ctx.caller.session };
     }
     const gate = checkGate(facts, chosen);

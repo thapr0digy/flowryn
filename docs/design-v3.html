@@ -580,6 +580,7 @@ type Verified = { ok: boolean;
         <li>The leader runs in <code>--permission-mode auto</code>. Ask rules that match a command's content still prompt in auto mode.</li>
         <li>For a <code>flowryn merge</code> command, the <code>PreToolUse</code> hook records an attempt (session, tool-use id, argument hash, <code>permission_mode</code>) and returns <code>permissionDecision: "ask"</code>, which prompts in auto mode too. A routine merge (the task is yolo and not sensitive) is neither asked nor recorded, so it merges under yolo. There is no static merge ask rule: it would prompt for routine merges as well.</li>
         <li>If you approve, the command runs with the leader token. The daemon matches it to the attempt (same session and arguments, under 5 minutes old) and records channel <code>claude-ask</code>.</li>
+        <li>A waiver: <code>flowryn merge T17 --allow-red '&lt;check&gt;'</code>. The hook reads the check name exactly as the shell will pass it (one quoted word; an expansion, a repeat or a flag-like value is unreadable and records no attempt), names it in the prompt beside the PR URL and head, and binds it into the attempt, so only a merge naming that same check matches. A waiver is never routine, and yolo never waives. A static ask rule <code>Bash(flowryn merge *allow-red*)</code> makes Claude prompt even if the hook's ask is lost after the attempt was recorded (hooks fail open).</li>
         <li>If the attempt is missing or its mode was <code>bypassPermissions</code>, the channel is unavailable. M0 found that the ask rule and the hook's ask both still prompt under bypass, but the leader never runs in bypass, so this refusal stays as defense in depth. The merge returns <code>approval_required</code>.</li>
       </ol>
       <p class="opacity-75"><span class="m0ok" title="Confirmed in M0; see docs/m0-verdicts.md">M0 ✓</span> the hook input carries <code>permission_mode</code> (every event except <code>SessionStart</code>); the prompt appears in auto mode inside a Herdr pane.</p>
@@ -588,7 +589,7 @@ type Verified = { ok: boolean;
       <h3 class="card-title text-base">Pi leader</h3>
       <ol class="list-decimal ml-5 space-y-1 opacity-90">
         <li>Pi has no permission system, so the extension is the gate.</li>
-        <li>Its <code>flowryn_merge</code> tool shows PR title, URL, head SHA and checks through <code>ctx.ui.confirm()</code>.</li>
+        <li>Its <code>flowryn_merge</code> tool shows PR title, URL, head SHA and checks through <code>ctx.ui.confirm()</code>. With <code>allow_red</code>, the confirm also names the one failing check your yes waives, and the merge carries exactly that name.</li>
         <li>On yes, it calls the daemon with an approval key it received over the socket at lease claim and never put in any environment. Channel <code>pi-confirm</code>.</li>
         <li>The extension blocks shell calls to <code>flowryn merge</code> and <code>flowryn approve</code>; without the key, a shell merge gets <code>approval_required</code>.</li>
       </ol>
@@ -600,7 +601,7 @@ type Verified = { ok: boolean;
         <li><code>flowryn approve T17</code> refuses when any <code>FLOWRYN_*</code> token is in the environment (an agent pane) or stdin/stdout is not a TTY.</li>
         <li>It prints the PR URL, head SHA and check summary, then reads a random 4-letter code from <code>/dev/tty</code>, so piped input cannot answer it.</li>
         <li>The board's approve key does the same. Channel <code>cli-tty</code> or <code>board</code>, actor <code>$USER</code>.</li>
-        <li><code>--allow-red &lt;check&gt;</code> names one failing check to waive. Only a human channel can create it; every other check must be green.</li>
+        <li><code>--allow-red &lt;check&gt;</code> names one failing check to waive. Only a human channel can create it (this one, Claude's prompt or Pi's confirm); every other check must be green.</li>
       </ol>
     </div></div>
   </div>

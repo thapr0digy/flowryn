@@ -51,13 +51,19 @@ export interface AttemptRow {
   action: string;
   pr_url: string | null;
   head_sha: string | null;
+  /** The one red check the prompt asked you to waive, if any. */
+  allow_red_check: string | null;
   created_at: number;
   matched_at: number | null;
 }
 
-/** The hash the Claude hook and the verb both compute for "this action on this task". */
-export function argsHash(action: ApprovalAction, task: string): string {
-  return sha256Hex(`flowryn-attempt:${action}\n${task}`);
+/**
+ * The hash the Claude hook and the verb both compute for "this action on this
+ * task" (and, for a merge that waives a red check, that exact check), so a
+ * prompt for a plain merge never matches a waiver, nor the reverse.
+ */
+export function argsHash(action: ApprovalAction, task: string, allowRed: string | null = null): string {
+  return sha256Hex(`flowryn-attempt:${action}\n${task}${allowRed === null ? "" : `\nallow-red:${allowRed}`}`);
 }
 
 function nextId(db: Db, key: string, prefix: string): string {
@@ -94,15 +100,20 @@ export function insertApproval(db: Db, a: NewApproval): ApprovalRow {
   return db.query("SELECT * FROM approvals WHERE id = ?1").get(id) as ApprovalRow;
 }
 
-/** A standing human record (cli-tty or board) for exactly this head, unexpired and unused. */
-export function findHumanApproval(db: Db, q: { task: string; action: ApprovalAction; ref: string; head: string; now: number }): ApprovalRow | null {
+/**
+ * A standing human record (cli-tty or board) for exactly this head, unexpired
+ * and unused. Given `allowRed`, only a record waiving exactly that check.
+ */
+export function findHumanApproval(db: Db, q: { task: string; action: ApprovalAction; ref: string; head: string; now: number; allowRed?: string | null }): ApprovalRow | null {
+  const waiver = q.allowRed ?? null;
   return db
     .query(
       `SELECT * FROM approvals WHERE task_id = ?1 AND action = ?2 AND pr_url = ?3 AND head_sha = ?4
          AND consumed_at IS NULL AND expires_at > ?5 AND channel IN ('cli-tty','board')
+         AND (?6 IS NULL OR allow_red_check = ?6)
        ORDER BY created_at DESC LIMIT 1`,
     )
-    .get(q.task, q.action, q.ref, q.head, q.now) as ApprovalRow | null;
+    .get(q.task, q.action, q.ref, q.head, q.now, waiver) as ApprovalRow | null;
 }
 
 /** Standing records for other heads: the reason a merge after a push asks again. */
@@ -148,6 +159,8 @@ export interface NewAttempt {
   permissionMode: string;
   prUrl: string | null;
   head: string | null;
+  /** A merge that waives one red check: the check, as the prompt showed it. */
+  allowRed?: string | null;
   now: number;
 }
 
@@ -157,29 +170,37 @@ export interface NewAttempt {
  * action supersedes older unmatched ones. Call inside a transaction.
  */
 export function recordAttempt(db: Db, a: NewAttempt): string {
-  const hash = argsHash(a.action, a.task);
+  const allowRed = a.allowRed ?? null;
+  const hash = argsHash(a.action, a.task, allowRed);
   db.query("UPDATE approval_attempts SET matched_at = -1 WHERE session_id = ?1 AND args_hash = ?2 AND matched_at IS NULL").run(a.session, hash);
   const id = ulid(a.now);
   db.query(
-    `INSERT INTO approval_attempts (id, session_id, tool_use_id, args_hash, permission_mode, created_at, task_id, action, pr_url, head_sha)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
-  ).run(id, a.session, a.toolUseId, hash, a.permissionMode, a.now, a.task, a.action, a.prUrl, a.head);
-  appendEvent(db, { source: "hook", kind: "approval.attempt", taskId: a.task, payload: { attempt: id, session: a.session, action: a.action, mode: a.permissionMode, head: a.head }, ts: a.now });
+    `INSERT INTO approval_attempts (id, session_id, tool_use_id, args_hash, permission_mode, created_at, task_id, action, pr_url, head_sha, allow_red_check)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+  ).run(id, a.session, a.toolUseId, hash, a.permissionMode, a.now, a.task, a.action, a.prUrl, a.head, allowRed);
+  appendEvent(db, {
+    source: "hook",
+    kind: "approval.attempt",
+    taskId: a.task,
+    payload: { attempt: id, session: a.session, action: a.action, mode: a.permissionMode, head: a.head, allow_red: allowRed },
+    ts: a.now,
+  });
   return id;
 }
 
 /**
- * The attempt a Claude merge matches: same session and arguments, under five
- * minutes old, unmatched. Under bypassPermissions there is no prompt to trust,
- * so such an attempt never matches (design section 7, defense in depth).
+ * The attempt a Claude merge matches: same session and arguments (a waiver
+ * only by the very check its prompt named), under five minutes old,
+ * unmatched. Under bypassPermissions there is no prompt to trust, so such an
+ * attempt never matches (design section 7, defense in depth).
  */
-export function findAttempt(db: Db, q: { session: string; action: ApprovalAction; task: string; now: number }): AttemptRow | null {
+export function findAttempt(db: Db, q: { session: string; action: ApprovalAction; task: string; now: number; allowRed?: string | null }): AttemptRow | null {
   return db
     .query(
       `SELECT * FROM approval_attempts WHERE session_id = ?1 AND args_hash = ?2 AND matched_at IS NULL
          AND created_at > ?3 AND permission_mode != 'bypassPermissions' ORDER BY created_at DESC LIMIT 1`,
     )
-    .get(q.session, argsHash(q.action, q.task), q.now - ATTEMPT_WINDOW_MS) as AttemptRow | null;
+    .get(q.session, argsHash(q.action, q.task, q.allowRed ?? null), q.now - ATTEMPT_WINDOW_MS) as AttemptRow | null;
 }
 
 export function matchAttempt(db: Db, id: string, now: number): void {

@@ -41,6 +41,8 @@ export interface FlagSpec {
   /** A free-text flag: a lone `-` value makes the CLI read the text from stdin instead. */
   stdin?: boolean;
   placeholder?: string;
+  /** Refuse the flag given twice, rather than keep the last value. */
+  once?: boolean;
 }
 
 export interface PositionalSpec {

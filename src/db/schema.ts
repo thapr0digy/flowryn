@@ -414,6 +414,14 @@ const GATE_COMMENT_SQL = /* sql */ `
 ALTER TABLE gates ADD COLUMN comment TEXT;
 `;
 
+/**
+ * A Claude prompt can carry a red-check waiver: the attempt names the one
+ * check the prompt showed, and only a merge naming that same check matches it.
+ */
+const ATTEMPT_WAIVER_SQL = /* sql */ `
+ALTER TABLE approval_attempts ADD COLUMN allow_red_check TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -427,6 +435,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 10, name: "steer-urgent", sql: STEER_URGENT_SQL },
   { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
   { version: 12, name: "gate-comment", sql: GATE_COMMENT_SQL },
+  { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
