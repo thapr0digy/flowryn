@@ -46,6 +46,14 @@ From the steer latency investigation (the 2026-10-04 spec in the superpowers vau
 - **The Pi extension** says how it delivered each steer (`hook steer-carried`, mode `followUp` or `steer`): only a `followUp` to an idle agent starts a turn at once, so only it gets the 5 s clock. The daemon's own idle guess stands until the report arrives. The extension now re-polls 50 ms after an empty reply instead of 1 s.
 - **What you see.** `flowryn show` lists the run's latest steers (every open one and the last few acknowledged) with `delivery`: `carried +2ms, seen +2.7s, acked +8.8s` after creation, or `queued 4s`, `not seen for 12s`, `lost, ringing again`. `flowryn fleet` has a `steer` column: the oldest open steer as `m3 queued 2s`, `m3 unseen 12s`, `m3 seen, not acked` or `m3 lost, ringing`.
 - **The contract suite measures steers** (`src/contracts/suite.ts`): the busy steer is sent once the worker's first tool call has started (its `PreToolUse`; hook evidence now names the hook), each steer step reports that steer's carried, seen and acked times beside the step's seconds, the runner re-reads the scratch database every 100 ms (was 500 ms) and reports step seconds to a tenth, and the scratch daemon keeps the default `wait_poll_ms`. The interrupt step's long command is acknowledged before it runs, and after the interrupt a second steer ("do not run it again") must reach the idle worker and be acknowledged; so every steer is acknowledged before exit, and the resumed worker no longer re-runs a 120 s sleep before the last deliver (the 131 s the investigation traced).
+- **Live, 2026-10-05** (`scripts/lab/m2-live.sh --claude-project <this checkout> contracts`, lab `fm-lab-flowryn-steers-31224-17191`, Herdr lab session, scratch home removed, no contract branch left): **22/22**. Times after each steer's creation:
+
+  | Harness | Busy steer (sent once the 25 s sleep started) | Idle steer | Idle steer right after an interrupt | Final deliver step |
+  |---|---|---|---|---|
+  | Pi 0.87.1, scripted model | carried +0ms, seen +25.0s, acked +25.0s | carried +0ms, seen +58ms, acked +99ms | carried +0ms, seen +66ms, acked +105ms | 0.2 s (was 131 s with a real model) |
+  | Claude 2.1.289, haiku, effort low | carried +26.5s (PostToolUse after the sleep), seen +28.2s, acked +28.4s | carried +1ms, seen +61ms, acked +3.3s | carried +0ms, seen +64ms, acked +3.3s | 9.2 s, the deliver steer seen +865ms |
+
+  The Claude interrupt row is the live check of the turn-start waiter: the woken turn's waiter, armed at `UserPromptSubmit`, fired 64 ms after the steer once the interrupt cleared busy. Idle steers are seen well inside the 1 s target on both harnesses. The lost-carry re-ring (5 s) is covered by tests, not this run: nothing was lost.
 
 ## Live runs
 
