@@ -4,6 +4,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
 import { todoViews } from "../lifecycle/todos.ts";
+import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { openActionable, type RankedItem } from "./router.ts";
@@ -77,8 +78,8 @@ function fleetLine(db: Db): string {
     .all() as { kind: string; n: number }[];
   const ships = kinds.find((k) => k.kind === "ship")?.n ?? 0;
   const scouts = kinds.find((k) => k.kind === "scout")?.n ?? 0;
-  const queued = (readSnapshot(db, "backlog")?.tasks ?? []).filter((t) => t.state === "queued" && t.kind !== "decision").length;
-  return `In flight: ${plural(ships, "ship")}, ${plural(scouts, "scout")}. Queued: ${queued}.`;
+  // The same set `flowryn fleet` lists under queued, so the count can be traced to a list.
+  return `In flight: ${plural(ships, "ship")}, ${plural(scouts, "scout")}. Queued: ${queuedSummary(queuedWork(db))}.`;
 }
 
 interface TodoFacts {
