@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractPrefix, removeOwnWorktrees, type GitRun } from "../../src/contracts/cleanup.ts";
-import { contractBody, contractSteps } from "../../src/contracts/suite.ts";
+import { contractBody, contractEstimateSeconds, contractSteps, type ContractEnv, type ContractState, type ContractStep } from "../../src/contracts/suite.ts";
+import { runContractSteps } from "../../src/contracts/runner.ts";
+import { contractPlan } from "../../src/cli/commands/setup.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -88,5 +90,39 @@ describe("contract suite", () => {
     expect(contractBody("pi", true)).toContain("FLOWRYN-SCRIPT:");
     expect(contractBody("pi", false)).not.toContain("FLOWRYN-SCRIPT:");
     expect(contractBody("claude", false)).not.toContain("FLOWRYN-SCRIPT:");
+  });
+});
+
+const step = (name: string, run: () => Promise<string>): ContractStep => ({ name, typicalSeconds: 3, run });
+const state: ContractState = { task: "t", run: "r", session: "s", pid: 0 };
+
+describe("contract progress", () => {
+  test("logs step N/M as each step starts and ends, and stops at the first failure", async () => {
+    const lines: string[] = [];
+    const results = await runContractSteps(
+      [
+        step("launch", async () => "pane 1"),
+        step("busy", async () => {
+          throw new Error("timed out");
+        }),
+        step("idle", async () => "never runs"),
+      ],
+      {} as ContractEnv,
+      state,
+      (line) => lines.push(line),
+    );
+    expect(results.map((r) => [r.step, r.ok])).toEqual([
+      ["launch", true],
+      ["busy", false],
+    ]);
+    expect(lines).toEqual(["step 1/3 launch (usually ~3s)", "step 1/3 ok launch (0s): pane 1", "step 2/3 busy (usually ~3s)", "step 2/3 FAILED busy (0s): timed out"]);
+  });
+
+  test("the up-front plan names the harnesses, counts every step and estimates the time", () => {
+    expect(contractEstimateSeconds("claude")).toBeGreaterThan(60);
+    expect(contractEstimateSeconds("pi")).toBeGreaterThan(contractEstimateSeconds("claude"));
+    const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
+    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 20 steps, about ${minutes} min`);
+    expect(contractPlan([])).toBe("contracts: no harness installed to test");
   });
 });

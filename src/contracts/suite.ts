@@ -40,6 +40,8 @@ export interface ContractEnv {
 
 export interface ContractStep {
   name: string;
+  /** Roughly how long the step takes on a healthy machine, in seconds, for doctor's up-front estimate. */
+  typicalSeconds: number;
   run(env: ContractEnv, state: ContractState): Promise<string>;
 }
 
@@ -98,10 +100,23 @@ async function waitAcked(env: ContractEnv, id: string, timeoutMs: number): Promi
   return env.waitFor(`steer ${id} to be acknowledged`, timeoutMs, () => env.steers().find((m) => m.id === id && m.acked_at !== null));
 }
 
+/** A scratch daemon's start and teardown around the steps (teardown waits up to 15 s for it to stop). */
+const SETUP_SECONDS = 30;
+
+/**
+ * A rough wall-clock estimate for one harness's suite, from the live runs'
+ * step times (docs/m5-notes.md). A slow model or a busy machine runs longer;
+ * each step's own timeout is the real bound.
+ */
+export function contractEstimateSeconds(harness: HarnessId): number {
+  return SETUP_SECONDS + contractSteps(harness).reduce((total, step) => total + step.typicalSeconds, 0);
+}
+
 export function contractSteps(harness: HarnessId): ContractStep[] {
   return [
     {
       name: "launch",
+      typicalSeconds: 5,
       async run(env, state) {
         const run = await env.waitFor("the worker's launch and worker-start", MID_MS, () => {
           const r = env.run();
@@ -116,6 +131,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "session id",
+      typicalSeconds: 1,
       async run(env, state) {
         const started = lastEvent(env, "run.worker_started")!;
         const reported = String(started.payload.session ?? "");
@@ -125,6 +141,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "busy",
+      typicalSeconds: 2,
       async run(env) {
         await env.waitFor("liveness busy", MID_MS, () => env.run().liveness === "busy");
         return "busy from the harness's own turn start";
@@ -132,6 +149,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "deliver while busy",
+      typicalSeconds: harness === "claude" ? 15 : 55,
       async run(env, state) {
         const id = await sendSteer(env, state, "This steer only needs an acknowledgement; then carry on with your current step.");
         await waitAcked(env, id, LONG_MS);
@@ -143,6 +161,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "idle",
+      typicalSeconds: harness === "claude" ? 30 : 5,
       async run(env) {
         await env.waitFor("liveness idle after the turn", LONG_MS, () => env.run().liveness === "idle");
         return "idle from the harness's own turn end";
@@ -150,6 +169,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "deliver while idle",
+      typicalSeconds: 10,
       async run(env, state) {
         const id = await sendSteer(env, state, "Acknowledge this steer, then reply with the single word TWO and end your turn.");
         await waitAcked(env, id, LONG_MS);
@@ -162,6 +182,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "interrupt",
+      typicalSeconds: 10,
       async run(env, state) {
         await sendSteer(env, state, "Run exactly this command now and wait for it: perl -e 'sleep 120'");
         await env.waitFor("the long command to be running", LONG_MS, () => env.run().liveness === "busy" && env.events().filter((e) => e.kind === "steer.rung").length >= 3);
@@ -176,6 +197,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "exit",
+      typicalSeconds: 2,
       async run(env, state) {
         const before = env.run();
         const exited = await env.exitWorker();
@@ -187,6 +209,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "resume",
+      typicalSeconds: 5,
       async run(env, state) {
         const run = await env.waitFor("the reconciler to resume the worker from its session", LONG_MS, () => {
           const r = env.run();
@@ -199,6 +222,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "deliver",
+      typicalSeconds: harness === "claude" ? 15 : 135,
       async run(env, state) {
         if (!(harness === "pi" && env.scripted)) {
           await sendSteer(env, state, 'Write one line, "contract ok", to $FLOWRYN_REPORT_DIR/report.md, then run $FLOWRYN_BIN deliver --report $FLOWRYN_REPORT_DIR/report.md and end your turn.');

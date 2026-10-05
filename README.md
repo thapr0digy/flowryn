@@ -58,7 +58,7 @@ flowryn show <task>                 # one run in detail
 flowryn steer <task> --body-file -  # words for a worker, delivered at its next tool call or idle wake
 flowryn answer <decision> <choice>  # answer a worker's question; it arrives as a steer
 flowryn interrupt <task>            # stop the current turn (verified); cancel <task>; resume <task>
-flowryn doctor --contracts          # run the harness contract suites and record each passing version
+flowryn doctor --contracts          # run the harness contract suites (steps and a time estimate up front, then step N/M) and record each passing version
 flowryn lead                        # start a Claude Code leader here; --pi for Pi; harness args after --
 flowryn board                       # a live, read-only view: what needs you, the fleet, updates, to-dos (--once)
 flowryn brief                       # the briefing again
