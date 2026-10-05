@@ -244,7 +244,7 @@ export function passReviewGate(db: Db, run: RunWithPolicy, gate: GateRow, approv
   const pos = positionOf(db, run, run.kind);
   db.query("UPDATE gates SET state = 'passed', approval_id = ?2, closed_at = ?3 WHERE id = ?1").run(gate.id, approval.id, now);
   appendEvent(db, { source: "cli", kind: "gate.passed", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, approval: approval.id, channel: approval.channel }, ts: now });
-  resolveRunItems(db, run.id, ["gate_ready", "review_feedback"], `gate.passed ${gate.id}`, now);
+  resolveRunItems(db, run.id, ["gate_ready", "review_feedback", "pass_requested"], `gate.passed ${gate.id}`, now);
   const plan = db.query("SELECT id FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gate.id) as { id: string } | null;
   // Approving the design approves the plan it carried (design section 11): its phases reach the backlog now.
   if (plan) approvePlan(db, plan.id, `gate ${gate.id} (${approval.channel})`, now);
@@ -266,7 +266,7 @@ export function sendBack(db: Db, run: RunWithPolicy, gate: GateRow, words: strin
   const text = sanitizeBlock(words).trim();
   db.query("UPDATE gates SET state = 'changes', feedback = ?2, closed_at = ?3 WHERE id = ?1").run(gate.id, text, now);
   appendEvent(db, { source: "cli", kind: "gate.changes", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, to: pos.def.stages[target]!.id, by }, ts: now });
-  resolveRunItems(db, run.id, ["gate_ready", "review_feedback"], `gate.changes ${gate.id}`, now);
+  resolveRunItems(db, run.id, ["gate_ready", "review_feedback", "pass_requested"], `gate.changes ${gate.id}`, now);
   discardPlansOfGate(db, gate.id, now);
   dismissGateQuestions(db, run, gate.id, now, "gate changes", "cli");
   const answers = gateAnswersNote(db, gate.id);

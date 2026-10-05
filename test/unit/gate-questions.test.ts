@@ -4,15 +4,18 @@ import { join } from "node:path";
 import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
-import { encodeAnswer, parsePollOutput } from "../../src/lavish/poll-output.ts";
+import { ANSWER_MARK, encodeAnswer, encodeSend, parsePollOutput } from "../../src/lavish/poll-output.ts";
 import { readsAsPass } from "../../src/lifecycle/gate-questions.ts";
 import { normalizeAnswer, parseGateQuestions } from "../../src/lavish/questions.ts";
 import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetState } from "../../src/lavish/widget.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, openGateFeedback, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
-import { cancelRun, failRun, getRun } from "../../src/lifecycle/runs.ts";
+import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateFeedback, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
+import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
+import { insertApproval } from "../../src/policy/approvals.ts";
 import { createRun } from "../../src/lifecycle/dispatch.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
 import { defaultConfig } from "../../src/config/config.ts";
@@ -89,6 +92,17 @@ describe("the questions file and the ask rule, checked in code", () => {
     expect(normalizeAnswer("text", [], ["  flowryn keys "])).toBe("flowryn keys");
     expect(() => normalizeAnswer("text", [], ["x".repeat(1_001)])).toThrow(/1,000/);
   });
+
+  test("a choice question also takes other, only with the user's words; no option may be called other", () => {
+    expect(() => normalizeAnswer("single", ["db", "file"], ["other"])).toThrow(/needs your words/);
+    expect(normalizeAnswer("single", ["db", "file"], ["other"], true)).toBe("other");
+    expect(normalizeAnswer("single", ["db", "file"], ["Other"], true)).toBe("other");
+    expect(() => normalizeAnswer("single", ["db", "file"], ["db", "other"], true)).toThrow(/one choice/);
+    expect(normalizeAnswer("multi", ["claude", "pi"], ["other", "pi"], true)).toBe("pi, other");
+    expect(() => normalizeAnswer("multi", ["claude", "pi"], ["pi", "other"])).toThrow(/needs your words/);
+    expect(normalizeAnswer("text", [], ["other"])).toBe("other");
+    expect(() => parseGateQuestions(withQuestion({ options: ["db", "Other"] }))).toThrow(/"other" is reserved/);
+  });
 });
 
 // Verbatim lavish-axi 0.1.65 output (the token is a real encoded answer for gate g1, q1).
@@ -163,6 +177,43 @@ describe("what lavish-axi poll printed", () => {
     expect(out.malformed).toBe(1);
     expect(encodeAnswer({ gate: "g2", decision: "q9", choice: ["a"], note: null })).toMatch(/^[A-Za-z0-9_-]+$/);
   });
+
+  test("one Send carries every answer, the user's comment and the pass request in one prompt", () => {
+    const token = encodeSend({ gate: "g4", comment: "line one\nline \"two\"", pass: true }, [
+      { decision: "q1", choice: ["db"], note: null },
+      { decision: "q2", choice: ["claude", "other"], note: "both, plus codex" },
+    ]);
+    const out = parsePollOutput(`status: feedback\nprompts[2]:\n  - prompt: ${JSON.stringify(`Answers:\n- q1: db\n${ANSWER_MARK} ${token}`)}\n  - prompt: chat\n`);
+    expect(out.answers).toEqual([
+      { gate: "g4", decision: "q1", choice: ["db"], note: null },
+      { gate: "g4", decision: "q2", choice: ["claude", "other"], note: "both, plus codex" },
+    ]);
+    expect(out.sends).toEqual([{ gate: "g4", comment: 'line one\nline "two"', pass: true }]);
+    expect(out).toMatchObject({ malformed: 0, otherPrompts: 1 });
+    // The Send's prompt is not the user's own feedback; the chat beside it is.
+    expect(out.feedback).toEqual(["chat"]);
+  });
+
+  test("a Send with one bad answer is malformed whole; the marks and versions go together", () => {
+    const bad = Buffer.from(JSON.stringify({ g: "g4", a: [{ d: "q1", c: ["db"] }, { d: "k1", c: ["x"] }], m: "", p: true })).toString("base64url");
+    expect(parsePollOutput(`status: feedback\nprompts[1]:\n  - prompt: "${ANSWER_MARK} ${bad}"\n`)).toMatchObject({ answers: [], sends: [], malformed: 1, otherPrompts: 0 });
+    const v1 = encodeAnswer({ gate: "g1", decision: "q1", choice: ["db"], note: null });
+    expect(parsePollOutput(`status: feedback\nprompts[1]:\n  - prompt: "flowryn-answer v2 ${v1}"\n`)).toMatchObject({ answers: [], malformed: 0, otherPrompts: 1 });
+  });
+
+  test("past the answer cap a later Send still keeps its comment and pass request", () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ decision: `q${i + 1}`, choice: ["db"], note: null }));
+    const full = encodeSend({ gate: "g1", comment: null, pass: false }, many);
+    const late = encodeSend({ gate: "g1", comment: "ship it small", pass: true }, [{ decision: "q51", choice: ["db"], note: null }]);
+    const v1 = encodeAnswer({ gate: "g1", decision: "q52", choice: ["db"], note: null });
+    const parsed = parsePollOutput(`status: feedback\nprompts[3]:\n  - prompt: "${ANSWER_MARK} ${full}"\n  - prompt: "${ANSWER_MARK} ${late}"\n  - prompt: "flowryn-answer v1 ${v1}"\n`);
+    expect(parsed.answers).toHaveLength(50);
+    expect(parsed.sends).toEqual([
+      { gate: "g1", comment: null, pass: false },
+      { gate: "g1", comment: "ship it small", pass: true },
+    ]);
+    expect(parsed).toMatchObject({ malformed: 0, otherPrompts: 0 });
+  });
 });
 
 // --- the widget, run against a small DOM stand-in -----------------------------------------------
@@ -173,8 +224,17 @@ class StubEl {
   textContent = "";
   listeners: Record<string, (event: { preventDefault(): void }) => void> = {};
   constructor(readonly tag: string) {}
+  get value(): string {
+    return this.attrs.value ?? "";
+  }
+  set value(v: string) {
+    this.attrs.value = v;
+  }
   setAttribute(k: string, v: string) {
     this.attrs[k] = v;
+  }
+  getAttribute(k: string): string | null {
+    return k in this.attrs ? this.attrs[k]! : null;
   }
   appendChild(c: StubEl) {
     this.children.push(c);
@@ -202,7 +262,7 @@ interface Queued {
 class StubFormData {
   private readonly inputs: StubEl[];
   constructor(form: StubEl) {
-    this.inputs = form.all().filter((e) => e.tag === "input");
+    this.inputs = form.all().filter((e) => e.tag === "input" || e.tag === "textarea");
   }
   private picked(name: string): StubEl[] {
     return this.inputs.filter((i) => i.attrs.name === name && ((i.attrs.type !== "radio" && i.attrs.type !== "checkbox") || "checked" in i.attrs));
@@ -234,8 +294,11 @@ function runWidget(state: WidgetState) {
     mount,
     queued,
     counter,
-    inputs: () => form.all().filter((e) => e.tag === "input"),
-    submit: () => form.listeners.submit!({ preventDefault() {} }),
+    inputs: () => form.all().filter((e) => e.tag === "input" || e.tag === "textarea"),
+    field: (name: string, value?: string) => form.all().find((e) => e.attrs.name === name && (value === undefined || e.attrs.value === value))!,
+    status: () => form.all().find((e) => e.attrs.role === "status")!.textContent,
+    /** Press Send, or "Send and request pass" (the submitter carries data-pass). */
+    submit: (pass = false) => form.listeners.submit!({ preventDefault() {}, submitter: form.all().find((e) => e.tag === "button" && (pass ? "data-pass" in e.attrs : !("data-pass" in e.attrs))) } as never),
   };
 }
 
@@ -259,42 +322,101 @@ const STATE: WidgetState = {
   ],
 };
 
+function decodeQueued(queued: Queued[]) {
+  return parsePollOutput(`status: feedback\nprompts[${queued.length}]:\n${queued.map((q) => `  - prompt: ${JSON.stringify(q.text)}`).join("\n")}\n`);
+}
+
 describe("the question widget", () => {
-  test("it renders radios with the recommendation checked, checkboxes, a text field and a locked answered question", () => {
+  test("it renders radios with the recommendation checked and Other, checkboxes, a text field, the comment box and a locked answered question", () => {
     const { mount } = runWidget(STATE);
     const inputs = mount.all().filter((e) => e.tag === "input");
     const radio = inputs.filter((i) => i.attrs.name === "q1");
     expect(radio.map((i) => [i.attrs.type, i.attrs.value, "checked" in i.attrs])).toEqual([
       ["radio", "db", true],
       ["radio", "file", false],
+      ["radio", "other", false],
     ]);
-    expect(inputs.filter((i) => i.attrs.name === "q2").map((i) => i.attrs.type)).toEqual(["checkbox", "checkbox"]);
+    expect(inputs.filter((i) => i.attrs.name === "q2").map((i) => [i.attrs.type, i.attrs.value])).toEqual([
+      ["checkbox", "claude"],
+      ["checkbox", "pi"],
+      ["checkbox", "other"],
+    ]);
     expect(inputs.find((i) => i.attrs.name === "q3")!.attrs).toMatchObject({ type: "text", placeholder: "flowryn tokens" });
     expect(inputs.some((i) => i.attrs.name === "q4")).toBe(false);
+    expect(mount.all().filter((e) => e.tag === "textarea").map((e) => e.attrs.name)).toEqual(["fq-comment"]);
     expect(mount.text()).toContain("Answered via your leader: no");
     expect(mount.text()).toContain("poller home: src/lavish/poller.ts");
-    expect(mount.all().filter((e) => e.tag === "button")).toHaveLength(1);
+    expect(mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Send answers", "Send and request pass"]);
   });
 
-  test("assumption: one Submit queues one prompt per answered question whose token decodes to the same answer, then sends", () => {
+  test("assumption: one Send queues one prompt whose token decodes to every answer and the comment, then sends", () => {
     const run = runWidget(STATE);
-    run.inputs().find((i) => i.attrs.name === "q2" && i.attrs.value === "pi")!.attrs.checked = "";
-    run.inputs().find((i) => i.attrs.name === "q1-note")!.attrs.value = "ünïcode note";
+    run.field("q2", "pi").attrs.checked = "";
+    run.field("q1-note").attrs.value = "ünïcode note";
+    run.field("fq-comment").attrs.value = "Keep it small.\nThanks";
     run.submit();
     expect(run.counter.sent).toBe(1);
-    expect(run.queued.map((q) => q.opts.queueKey)).toEqual(["flowryn:q1", "flowryn:q2"]);
-    const parsed = parsePollOutput(`status: feedback\nprompts[2]:\n${run.queued.map((q) => `  - prompt: ${JSON.stringify(q.text)}`).join("\n")}\n`);
+    expect(run.queued).toHaveLength(1);
+    expect(run.queued[0]!.opts.queueKey).toBe("flowryn:g7");
+    expect(run.queued[0]!.text).toContain("Anything else: Keep it small.");
+    const parsed = decodeQueued(run.queued);
     expect(parsed.answers).toEqual([
       { gate: "g7", decision: "q1", choice: ["db"], note: "ünïcode note" },
       { gate: "g7", decision: "q2", choice: ["claude", "pi"], note: null },
     ]);
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: "Keep it small.\nThanks", pass: false }]);
     expect(parsed.otherPrompts).toBe(0);
+    expect(run.status()).toContain("Still open: q3");
   });
 
-  test("a closed gate shows every question locked, with no Submit", () => {
+  test("the comment box clears once its Send is queued, so the next Send does not carry it again; a failed queue keeps it", () => {
+    const run = runWidget(STATE);
+    run.field("fq-comment").value = "Keep it small";
+    run.submit();
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: "Keep it small", pass: false }]);
+    expect(run.field("fq-comment").value).toBe("");
+    run.submit();
+    expect(run.queued).toHaveLength(2);
+    expect(decodeQueued(run.queued.slice(1)).sends).toEqual([{ gate: "g7", comment: null, pass: false }]);
+    run.field("fq-comment").value = "Not lost";
+    ((globalThis as Record<string, unknown>).window as { lavish: { queuePrompt: () => void } }).lavish.queuePrompt = () => {
+      throw new Error("the frame is gone");
+    };
+    expect(() => run.submit()).toThrow("the frame is gone");
+    expect(run.field("fq-comment").value).toBe("Not lost");
+  });
+
+  test("Other needs its note: without one nothing is sent; with one it is the answer, the note its words", () => {
+    const run = runWidget(STATE);
+    delete run.field("q1", "db").attrs.checked;
+    run.field("q1", "other").attrs.checked = "";
+    run.submit();
+    expect(run.queued).toHaveLength(0);
+    expect(run.status()).toContain("q1: say what Other means in its note");
+    run.field("q1-note").attrs.value = "redis, shared with the cache";
+    run.submit();
+    expect(decodeQueued(run.queued).answers[0]).toEqual({ gate: "g7", decision: "q1", choice: ["other"], note: "redis, shared with the cache" });
+  });
+
+  test("a pass request needs every question answered, and rides the same Send", () => {
+    const run = runWidget(STATE);
+    run.submit(true);
+    expect(run.queued).toHaveLength(0);
+    expect(run.status()).toContain("A pass needs every question answered: q3 is empty");
+    run.field("q3").attrs.value = "flowryn keys";
+    run.submit(true);
+    expect(run.queued).toHaveLength(1);
+    expect(run.queued[0]!.text).toContain("Please pass this review.");
+    const parsed = decodeQueued(run.queued);
+    expect(parsed.answers.map((a) => a.decision)).toEqual(["q1", "q2", "q3"]);
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: null, pass: true }]);
+    expect(run.status()).toContain("a pass request");
+  });
+
+  test("a closed gate shows every question locked, with no Send, comment box or pass", () => {
     const { mount } = runWidget({ ...STATE, gateState: "passed" });
     expect(mount.all().filter((e) => e.tag === "button")).toHaveLength(0);
-    expect(mount.all().filter((e) => e.tag === "input")).toHaveLength(0);
+    expect(mount.all().filter((e) => e.tag === "input" || e.tag === "textarea")).toHaveLength(0);
   });
 
   test("the page must mount the widget", () => {
@@ -477,6 +599,132 @@ describe("a gate's questions as decisions", () => {
     });
     tx(db, () => answerDecision(ctx(), getDecision(db, "q9")!, { choice: "a", words: null, by: "leader", via: "cli" }));
     expect((db.query("SELECT decision_id FROM items WHERE state = 'open' ORDER BY decision_id").all() as { decision_id: string }[]).map((i) => i.decision_id)).toEqual(["q1", "q2", "q3"]);
+  });
+
+  test("an Other answer keeps the user's words, and the comment reaches the verdict verbatim", () => {
+    open();
+    expect(tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["other"], note: null }))).toBe("invalid");
+    expect(tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["other"], note: "redis" }))).toBe("recorded");
+    expect(getDecision(db, "q1")!).toMatchObject({ answer: "other", rationale: "redis" });
+    expect(tx(db, () => recordGateComment(db, "g1", "  keep \"it\" small\n\nthanks ", NOW))).toBe("recorded");
+    expect(tx(db, () => recordGateComment(db, "g1", "and one more", NOW))).toBe("recorded");
+    expect(tx(db, () => recordGateComment(db, "g1", "   ", NOW))).toBe("empty");
+    expect(tx(db, () => recordGateComment(db, "g9", "x", NOW))).toBe("stale");
+    const verdict = gateAnswersNote(db, "g1")!;
+    expect(verdict).toContain("q1 (token-store) = other [their words: redis]");
+    expect(verdict).toContain('The user also wrote on the review page: """keep "it" small\n\nthanks\n\nand one more"""');
+    expect((db.query("SELECT payload FROM events WHERE kind = 'gate.comment' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).text)).toEqual(['keep "it" small\n\nthanks', "and one more"]);
+    db.query("UPDATE gates SET state = 'passed' WHERE id = 'g1'").run();
+    expect(tx(db, () => recordGateComment(db, "g1", "too late", NOW))).toBe("late");
+  });
+
+  test("a long comment is cut in the verdict steer, which names the notes file holding every Send in full and still ends with the next stage's instructions", async () => {
+    db.query("UPDATE runs SET workflow = 'feature', stage = 'design' WHERE id = ?1").run(runId);
+    open();
+    const first = encodeSend({ gate: "g1", comment: "a".repeat(3_000), pass: false }, []);
+    const answers = [
+      { decision: "q1", choice: ["db"], note: null },
+      { decision: "q2", choice: ["claude"], note: null },
+      { decision: "q3", choice: ["flowryn tokens"], note: null },
+    ];
+    const second = encodeSend({ gate: "g1", comment: "b".repeat(3_000), pass: false }, answers);
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, `session:\n  status: feedback\nprompts[2]:\n  - prompt: "${ANSWER_MARK} ${first}"\n  - prompt: "${ANSWER_MARK} ${second}"\n`);
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+    } finally {
+      poller.stop();
+    }
+    expect((db.query("SELECT comment FROM gates WHERE id = 'g1'").get() as { comment: string }).comment).toHaveLength(4_000);
+    const notes = join(reportDir, "design", "lavish-notes-g1.txt");
+    const kept = readFileSync(notes, "utf8");
+    expect(kept).toContain(`anything else for the worker\n${"a".repeat(3_000)}\n`);
+    expect(kept).toContain(`anything else for the worker\n${"b".repeat(3_000)}\n`);
+    const config = { ...defaultConfig(h.home), state_dir: h.home };
+    const steer = tx(db, () => {
+      const approval = insertApproval(db, { task: taskId, ref: "gate:g1", head: "abc123", channel: "cli-tty", actor: "captain", action: "gate", now: NOW });
+      passReviewGate(db, getRunWithPolicy(db, runId)!, db.query("SELECT * FROM gates WHERE id = 'g1'").get() as GateRow, approval, NOW);
+      return activateStage(db, config, getRunWithPolicy(db, runId)!, NOW).steer;
+    });
+    const body = getMessage(db, steer!)!.body;
+    const run = getRunWithPolicy(db, runId)!;
+    expect(body.length).toBeLessThan(MAX_STEER_CHARS);
+    expect(body).toContain(`"""${"a".repeat(2_000)}""" [cut; the full text is in ${notes}]`);
+    expect(body).toContain(`read ${notes}`);
+    expect(body.endsWith(stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run)))).toBe(true);
+  });
+
+  test("a cut comment with no notes file kept says the rest was not kept", async () => {
+    open();
+    symlinkSync(join(h.home, "victim.txt"), join(reportDir, "design", "lavish-notes-g1.txt"));
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, `session:\n  status: feedback\nprompts[1]:\n  - prompt: "${ANSWER_MARK} ${encodeSend({ gate: "g1", comment: "c".repeat(3_000), pass: false }, [])}"\n`);
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+    } finally {
+      poller.stop();
+    }
+    expect(logs.some((l) => l.includes("cannot keep gate g1's notes"))).toBe(true);
+    expect(existsSync(join(h.home, "victim.txt"))).toBe(false);
+    expect(gateAnswersNote(db, "g1")).toContain(`"""${"c".repeat(2_000)}""" [cut; the rest was not kept]`);
+  });
+
+  test("a pass request from the page never passes the gate: once every question is answered it opens one P1 for the leader", () => {
+    open();
+    expect(tx(db, () => requestGatePass(db, "g1", NOW))).toEqual({ outcome: "questions_open", open: ["q1", "q2", "q3"] });
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
+    tx(db, () => {
+      lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null });
+      lavishAnswer(ctx(), { gate: "g1", decision: "q2", choice: ["pi"], note: null });
+      lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: ["flowryn keys"], note: null });
+    });
+    expect(tx(db, () => requestGatePass(db, "g1", NOW))).toEqual({ outcome: "requested" });
+    expect(tx(db, () => requestGatePass(db, "g1", NOW))).toEqual({ outcome: "already" });
+    const item = db.query("SELECT lane, line FROM items WHERE kind = 'pass_requested' AND state = 'open'").all() as { lane: string; line: string }[];
+    expect(item).toHaveLength(1);
+    expect(item[0]!.lane).toBe("P1");
+    expect(item[0]!.line).toContain(`flowryn gate pass ${taskId} --gate-id g1, or the user runs flowryn approve ${taskId} --gate design.`);
+    expect(item[0]!.line).not.toContain("…");
+    expect(db.query("SELECT state, approval_id FROM gates WHERE id = 'g1'").get()).toEqual({ state: "open", approval_id: null });
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+    expect(tx(db, () => requestGatePass(db, "g9", NOW))).toEqual({ outcome: "stale" });
+    db.query("UPDATE gates SET state = 'changes' WHERE id = 'g1'").run();
+    expect(tx(db, () => requestGatePass(db, "g1", NOW))).toEqual({ outcome: "late" });
+  });
+
+  test("the poller records one Send whole: answers, comment and pass request, and tells the user what happened", async () => {
+    open();
+    const token = encodeSend({ gate: "g1", comment: "ship it", pass: true }, [
+      { decision: "q1", choice: ["file"], note: null },
+      { decision: "q2", choice: ["claude"], note: null },
+      { decision: "q3", choice: ["flowryn keys"], note: null },
+    ]);
+    const output = join(h.home, "send.out");
+    writeFileSync(output, `session:\n  status: feedback\nprompts[1]:\n  - uid: ""\n    prompt: ${JSON.stringify(`Answers\n${ANSWER_MARK} ${token}`)}\n    tag: choice\n`);
+    const calls = join(h.home, "calls.log");
+    const logs: string[] = [];
+    // Lavish delivers a queued Send once; the daemon keeps polling the open gate after it.
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`echo "$@" >> ${JSON.stringify(calls)}; case "$*" in *agent-reply*) exit 0;; esac; cat ${JSON.stringify(output)} && rm ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("--agent-reply"), 5_000, "the reply poll");
+    } finally {
+      poller.stop();
+    }
+    expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["answered", "answered", "answered"]);
+    expect(logs.find((l) => l.startsWith("lavish: gate g1:"))).toContain("comment recorded, pass requested");
+    expect(db.query("SELECT comment FROM gates WHERE id = 'g1'").get()).toEqual({ comment: "ship it" });
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested' AND state = 'open'").get()).toEqual({ n: 1 });
+    const reply = readFileSync(calls, "utf8");
+    expect(reply).toContain("Pass requested. This page cannot pass the review");
+    expect(reply).toContain("Your note for the worker is kept");
   });
 
   test("a long free answer and note reach the verdict whole", () => {

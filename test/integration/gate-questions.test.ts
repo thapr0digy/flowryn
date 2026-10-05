@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
-import { encodeAnswer } from "../../src/lavish/poll-output.ts";
+import { ANSWER_MARK, encodeAnswer, encodeSend } from "../../src/lavish/poll-output.ts";
 
 /**
  * A review gate's questions, end to end on the fake fleet (design: "A
@@ -69,6 +69,15 @@ function queuePoll(e: FleetEnv, n: number, gate: string, answers: { d: string; c
   writeFileSync(join(dir, `${String(n).padStart(3, "0")}.out`), out);
 }
 
+/** One Send from the current widget: every answer, the comment and the pass request in one prompt. */
+function queueSend(e: FleetEnv, n: number, gate: string, answers: { d: string; c: string[]; n?: string }[], comment: string | null, pass: boolean): void {
+  const dir = join(e.h.home, "lavish-queue");
+  mkdirSync(dir, { recursive: true });
+  const token = encodeSend({ gate, comment, pass }, answers.map((a) => ({ decision: a.d, choice: a.c, note: a.n ?? null })));
+  const prompt = `  - uid: ""\n    prompt: ${JSON.stringify(`Answers for the design review (gate ${gate}):\n${ANSWER_MARK} ${token}`)}\n    selector: ""\n    tag: choice\n    text: answers\n    target:\n      type: flowryn-answers\n      gate: ${gate}`;
+  writeFileSync(join(dir, `${String(n).padStart(3, "0")}.out`), `session:\n  file: /x/design.html\n  status: feedback\nprompts[1]:\n${prompt}\nnext_step: "Apply the requested changes."\ndom_snapshot: ""\n`);
+}
+
 describe("a review gate's questions", () => {
   test(
     "open as reserved decisions with the gate; answered on the page and through the leader; held until the verdict, which carries them",
@@ -131,11 +140,12 @@ describe("a review gate's questions", () => {
       expect(relayed).toMatchObject({ prompted: true, ran: true, code: 0 });
       expect(JSON.parse(relayed.stdout).data).toMatchObject({ decision: "q3", answer: "flowryn keys", by: "captain", steer: "held for the verdict" });
 
-      // A late page answer to q3 changes nothing; q2's goes in.
-      queuePoll(f, 2, gate.id, [
-        { d: "q3", c: ["something else"] },
+      // One Send from the page: a late answer to q3 changes nothing; q2's goes in, with a note for the
+      // worker and a pass request, which opens a P1 for the leader and never passes the gate itself.
+      queueSend(f, 2, gate.id, [
         { d: "q2", c: ["claude", "pi"] },
-      ]);
+        { d: "q3", c: ["something else"] },
+      ], "Keep the CLI name short.", true);
       await waitUntil(() => one<{ state: string }>(f, "SELECT state FROM decisions WHERE id = 'q2'")?.state === "answered", 10_000, "q2 answered from the page");
       expect(one<Record<string, unknown>>(f, "SELECT answer, answered_via FROM decisions WHERE id = 'q3'")).toEqual({ answer: "flowryn keys", answered_via: "claude-ask" });
       expect(JSON.parse(one<{ payload: string }>(f, "SELECT payload FROM events WHERE kind = 'decision.lavish_ignored'")!.payload)).toMatchObject({ decision: "q3", outcome: "late" });
@@ -144,7 +154,9 @@ describe("a review gate's questions", () => {
       expect(readFileSync(widget, "utf8")).toContain('"via":"your leader"');
       // Lavish's conversation hears what Flowryn recorded with the next poll, which keeps listening while the gate is open.
       await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Your leader has your notes now, and they reach the worker with the verdict. 2 questions still open."), 10_000, "the reply after q1");
-      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Every question is answered; the review now waits for your pass in Flowryn\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
+      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Your note for the worker is kept; it reaches the worker with the verdict\. Pass requested\. This page cannot pass the review: your leader asks you to confirm it, or you run flowryn approve in your terminal\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
+      expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'pass_requested' AND run_id = ?1 AND state = 'open'", run)!.line).toContain(`flowryn gate pass ${task} --gate-id ${gate.id}`);
+      expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open" });
 
       // Every question answered: the gate passes, and the verdict steer carries the answers and the notes.
       const passed = await e.approve(task, { gate: "design" });
@@ -153,6 +165,8 @@ describe("a review gate's questions", () => {
       const steer = one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE 'The design review passed%'", run)!;
       expect(steer.body).toContain("The user's answers to your review questions: q1 (token-store) = file [their note: file survives resets]; q2 (harnesses) = claude, pi; q3 (verb-name) = flowryn keys.");
       expect(steer.body).toContain(`read ${notes}`);
+      expect(steer.body).toContain('The user also wrote on the review page: """Keep the CLI name short."""');
+      expect(one<{ resolved_by: string }>(f, "SELECT resolved_by FROM items WHERE kind = 'pass_requested' AND run_id = ?1", run)).toEqual({ resolved_by: `gate.passed ${gate.id}` });
       await waitUntil(() => readFileSync(widget, "utf8").includes('"gateState":"passed"'), 10_000, "the widget locked");
     },
     { timeout: 120_000 },
@@ -181,8 +195,11 @@ describe("a review gate's questions", () => {
       expect((refused.reply.error as { message: string }).message).toContain("only the user answers it");
       expect(one<{ decision: string; item: string }>(f, "SELECT d.state AS decision, i.state AS item FROM decisions d JOIN items i ON i.decision_id = d.id WHERE d.id = 'q2'")).toEqual({ decision: "open", item: "open" });
       expect(rows(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE '%was dismissed%'", run)).toEqual([]);
-      // You answer q1 in your own shell (a human channel).
-      expect((await e.call("decide", { decision: "q1", choice: "db", by: "captain" })).ok).toBe(true);
+      // You answer q1 in your own shell (a human channel); "other" needs your words.
+      const bare = await e.call("decide", { decision: "q1", choice: "other", by: "captain" });
+      expect(bare.ok).toBe(false);
+      expect((bare.error as { message: string }).message).toContain("needs your words");
+      expect((await e.call("decide", { decision: "q1", choice: "other", by: "captain", words: "redis, shared with the cache" })).ok).toBe(true);
 
       const changes = await f.json(["gate", "changes", task, "--body-file", "-"], { stdin: "Split the token store question." });
       expect(changes.code).toBe(0);
@@ -192,7 +209,7 @@ describe("a review gate's questions", () => {
         { id: "q3", state: "dismissed" },
       ]);
       const steer = one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE 'Changes requested%'", run)!;
-      expect(steer.body).toContain("Split the token store question. The user's answers to your review questions: q1 (token-store) = db. Closed unanswered: q2, q3.");
+      expect(steer.body).toContain("Split the token store question. The user's answers to your review questions: q1 (token-store) = other [their words: redis, shared with the cache]. Closed unanswered: q2, q3.");
 
       // The worker's next hand-in: a question with no blocks is refused (the ask rule), then the good file opens q4-q6.
       const replies = await e.replies(task, 4);

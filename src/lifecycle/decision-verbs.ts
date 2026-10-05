@@ -101,8 +101,8 @@ export function lavishAnswer(ctx: { db: Db; now(): number }, answer: { gate: str
   else if (d.state !== "open" || gate.state !== "open") outcome = "late";
   else {
     try {
-      const choice = normalizeAnswer(d.kind ?? "single", JSON.parse(d.options) as string[], answer.choice);
       const words = answer.note ? sanitizeBlock(answer.note).trim().slice(0, 2_000) || null : null;
+      const choice = normalizeAnswer(d.kind ?? "single", JSON.parse(d.options) as string[], answer.choice, words !== null);
       answerDecision(ctx, d, { choice, words, by: "captain", via: "lavish" });
       return "recorded";
     } catch (error) {
@@ -192,7 +192,7 @@ const decide: VerbSpec = {
   summary: "Answer a decision: the leader with --rationale; a reserved one only with the user's word (--by captain)",
   positionals: [
     { name: "decision", required: true, help: "decision id, such as k3 or q2" },
-    { name: "choice", required: true, help: "one of its options (a multi choice: \"a, b\"), or the answer when it has none" },
+    { name: "choice", required: true, help: "one of its options (a multi choice: \"a, b\"; a review question also takes \"other\" with the user's words), or the answer when it has none" },
   ],
   flags: {
     rationale: { type: "string", help: "the leader's reason (required for a leader answer); - reads it from stdin", stdin: true, placeholder: "text" },
@@ -210,12 +210,15 @@ const decide: VerbSpec = {
     if (!d) throw new FlowrynError("not_found", `no decision ${id}`, "flowryn decision list");
     if (d.state !== "open") throw new FlowrynError("bad_args", `decision ${id} is already ${d.state}`);
     const opts = JSON.parse(d.options) as string[];
-    // A review gate's question may take several choices ("a, b") or free text; the rest take one short choice.
-    const choice = d.kind === "multi" || d.kind === "text" ? normalizeAnswer(d.kind, opts, d.kind === "multi" ? typed.split(",") : [typed]) : typed;
-    if (opts.length > 0 && d.kind !== "multi" && !opts.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${opts.join(", ")}`);
-    if (opts.length === 0 && d.kind !== "text" && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const words = sanitizeBlock(stringArg(args, "body") ?? stringArg(args, "words") ?? "").trim() || null;
     const rationale = sanitizeBlock(stringArg(args, "rationale") ?? "").trim() || null;
+    // A review gate's question is checked as the page checks it: several choices ("a, b"), free text,
+    // or "other" with the user's words. The rest take one short choice.
+    const gateKind = d.gate_id !== null ? (d.kind ?? "single") : d.kind;
+    const checked = gateKind === "multi" || gateKind === "text" || d.gate_id !== null;
+    const choice = checked ? normalizeAnswer(gateKind ?? "single", opts, gateKind === "multi" ? typed.split(",") : [typed], (words ?? rationale) !== null) : typed;
+    if (!checked && opts.length > 0 && !opts.includes(choice)) throw new FlowrynError("bad_args", `choice must be one of: ${opts.join(", ")}`);
+    if (opts.length === 0 && gateKind !== "text" && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const asCaptain = stringArg(args, "by") === "captain" || ctx.caller.role === "human";
     if (stringArg(args, "by") !== undefined && stringArg(args, "by") !== "captain") throw new FlowrynError("bad_args", "--by takes only captain");
     let via: string;

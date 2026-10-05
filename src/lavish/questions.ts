@@ -14,6 +14,12 @@ export const QUESTION_KINDS = ["single", "multi", "text"] as const;
 export type QuestionKind = (typeof QUESTION_KINDS)[number];
 
 export const MAX_GATE_QUESTIONS = 5;
+/**
+ * The answer every choice question offers beside its options: the user's own
+ * answer, said in their words (the page's note, or `decide --words`). It is
+ * reserved, so no worker option may be called "other".
+ */
+export const OTHER_ANSWER = "other";
 export const MAX_DECIDED = 30;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 8;
@@ -75,6 +81,7 @@ function options(value: unknown, where: string): string[] {
   if (!Array.isArray(value)) throw bad(`${where} must be a list of ${MIN_OPTIONS} to ${MAX_OPTIONS} options`);
   const list = value.map((o, i) => {
     if (typeof o !== "string" || !DECISION_OPTION.test(o.trim())) throw bad(`${where}[${i}] must be short: letters, digits, spaces, _ . - (at most 40)`);
+    if (o.trim().toLowerCase() === OTHER_ANSWER) throw bad(`${where}[${i}]: "${OTHER_ANSWER}" is reserved; every choice question already offers it, with the user's words`);
     return o.trim();
   });
   if (list.length < MIN_OPTIONS || list.length > MAX_OPTIONS) throw bad(`${where} needs ${MIN_OPTIONS} to ${MAX_OPTIONS} options; a question with one answer is a decision you make yourself`);
@@ -148,9 +155,11 @@ export function parseGateQuestions(source: string): GateQuestions {
 /**
  * Check an answer against its question: a single choice is one option, a
  * multi choice a non-empty set of options, a text answer up to 1,000 chars.
- * Returns the answer as stored (multi: "a, b" in the options' order).
+ * A choice question also takes "other" (alone, or among a multi choice's
+ * options), only with the user's words, which are kept beside it verbatim.
+ * Returns the answer as stored (multi: "a, b" in the options' order, "other" last).
  */
-export function normalizeAnswer(kind: QuestionKind, opts: string[], given: string[]): string {
+export function normalizeAnswer(kind: QuestionKind, opts: string[], given: string[], hasWords = false): string {
   const values = given.map((v) => v.trim()).filter((v) => v.length > 0);
   if (kind === "text") {
     const answer = sanitizeBlock(values.join("\n")).trim();
@@ -158,12 +167,15 @@ export function normalizeAnswer(kind: QuestionKind, opts: string[], given: strin
     if (answer.length > 1_000) throw new FlowrynError("bad_args", "the answer is longer than 1,000 characters");
     return answer;
   }
-  if (values.length === 0) throw new FlowrynError("bad_args", `choose ${kind === "multi" ? "at least one" : "one"} of: ${opts.join(", ")}`);
-  const unknown = values.find((v) => !opts.includes(v));
-  if (unknown !== undefined) throw new FlowrynError("bad_args", `"${sanitizeLine(unknown, 60)}" is not an option; choose from: ${opts.join(", ")}`);
+  if (values.length === 0) throw new FlowrynError("bad_args", `choose ${kind === "multi" ? "at least one" : "one"} of: ${opts.join(", ")}, or ${OTHER_ANSWER} with your words`);
+  const other = values.some((v) => v.toLowerCase() === OTHER_ANSWER);
+  const picked = values.filter((v) => v.toLowerCase() !== OTHER_ANSWER);
+  if (other && !hasWords) throw new FlowrynError("bad_args", `"${OTHER_ANSWER}" needs your words: say what you want in the note (decide: --words or --body-file)`);
+  const unknown = picked.find((v) => !opts.includes(v));
+  if (unknown !== undefined) throw new FlowrynError("bad_args", `"${sanitizeLine(unknown, 60)}" is not an option; choose from: ${opts.join(", ")}, or ${OTHER_ANSWER} with your words`);
   if (kind === "single") {
-    if (new Set(values).size !== 1) throw new FlowrynError("bad_args", "this question takes one choice");
-    return values[0]!;
+    if (new Set(values.map((v) => (v.toLowerCase() === OTHER_ANSWER ? OTHER_ANSWER : v))).size !== 1) throw new FlowrynError("bad_args", "this question takes one choice");
+    return other ? OTHER_ANSWER : picked[0]!;
   }
-  return opts.filter((o) => values.includes(o)).join(", ");
+  return [...opts.filter((o) => picked.includes(o)), ...(other ? [OTHER_ANSWER] : [])].join(", ");
 }

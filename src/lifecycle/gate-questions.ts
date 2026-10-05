@@ -1,12 +1,12 @@
 import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { extname, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
-import { openItem, resolveDecisionItems } from "../attention/items.ts";
+import { findOpenRunItem, openItem, resolveDecisionItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
-import type { GateQuestions } from "../lavish/questions.ts";
+import { OTHER_ANSWER, type GateQuestions } from "../lavish/questions.ts";
 import { MOUNT_SNIPPET, pageMountsWidget, type WidgetState } from "../lavish/widget.ts";
-import { sanitizeLine } from "../util/sanitize.ts";
+import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { nextRunDecisionId, type DecisionRow } from "./decisions.ts";
 import { taskTitle, type RunRow } from "./runs.ts";
 
@@ -25,6 +25,10 @@ import { taskTitle, type RunRow } from "./runs.ts";
 
 export const GATE_QUESTION_RESERVED = "a review question for the user";
 const MAX_PAGE_BYTES = 5 * 1024 * 1024;
+/** What the gate keeps of the user's "anything else" box, all Sends together. */
+const MAX_GATE_COMMENT = 4_000;
+/** What the verdict steer quotes of it, so the steer keeps its pointers and the next stage's instructions. */
+const MAX_QUOTED_COMMENT = 2_000;
 
 export interface GateRef {
   id: string;
@@ -125,11 +129,19 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   const parts: string[] = [];
   const answered = all.filter((d) => d.state === "answered");
   if (answered.length > 0) {
-    const list = answered.map((d) => `${d.id} (${d.key ?? "-"}) = ${sanitizeLine(d.answer ?? "-", 1_000)}${d.rationale ? ` [their note: ${sanitizeLine(d.rationale, 2_000)}]` : ""}`);
+    const list = answered.map((d) => {
+      const own = (d.answer ?? "").split(", ").includes(OTHER_ANSWER) && d.kind !== "text";
+      return `${d.id} (${d.key ?? "-"}) = ${sanitizeLine(d.answer ?? "-", 1_000)}${d.rationale ? ` [their ${own ? "words" : "note"}: ${sanitizeLine(d.rationale, 2_000)}]` : ""}`;
+    });
     parts.push(`The user's answers to your review questions: ${list.join("; ")}.`);
   }
   const dismissed = all.filter((d) => d.state === "dismissed").map((d) => d.id);
   if (dismissed.length > 0) parts.push(`Closed unanswered: ${dismissed.join(", ")}.`);
+  const comment = (db.query("SELECT comment FROM gates WHERE id = ?1").get(gateId) as { comment: string | null } | null)?.comment ?? null;
+  if (comment && comment.length > MAX_QUOTED_COMMENT) {
+    const rest = notes ? `the full text is in ${notes}` : "the rest was not kept";
+    parts.push(`The user also wrote on the review page: """${comment.slice(0, MAX_QUOTED_COMMENT)}""" [cut; ${rest}]`);
+  } else if (comment) parts.push(`The user also wrote on the review page: """${comment}"""`);
   if (notes) parts.push(`The user also left notes on the review page: read ${notes}.`);
   return parts.length > 0 ? parts.join(" ") : null;
 }
@@ -179,6 +191,65 @@ export function recordGateNotes(db: Db, gateId: string, path: string, prompts: n
   if (!gate) return;
   db.query("UPDATE gates SET notes_path = ?2 WHERE id = ?1").run(gateId, path);
   appendEvent(db, { source: "daemon", kind: "gate.notes", runId: gate.run_id, payload: { gate: gateId, prompts, path }, ts: now });
+}
+
+interface OpenGateRow {
+  id: string;
+  run_id: string;
+  stage: string;
+  state: string;
+  task_id: string;
+  run_state: string;
+}
+
+function liveGate(db: Db, gateId: string): OpenGateRow | null {
+  return db.query("SELECT g.id, g.run_id, g.stage, g.state, r.task_id, r.state AS run_state FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gateId) as OpenGateRow | null;
+}
+
+/**
+ * Keep what the user wrote in the review page's "anything else" box, verbatim
+ * (only control characters are cleaned), appended to the gate's comment for
+ * the verdict steer. Only while the gate is open. Call inside a transaction.
+ */
+export function recordGateComment(db: Db, gateId: string, text: string, now: number): "recorded" | "late" | "stale" | "empty" {
+  const gate = liveGate(db, gateId);
+  if (!gate) return "stale";
+  if (gate.state !== "open") return "late";
+  const said = sanitizeBlock(text).trim();
+  if (said.length === 0) return "empty";
+  const before = (db.query("SELECT comment FROM gates WHERE id = ?1").get(gateId) as { comment: string | null }).comment;
+  const joined = (before ? `${before}\n\n${said}` : said).slice(0, MAX_GATE_COMMENT);
+  db.query("UPDATE gates SET comment = ?2 WHERE id = ?1").run(gateId, joined);
+  appendEvent(db, { source: "daemon", kind: "gate.comment", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, text: said }, ts: now });
+  return "recorded";
+}
+
+export type PassRequest = { outcome: "requested" | "already" | "late" | "stale" } | { outcome: "questions_open"; open: string[] };
+
+/**
+ * The user pressed "Send and request pass" on the review page. The page never
+ * passes a gate (a review gate passes only through a human channel): this
+ * opens one P1 for the leader to confirm it with the user, once every
+ * question is answered. Call inside a transaction, after the Send's answers.
+ */
+export function requestGatePass(db: Db, gateId: string, now: number): PassRequest {
+  const gate = liveGate(db, gateId);
+  if (!gate || ["cleaned", "failed", "cancelled"].includes(gate.run_state)) return { outcome: "stale" };
+  if (gate.state !== "open") return { outcome: "late" };
+  const open = openIds(db, gateId);
+  if (open.length > 0) return { outcome: "questions_open", open };
+  if (findOpenRunItem(db, "pass_requested", gate.run_id)) return { outcome: "already" };
+  const event = appendEvent(db, { source: "daemon", kind: "gate.pass_requested", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, stage: gate.stage, via: "lavish" }, ts: now });
+  openItem(db, {
+    kind: "pass_requested",
+    eventSeq: event.seq,
+    taskId: gate.task_id,
+    runId: gate.run_id,
+    // The command comes first: an item line is cut at MAX_LINE_CHARS, and a long title must not cut it.
+    line: `Pass requested on the review page (not an approval): flowryn gate pass ${gate.task_id} --gate-id ${gateId}, or the user runs flowryn approve ${gate.task_id} --gate ${gate.stage}. ${gate.stage} review of ${sanitizeLine(taskTitle(db, gate.task_id), 60)}`,
+    now,
+  });
+  return { outcome: "requested" };
 }
 
 /** The user ended the review page's Lavish session: stop polling it. Call inside a transaction. */
