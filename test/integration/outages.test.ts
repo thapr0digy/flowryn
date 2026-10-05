@@ -70,12 +70,15 @@ describe("Herdr unreachable: one P1 per episode", () => {
       await env.startHerdr();
       await waitUntil(() => itemsOf(env, "herdr_unreachable")[0]!.state === "resolved", 30_000, "the P1 resolved");
       expect(eventCount(env, "herdr.reachable")).toBe(1);
+      // The reconciler can resolve the P1 before the subscription's backoff reconnects it; the next
+      // outage is seen when that subscription drops, so wait for it rather than for the next retry.
+      await waitUntil(() => env.herdr.subscriberCount() > 0, 35_000, "the event subscription back");
 
       await env.stopHerdr();
       await waitUntil(() => itemsOf(env, "herdr_unreachable").length === 2, 15_000, "a second episode's P1");
       expect(itemsOf(env, "herdr_unreachable")[1]!.state).toBe("open");
     },
-    { timeout: 90_000 },
+    { timeout: 120_000 },
   );
 
   test(

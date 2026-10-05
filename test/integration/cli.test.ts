@@ -129,6 +129,7 @@ describe("roles", () => {
     expect(stale.reply.error).toMatchObject({ code: "bad_token" });
   });
 
+  // macOS only: the call below is BSD script(1)'s syntax; util-linux's takes the command with -c.
   test.skipIf(process.platform !== "darwin")("your own terminal is the human channel", async () => {
     const { h } = await setup();
     const proc = Bun.spawn(["script", "-q", "/dev/null", "bun", join(REPO_ROOT, "src/main.ts"), "todo", "add", "from my shell"], {

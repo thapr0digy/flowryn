@@ -41,10 +41,23 @@ function stage(id: string, extra: Partial<StageDef> = {}): StageDef {
   return { id, skill: null, gate: "none", pools: [], fresh: false, ...extra };
 }
 
-/** The design's three workflows (section 11); a [workflows.<id>] table replaces one of them or adds another. */
+/**
+ * The built-in workflows; a [workflows.<id>] table replaces one of them or
+ * adds another. Visual QA reviews only work with screens to look at:
+ * `feature-ui` carries it, `feature` goes from build straight to ship
+ * (no-mistakes already covers tests, lint and review there).
+ */
 export const DEFAULT_WORKFLOWS: Record<string, WorkflowDef> = {
   feature: {
     id: "feature",
+    stages: [
+      stage("design", { skill: "flowryn-design", gate: "review" }),
+      stage("build", { skill: "flowryn-build-test" }),
+      stage("ship", { pools: ["validation"], gate: "merge" }),
+    ],
+  },
+  "feature-ui": {
+    id: "feature-ui",
     stages: [
       stage("design", { skill: "flowryn-design", gate: "review" }),
       stage("build", { skill: "flowryn-build-test" }),
@@ -178,7 +191,7 @@ export function checkWorkflow(wf: WorkflowDef): void {
   });
 }
 
-/** Every workflow: the design's three, replaced or extended by [workflows.<id>] tables. */
+/** Every workflow: the built-in ones, replaced or extended by [workflows.<id>] tables. */
 export function workflowsConfig(config: FlowrynConfig): Record<string, WorkflowDef> {
   const pools = capacityConfig(config).pools;
   const raw = table(config.extra.workflows, "[workflows]");

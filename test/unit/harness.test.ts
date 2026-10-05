@@ -285,6 +285,7 @@ describe("a ship worker's git access under Claude's Bash sandbox", () => {
     }
   });
 
+  // macOS only: Claude's Bash sandbox is Seatbelt (sandbox-exec), which Linux does not have.
   test.skipIf(!canSandbox)("under that profile a worker commits and pushes from its linked worktree, and cannot touch the hooks or config", async () => {
     const { project, worktree, base } = repoWithWorktree();
     const origin = join(base, "origin.git");

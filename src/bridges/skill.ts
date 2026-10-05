@@ -22,7 +22,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 - \`flowryn daemon status\`: the daemon's version, build and any pending restart.
 
 ## Act
-- \`flowryn dispatch <project> --kind ship|scout [--workflow feature|fix] --body-file - <<'EOF'\` … \`EOF\`: start a worker. It may wait for capacity (\`flowryn capacity\`).
+- \`flowryn dispatch <project> --kind ship|scout [--workflow feature|feature-ui|fix] --body-file - <<'EOF'\` … \`EOF\`: start a worker (\`feature-ui\` adds a visual QA review, for work with screens). It may wait for capacity (\`flowryn capacity\`).
 - \`flowryn plan <project> --body-file -\`: a phased feature, one \`## Phase\` section each; each phase starts by itself once the one before it has landed. \`flowryn show <plan id>\` shows where each is.
 - Review gates (a design or visual QA page in Lavish): the user reviews the link, then passes it: Claude asks the user for \`flowryn gate pass <task>\`; on Pi use the \`flowryn_gate_pass\` tool; or the user runs \`flowryn approve <task> --gate <stage>\`. \`flowryn gate changes <task> --body-file -\` sends it back with the user's words. Never pass a gate the user has not approved. A review may carry the worker's questions (reserved decisions with a gate): the user answers on the page, or you relay each one (\`flowryn decide <id> <choice> --by captain\`; a multi choice is "a, b"; their own answer is \`other\` with their words in \`--body-file -\`); the gate passes only once all are answered (questions_open). A pass_requested item means the user pressed "request pass" on the page: it is not an approval; confirm with them through \`flowryn gate pass <task>\` as above.
 - \`flowryn steer <task> --body-file -\`: words for a worker.
