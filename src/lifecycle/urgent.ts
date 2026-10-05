@@ -101,7 +101,7 @@ export interface PreempterDeps {
   timing(): Timing;
   now(): number;
   runtime(): HerdrRuntime | null;
-  /** The verified interrupt (src/lifecycle/control.ts interruptRun), gated on no dialog. */
+  /** The verified interrupt (src/lifecycle/control.ts interruptRun), gated on no dialog; its refusals are this preempter's deferrals to record. */
   interrupt(runId: string): Promise<Verified>;
   log(message: string): void;
   recheckMs?: number;
@@ -144,6 +144,7 @@ export class UrgentPreempter implements UrgentServices {
   }
 
   private schedule(runId: string, delayMs: number): void {
+    this.cancelTimer(runId);
     const timer = setTimeout(() => {
       this.timers.delete(runId);
       void this.attempt(runId).catch((error: unknown) => this.deps.log(`urgent: preempting ${runId} failed: ${(error as Error).message}`));
@@ -158,33 +159,40 @@ export class UrgentPreempter implements UrgentServices {
     this.timers.delete(runId);
   }
 
+  /** One attempt per run at a time: a kick during an attempt's awaits must not start a second interrupt. */
   private async attempt(runId: string): Promise<void> {
     if (this.closed || this.busy.has(runId)) return;
-    const { db, now } = this.deps;
-    const at = this.plan(runId);
-    if (at === null) return;
-    if (at > now()) return this.schedule(runId, at - now());
-    const run = getRun(db, runId)!;
-    const steer = preemptCandidate(db, runId)!;
-    const recheck = () => this.schedule(runId, this.deps.recheckMs ?? RECHECK_MS);
-    if (await this.releasedPrompt(run)) return this.kick(runId);
-    const known = knownDialogRefusal(db, run);
-    if (known) {
-      tx(db, () => this.deferrals.note(db, run, steer.id, known, now()));
-      return recheck();
-    }
-    const toolMs = now() - this.tools.oldest(runId)!;
     this.busy.add(runId);
-    let result: Verified;
+    let next: (() => void) | undefined;
     try {
-      result = await this.deps.interrupt(runId);
+      next = await this.tryCut(runId);
     } finally {
       this.busy.delete(runId);
     }
+    next?.();
+  }
+
+  /** Returns what to do once the run is free again (schedule a recheck, re-plan), if anything. */
+  private async tryCut(runId: string): Promise<(() => void) | undefined> {
+    const { db, now } = this.deps;
+    const at = this.plan(runId);
+    if (at === null) return;
+    if (at > now()) return () => this.schedule(runId, at - now());
+    const run = getRun(db, runId)!;
+    const steer = preemptCandidate(db, runId)!;
+    const recheck = () => this.schedule(runId, this.deps.recheckMs ?? RECHECK_MS);
+    if (await this.releasedPrompt(run)) return () => this.kick(runId);
+    const known = knownDialogRefusal(db, run);
+    if (known) {
+      tx(db, () => this.deferrals.note(db, run, steer.id, known, now()));
+      return recheck;
+    }
+    const toolMs = now() - this.tools.oldest(runId)!;
+    const result: Verified = await this.deps.interrupt(runId);
     // Refused (a dialog may be open), or nothing was sent (Herdr unreachable, the worker gone): try again.
     if (!result.ok && (result.evidence === "refused" || result.detail !== undefined)) {
       tx(db, () => this.deferrals.note(db, run, steer.id, result.detail ?? result.evidence, now()));
-      return recheck();
+      return recheck;
     }
     // The key went (verified or not): the steer has had its one cancel.
     tx(db, () => markPreempted(db, run, getMessage(db, steer.id)!, "escape", toolMs, now(), result.ok));

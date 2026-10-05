@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_TIMING, type Timing } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { resolveRunItems } from "../../src/attention/items.ts";
 import type { Verified } from "../../src/harness/types.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { getRun, setLiveness } from "../../src/lifecycle/runs.ts";
@@ -26,6 +27,7 @@ let db: Db;
 let interrupts: number;
 let interruptResult: Verified;
 let herdrStatus: string | null;
+let statusDelayMs: number;
 let preempter: UrgentPreempter | null;
 
 function seedRun(id: string, harness: "claude" | "pi"): void {
@@ -47,7 +49,12 @@ function events(kind: string): Record<string, unknown>[] {
 }
 
 function makePreempter(): UrgentPreempter {
-  const runtime = { agentStatus: async () => herdrStatus } as unknown as HerdrRuntime;
+  const runtime = {
+    agentStatus: async () => {
+      if (statusDelayMs > 0) await Bun.sleep(statusDelayMs);
+      return herdrStatus;
+    },
+  } as unknown as HerdrRuntime;
   preempter = new UrgentPreempter({
     db,
     timing: () => timing,
@@ -70,6 +77,7 @@ beforeEach(() => {
   interrupts = 0;
   interruptResult = { ok: true, evidence: "transcript" };
   herdrStatus = "working";
+  statusDelayMs = 0;
   preempter = null;
   tx(db, () => {
     db.query("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('p', '', '/p', 'main', 'local-only')").run();
@@ -220,6 +228,26 @@ describe("the Claude preempter", () => {
     // The approved tool got its own threshold from the release, not from its PreToolUse.
     expect(Date.now() - released).toBeGreaterThanOrEqual(AFTER_MS - 40);
     expect(getMessage(db, steer.id)!.preempted_at).not.toBeNull();
+  });
+
+  test("a kick while an attempt reads Herdr (the hook that resolved the dialog) starts no second interrupt", async () => {
+    const steer = urgentSteer();
+    tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: 0 }, Date.now()));
+    herdrStatus = "blocked";
+    statusDelayMs = 150;
+    const p = makePreempter();
+    p.tools.start("r1", "toolu_1", Date.now() - 5_000);
+    p.kick("r1");
+    await Bun.sleep(50);
+    tx(db, () => {
+      resolveRunItems(db, "r1", ["blocked_prompt"], "hook tool", Date.now());
+      setLiveness(db, getRun(db, "r1")!, "busy", "hook", {}, Date.now());
+    });
+    p.kick("r1");
+    await waitUntil(() => getMessage(db, steer.id)!.preempted_at !== null, 2_000, "the cut");
+    await Bun.sleep(300);
+    expect(interrupts).toBe(1);
+    expect(events("steer.preempted")).toHaveLength(1);
   });
 
   test("the interrupt gate refusing (Herdr saw a dialog) defers and tries again; a key sent but unverified is the one cut", async () => {

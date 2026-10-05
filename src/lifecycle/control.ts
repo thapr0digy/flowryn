@@ -141,7 +141,7 @@ async function herdrStatusRefusal(runtime: HerdrRuntime, paneId: string): Promis
  * messages; an interrupted Claude turn never reads its attachment), and the
  * waiter is woken so an idle steer goes at once.
  */
-export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10_000): Promise<Verified> {
+export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10_000, options: { recordRefusal?: boolean } = {}): Promise<Verified> {
   const run = getRun(deps.db, runId);
   if (!run) return { ok: false, evidence: "timeout", detail: "no such run" };
   const identity = identityOf(run);
@@ -155,9 +155,10 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
     if (!runtime || !run.pane_id) return { ok: false, evidence: "timeout", detail: "Herdr is not reachable" };
     const refusal = await interruptKeyRefusal(deps, run, runtime);
     if (refusal) {
-      tx(deps.db, () =>
-        appendEvent(deps.db, { source: "daemon", kind: "run.interrupt_refused", runId, taskId: run.task_id, payload: { reason: refusal, liveness: run.liveness }, ts: deps.now() }),
-      );
+      if (options.recordRefusal !== false)
+        tx(deps.db, () =>
+          appendEvent(deps.db, { source: "daemon", kind: "run.interrupt_refused", runId, taskId: run.task_id, payload: { reason: refusal, liveness: run.liveness }, ts: deps.now() }),
+        );
       return { ok: false, evidence: "refused", detail: refusal };
     }
     const before = transcriptSize(run.transcript_path);

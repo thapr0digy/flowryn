@@ -221,7 +221,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
     });
     const control: ControlDeps = { db: database, runtime: () => runtime, bus, timing, now: Date.now };
-    const urgent = new UrgentPreempter({ db: database, timing, now: Date.now, runtime: () => runtime, interrupt: (runId) => interruptRun(control, runId), log });
+    const urgent = new UrgentPreempter({ db: database, timing, now: Date.now, runtime: () => runtime, interrupt: (runId) => interruptRun(control, runId, undefined, { recordRefusal: false }), log });
     const fleet: FleetServices = {
       runtime: () => runtime,
       bus,

@@ -122,6 +122,13 @@ describe("the Claude interrupt key never answers a dialog", () => {
     expect(refusals()[0]).toContain("confirmation dialog");
   });
 
+  test("the urgent preempter's retries leave the refusal to its own deferral record: no run.interrupt_refused", async () => {
+    status = "blocked";
+    expect(await interruptRun(deps(), "r1", 1_000, { recordRefusal: false })).toMatchObject({ ok: false, evidence: "refused" });
+    expect(keys).toEqual([]);
+    expect(refusals()).toEqual([]);
+  });
+
   test("the screen unreadable refuses rather than guessing", async () => {
     screen = null;
     expect(await interruptRun(deps(), "r1", 1_000)).toMatchObject({ ok: false, evidence: "refused" });

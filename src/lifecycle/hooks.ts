@@ -126,7 +126,10 @@ function takeSteer(ctx: HandlerCtx, run: RunWithPolicy, path: RingPath) {
  * inference in between). UserPromptSubmit is not evidence: it fires before
  * the model reads anything, so a woken turn that fails or is interrupted
  * before its first inference leaves the steer carried, and lost. A parallel
- * sibling tool's hook can mark it a moment early. Pi proves it with its
+ * sibling tool's hook can mark it a moment early. For an urgent steer that
+ * matters (accepted): in a parallel batch, a sibling's PreToolUse after the
+ * deny that carried it marks it seen, so a long sibling is not cut and runs
+ * to its end before the model reads the steer. Pi proves it with its
  * context event instead (hook steer-seen).
  */
 function claudeSaw(ctx: HandlerCtx, run: RunWithPolicy, args: Args, hook: "pre-tool" | "post-tool" | "stop"): void {
@@ -423,6 +426,23 @@ const postTool = signalVerb(
   (ctx) => leader.toolActivity(ctx),
 );
 
+/**
+ * PostToolUseFailure: a tool failed (Claude fires this instead of PostToolUse,
+ * for a command exiting non-zero too). It only ends the tool's clock and
+ * refreshes busy; it carries no steer.
+ */
+const toolFailed = signalVerb(
+  "tool-failed",
+  "Hook: a tool failed; its urgent-steer clock stops",
+  (ctx, run, args) => {
+    markBusy(ctx, run, HOOK_SIGNALS["tool-failed"], "tool-failed");
+    const tool = mainTool(args);
+    if (tool !== null) ctx.fleet.urgent.tools.end(run.id, tool);
+    return { data: { run: run.id } };
+  },
+  (ctx) => leader.toolActivity(ctx),
+);
+
 /** Stop: a turn ended, unless a pending steer continues it (M0 c06), at most twice in a row. */
 const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer (worker) or a P0 (leader)", (ctx, run, args) => {
   claudeSaw(ctx, run, args, "stop");
@@ -711,4 +731,4 @@ const preempt = piWorkerVerb("preempt", "Worker hook (Pi): may the extension cut
   return { data: { run: run.id, steer: id, ...piPreempt(ctx.db, run, id, toolMs, ctx.fleet.timing(), ctx.fleet.urgent.deferrals, ctx.now()) } };
 });
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, toolFailed, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];

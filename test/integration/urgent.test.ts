@@ -135,6 +135,27 @@ describe("urgent steers to a claude worker", () => {
   );
 
   test(
+    "a tool that failed (PostToolUseFailure) stops its clock: an urgent steer later in the turn cuts nothing",
+    async () => {
+      const env = await fleet();
+      const { run } = await env.dispatch("Build\nFAKE: no-start");
+      const launched = await env.waitRun(run, (r) => r.pane_id !== null && r.proc_pid !== null, "launched");
+      env.herdr.setStatus(launched.pane_id!, "working");
+      const token = env.herdr.panes.get(launched.pane_id!)!.env.FLOWRYN_TOKEN!;
+      const hook = (name: string, input: Record<string, unknown>) => env.cli(["hook", name, "--harness", "claude"], { env: { FLOWRYN_TOKEN: token }, stdin: JSON.stringify(input) });
+      await hook("prompt", {});
+      await hook("pre-tool", { tool_name: "Bash", tool_use_id: "toolu_grep" });
+      expect((await hook("tool-failed", { tool_name: "Bash", tool_use_id: "toolu_grep", error: "exit 1" })).stdout.trim()).toBe("");
+      await Bun.sleep(AFTER_MS + 200);
+      const id = await steer(env, run, "stop the migration", true);
+      await Bun.sleep(AFTER_MS * 2);
+      expect(keysSent(env)).toBe(0);
+      expect(steerRow(env, id)).toMatchObject({ preempted_at: null });
+    },
+    { timeout: 30_000 },
+  );
+
+  test(
     "a permission dialog is open: no key at all and one deferral; once you answer it, the approved tool gets its own threshold and is cut",
     async () => {
       const env = await fleet();

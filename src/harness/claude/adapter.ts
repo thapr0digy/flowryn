@@ -47,6 +47,8 @@ export function workerSettings(bin: string, access: { socket: string; writable: 
       UserPromptSubmit: [{ hooks: [command("prompt"), waiter] }],
       PreToolUse: [{ matcher: "*", hooks: [command("pre-tool")] }],
       PostToolUse: [{ matcher: "*", hooks: [command("post-tool")] }],
+      // Claude fires PostToolUseFailure, not PostToolUse, for a tool that failed (a command exiting non-zero): it ends the tool's clock too.
+      PostToolUseFailure: [{ matcher: "*", hooks: [command("tool-failed")] }],
       Stop: [{ hooks: [command("stop"), waiter] }],
       StopFailure: [{ hooks: [command("stop-failure")] }],
       SessionEnd: [{ hooks: [command("session-end")] }],

@@ -221,6 +221,7 @@ export const HOOK_CLI_VERBS: VerbSpec[] = [
   signalHook("prompt", "Hook: a turn started; a leader gets its P1 digest"),
   signalHook("pre-tool", "Hook: a tool is about to run; an urgent steer may block it"),
   signalHook("post-tool", "Hook: a tool finished; may print a pending steer as context"),
+  signalHook("tool-failed", "Hook: a tool failed; its urgent-steer clock stops"),
   signalHook("stop", "Hook: a turn ended; may continue it with a steer (worker) or a P0 (leader)"),
   signalHook("stop-failure", "Hook: a turn ended in an API error"),
   signalHook("session-end", "Hook: the harness session ended"),
