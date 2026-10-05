@@ -780,7 +780,7 @@ Needs you (3):
 - [i41] PR ready: auth fix (web) checks green
 - [i44] Worker question: cache scout, blocking
 - [i47] Overdue to-do: renew passport (Sep 20)
-In flight: 4 ships, 1 scout. Queued: 6.
+In flight: 4 ships, 1 scout. Queued: 6 (2 ready, 3 waiting, 1 held).
 Due today: call bank · book dentist
 Commands: flowryn fleet · flowryn show &lt;id&gt;
   · flowryn answer &lt;id&gt; &lt;choice&gt;</code></pre>
@@ -980,6 +980,9 @@ fleet[4]{id,kind,project,state,age,needs}:
   api-flaky-p7,scout,api,ready,40m,read
   billing-mig-q4,ship,billing,blocked,5m,answer
   web-docs-z1,ship,web,running,12m,-
+queued[2]{id,kind,project,status,auto,waits,next,age}:
+  web-cart-api,ship,web,ready,off,-,flowryn dispatch web --task web-cart-api,1d
+  web-cart-page,ship,web,waiting,on,web-cart-api,starts when unblocked,1d
 open: P0 1 · P1 2
 hints[2]:
   flowryn show &lt;id&gt;
