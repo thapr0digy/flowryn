@@ -8,7 +8,9 @@ import { EXIT } from "../../api/errors.ts";
 import type { CliIo, VerbSpec } from "../../api/verbs.ts";
 import { boolArg } from "../../api/verbs.ts";
 import { runDaemon } from "../../daemon/daemon.ts";
-import { PING_VERB, STOP_VERB } from "../../daemon/system-verbs.ts";
+import { PING_VERB, RESTART_VERB, STOP_VERB, systemVerbs } from "../../daemon/system-verbs.ts";
+import type { DaemonSnapshot } from "../../daemon/restart.ts";
+import { callServerVerb } from "../client.ts";
 import { installService, isLoaded, kickstart, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
 import { request } from "../../transport/unix.ts";
 import { ensureDir } from "../../util/fsx.ts";
@@ -19,6 +21,8 @@ import { notHumanReason } from "../human.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 
 const START_WAIT_MS = 8_000;
+/** How long `daemon restart` waits for the new daemon to answer. */
+const RESTART_WAIT_MS = 30_000;
 const STOP_WAIT_MS = 15_000;
 
 function print(io: CliIo, reply: Reply): number {
@@ -150,6 +154,69 @@ const stop: VerbSpec = {
   },
 };
 
+function uptime(seconds: number): string {
+  if (seconds < 60) return `${seconds} s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function describe(d: { pid: number; version: string; proto: number; build: string | null; uptime_s?: number | null }): string {
+  const parts = [`pid ${d.pid}`, d.version, `proto ${d.proto}`, `build ${d.build ?? "dev"}`];
+  if (typeof d.uptime_s === "number") parts.push(`up ${uptime(d.uptime_s)}`);
+  return parts.join(" · ");
+}
+
+/**
+ * The leader may restart the daemon, unlike stop and start: every rule is the
+ * daemon's (src/daemon/restart.ts), which checks the caller's role from its
+ * token, refuses while a restart would break something, checks the new
+ * binary, and has launchd restart it. This side only waits for the new
+ * daemon and reports it. A worker is refused here before it reaches the daemon.
+ */
+const restart: VerbSpec = {
+  name: "daemon restart",
+  summary: "Restart flowrynd onto the installed build (leader or you); refused while a restart would break something",
+  positionals: [],
+  flags: {
+    "when-idle": { type: "boolean", help: "wait for what blocks it to clear, instead of refusing (returns at once)" },
+    "wait-min": { type: "int", help: "with --when-idle: give up after this many minutes (default 30, at most 240)" },
+    cancel: { type: "boolean", help: "drop a pending --when-idle restart" },
+    force: { type: "boolean", help: "restart even when the installed build is the one running" },
+  },
+  kind: "local",
+  roles: ["leader", "human"],
+  async local(args, io) {
+    if ((io.env.FLOWRYN_RUN ?? "").length > 0) {
+      return print(io, errorReply({ code: "worker_token", message: "a worker cannot restart the daemon", help: "report, ask or fail instead; the leader decides" }));
+    }
+    const spec = systemVerbs().find((v) => v.name === RESTART_VERB)!;
+    const asked = await callServerVerb(spec, args, io);
+    if (!asked.ok) return print(io, errorReply(asked.error ?? { code: "internal", message: "the restart failed" }));
+    if (asked.data.restart !== "restarting") {
+      const hints = asked.data.restart === "pending" ? ["flowryn daemon status", "flowryn daemon restart --cancel"] : [];
+      return print(io, okReply(asked.data, hints));
+    }
+    const old = asked.data.old as DaemonSnapshot;
+    const started = Date.now();
+    let fresh: Reply | null = null;
+    const up = await waitFor(async () => {
+      const reply = await ping(io.env);
+      if (reply?.ok && (reply.data as { pid?: number }).pid !== old.pid) fresh = reply;
+      return fresh !== null;
+    }, RESTART_WAIT_MS);
+    if (!up || !fresh) {
+      const { config } = loadConfig(flowrynHome(io.env));
+      return print(io, errorReply({ code: "daemon_unavailable", message: `the old daemon (pid ${old.pid}) was asked to restart, but no new daemon answered within ${RESTART_WAIT_MS / 1000} s`, help: `launchd keeps retrying it; see ${stateFiles(config.state_dir).logs}` }));
+    }
+    const next = (fresh as Reply).data as { pid: number; version: string; proto: number; build: string | null; uptime_s: number | null };
+    return print(
+      io,
+      okReply({ restarted: String(asked.data.supervisor), old: describe(old), new: describe(next), waited: `${((Date.now() - started) / 1000).toFixed(1)} s` }, ["flowryn daemon status", "flowryn fleet"]),
+    );
+  },
+};
+
 const install: VerbSpec = {
   name: "daemon install",
   summary: "Install the launchd agent (KeepAlive) and start it",
@@ -192,4 +259,4 @@ const uninstall: VerbSpec = {
   },
 };
 
-export const DAEMON_VERBS: VerbSpec[] = [run, start, stop, status, install, uninstall];
+export const DAEMON_VERBS: VerbSpec[] = [run, start, stop, restart, status, install, uninstall];
