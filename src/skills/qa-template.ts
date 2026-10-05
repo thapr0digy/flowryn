@@ -33,14 +33,14 @@ export const QA_TEMPLATE = `<!doctype html>
   Everything else goes in the folded sections below the card. A section with nothing in it says "None."
 -->
 <style>
-:root{--bg:#fbfaf7;--fg:#1d1d1b;--mut:#66635c;--card:#fff;--line:#e3e0d8;--ok:#1f7a4a;--warn:#9a6400;--bad:#b3261e}
-@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#ecebe6;--mut:#a29f97;--card:#1f1f1c;--line:#34332f;--ok:#5cc28c;--warn:#e0a83a;--bad:#ef7b72}}
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mut:#66635c;--card:#fff;--line:#e3e0d8;--ok:#1f7a4a;--warn:#9a6400;--bad:#b3261e;--on-badge:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#ecebe6;--mut:#a29f97;--card:#1f1f1c;--line:#34332f;--ok:#5cc28c;--warn:#e0a83a;--bad:#ef7b72;--on-badge:#161614}}
 body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;max-width:860px;margin:0 auto;padding:24px 16px}
 h1{font-size:1.4rem;margin:0 0 16px}
 .card{border:2px solid var(--line);border-radius:10px;padding:14px 18px;background:var(--card);margin:0 0 20px}
 .card dl{margin:0}.card dt{font-weight:700;margin-top:12px}.card dt:first-child{margin-top:0}.card dd{margin:2px 0 0}
 .card ol,.card ul{margin:4px 0;padding-left:20px}
-[data-verdict]::before{display:inline-block;margin-right:8px;padding:0 10px;border-radius:99px;font-weight:700;color:#fff}
+[data-verdict]::before{display:inline-block;margin-right:8px;padding:0 10px;border-radius:99px;font-weight:700;color:var(--on-badge)}
 [data-verdict="works"]::before{content:"Works";background:var(--ok)}
 [data-verdict="works-with-caveats"]::before{content:"Works with caveats";background:var(--warn)}
 [data-verdict="broken"]::before{content:"Broken";background:var(--bad)}
