@@ -1,4 +1,5 @@
 import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig, resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { assertSocketPathFits, flowrynHome, runDir, socketPath, spoolDir, stateFiles } from "../config/paths.ts";
@@ -397,7 +398,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       const found = resolveTool(config, "lavish_axi");
       return found && existsSync(found) ? found : null;
     };
-    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now });
+    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now, pidDir: join(config.state_dir, "lavish-polls") });
 
     const services: DaemonServices = {
       db: database,

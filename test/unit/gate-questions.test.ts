@@ -408,6 +408,23 @@ describe("a gate's questions as decisions", () => {
     expect(getDecision(db, "q1")!.state).toBe("open");
   });
 
+  test("a poll an earlier daemon left running is stopped before polling again; an unrelated pid is left alone", async () => {
+    const pidDir = join(h.home, "lavish-polls");
+    mkdirSync(pidDir, { recursive: true });
+    const orphan = Bun.spawn(["/bin/sh", "-c", "sleep 30; exit 0", "lavish-axi", "poll", page], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    writeFileSync(join(pidDir, "g1.json"), JSON.stringify({ pid: orphan.pid, page }));
+    writeFileSync(join(pidDir, "g2.json"), JSON.stringify({ pid: process.pid, page }));
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => null, log: (m) => logs.push(m), now: () => NOW, pidDir });
+    poller.pass();
+    const code = await Promise.race([orphan.exited, Bun.sleep(5_000).then(() => "still running")]);
+    expect(code).not.toBe("still running");
+    expect(logs.some((l) => l.includes(`stopped a poll an earlier daemon left running (pid ${orphan.pid}`))).toBe(true);
+    expect(existsSync(join(pidDir, "g1.json"))).toBe(false);
+    expect(existsSync(join(pidDir, "g2.json"))).toBe(false);
+    poller.stop();
+  });
+
   test("the review page must be a real .html under the report directory that mounts the widget", () => {
     expect(checkReviewPage(page, reportDir)).toContain("design.html");
     const outside = join(h.home, "elsewhere.html");

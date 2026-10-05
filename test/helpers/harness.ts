@@ -39,12 +39,16 @@ echo "$*" >> "$FLOWRYN_HOME/lavish-calls.log"
 [ "$1" = "poll" ] || exit 0
 q="$FLOWRYN_HOME/lavish-queue"
 mkdir -p "$q"
+parent=$PPID
 ticks=-1
 prev=""
 for a in "$@"; do [ "$prev" = "--timeout-ms" ] && ticks=$((a / 50)); prev="$a"; done
 while :; do
   if [ "$ticks" -eq 0 ]; then printf 'session:\n  status: waiting\n'; exit 0; fi
   [ "$ticks" -gt 0 ] && ticks=$((ticks - 1))
+  # Unlike the real one, it ends with its daemon (or its home), so tests leave no process behind.
+  kill -0 "$parent" 2>/dev/null || exit 0
+  [ -d "$FLOWRYN_HOME" ] || exit 0
   for f in "$q"/*.out; do
     [ -e "$f" ] || continue
     if mv "$f" "$f.taken" 2>/dev/null; then

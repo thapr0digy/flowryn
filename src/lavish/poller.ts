@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
@@ -26,6 +26,12 @@ export interface PollerDeps {
   lavish(): string | null;
   log(message: string): void;
   now(): number;
+  /**
+   * Where each running poll's pid is kept (<state_dir>/lavish-polls). A daemon that died without
+   * its shutdown leaves its polls running, and an orphaned poll would take the user's answers with
+   * nothing reading them: the next daemon kills those before it polls.
+   */
+  pidDir?: string;
 }
 
 interface Running {
@@ -54,6 +60,8 @@ export class LavishPoller {
   private retry: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
+  private swept = false;
+
   constructor(private readonly deps: PollerDeps) {}
 
   /** Look at the gates soon (debounced). */
@@ -69,6 +77,10 @@ export class LavishPoller {
   pass(): void {
     if (this.closed) return;
     try {
+      if (!this.swept) {
+        this.swept = true;
+        this.sweepOrphans();
+      }
       this.writeWidgets();
       this.followGates();
     } catch (error) {
@@ -166,8 +178,10 @@ export class LavishPoller {
     }
     const entry: Running = { page, proc, stopped: false, final };
     this.running.set(gate, entry);
+    this.keepPid(gate, proc.pid, page);
     void (async () => {
       const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
+      this.dropPid(gate, proc.pid);
       if (this.running.get(gate) === entry) this.running.delete(gate);
       if (entry.stopped || this.closed) return;
       this.finished(gate, page, code, stdout, stderr);
@@ -231,5 +245,52 @@ export class LavishPoller {
     const open = (this.deps.db.query("SELECT COUNT(*) AS n FROM decisions WHERE gate_id = ?1 AND state = 'open'").get(gate) as { n: number }).n;
     parts.push(open > 0 ? `${open} question${open === 1 ? "" : "s"} still open.` : "Every question is answered; the review now waits for your pass in Flowryn.");
     return parts.join(" ");
+  }
+
+  private pidFile(gate: string): string | null {
+    return this.deps.pidDir ? join(this.deps.pidDir, `${gate}.json`) : null;
+  }
+
+  private keepPid(gate: string, pid: number, page: string): void {
+    const file = this.pidFile(gate);
+    if (!file) return;
+    try {
+      mkdirSync(this.deps.pidDir!, { recursive: true, mode: 0o700 });
+      writeFileSync(file, JSON.stringify({ pid, page }), { mode: 0o600 });
+    } catch (error) {
+      this.deps.log(`lavish: cannot record the poll of gate ${gate}: ${(error as Error).message}`);
+    }
+  }
+
+  private dropPid(gate: string, pid: number): void {
+    const file = this.pidFile(gate);
+    if (!file) return;
+    try {
+      if ((JSON.parse(readFileSync(file, "utf8")) as { pid: number }).pid === pid) rmSync(file, { force: true });
+    } catch {
+      // already gone, or a newer poll's file
+    }
+  }
+
+  /** Kill the polls an earlier daemon left running: a recorded pid whose command line is still that poll. */
+  private sweepOrphans(): void {
+    const dir = this.deps.pidDir;
+    if (!dir || !existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = join(dir, name);
+      try {
+        const { pid, page } = JSON.parse(readFileSync(file, "utf8")) as { pid: number; page: string };
+        const ps = Bun.spawnSync(["/bin/ps", "-o", "command=", "-p", String(pid)], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+        const command = ps.stdout.toString().trim();
+        if (Number.isInteger(pid) && pid > 1 && command.includes(" poll ") && command.includes(page)) {
+          process.kill(pid, "SIGTERM");
+          this.deps.log(`lavish: stopped a poll an earlier daemon left running (pid ${pid}, ${page})`);
+        }
+      } catch (error) {
+        this.deps.log(`lavish: cannot check the leftover poll in ${file}: ${(error as Error).message}`);
+      }
+      rmSync(file, { force: true });
+    }
   }
 }
