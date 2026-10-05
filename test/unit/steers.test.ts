@@ -6,7 +6,7 @@ import { DEFAULT_TIMING, type Timing } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { taskTitleFrom } from "../../src/lifecycle/dispatch.ts";
 import { getRun, type RunRow } from "../../src/lifecycle/runs.ts";
-import { ackSteer, confirmPromptSeen, createSteer, dueSteers, flagUnackedSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, recentSteers, steerBrief, steerStatus, SteerBus } from "../../src/lifecycle/steers.ts";
+import { ackSteer, createSteer, dueSteers, flagUnackedSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, recentSteers, steerBrief, steerStatus, SteerBus } from "../../src/lifecycle/steers.ts";
 
 let dir: string;
 let db: Db;
@@ -115,28 +115,6 @@ describe("seen and lost carries", () => {
     expect(steerBrief(db, "r1", 30)).toBe(`${a.id} lost, ringing`);
     tx(db, () => markRung(db, getMessage(db, a.id)!, run, "extension", 40, true, slow));
     expect(events("steer.rung").at(-1)).toMatchObject({ steer: a.id, ring: 2, again: "lost" });
-  });
-
-  test("a carry seen only at a Claude turn's prompt is lost when the turn fails, and rings again at once", () => {
-    const m = tx(db, () => createSteer(db, run, "x", 0));
-    tx(db, () => markRung(db, m, run, "waiter", 100, true, slow));
-    tx(db, () => markSeen(db, run, null, "prompt", 150));
-    expect(tx(db, () => markLost(db, run, "turn failed", 200))).toEqual([m.id]);
-    expect(getMessage(db, m.id)).toMatchObject({ ring_state: "lost", seen_at: 150 });
-    expect(dueSteers(db, "r1", 200, slow).map((x) => x.id)).toEqual([m.id]);
-    expect(events("steer.lost")).toEqual([{ steer: m.id, ring: 1, reason: "turn failed", seen_via: "prompt" }]);
-    tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", 210, true, slow));
-    expect(getMessage(db, m.id)).toMatchObject({ ring_state: "carried", seen_via: null });
-  });
-
-  test("a later hook in the turn confirms a prompt-seen carry, so a failed turn keeps it seen", () => {
-    const m = tx(db, () => createSteer(db, run, "x", 0));
-    tx(db, () => markRung(db, m, run, "waiter", 100, true, slow));
-    tx(db, () => markSeen(db, run, null, "prompt", 150));
-    tx(db, () => confirmPromptSeen(db, run, "pre-tool"));
-    expect(tx(db, () => markLost(db, run, "turn failed", 200))).toEqual([]);
-    expect(getMessage(db, m.id)).toMatchObject({ ring_state: "seen", seen_via: "pre-tool" });
-    expect(dueSteers(db, "r1", 60_000, slow)).toEqual([]);
   });
 
   test("a carry seen by the Pi context event is not lost on an interrupt", () => {

@@ -107,6 +107,16 @@ function steers(env: FleetEnv, runId: string): { id: string; rings: number; seen
   }
 }
 
+/** One steer's ring state, as the daemon recorded it. */
+function ringOf(env: FleetEnv, id: string): { ring_state: string; seen_at: number | null; rings: number } {
+  const db = env.h.db();
+  try {
+    return db.query("SELECT ring_state, seen_at, rings FROM messages WHERE id = ?1").get(id) as { ring_state: string; seen_at: number | null; rings: number };
+  } finally {
+    db.close();
+  }
+}
+
 async function steer(env: FleetEnv, target: string, text: string): Promise<string> {
   const result = await env.json(["steer", target, "--body-file", "-"], { stdin: text });
   expect(result.code).toBe(0);
@@ -158,6 +168,44 @@ describe("steers to a claude worker", () => {
       const delivery = (shown.reply.data as { steers: { id: string; delivery: string }[] }).steers.map((m) => m.delivery);
       expect(delivery).toHaveLength(2);
       for (const line of delivery) expect(line).toMatch(/^carried \+\d+(ms|\.\ds), seen \+.*, acked \+/);
+    },
+    { timeout: 45_000 },
+  );
+
+  test(
+    "a woken turn's UserPromptSubmit is not seen: a StopFailure before its first inference loses the steer, a PreToolUse first keeps it seen",
+    async () => {
+      const env = await fleet();
+      // A worker that sends no hooks of its own: the test plays Claude's hooks with the run's token.
+      const { run } = await env.dispatch("Build\nFAKE: no-start");
+      const launched = await env.waitRun(run, (r) => r.pane_id !== null && r.proc_pid !== null, "launched");
+      const pane = env.herdr.panes.get(launched.pane_id!)!;
+      const worker = { env: { FLOWRYN_TOKEN: pane.env.FLOWRYN_TOKEN! } };
+      const hook = (name: string) => env.cli(["hook", name, "--harness", "claude"], { ...worker, stdin: "{}" });
+      const state = (id: string) => ringOf(env, id);
+
+      // The waiter wakes the idle worker; the woken turn starts and fails before the model reads anything.
+      const lost = await steer(env, run, "first");
+      expect((await hook("wait-steer")).code).toBe(2);
+      await hook("prompt");
+      expect(state(lost)).toMatchObject({ ring_state: "carried", seen_at: null });
+      await hook("stop-failure");
+      expect(state(lost)).toMatchObject({ ring_state: "lost", seen_at: null, rings: 1 });
+      // It rings again at once, through the next waiter.
+      const again = await hook("wait-steer");
+      expect(again.code).toBe(2);
+      expect(again.stderr).toContain(lost);
+      expect(state(lost)).toMatchObject({ ring_state: "carried", rings: 2 });
+
+      // This time the model reaches a tool call: the PreToolUse proves it read the wake, so a later failure keeps it seen.
+      await hook("prompt");
+      await hook("pre-tool");
+      expect(state(lost)).toMatchObject({ ring_state: "seen" });
+      await hook("stop-failure");
+      expect(state(lost).ring_state).toBe("seen");
+      const events = env.events(run);
+      expect(events.filter((e) => e === "steer.lost")).toHaveLength(1);
+      expect(events.filter((e) => e === "steer.seen")).toHaveLength(1);
     },
     { timeout: 45_000 },
   );

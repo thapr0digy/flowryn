@@ -349,9 +349,7 @@ CREATE UNIQUE INDEX decisions_import ON decisions(import_source) WHERE import_so
  * (seen_at, the first time), and the latest ring's state: carried, seen or
  * lost (a known-lost carry rings again at once). ring_idle marks a carry to an
  * idle worker, which must be seen within seconds or it rings again. seen_via
- * names the hook that marked the latest ring seen: one seen only by a Claude
- * turn's UserPromptSubmit ('prompt') is still lost if the turn fails or is
- * interrupted before any later hook.
+ * names what marked the latest ring seen (a Claude hook, Pi's context event).
  */
 const STEER_SEEN_SQL = /* sql */ `
 ALTER TABLE messages ADD COLUMN seen_at INTEGER;

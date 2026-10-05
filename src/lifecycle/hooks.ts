@@ -14,7 +14,7 @@ import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, tas
 import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
-import { confirmPromptSeen, dueSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
+import { dueSteers, getMessage, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 
@@ -115,17 +115,17 @@ function takeSteer(ctx: HandlerCtx, run: RunWithPolicy, path: RingPath) {
 }
 
 /**
- * A Claude worker hook after a carry proves the steer reached a model request:
- * a woken turn's UserPromptSubmit, or the next PreToolUse, PostToolUse or Stop
- * after a PostToolUse or Stop carry (the model read the attachment at its
- * inference in between). A parallel sibling tool's hook can mark it a moment
- * early. Pi proves it with its context event instead (hook steer-seen). What
- * only UserPromptSubmit saw stays losable until a later hook in the turn.
+ * A Claude worker hook that follows a model inference proves a carried steer
+ * reached a model request: the next PreToolUse, PostToolUse or Stop after the
+ * carry (the model read the attachment, or the woken turn's prompt, at the
+ * inference in between). UserPromptSubmit is not evidence: it fires before
+ * the model reads anything, so a woken turn that fails or is interrupted
+ * before its first inference leaves the steer carried, and lost. A parallel
+ * sibling tool's hook can mark it a moment early. Pi proves it with its
+ * context event instead (hook steer-seen).
  */
-function claudeSaw(ctx: HandlerCtx, run: RunWithPolicy, args: Args, hook: string): void {
-  if (harnessOf(args) !== "claude") return;
-  if (hook !== "prompt") confirmPromptSeen(ctx.db, run, hook);
-  markSeen(ctx.db, run, null, hook, ctx.now());
+function claudeSaw(ctx: HandlerCtx, run: RunWithPolicy, args: Args, hook: "pre-tool" | "post-tool" | "stop"): void {
+  if (harnessOf(args) === "claude") markSeen(ctx.db, run, null, hook, ctx.now());
 }
 
 // --- worker-start and the isolation assertion ---------------------------------------------
@@ -351,9 +351,8 @@ function leaderVerb(name: string, summary: string, body: LeaderBody, prepare?: (
 const prompt = signalVerb(
   "prompt",
   "Hook: a turn started (busy); a leader gets its P1 digest",
-  (ctx, run, args) => {
+  (ctx, run) => {
     ctx.fleet.continuations.delete(run.id);
-    claudeSaw(ctx, run, args, "prompt");
     markBusy(ctx, run, HOOK_SIGNALS.prompt);
     return { data: { run: run.id } };
   },

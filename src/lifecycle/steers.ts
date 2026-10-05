@@ -9,14 +9,13 @@ import { taskTitle, type RunRow } from "./runs.ts";
 /**
  * Steers to workers (design sections 5, 6 and 12). A steer is a messages row.
  * Hooks and the Pi extension carry it; it is *seen* once it was provably in a
- * model request (Claude: the next worker hook after the carry; Pi: the
- * extension's context event), and only the worker's `ack` proves it was acted
+ * model request (Claude: the next PreToolUse, PostToolUse or Stop after the
+ * carry, never UserPromptSubmit, which fires before the model reads anything;
+ * Pi: the extension's context event), and only the worker's `ack` proves it was acted
  * on. A steer not acknowledged within ring_interval_ms rings again, up to
  * max_rings deliveries in all (the first plus three re-rings), and then opens
  * a P1. A carry known to be lost (an interrupt or a failed turn before it was
  * seen, or an idle carry not seen within seen_timeout_ms) rings again at once.
- * A Claude turn's UserPromptSubmit marks a carry seen, but until a later
- * worker hook confirms it, a failed or interrupted turn still loses it.
  */
 
 export interface MessageRow {
@@ -152,25 +151,15 @@ export function markSeen(db: Db, run: RunRow, ids: string[] | null, via: string,
 }
 
 /**
- * A later Claude worker hook in the turn confirms what its UserPromptSubmit
- * marked seen: the turn went on past its first inference. Call inside a
- * transaction.
- */
-export function confirmPromptSeen(db: Db, run: RunRow, via: string): void {
-  db.query("UPDATE messages SET seen_via = ?2 WHERE run_id = ?1 AND acked_at IS NULL AND ring_state = 'seen' AND seen_via = 'prompt'").run(run.id, via);
-}
-
-/**
  * Carried steers that never reached a model request are lost (an interrupt
- * dropped them, or the turn failed first): each rings again at once. So is
- * one only a Claude turn's UserPromptSubmit saw, with no later hook. Call
+ * dropped them, or the turn failed first): each rings again at once. Call
  * inside a transaction; returns the ids marked.
  */
 export function markLost(db: Db, run: RunRow, reason: string, now: number): string[] {
-  const lost = unackedSteers(db, run.id).filter((m) => m.ring_state === "carried" || (m.ring_state === "seen" && m.seen_via === "prompt"));
+  const lost = carriedUnseen(db, run.id);
   for (const m of lost) {
     db.query("UPDATE messages SET ring_state = 'lost' WHERE id = ?1").run(m.id);
-    appendEvent(db, { source: "daemon", kind: "steer.lost", runId: run.id, taskId: run.task_id, payload: { steer: m.id, ring: m.rings, reason, ...(m.ring_state === "seen" ? { seen_via: m.seen_via } : {}) }, ts: now });
+    appendEvent(db, { source: "daemon", kind: "steer.lost", runId: run.id, taskId: run.task_id, payload: { steer: m.id, ring: m.rings, reason }, ts: now });
   }
   return lost.map((m) => m.id);
 }
