@@ -7,7 +7,7 @@ import { stateFiles } from "../config/paths.ts";
 import { sha256Hex } from "../util/hash.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { FlowrynError } from "../api/errors.ts";
-import { detached, type Supervisor } from "../daemon/restart.ts";
+import { SMOKE_TIMEOUT_MS, detached, runProc, type Supervisor } from "../daemon/restart.ts";
 
 export const BASE_LABEL = "dev.flowryn.flowrynd";
 const SYSTEM_PATH = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -125,10 +125,11 @@ export interface LaunchdDeps {
   bootstrapBackoffMs: number[];
 }
 
+/** launchctl with a time limit: a hung call reads as a failure (for `print`, not loaded). */
 async function launchctl(args: string[]): Promise<LaunchctlResult> {
-  const proc = Bun.spawn(["/bin/launchctl", ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  return { exitCode, output: (stdout + stderr).trim() };
+  const result = await runProc(["/bin/launchctl", ...args], process.env, SMOKE_TIMEOUT_MS);
+  if (result.timedOut) return { exitCode: -1, output: `launchctl ${args[0] ?? ""} did not answer within ${SMOKE_TIMEOUT_MS / 1000} s` };
+  return { exitCode: result.exitCode ?? -1, output: (result.stdout + result.stderr).trim() };
 }
 
 export const LAUNCHD_DEPS: LaunchdDeps = {
@@ -224,10 +225,10 @@ export interface InstalledPlist {
   workingDir: string | null;
 }
 
-/** Read an installed plist through plutil (it accepts XML and binary plists alike). */
-export async function readInstalledPlist(path: string): Promise<InstalledPlist> {
-  const proc = Bun.spawn(["/usr/bin/plutil", "-convert", "json", "-o", "-", path], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+/** Read an installed plist through plutil (it accepts XML and binary plists alike), within a time limit. */
+export async function readInstalledPlist(path: string, timeoutMs: number = SMOKE_TIMEOUT_MS): Promise<InstalledPlist> {
+  const { stdout, stderr, exitCode, timedOut } = await runProc(["/usr/bin/plutil", "-convert", "json", "-o", "-", path], process.env, timeoutMs);
+  if (timedOut) throw new Error(`plutil did not read ${path} within ${timeoutMs / 1000} s`);
   if (exitCode !== 0) throw new Error(`plutil could not read ${path}: ${(stderr || stdout).trim()}`);
   const raw = JSON.parse(stdout) as { ProgramArguments?: unknown; EnvironmentVariables?: unknown; WorkingDirectory?: unknown };
   const program = Array.isArray(raw.ProgramArguments) ? raw.ProgramArguments.filter((a): a is string => typeof a === "string") : [];

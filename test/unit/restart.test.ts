@@ -293,9 +293,13 @@ describe("restart controller", () => {
     expect(localStamp(new Date(2026, 9, 5, 14, 32).getTime())).toBe("2026-10-05 14:32");
     expect(first.restart === "pending" && first.waiting_on[0]).toContain("merging: t1");
     now += 60_000;
-    tx(db, () => c.request({ role: "human", runId: null, taskId: null }, { ...BASE, whenIdle: true, waitMin: 200, preflight: null }));
+    const second = tx(db, () => c.request({ role: "human", runId: null, taskId: null }, { ...BASE, whenIdle: true, waitMin: 200, preflight: null }));
+    expect(second).toMatchObject({ restart: "pending", expires_at: 1_600_000, kept: `the earlier request's deadline (${localStamp(1_600_000)}); --wait-min was ignored` });
+    expect("kept" in first).toBe(false);
     // The second request keeps the first one's deadline and its start, so an expiry reports the real wait.
     expect(readPending(db)).toMatchObject({ by: "human", requested_at: 1_000_000, expires_at: 1_600_000 });
+    const third = tx(db, () => c.request(LEADER, { ...BASE, whenIdle: true, waitMin: undefined, preflight: null }));
+    expect(third).toMatchObject({ kept: `the earlier request's deadline (${localStamp(1_600_000)})` });
     expect(tx(db, () => c.request(LEADER, { ...BASE, cancel: true, preflight: null }))).toEqual({ restart: "cancelled", had_pending: true });
     expect(readPending(db)).toBeNull();
     expect(events("daemon.restart_cancelled")).toEqual([{ by: "leader", session: "L3", had_pending: true }]);
@@ -369,6 +373,25 @@ describe("restart controller", () => {
     expect(openItemsOf("restart_dropped")[0]!.line).toContain("Could not find service");
   });
 });
+
+for (const [how, restart] of [
+  ["throws", () => {
+    throw new Error("FLOWRYN_SUPERVISOR is unreadable");
+  }],
+  ["rejects", () => Promise.reject(new Error("FLOWRYN_SUPERVISOR is unreadable"))],
+] as const) {
+  test(`a supervisor whose restart ${how} withdraws the handoff and opens a P1, and the daemon carries on`, async () => {
+    const supervisor: Supervisor = { ...fakeSupervisor().supervisor, restart };
+    const c = controller({ supervisor });
+    const preflight = await c.preflight(false);
+    tx(db, () => c.request(LEADER, { ...BASE, preflight }));
+    c.kick();
+    await Bun.sleep(150);
+    expect(getMeta(db, "restart_handoff")).toBeNull();
+    expect(c.inProgress).toBe(false);
+    expect(openItemsOf("restart_dropped")[0]!.line).toContain("FLOWRYN_SUPERVISOR is unreadable");
+  });
+}
 
 describe("the new daemon's record", () => {
   test("recordRestarted writes daemon.restarted once, with who asked and both builds, and closes a dropped-restart P1", async () => {

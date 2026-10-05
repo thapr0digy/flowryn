@@ -100,7 +100,7 @@ export function systemVerbs(): VerbSpec[] {
         const outcome = ctx.restart.request(ctx.caller, {
           cancel: boolArg(args, "cancel"),
           whenIdle: boolArg(args, "when-idle"),
-          waitMin: intArg(args, "wait-min") ?? DEFAULT_WAIT_MIN,
+          waitMin: intArg(args, "wait-min"),
           force: boolArg(args, "force"),
           preflight: (prepared as RestartPrepared).preflight,
         });

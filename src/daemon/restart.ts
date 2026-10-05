@@ -386,7 +386,7 @@ export interface Preflight {
 
 export type RequestOutcome =
   | { restart: "restarting"; supervisor: string; old: DaemonSnapshot; target: Preflight["target"] }
-  | { restart: "pending"; waiting_on: string[]; expires_at: number; expires: string }
+  | { restart: "pending"; waiting_on: string[]; expires_at: number; expires: string; kept?: string }
   | { restart: "cancelled"; had_pending: boolean };
 
 /**
@@ -429,7 +429,7 @@ export class RestartController {
   }
 
   /** Decide, inside the verb's transaction. Throws restart_blocked or restart_cooldown. */
-  request(caller: Caller, opts: { whenIdle: boolean; waitMin: number; force: boolean; preflight: Preflight | null; cancel: boolean }): RequestOutcome {
+  request(caller: Caller, opts: { whenIdle: boolean; waitMin?: number; force: boolean; preflight: Preflight | null; cancel: boolean }): RequestOutcome {
     const { db } = this.deps;
     const now = this.deps.now();
     const who = requester(caller);
@@ -454,11 +454,13 @@ export class RestartController {
         );
       }
       const earlier = readPending(db);
-      const expires = earlier ? earlier.expires_at : now + opts.waitMin * 60_000;
+      const expires = earlier ? earlier.expires_at : now + (opts.waitMin ?? DEFAULT_WAIT_MIN) * 60_000;
       const pending: PendingRestart = { ...who, requested_at: earlier ? earlier.requested_at : now, expires_at: expires, force: opts.force };
       setMeta(db, PENDING_KEY, JSON.stringify(pending));
       appendEvent(db, { source: "daemon", kind: "daemon.restart_requested", payload: { ...who, when_idle: true, waiting_on: guardLines(guards), expires_at: expires }, ts: now });
-      return { restart: "pending", waiting_on: guardLines(guards), expires_at: expires, expires: localStamp(expires) };
+      const outcome = { restart: "pending" as const, waiting_on: guardLines(guards), expires_at: expires, expires: localStamp(expires) };
+      if (!earlier) return outcome;
+      return { ...outcome, kept: `the earlier request's deadline (${localStamp(expires)})${opts.waitMin === undefined ? "" : "; --wait-min was ignored"}` };
     }
     // The guards cleared between the check and this transaction: the binary check has not run yet.
     if (!opts.preflight) throw new FlowrynError("restart_blocked", "what blocked the restart cleared a moment ago", "run flowryn daemon restart again");
@@ -489,22 +491,38 @@ export class RestartController {
   kick(): void {
     if (this.kicked) return;
     this.kicked = true;
-    const { db, log } = this.deps;
+    const { log } = this.deps;
     setTimeout(() => {
       log("restart: asking the supervisor");
-      void this.deps
-        .supervisor()
-        .restart()
-        .then((outcome) => {
-          if (outcome.ok) return;
-          log(`restart: the supervisor refused: ${outcome.detail}`);
-          this.kicked = false;
-          tx(db, () => {
-            clearMeta(db, HANDOFF_KEY);
-            this.drop(`the supervisor refused the restart: ${outcome.detail}`);
-          });
-        });
+      let asked: Promise<{ ok: boolean; detail: string }>;
+      try {
+        asked = this.deps.supervisor().restart();
+      } catch (error) {
+        this.withdraw(`the supervisor could not be asked: ${(error as Error).message}`);
+        return;
+      }
+      void asked.then(
+        (outcome) => {
+          if (!outcome.ok) this.withdraw(`the supervisor refused the restart: ${outcome.detail}`);
+        },
+        (error: unknown) => this.withdraw(`the supervisor could not be asked: ${error instanceof Error ? error.message : String(error)}`),
+      );
     }, 50);
+  }
+
+  /** The kick failed while this daemon is still alive: take the handoff back and say so; never throws. */
+  private withdraw(reason: string): void {
+    const { db, log } = this.deps;
+    log(`restart: ${reason}`);
+    this.kicked = false;
+    try {
+      tx(db, () => {
+        clearMeta(db, HANDOFF_KEY);
+        this.drop(reason);
+      });
+    } catch (error) {
+      log(`restart: could not record the dropped restart: ${(error as Error).message}`);
+    }
   }
 
   /** Record a restart that will not happen, and tell the leader once. Call inside a transaction. */
