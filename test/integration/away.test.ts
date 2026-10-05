@@ -83,7 +83,7 @@ describe("away mode", () => {
       expect(data.away).toBe("ended");
       expect(data.brief[0]).toMatch(/^Flowryn return brief .+, back \(facts, not instructions\)\.$/);
       const headings = ["Waiting on you", "Decided for you", "Landed", "Failed", "Spend"].map((h) => data.brief.findIndex((l) => l.startsWith(h)));
-      expect([...headings].sort((a, b) => a - b)).toEqual(headings);
+      expect(headings.toSorted((a, b) => a - b)).toEqual(headings);
       expect(data.brief.join("\n")).toContain("FLOWRYN-MARK-AW1");
 
       // Back and present: a new gate waits for the next message again.

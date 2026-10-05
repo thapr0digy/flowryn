@@ -39,8 +39,8 @@ function task(id: string, yolo: 0 | 1): string {
 
 function open(kind: ItemKind, at: number, taskId: string | null = null): string {
   return tx(db, () => {
-    const event = appendEvent(db, { source: "cli", kind: "test.item", payload: {}, ts: at });
-    return openItem(db, { kind, eventSeq: event.seq, line: `${kind} line`, taskId, now: at });
+    const opened = appendEvent(db, { source: "cli", kind: "test.item", payload: {}, ts: at });
+    return openItem(db, { kind, eventSeq: opened.seq, line: `${kind} line`, taskId, now: at });
   });
 }
 
@@ -208,7 +208,7 @@ describe("the return brief", () => {
     const at = (prefix: string) => lines.findIndex((l) => l.startsWith(prefix));
     const order = ["Waiting on you", "Decided for you", "Landed", "Failed", "Spend"].map(at);
     expect(order.every((n) => n > 0)).toBe(true);
-    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(order.toSorted((a, b) => a - b)).toEqual(order);
     expect(text).toContain("Waiting on you (1):");
     expect(text).toContain("[q22] Retry the flaky test? → yes: same failure upstream");
     expect(text).not.toContain("q21");
