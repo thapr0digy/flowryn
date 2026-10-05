@@ -192,7 +192,7 @@ export async function importFirstmate(args: Parameters<NonNullable<VerbSpec["loc
     writeFileAtomic(prefs, ["# Your preferences", "", "Imported from Firstmate. The leader keeps this file current: inspect, then update.", "", ...keep, "", "## Review", "", "These name Firstmate machinery; keep, reword or delete them.", "", ...review, ""].join("\n"), 0o600);
   }
   const fw = join(cloneRoot, "flowryn");
-  rows.push({ item: "links", kind: "links", action: "review", reason: `after apply: cd ${fw} && bun install && bun run build && ln -sf ${fw}/dist/flowryn ~/.local/bin/flowryn && ln -sf ${fw}/dist/flowryn ~/.local/bin/flowrynd` });
+  rows.push({ item: "links", kind: "links", action: "review", reason: `after apply: cd ${fw} && bun install && bun run build && ln -sf ${fw}/dist/flowryn ~/.local/bin/flowryn && ln -sf ${fw}/dist/flowryn ~/.local/bin/flowrynd && flowryn daemon uninstall && flowryn daemon install` });
   const out = okReply({ rows });
   io.stdout(renderReply(out, { json: io.json }));
   return exitCodeOf(out);

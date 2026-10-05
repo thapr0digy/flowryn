@@ -19,5 +19,5 @@
   { "item": "captain.md", "kind": "preferences", "action": "create", "reason": "3 lines, 1 for review" },
   { "item": "learnings.md", "kind": "preferences", "action": "create", "reason": "1 line, 1 for review" },
   { "item": "captain-shared.md", "kind": "preferences", "action": "skip", "reason": "absent" },
-  { "item": "links", "kind": "links", "action": "review", "reason": "after apply: cd <home>/clones/flowryn && bun install && bun run build && ln -sf <home>/clones/flowryn/dist/flowryn ~/.local/bin/flowryn && ln -sf <home>/clones/flowryn/dist/flowryn ~/.local/bin/flowrynd" }
+  { "item": "links", "kind": "links", "action": "review", "reason": "after apply: cd <home>/clones/flowryn && bun install && bun run build && ln -sf <home>/clones/flowryn/dist/flowryn ~/.local/bin/flowryn && ln -sf <home>/clones/flowryn/dist/flowryn ~/.local/bin/flowrynd && flowryn daemon uninstall && flowryn daemon install" }
 ]
