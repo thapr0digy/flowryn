@@ -3,7 +3,7 @@
  * M5 exit, live. Run it through scripts/lab/m5-live.sh, which owns the Herdr
  * lab session. Each flow runs two independent two-phase features side by side
  * under its one leader (design section 17), each in its own project: phase 1
- * runs the feature workflow (design, review, build, visual QA, review, ship)
+ * runs the feature-ui workflow (design, review, build, visual QA, review, ship)
  * and hands in a phase plan with its design; approving the design approves the
  * plan; phase 1 merges and is cleaned; phase 2 starts by itself and ships.
  * Both phase-1 workers are live together; gates and merges take turns with
@@ -37,6 +37,7 @@ import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
 import { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
 import { request } from "../../src/transport/unix.ts";
+import { QA_TEMPLATE } from "../../src/skills/qa-template.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
 
@@ -374,7 +375,7 @@ class LiveLeader {
  * stage starts by acknowledging its steers. Visual QA is real: an nginx:alpine
  * container labelled with the run, a curl, a chrome-devtools-axi screenshot.
  */
-function phaseOneScript(label: string, planFile: string): string {
+function phaseOneScript(label: string, planFile: string, evidenceFile: string): string {
   const site = `m5-live/${label}`;
   const ack = "for id in $($FLOWRYN_BIN inbox --json | jq -r '.data.steers[].id'); do $FLOWRYN_BIN ack $id; done";
   const container = "flowryn-qa-$FLOWRYN_RUN";
@@ -384,12 +385,28 @@ function phaseOneScript(label: string, planFile: string): string {
     "say the design is ready for review",
     `bash ${ack} && mkdir -p ${site} && printf '<html><body><h1 id="cart">Cart</h1></body></html>\\n' > ${site}/index.html && printf 'grep -q "id=.cart." "$(dirname "$0")/index.html"\\n' > ${site}/test.sh && sh ${site}/test.sh && git add ${site} && git commit -q -m "m5 live: ${label} cart page" && $FLOWRYN_BIN stage done && sleep 5`,
     `bash ${ack} && docker run -d --label flowryn.run=$FLOWRYN_RUN --label com.docker.compose.project=flowryn-$FLOWRYN_RUN --name ${container} -p 127.0.0.1::80 nginx:alpine && docker cp ${site}/. ${container}:/usr/share/nginx/html/ && sleep 2 && port=$(docker port ${container} 80/tcp | head -1 | sed 's/.*://') && mkdir -p "$FLOWRYN_REPORT_DIR/qa" && curl -s "http://127.0.0.1:$port/" > "$FLOWRYN_REPORT_DIR/qa/page.html" && grep -q 'id="cart"' "$FLOWRYN_REPORT_DIR/qa/page.html" && (${axi} open "http://127.0.0.1:$port/" > "$FLOWRYN_REPORT_DIR/qa/walk.txt" 2>&1 && ${axi} screenshot "$FLOWRYN_REPORT_DIR/qa/cart.png" >> "$FLOWRYN_REPORT_DIR/qa/walk.txt" 2>&1; ${axi} stop > /dev/null 2>&1; true) && sleep 12`,
-    `bash docker rm -f ${container} && printf '<html><body><h1>QA evidence: ${label}</h1><p>GET / served the cart page (id cart present).</p><img src="cart.png" alt="the cart page"></body></html>\\n' > "$FLOWRYN_REPORT_DIR/qa/evidence.html" && $FLOWRYN_BIN stage done --review "file://$FLOWRYN_REPORT_DIR/qa/evidence.html"`,
+    `bash docker rm -f ${container} && cp ${JSON.stringify(evidenceFile)} "$FLOWRYN_REPORT_DIR/qa/evidence.html" && $FLOWRYN_BIN stage done --review "file://$FLOWRYN_REPORT_DIR/qa/evidence.html"`,
     "say the QA evidence is ready for review",
     `bash ${ack} && $FLOWRYN_BIN deliver --local`,
     "say DONE",
   ];
   return `FLOWRYN-SCRIPT: ${steps.join(" ;; ")}`;
+}
+
+/** Phase 1's QA page: the visual QA skill's template, filled the way a worker would. */
+function evidencePage(label: string): string {
+  const slots: Record<string, string> = {
+    "{{TITLE}}": `the ${label} cart page`,
+    "{{WHAT_CHANGED}}": "A cart page now loads at the site's address.",
+    "{{WHAT_CHECKED}}": "The page was served from a container and opened in a browser; it shows the cart.",
+    "{{VERDICT}}": "works",
+    "{{VERDICT_DETAIL}}": "No caveats.",
+    "{{DECISIONS}}": "Nothing to decide.",
+    "{{HOW_CHECKED}}": "<p>GET / served the cart page (id cart present).</p>",
+    "{{FLOWS}}": '<img src="cart.png" alt="the cart page">',
+    "{{RAW_OUTPUT}}": '<p><a href="walk.txt">walk.txt</a></p>',
+  };
+  return Object.entries(slots).reduce((page, [slot, text]) => page.replaceAll(slot, text), QA_TEMPLATE);
 }
 
 /** The phase plan the design hands in: phase 2, on Pi (scripted) or on a real Claude worker. */
@@ -545,7 +562,9 @@ async function twoPhaseFeature(
   const planFile = join(home, "plans", `${label}.md`);
   mkdirSync(join(home, "plans"), { recursive: true });
   writeFileSync(planFile, planText(label, phase2));
-  const reply = await call("dispatch", { project, kind: "ship", harness: "pi", workflow: "feature", title: `m5 live ${label} cart`, body: `Build the ${label} cart page, in stages.\n${phaseOneScript(label, planFile)}` });
+  const evidenceFile = join(home, "plans", `${label}-evidence.html`);
+  writeFileSync(evidenceFile, evidencePage(label));
+  const reply = await call("dispatch", { project, kind: "ship", harness: "pi", workflow: "feature-ui", title: `m5 live ${label} cart`, body: `Build the ${label} cart page, in stages.\n${phaseOneScript(label, planFile, evidenceFile)}` });
   if (!reply.ok) throw new Error(`dispatch: ${JSON.stringify(reply.error)}`);
   const { task, run } = reply.data as { task: string; run: string };
   dispatched.push(task);
@@ -614,7 +633,7 @@ async function main(): Promise<number> {
   const shops: Feature[] = [];
   for (const id of ["a", "b"]) {
     const path = scratchRepo(`shop-${id}`);
-    const added = await call("project add", { path, id: `shop-${id}`, mode: "local-only", harness: "pi", workflow: "feature" });
+    const added = await call("project add", { path, id: `shop-${id}`, mode: "local-only", harness: "pi", workflow: "feature-ui" });
     if (!added.ok) throw new Error(`project add shop-${id}: ${JSON.stringify(added.error)}`);
     shops.push({ name: `pi-${id}`, project: `shop-${id}`, checkout: path, mainBranch: "main" });
   }
@@ -622,7 +641,7 @@ async function main(): Promise<number> {
   if (claudeProject && flows.includes("claude")) {
     for (const id of ["a", "b"]) {
       const path = trustedWorktree(`main-${id}`);
-      const added = await call("project add", { path, id: `trusted-${id}`, mode: "local-only", "default-branch": `${runPrefix}main-${id}`, harness: "pi", workflow: "feature" });
+      const added = await call("project add", { path, id: `trusted-${id}`, mode: "local-only", "default-branch": `${runPrefix}main-${id}`, harness: "pi", workflow: "feature-ui" });
       if (!added.ok) throw new Error(`project add trusted-${id}: ${JSON.stringify(added.error)}`);
       trusted.push({ name: `claude-${id}`, project: `trusted-${id}`, checkout: path, mainBranch: `${runPrefix}main-${id}` });
     }

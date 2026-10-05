@@ -51,6 +51,7 @@ v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the 
 | **M5** plan, and auto-dispatch on landing | Done (M5) |
 | **M5** the terse style block | Done (M3 #5 wrote it into the leader's prompt and the worker contract; M5 made it configurable in `[style]` and leading) |
 | **M5** the three stage skills | Done (M5) |
+| **M5** `feature-ui` carries visual QA (`feature` is design, build, ship); every QA page opens with a plain-language card, checked at `stage done` | Done (plain-language-qa-rh) |
 | **M5 exit** a two-phase feature runs design, review, build, visual QA, review, ship and merge, and phase 2 starts by itself | Done (M5): fake leaders in `bun test`, and live in a Herdr lab session with two features side by side per flow and the worker pool capped at 4 (the scale the user approved, scaled from the design's "20 workers on a real machine" for cost). Peak concurrency: **2 live workers** in each flow. The Pi flow passed 17/17; the Claude flow passed 17/17 on its own run, after one real Claude worker in the combined run went idle at its ship stage without delivering; see [M5 notes](m5-notes.md#live-runs) |
 | **M5 exit** 20 workers under the caps | Done (M5) with fake workers (real processes through the real CLI, no model calls) on the fake Herdr: 24 ships against the design's caps, the host check and the queue (`test/integration/capacity.test.ts`); not with 20 live model sessions, for cost |
 

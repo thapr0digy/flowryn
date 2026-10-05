@@ -66,6 +66,7 @@ export const ERROR_CODES = {
   not_supported: EXIT.validation,
   run_not_active: EXIT.validation,
   invalid_report: EXIT.validation,
+  qa_page_invalid: EXIT.validation,
   // not found
   not_found: EXIT.notFound,
   // transport

@@ -853,7 +853,7 @@ Done since yesterday: 3 tasks</code></pre>
   <p class="opacity-80 max-w-3xl">You work in a particular way. You review a design in Lavish, the crew builds and writes tests on its own, visual QA collects evidence you review in Lavish, you ask for changes until it looks right, and then it ships. You want the next phase to start as soon as the previous one lands. And you want many workers running at once, while heavy stages such as Docker environments, visual QA and no-mistakes stay under hard caps. Flowryn splits this into two parts. It owns <strong>when and whether</strong>: stages, human review gates, capacity and auto-dispatch, because those need durable state, supervision and human-bound approval. <strong>Skills</strong> own <strong>how</strong>: how to test a stack with a front end, back end and database, how to walk an app with <code>chrome-devtools-axi</code> and capture evidence, and how to build the Lavish evidence page.</p>
 
   <svg class="fig w-full" viewBox="0 0 960 200" role="img" aria-labelledby="wfT">
-    <title id="wfT">The default feature workflow: stages, gates and capacity pools</title>
+    <title id="wfT">The feature-ui workflow: stages, gates and capacity pools</title>
     <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" opacity=".6"/></marker></defs>
     <g id="w-design"><title>Design stage: the worker builds the design as a Lavish page and iterates with you there</title><rect class="box" x="6" y="40" width="128" height="70" rx="8"/><text class="lbl" x="70" y="66" text-anchor="middle">Design</text><text class="small" x="70" y="84" text-anchor="middle">Lavish page</text><text class="tiny" x="70" y="100" text-anchor="middle">pool: worker</text></g>
     <path class="edge" d="M136,75 L150,75" marker-end="url(#a6)"/>
@@ -874,7 +874,13 @@ Done since yesterday: 3 tasks</code></pre>
 
   <div class="grid lg:grid-cols-2 gap-4">
 <pre class="code"><code># config.toml — workflows are data; stage know-how is skills
-[workflows.feature]
+[workflows.feature]     # no screens: no QA review
+stages = [
+  { id = "design", skill = "flowryn-design", gate = "review" },
+  { id = "build",  skill = "flowryn-build-test" },
+  { id = "ship",   pools = ["validation"], gate = "merge" },
+]
+[workflows.feature-ui]  # work with screens
 stages = [
   { id = "design", skill = "flowryn-design", gate = "review" },
   { id = "build",  skill = "flowryn-build-test" },
