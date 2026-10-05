@@ -5,7 +5,7 @@ export interface ParsedCommand {
   spec: VerbSpec;
   /** Positionals by name and flags by name; `--x-file` flags still hold their path here. */
   args: Record<string, unknown>;
-  /** File-backed flags to read before sending: argument name -> path or "-". */
+  /** File-backed flags (and stdin flags given -) to read before sending: argument name -> path or "-". */
   files: Record<string, string>;
 }
 
@@ -95,9 +95,12 @@ export function parseArgv(argv: string[], verbs: readonly VerbSpec[]): ParsedArg
       i++;
     }
     if (flag.fileFor) files[flag.fileFor] = value;
+    else if (flag.stdin && value === "-") files[name] = "-";
     else if (flag.type === "list") args[name] = [...((args[name] as string[] | undefined) ?? []), value];
     else args[name] = value;
   }
+  const fromStdin = Object.keys(files).filter((name) => files[name] === "-");
+  if (fromStdin.length > 1) throw new FlowrynError("bad_args", `only one flag can read stdin (-); got ${fromStdin.length}`, `usage: ${usage(spec)}`);
   if (positionals.length > spec.positionals.length) {
     throw new FlowrynError("bad_args", `too many arguments for ${spec.name}: ${positionals.slice(spec.positionals.length).join(" ")}`, `usage: ${usage(spec)}`);
   }
