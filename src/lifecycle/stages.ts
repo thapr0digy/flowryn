@@ -264,7 +264,7 @@ export function sendBack(db: Db, run: RunWithPolicy, gate: GateRow, words: strin
   appendEvent(db, { source: "cli", kind: "gate.changes", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, to: pos.def.stages[target]!.id, by }, ts: now });
   resolveRunItems(db, run.id, ["gate_ready"], `gate.changes ${gate.id}`, now);
   discardPlansOfGate(db, gate.id, now);
-  dismissGateQuestions(db, run, gate.id, now);
+  dismissGateQuestions(db, run, gate.id, now, "gate changes", "cli");
   const answers = gateAnswersNote(db, gate.id);
   requestStage(db, run, pos.def, target, `Changes requested at the ${gate.stage} review: ${text}${answers ? ` ${answers}` : ""} Back to stage ${pos.def.stages[target]!.id}.`, now);
   return pos.def.stages[target]!.id;

@@ -110,7 +110,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
   if (open) {
     db.query("UPDATE gates SET state = 'changes', feedback = 'promoted to a ship', closed_at = ?2 WHERE id = ?1").run(open.id, now);
     discardPlansOfGate(db, open.id, now);
-    dismissGateQuestions(db, run, open.id, now, "promoted");
+    dismissGateQuestions(db, run, open.id, now, "promoted", "cli");
     resolveRunItems(db, run.id, ["gate_ready"], "run.promoted", now);
   }
   // A worker that runs is stopped and its session resumed under the ship contract; one not launched yet starts as a ship.

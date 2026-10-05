@@ -232,6 +232,13 @@ describe("a review gate's questions", () => {
       expect(rows(f, "SELECT d.id, d.state, d.answered_via, i.resolved_by FROM decisions d JOIN items i ON i.decision_id = d.id WHERE d.run_id = ?1 ORDER BY d.id", run)).toEqual(
         ["q1", "q2", "q3"].map((id) => ({ id, state: "dismissed", answered_via: "run ended", resolved_by: `run.ended ${gate}` })),
       );
+      expect(rows(f, "SELECT DISTINCT source FROM events WHERE kind = 'decision.dismissed' AND run_id = ?1", run)).toEqual([{ source: "daemon" }]);
+      // Cleaned up, the run has ended for good: it is not resumed, so its gate cannot come back without its questions.
+      const resumed = await f.json(["resume", task]);
+      expect(resumed.code).not.toBe(0);
+      expect(resumed.reply.error).toMatchObject({ code: "run_not_active" });
+      expect((resumed.reply.error as { message: string }).message).toContain("cleaned up");
+      expect(f.run(run).state).toBe("failed");
     },
     { timeout: 90_000 },
   );

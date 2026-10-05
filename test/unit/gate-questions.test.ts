@@ -373,7 +373,7 @@ describe("a gate's questions as decisions", () => {
     open();
     tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null }));
     const run = getRun(db, runId)!;
-    expect(tx(db, () => dismissGateQuestions(db, run, "g1", NOW))).toEqual(["q2", "q3"]);
+    expect(tx(db, () => dismissGateQuestions(db, run, "g1", NOW, "gate changes", "cli"))).toEqual(["q2", "q3"]);
     expect(getDecision(db, "q2")!).toMatchObject({ state: "dismissed", answered_via: "gate changes" });
     expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q2'").get()).toEqual({ resolved_by: "gate.changes g1" });
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE state = 'open'").get()).toEqual({ n: 0 });
@@ -505,6 +505,7 @@ describe("a gate's questions as decisions", () => {
       ["dismissed", "run ended"],
     ]);
     expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q1'").get()).toEqual({ resolved_by: "run.ended g1" });
+    expect(db.query("SELECT DISTINCT source FROM events WHERE kind = 'decision.dismissed'").all()).toEqual([{ source: "cli" }]);
   });
 
   function scriptedLavish(body: string): string {

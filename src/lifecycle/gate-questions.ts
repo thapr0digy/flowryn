@@ -3,7 +3,7 @@ import { extname, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { openItem, resolveDecisionItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
-import { appendEvent } from "../db/events.ts";
+import { appendEvent, type EventSource } from "../db/events.ts";
 import type { GateQuestions } from "../lavish/questions.ts";
 import { MOUNT_SNIPPET, pageMountsWidget, type WidgetState } from "../lavish/widget.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
@@ -144,12 +144,12 @@ const CLOSERS: Record<GateQuestionsCloser, { why: string; resolvedBy: string }> 
 };
 
 /** The gate closed without them: the questions still open close unanswered. Call inside a transaction. */
-export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: number, by: GateQuestionsCloser = "gate changes"): string[] {
+export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: number, by: GateQuestionsCloser, source: EventSource): string[] {
   const { why, resolvedBy } = CLOSERS[by];
   const open = openIds(db, gateId);
   for (const id of open) {
     db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2, answered_via = ?3 WHERE id = ?1").run(id, now, by);
-    appendEvent(db, { source: "cli", kind: "decision.dismissed", runId: run.id, taskId: run.task_id, payload: { decision: id, gate: gateId, why }, ts: now });
+    appendEvent(db, { source, kind: "decision.dismissed", runId: run.id, taskId: run.task_id, payload: { decision: id, gate: gateId, why }, ts: now });
     resolveDecisionItems(db, id, `${resolvedBy} ${gateId}`, now);
   }
   return open;
@@ -161,15 +161,15 @@ export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: n
  * keeps them open until then, since a resume brings its gate back and the
  * gate still refuses a pass until the user answers. Call inside a transaction.
  */
-export function dismissRunQuestions(db: Db, run: RunRow, now: number, by: "run cancelled" | "run ended"): string[] {
+export function dismissRunQuestions(db: Db, run: RunRow, now: number, by: "run cancelled" | "run ended", source: EventSource): string[] {
   const gates = db.query("SELECT DISTINCT gate_id FROM decisions WHERE run_id = ?1 AND gate_id IS NOT NULL AND state = 'open'").all(run.id) as { gate_id: string }[];
-  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, by));
+  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, by, source));
 }
 
 /** A new run of the task replaces its earlier ones: their open review questions close unanswered. Call inside a transaction. */
-export function dismissEarlierRunsQuestions(db: Db, taskId: string, newRunId: string, now: number): string[] {
+export function dismissEarlierRunsQuestions(db: Db, taskId: string, newRunId: string, now: number, source: EventSource): string[] {
   const runs = db.query("SELECT DISTINCT r.* FROM runs r JOIN decisions d ON d.run_id = r.id WHERE r.task_id = ?1 AND r.id != ?2 AND d.gate_id IS NOT NULL AND d.state = 'open'").all(taskId, newRunId) as RunRow[];
-  return runs.flatMap((run) => dismissRunQuestions(db, run, now, "run ended"));
+  return runs.flatMap((run) => dismissRunQuestions(db, run, now, "run ended", source));
 }
 
 /** Record where the notes a poll took from the review page went. Call inside a transaction. */
