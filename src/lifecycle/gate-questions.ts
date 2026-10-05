@@ -136,10 +136,10 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   }
   const dismissed = all.filter((d) => d.state === "dismissed").map((d) => d.id);
   if (dismissed.length > 0) parts.push(`Closed unanswered: ${dismissed.join(", ")}.`);
-  const gate = db.query("SELECT comment, run_id FROM gates WHERE id = ?1").get(gateId) as { comment: string | null; run_id: string } | null;
-  const comment = gate?.comment ?? null;
+  const comment = (db.query("SELECT comment FROM gates WHERE id = ?1").get(gateId) as { comment: string | null } | null)?.comment ?? null;
   if (comment && comment.length > MAX_QUOTED_COMMENT) {
-    parts.push(`The user also wrote on the review page: """${comment.slice(0, MAX_QUOTED_COMMENT)}""" [cut; the full text is in the gate.comment events: flowryn show ${gate!.run_id}]`);
+    const rest = notes ? `the full text is in ${notes}` : "the rest was not kept";
+    parts.push(`The user also wrote on the review page: """${comment.slice(0, MAX_QUOTED_COMMENT)}""" [cut; ${rest}]`);
   } else if (comment) parts.push(`The user also wrote on the review page: """${comment}"""`);
   if (notes) parts.push(`The user also left notes on the review page: read ${notes}.`);
   return parts.length > 0 ? parts.join(" ") : null;

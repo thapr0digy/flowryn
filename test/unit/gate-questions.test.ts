@@ -10,7 +10,7 @@ import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetSt
 import { LavishPoller } from "../../src/lavish/poller.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, recordGateComment, recordGateNotes, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
 import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
 import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
@@ -602,21 +602,31 @@ describe("a gate's questions as decisions", () => {
     expect(tx(db, () => recordGateComment(db, "g1", "too late", NOW))).toBe("late");
   });
 
-  test("a long comment is cut in the verdict steer, which still ends with the next stage's instructions", () => {
+  test("a long comment is cut in the verdict steer, which names the notes file holding every Send in full and still ends with the next stage's instructions", async () => {
     db.query("UPDATE runs SET workflow = 'feature', stage = 'design' WHERE id = ?1").run(runId);
     open();
-    tx(db, () => {
-      lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null });
-      lavishAnswer(ctx(), { gate: "g1", decision: "q2", choice: ["claude"], note: null });
-      lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: ["flowryn tokens"], note: null });
-    });
-    expect(tx(db, () => recordGateComment(db, "g1", "a".repeat(3_000), NOW))).toBe("recorded");
-    expect(tx(db, () => recordGateComment(db, "g1", "b".repeat(3_000), NOW))).toBe("recorded");
+    const first = encodeSend({ gate: "g1", comment: "a".repeat(3_000), pass: false }, []);
+    const answers = [
+      { decision: "q1", choice: ["db"], note: null },
+      { decision: "q2", choice: ["claude"], note: null },
+      { decision: "q3", choice: ["flowryn tokens"], note: null },
+    ];
+    const second = encodeSend({ gate: "g1", comment: "b".repeat(3_000), pass: false }, answers);
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, `session:\n  status: feedback\nprompts[2]:\n  - prompt: "${ANSWER_MARK} ${first}"\n  - prompt: "${ANSWER_MARK} ${second}"\n`);
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+    } finally {
+      poller.stop();
+    }
     expect((db.query("SELECT comment FROM gates WHERE id = 'g1'").get() as { comment: string }).comment).toHaveLength(4_000);
-    const texts = (db.query("SELECT payload FROM events WHERE kind = 'gate.comment' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).text);
-    expect(texts).toEqual(["a".repeat(3_000), "b".repeat(3_000)]);
     const notes = join(reportDir, "design", "lavish-notes-g1.txt");
-    tx(db, () => recordGateNotes(db, "g1", notes, 1, NOW));
+    const kept = readFileSync(notes, "utf8");
+    expect(kept).toContain(`anything else for the worker\n${"a".repeat(3_000)}\n`);
+    expect(kept).toContain(`anything else for the worker\n${"b".repeat(3_000)}\n`);
     const config = { ...defaultConfig(h.home), state_dir: h.home };
     const steer = tx(db, () => {
       const approval = insertApproval(db, { task: taskId, ref: "gate:g1", head: "abc123", channel: "cli-tty", actor: "captain", action: "gate", now: NOW });
@@ -626,9 +636,27 @@ describe("a gate's questions as decisions", () => {
     const body = getMessage(db, steer!)!.body;
     const run = getRunWithPolicy(db, runId)!;
     expect(body.length).toBeLessThan(MAX_STEER_CHARS);
-    expect(body).toContain(`"""${"a".repeat(2_000)}""" [cut; the full text is in the gate.comment events: flowryn show ${runId}]`);
+    expect(body).toContain(`"""${"a".repeat(2_000)}""" [cut; the full text is in ${notes}]`);
     expect(body).toContain(`read ${notes}`);
     expect(body.endsWith(stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run)))).toBe(true);
+  });
+
+  test("a cut comment with no notes file kept says the rest was not kept", async () => {
+    open();
+    symlinkSync(join(h.home, "victim.txt"), join(reportDir, "design", "lavish-notes-g1.txt"));
+    const output = join(h.home, "feedback.out");
+    writeFileSync(output, `session:\n  status: feedback\nprompts[1]:\n  - prompt: "${ANSWER_MARK} ${encodeSend({ gate: "g1", comment: "c".repeat(3_000), pass: false }, [])}"\n`);
+    const logs: string[] = [];
+    const poller = new LavishPoller({ db, lavish: () => scriptedLavish(`cat ${JSON.stringify(output)}`), log: (m) => logs.push(m), now: () => NOW });
+    try {
+      poller.pass();
+      await waitUntil(() => logs.some((l) => l.startsWith("lavish: gate g1:")), 5_000, "the poll recorded");
+    } finally {
+      poller.stop();
+    }
+    expect(logs.some((l) => l.includes("cannot keep gate g1's notes"))).toBe(true);
+    expect(existsSync(join(h.home, "victim.txt"))).toBe(false);
+    expect(gateAnswersNote(db, "g1")).toContain(`"""${"c".repeat(2_000)}""" [cut; the rest was not kept]`);
   });
 
   test("a pass request from the page never passes the gate: once every question is answered it opens one P1 for the leader", () => {

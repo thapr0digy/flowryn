@@ -4,6 +4,7 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
 import { gatesToPoll, gatesWithWidget, recordGateComment, recordGateNotes, recordLavishEnded, requestGatePass, widgetState, type PassRequest } from "../lifecycle/gate-questions.ts";
+import { sanitizeBlock } from "../util/sanitize.ts";
 import { parsePollOutput, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
 
@@ -14,7 +15,8 @@ import { requirePageDir, writeWidget } from "./widget.ts";
  * (gatesToPoll). A poll returns when the user sends feedback; its answers are
  * recorded (lavishAnswer), then the Send's "anything else" (recordGateComment)
  * and its pass request (requestGatePass, a P1 for the leader: the page never
- * passes a gate), all in one transaction; any other prompts (annotations, chat) are kept in
+ * passes a gate), all in one transaction; any other prompts (annotations, chat),
+ * and each Send's "anything else" in full, are kept in
  * `lavish-notes-<gate>.txt` beside the page for the verdict steer to point
  * at, and the poll starts again. A poll Flowryn kills loses nothing: Lavish
  * keeps queued feedback until a poll delivers it. A poll that fails backs off
@@ -238,10 +240,14 @@ export class LavishPoller {
 
   private record(gate: string, page: string, out: PollOutput, raw: string): void {
     let notes: string | null = null;
-    if (out.otherPrompts > 0 || out.malformed > 0) {
+    const others = out.otherPrompts > 0 || out.malformed > 0;
+    const said = out.sends.filter((s) => s.gate === gate && s.comment !== null).map((s) => sanitizeBlock(s.comment!).trim()).filter((c) => c.length > 0);
+    if (others || said.length > 0) {
       const path = join(dirname(page), `lavish-notes-${gate}.txt`);
+      const stamp = new Date(this.deps.now()).toISOString();
+      const text = [...(others ? [`--- ${stamp}\n${raw}\n`] : []), ...said.map((c) => `--- ${stamp} anything else for the worker\n${c}\n`)].join("");
       try {
-        appendNotes(page, path, `--- ${new Date(this.deps.now()).toISOString()}\n${raw}\n`);
+        appendNotes(page, path, text);
         notes = path;
       } catch (error) {
         this.deps.log(`lavish: cannot keep gate ${gate}'s notes in ${path}: ${(error as Error).message}`);
@@ -257,10 +263,11 @@ export class LavishPoller {
       if (out.ended) recordLavishEnded(this.deps.db, gate, this.deps.now());
       return { outcomes: results, comments: kept, passes: asked };
     });
-    const said = outcomes.length > 0 || comments.length > 0 || passes.length > 0;
-    if (!out.ended && (said || notes)) this.replies.set(gate, { page, text: this.replyText(gate, outcomes, notes !== null, comments, passes) });
+    const othersKept = notes !== null && others;
+    const recorded = outcomes.length > 0 || comments.length > 0 || passes.length > 0;
+    if (!out.ended && (recorded || othersKept)) this.replies.set(gate, { page, text: this.replyText(gate, outcomes, othersKept, comments, passes) });
     const extra = [comments.length > 0 ? `comment ${comments.join(", ")}` : null, passes.length > 0 ? `pass ${passes.map((p) => p.outcome).join(", ")}` : null].filter(Boolean);
-    this.deps.log(`lavish: gate ${gate}: ${outcomes.length > 0 ? outcomes.map((o) => `${o.decision} ${o.outcome}`).join(", ") : "no answers"}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}${notes ? `, ${out.otherPrompts + out.malformed} other prompt(s) kept` : ""}${out.ended ? ", the user ended the session" : ""}`);
+    this.deps.log(`lavish: gate ${gate}: ${outcomes.length > 0 ? outcomes.map((o) => `${o.decision} ${o.outcome}`).join(", ") : "no answers"}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}${othersKept ? `, ${out.otherPrompts + out.malformed} other prompt(s) kept` : ""}${notes && said.length > 0 ? `, ${said.length} comment(s) kept in ${notes}` : ""}${out.ended ? ", the user ended the session" : ""}`);
   }
 
   /** The reply Lavish shows the user: what was recorded, what was not and why, and what comes next. */
