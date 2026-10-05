@@ -1,11 +1,12 @@
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type VerbSpec } from "../api/verbs.ts";
-import { leaderTiming } from "../config/leader.ts";
+import { awayConfig, leaderTiming } from "../config/leader.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
-import { composeBriefing, readOnlyBanner } from "./briefing.ts";
+import { AWAY_MAX_MS, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief } from "./away.ts";
+import { composeBriefing, composeReturnBrief, readOnlyBanner } from "./briefing.ts";
 
 /**
  * `flowryn brief`: the briefing on demand, as a session start would show it.
@@ -96,4 +97,69 @@ const dismiss: VerbSpec = {
   },
 };
 
-export const ATTENTION_VERBS: VerbSpec[] = [brief, dismiss];
+/** `back` reprints the last return brief for this long after away ended. */
+const REPRINT_MS = 24 * 60 * 60_000;
+
+/**
+ * `flowryn away [--until <time>] [--body-file -]`: you are away (autonomy
+ * spec 2). Every new item that needs you wakes the leader, so it reaches you
+ * in the remote-control chat. Run again to extend it. Delivery only: it
+ * grants nothing. The leader runs it only on your words.
+ */
+const away: VerbSpec = {
+  name: "away",
+  summary: "Say you are away: items that need you wake the leader until you are back or it expires",
+  positionals: [],
+  flags: {
+    until: { type: "string", help: "when it ends: HH:MM, +8h, +90m or YYYY-MM-DD HH:MM (default: [away] default_hours)", placeholder: "time" },
+    "body-file": { type: "string", help: "the user's words, from a file or - for stdin", fileFor: "body" },
+  },
+  kind: "mutation",
+  roles: ["leader", "human"],
+  apply(ctx, args) {
+    const now = ctx.now();
+    const cfg = awayConfig(ctx.config());
+    const text = stringArg(args, "until");
+    const until = text === undefined ? now + cfg.default_hours * 60 * 60_000 : parseUntil(text, now);
+    if (until === null) throw new FlowrynError("bad_args", `--until ${text} is not a time`, "HH:MM, +8h, +90m or YYYY-MM-DD HH:MM");
+    if (until <= now) throw new FlowrynError("bad_args", `--until ${text} is in the past`);
+    if (until - now > AWAY_MAX_MS) throw new FlowrynError("bad_args", `--until ${text} is more than 7 days away`);
+    const words = stringArg(args, "body") ?? null;
+    const { posture, extended } = startAway(ctx.db, { until, words, by: ctx.caller.role, now });
+    return {
+      data: { away: extended ? "extended" : "started", since: clockLabel(posture.since, now), until: clockLabel(posture.until, now), words: posture.words ?? "-", wake_cap_per_hour: cfg.max_wakes_per_hour },
+      hints: ["flowryn back ends it and prints the return brief"],
+    };
+  },
+  async settle(ctx, result) {
+    // Idle waiters look again: an item already waiting may now wake the leader.
+    ctx.attention.bus.notifyAll();
+    return result;
+  },
+};
+
+/**
+ * `flowryn back`: away ends, and you get the return brief. With no away to
+ * end, it reprints the last brief for a day after away ended.
+ */
+const back: VerbSpec = {
+  name: "back",
+  summary: "Say you are back: away ends and the return brief prints",
+  positionals: [],
+  flags: {},
+  kind: "mutation",
+  roles: ["leader", "human"],
+  apply(ctx) {
+    const now = ctx.now();
+    expireAway(ctx.db, now);
+    const endedNow = getAway(ctx.db, now) !== null;
+    const ended = endedNow ? endAway(ctx.db, "back", now) : lastAway(ctx.db);
+    if (!ended || now - ended.ended_at > REPRINT_MS) throw new FlowrynError("not_away", "you are not away", "flowryn away [--until <time>]");
+    // An expiry's brief printed here does not ride the next message as well.
+    takePendingBrief(ctx.db, now);
+    const text = composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: leaderTiming(ctx.config()).age_ms, reason: ended.reason });
+    return { data: { away: endedNow ? "ended" : `already ended (${ended.reason})`, brief: text.split("\n") } };
+  },
+};
+
+export const ATTENTION_VERBS: VerbSpec[] = [brief, dismiss, away, back];

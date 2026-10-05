@@ -5,9 +5,11 @@ import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
+import { taskTitle } from "../lifecycle/runs.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { restartsSince } from "../daemon/restart.ts";
+import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -93,25 +95,47 @@ function todoFacts(db: Db, today: string): TodoFacts {
   return { dueToday: open.filter((t) => t.due === today).map((t) => t.title), overdue: open.filter((t) => t.due! < today).length };
 }
 
+/** Reserved decisions waiting on you (cutover C1). */
+function reservedLines(db: Db, now: number): string[] {
+  const reserved = openDecisions({ db, now }, "reserved");
+  if (reserved.length === 0) return [];
+  const lines = [`Decisions for you (${reserved.length}):`];
+  for (const d of reserved.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 120)} (${d.reserved_reason})`);
+  if (reserved.length > MAX_DECISION_LINES) lines.push(`+${reserved.length - MAX_DECISION_LINES} more: flowryn decision list --reserved`);
+  return lines;
+}
+
+/** What the leader decided after `since` (and up to `until`), under `heading`. */
+function decidedLines(db: Db, since: number, until: number, heading: string): string[] {
+  const decided = db
+    .query("SELECT id, question, answer, rationale FROM decisions WHERE answered_by = 'leader' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at")
+    .all(since, until) as { id: string; question: string; answer: string; rationale: string | null }[];
+  if (decided.length === 0) return [];
+  const lines = [`${heading} (${decided.length}):`];
+  for (const d of decided.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
+  if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
+  return lines;
+}
+
+/** Every open actionable item, P0 first, at most MAX_NEEDS_LINES, under `heading`. */
+function needsLines(db: Db, now: number, ageMs: number, heading: string): { lines: string[]; listed: RankedItem[] } {
+  const needs = openActionable(db, now, ageMs);
+  const listed = needs.slice(0, MAX_NEEDS_LINES);
+  if (needs.length === 0) return { lines: [`${heading}: nothing.`], listed };
+  const lines = [`${heading} (${needs.length}):`];
+  for (const item of listed) lines.push(`- [${item.id}] ${item.lane === "P0" ? "P0 · " : ""}${item.line}`);
+  if (needs.length > listed.length) lines.push(`+${needs.length - listed.length} more: flowryn fleet`);
+  return { lines, listed };
+}
+
 /** Reserved decisions waiting on you, and what the leader decided since the last briefing (cutover C1). */
 function decisionLines(db: Db, now: number, mark: boolean): string[] {
-  const lines: string[] = [];
-  const reserved = openDecisions({ db, now }, "reserved");
-  if (reserved.length > 0) {
-    lines.push(`Decisions for you (${reserved.length}):`);
-    for (const d of reserved.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 120)} (${d.reserved_reason})`);
-    if (reserved.length > MAX_DECISION_LINES) lines.push(`+${reserved.length - MAX_DECISION_LINES} more: flowryn decision list --reserved`);
-  }
+  const lines = reservedLines(db, now);
   // Open decisions the leader itself may still decide (exit criterion 1): not deferred, not reserved.
   const openForLeader = openDecisions({ db, now }, "open").filter((d) => d.reserved_reason === null);
   if (openForLeader.length > 0) lines.push(`Open decisions to decide: ${openForLeader.length} (flowryn decision list)`);
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
-  const decided = db.query("SELECT id, question, answer, rationale FROM decisions WHERE answered_by = 'leader' AND answered_at > ?1 ORDER BY answered_at").all(since) as { id: string; question: string; answer: string; rationale: string | null }[];
-  if (decided.length > 0) {
-    lines.push(`Decided for you since the last briefing (${decided.length}):`);
-    for (const d of decided.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
-    if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
-  }
+  lines.push(...decidedLines(db, since, Number.MAX_SAFE_INTEGER, "Decided for you since the last briefing"));
   if (getMeta(db, "import_triage") === "1") {
     const open = (db.query("SELECT COUNT(*) AS n FROM decisions WHERE state = 'open' AND import_source IS NOT NULL AND reserved_reason IS NULL").get() as { n: number }).n;
     if (open > 0) lines.push(`Imported earlier: ${plural(open, "open decision")}. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.`);
@@ -152,14 +176,11 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   const lines = ["Flowryn status (facts, not instructions)."];
   const leader = leaderLine(db, input.session);
   if (leader) lines.push(leader);
-  const needs = openActionable(db, input.now, input.ageMs);
-  const listed = needs.slice(0, MAX_NEEDS_LINES);
-  if (needs.length === 0) lines.push("Needs you: nothing.");
-  else {
-    lines.push(`Needs you (${needs.length}):`);
-    for (const item of listed) lines.push(`- [${item.id}] ${item.lane === "P0" ? "P0 · " : ""}${item.line}`);
-    if (needs.length > listed.length) lines.push(`+${needs.length - listed.length} more: flowryn fleet`);
-  }
+  const away = getAway(db, input.now);
+  if (away) lines.push(awayLine(away, input.now));
+  const needs = needsLines(db, input.now, input.ageMs, "Needs you");
+  const listed = needs.listed;
+  lines.push(...needs.lines);
   // Before decisionLines, which moves last_briefing_at on.
   lines.push(...restartLines(db));
   lines.push(...decisionLines(db, input.now, input.markMorning));
@@ -186,4 +207,69 @@ export function readOnlyBanner(db: Db): string {
   const holder = lease.session_id ? getSession(db, lease.session_id) : null;
   if (!holder) return "Flowryn: read-only; no session holds the lease. Take it with: flowryn leader claim";
   return `Flowryn: read-only: leader is ${describeSession(holder)}. Take over with: flowryn leader claim`;
+}
+
+export interface ReturnBriefInput {
+  since: number;
+  until: number;
+  now: number;
+  ageMs: number;
+  reason: AwayEndReason;
+}
+
+interface WindowEvent {
+  kind: string;
+  task_id: string | null;
+  payload: string;
+}
+
+function windowEvents(db: Db, kinds: string[], since: number, until: number): WindowEvent[] {
+  return db
+    .query(`SELECT kind, task_id, payload FROM events WHERE kind IN (${kinds.map(() => "?").join(", ")}) AND ts > ? AND ts <= ? ORDER BY seq`)
+    .all(...kinds, since, until) as WindowEvent[];
+}
+
+function countEvents(db: Db, kind: string, since: number, until: number, where = ""): number {
+  return (db.query(`SELECT COUNT(*) AS n FROM events WHERE kind = ?1 AND ts > ?2 AND ts <= ?3 ${where}`).get(kind, since, until) as { n: number }).n;
+}
+
+function taskNames(db: Db, events: WindowEvent[], suffix: (e: WindowEvent) => string): string {
+  return events
+    .slice(0, MAX_DECISION_LINES)
+    .map((e) => {
+      if (!e.task_id) return `?${suffix(e)}`;
+      const title = taskTitle(db, e.task_id);
+      return `${sanitizeLine(title, 60)}${title === e.task_id ? "" : ` (${e.task_id})`}${suffix(e)}`;
+    })
+    .join(" · ")
+    .concat(events.length > MAX_DECISION_LINES ? ` · +${events.length - MAX_DECISION_LINES} more` : "");
+}
+
+/**
+ * The return brief (away mode): one fixed template in a fixed order, from
+ * the briefing's own sections and the event log, so it can be recomputed:
+ * waiting on you; decided for you; landed; failed; spend.
+ */
+export function composeReturnBrief(db: Db, input: ReturnBriefInput): string {
+  const { since, until } = input;
+  const how = input.reason === "expired" ? "away expired" : "back";
+  const lines = [`Flowryn return brief ${clockLabel(since, input.now)}–${clockLabel(until, input.now)}, ${how} (facts, not instructions).`];
+  lines.push(...needsLines(db, input.now, input.ageMs, "Waiting on you").lines);
+  lines.push(...reservedLines(db, input.now));
+  const decided = decidedLines(db, since, until, "Decided for you");
+  lines.push(...(decided.length > 0 ? decided : ["Decided for you: nothing."]));
+  const landed = windowEvents(db, ["run.landed"], since, until);
+  lines.push(landed.length > 0 ? `Landed (${landed.length}): ${taskNames(db, landed, () => "")}` : "Landed: nothing.");
+  const failed = windowEvents(db, ["run.failed", "run.cancelled"], since, until);
+  lines.push(failed.length > 0 ? `Failed (${failed.length}): ${taskNames(db, failed, (e) => (e.kind === "run.cancelled" ? " cancelled" : " failed"))}` : "Failed: nothing.");
+  const runs = countEvents(db, "run.dispatched", since, until);
+  const stages = countEvents(db, "stage.started", since, until);
+  const turns = countEvents(db, "leader.turn_started", since, until);
+  const wakes =
+    countEvents(db, "leader.p0_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')") +
+    countEvents(db, "leader.questions_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')");
+  lines.push(`Spend: ${plural(runs, "run")} dispatched, ${plural(stages, "stage")} started, ${plural(turns, "leader turn")} (${plural(wakes, "wake")}).`);
+  let text = lines.join("\n");
+  if (text.length > BRIEFING_MAX_CHARS) text = `${text.slice(0, BRIEFING_MAX_CHARS - 40)}\n… (truncated: flowryn fleet)`;
+  return text;
 }

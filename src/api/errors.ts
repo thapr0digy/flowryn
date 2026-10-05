@@ -67,6 +67,8 @@ export const ERROR_CODES = {
   run_not_active: EXIT.validation,
   invalid_report: EXIT.validation,
   qa_page_invalid: EXIT.validation,
+  // `flowryn back` with no away to end and no recent brief to reprint
+  not_away: EXIT.validation,
   // not found
   not_found: EXIT.notFound,
   // transport

@@ -1,10 +1,13 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
-import { composeBriefing, readOnlyBanner } from "../attention/briefing.ts";
+import { awaySuggestion, expireAway, getAway, takePendingBrief, type AwayPosture } from "../attention/away.ts";
+import { composeBriefing, composeReturnBrief, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
 import { QUESTION_KINDS } from "../attention/items.ts";
 import { composeDigest, digestCandidates, isQuestionWake, isWakePrompt, p0Candidate, p0Line, questionBatch, questionsText, questionWakeLine, type RankedItem } from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
+import { awayConfig } from "../config/leader.ts";
+import { localDate } from "../lifecycle/dates.ts";
 import { appendEvent } from "../db/events.ts";
 import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
@@ -137,10 +140,14 @@ function interruptedByTranscript(ctx: HandlerCtx, s: LeaderSessionRow): boolean 
   return offset !== undefined && transcriptShowsInterrupt(s.transcript_path, offset);
 }
 
-/** How a push would reach this session now, or null when nothing may be pushed to it. */
-function pushMode(s: LeaderSessionRow, now: number): PushMode | null {
+/**
+ * How a push would reach this session now, or null when nothing may be
+ * pushed to it. Away counts as inactive: your remote-control chat never
+ * fires idle_prompt on the Mac.
+ */
+function pushMode(s: LeaderSessionRow, now: number, away: AwayPosture | null): PushMode | null {
   if (busyNow(s, now)) return s.harness === "pi" ? "continuation" : null;
-  if (s.user_inactive_since === null) return null;
+  if (s.user_inactive_since === null && away === null) return null;
   if (s.harness === "pi" && s.has_ui !== 1) return null;
   return s.harness === "pi" ? "trigger" : "waiter";
 }
@@ -163,15 +170,19 @@ export interface Push {
  * questions go as a batch, and start a turn only once the oldest has waited
  * question_batch_ms (`dueAt` says when, so the waiter wakes then). Started
  * turns are capped per hour, P0s and question batches each on their own budget.
+ * While you are away, items only you can move count as P0s (p0Candidate) and
+ * the P0 budget is [away] max_wakes_per_hour.
  */
 export function leaderPush(ctx: HandlerCtx, s: LeaderSessionRow, now: number): { push: Push | null; dueAt: number | null } {
   if (!isHolder(ctx.db, s.session_id)) return { push: null, dueAt: null };
-  const mode = pushMode(s, now);
+  const away = getAway(ctx.db, now);
+  const mode = pushMode(s, now, away);
   const startsTurn = mode === "waiter" || mode === "trigger";
   const budgets = ctx.attention.notify();
+  const p0Budget = away ? awayConfig(ctx.config()).max_wakes_per_hour : budgets.max_triggered_turns_per_hour;
   if (mode) {
-    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx));
-    if (item && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") >= budgets.max_triggered_turns_per_hour)) {
+    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), away?.since ?? null);
+    if (item && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") >= p0Budget)) {
       return { push: { items: [item], mode, questions: false, more: 0 }, dueAt: null };
     }
   }
@@ -326,6 +337,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
       const woken = wokenQuestions(ctx.db, s.session_id, turn);
       if (woken.length > 0) lines.push(questionsText(woken));
     }
+    if (!isWakePrompt(input.prompt)) lines.push(...awayLines(ctx, s, now));
     const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx)));
     if (digest) {
       for (const item of digest.shown) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "digest", now });
@@ -334,6 +346,25 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
   }
   if (lines.length === 0) return { data: {} };
   return { data: deadline === null ? { context: lines.join("\n") } : { context: lines.join("\n"), deadline } };
+}
+
+/**
+ * What your own message carries about away mode: an expired away's return
+ * brief, once, or the idle suggestion. Your messages never end away (you
+ * answer from the remote-control chat while away): only `flowryn back` and
+ * the expiry do. Inside a transaction.
+ */
+function awayLines(ctx: HandlerCtx, s: LeaderSessionRow, now: number): string[] {
+  expireAway(ctx.db, now);
+  const ended = takePendingBrief(ctx.db, now);
+  if (ended) return [composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: ageMs(ctx), reason: ended.reason })];
+  const suggestion = awaySuggestion(ctx.db, {
+    inactiveSince: s.user_inactive_since,
+    now,
+    suggestAfterMs: awayConfig(ctx.config()).suggest_after_min * 60_000,
+    today: localDate(new Date(now)),
+  });
+  return suggestion ? [suggestion] : [];
 }
 
 /** Pre/PostToolUse: refresh the busy lease, and the heartbeat. A tool never starts a turn. */
@@ -591,7 +622,7 @@ export function stop(ctx: HandlerCtx): HandlerResult {
   const presented = confirmTurn(ctx.db, s.session_id, s.turn_no, now);
   heartbeat(ctx.db, s.session_id, now);
   if (s.harness === "claude" && s.continuations < MAX_LEADER_CONTINUATIONS && isHolder(ctx.db, s.session_id)) {
-    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx));
+    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), getAway(ctx.db, now)?.since ?? null);
     if (item && carry(ctx.db, { itemId: item.id, session: s.session_id, turn: s.turn_no, path: "continuation", now })) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
       appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: item.id, path: "continuation", turn: s.turn_no }, ts: now });
