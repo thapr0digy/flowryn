@@ -181,14 +181,15 @@ describe("a scout in a review with questions", () => {
       const decisions = () => {
         const db = env.h.db();
         try {
-          return db.query("SELECT d.id, d.state, (SELECT COUNT(*) FROM items i WHERE i.decision_id = d.id AND i.state = 'open') AS items FROM decisions d WHERE d.run_id = ?1").all(run);
+          return db.query("SELECT d.id, d.gate_id, d.state, d.answered_via, (SELECT COUNT(*) FROM items i WHERE i.decision_id = d.id AND i.state = 'open') AS items, (SELECT i.resolved_by FROM items i WHERE i.decision_id = d.id) AS resolved_by FROM decisions d WHERE d.run_id = ?1").all(run);
         } finally {
           db.close();
         }
       };
-      expect(decisions()).toEqual([{ id: "q1", state: "open", items: 1 }]);
+      const gate = (decisions()[0] as { gate_id: string }).gate_id;
+      expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "open", answered_via: null, items: 1, resolved_by: null }]);
       expect((await env.json(["promote", task])).code).toBe(0);
-      expect(decisions()).toEqual([{ id: "q1", state: "dismissed", items: 0 }]);
+      expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "dismissed", answered_via: "promoted", items: 0, resolved_by: `run.promoted ${gate}` }]);
     },
     { timeout: 60_000 },
   );

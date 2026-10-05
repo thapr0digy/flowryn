@@ -209,4 +209,31 @@ describe("a review gate's questions", () => {
     },
     { timeout: 90_000 },
   );
+
+  test(
+    "a failed run keeps its questions open until its cleanup ends it for good",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const { task, run } = await f.dispatch(steps("f", ["FAKE: sleep 120000"]), { kind: "ship" });
+      await f.waitRun(run, (r) => r.stage_state === "review", "the design review");
+      const db = f.h.db();
+      try {
+        db.query("UPDATE runs SET state = 'failed', liveness = 'dead', ended_at = ?2 WHERE id = ?1").run(run, Date.now());
+      } finally {
+        db.close();
+      }
+      expect(rows<{ state: string }>(f, "SELECT state FROM decisions WHERE run_id = ?1 ORDER BY id", run).map((d) => d.state)).toEqual(["open", "open", "open"]);
+      const cleaned = await f.json(["cleanup", task]);
+      expect(cleaned.code).toBe(0);
+      const gate = one<{ id: string }>(f, "SELECT id FROM gates WHERE run_id = ?1", run)!.id;
+      expect(rows(f, "SELECT d.id, d.state, d.answered_via, i.resolved_by FROM decisions d JOIN items i ON i.decision_id = d.id WHERE d.run_id = ?1 ORDER BY d.id", run)).toEqual(
+        ["q1", "q2", "q3"].map((id) => ({ id, state: "dismissed", answered_via: "run ended", resolved_by: `run.ended ${gate}` })),
+      );
+    },
+    { timeout: 90_000 },
+  );
 });
+

@@ -16,6 +16,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { closeMergeGate } from "./stages.ts";
+import { dismissRunQuestions } from "./gate-questions.ts";
 
 /**
  * Landing and cleanup (design sections 8 and 14). A task is landed only when
@@ -173,6 +174,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
     }
     db.query("UPDATE runs SET cleanup = 'done', cleanup_detail = ?2, liveness = 'dead', busy_until = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, outcome.reason, now);
     appendEvent(db, { source: "daemon", kind: "cleanup.done", runId: run.id, taskId: run.task_id, payload, ts: now });
+    dismissRunQuestions(db, current, now, "run ended");
     resolveRunItems(db, run.id, ["cleanup_refused"], "cleanup.done", now);
     if (current.state === "landed") {
       db.query("UPDATE runs SET state = 'cleaned', ended_at = ?2, updated_at = ?2, pending_launch = NULL WHERE id = ?1").run(run.id, now);

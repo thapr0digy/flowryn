@@ -25,6 +25,7 @@ import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitin
 import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { openRunForTask } from "./runs.ts";
+import { dismissEarlierRunsQuestions } from "./gate-questions.ts";
 
 /** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
 export { MAX_BACKLOG_BODY };
@@ -186,6 +187,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
        stage_state, waiting_since, pending_launch)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'launching', 'starting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'waiting', ?14, 'fresh')`,
   ).run(runId, r.taskId, r.harness, r.version, model, effort, r.workflow.id, first.id, randomUUID(), worktree, `${workers.branch_prefix}${r.taskId}`, r.base, hashToken(mintToken("run")), r.now);
+  dismissEarlierRunsQuestions(db, r.taskId, runId, r.now);
   const intent = r.existing
     ? recordIntent(db, { file: "backlog", verb: "start", taskId: r.taskId, positional: [r.taskId], now: r.now })
     : recordIntent(db, { file: "backlog", verb: "add", taskId: r.taskId, positional: [r.taskId, r.title], flags: { kind: r.kind, repo: r.project.id, body: r.body.slice(0, MAX_BACKLOG_BODY), start: true }, now: r.now });

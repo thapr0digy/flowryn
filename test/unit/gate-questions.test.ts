@@ -12,6 +12,10 @@ import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs
 import { getDecision } from "../../src/lifecycle/decisions.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
 import { cancelRun, failRun, getRun } from "../../src/lifecycle/runs.ts";
+import { createRun } from "../../src/lifecycle/dispatch.ts";
+import { getProject } from "../../src/lifecycle/projects.ts";
+import { defaultConfig } from "../../src/config/config.ts";
+import { DEFAULT_WORKFLOWS } from "../../src/config/workflows.ts";
 import { makeHome, seedRun, waitUntil, type TestHome } from "../helpers/harness.ts";
 
 /**
@@ -488,12 +492,19 @@ describe("a gate's questions as decisions", () => {
     expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
   });
 
-  test("questions closed by a promotion or by changes say so", () => {
+  test("a new run of the task ends a failed run's questions for good", () => {
     open();
-    const run = getRun(db, runId)!;
-    tx(db, () => dismissGateQuestions(db, run, "g1", NOW, "promoted"));
-    expect(getDecision(db, "q1")!.answered_via).toBe("promoted");
-    expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q1'").get()).toEqual({ resolved_by: "run.promoted g1" });
+    tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
+    const newRun = tx(db, () =>
+      createRun(db, defaultConfig(h.home), { taskId, title: taskId, body: "again", project: getProject(db, "web")!, kind: "ship", harness: "claude", version: "2.1.281", base: "abc123", workflow: DEFAULT_WORKFLOWS.feature!, sensitive: false, existing: true, by: "leader", override: null, now: NOW }),
+    );
+    expect(newRun).not.toBe(runId);
+    expect(["q1", "q2", "q3"].map((id) => [getDecision(db, id)!.state, getDecision(db, id)!.answered_via])).toEqual([
+      ["dismissed", "run ended"],
+      ["dismissed", "run ended"],
+      ["dismissed", "run ended"],
+    ]);
+    expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q1'").get()).toEqual({ resolved_by: "run.ended g1" });
   });
 
   function scriptedLavish(body: string): string {

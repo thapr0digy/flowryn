@@ -133,12 +133,13 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-/** What closes a gate's questions unanswered: the review sent back, the run cancelled, or the scout promoted. */
-export type GateQuestionsCloser = "gate changes" | "run cancelled" | "promoted";
+/** What closes a gate's questions unanswered: the review sent back, the run cancelled or ended for good, or the scout promoted. */
+export type GateQuestionsCloser = "gate changes" | "run cancelled" | "run ended" | "promoted";
 
 const CLOSERS: Record<GateQuestionsCloser, { why: string; resolvedBy: string }> = {
   "gate changes": { why: "the review was sent back", resolvedBy: "gate.changes" },
   "run cancelled": { why: "the run was cancelled", resolvedBy: "run.cancelled" },
+  "run ended": { why: "the run ended for good", resolvedBy: "run.ended" },
   promoted: { why: "the scout was promoted to a ship", resolvedBy: "run.promoted" },
 };
 
@@ -155,13 +156,20 @@ export function dismissGateQuestions(db: Db, run: RunRow, gateId: string, now: n
 }
 
 /**
- * The run was cancelled: its open review questions close unanswered. A
- * failed run keeps them open, since a resume brings its gate back and the
+ * The run was cancelled, or ended for good (cleaned up, or replaced by a new
+ * run of its task): its open review questions close unanswered. A failed run
+ * keeps them open until then, since a resume brings its gate back and the
  * gate still refuses a pass until the user answers. Call inside a transaction.
  */
-export function dismissCancelledRunQuestions(db: Db, run: RunRow, now: number): string[] {
+export function dismissRunQuestions(db: Db, run: RunRow, now: number, by: "run cancelled" | "run ended"): string[] {
   const gates = db.query("SELECT DISTINCT gate_id FROM decisions WHERE run_id = ?1 AND gate_id IS NOT NULL AND state = 'open'").all(run.id) as { gate_id: string }[];
-  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, "run cancelled"));
+  return gates.flatMap((g) => dismissGateQuestions(db, run, g.gate_id, now, by));
+}
+
+/** A new run of the task replaces its earlier ones: their open review questions close unanswered. Call inside a transaction. */
+export function dismissEarlierRunsQuestions(db: Db, taskId: string, newRunId: string, now: number): string[] {
+  const runs = db.query("SELECT DISTINCT r.* FROM runs r JOIN decisions d ON d.run_id = r.id WHERE r.task_id = ?1 AND r.id != ?2 AND d.gate_id IS NOT NULL AND d.state = 'open'").all(taskId, newRunId) as RunRow[];
+  return runs.flatMap((run) => dismissRunQuestions(db, run, now, "run ended"));
 }
 
 /** Record where the notes a poll took from the review page went. Call inside a transaction. */
