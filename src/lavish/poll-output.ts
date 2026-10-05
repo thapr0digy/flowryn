@@ -9,6 +9,8 @@
  * encoder applies, so the answers never depend on the TOON layout.
  */
 
+import { decode as decodeToon } from "@toon-format/toon";
+
 export const ANSWER_MARK = "flowryn-answer v1";
 const ANSWER_LINE = /flowryn-answer v1 ([A-Za-z0-9_-]{4,8000})/g;
 const PROMPT_COUNT = /^prompts\[(\d+)\]/m;
@@ -30,6 +32,32 @@ export interface PollOutput {
   malformed: number;
   /** Prompts that are not answers: annotations, chat, layout fixes. */
   otherPrompts: number;
+  /** The text of each prompt that is not an answer, as the user wrote it (empty when the output does not decode). */
+  feedback: string[];
+}
+
+const MAX_FEEDBACK = 20;
+const MAX_FEEDBACK_CHARS = 2_000;
+
+/** The user's own words in each prompt that is not an answer, read through the TOON decoder; nothing when it does not decode. */
+function feedbackTexts(stdout: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = decodeToon(stdout);
+  } catch {
+    return [];
+  }
+  const prompts = (parsed as { prompts?: unknown } | null)?.prompts;
+  if (!Array.isArray(prompts)) return [];
+  const texts: string[] = [];
+  for (const p of prompts) {
+    const text = (p as { prompt?: unknown } | null)?.prompt;
+    if (typeof text !== "string" || text.includes(ANSWER_MARK)) continue;
+    const trimmed = text.trim();
+    if (trimmed.length > 0) texts.push(trimmed.slice(0, MAX_FEEDBACK_CHARS));
+    if (texts.length >= MAX_FEEDBACK) break;
+  }
+  return texts;
 }
 
 function decode(token: string): LavishAnswer | null {
@@ -71,5 +99,5 @@ export function parsePollOutput(stdout: string): PollOutput {
     else malformed += 1;
   }
   const count = Number(PROMPT_COUNT.exec(stdout)?.[1] ?? "0");
-  return { status, ended, answers, malformed, otherPrompts: Math.max(0, count - answers.length - malformed) };
+  return { status, ended, answers, malformed, otherPrompts: Math.max(0, count - answers.length - malformed), feedback: feedbackTexts(stdout) };
 }

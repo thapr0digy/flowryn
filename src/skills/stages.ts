@@ -39,7 +39,7 @@ Goal: a design the user reviews and approves in Lavish, and a phase plan when th
    <what the phase does, and how to tell it is done>
 
    The \`workflow:\` line is optional. Approving the design approves the plan; each later phase starts by itself once the phase before it has landed (merged and cleaned up).
-6. Finish: \`$FLOWRYN_BIN stage done --review <url> [--plan-file $FLOWRYN_REPORT_DIR/plan.md] [--page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json]\`, then end your turn. The user reviews in Lavish; do not hold a \`lavish-axi poll\` open. A steer brings the verdict with the user's answers: approved (the next stage starts), or changes with the user's words (revise, then run stage done again).
+6. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/design/design.html [--plan-file $FLOWRYN_REPORT_DIR/plan.md] [--questions-file $FLOWRYN_REPORT_DIR/design/questions.json]\`, then end your turn. The user reviews in Lavish; Flowryn listens on the page for their feedback, so do not hold a \`lavish-axi poll\` open. A steer brings the verdict with the user's answers: approved (the next stage starts), or changes with the user's words (revise, then run stage done again).
 
 Rules:
 - Only the user passes a review gate. Never say or assume the design was approved until the steer says so.
@@ -77,7 +77,7 @@ Goal: evidence, reviewed in Lavish, that the change works in the running app: th
 2. Walk each flow the design names with chrome-devtools-axi, in your own session: \`export CHROME_DEVTOOLS_AXI_SESSION=flowryn-$FLOWRYN_RUN\`, then \`chrome-devtools-axi open <url>\`, \`snapshot\`, \`click @<uid>\`, \`fill @<uid> <text>\`, and \`chrome-devtools-axi screenshot $FLOWRYN_REPORT_DIR/qa/<step>.png\` after each step. Keep \`console\` and \`network\` errors.
 3. Write \`$FLOWRYN_REPORT_DIR/qa/evidence.html\`: each flow, its screenshots (relative paths, next to the page), what passed and what failed, and the relevant logs. Host it: \`lavish-axi $FLOWRYN_REPORT_DIR/qa/evidence.html\` prints its URL.
 4. Stop everything you started: \`docker compose -p flowryn-$FLOWRYN_RUN down\` (or \`docker rm -f\`), and \`chrome-devtools-axi stop\`. A labelled container still running after the stage is flagged to the user.
-5. Finish: \`$FLOWRYN_BIN stage done --review <url>\`, end your turn. A steer brings the verdict: approved (shipping starts), or changes with the user's words (back to build).
+5. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/qa/evidence.html\` (Flowryn listens on the page for the user's feedback; do not hold a \`lavish-axi poll\` open), end your turn. A steer brings the verdict: approved (shipping starts), or changes with the user's words (back to build).
 
 Rules:
 - A project without Docker: run the app the way its README says, capture the same evidence, and say so on the page.

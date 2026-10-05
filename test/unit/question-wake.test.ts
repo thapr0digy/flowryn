@@ -68,6 +68,13 @@ describe("the question batch", () => {
     expect(questionsText(batch.items, batch.more).split("\n").at(-1)).toBe("+2 more: flowryn decision list");
   });
 
+  test("what the user sent from a review page rides in the same batch as the worker questions", () => {
+    const now = Date.now();
+    const question = open("worker_question", "Worker question q1", now - 1_000);
+    const feedback = open("review_feedback", "Review feedback on t (design gate g1): the user wrote \"ok\"", now);
+    expect(questionBatch(db, "L1", WINDOW)!.items.map((i) => i.id)).toEqual([question, feedback]);
+  });
+
   test("a blocking question is never the P0 push path's: it goes in a batch", () => {
     const now = Date.now();
     open("worker_question_blocking", "Worker question q1, blocking", now);
@@ -138,12 +145,13 @@ describe("question pushes in presentations", () => {
 });
 
 describe("question alerts", () => {
-  test("a blocking question notifies at once; a non-blocking one never does", async () => {
+  test("a blocking question notifies at once; a non-blocking one, or review feedback, never does", async () => {
     const sent: string[] = [];
     const now = Date.now();
     const cfg = parseConfig("[notify]\nmacos = true\nherdr = false\nmin_interval_min = 30\n", h.home);
     const notifier = new NotifyPump({ db, config: () => cfg, runtime: () => null, now: () => now, log: () => {}, macos: async (title, body) => void sent.push(`${title}: ${body}`) });
     open("worker_question", "Worker question q1 later is fine", now);
+    open("review_feedback", "Review feedback on t (design gate g1): the user wrote \"ok\"", now);
     await notifier.tick();
     expect(sent).toEqual([]);
     open("worker_question_blocking", "Worker question q2, blocking", now);

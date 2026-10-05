@@ -19,6 +19,7 @@ afterEach(async () => {
 });
 
 const BATCH_MS = 1_500;
+const WAKE_BATCH_MS = 5_000;
 const T = 30_000;
 
 function questionConfig(extra = ""): string {
@@ -52,20 +53,24 @@ describe("worker questions wake the leader", () => {
   test(
     "an idle Claude leader is woken once for questions opened within the batch window, and the woken turn gets each in full",
     async () => {
-      env = await makeLeaderEnv({ extraConfig: questionConfig() });
+      // A window wide enough that both asks land in it even on a loaded machine.
+      env = await makeLeaderEnv({ extraConfig: questionConfig().replace(`${BATCH_MS}`, `${WAKE_BATCH_MS}`) });
       const lead = await env.claude();
       await lead.start();
       await lead.prompt("first");
       await lead.goInactive();
       const first = await ask(env, "FLOWRYN-MARK-QW1 which colour?");
       const second = await ask(env, "FLOWRYN-MARK-QW2 which shape?");
-      // Not before the window: the first question waits for the rest of its burst.
-      await Bun.sleep(BATCH_MS / 3);
-      expect(questionPushes(env)).toEqual([]);
-      await waitFor("the woken turn to present both", 10_000, () =>
+      await waitFor("the woken turn to present both", 15_000, () =>
         [first, second].every((id) => presentations(env!, id).some((p) => p.path === "waiter" && p.state === "presented")),
       );
       expect(questionPushes(env).map((p) => `${p.path}:${p.items.join(",")}`)).toEqual([`waiter:${first},${second}`]);
+      // Not before the window: the first question waited for the rest of its burst.
+      const [openedAt, pushedAt] = env.withDb((db) => [
+        (db.query("SELECT opened_at FROM items WHERE id = ?1").get(first) as { opened_at: number }).opened_at,
+        (db.query("SELECT ts FROM events WHERE kind = 'leader.questions_pushed'").get() as { ts: number }).ts,
+      ]);
+      expect(pushedAt - openedAt).toBeGreaterThanOrEqual(WAKE_BATCH_MS);
       const wake = lead.seen.find((s) => s.via === "waiter")!.text;
       expect(wake).toContain(`Flowryn questions [${first},${second}]`);
       // The wake line stays one line; the woken turn's prompt hook hands over every question's line.

@@ -84,7 +84,7 @@ describe("a review gate's questions", () => {
       const { task, run } = dispatched.reply.data as { task: string; run: string };
 
       const [refused, handed] = await e.replies(task, 2);
-      expect((refused!.reply.error as { code: string; message: string }).message).toContain("--page and --questions-file go together");
+      expect((refused!.reply.error as { code: string; message: string }).message).toContain("--questions-file needs --page");
       expect(handed!.code).toBe(0);
       expect(handed!.reply.data).toMatchObject({ stage: "design", state: "review", questions: ["q1", "q2", "q3"] });
       await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
@@ -122,6 +122,9 @@ describe("a review gate's questions", () => {
       const notes = join(gate.page_path, "..", `lavish-notes-${gate.id}.txt`);
       await waitUntil(() => existsSync(notes), 10_000, "the kept notes");
       expect(readFileSync(notes, "utf8")).toContain("Make the header bigger");
+      // What came from the page reaches the leader as one item, batched with worker questions.
+      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run) !== null, 10_000, "the review feedback item");
+      expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.line).toBe(`Review feedback on ${task} (design gate ${gate.id}): the user answered q1 = file and wrote "Make the header bigger"; notes beside the page`);
 
       // The leader relays q3 through Claude's prompt; the answer is held from the worker while the gate is open.
       const relayed = await leader.runBash(`flowryn decide q3 "flowryn keys" --by captain --json`, { approve: true });
@@ -139,10 +142,9 @@ describe("a review gate's questions", () => {
       expect(rows(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE 'Answer to your question%'", run)).toEqual([]);
       await waitUntil(() => readFileSync(widget, "utf8").includes('"answer":"claude, pi"'), 10_000, "the widget shows q2 answered");
       expect(readFileSync(widget, "utf8")).toContain('"via":"your leader"');
-      // Lavish's conversation hears what Flowryn recorded: the next poll carries it, and once nothing is
-      // left to poll for, one short poll does.
-      await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Your other notes reach the worker with the verdict. 2 questions still open."), 10_000, "the reply after q1");
-      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Every question is answered; the review now waits for your pass in Flowryn\. --timeout-ms 1500/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
+      // Lavish's conversation hears what Flowryn recorded with the next poll, which keeps listening while the gate is open.
+      await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Your leader has your notes now, and they reach the worker with the verdict. 2 questions still open."), 10_000, "the reply after q1");
+      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Every question is answered; the review now waits for your pass in Flowryn\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
 
       // Every question answered: the gate passes, and the verdict steer carries the answers and the notes.
       const passed = await e.approve(task, { gate: "design" });
@@ -244,3 +246,72 @@ describe("a review gate's questions", () => {
   );
 });
 
+describe("the daemon listens on every review page", () => {
+  test(
+    "a page with no questions is polled from the hand-in; feedback reading as a pass wakes the leader as the user's word, and the gate stays open",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only", extraConfig: "[leader]\nquestion_batch_ms = 300" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const leader = await e.claude();
+      await leader.start();
+      await leader.prompt("first");
+      await leader.goInactive();
+      const plain = "<html><body><h1>Design</h1></body></html>";
+      const body = [
+        "Feature listen",
+        `FAKE: write design/design.html ${plain}`,
+        "FAKE: stage-done --review https://lavish.test/listen/design --page $FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: sleep 120000",
+      ].join("\n");
+      const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: body });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
+      const gate = one<{ id: string; page_path: string }>(f, "SELECT id, page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+      expect(gate.page_path).toEndWith("design/design.html");
+      // No question to answer, yet the daemon listens, so Lavish never says the agent is not listening.
+      const calls = join(f.h.home, "lavish-calls.log");
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
+      expect(existsSync(join(gate.page_path, "..", "flowryn-questions.js"))).toBe(false);
+
+      queuePoll(f, 1, gate.id, [], ["approved, ship it"]);
+      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run) !== null, 10_000, "the review feedback item");
+      const line = one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.line;
+      expect(line).toBe(`Review feedback on ${task} (design gate ${gate.id}) reads as a pass (put flowryn gate pass to the user): the user wrote "approved, ship it"; notes beside the page`);
+      // It wakes the idle leader with the worker questions' batch; the gate passes only through a human channel.
+      await waitUntil(async () => (await leader.saw(`Review feedback on ${task}`)) > 0, 15_000, "the leader woken with the feedback");
+      expect(leader.seen.some((s) => s.via === "waiter" && s.text.includes("Flowryn questions ["))).toBe(true);
+      expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)!.state).toBe("open");
+      await waitUntil(() => readFileSync(calls, "utf8").includes("Your leader will ask you to confirm the pass in Flowryn."), 10_000, "the reply on the page");
+
+      const passed = await e.approve(task, { gate: "design" });
+      expect(passed.ok).toBe(true);
+      await f.waitRun(run, (r) => r.stage === "build", "the build stage");
+      expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.state).toBe("resolved");
+      // Let the woken turn finish before cleanup removes the leader's directory under it.
+      await leader.prompt("done");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "a file:// review URL under the report directory is the page; an https one without --page is not listened on, and says so",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const viaFile = await f.dispatch(["Feature file", "FAKE: write design/design.html <html></html>", "FAKE: stage-done --review file://$FLOWRYN_REPORT_DIR/design/design.html", "FAKE: sleep 120000"].join("\n"), { kind: "ship" });
+      const viaHttps = await f.dispatch(["Feature https", "FAKE: stage-done --review https://lavish.test/x/design", "FAKE: sleep 120000"].join("\n"), { kind: "ship" });
+      await f.waitRun(viaFile.run, (r) => r.stage_state === "review", "the file review");
+      await f.waitRun(viaHttps.run, (r) => r.stage_state === "review", "the https review");
+      expect(one<{ page_path: string | null }>(f, "SELECT page_path FROM gates WHERE run_id = ?1", viaFile.run)!.page_path).toEndWith("design/design.html");
+      expect(one<{ page_path: string | null }>(f, "SELECT page_path FROM gates WHERE run_id = ?1", viaHttps.run)!.page_path).toBeNull();
+      const [reply] = await e.replies(viaHttps.task, 1);
+      expect(reply!.reply.hints).toContain("no --page: Flowryn cannot listen on the review page; next time pass --page <its .html file>");
+    },
+    { timeout: 90_000 },
+  );
+});

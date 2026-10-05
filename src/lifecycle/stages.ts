@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
@@ -93,8 +94,8 @@ export function stageInstructions(pos: StagePos, ctx: StageTextContext): string 
   }
   if (ctx.delivery.kind === "ship" && ctx.delivery.mode === "no-mistakes") parts.push(`Do not run the no-mistakes pipeline yet: it runs in stage ${def.stages[def.stages.length - 1]!.id}, once that stage has started.`);
   if (stage.gate === "review") {
-    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url>, then end your turn; a steer brings the verdict.");
-    parts.push("Only a question you cannot proceed without goes to the user: add --page <html> --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.");
+    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict. Flowryn listens on the page itself: do not hold a lavish-axi poll open.");
+    parts.push("Only a question you cannot proceed without goes to the user: add --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.");
   }
   else parts.push("When it is done: $FLOWRYN_BIN stage done, then end your turn; a steer starts the next stage.");
   return parts.join(" ");
@@ -240,7 +241,7 @@ export function passReviewGate(db: Db, run: RunWithPolicy, gate: GateRow, approv
   const pos = positionOf(db, run, run.kind);
   db.query("UPDATE gates SET state = 'passed', approval_id = ?2, closed_at = ?3 WHERE id = ?1").run(gate.id, approval.id, now);
   appendEvent(db, { source: "cli", kind: "gate.passed", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, approval: approval.id, channel: approval.channel }, ts: now });
-  resolveRunItems(db, run.id, ["gate_ready"], `gate.passed ${gate.id}`, now);
+  resolveRunItems(db, run.id, ["gate_ready", "review_feedback"], `gate.passed ${gate.id}`, now);
   const plan = db.query("SELECT id FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gate.id) as { id: string } | null;
   // Approving the design approves the plan it carried (design section 11): its phases reach the backlog now.
   if (plan) approvePlan(db, plan.id, `gate ${gate.id} (${approval.channel})`, now);
@@ -262,7 +263,7 @@ export function sendBack(db: Db, run: RunWithPolicy, gate: GateRow, words: strin
   const text = sanitizeBlock(words).trim();
   db.query("UPDATE gates SET state = 'changes', feedback = ?2, closed_at = ?3 WHERE id = ?1").run(gate.id, text, now);
   appendEvent(db, { source: "cli", kind: "gate.changes", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, to: pos.def.stages[target]!.id, by }, ts: now });
-  resolveRunItems(db, run.id, ["gate_ready"], `gate.changes ${gate.id}`, now);
+  resolveRunItems(db, run.id, ["gate_ready", "review_feedback"], `gate.changes ${gate.id}`, now);
   discardPlansOfGate(db, gate.id, now);
   dismissGateQuestions(db, run, gate.id, now, "gate changes", "cli");
   const answers = gateAnswersNote(db, gate.id);
@@ -433,7 +434,7 @@ export async function beginLastStage(ctx: HandlerCtx, runId: string, target: str
 }
 
 function stageDoneHelp(pos: StagePos): string {
-  return pos.stage.gate === "review" ? "$FLOWRYN_BIN stage done --review <lavish url>" : "$FLOWRYN_BIN stage done";
+  return pos.stage.gate === "review" ? "$FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>" : "$FLOWRYN_BIN stage done";
 }
 
 /** The delivery ended the last stage: its pools go back and a ship's merge gate opens. Call inside a transaction. */
@@ -459,11 +460,22 @@ function workerRun(ctx: { db: Db; caller: HandlerCtx["caller"] }): RunWithPolicy
   return run;
 }
 
+/** A file:// review URL that names a page the daemon may poll, or null. */
+function reviewFilePage(review: string, reportDir: string): string | null {
+  if (!review.startsWith("file://")) return null;
+  try {
+    return checkReviewPage(fileURLToPath(review), reportDir, { widget: false });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `flowryn stage done [--review <url>] [--plan-file <path>] [--page <html>
- * --questions-file <json>]`: the worker finished its stage. A review gate
- * opens (a P1 with the link) and waits for a human channel, its questions
- * opened as decisions reserved for the user (gate-questions.ts); otherwise
+ * [--questions-file <json>]]`: the worker finished its stage. A review gate
+ * opens (a P1 with the link) and waits for a human channel; the daemon
+ * listens on its page, and its questions open as decisions reserved for the
+ * user (gate-questions.ts); otherwise
  * the next stage is requested and a steer starts it. Either way the worker
  * ends its turn.
  */
@@ -474,7 +486,7 @@ const stageDone: VerbSpec = {
   flags: {
     review: { type: "string", help: "the Lavish page to review (a review gate stage)", placeholder: "url" },
     "plan-file": { type: "string", help: "a phase plan for the later phases, approved with the design", fileFor: "plan" },
-    page: { type: "string", help: "the review page's .html file, which mounts the question widget (with --questions-file)", placeholder: "path" },
+    page: { type: "string", help: "the review page's .html file: Flowryn listens on it for the user's feedback, and it mounts the question widget with --questions-file", placeholder: "path" },
     "questions-file": { type: "string", help: "what only the user can answer, as JSON (with --page); each becomes a decision reserved for them", fileFor: "questions" },
   },
   kind: "mutation",
@@ -492,10 +504,12 @@ const stageDone: VerbSpec = {
     const planText = stringArg(args, "plan");
     const page = stringArg(args, "page");
     const questionsText = stringArg(args, "questions");
-    if ((page === undefined) !== (questionsText === undefined)) throw new FlowrynError("bad_args", "--page and --questions-file go together: the questions go on that page");
+    if (questionsText !== undefined && page === undefined) throw new FlowrynError("bad_args", "--questions-file needs --page: the questions go on that page");
     if (questionsText !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `questions ride with a review gate; stage ${pos.stage.id} has none: decide them yourself and record your choices`);
+    if (page !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `--page rides with a review gate; stage ${pos.stage.id} has none`);
     const questions = questionsText !== undefined ? parseGateQuestions(questionsText) : null;
-    const pagePath = page !== undefined ? checkReviewPage(page, reportDirFor(ctx.config(), run.task_id)) : null;
+    const reportDir = reportDirFor(ctx.config(), run.task_id);
+    const pagePath = page !== undefined ? checkReviewPage(page, reportDir, { widget: questions !== null }) : null;
     const title = taskTitle(ctx.db, run.task_id);
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
     if (pos.stage.gate === "review") {
@@ -504,6 +518,9 @@ const stageDone: VerbSpec = {
       const gateId = nextGateId(ctx.db);
       ctx.db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at) VALUES (?1, ?2, ?3, 'review', ?4, 'open', ?5)").run(gateId, run.id, pos.stage.id, review, now);
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
+      // The daemon listens on the page itself (src/lavish/poller.ts): --page, or a file:// review URL under the report directory.
+      const listened = pagePath ?? reviewFilePage(review, reportDir);
+      if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
       const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: review }, pagePath, questions, now) : [];
       let plan: string | null = null;
       if (planText !== undefined) {
@@ -516,7 +533,9 @@ const stageDone: VerbSpec = {
       resolveRunItems(ctx.db, run.id, ["worker_idle"], "stage.done", now);
       const asking = asked.length > 0 ? ` with ${asked.length} question${asked.length === 1 ? "" : "s"} for you (${asked.join(", ")})` : "";
       openItem(ctx.db, { kind: "gate_ready", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `${pos.stage.id} ready for review (${gateId})${asking}: ${title} (${run.project_id}) ${sanitizeLine(review, 120)}`, now });
-      return { data: { stage: pos.stage.id, gate: gateId, state: "review", plan: plan ?? "-", questions: asked }, hints: ["end your turn; a steer brings the verdict and the user's answers"] };
+      const hints = ["end your turn; a steer brings the verdict and the user's answers"];
+      if (!listened) hints.unshift("no --page: Flowryn cannot listen on the review page; next time pass --page <its .html file>");
+      return { data: { stage: pos.stage.id, gate: gateId, state: "review", plan: plan ?? "-", questions: asked }, hints };
     }
     if (planText !== undefined) throw new FlowrynError("bad_args", "a plan rides with a review gate (approving the design approves the plan); this stage has none");
     if (review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has no review gate; drop --review`);

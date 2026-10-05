@@ -3,18 +3,20 @@ import { dirname, join } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
-import { gatesToPoll, gatesWithWidget, recordGateNotes, recordLavishEnded, widgetState } from "../lifecycle/gate-questions.ts";
+import { gatesToPoll, gatesWithWidget, openGateFeedback, readsAsPass, recordGateNotes, recordLavishEnded, widgetState } from "../lifecycle/gate-questions.ts";
 import { parsePollOutput, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
 
 /**
- * The daemon's side of a review page's questions. Each pass rewrites the
- * question widget of every gate whose state changed, and keeps one
- * `lavish-axi poll <page>` running for each open gate with an open question
- * (gatesToPoll). A poll returns when the user sends feedback; its answers are
- * recorded (lavishAnswer), any other prompts (annotations, chat) are kept in
- * `lavish-notes-<gate>.txt` beside the page for the verdict steer to point
- * at, and the poll starts again. A poll Flowryn kills loses nothing: Lavish
+ * The daemon's side of a review page. Each pass rewrites the question widget
+ * of every gate whose state changed, and keeps one `lavish-axi poll <page>`
+ * running for each open gate with a known page, questions or not
+ * (gatesToPoll), so the leader never has to. A poll returns when the user
+ * sends feedback; its answers are recorded (lavishAnswer), any other prompts
+ * (annotations, chat) are kept in `lavish-notes-<gate>.txt` beside the page
+ * for the verdict steer to point at, what arrived opens one review_feedback
+ * item that wakes the leader with the worker questions, and the poll starts
+ * again. A poll Flowryn kills loses nothing: Lavish
  * keeps queued feedback until a poll delivers it. A poll that fails backs off
  * (2 s doubling to a minute); one that reports the user ended the session
  * stops for good. Nothing here decides anything: patterns and the database.
@@ -249,24 +251,28 @@ export class LavishPoller {
     const outcomes = tx(this.deps.db, () => {
       const results = out.answers.map((a) => ({ decision: a.decision, outcome: lavishAnswer(ctx, a) }));
       if (notes) recordGateNotes(this.deps.db, gate, notes, out.otherPrompts + out.malformed, this.deps.now());
+      const recorded = results.filter((r) => r.outcome === "recorded").map((r) => r.decision);
+      openGateFeedback(this.deps.db, gate, { recorded, feedback: out.feedback, notes }, this.deps.now());
       if (out.ended) recordLavishEnded(this.deps.db, gate, this.deps.now());
       return results;
     });
-    if (!out.ended && (outcomes.length > 0 || notes)) this.replies.set(gate, { page, text: this.replyText(gate, outcomes, notes !== null) });
+    if (!out.ended && (outcomes.length > 0 || notes)) this.replies.set(gate, { page, text: this.replyText(gate, outcomes, notes !== null, out.feedback.some(readsAsPass)) });
     this.deps.log(`lavish: gate ${gate}: ${outcomes.length > 0 ? outcomes.map((o) => `${o.decision} ${o.outcome}`).join(", ") : "no answers"}${notes ? `, ${out.otherPrompts + out.malformed} other prompt(s) kept` : ""}${out.ended ? ", the user ended the session" : ""}`);
   }
 
   /** The reply Lavish shows the user: what was recorded, what was not and why, and what comes next. */
-  private replyText(gate: string, outcomes: { decision: string; outcome: string }[], notes: boolean): string {
+  private replyText(gate: string, outcomes: { decision: string; outcome: string }[], notes: boolean, pass: boolean): string {
     const said = (outcome: string) => outcomes.filter((o) => o.outcome === outcome).map((o) => o.decision);
     const parts: string[] = [];
     if (said("recorded").length > 0) parts.push(`Flowryn recorded your answer to ${said("recorded").join(", ")}.`);
     if (said("late").length > 0) parts.push(`${said("late").join(", ")} already had an answer; it stands.`);
     if (said("invalid").length > 0) parts.push(`${said("invalid").join(", ")}: the choice was not one the question offers; answer again.`);
     if (said("stale").length > 0) parts.push("An answer from an earlier version of this page was ignored.");
-    if (notes) parts.push("Your other notes reach the worker with the verdict.");
-    const open = (this.deps.db.query("SELECT COUNT(*) AS n FROM decisions WHERE gate_id = ?1 AND state = 'open'").get(gate) as { n: number }).n;
-    parts.push(open > 0 ? `${open} question${open === 1 ? "" : "s"} still open.` : "Every question is answered; the review now waits for your pass in Flowryn.");
+    if (notes) parts.push("Your leader has your notes now, and they reach the worker with the verdict.");
+    if (pass) parts.push("Your leader will ask you to confirm the pass in Flowryn.");
+    const { total, open } = this.deps.db.query("SELECT COUNT(*) AS total, COALESCE(SUM(state = 'open'), 0) AS open FROM decisions WHERE gate_id = ?1").get(gate) as { total: number; open: number };
+    if (open > 0) parts.push(`${open} question${open === 1 ? "" : "s"} still open.`);
+    else if (total > 0) parts.push("Every question is answered; the review now waits for your pass in Flowryn.");
     return parts.join(" ");
   }
 

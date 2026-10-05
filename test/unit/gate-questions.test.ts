@@ -5,6 +5,7 @@ import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { encodeAnswer, parsePollOutput } from "../../src/lavish/poll-output.ts";
+import { readsAsPass } from "../../src/lifecycle/gate-questions.ts";
 import { normalizeAnswer, parseGateQuestions } from "../../src/lavish/questions.ts";
 import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetState } from "../../src/lavish/widget.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
@@ -140,6 +141,18 @@ describe("what lavish-axi poll printed", () => {
   test("the last batch before the user ended the session, and the ended reply", () => {
     expect(parsePollOutput(LAST_BATCH)).toMatchObject({ status: "feedback", ended: true, answers: [], otherPrompts: 1 });
     expect(parsePollOutput(ENDED)).toMatchObject({ status: "ended", ended: true, answers: [], otherPrompts: 0 });
+  });
+
+  test("assumption: the TOON decoder reads lavish-axi 0.1.65's list and table layouts, giving the user's own words for every prompt that is not an answer", () => {
+    expect(parsePollOutput(FEEDBACK).feedback).toEqual(['make the header bigger, "please"']);
+    expect(parsePollOutput(LAST_BATCH).feedback).toEqual(["bye"]);
+    expect(parsePollOutput(ENDED).feedback).toEqual([]);
+    expect(parsePollOutput("not toon at all: [").feedback).toEqual([]);
+  });
+
+  test("feedback reads as a pass only when it opens with a pass word", () => {
+    for (const text of ["pass", "Approved, ship it", "LGTM", "looks good to me", "go ahead"]) expect(readsAsPass(text)).toBe(true);
+    for (const text of ["do not pass yet", "passing thought: rename it", "not approved", "make the header bigger"]) expect(readsAsPass(text)).toBe(false);
   });
 
   test("a token that does not decode to an answer is counted, never recorded", () => {
