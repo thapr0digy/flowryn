@@ -239,7 +239,8 @@ export function requestGatePass(db: Db, gateId: string, now: number): PassReques
     eventSeq: event.seq,
     taskId: gate.task_id,
     runId: gate.run_id,
-    line: `The user asked on the review page to pass the ${gate.stage} review (${gateId}) of ${taskTitle(db, gate.task_id)}; the page cannot pass it. Confirm with them: flowryn gate pass ${gate.task_id} --gate-id ${gateId} (Claude asks them; Pi: flowryn_gate_pass), or they run flowryn approve ${gate.task_id} --gate ${gate.stage}`,
+    // The command comes first: an item line is cut at MAX_LINE_CHARS, and a long title must not cut it.
+    line: `Pass requested on the review page (not an approval): flowryn gate pass ${gate.task_id} --gate-id ${gateId}, or the user runs flowryn approve ${gate.task_id} --gate ${gate.stage}. ${gate.stage} review of ${sanitizeLine(taskTitle(db, gate.task_id), 60)}`,
     now,
   });
   return { outcome: "requested" };

@@ -576,7 +576,8 @@ describe("a gate's questions as decisions", () => {
     const item = db.query("SELECT lane, line FROM items WHERE kind = 'pass_requested' AND state = 'open'").all() as { lane: string; line: string }[];
     expect(item).toHaveLength(1);
     expect(item[0]!.lane).toBe("P1");
-    expect(item[0]!.line).toContain(`flowryn gate pass ${taskId} --gate-id g1`);
+    expect(item[0]!.line).toContain(`flowryn gate pass ${taskId} --gate-id g1, or the user runs flowryn approve ${taskId} --gate design.`);
+    expect(item[0]!.line).not.toContain("…");
     expect(db.query("SELECT state, approval_id FROM gates WHERE id = 'g1'").get()).toEqual({ state: "open", approval_id: null });
     expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
     expect(tx(db, () => requestGatePass(db, "g9", NOW))).toEqual({ outcome: "stale" });
