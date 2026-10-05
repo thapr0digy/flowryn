@@ -323,6 +323,13 @@ function open(): string[] {
 
 const ctx = () => ({ db, now: () => NOW + 10 });
 
+function scriptedLavish(body: string): string {
+  const bin = join(h.home, "scripted-lavish");
+  writeFileSync(bin, `#!/bin/sh\n${body}\n`);
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
 describe("a gate's questions as decisions", () => {
   test("each question opens reserved for the user, bound to the gate, with a P1 that carries it", () => {
     expect(open()).toEqual(["q1", "q2", "q3"]);
@@ -507,13 +514,6 @@ describe("a gate's questions as decisions", () => {
     expect(db.query("SELECT resolved_by FROM items WHERE decision_id = 'q1'").get()).toEqual({ resolved_by: "run.ended g1" });
     expect(db.query("SELECT DISTINCT source FROM events WHERE kind = 'decision.dismissed'").all()).toEqual([{ source: "cli" }]);
   });
-
-  function scriptedLavish(body: string): string {
-    const bin = join(h.home, "scripted-lavish");
-    writeFileSync(bin, `#!/bin/sh\n${body}\n`);
-    chmodSync(bin, 0o755);
-    return bin;
-  }
 
   test("notes are never appended through a symlink the worker put beside the page", async () => {
     open();
