@@ -39,11 +39,11 @@ function policy(taskId: string, extra: { kind?: string; auto?: number; importSou
   );
 }
 
-function run(taskId: string, state: string, id = `r-${taskId}-${state}`): void {
+function run(taskId: string, state: string, id = `r-${taskId}-${state}`, startedAt = 1): void {
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
-     VALUES (?1, ?2, 'claude', '1', ?3, 'busy', 'fix', 'build', '/tmp/wt', 'b', 'abc', 'h', 1, 1)`,
-  ).run(id, taskId, state);
+     VALUES (?1, ?2, 'claude', '1', ?3, 'busy', 'fix', 'build', '/tmp/wt', 'b', 'abc', 'h', ?4, ?4)`,
+  ).run(id, taskId, state, startedAt);
 }
 
 function backlog(...tasks: BacklogTask[]): void {
@@ -111,6 +111,19 @@ describe("each queued task's status", () => {
     backlog(task("web-blocker"), task("hand-done", { state: "done" }), task("web-dependent", { deps: ["blocked-by:web-blocker", "blocked-by:hand-done"] }));
     expect(queuedTask(db, "web-dependent")).toMatchObject({ status: "waiting", blockedBy: ["web-blocker", "hand-done"], waits: ["web-blocker"], next: "dispatch when unblocked" });
     run("web-blocker", "cleaned");
+    expect(queuedTask(db, "web-dependent")).toMatchObject({ status: "ready", waits: [] });
+  });
+
+  test("only a blocker's latest run counts: a promoted scout's landed report is not the ship landing", () => {
+    policy("web-promoted");
+    policy("web-dependent");
+    backlog(task("web-promoted", { state: "in_flight" }), task("web-dependent", { deps: ["blocked-by:web-promoted"] }));
+    run("web-promoted", "cleaned", "r-scout", 1);
+    run("web-promoted", "running", "r-ship", 2);
+    expect(queuedTask(db, "web-dependent")).toMatchObject({ status: "waiting", waits: ["web-promoted"] });
+    db.query("UPDATE runs SET state = 'failed' WHERE id = 'r-ship'").run();
+    expect(queuedTask(db, "web-dependent")).toMatchObject({ status: "waiting", waits: ["web-promoted"] });
+    run("web-promoted", "cleaned", "r-ship-again", 3);
     expect(queuedTask(db, "web-dependent")).toMatchObject({ status: "ready", waits: [] });
   });
 
