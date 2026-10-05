@@ -382,6 +382,26 @@ describe("ask --key", () => {
     expect(JSON.stringify(refused.reply)).toContain(`key db already used by ${decisionId}`);
   });
 
+  test("ask refuses a question that names no choice it blocks, and opens no decision", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const missing = await cliJson(h, ["ask", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(missing.code).toBe(3);
+    expect(JSON.stringify(missing.reply)).toContain("bad_args");
+    expect(JSON.stringify(missing.reply)).toContain("--blocks <what waits on the answer> is required");
+    const vague = await cliJson(h, ["ask", "--options", "sqlite,postgres", "--blocks", "stuff", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    expect(vague.code).toBe(3);
+    expect(JSON.stringify(vague.reply)).toContain("--blocks <what waits on the answer> is required");
+    const db = h.db();
+    const count = db.query("SELECT COUNT(*) AS n FROM decisions").get() as { n: number };
+    db.close();
+    expect(count.n).toBe(0);
+  });
+
   test("ask --key refuses a key a standalone decision from its task already holds", async () => {
     const h = makeHome();
     homes.push(h);
