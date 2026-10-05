@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../util/fsx.ts";
 import { ANSWER_MARK } from "./poll-output.ts";
-import type { DecidedChoice, QuestionKind } from "./questions.ts";
+import { OTHER_ANSWER, type DecidedChoice, type QuestionKind } from "./questions.ts";
 
 /**
  * The question widget (lavish-axi's input playbook): Flowryn writes
@@ -10,11 +10,14 @@ import type { DecidedChoice, QuestionKind } from "./questions.ts";
  * `<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>`.
  * The file is a fixed renderer plus the gate's state as JSON, so every page
  * asks the same way: radios with the recommendation preselected, checkboxes
- * for a multi choice, a text field for a free answer, an optional note each,
- * and one Submit that queues one prompt per answered question and sends them.
- * Flowryn rewrites the file whenever a question's state changes; a page whose
- * root carries data-lavish-live-reload-root reloads, and an answered question
- * shows locked, whichever channel answered it.
+ * for a multi choice, an "Other" choice beside the options (the user says what
+ * in the question's note), a text field for a free answer, one "anything else
+ * for the worker" box, and one Send that queues a single prompt carrying every
+ * answer (`flowryn-answers v2 <token>`) and sends it. "Send and request pass"
+ * adds a pass request: the page never passes the gate, it asks the leader to
+ * confirm it with the user. Flowryn rewrites the file whenever a question's
+ * state changes; a page whose root carries data-lavish-live-reload-root
+ * reloads, and an answered question shows locked, whichever channel answered.
  */
 
 export const WIDGET_FILE = "flowryn-questions.js";
@@ -58,7 +61,7 @@ export function widgetPath(pagePath: string): string {
 // The renderer runs in the reviewer's browser, inside Lavish's sandboxed frame.
 // It never reaches Flowryn: answers leave only through window.lavish.queuePrompt.
 const RENDERER = String.raw`
-(function (S, MARK) {
+(function (S, MARK, OTHER) {
   var mount = document.getElementById("flowryn-questions");
   if (!mount) return;
   var css = ".fq{font:inherit;color:inherit;display:grid;gap:1rem}.fq h3{margin:0;font-size:1.15em}" +
@@ -66,6 +69,7 @@ const RENDERER = String.raw`
     ".fq .fq-q.fq-done{opacity:.75;border-left-style:dashed}.fq .fq-meta{font-size:.8em;opacity:.75}" +
     ".fq label{display:flex;gap:.5rem;align-items:center;cursor:pointer}.fq .fq-rec{font-size:.72em;border:1px solid currentColor;border-radius:999px;padding:0 .45em;opacity:.8}" +
     ".fq input[type=text],.fq textarea{font:inherit;color:inherit;background:transparent;border:1px solid color-mix(in oklab,currentColor 35%,transparent);border-radius:.4rem;padding:.35rem .5rem;width:100%;max-width:36rem}" +
+    ".fq .fq-actions{display:flex;flex-wrap:wrap;gap:.6rem}" +
     ".fq button{font:inherit;padding:.4rem 1rem;border-radius:.5rem;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}" +
     ".fq .fq-status{font-size:.85em;opacity:.85}.fq ul{margin:.2rem 0 0 1.1rem;padding:0}.fq code{font-size:.9em}";
   var style = document.createElement("style");
@@ -90,8 +94,9 @@ const RENDERER = String.raw`
 
   var form = el("form", { "class": "fq", "data-lavish-question": "flowryn-" + S.gate });
   var openCount = S.questions.filter(function (q) { return q.state === "open"; }).length;
+  var asking = openCount > 0 && S.gateState === "open";
   form.appendChild(el("h3", { text: (S.gateState !== "open" ? "Questions, review closed" : openCount > 0 ? "Open questions" : "Questions, all answered") + " (" + S.stage + " review, gate " + S.gate + ")" }));
-  form.appendChild(el("div", { "class": "fq-meta", text: "Each is a Flowryn decision reserved for you. Answer here, or tell your leader (flowryn decide <id> <choice> --by captain); the first answer counts." }));
+  form.appendChild(el("div", { "class": "fq-meta", text: "Each is a Flowryn decision reserved for you. Pick an answer and press Send once for all of them, or tell your leader (flowryn decide <id> <choice> --by captain); the first answer counts." }));
   if (S.decided.length) {
     form.appendChild(el("div", { "class": "fq-meta", text: "Decided by the worker (send the review back if you disagree):" }));
     form.appendChild(el("ul", {}, S.decided.map(function (d) {
@@ -113,50 +118,69 @@ const RENDERER = String.raw`
       box.appendChild(el("input", { type: "text", name: q.id, placeholder: q.recommend[0] || "", "aria-label": q.question }));
       box.appendChild(el("div", { "class": "fq-meta", text: "Leave it empty to keep it open; the worker's default: " + (q.recommend[0] || "-") }));
     } else {
+      var type = q.kind === "multi" ? "checkbox" : "radio";
       q.options.forEach(function (o) {
         var rec = q.recommend.indexOf(o) >= 0;
         box.appendChild(el("label", {}, [
-          el("input", { type: q.kind === "multi" ? "checkbox" : "radio", name: q.id, value: o, checked: rec }),
+          el("input", { type: type, name: q.id, value: o, checked: rec }),
           el("span", { text: o }),
           rec ? el("span", { "class": "fq-rec", text: "recommended" }) : null,
         ]));
       });
+      box.appendChild(el("label", {}, [el("input", { type: type, name: q.id, value: OTHER }), el("span", { text: "Other: say what in the note below" })]));
     }
-    box.appendChild(el("input", { type: "text", name: q.id + "-note", placeholder: "Optional note for the worker", "aria-label": "Note on " + q.id }));
+    box.appendChild(el("input", { type: "text", name: q.id + "-note", placeholder: q.kind === "text" ? "Optional note for the worker" : "Note for the worker, or your own answer when you pick Other", "aria-label": "Note on " + q.id }));
     form.appendChild(box);
   });
   var status = el("div", { "class": "fq-status", role: "status" });
-  if (openCount > 0 && S.gateState === "open") form.appendChild(el("div", {}, [el("button", { type: "submit", text: "Submit answers" })]));
+  if (asking) {
+    form.appendChild(el("label", { "class": "fq-meta", "for": "fq-comment-" + S.gate, text: "Anything else for the worker (optional)" }));
+    form.appendChild(el("textarea", { id: "fq-comment-" + S.gate, name: "fq-comment", rows: "3", "aria-label": "Anything else for the worker" }));
+    form.appendChild(el("div", { "class": "fq-actions" }, [
+      el("button", { type: "submit", value: "send", text: "Send answers" }),
+      el("button", { type: "submit", value: "pass", "data-pass": true, text: "Send and request pass" }),
+    ]));
+    form.appendChild(el("div", { "class": "fq-meta", text: "Request pass asks your leader to confirm the pass with you; this page cannot pass the review." }));
+  }
   form.appendChild(status);
   form.addEventListener("submit", function (event) {
     event.preventDefault();
+    var pass = !!(event.submitter && event.submitter.getAttribute && event.submitter.getAttribute("data-pass") !== null);
     if (!window.lavish || !window.lavish.queuePrompt) {
       status.textContent = "Open this page through Lavish to answer here, or tell your leader your answers.";
       return;
     }
-    var data = new FormData(form), sent = [];
+    var data = new FormData(form), answers = [], lines = [], shown = [], empty = [], problems = [];
     S.questions.forEach(function (q) {
       if (q.state !== "open") return;
       var choice = q.kind === "text" ? [String(data.get(q.id) || "").trim()].filter(Boolean) : data.getAll(q.id).map(String);
-      if (!choice.length) return;
       var note = String(data.get(q.id + "-note") || "").trim();
-      var token = b64url(JSON.stringify({ g: S.gate, d: q.id, c: choice, n: note }));
-      var shown = choice.join(", ");
-      window.lavish.queuePrompt("Answer to " + q.id + " (" + q.question + "): " + shown + (note ? " (" + note + ")" : "") + "\n" + MARK + " " + token, {
-        tag: "choice", text: q.id + ": " + shown, queueKey: "flowryn:" + q.id, target: { type: "flowryn-answer", decision: q.id },
-      });
-      sent.push(q.id + ": " + shown);
+      if (!choice.length) { empty.push(q.id); return; }
+      if (choice.indexOf(OTHER) >= 0 && !note) { problems.push(q.id + ": say what Other means in its note"); return; }
+      answers.push({ d: q.id, c: choice, n: note });
+      lines.push("- " + q.id + " (" + q.question + "): " + choice.join(", ") + (note ? " — " + note : ""));
+      shown.push(q.id + ": " + choice.join(", "));
     });
-    if (!sent.length) { status.textContent = "Nothing to send: every open question is empty."; return; }
+    var comment = String(data.get("fq-comment") || "").trim();
+    if (problems.length) { status.textContent = "Nothing sent. " + problems.join("; ") + "."; return; }
+    if (pass && empty.length) { status.textContent = "Nothing sent. A pass needs every question answered: " + empty.join(", ") + " is empty."; return; }
+    if (!answers.length && !comment && !pass) { status.textContent = "Nothing to send: every open question is empty."; return; }
+    var text = "Answers for the " + S.stage + " review (gate " + S.gate + "):\n" + (lines.length ? lines.join("\n") : "- (no answers)") +
+      (comment ? "\nAnything else: " + comment : "") + (pass ? "\nPlease pass this review." : "") +
+      "\n" + MARK + " " + b64url(JSON.stringify({ g: S.gate, a: answers, m: comment, p: pass }));
+    window.lavish.queuePrompt(text, {
+      tag: "choice", text: (shown.length ? shown.join("; ") : "No answers") + (pass ? " · pass requested" : ""), queueKey: "flowryn:" + S.gate, target: { type: "flowryn-answers", gate: S.gate },
+    });
     if (window.lavish.sendQueuedPrompts) window.lavish.sendQueuedPrompts();
-    status.textContent = "Sent to Flowryn: " + sent.join("; ") + ". Each locks here once recorded.";
+    status.textContent = "Sent to Flowryn: " + (shown.length ? shown.join("; ") : "no answers") + (comment ? "; your note for the worker" : "") +
+      (pass ? "; a pass request (your leader asks you to confirm it)" : "") + ". Each question locks here once recorded." + (empty.length ? " Still open: " + empty.join(", ") + "." : "");
   });
   mount.replaceChildren(form);
 })`;
 
 /** The widget file for a gate's state. */
 export function renderWidget(state: WidgetState): string {
-  return `// Written by Flowryn for gate ${state.gate}; it is rewritten when a question's state changes.\n${RENDERER.trim()}(${JSON.stringify(state)}, ${JSON.stringify(ANSWER_MARK)});\n`;
+  return `// Written by Flowryn for gate ${state.gate}; it is rewritten when a question's state changes.\n${RENDERER.trim()}(${JSON.stringify(state)}, ${JSON.stringify(ANSWER_MARK)}, ${JSON.stringify(OTHER_ANSWER)});\n`;
 }
 
 /**

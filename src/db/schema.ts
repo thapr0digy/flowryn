@@ -406,6 +406,14 @@ ALTER TABLE gates ADD COLUMN lavish_ended INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gates ADD COLUMN notes_path TEXT;
 `;
 
+/**
+ * Gate comment: what the user wrote in the review page's "anything else for
+ * the worker" box, verbatim, each Send appended (the verdict steer carries it).
+ */
+const GATE_COMMENT_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN comment TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -418,6 +426,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 9, name: "legacy-source", sql: LEGACY_SOURCE_SQL },
   { version: 10, name: "steer-urgent", sql: STEER_URGENT_SQL },
   { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
+  { version: 12, name: "gate-comment", sql: GATE_COMMENT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
