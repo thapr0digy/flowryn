@@ -3,7 +3,7 @@
 # directories, and verdict recording.
 #
 # Source it from a spike script. Every Herdr call goes through lab_herdr, which
-# delegates to Firstmate's fm-herdr-lab.sh helper; that helper appends
+# delegates to the vendored lab helper spikes/lib/herdr-lab.sh; that helper appends
 # --session <lab> and refuses server and session lifecycle operations.
 #
 # If FLOWRYN_LAB_SESSION is set (by spikes/lib/lab-hold.sh or run-all.sh), the
@@ -13,12 +13,12 @@
 SPIKES_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export SPIKES_ROOT
 export SPIKES_RUNS="${SPIKES_RUNS:-$SPIKES_ROOT/.runs}"
-export HERDR_LAB_HELPER="${HERDR_LAB_HELPER:-${FIRSTMATE_REPO:-$HOME/projects/firstmate}/bin/fm-herdr-lab.sh}"
+export HERDR_LAB_HELPER="${HERDR_LAB_HELPER:-$SPIKES_ROOT/lib/herdr-lab.sh}"
 # Pin the helper's tripwire directory so sandboxed and unsandboxed shells agree.
 # Nothing a spike or a live run starts posts a notification to your Mac (a Flowryn daemon records, never delivers).
 export FLOWRYN_NOTIFY=off
-export FM_HERDR_LAB_STATE_DIR="${FM_HERDR_LAB_STATE_DIR:-$SPIKES_RUNS/lab-state}"
-mkdir -p "$SPIKES_RUNS/results" "$FM_HERDR_LAB_STATE_DIR"
+export HERDR_LAB_STATE_DIR="${HERDR_LAB_STATE_DIR:-$SPIKES_RUNS/lab-state}"
+mkdir -p "$SPIKES_RUNS/results" "$HERDR_LAB_STATE_DIR"
 
 lab_die() {
   echo "spike: $*" >&2
@@ -56,7 +56,7 @@ lab_ensure() {
     "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || lab_die "lab provision failed"
   fi
   case "$HERDR_LAB_SESSION" in
-    fm-lab-*) ;;
+    fl-lab-*) ;;
     *) lab_die "refusing non-lab session name: $HERDR_LAB_SESSION" ;;
   esac
   export HERDR_LAB_SESSION

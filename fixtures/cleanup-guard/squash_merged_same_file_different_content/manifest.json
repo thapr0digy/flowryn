@@ -1,7 +1,7 @@
 {
   "name": "squash_merged_same_file_different_content",
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_same_file_different_content_refuses",
-  "firstmate_matrix_row": "q3",
+  "reference_matrix_row": "q3",
   "description": "Same squash-merged history, but the worktree is left at the stale pre-rebase head whose shared.txt blob differs from what landed. Not an ancestor of the PR head, its per-commit patch-ids differ, and a 3-way merge of origin/main with it conflicts on shared.txt. Touching the same path is not proof the local content landed: refused, and the worktree, task branch and HEAD must be retained.",
   "delivery_mode": "no-mistakes",
   "inputs": {

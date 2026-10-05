@@ -183,7 +183,7 @@ is_commit_anywhere() {
 
 patch_id() { gitx show --pretty=medium --no-ext-diff "$1" | git patch-id --stable | awk 'NR==1{print $1}'; }
 
-# Firstmate's unpushed_patches_are_in_pr_head, evaluated on the fixture.
+# The reference's unpushed_patches_are_in_pr_head, evaluated on the fixture.
 patches_in() {
   local target=$1 head=${REF[local_head]} base ids c unpushed
   base=$(gitx merge-base "$head" "$target") || return 1

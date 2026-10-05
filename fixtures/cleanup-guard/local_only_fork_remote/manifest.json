@@ -1,8 +1,8 @@
 {
   "name": "local_only_fork_remote",
   "ported_from": "tests/fm-teardown.test.sh:test_local_only_fork_remote_allows",
-  "firstmate_matrix_row": "a",
-  "description": "Local-only task whose HEAD (an empty commit) was pushed to a fork remote, not origin. A fork is still a remote: the worktree HEAD is reachable from refs/remotes/fork/fm/task-x1, so cleanup is allowed. Firstmate's pre-fix code false-refused this upstream-contribution flow.",
+  "reference_matrix_row": "a",
+  "description": "Local-only task whose HEAD (an empty commit) was pushed to a fork remote, not origin. A fork is still a remote: the worktree HEAD is reachable from refs/remotes/fork/fm/task-x1, so cleanup is allowed. The reference's pre-fix code false-refused this upstream-contribution flow.",
   "delivery_mode": "local-only",
   "inputs": {
     "operation": "cleanup",

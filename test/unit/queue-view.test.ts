@@ -100,9 +100,9 @@ describe("each queued task's status", () => {
   });
 
   test("an imported queued scout is ready to dispatch by hand", () => {
-    policy("web-amend", { kind: "scout", importSource: "firstmate:web-amend" });
+    policy("web-amend", { kind: "scout", importSource: "legacy:web-amend" });
     backlog(task("web-amend", { kind: "scout" }));
-    expect(queuedTask(db, "web-amend")).toMatchObject({ kind: "scout", status: "ready", auto: "off", next: "flowryn dispatch web --task web-amend", filed: "imported", importSource: "firstmate:web-amend" });
+    expect(queuedTask(db, "web-amend")).toMatchObject({ kind: "scout", status: "ready", auto: "off", next: "flowryn dispatch web --task web-amend", filed: "imported", importSource: "legacy:web-amend" });
   });
 
   test("a task waits until its blockers land: a Flowryn task's run must be cleaned, a hand task done", () => {
@@ -221,7 +221,7 @@ describe("ordering and the count", () => {
 describe("the board", () => {
   test("a QUEUED section lists the same set, at most 6 rows", () => {
     const tasks = Array.from({ length: 7 }, (_, i) => task(`web-q${i}`));
-    policy("web-q0", { importSource: "firstmate:web-q0" });
+    policy("web-q0", { importSource: "legacy:web-q0" });
     backlog(...tasks, task("web-held", { hold: { kind: "parked", reason: "failed", until: null } }));
     const lines = boardFrame(db, { now: 10, daemon: "down" }, 86_400_000);
     const at = lines.indexOf("QUEUED (8)");

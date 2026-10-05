@@ -2,8 +2,8 @@
 # The cutover live run (docs/cutover-notes.md "Live runs"): a real Claude
 # scout raising, and the leader and the user answering, standalone decisions,
 # and a real Claude worker wedged by a user-level permission hook. Everything
-# Herdr-side happens in an isolated lab session from Firstmate's
-# fm-herdr-lab.sh, never the default session.
+# Herdr-side happens in an isolated lab session from
+# spikes/lib/herdr-lab.sh, never the default session.
 #
 #   scripts/lab/cutover-live.sh [--keep] [phase ...]
 #   phases: decisions prompt (default: both)

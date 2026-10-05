@@ -1,7 +1,7 @@
 {
   "name": "pr_check_records_remote_head_when_local_lags",
   "ported_from": "tests/fm-teardown.test.sh:test_pr_check_records_remote_head_when_local_lags",
-  "firstmate_matrix_row": "p",
+  "reference_matrix_row": "p",
   "description": "PR-head recording when the local worktree lags the forge: the forge PR head is a no-mistakes follow-up commit on top of the local HEAD that the worktree never pulled. Recording must store the forge PR head, not the local HEAD.",
   "delivery_mode": "no-mistakes",
   "inputs": {

@@ -12,7 +12,7 @@ import { runCommand } from "./command.ts";
  * SIGTERM, given a grace period, and sent SIGKILL only while it is still the
  * same process. A scan that fails refuses the cleanup before anything is
  * removed; processes that survive every pass refuse it too. Ported from
- * Firstmate's reap_task_worktree_processes (bin/fm-teardown.sh, a09090d1).
+ * the previous orchestrator's reap_task_worktree_processes (bin/fm-teardown.sh, a09090d1).
  */
 
 export interface ReapOptions {

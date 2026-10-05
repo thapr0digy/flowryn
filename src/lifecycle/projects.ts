@@ -66,13 +66,13 @@ export function getProject(db: Db, id: string): ProjectRow | null {
   return db.query("SELECT * FROM projects WHERE id = ?1").get(id) as ProjectRow | null;
 }
 
-/** Insert a project row and its event (call inside a transaction); import_source marks one an import created. */
-export function insertProject(db: Db, row: ProjectRow, importSource: string | null = null): void {
+/** Insert a project row and its event (call inside a transaction). */
+export function insertProject(db: Db, row: ProjectRow): void {
   db.query(
-    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, import_source)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
-  ).run(row.id, row.repo_url, row.path, row.default_branch, row.delivery_mode, row.yolo, row.priority, row.harness, row.workflow, row.autonomy, importSource);
-  appendEvent(db, { source: "cli", kind: "project.added", payload: { ...row, import_source: importSource } });
+    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+  ).run(row.id, row.repo_url, row.path, row.default_branch, row.delivery_mode, row.yolo, row.priority, row.harness, row.workflow, row.autonomy);
+  appendEvent(db, { source: "cli", kind: "project.added", payload: { ...row } });
 }
 
 export function listProjects(db: Db): ProjectRow[] {

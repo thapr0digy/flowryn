@@ -1,7 +1,7 @@
 {
   "name": "squash_merged_stale_local_when_forge_unreachable",
   "ported_from": "tests/fm-teardown.test.sh:test_squash_merged_stale_local_refuses_when_forge_unreachable",
-  "firstmate_matrix_row": "q5",
+  "reference_matrix_row": "q5",
   "description": "The stale pre-rebase worktree of squash_merged_same_file_different_content, but the forge is unreachable (every gh call fails). The PR cannot be consulted and the content check is inconclusive (merge-tree conflicts on shared.txt): refused, fail-safe, with the worktree, task branch and HEAD retained.",
   "delivery_mode": "no-mistakes",
   "inputs": {

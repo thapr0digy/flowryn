@@ -2,7 +2,7 @@
 # p14-abort: the extension aborts the current run (the Pi worker interrupt
 # path), with no keystroke.
 #
-# API: ExtensionContext.abort() (0.87.1 types.d.ts; Firstmate
+# API: ExtensionContext.abort() (0.87.1 types.d.ts; the previous orchestrator
 # fm-branch-supervision.ts calls ctx.abort()).
 # Method: prompt `sleep 29.7` through bash; at tool_execution_start the probe
 # queues two follow-ups (Q14 custom message, U14 user message). Once the sleep

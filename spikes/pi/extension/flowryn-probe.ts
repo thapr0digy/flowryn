@@ -5,8 +5,8 @@
 //
 // API source of truth: @earendil-works/pi-coding-agent 0.87.1 (npm, 2026-09-22),
 // dist/core/extensions/types.d.ts and docs/extensions.md from that tarball, plus
-// Firstmate's live extensions (/Users/pr0digy/projects/firstmate/.pi/extensions,
-// verified by Firstmate against Pi 0.80.5 - 0.84.4). Each call cites where it was
+// the previous orchestrator's live Pi extensions (its .pi/extensions,
+// verified by the previous orchestrator against Pi 0.80.5 - 0.84.4). Each call cites where it was
 // seen; "types.d.ts" means the 0.87.1 declaration file.
 //
 // Output: JSON lines appended to $FLOWRYN_PROBE_LOG, one per observation:
@@ -46,10 +46,10 @@
 //   handler, with that handler's ctx.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 // Pi aliases "typebox" to its bundled copy for extensions
-// (dist/core/extensions/virtual-modules.js in 0.87.1; Firstmate imports it the same way).
+// (dist/core/extensions/virtual-modules.js in 0.87.1; the previous orchestrator imports it the same way).
 import { Type } from "typebox";
 // Namespace import so a missing export (VERSION) degrades instead of failing to load.
-// Seen in Firstmate lib/fm-calm-assistant-layout.ts; VERSION is exported by 0.87.1 index.d.ts.
+// Seen in the previous orchestrator's lib/fm-calm-assistant-layout.ts; VERSION is exported by 0.87.1 index.d.ts.
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -144,7 +144,7 @@ function safe<T>(label: string, fn: () => T): T | undefined {
 
 function sessionFacts(ctx: ExtensionContext): Json {
   // ReadonlySessionManager exposes getSessionId/getSessionFile/getSessionDir/getHeader/getEntries
-  // (0.87.1 core/session-manager.d.ts; Firstmate fm-primary-turnend-guard.ts uses getSessionId/getHeader).
+  // (0.87.1 core/session-manager.d.ts; the previous orchestrator's fm-primary-turnend-guard.ts uses getSessionId/getHeader).
   const sm: any = (ctx as any).sessionManager;
   return {
     sessionId: safe("getSessionId", () => sm?.getSessionId?.()) ?? null,
@@ -157,7 +157,7 @@ function sessionFacts(ctx: ExtensionContext): Json {
 
 function editorText(ctx: ExtensionContext): string | null {
   // ExtensionUIContext.getEditorText(): types.d.ts line "Get the current text from the core
-  // input editor"; Firstmate fm-calm.ts reads it inside onTerminalInput.
+  // input editor"; the previous orchestrator's fm-calm.ts reads it inside onTerminalInput.
   const ui: any = (ctx as any).ui;
   if (typeof ui?.getEditorText !== "function") {
     log("editor_api_missing", { hasUI: (ctx as any).hasUI, mode: (ctx as any).mode });
@@ -203,7 +203,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
           const text = String(command.text ?? "");
           const deliverAs = command.deliverAs as "nextTurn" | "followUp" | "steer" | undefined;
           if (command.api === "user") {
-            // sendUserMessage(content, {deliverAs: "steer"|"followUp"}): types.d.ts; Firstmate
+            // sendUserMessage(content, {deliverAs: "steer"|"followUp"}): types.d.ts; the previous orchestrator
             // fm-primary-pi-watch.ts sends followUp this way. A busy call without deliverAs is
             // rejected inside AgentSession.prompt() and reported through the runner's error
             // channel, not thrown here (agent-session.js bindCore -> runner.emitError).
@@ -211,7 +211,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
             await Promise.resolve((pi as any).sendUserMessage(text, options));
           } else {
             // sendMessage(message, {triggerTurn, deliverAs: "steer"|"followUp"|"nextTurn"}):
-            // types.d.ts; Firstmate fm-branch-supervision.ts uses nextTurn and
+            // types.d.ts; the previous orchestrator's fm-branch-supervision.ts uses nextTurn and
             // {triggerTurn: true, deliverAs: "followUp"}.
             const options: Json = {};
             if (deliverAs) options.deliverAs = deliverAs;
@@ -231,7 +231,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
         }
         case "abort":
           // ExtensionContext.abort(): types.d.ts "Abort the current agent operation";
-          // Firstmate fm-branch-supervision.ts calls ctx.abort() from the context event.
+          // the previous orchestrator's fm-branch-supervision.ts calls ctx.abort() from the context event.
           if (!c) throw new Error("no extension context captured yet");
           c.abort();
           log("ctl_exec", { ...base, ok: true, signalPresent: Boolean((c as any).signal) });
@@ -365,7 +365,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
     }
     removeInputListener?.();
     removeInputListener = undefined;
-    // onTerminalInput(handler) -> unsubscribe: types.d.ts; Firstmate fm-calm.ts. Returning
+    // onTerminalInput(handler) -> unsubscribe: types.d.ts; the previous orchestrator's fm-calm.ts. Returning
     // undefined leaves the keystroke to Pi.
     const ui: any = (ctx as any).ui;
     if ((ctx as any).hasUI && typeof ui?.onTerminalInput === "function") {
@@ -411,7 +411,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
   });
 
   // --- session lifecycle ---------------------------------------------------------------
-  // session_start reasons startup|reload|new|resume|fork (types.d.ts; Firstmate
+  // session_start reasons startup|reload|new|resume|fork (types.d.ts; the previous orchestrator
   // fm-primary-turnend-guard.ts). A CLI --session resume arrives as reason "startup".
   pi.on("session_start", async (event: any, ctx) => {
     remember(ctx);
@@ -570,7 +570,7 @@ export default function flowrynProbe(pi: ExtensionAPI) {
   });
 
   // --- tools ---------------------------------------------------------------------------
-  // tool_call can block with {block: true, reason} (types.d.ts ToolCallEventResult; Firstmate
+  // tool_call can block with {block: true, reason} (types.d.ts ToolCallEventResult; the previous orchestrator
   // fm-primary-turnend-guard.ts, verified there against pi 0.80.5).
   pi.on("tool_call", async (event: any, ctx) => {
     remember(ctx);

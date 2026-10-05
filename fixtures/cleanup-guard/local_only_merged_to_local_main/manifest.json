@@ -1,7 +1,7 @@
 {
   "name": "local_only_merged_to_local_main",
   "ported_from": "tests/fm-teardown.test.sh:test_local_only_merged_to_local_main_allows",
-  "firstmate_matrix_row": "c",
+  "reference_matrix_row": "c",
   "description": "Local-only task whose commit was fast-forwarded into the primary checkout's local main (update-ref), with no remote involvement. Local-only work lands on the local default branch, so cleanup is allowed.",
   "delivery_mode": "local-only",
   "inputs": {

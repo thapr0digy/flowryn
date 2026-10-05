@@ -113,7 +113,7 @@ function decisionLines(db: Db, now: number, mark: boolean): string[] {
   }
   if (getMeta(db, "import_triage") === "1") {
     const open = (db.query("SELECT COUNT(*) AS n FROM decisions WHERE state = 'open' AND import_source IS NOT NULL AND reserved_reason IS NULL").get() as { n: number }).n;
-    if (open > 0) lines.push(`Imported from Firstmate: ${plural(open, "open decision")}. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.`);
+    if (open > 0) lines.push(`Imported earlier: ${plural(open, "open decision")}. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.`);
     if (mark) setMeta(db, "import_triage", "0");
   }
   if (mark) setMeta(db, "last_briefing_at", String(now));

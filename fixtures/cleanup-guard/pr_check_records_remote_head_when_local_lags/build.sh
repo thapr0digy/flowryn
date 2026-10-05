@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pr_check_records_remote_head_when_local_lags - builds the git state and fake forge for this cleanup-guard case.
-# Ported from Firstmate tests/fm-teardown.test.sh:test_pr_check_records_remote_head_when_local_lags (matrix row p).
+# Ported from the reference's tests/fm-teardown.test.sh:test_pr_check_records_remote_head_when_local_lags (matrix row p).
 # Usage: build.sh <out-dir>
 # shellcheck source=../lib/build-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/build-common.sh"

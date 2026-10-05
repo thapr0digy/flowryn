@@ -299,13 +299,13 @@ describe("decisions in the briefing", () => {
 
   test("the import triage asks the leader to decide what it may, once", () => {
     tx(db, () => {
-      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, created_at, import_source) VALUES ('k9', 'decision-r-x9', 'Keep 365 days?', '[]', 1, 'open', 1, 'firstmate:x')").run();
+      db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, created_at, import_source) VALUES ('k9', 'decision-r-x9', 'Keep 365 days?', '[]', 1, 'open', 1, 'legacy:x')").run();
       setMeta(db, "import_triage", "1");
     });
     const first = tx(db, () => composeBriefing(db, { session: "L1", now: 10, morningHour: 99, ageMs: AGE, markMorning: true }));
-    expect(first.text).toContain("Imported from Firstmate: 1 open decision. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.");
+    expect(first.text).toContain("Imported earlier: 1 open decision. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.");
     const second = tx(db, () => composeBriefing(db, { session: "L1", now: 20, morningHour: 99, ageMs: AGE, markMorning: true }));
-    expect(second.text).not.toContain("Imported from Firstmate");
+    expect(second.text).not.toContain("Imported earlier");
   });
 
   test("decision tasks do not count as queued work", () => {

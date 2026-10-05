@@ -1,7 +1,7 @@
 {
   "name": "dirty_worktree",
   "ported_from": "tests/fm-teardown.test.sh:test_dirty_worktree_refuses",
-  "firstmate_matrix_row": "i",
+  "reference_matrix_row": "i",
   "description": "The committed work has fully landed (recorded PR reads MERGED with head = local HEAD, and the content is on origin/main), but feature.txt has an uncommitted edit. Cleanup would discard it: refused, and the refusal must cite uncommitted changes. Dirty always wins.",
   "delivery_mode": "no-mistakes",
   "inputs": {

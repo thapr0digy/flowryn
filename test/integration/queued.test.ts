@@ -18,7 +18,7 @@ test("a queued scout starts with dispatch --task", async () => {
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-amend-q1", title: "Amend the design", body: "Fold in the model\nFAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: 2, blockedBy: [], importSource: "firstmate:web-amend-q1", now: Date.now() }));
+  tx(db, () => queueTask(db, { taskId: "web-amend-q1", title: "Amend the design", body: "Fold in the model\nFAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: 2, blockedBy: [], now: Date.now() }));
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-amend-q1' AND state = 'applied'").get() !== null, 10_000, "added");
   const started = await env.json(["dispatch", "web", "--task", "web-amend-q1"]);
@@ -34,7 +34,7 @@ test("dispatch --task against the wrong project refuses, naming the task's real 
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-mismatch-q1", title: "Mismatched", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: "firstmate:web-mismatch-q1", now: Date.now() }));
+  tx(db, () => queueTask(db, { taskId: "web-mismatch-q1", title: "Mismatched", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() }));
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-mismatch-q1' AND state = 'applied'").get() !== null, 10_000, "added");
   const otherRepo = makeRepo(join(env.h.home, "other-repo"));
@@ -50,12 +50,12 @@ test("dispatch --task on a queued task still waiting for its blocker refuses, na
   envs.push(env);
   const db = env.h.db();
   tx(db, () => {
-    queueTask(db, { taskId: "web-blocker-q1", title: "The blocker", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: "firstmate:web-blocker-q1", now: Date.now() });
+    queueTask(db, { taskId: "web-blocker-q1", title: "The blocker", body: "x", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() });
   });
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-blocker-q1' AND state = 'applied'").get() !== null, 10_000, "blocker added");
   const db2 = env.h.db();
-  tx(db2, () => queueTask(db2, { taskId: "web-dependent-q1", title: "The dependent", body: "x", kind: "scout", project: getProject(db2, "web")!, priority: null, blockedBy: ["web-blocker-q1"], importSource: "firstmate:web-dependent-q1", now: Date.now() }));
+  tx(db2, () => queueTask(db2, { taskId: "web-dependent-q1", title: "The dependent", body: "x", kind: "scout", project: getProject(db2, "web")!, priority: null, blockedBy: ["web-blocker-q1"], now: Date.now() }));
   db2.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-dependent-q1' AND state = 'applied'").get() !== null, 10_000, "dependent added");
   const result = await env.json(["dispatch", "web", "--task", "web-dependent-q1"]);
@@ -67,7 +67,7 @@ test("a queued task whose run failed can be started again with --task (cutover C
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-retry-q1", title: "Retry me", body: "FAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: "firstmate:web-retry-q1", now: Date.now() }));
+  tx(db, () => queueTask(db, { taskId: "web-retry-q1", title: "Retry me", body: "FAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() }));
   db.close();
   await waitUntil(() => env.h.db().query("SELECT 1 FROM intents WHERE task_id = 'web-retry-q1' AND state = 'applied'").get() !== null, 10_000, "added");
   const first = await env.json(["dispatch", "web", "--task", "web-retry-q1"]);
@@ -99,7 +99,11 @@ test("fleet lists a queued imported scout and show describes it, until dispatch 
   const env = await makeFleetEnv();
   envs.push(env);
   const db = env.h.db();
-  tx(db, () => queueTask(db, { taskId: "web-amend-three-column", title: "Amend the three-column design", body: "Fold in the model\nFAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: 2, blockedBy: [], importSource: "firstmate:web-amend-three-column", now: Date.now() }));
+  tx(db, () => {
+    queueTask(db, { taskId: "web-amend-three-column", title: "Amend the three-column design", body: "Fold in the model\nFAKE: sleep 60000", kind: "scout", project: getProject(db, "web")!, priority: 2, blockedBy: [], now: Date.now() });
+    // What the retired cutover import filed carries legacy:<id> since migration 9.
+    db.query("UPDATE task_policy SET import_source = 'legacy:web-amend-three-column' WHERE task_id = 'web-amend-three-column'").run();
+  });
   db.close();
   await waitUntil(() => (readSnapshot(env.h.db(), "backlog")?.tasks ?? []).some((t) => t.id === "web-amend-three-column"), 10_000, "in the snapshot");
   const before = await env.json(["fleet"]);
@@ -110,7 +114,7 @@ test("fleet lists a queued imported scout and show describes it, until dispatch 
   const shown = await env.json(["show", "web-amend-three-column"]);
   expect(shown.code).toBe(0);
   expect(shown.reply.data).toMatchObject({ task: "web-amend-three-column", title: "Amend the three-column design", state: "queued", status: "ready", kind: "scout", project: "web", workflow: "scout", priority: 2, auto: "off", blocked_by: [], waits: [], runs: [], body: "Fold in the model\nFAKE: sleep 60000" });
-  expect((shown.reply.data as { filed: string }).filed).toContain("imported (firstmate:web-amend-three-column)");
+  expect((shown.reply.data as { filed: string }).filed).toContain("imported (legacy:web-amend-three-column)");
   expect(shown.reply.hints).toEqual(["flowryn dispatch web --task web-amend-three-column"]);
   const started = await env.json(["dispatch", "web", "--task", "web-amend-three-column"]);
   expect(started.code).toBe(0);
@@ -124,8 +128,8 @@ test("show describes a waiting task and a hand-added one; fleet lists both", asy
   envs.push(env);
   const db = env.h.db();
   tx(db, () => {
-    queueTask(db, { taskId: "web-first-q1", title: "First", body: "x", kind: "ship", project: getProject(db, "web")!, priority: null, blockedBy: [], importSource: null, now: Date.now() });
-    queueTask(db, { taskId: "web-second-q1", title: "Second", body: "x", kind: "ship", project: getProject(db, "web")!, priority: null, blockedBy: ["web-first-q1"], importSource: null, now: Date.now() });
+    queueTask(db, { taskId: "web-first-q1", title: "First", body: "x", kind: "ship", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() });
+    queueTask(db, { taskId: "web-second-q1", title: "Second", body: "x", kind: "ship", project: getProject(db, "web")!, priority: null, blockedBy: ["web-first-q1"], now: Date.now() });
   });
   db.close();
   await waitUntil(() => (readSnapshot(env.h.db(), "backlog")?.tasks ?? []).some((t) => t.id === "web-second-q1"), 10_000, "both in the snapshot");
