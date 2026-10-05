@@ -119,9 +119,14 @@ describe("redactSecrets", () => {
     ["1 MB of repeated PEM BEGIN markers with no END", "-----BEGIN RSA PRIVATE KEY-----\n".repeat(32_768)],
     ["1 MB of repeated PEM END markers", "-----END RSA PRIVATE KEY-----\n".repeat(34_000)],
     ["200 KB of \"--token x \"", "--token x ".repeat(20_000)],
-  ])("redacts %s in linear time (under 100ms, no catastrophic backtracking)", (_label, input) => {
-    const start = performance.now();
-    redactSecrets(input);
-    expect(performance.now() - start).toBeLessThan(100);
+  ])("redacts %s in linear time (no catastrophic backtracking)", (_label, input) => {
+    // Quadratic backtracking on these inputs costs ~1e10 steps (tens of seconds); linear is a few ms.
+    // The best of three runs under a 1s budget separates the two without failing on a loaded machine.
+    const runs = Array.from({ length: 3 }, () => {
+      const start = performance.now();
+      redactSecrets(input);
+      return performance.now() - start;
+    });
+    expect(Math.min(...runs)).toBeLessThan(1_000);
   });
 });
