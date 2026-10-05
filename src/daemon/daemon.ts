@@ -393,7 +393,11 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const sched: SchedServices = { kick: () => scheduler?.kick(), passNow: async () => scheduler?.passNow(), grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false };
 
     // A review gate's questions: the widget beside its page, and a lavish-axi poll per open gate.
-    const lavishPoller = new LavishPoller({ db: database, lavish: () => resolveTool(config, "lavish_axi"), log, now: Date.now });
+    const lavishTool = (): string | null => {
+      const found = resolveTool(config, "lavish_axi");
+      return found && existsSync(found) ? found : null;
+    };
+    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now });
 
     const services: DaemonServices = {
       db: database,

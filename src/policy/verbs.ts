@@ -363,6 +363,7 @@ const approveConfirm: VerbSpec = {
   async settle(ctx, result) {
     if (result.data.passed !== true) return result;
     ctx.journal.kick();
+    ctx.lavish.kick();
     return stageStartedReply(ctx, result);
   },
 };

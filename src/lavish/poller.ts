@@ -137,7 +137,13 @@ export class LavishPoller {
   }
 
   private start(lavish: string, gate: string, page: string): void {
-    const proc = Bun.spawn([lavish, "poll", page], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
+    let proc: ReturnType<typeof Bun.spawn>;
+    try {
+      proc = Bun.spawn([lavish, "poll", page], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
+    } catch (error) {
+      this.finished(gate, page, -1, "", `cannot run ${lavish}: ${(error as Error).message}`);
+      return;
+    }
     const entry: Running = { page, proc, stopped: false };
     this.running.set(gate, entry);
     void (async () => {
@@ -163,7 +169,7 @@ export class LavishPoller {
       this.failures.set(gate, failures);
       const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** (failures - 1));
       this.waitUntil.set(gate, this.deps.now() + delay);
-      const why = /NOT_FOUND/.test(stdout + stderr) ? "no Lavish session for the page (the worker opens it with lavish-axi)" : `exit ${code}`;
+      const why = /NOT_FOUND/.test(stdout + stderr) ? "no Lavish session for the page (the worker opens it with lavish-axi)" : code < 0 ? stderr : `exit ${code}`;
       this.deps.log(`lavish: the poll of gate ${gate} failed (${why}); again in ${delay / 1000} s`);
       return;
     }

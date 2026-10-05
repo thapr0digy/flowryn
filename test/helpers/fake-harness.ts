@@ -13,6 +13,8 @@
  *   FAKE: deliver-decisions <file> <k:q:opts:rec:reserved ; ...>  write a report with an ## Open decisions
  *                                    section (- for no recommendation or reason), then deliver --report
  *   FAKE: symlink <name> <target>    make $FLOWRYN_REPORT_DIR/<name> a symlink to <target>
+ *   FAKE: write <file> <text...>     write $FLOWRYN_REPORT_DIR/<file> (literal \n tokens become newlines): a review
+ *                                    page, a questions file
  *   FAKE: verb <args...>             run flowryn <args> --json; the reply goes to $FLOWRYN_REPORT_DIR/fake-replies.jsonl
  *   FAKE: ask <a,b> <question...>    ask (blocking), then end the turn
  *   FAKE: fail <reason...>           fail
@@ -236,6 +238,13 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
         const result = await flowryn(["deliver", "--report", path]);
         log(`deliver -> ${result.code} ${result.stdout.trim()}`);
       });
+      return "continue";
+    }
+    case "write": {
+      const [file = "note.txt", ...words] = rest;
+      const path = join(env.FLOWRYN_REPORT_DIR ?? ".", file);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${words.join(" ").replaceAll("\\n", "\n")}\n`);
       return "continue";
     }
     case "symlink": {
