@@ -6,6 +6,8 @@ import { TOOL_NAMES, resolveTool } from "../config/config.ts";
 import { stateFiles } from "../config/paths.ts";
 import { sha256Hex } from "../util/hash.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
+import { FlowrynError } from "../api/errors.ts";
+import { SMOKE_TIMEOUT_MS, detached, runProc, type Supervisor } from "../daemon/restart.ts";
 
 export const BASE_LABEL = "dev.flowryn.flowrynd";
 const SYSTEM_PATH = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -123,10 +125,11 @@ export interface LaunchdDeps {
   bootstrapBackoffMs: number[];
 }
 
+/** launchctl with a time limit: a hung call reads as a failure (for `print`, not loaded). */
 async function launchctl(args: string[]): Promise<LaunchctlResult> {
-  const proc = Bun.spawn(["/bin/launchctl", ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  return { exitCode, output: (stdout + stderr).trim() };
+  const result = await runProc(["/bin/launchctl", ...args], process.env, SMOKE_TIMEOUT_MS);
+  if (result.timedOut) return { exitCode: -1, output: `launchctl ${args[0] ?? ""} did not answer within ${SMOKE_TIMEOUT_MS / 1000} s` };
+  return { exitCode: result.exitCode ?? -1, output: (result.stdout + result.stderr).trim() };
 }
 
 export const LAUNCHD_DEPS: LaunchdDeps = {
@@ -205,4 +208,78 @@ export async function uninstallService(label: string, path: string): Promise<boo
 /** Start (or restart) an installed agent. */
 export async function kickstart(label: string): Promise<boolean> {
   return (await launchctl(["kickstart", `${domain()}/${label}`])).exitCode === 0;
+}
+
+/** The running pid launchd reports for the agent, or null when it is not loaded or not running. */
+export async function agentPid(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<number | null> {
+  const printed = await deps.launchctl(["print", `${domain()}/${label}`]);
+  if (printed.exitCode !== 0) return null;
+  const match = /^\s*pid = (\d+)\s*$/m.exec(printed.output);
+  return match ? Number(match[1]) : null;
+}
+
+/** The parts of an installed plist a restart depends on. */
+export interface InstalledPlist {
+  program: string[];
+  env: Record<string, string>;
+  workingDir: string | null;
+}
+
+/** Read an installed plist through plutil (it accepts XML and binary plists alike), within a time limit. */
+export async function readInstalledPlist(path: string, timeoutMs: number = SMOKE_TIMEOUT_MS): Promise<InstalledPlist> {
+  const { stdout, stderr, exitCode, timedOut } = await runProc(["/usr/bin/plutil", "-convert", "json", "-o", "-", path], process.env, timeoutMs);
+  if (timedOut) throw new Error(`plutil did not read ${path} within ${timeoutMs / 1000} s`);
+  if (exitCode !== 0) throw new Error(`plutil could not read ${path}: ${(stderr || stdout).trim()}`);
+  const raw = JSON.parse(stdout) as { ProgramArguments?: unknown; EnvironmentVariables?: unknown; WorkingDirectory?: unknown };
+  const program = Array.isArray(raw.ProgramArguments) ? raw.ProgramArguments.filter((a): a is string => typeof a === "string") : [];
+  const env = raw.EnvironmentVariables && typeof raw.EnvironmentVariables === "object" ? (raw.EnvironmentVariables as Record<string, string>) : {};
+  return { program, env, workingDir: typeof raw.WorkingDirectory === "string" ? raw.WorkingDirectory : null };
+}
+
+/** How the installed plist differs from what `daemon install` would write now; empty when it does not. */
+export function plistDrift(installed: InstalledPlist, spec: PlistSpec): string[] {
+  const drift: string[] = [];
+  if (JSON.stringify(installed.program) !== JSON.stringify(spec.program)) drift.push(`program ${installed.program.join(" ")} ≠ ${spec.program.join(" ")}`);
+  const keys = [...new Set([...Object.keys(installed.env), ...Object.keys(spec.env)])].toSorted();
+  for (const key of keys) if (installed.env[key] !== spec.env[key]) drift.push(`${key} differs`);
+  if (installed.workingDir !== spec.workingDir) drift.push("WorkingDirectory differs");
+  return drift;
+}
+
+/**
+ * The launchd supervisor for `flowryn daemon restart`: this process must be
+ * the agent's running pid; the next daemon runs the installed plist's
+ * program, which must match what `daemon install` would write (a stale plist
+ * is refused: re-installing stays in your terminal); the restart is a
+ * detached `launchctl kickstart -k`, which stops this daemon (SIGTERM, a
+ * clean exit) and starts the program again.
+ */
+export function launchdSupervisor(spec: PlistSpec, env: NodeJS.ProcessEnv, deps: LaunchdDeps = LAUNCHD_DEPS, path: string = plistPath(spec.label)): Supervisor {
+  return {
+    name: "launchd",
+    async supervised() {
+      if (process.platform !== "darwin") return "launchd is macOS only";
+      if (!existsSync(path)) return `no launchd agent is installed (${path})`;
+      const pid = await agentPid(spec.label, deps);
+      if (pid === null) return `the agent ${spec.label} is not loaded or not running`;
+      if (pid !== process.pid) return `the agent ${spec.label} runs pid ${pid}, not this daemon (pid ${process.pid}), which was started by hand or in the background`;
+      return null;
+    },
+    async target() {
+      let installed: InstalledPlist;
+      try {
+        installed = await readInstalledPlist(path);
+      } catch (error) {
+        return { refusal: new FlowrynError("plist_drift", (error as Error).message, "ask the user to run flowryn daemon install in their terminal") };
+      }
+      const drift = plistDrift(installed, spec);
+      if (drift.length > 0) {
+        return { refusal: new FlowrynError("plist_drift", `the installed launchd agent differs from what flowryn daemon install would write: ${drift.join("; ")}`, "ask the user to run flowryn daemon install in their terminal") };
+      }
+      return { program: installed.program };
+    },
+    restart() {
+      return detached("/bin/launchctl", ["kickstart", "-k", `${domain()}/${spec.label}`], env);
+    },
+  };
 }

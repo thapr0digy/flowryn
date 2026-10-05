@@ -7,6 +7,7 @@ import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
+import { restartsSince } from "../daemon/restart.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -124,6 +125,21 @@ function doneSince(db: Db, day: string): number {
   return (readSnapshot(db, "backlog")?.tasks ?? []).filter((t) => t.state === "done" && t.closed !== null && t.closed >= day).length;
 }
 
+function hhmm(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Daemon restarts since the last briefing, each shown once: who asked, and the build before and after. */
+function restartLines(db: Db): string[] {
+  const since = Number(getMeta(db, "last_briefing_at") ?? "0");
+  return restartsSince(db, since).map((r) => {
+    const who = r.by === "leader" ? `the leader${r.session ? ` (${r.session})` : ""}` : r.by === "human" ? "you" : r.by;
+    const proto = r.old.proto === r.new.proto ? `proto ${r.new.proto}` : `proto ${r.old.proto}→${r.new.proto}`;
+    return `Daemon restarted ${hhmm(r.ts)} by ${who}: build ${r.old.build ?? "dev"}→${r.new.build ?? "dev"}, ${r.new.version}, ${proto}.`;
+  });
+}
+
 /** Is the morning section due: at or after the morning hour, and not yet shown today? */
 export function morningDue(db: Db, now: number, morningHour: number): boolean {
   const date = new Date(now);
@@ -144,6 +160,8 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
     for (const item of listed) lines.push(`- [${item.id}] ${item.lane === "P0" ? "P0 · " : ""}${item.line}`);
     if (needs.length > listed.length) lines.push(`+${needs.length - listed.length} more: flowryn fleet`);
   }
+  // Before decisionLines, which moves last_briefing_at on.
+  lines.push(...restartLines(db));
   lines.push(...decisionLines(db, input.now, input.markMorning));
   lines.push(fleetLine(db));
   const todos = todoFacts(db, today);

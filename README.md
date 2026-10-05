@@ -32,7 +32,7 @@ fixtures/cleanup-guard/run.sh --impl "bun $PWD/scripts/guard/landed-impl.ts"   #
 fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"   # the 23 cleanup-order fixtures (locks, reaping, parked runs)
 ```
 
-After relinking a new build into place (for example `ln -sf "$PWD/dist/flowryn" ~/.local/bin/flowryn`), run `flowryn daemon uninstall && flowryn daemon install`: the launchd plist records the resolved binary path, so a daemon installed from the old build keeps running the old binary until it is reinstalled. Install waits for launchd to finish unloading the old agent and retries the bootstrap with a short backoff, so the two can run back to back.
+After `bun run build` rewrites the binary the launchd agent runs, `flowryn daemon restart` (or the leader) applies it: it refuses while a restart would break a merge, a blocked prompt or a validation (`--when-idle` waits instead), smoke-checks the new binary first, and has launchd restart the daemon (docs/cutover-notes.md, "Leader-safe daemon restart"). After relinking a new build into a different place (for example `ln -sf "$PWD/dist/flowryn" ~/.local/bin/flowryn`), run `flowryn daemon uninstall && flowryn daemon install`: the launchd plist records the resolved binary path, so a daemon installed from the old build keeps running the old binary until it is reinstalled. Install waits for launchd to finish unloading the old agent and retries the bootstrap with a short backoff, so the two can run back to back.
 
 The tests start real daemons on Unix sockets, watch files with FSEvents, run the real tasks-axi and drive `flowryn approve` and the board through a pty (`script`), so run them outside any command sandbox. They never reach GitHub or the real no-mistakes: a local fake GitHub and a stand-in no-mistakes answer instead. CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the above on every pull request and on pushes to `main`.
 
@@ -45,7 +45,8 @@ The tests never touch a real Herdr or harness: runtime tests use a fake Herdr (`
 ```bash
 flowryn init                        # interactive: tools, data and state directories, tasks-axi files, launchd agent
 flowryn doctor                      # checks config, tools, tasks-axi files, database, daemon and service
-flowryn daemon status               # start | stop | install | uninstall | run (foreground)
+flowryn daemon status               # start | stop | install | uninstall | run (foreground); shows the build and any pending restart
+flowryn daemon restart              # onto the installed build; the leader may run it too. --when-idle waits for merges, prompts and validations to clear
 flowryn todo add "renew passport" --due 2026-10-01
 flowryn todo list                   # --all, --due today|overdue
 flowryn todo due <id> tomorrow      # YYYY-MM-DD, today, tomorrow, +Nd or none

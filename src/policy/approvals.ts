@@ -235,6 +235,11 @@ export class ChallengeStore {
     return challenge;
   }
 
+  /** Tasks with a challenge still waiting for its code; a restart would forget them. */
+  openTasks(now: number): string[] {
+    return [...this.pending.values()].filter((c) => c.expiresAt > now).map((c) => c.task);
+  }
+
   /** The challenge, if the code matches and it is still fresh; it is used up either way. */
   take(id: string, code: string, now: number): Challenge | "expired" | "wrong" | "unknown" {
     const challenge = this.pending.get(id);
