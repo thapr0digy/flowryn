@@ -6,6 +6,7 @@ import type { FleetServices } from "../lifecycle/fleet-services.ts";
 import type { AttentionServices } from "../attention/services.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import type { SchedServices } from "../sched/services.ts";
+import type { LavishServices } from "../lavish/services.ts";
 import { FlowrynError } from "./errors.ts";
 import type { RestartController } from "../daemon/restart.ts";
 
@@ -86,6 +87,8 @@ export interface DaemonServices {
   sched: SchedServices;
   /** `flowryn daemon restart`: the guards, the binary check and the supervisor. */
   restart: RestartController;
+  /** The review pages' question widgets and their lavish-axi polls. */
+  lavish: LavishServices;
 }
 
 export interface HandlerCtx extends DaemonServices {

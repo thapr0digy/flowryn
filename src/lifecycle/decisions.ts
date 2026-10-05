@@ -16,6 +16,8 @@ import { holdReason } from "./runs.ts";
  */
 
 export const DECISION_KEY = /^[a-z0-9][a-z0-9-]{0,47}$/;
+/** A choice as a decision lists it: short, so it fits a prompt line and a CLI argument. */
+export const DECISION_OPTION = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
 const MAX_QUESTION = 2_000;
 const MAX_CONTEXT = 4_000;
 
@@ -39,10 +41,25 @@ export interface DecisionRow {
   answered_by: "captain" | "leader" | null;
   rationale: string | null;
   created_at: number | null;
+  /** single (NULL), multi or text: a review gate's question may take more than one choice, or free text. */
+  kind: "single" | "multi" | "text" | null;
+  /** The review gate a question was handed in with. */
+  gate_id: string | null;
+  /** The worker's why for a review gate's question. */
+  note: string | null;
+  /** The choice in the worker's work that waits on the answer. */
+  blocks: string | null;
 }
 
 export function getDecision(db: Db, id: string): DecisionRow | null {
   return db.query("SELECT * FROM decisions WHERE id = ?1").get(id) as DecisionRow | null;
+}
+
+/** The next run-scoped question id (q<N>), shared by `flowryn ask` and a review gate's questions. */
+export function nextRunDecisionId(db: Db): string {
+  const next = Number(getMeta(db, "next_decision_no") ?? "1");
+  setMeta(db, "next_decision_no", String(next + 1));
+  return `q${next}`;
 }
 
 function nextStandaloneId(db: Db): string {

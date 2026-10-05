@@ -66,6 +66,14 @@ const dismiss: VerbSpec = {
     const item = ctx.db.query("SELECT id, class, state, kind, task_id, run_id, decision_id FROM items WHERE id = ?1").get(id) as ItemRef | null;
     if (!item) throw new FlowrynError("not_found", `no item ${id}`, "flowryn fleet");
     if (item.state !== "open" && item.state !== "presented") throw new FlowrynError("bad_args", `item ${id} is already ${item.state}`);
+    const gateQuestion = item.decision_id ? (ctx.db.query("SELECT id, gate_id FROM decisions WHERE id = ?1 AND gate_id IS NOT NULL").get(item.decision_id) as { id: string; gate_id: string } | null) : null;
+    if (gateQuestion) {
+      throw new FlowrynError(
+        "bad_args",
+        `item ${id} is review question ${gateQuestion.id} of gate ${gateQuestion.gate_id}: only the user answers it`,
+        `relay the user's answer: flowryn decide ${gateQuestion.id} <choice> --by captain; or send the review back (flowryn gate changes), which closes it`,
+      );
+    }
     const now = ctx.now();
     ctx.db.query("UPDATE items SET state = 'dismissed', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1").run(id, `dismissed by ${ctx.caller.role}`, now);
     appendEvent(ctx.db, { source: "cli", kind: "item.dismissed", runId: item.run_id, taskId: item.task_id, payload: { item: id, kind: item.kind, by: ctx.caller.role } });

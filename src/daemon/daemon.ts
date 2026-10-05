@@ -1,4 +1,5 @@
 import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig, resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { assertSocketPathFits, flowrynHome, runDir, socketPath, spoolDir, stateFiles } from "../config/paths.ts";
@@ -25,6 +26,7 @@ import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts
 import { UrgentPreempter } from "../lifecycle/urgent.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
 import { Launcher } from "../lifecycle/launcher.ts";
+import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
@@ -419,6 +421,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }),
       supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
     });
+    // A review gate's questions: the widget beside its page, and a lavish-axi poll per open gate.
+    const lavishTool = (): string | null => {
+      const found = resolveTool(config, "lavish_axi");
+      return found && existsSync(found) ? found : null;
+    };
+    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now, pidDir: join(config.state_dir, "lavish-polls") });
 
     const services: DaemonServices = {
       db: database,
@@ -435,6 +443,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       delivery,
       sched,
       restart,
+      lavish: { kick: () => lavishPoller.kick() },
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
@@ -480,6 +489,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     await reconciler.passNow("startup");
     deliveryWatcher.start();
     scheduler.start();
+    lavishPoller.kick();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
     const attentionTick = setInterval(() => {
@@ -501,6 +511,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         try {
           await ingestSpool(spool, gateway, isIngested, log);
           syncTodos();
+          lavishPoller.kick();
           const backup = backupIfDue(database, stateFiles(config.state_dir).backups);
           if (backup) log(`backup: ${backup}`);
           gateway.sweepIdempotency(Date.now());
@@ -536,6 +547,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(pendingRestart);
     reconciler.stop();
     scheduler.stop();
+    lavishPoller.stop();
     deliveryWatcher.stop();
     herdrWatcher.stop();
     bus.close();
