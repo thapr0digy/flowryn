@@ -214,4 +214,4 @@ A review page used to list its open questions as prose that Flowryn never saw: y
 
 ### Protocol and version
 
-`PROTO` is 5 (new arguments: `stage done --page --questions-file`, `ask --blocks` now required), so an older CLI in a running worker gets exit 76. Migration 10 adds the columns above. The version is 0.6.0.
+`PROTO` is 5 (new arguments: `stage done --page --questions-file`, `ask --blocks` now required), so an older CLI in a running worker gets exit 76. Migration 11 adds the columns above. The version is 0.6.0.

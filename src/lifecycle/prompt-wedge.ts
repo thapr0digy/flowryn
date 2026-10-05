@@ -2,7 +2,7 @@ import { appendEvent } from "../db/events.ts";
 import type { Db } from "../db/db.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { redactSecrets } from "../util/redact.ts";
-import { findOpenRunItem } from "../attention/items.ts";
+import { findOpenRunItem, resolveRunItems } from "../attention/items.ts";
 import { openRunItemOnce, setLiveness, taskTitle, type RunRow } from "./runs.ts";
 
 /**
@@ -13,7 +13,8 @@ import { openRunItemOnce, setLiveness, taskTitle, type RunRow } from "./runs.ts"
 
 export const SCREEN_LINES = 40;
 const PROMPT_HINT = /(proceed|allow|approve|confirm|continue|\?\s*$|\(y\/n\)|yes\b.*\bno\b)/i;
-const DIALOG_QUESTION = /Do you want to proceed\?/i;
+/** The question every Claude confirmation dialog asks (spike c12). */
+export const DIALOG_QUESTION = /Do you want to proceed\?/i;
 
 /**
  * The prompt as one line. Claude's confirmation dialog always asks "Do you
@@ -46,6 +47,16 @@ export function promptLineOf(screen: string | null): string {
 export function idleByDesign(db: Db, run: RunRow): boolean {
   if (run.stage_state === "review") return true;
   return db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open' AND blocking = 1").get(run.id) !== null;
+}
+
+/**
+ * The dialog behind an open blocked_prompt is gone (Herdr reads it working
+ * again, or settled twice): resolve the item, say so, and return the run to
+ * busy. Call inside a transaction.
+ */
+export function clearPrompt(db: Db, run: RunRow, herdrStatus: string | null, source: "reconciler" | "daemon", now: number): void {
+  resolveRunItems(db, run.id, ["blocked_prompt"], "dialog gone", now);
+  appendEvent(db, { source, kind: "run.prompt_cleared", runId: run.id, taskId: run.task_id, payload: { agent_status: herdrStatus }, ts: now });
 }
 
 /**

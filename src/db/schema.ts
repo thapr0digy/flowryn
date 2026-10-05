@@ -375,6 +375,16 @@ UPDATE decisions SET import_source = 'legacy:' || substr(import_source, instr(im
 `;
 
 /**
+ * Urgent steers (steer latency Tier 2): an urgent steer blocks the worker's
+ * next tool call and cancels a tool that has run past steer_preempt_after_ms;
+ * preempted_at is when Flowryn cancelled a tool for it (at most once).
+ */
+const STEER_URGENT_SQL = /* sql */ `
+ALTER TABLE messages ADD COLUMN urgent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN preempted_at INTEGER;
+`;
+
+/**
  * Gate questions: a review gate may carry the worker's questions for the user
  * (`stage done --questions-file`), each a run-scoped decision bound to the
  * gate (gate_id) with its kind (single, multi or text; NULL is a plain
@@ -406,7 +416,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 7, name: "import", sql: IMPORT_SQL },
   { version: 8, name: "steer-seen", sql: STEER_SEEN_SQL },
   { version: 9, name: "legacy-source", sql: LEGACY_SOURCE_SQL },
-  { version: 10, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
+  { version: 10, name: "steer-urgent", sql: STEER_URGENT_SQL },
+  { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

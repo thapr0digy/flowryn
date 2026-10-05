@@ -44,6 +44,14 @@
  *   FAKE: no-waiter                  (Claude) never arm the wait-steer waiter, as if it expired or died with an old
  *                                    daemon: an idle wake comes only from a line the fake Herdr's pane.send_text and
  *                                    Enter typed ($FLOWRYN_REPORT_DIR/fake-typed.txt)
+ *   FAKE: dialog-tool <ms> <text...> a tool call whose PreToolUse raises a permission dialog: pre-tool, the screen
+ *                                    shows <text>, hook notify permission_prompt, then (once the test clears the
+ *                                    screen) the tool runs <ms> and post-tool follows
+ *
+ * Tool calls carry a tool_use_id. A PreToolUse that denies (an urgent steer) skips the tool and hands the
+ * steer to the model. The fake Pi plays its extension's urgent steers: one that arrives while a tool runs
+ * asks hook preempt once the tool has run preempt_after_ms, and on go aborts (the steer it held is dropped,
+ * as Pi drops it, and comes again after the stop).
  *
  * Steps run once per session: a resumed session continues after the last step
  * it finished (state kept next to the task file).
@@ -164,11 +172,36 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-/** One tool call, with the busy lease refreshed and a steer possibly riding back on PostToolUse. */
-async function tool(run: () => Promise<void>): Promise<void> {
-  await hook("pre-tool", { tool_name: "Bash" });
+let toolNo = 0;
+/** When the running tool started, or null (the fake Pi extension times urgent steers from it). */
+let toolStartedAt: number | null = null;
+
+/** A PreToolUse deny's reason, if the hook printed one: an urgent steer blocking the call. */
+function denyOf(stdout: string): string | null {
+  try {
+    const value = JSON.parse(stdout.trim()) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+    return value.hookSpecificOutput?.permissionDecision === "deny" ? (value.hookSpecificOutput.permissionDecisionReason ?? "") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One tool call, with the busy lease refreshed and a steer possibly riding back on PostToolUse (or blocking it at PreToolUse). */
+async function tool(run: () => Promise<void>, beforeRun?: () => Promise<void>): Promise<void> {
+  const id = `toolu_fake_${++toolNo}`;
+  const pre = await hook("pre-tool", { tool_name: "Bash", tool_use_id: id });
+  const denied = denyOf(pre.stdout);
+  if (denied !== null) {
+    log(`tool ${id} denied: ${denied}`);
+    await onSteer(denied);
+    return;
+  }
+  if (beforeRun) await beforeRun();
+  toolStartedAt = Date.now();
   await run();
-  const post = await hook("post-tool", { tool_name: "Bash" });
+  toolStartedAt = null;
+  if (interrupted) return;
+  const post = await hook("post-tool", { tool_name: "Bash", tool_use_id: id });
   const context = contextOf(post.stdout);
   if (context) await onSteer(context);
 }
@@ -386,6 +419,20 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
     }
     case "stall":
       for (;;) await Bun.sleep(60_000);
+    case "dialog-tool": {
+      const [ms = "1000", ...words] = rest;
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      await tool(
+        () => sleep(Number(ms)),
+        async () => {
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, "fake-screen.txt"), words.join(" ") || "Do you want to proceed?");
+          await hook("notify", { notification_type: "permission_prompt", message: "Claude needs your permission" });
+          while (existsSync(join(dir, "fake-screen.txt"))) await Bun.sleep(100);
+        },
+      );
+      return interrupted ? "end-turn" : "continue";
+    }
     case "crash":
       log("crash");
       process.exit(1);
@@ -441,7 +488,7 @@ async function piLoop(): Promise<void> {
     const reply = await hook("wait-steer", {}, ["--json"]);
     const message = (() => {
       try {
-        return JSON.parse(reply.stdout.trim().split("\n").pop() ?? "{}") as { exit?: boolean; command?: string; steer?: { id: string; line: string } };
+        return JSON.parse(reply.stdout.trim().split("\n").pop() ?? "{}") as { exit?: boolean; command?: string; steer?: { id: string; line: string; urgent?: boolean; preempt_after_ms?: number } };
       } catch {
         return {};
       }
@@ -452,9 +499,40 @@ async function piLoop(): Promise<void> {
       abortSleep?.();
       continue;
     }
-    if (message.steer) await onSteer(message.steer.line);
+    if (message.steer?.urgent && toolStartedAt !== null) void urgentWhileBusy(message.steer);
+    else if (message.steer) await onSteer(message.steer.line);
     else await Bun.sleep(200);
   }
+}
+
+/** The extension's urgent steer in a busy turn: held (queued) until the tool ends, or cut once it has run long enough. */
+async function urgentWhileBusy(steer: { id: string; line: string; preempt_after_ms?: number }): Promise<void> {
+  const after = steer.preempt_after_ms ?? 3_000;
+  while (toolStartedAt !== null) {
+    const ran = Date.now() - toolStartedAt;
+    if (ran < after) {
+      await Bun.sleep(Math.min(100, after - ran));
+      continue;
+    }
+    const reply = await hook("preempt", { steer: steer.id, tool_ms: ran }, ["--json"]);
+    const answer = (() => {
+      try {
+        return JSON.parse(reply.stdout.trim().split("\n").pop() ?? "{}") as { go?: boolean; defer?: string };
+      } catch {
+        return {};
+      }
+    })();
+    log(`preempt ${steer.id} -> ${reply.stdout.trim()}`);
+    if (answer.go === true) {
+      // Pi's abort drops the queued steer (M0 p14); the stop that follows makes the daemon ring it again.
+      interrupted = true;
+      abortSleep?.();
+      return;
+    }
+    if (answer.go === false) break;
+    await Bun.sleep(1_000);
+  }
+  await onSteer(steer.line);
 }
 
 /** Run the steps from `from`; returns where a stage done paused them, or null when they ended (or a turn ended for good). */

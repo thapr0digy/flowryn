@@ -137,7 +137,7 @@ describe("migrations", () => {
     db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at, import_source) VALUES ('alpha-q1', 'alpha', 'ship', 'no-mistakes', 0, 'fix', 1, 'cutover:alpha-q1')");
     db.exec("INSERT INTO decisions (id, task_id, question, options, blocking, state, import_source) VALUES ('k1', 'decision-k1', 'Keep it?', '[]', 1, 'open', 'cutover:alpha-r2:with-colon')");
     db.exec("INSERT INTO decisions (id, task_id, question, options, blocking, state, import_source) VALUES ('k2', 'decision-k2', 'Already?', '[]', 1, 'open', 'legacy:beta')");
-    expect(migrate(db)).toEqual([9, 10]);
+    expect(migrate(db, MIGRATIONS.slice(0, 9))).toEqual([9]);
 
     expect(db.query("SELECT id, import_source FROM projects ORDER BY id").all()).toEqual([
       { id: "alpha", import_source: "legacy:alpha" },
@@ -149,7 +149,7 @@ describe("migrations", () => {
       { id: "k1", import_source: "legacy:alpha-r2:with-colon" },
       { id: "k2", import_source: "legacy:beta" },
     ]);
-    expect(migrate(db)).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 9))).toEqual([]);
     db.close();
   });
 });

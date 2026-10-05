@@ -222,6 +222,12 @@ export interface Timing {
    * dialog-specific status of its own).
    */
   prompt_suspect_ms: number;
+  /**
+   * An urgent steer cancels the worker's running tool once that tool has run
+   * this long (Claude: the interrupt key; Pi: the extension's abort), never
+   * while a dialog may be open.
+   */
+  steer_preempt_after_ms: number;
 }
 
 export const DEFAULT_TIMING: Timing = {
@@ -239,6 +245,7 @@ export const DEFAULT_TIMING: Timing = {
   seen_timeout_ms: 5_000,
   waiter_grace_ms: 20_000,
   prompt_suspect_ms: 120_000,
+  steer_preempt_after_ms: 3_000,
 };
 
 export function timingConfig(config: FlowrynConfig): Timing {
