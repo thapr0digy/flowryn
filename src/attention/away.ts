@@ -26,6 +26,8 @@ export interface AwayPosture {
   words: string | null;
   /** The role that ran `flowryn away`: human (your terminal) or leader (on your words in chat). */
   by: string;
+  /** The start of an expired away whose unshown brief this one folded in: the return brief starts here. */
+  brief_since?: number;
 }
 
 export type AwayEndReason = "back" | "expired";
@@ -82,12 +84,13 @@ export function lastAway(db: Db): AwayEnded | null {
   return parse<AwayEnded>(getMeta(db, LAST_KEY));
 }
 
-/** Start away, or extend it (a new expiry and words; the start stays). A start after an expiry whose brief was never shown begins at that away's start. Call inside a transaction. */
+/** Start away, or extend it (a new expiry and words; the start stays). A start after an expiry whose brief was never shown carries that away's start for its brief. Call inside a transaction. */
 export function startAway(db: Db, input: { until: number; words: string | null; by: string; now: number }): { posture: AwayPosture; extended: boolean } {
   const current = getAway(db, input.now);
   const unshown = current ? null : foldPendingBrief(db, input.now);
   const words = input.words === null ? (current?.words ?? null) : sanitizeLine(input.words, AWAY_WORDS_MAX) || null;
-  const posture: AwayPosture = { since: current?.since ?? unshown?.since ?? input.now, until: input.until, words, by: input.by };
+  const briefSince = current ? current.brief_since : unshown?.since;
+  const posture: AwayPosture = { since: current?.since ?? input.now, until: input.until, words, by: input.by, ...(briefSince === undefined ? {} : { brief_since: briefSince }) };
   setMeta(db, AWAY_KEY, JSON.stringify(posture));
   const payload = { since: posture.since, until: posture.until, by: input.by, words, ...(unshown ? { folded: true } : {}) };
   appendEvent(db, { source: "cli", kind: current ? "away.extended" : "away.started", payload, ts: input.now });
@@ -110,7 +113,7 @@ function foldPendingBrief(db: Db, now: number): AwayEnded | null {
 export function endAway(db: Db, reason: AwayEndReason, now: number): AwayEnded | null {
   const away = storedAway(db);
   if (!away) return null;
-  const ended: AwayEnded = { since: away.since, ended_at: reason === "expired" ? Math.min(away.until, now) : now, reason, brief_pending: reason === "expired" };
+  const ended: AwayEnded = { since: away.brief_since ?? away.since, ended_at: reason === "expired" ? Math.min(away.until, now) : now, reason, brief_pending: reason === "expired" };
   setMeta(db, AWAY_KEY, "");
   setMeta(db, LAST_KEY, JSON.stringify(ended));
   appendEvent(db, { source: reason === "expired" ? "daemon" : "cli", kind: "away.ended", payload: { since: ended.since, ended_at: ended.ended_at, reason }, ts: now });

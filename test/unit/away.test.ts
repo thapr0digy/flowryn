@@ -109,16 +109,21 @@ describe("the posture", () => {
     expect(tx(db, () => takePendingBrief(db, now))).toBeNull();
   });
 
-  test("a new away after an expiry whose brief was never shown folds it in: one brief from the old start", () => {
+  test("a new away after an expiry whose brief was never shown folds it in: one brief from the old start, wakes only from its own start", () => {
     const now = Date.now();
     away(now - 10 * HOUR, now - HOUR, "night");
     tx(db, () => expireAway(db, now));
+    const gap = open("gate_ready", now - 30 * 60_000);
     const { posture, extended } = away(now, now + 8 * HOUR);
     expect(extended).toBe(false);
-    expect(posture.since).toBe(now - 10 * HOUR);
+    expect(getAway(db, now + 1)?.since).toBe(now);
+    expect(posture.brief_since).toBe(now - 10 * HOUR);
+    expect(p0Candidate(db, "L1", now + 1, DAY, posture.since)).toBeNull();
+    expect(p0Candidate(db, "L1", now + 1, DAY, now - 10 * HOUR)?.id).toBe(gap);
     expect(tx(db, () => takePendingBrief(db, now + 1_000))).toBeNull();
     const started = db.query("SELECT payload FROM events WHERE kind = 'away.started' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
     expect(JSON.parse(started.payload).folded).toBe(true);
+    expect(away(now + 1_000, now + 9 * HOUR).posture.brief_since).toBe(now - 10 * HOUR);
     const ended = tx(db, () => endAway(db, "back", now + 2 * HOUR))!;
     expect(ended.since).toBe(now - 10 * HOUR);
   });
