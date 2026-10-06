@@ -109,6 +109,28 @@ describe("the posture", () => {
     expect(tx(db, () => takePendingBrief(db, now))).toBeNull();
   });
 
+  test("a new away after an expiry whose brief was never shown folds it in: one brief from the old start", () => {
+    const now = Date.now();
+    away(now - 10 * HOUR, now - HOUR, "night");
+    tx(db, () => expireAway(db, now));
+    const { posture, extended } = away(now, now + 8 * HOUR);
+    expect(extended).toBe(false);
+    expect(posture.since).toBe(now - 10 * HOUR);
+    expect(tx(db, () => takePendingBrief(db, now + 1_000))).toBeNull();
+    const started = db.query("SELECT payload FROM events WHERE kind = 'away.started' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(started.payload).folded).toBe(true);
+    const ended = tx(db, () => endAway(db, "back", now + 2 * HOUR))!;
+    expect(ended.since).toBe(now - 10 * HOUR);
+  });
+
+  test("a new away after an expiry whose brief was shown starts now", () => {
+    const now = Date.now();
+    away(now - 10 * HOUR, now - HOUR);
+    tx(db, () => expireAway(db, now));
+    tx(db, () => takePendingBrief(db, now));
+    expect(away(now + 1_000, now + HOUR).posture.since).toBe(now + 1_000);
+  });
+
   test("back ends it now, and its brief is not left pending", () => {
     const now = Date.now();
     away(now - HOUR, now + HOUR);

@@ -82,15 +82,28 @@ export function lastAway(db: Db): AwayEnded | null {
   return parse<AwayEnded>(getMeta(db, LAST_KEY));
 }
 
-/** Start away, or extend it (a new expiry and words; the start stays). Call inside a transaction. */
+/** Start away, or extend it (a new expiry and words; the start stays). A start after an expiry whose brief was never shown begins at that away's start. Call inside a transaction. */
 export function startAway(db: Db, input: { until: number; words: string | null; by: string; now: number }): { posture: AwayPosture; extended: boolean } {
   const current = getAway(db, input.now);
-  if (!current) expireAway(db, input.now);
+  const unshown = current ? null : foldPendingBrief(db, input.now);
   const words = input.words === null ? (current?.words ?? null) : sanitizeLine(input.words, AWAY_WORDS_MAX) || null;
-  const posture: AwayPosture = { since: current?.since ?? input.now, until: input.until, words, by: input.by };
+  const posture: AwayPosture = { since: current?.since ?? unshown?.since ?? input.now, until: input.until, words, by: input.by };
   setMeta(db, AWAY_KEY, JSON.stringify(posture));
-  appendEvent(db, { source: "cli", kind: current ? "away.extended" : "away.started", payload: { since: posture.since, until: posture.until, by: input.by, words }, ts: input.now });
+  const payload = { since: posture.since, until: posture.until, by: input.by, words, ...(unshown ? { folded: true } : {}) };
+  appendEvent(db, { source: "cli", kind: current ? "away.extended" : "away.started", payload, ts: input.now });
   return { posture, extended: current !== null };
+}
+
+/**
+ * Before a new away starts: end an expired one, and if an expired away's
+ * brief was never shown, take it so the new away's one brief covers both.
+ */
+function foldPendingBrief(db: Db, now: number): AwayEnded | null {
+  expireAway(db, now);
+  const last = lastAway(db);
+  if (!last?.brief_pending) return null;
+  setMeta(db, LAST_KEY, JSON.stringify({ ...last, brief_pending: false }));
+  return last;
 }
 
 /** End away. An expiry ends at its own time and leaves the brief for your next message. Call inside a transaction. */
