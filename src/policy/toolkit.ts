@@ -13,7 +13,8 @@ import { basename, shellCommands, type Command } from "./shell.ts";
  * a URL host or a file path; no model is involved.
  */
 
-export type ToolkitRule = "github" | "sqlite" | "worktree" | "jira" | "browser" | "tasks" | "flowryn-tasks" | "leader-shell";
+export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell"] as const;
+export type ToolkitRule = (typeof TOOLKIT_RULES)[number];
 
 export interface ToolkitVerdict {
   rule: ToolkitRule;
@@ -62,7 +63,7 @@ const LEADER_SHELL_REASON =
 const SHELL_TOOLS = new Set(["bash"]);
 const FILE_TOOLS = new Set(["edit", "write", "multiedit", "notebookedit"]);
 
-const MCP_RULES: { pattern: RegExp; rule: ToolkitRule }[] = [
+const MCP_RULES: { pattern: RegExp; rule: Exclude<ToolkitRule, "leader-shell"> }[] = [
   { pattern: /^mcp__.*github/i, rule: "github" },
   { pattern: /^mcp__.*sqlite/i, rule: "sqlite" },
   { pattern: /^mcp__.*atlassian/i, rule: "jira" },

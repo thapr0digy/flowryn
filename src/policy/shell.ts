@@ -37,7 +37,6 @@ export interface Command {
 }
 
 const MAX_DEPTH = 4;
-const SEPARATORS = new Set([";", "&&", "||", "|", "|&", "&", "\n", "(", ")"]);
 /** Words that start a command list rather than name a command. */
 const KEYWORDS = new Set(["{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "case", "esac", "in", "for", "select", "function"]);
 

@@ -36,15 +36,13 @@ export interface LeaderLaunch {
 export function claudeLeaderArgs(files: LeaderFiles, passthrough: string[]): string[] {
   // The leader always runs in auto mode: the approval channel needs it (design sections 7 and 18).
   const args = ["--settings", files.claudeSettings, "--permission-mode", "auto", "--plugin-dir", files.claudePlugin];
-  if (files.appendPrompt) args.push("--append-system-prompt-file", files.appendPrompt);
-  return [...args, ...passthrough];
+  return [...args, "--append-system-prompt-file", files.appendPrompt, ...passthrough];
 }
 
 export function piLeaderArgs(files: LeaderFiles, passthrough: string[]): string[] {
   // --append-system-prompt takes text or a file (M0 p05); -e scopes the extension to this process (M0 p12).
   const args = ["-e", files.piExtension, "--skill", files.skillDir];
-  if (files.appendPrompt) args.push("--append-system-prompt", files.appendPrompt);
-  return [...args, ...passthrough];
+  return [...args, "--append-system-prompt", files.appendPrompt, ...passthrough];
 }
 
 export interface LeaderEnvInput {

@@ -21,9 +21,11 @@ function ruleOf(command: string, over: Partial<ToolCall> = {}): string | null {
   return bash(command, over)?.rule ?? null;
 }
 
-describe("shell normalizer: what the rules see", () => {
-  const names = (line: string) => shellCommands(line).map((c) => c.name);
+function names(line: string): string[] {
+  return shellCommands(line).map((c) => c.name);
+}
 
+describe("shell normalizer: what the rules see", () => {
   test.each([
     ["plain", "gh pr list", ["gh"]],
     ["chained", "cd x && gh pr list; ls", ["cd", "gh", "ls"]],
