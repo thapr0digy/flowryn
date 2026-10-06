@@ -1,4 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
+import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
@@ -278,7 +279,7 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
 function gatesView(ctx: ReadCtx, runId: string): string[] | null {
   const gates = gatesOf(ctx.db, runId);
   if (gates.length === 0) return null;
-  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
+  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
 }
 
 function planLine(ctx: ReadCtx, taskId: string): string {
@@ -338,6 +339,8 @@ const fleet: VerbSpec = {
     const count = (lane: string) => lanes.find((l) => l.lane === lane)?.n ?? 0;
     const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}`, capacity: capacityLine(ctx) };
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;
+    const away = getAway(ctx.db, ctx.now);
+    if (away) data.away = awayLine(away, ctx.now);
     const queued = queuedWork(ctx.db);
     if (queued.length > 0) {
       data.queued = queued.slice(0, MAX_QUEUED_ROWS).map((q) => queuedRow(ctx, q));

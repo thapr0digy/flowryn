@@ -109,6 +109,11 @@ describe("a review gate's questions", () => {
       const shown = await f.json(["show", "q2"], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
       expect(shown.reply.data).toMatchObject({ decision: "q2", kind: "multi", gate: gate.id, blocks: "which adapters the build touches", reserved: "a review question for the user" });
       expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'gate_ready' AND run_id = ?1", run)!.line).toContain("with 3 questions for you (q1, q2, q3)");
+      // Away mode: show names the open gate's page file, so the leader can publish it as an artifact.
+      const shownTask = await f.json(["show", task], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      const gateLine = (shownTask.reply.data as { gates: string[] }).gates.find((l) => l.startsWith(`${gate.id} `));
+      expect(gateLine).toContain(`: open`);
+      expect(gateLine).toContain(` page ${gate.page_path}`);
 
       // Item 1: the widget beside the page, and the daemon's poll of that page.
       const widget = join(gate.page_path, "..", "flowryn-questions.js");

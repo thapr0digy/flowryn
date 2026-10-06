@@ -34,6 +34,7 @@ import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
 import { leaderTiming, notificationsOff, notifyConfig, recordingNotifierPath } from "../config/leader.ts";
+import { expireAway } from "../attention/away.ts";
 import type { AttentionServices } from "../attention/services.ts";
 import { NotifyPump, recordingNotify } from "../attention/notify.ts";
 import { lastItemNo } from "../attention/items.ts";
@@ -473,6 +474,16 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }
     };
     syncTodos();
+    // Away mode: an expiry passed while the daemon was down, or since the last pass, ends it; its brief rides your next message.
+    const expireAwayIfDue = () => {
+      try {
+        const ended = tx(database, () => expireAway(database, Date.now()));
+        if (ended) log("away: expired; the return brief rides the next message");
+      } catch (error) {
+        log(`away: expiry check failed: ${(error as Error).message}`);
+      }
+    };
+    expireAwayIfDue();
     resolveReady();
 
     // Design section 5: every harness in use, its installed version against the passing contract records, before any launch.
@@ -511,6 +522,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         try {
           await ingestSpool(spool, gateway, isIngested, log);
           syncTodos();
+          expireAwayIfDue();
           lavishPoller.kick();
           const backup = backupIfDue(database, stateFiles(config.state_dir).backups);
           if (backup) log(`backup: ${backup}`);

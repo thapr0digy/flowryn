@@ -1,5 +1,6 @@
 import type { Db } from "../db/db.ts";
 import { MAX_INFO_ATTEMPTS } from "./presentations.ts";
+import { awayWakeSql } from "./away.ts";
 import { QUESTION_KINDS, type ItemRow } from "./items.ts";
 
 /**
@@ -68,19 +69,21 @@ export function digestCandidates(db: Db, session: string, now: number, ageMs: nu
 
 /**
  * The P0 a push path may take for this session: open, not yet shown to it,
- * and not leased to another push path anywhere (design section 9).
+ * and not leased to another push path anywhere (design section 9). While you
+ * are away (`awaySince`), an item only you can move that opened since then
+ * counts as a P0 here too (awayWakeSql); its stored lane stays as it is.
  */
-export function p0Candidate(db: Db, session: string, now: number, ageMs: number): RankedItem | null {
+export function p0Candidate(db: Db, session: string, now: number, ageMs: number, awaySince: number | null = null): RankedItem | null {
   return (
     (db
       .query(
         `${RANK_SELECT}
-         WHERE i.lane = 'P0' AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST})
+         WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST})
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried','offered'))
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
          ${RANK_ORDER} LIMIT 1`,
       )
-      .get(now - ageMs, session) as RankedItem | null) ?? null
+      .get(now - ageMs, session, awaySince) as RankedItem | null) ?? null
   );
 }
 

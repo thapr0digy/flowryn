@@ -103,6 +103,7 @@ The features that let Flowryn replace the previous orchestrator (docs/cutover-no
 | Review questions: a review gate's open questions become decisions reserved for you, asked on the review page (lavish-axi's input playbook) and listed for the leader, the first answer counting; the ask rule (decide autonomously, ask only when blocked) in the worker contract and checked in code | Done: docs/m5-notes.md, "Gate questions" |
 | Worker questions wake the leader: every open worker question reaches the leader without your message, batched per 30 s into one wake, a busy turn taking them at its Stop, on its own hourly budget; only a blocking one raises an OS alert; the daemon listens on every review page and wakes the leader with what you send from it | Done (docs/m5-notes.md "Worker questions wake the leader") |
 | Clickable review answers: one Send carries every answer, an Other choice with your words, an "anything else" note and a pass request (a leader item; the gate still passes only through a human channel); the design and QA skills never list questions as text | Done: docs/m5-notes.md, "Gate questions", "One Send" |
+| Away mode (autonomy spec 2, ship B): `flowryn away [--until] [--body-file -]` and `flowryn back`; while away every new item only you can move wakes the leader for the remote-control chat, on `[away] max_wakes_per_hour`; your messages never end it; `back` or the expiry gives one return brief (waiting on you, decided for you, landed, failed, spend); delivery only, no grants | Done: docs/m5-notes.md, "Away mode" |
 
 ## Not in v1
 
@@ -112,5 +113,5 @@ These are out of v1 by the design itself (section 2's non-goals, section 17's "A
 - Side-by-side running with the previous orchestrator.
 - The Obsidian plugin; a Herdr plugin-pane board; the MCP wrapper; Claude Code channels and plugin monitors.
 - Harnesses other than Claude Code and Pi; runtimes other than Herdr; Linux and native Windows hosts (the transport and service seams exist).
-- Desks, quota-aware scheduling and profile routing; focus routing and score formulas; away and quiet modes; Jira; retention compaction; relay, the mail plane and multi-machine fleets.
+- Desks, quota-aware scheduling and profile routing; focus routing and score formulas; quiet mode (away mode came after v1, above); Jira; retention compaction; relay, the mail plane and multi-machine fleets.
 - Stacking a phase on an open PR (a per-plan option after v1, section 11).

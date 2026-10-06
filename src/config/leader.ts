@@ -103,6 +103,30 @@ export function notifyConfig(config: FlowrynConfig): NotifyConfig {
   return out;
 }
 
+/** [away]: away mode (`flowryn away`), which changes how items reach you, never who may act. */
+export interface AwayConfig {
+  /** Turns the P0 push path may start in a leader per hour while you are away, in place of max_triggered_turns_per_hour. */
+  max_wakes_per_hour: number;
+  /** How long away lasts when `flowryn away` names no --until. */
+  default_hours: number;
+  /** Inactive this long, with an item that would have woken the leader, before your next message suggests `flowryn away`. */
+  suggest_after_min: number;
+}
+
+export const DEFAULT_AWAY: AwayConfig = {
+  max_wakes_per_hour: 6,
+  default_hours: 12,
+  suggest_after_min: 60,
+};
+
+export function awayConfig(config: FlowrynConfig): AwayConfig {
+  const raw = table(config.extra.away, "[away]");
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_AWAY)) throw new FlowrynError("config_invalid", `[away] ${key} is not a known setting`);
+  }
+  return positiveInts(raw, DEFAULT_AWAY, "[away]", Object.keys(DEFAULT_AWAY) as (keyof AwayConfig)[]);
+}
+
 /**
  * The notification override for everything that is not your own setup: tests,
  * the fixtures, the spikes, the contract suites and the live runs set
