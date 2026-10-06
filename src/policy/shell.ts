@@ -23,6 +23,8 @@ export interface RawCommand {
   redirects: Redirect[];
   /** Heredoc and here-string text, and the words of the command piped into this one. */
   stdin: string;
+  /** Piped from a command whose output the line does not show: anything but echo/printf, or a heredoc/here-string. */
+  pipedOpaque: boolean;
 }
 
 /** A command after its assignments and wrappers are peeled off. */
@@ -34,10 +36,13 @@ export interface Command {
   assignments: Record<string, string>;
   redirects: Redirect[];
   stdin: string;
+  pipedOpaque: boolean;
 }
 
 const MAX_DEPTH = 4;
 /** Words that start a command list rather than name a command. */
+/** Commands whose piped output is the literal text of their arguments. */
+const LITERAL_SOURCES = new Set(["echo", "printf"]);
 const KEYWORDS = new Set(["{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "case", "esac", "in", "for", "select", "function"]);
 
 type Token = { kind: "word"; text: string } | { kind: "op"; text: string } | { kind: "redir"; text: string } | { kind: "heredoc"; text: string };
@@ -66,14 +71,22 @@ function commandsAt(line: string, depth: number): Command[] {
 export function rawCommands(line: string): { raw: RawCommand[]; nested: string[] } {
   const { tokens, nested } = scan(line.replace(/\\\r?\n/g, ""));
   const raw: RawCommand[] = [];
-  let current: RawCommand = { words: [], redirects: [], stdin: "" };
+  let current: RawCommand = { words: [], redirects: [], stdin: "", pipedOpaque: false };
+  let hereText = false;
   let pipedText = "";
+  let pipedOpaque = false;
   const finish = (op: string | null) => {
+    const piped = op === "|" || op === "|&";
     if (current.words.length > 0 || current.redirects.length > 0) {
       raw.push(current);
-      pipedText = op === "|" || op === "|&" ? current.words.join(" ") + (current.stdin ? `\n${current.stdin}` : "") : "";
-    } else if (op !== "|" && op !== "|&") pipedText = "";
-    current = { words: [], redirects: [], stdin: pipedText };
+      pipedText = piped ? current.words.join(" ") + (current.stdin ? `\n${current.stdin}` : "") : "";
+      pipedOpaque = piped && !hereText && !LITERAL_SOURCES.has(peel(current, MAX_DEPTH)[0]?.name ?? "");
+    } else if (!piped) {
+      pipedText = "";
+      pipedOpaque = false;
+    }
+    current = { words: [], redirects: [], stdin: pipedText, pipedOpaque };
+    hereText = false;
   };
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!;
@@ -90,6 +103,7 @@ export function rawCommands(line: string): { raw: RawCommand[]; nested: string[]
       const next = tokens[i + 1];
       const target = next && next.kind === "word" ? next.text : "";
       if (next && next.kind === "word") i++;
+      if (token.text.startsWith("<<")) hereText = true;
       if (token.text === "<<<") current.stdin += (current.stdin ? "\n" : "") + target;
       else if (!token.text.startsWith("<<")) current.redirects.push({ op: token.text, target });
       continue;
@@ -375,7 +389,7 @@ function peelWords(words: string[], assignments: Record<string, string>, raw: Ra
   if (rest.length === 0) return [];
   // A scoped package run by npx keeps its scope: `@playwright/mcp`, not `mcp`.
   const name = rest[0]!.startsWith("@") ? rest[0]!.toLowerCase() : basename(rest[0]!);
-  const command: Command = { argv: rest, name, assignments: env, redirects: raw.redirects, stdin: raw.stdin };
+  const command: Command = { argv: rest, name, assignments: env, redirects: raw.redirects, stdin: raw.stdin, pipedOpaque: raw.pipedOpaque };
 
   if (name === "command" && rest.slice(1).some((w) => w === "-v" || w === "-V")) return [command];
   if (name === "env") return peelEnv(rest, env, raw, depth);
@@ -422,7 +436,7 @@ function peelEnv(words: string[], assignments: Record<string, string>, raw: RawC
     }
     break;
   }
-  if (i >= words.length) return [{ argv: words, name: "env", assignments: env, redirects: raw.redirects, stdin: raw.stdin }];
+  if (i >= words.length) return [{ argv: words, name: "env", assignments: env, redirects: raw.redirects, stdin: raw.stdin, pipedOpaque: raw.pipedOpaque }];
   return peelWords(words.slice(i), env, raw, depth);
 }
 

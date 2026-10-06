@@ -209,7 +209,8 @@ const SQL_WRITE = /\b(insert|update|delete|replace|upsert|create|drop|alter|vacu
  * sqlite: a raw sqlite3 that only reads is denied (sqlite-axi reads); one that
  * writes is allowed (the user's answer to the design's q31), except on
  * Flowryn's own flowryn.db, which no agent touches. SQL it cannot see (a
- * redirected file) counts as a write.
+ * redirected file, or the output of a command other than echo/printf piped in)
+ * counts as a write.
  */
 function sqliteVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
   const words = c.argv.slice(1);
@@ -231,11 +232,11 @@ function sqliteVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolkit
   if (db !== null && samePath(resolvePath(db, call.cwd, paths.home), paths.flowrynDb)) {
     return deny("sqlite", call, "a raw sqlite3 on Flowryn's flowryn.db", "Flowryn's database belongs to flowrynd; use the flowryn verbs.");
   }
-  if (c.redirects.some((r) => r.op === "<")) return null;
+  if (c.redirects.some((r) => r.op === "<") || c.pipedOpaque) return null;
   const text = [...sql, c.stdin].join("\n");
   if (!readonly && SQL_WRITE.test(text)) return null;
   if (!readonly && text.trim() === "" && db === null) return null;
-  return deny("sqlite", call, `\`${c.argv[0]}\` to read`, "Raw sqlite3 stays allowed for writes: put the SQL in the command, or pass a file with < file.sql.");
+  return deny("sqlite", call, `\`${c.argv[0]}\` to read`, "Raw sqlite3 stays allowed for writes: put the SQL in the command, or pass a file with < file.sql (or pipe it in from cat).");
 }
 
 function gitSubcommand(args: string[]): { name: string; rest: string[] } | null {
@@ -313,13 +314,28 @@ function writtenFiles(c: Command): string[] {
     case "sed":
     case "gsed":
     case "perl":
-      if (args.some((a) => /^-[a-zA-Z]*i/.test(a) || a.startsWith("--in-place"))) files.push(...operands);
+      if (args.some((a) => editsInPlace(c.name, a))) files.push(...operands);
       break;
     case "dd":
       for (const a of args) if (a.startsWith("of=")) files.push(a.slice(3));
       break;
   }
   return files;
+}
+
+/** Short-flag letters after which the rest of a sed/perl cluster is the flag's value, not more flags. */
+const VALUED_SHORT_FLAGS: Record<string, string> = { sed: "efl", gsed: "efl", perl: "eEIMmdDxlC0" };
+
+/** A sed/perl flag that edits in place: --in-place, or -i in a short-flag cluster before any value-taking letter. */
+function editsInPlace(command: string, arg: string): boolean {
+  if (arg.startsWith("--in-place")) return true;
+  if (!/^-[^-]/.test(arg)) return false;
+  const valued = VALUED_SHORT_FLAGS[command] ?? "";
+  for (const letter of arg.slice(1)) {
+    if (letter === "i") return true;
+    if (valued.includes(letter)) return false;
+  }
+  return false;
 }
 
 function fileVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what: string): ToolkitVerdict | null {
