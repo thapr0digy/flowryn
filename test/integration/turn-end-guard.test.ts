@@ -77,6 +77,16 @@ for (const harness of ["claude", "pi"] as const) {
   });
 }
 
+describe("[workers] turn_end_guard = false", () => {
+  test("a Claude worker that ends its turn with no outcome goes idle with no reminder", async () => {
+    const env = await fleet({ turnEndGuard: false });
+    const { task, run } = await env.dispatch("Build\nFAKE: sleep 50", { harness: "claude" });
+    await env.waitRun(run, stopped, "idle after its first Stop");
+    expect(received(env, task)).toEqual([]);
+    expect(payloads(env, run, "run.turn_end_reminder")).toEqual([]);
+  }, 30_000);
+});
+
 describe("the turn-end guard's episodes", () => {
   test("a steer starts a new episode: a worker that ignored one reminder gets another after the next instruction", async () => {
     const env = await fleet();

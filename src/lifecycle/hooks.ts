@@ -468,7 +468,7 @@ const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pend
     }
   }
   // No steer taken: the turn-end guard may continue it once per episode (Claude) or follow it up (Pi).
-  const reminder = guardTurnEnd(
+  const reminder = !ctx.fleet.turnEndGuard() ? null : guardTurnEnd(
     ctx.db,
     run,
     {

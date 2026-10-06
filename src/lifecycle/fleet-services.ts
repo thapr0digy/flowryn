@@ -27,6 +27,8 @@ export interface FleetServices {
   interruptRun(runId: string, waitMs?: number): Promise<Verified>;
   /** Ask the reconciler to look at one run, or at every run, soon. */
   reconcile(runId?: string): void;
+  /** Whether an outcome-less turn end gets the turn-end guard's reminder ([workers] turn_end_guard). */
+  turnEndGuard(): boolean;
   /** Consecutive Stop continuations per run (design section 5: at most two). */
   continuations: Map<string, number>;
   /** Urgent steers: the main agent's running tools, and the timer that cuts a long one. */
@@ -46,6 +48,7 @@ export function inertFleet(overrides: Partial<FleetServices> = {}): FleetService
     exitRun: async () => ({ ok: false, evidence: "timeout", detail: "no runtime" }),
     interruptRun: async () => ({ ok: false, evidence: "timeout", detail: "no runtime" }),
     reconcile: () => {},
+    turnEndGuard: () => true,
     continuations: new Map(),
     urgent: inertUrgent(),
     ...overrides,
