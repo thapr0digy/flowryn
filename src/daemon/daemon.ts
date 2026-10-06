@@ -21,7 +21,7 @@ import { ulid } from "../util/ulid.ts";
 import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
-import { herdrConfig, timingConfig, workerConfigProblems } from "../config/workers.ts";
+import { herdrConfig, timingConfig, workerConfigProblems, workersConfig } from "../config/workers.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
 import { UrgentPreempter } from "../lifecycle/urgent.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
@@ -245,6 +245,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         return result;
       },
       reconcile: (runId) => reconciler?.schedule(runId),
+      turnEndGuard: () => workersConfig(config).turn_end_guard,
       continuations: new Map(),
       urgent,
     };

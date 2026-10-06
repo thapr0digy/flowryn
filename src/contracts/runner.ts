@@ -94,6 +94,8 @@ function scratchConfig(options: ContractOptions, home: string, branchPrefix: str
   const workers: Record<string, unknown> = { ...(real.extra.workers as Record<string, unknown> | undefined) };
   workers.worktree_root = join(home, "wt");
   workers.branch_prefix = branchPrefix;
+  // The contract worker ends its turns without an outcome on purpose; a reminder would keep it busy past the idle step.
+  workers.turn_end_guard = false;
   if (options.model) workers[options.harness] = { ...(workers[options.harness] as Record<string, unknown> | undefined), model: options.model };
   const data: Record<string, unknown> = {
     data_dir: join(home, "data"),

@@ -110,6 +110,8 @@ export interface FleetOptions {
   herdrAlertMs?: number;
   /** Supervise the daemon with a script, so `flowryn daemon restart` works (superviseWithScript). */
   supervised?: boolean;
+  /** [workers] turn_end_guard (default on). */
+  turnEndGuard?: boolean;
 }
 
 export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv> {
@@ -127,6 +129,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
         ...(options.herdrAlertMs ? [`unreachable_alert_ms = ${options.herdrAlertMs}`] : []),
         "[workers]",
         `worktree_root = ${JSON.stringify(join(home, "wt"))}`,
+        ...(options.turnEndGuard === false ? ["turn_end_guard = false"] : []),
         "[workers.claude]",
         'pretrust = "register"',
         `config_dir = ${JSON.stringify(join(home, "claude-config"))}`,
