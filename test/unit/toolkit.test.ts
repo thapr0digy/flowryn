@@ -129,6 +129,9 @@ describe("rule: sqlite (deny reads only; q31)", () => {
     "printf 'select 1' | sqlite3 app.db",
     "cat <<EOF | sqlite3 app.db\nSELECT 1;\nEOF",
     "cat <<< 'select 1' | sqlite3 app.db",
+    "ls | sqlite3 app.db 'select * from t'",
+    "true | sqlite3 app.db -cmd 'select 1'",
+    "sqlite3 app.db 'select 1' < seed.sql",
     "sqlite3 app.db <<EOF\nSELECT 1;\nEOF",
     "sqlite3 app.db",
     "litecli app.db",
@@ -145,6 +148,7 @@ describe("rule: sqlite (deny reads only; q31)", () => {
     "sqlite3 app.db < seed.sql",
     "cat migrate.sql | sqlite3 app.db",
     "gunzip -c dump.sql.gz | sqlite3 app.db",
+    "true | sqlite3 app.db 'insert into t values (1)'",
     "sqlite3 app.db <<EOF\nUPDATE t SET x = 1;\nEOF",
     "sqlite3 -version",
     "sqlite-axi query app.db 'select 1'",
@@ -243,11 +247,11 @@ describe("rule: tasks (a project's backlog.md and todos.md)", () => {
     expect(toolkitVerdict(call("write", { path: "/x/todos.md" }, { harness: "pi" }), PATHS)?.rule).toBe("tasks");
   });
 
-  test.each(["echo '- [ ] x' >> backlog.md", "printf x > todos.md", "cat x | tee -a backlog.md", "sed -i '' 's/a/b/' backlog.md", "sed -i.bak 's/a/b/' todos.md", "perl -pi -e 's/a/b/' backlog.md", "perl -i.bak -pe 's/a/b/' backlog.md", "sed --in-place 's/a/b/' backlog.md", "sed -ni 's/a/b/p' backlog.md", "mv /tmp/x backlog.md", "cp /tmp/x docs/backlog.md", "rm backlog.md", "truncate -s 0 todos.md", "dd if=/dev/null of=backlog.md", "cat <<EOF > backlog.md\nx\nEOF"])("denies the shell write %s", (cmd) => {
+  test.each(["echo '- [ ] x' >> backlog.md", "printf x > todos.md", "cat x | tee -a backlog.md", "sed -i '' 's/a/b/' backlog.md", "sed -i.bak 's/a/b/' todos.md", "perl -pi -e 's/a/b/' backlog.md", "perl -i.bak -pe 's/a/b/' backlog.md", "sed --in-place 's/a/b/' backlog.md", "sed -ni 's/a/b/p' backlog.md", "perl -lpi -e 's/a/b/' backlog.md", "perl -0pi -e 's/a/b/' backlog.md", "perl -l0pi -e 's/a/b/' backlog.md", "perl -0777pi -e 's/a/b/' backlog.md", "perl -0x0Api -e 's/a/b/' backlog.md", "mv /tmp/x backlog.md", "cp /tmp/x docs/backlog.md", "rm backlog.md", "truncate -s 0 todos.md", "dd if=/dev/null of=backlog.md", "cat <<EOF > backlog.md\nx\nEOF"])("denies the shell write %s", (cmd) => {
     expect(ruleOf(cmd)).toBe("tasks");
   });
 
-  test.each(["cat backlog.md", "grep x todos.md", "tasks-axi add x 'y'", "cp backlog.md /tmp/x", "echo x > notes.md", "sed 's/a/b/' backlog.md", "perl -MList::Util=sum -ne 'print' backlog.md", "perl -Mstrict -ne 'print' todos.md", "perl -e 'print 1' backlog.md", "sed -n -e 's/a/b/p' backlog.md"])("allows %s", (cmd) => {
+  test.each(["cat backlog.md", "grep x todos.md", "tasks-axi add x 'y'", "cp backlog.md /tmp/x", "echo x > notes.md", "sed 's/a/b/' backlog.md", "perl -MList::Util=sum -ne 'print' backlog.md", "perl -Mstrict -ne 'print' todos.md", "perl -e 'print 1' backlog.md", "perl -lne 'print' backlog.md", "perl -Ilib -ne 'print' backlog.md", "sed -n -e 's/a/b/p' backlog.md"])("allows %s", (cmd) => {
     expect(ruleOf(cmd)).toBeNull();
   });
 

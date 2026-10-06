@@ -209,8 +209,8 @@ const SQL_WRITE = /\b(insert|update|delete|replace|upsert|create|drop|alter|vacu
  * sqlite: a raw sqlite3 that only reads is denied (sqlite-axi reads); one that
  * writes is allowed (the user's answer to the design's q31), except on
  * Flowryn's own flowryn.db, which no agent touches. SQL it cannot see (a
- * redirected file, or the output of a command other than echo/printf piped in)
- * counts as a write.
+ * redirected file, or the output of a command other than echo/printf piped in,
+ * when the command itself carries no SQL) counts as a write.
  */
 function sqliteVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
   const words = c.argv.slice(1);
@@ -232,7 +232,7 @@ function sqliteVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolkit
   if (db !== null && samePath(resolvePath(db, call.cwd, paths.home), paths.flowrynDb)) {
     return deny("sqlite", call, "a raw sqlite3 on Flowryn's flowryn.db", "Flowryn's database belongs to flowrynd; use the flowryn verbs.");
   }
-  if (c.redirects.some((r) => r.op === "<") || c.pipedOpaque) return null;
+  if (sql.length === 0 && (c.redirects.some((r) => r.op === "<") || c.pipedOpaque)) return null;
   const text = [...sql, c.stdin].join("\n");
   if (!readonly && SQL_WRITE.test(text)) return null;
   if (!readonly && text.trim() === "" && db === null) return null;
@@ -324,16 +324,27 @@ function writtenFiles(c: Command): string[] {
 }
 
 /** Short-flag letters after which the rest of a sed/perl cluster is the flag's value, not more flags. */
-const VALUED_SHORT_FLAGS: Record<string, string> = { sed: "efl", gsed: "efl", perl: "eEIMmdDxlC0" };
+const VALUED_SHORT_FLAGS: Record<string, string> = { sed: "efl", gsed: "efl", perl: "eEIMmdDx" };
+/** perl flags that take only an optional run of digits (-0 also a hex `xHH`), after which the cluster goes on. */
+const DIGIT_SHORT_FLAGS: Record<string, RegExp> = { perl: /^(?:0(?:x[0-9a-f]*|\d*)|[lC]\d*)/i };
 
 /** A sed/perl flag that edits in place: --in-place, or -i in a short-flag cluster before any value-taking letter. */
 function editsInPlace(command: string, arg: string): boolean {
   if (arg.startsWith("--in-place")) return true;
   if (!/^-[^-]/.test(arg)) return false;
   const valued = VALUED_SHORT_FLAGS[command] ?? "";
-  for (const letter of arg.slice(1)) {
+  const digitFlag = DIGIT_SHORT_FLAGS[command];
+  let i = 1;
+  while (i < arg.length) {
+    const letter = arg[i]!;
     if (letter === "i") return true;
+    const digits = digitFlag?.exec(arg.slice(i));
+    if (digits) {
+      i += digits[0].length;
+      continue;
+    }
     if (valued.includes(letter)) return false;
+    i++;
   }
   return false;
 }
