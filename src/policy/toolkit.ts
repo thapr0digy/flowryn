@@ -232,7 +232,7 @@ function sqliteVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolkit
   if (db !== null && samePath(resolvePath(db, call.cwd, paths.home), paths.flowrynDb)) {
     return deny("sqlite", call, "a raw sqlite3 on Flowryn's flowryn.db", "Flowryn's database belongs to flowrynd; use the flowryn verbs.");
   }
-  if (sql.length === 0 && (c.redirects.some((r) => r.op === "<") || c.pipedOpaque)) return null;
+  if (!readonly && sql.length === 0 && (c.redirects.some((r) => r.op === "<") || c.pipedOpaque)) return null;
   const text = [...sql, c.stdin].join("\n");
   if (!readonly && SQL_WRITE.test(text)) return null;
   if (!readonly && text.trim() === "" && db === null) return null;
@@ -325,8 +325,8 @@ function writtenFiles(c: Command): string[] {
 
 /** Short-flag letters after which the rest of a sed/perl cluster is the flag's value, not more flags. */
 const VALUED_SHORT_FLAGS: Record<string, string> = { sed: "efl", gsed: "efl", perl: "eEIMmdDx" };
-/** perl flags that take only an optional run of digits (-0 also a hex `xHH`), after which the cluster goes on. */
-const DIGIT_SHORT_FLAGS: Record<string, RegExp> = { perl: /^(?:0(?:x[0-9a-f]*|\d*)|[lC]\d*)/i };
+/** perl flags that take only an optional run of digits (-0 also a hex `xHH`, -C a letter list), after which the cluster goes on. */
+const DIGIT_SHORT_FLAGS: Record<string, RegExp> = { perl: /^(?:0(?:x[0-9a-fA-F]*|\d*)|l\d*|C(?:\d+|[IOESioDALa]*))/ };
 
 /** A sed/perl flag that edits in place: --in-place, or -i in a short-flag cluster before any value-taking letter. */
 function editsInPlace(command: string, arg: string): boolean {
