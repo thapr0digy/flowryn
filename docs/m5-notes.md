@@ -162,6 +162,10 @@ After M5, one pass built every v1 item [`v1-status.md`](v1-status.md) still list
 
 Found live in this pass: `flowryn doctor --contracts` could not pass on a busy laptop. Its scratch daemon took M5's default host check (8 GB free), so on a machine with 7.5 GB available the scheduler never granted the suite's one worker and the suite timed out at its first step. The suite launches exactly the worker you asked for, so its scratch home now caps the worker pool at 1 and refuses only when the machine is truly out of room (1 GB free, a load of 8 per core) (`src/contracts/runner.ts`). M5's live run had seeded its contract records instead of running the suite.
 
+### The contract suite pins its harness
+
+Found live: a Claude run started on 2.1.291, Claude Code auto-updated to 2.1.292 mid-run, and the resume step launched 2.1.292, which had no passing record in the scratch database, so the resume was refused and the step timed out after 240s. The runner now resolves the harness once at start (`src/contracts/pin.ts`): the real file behind the configured path (for Claude's native install, `~/.local/share/claude/versions/<ver>`, which the updater never rewrites; it repoints the `claude` symlink), written into the scratch home's `[tools]`, so launch, resume and the scratch daemon's version gate all run the pinned file. Pi has no equivalent here: the Pi Launcher app replaces its bundled Pi in place, and its signed launcher must stay the entry point, so its path is pinned but its version can still change. Before each step, and on every poll while a step waits, the runner re-reads the pinned file's version; a change or a removed file fails the step at once with "<harness> updated to X mid-run ...; re-run flowryn doctor --contracts --harness <h>".
+
 ### Protocol and version
 
 `PROTO` is 4 (new verbs: `divergence resolve`, `promote`), so an older CLI in a running worker gets exit 76. The version is 0.5.0.
