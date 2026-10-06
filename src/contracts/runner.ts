@@ -64,6 +64,17 @@ const CONTRACT_TIMING = { pass_ms: 1_000, ring_interval_ms: 600_000, launch_time
 const WAIT_POLL_MS = 100;
 
 /**
+ * FLOWRYN_CONTRACT_MAX_WAIT_MS caps every step's wait. The offline contract
+ * test (test/integration/contracts-offline.test.ts) sets it: its fakes answer
+ * in seconds, so a broken step fails there at once, naming itself, rather than
+ * after a live model's minutes.
+ */
+function maxWaitMs(env: NodeJS.ProcessEnv): number {
+  const value = Number(env.FLOWRYN_CONTRACT_MAX_WAIT_MS);
+  return Number.isFinite(value) && value > 0 ? value : Number.POSITIVE_INFINITY;
+}
+
+/**
  * The suite launches the one worker you asked for, so the host check that
  * guards autonomous capacity (design section 11) refuses it only when the
  * machine is truly out of room; with the defaults (8 GB free) a busy laptop
@@ -220,11 +231,12 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         return { hook: value.hook ?? null, signal: String(value.signal ?? ""), at: Number(value.at ?? 0) };
       },
       async waitFor(what, timeoutMs, check) {
-        const until = Date.now() + timeoutMs;
+        const limitMs = Math.min(timeoutMs, maxWaitMs(process.env));
+        const until = Date.now() + limitMs;
         for (;;) {
           const value = check();
           if (value) return value;
-          if (Date.now() > until) throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${what}`);
+          if (Date.now() > until) throw new Error(`timed out after ${Math.round(limitMs / 1000)}s waiting for ${what}`);
           await Bun.sleep(WAIT_POLL_MS);
         }
       },
