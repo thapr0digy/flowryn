@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
@@ -102,7 +103,7 @@ export function verificationView(v: Verification, now: number): Record<string, u
     steps: v.steps.map((s) => ({ step: s.name, state: s.state, exit: s.exit ?? "-", ms: s.ms ?? "-", tests: s.tests ? countsLine(s.tests) : "-", detail: s.detail ?? "-" })),
     tests: v.tests ? countsLine(v.tests) : "-",
     duration_ms: (v.finished_at ?? now) - v.started_at,
-    binary: v.binary_path ?? "-",
+    binary: v.binary_path === null ? "-" : existsSync(v.binary_path) ? v.binary_path : `${v.binary_path} (removed)`,
     detail: v.detail ?? "-",
     logs: v.dir,
     tail: failed ? readTail(join(v.dir, failed.log), 16 * 1024).split("\n").slice(-31).join("\n").trimEnd() : "-",

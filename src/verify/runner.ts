@@ -237,6 +237,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
   if (active.has(v.id)) return;
   const job: Job = { aborted: false, child: null };
   active.set(v.id, job);
+  const deadline = Date.now() + plan.timeoutMs;
   const steps = v.steps.map((s) => ({ ...s }));
   const finish = (outcome: Omit<VerificationOutcome, "steps" | "tests">) => {
     try {
@@ -253,7 +254,6 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     const added = await deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path);
     if (added.code !== 0) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
     worktreeAdded = true;
-    const deadline = v.started_at + plan.timeoutMs;
     const childEnv = stepEnv(env, plan.path);
     for (const step of steps) {
       if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null });

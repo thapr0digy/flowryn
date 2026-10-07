@@ -15,6 +15,7 @@ import { verifyConfig } from "../../src/verify/config.ts";
 import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVerifications, runVerification, stepEnv, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
 import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
 import { countsLine, parseBunSummary } from "../../src/verify/summary.ts";
+import { verificationView } from "../../src/verify/verbs.ts";
 import { NOT_STARTED_MESSAGE } from "../helpers/fake-github.ts";
 
 /**
@@ -111,7 +112,7 @@ interface Fixture {
   repo: string;
   head: string;
   root: string;
-  start(steps: string[], over?: Partial<VerifyPlan>, head?: string): Promise<Verification>;
+  start(steps: string[], over?: Partial<VerifyPlan>, head?: string, startedAt?: number): Promise<Verification>;
 }
 
 /** A project repository with one commit, a migrated database and a verify root. */
@@ -136,7 +137,7 @@ function fixture(): Fixture {
     repo,
     head,
     root,
-    async start(steps, over = {}, at = head) {
+    async start(steps, over = {}, at = head, startedAt = Date.now()) {
       const v = tx(db, () =>
         insertVerification(db, {
           project_id: "web",
@@ -148,7 +149,7 @@ function fixture(): Fixture {
           worktree: (id) => join(root, id, "wt"),
           project_path: repo,
           source: "cli",
-          now: Date.now(),
+          now: startedAt,
         }),
       );
       await runVerification(deps, v, { prNumber: 1, headRef: "flowryn/t", binary: null, timeoutMs: 60_000, path: null, ...over }, { PATH: process.env.PATH, HOME: process.env.HOME, FLOWRYN_HOME: "/must/not/leak" });
@@ -219,6 +220,13 @@ describe("a verification job", () => {
     await Bun.sleep(3_500);
     expect(existsSync(marker)).toBe(false);
   }, 20_000);
+
+  test("the time limit runs from when the job starts, not from the row's recorded start", async () => {
+    const f = fixture();
+    const v = await f.start(["sleep 0.2"], { timeoutMs: 60_000 }, f.head, Date.now() - 3_600_000);
+    expect(v.state).toBe("passed");
+    expect(v.steps[0]!.detail).toBeNull();
+  });
 
   test("a head the project cannot fetch is an error, and no worktree is added", async () => {
     const f = fixture();
@@ -331,7 +339,7 @@ function facts(over: Partial<MergeFacts> = {}): MergeFacts {
     primaryBranch: null,
     primaryDirty: false,
     fastForward: false,
-    local: { notStarted: [NOT_STARTED.name], atHead: null, lastPassed: null },
+    local: { notStarted: [NOT_STARTED.id!], atHead: null, lastPassed: null },
     ...over,
   };
 }
@@ -347,6 +355,18 @@ function refusal(fn: () => unknown): { code: string; message: string; help?: str
   throw new Error("expected a refusal");
 }
 
+describe("verify show", () => {
+  test("a kept binary that pruning removed reads as removed", () => {
+    const dir = tempDir();
+    const kept = join(dir, "flowryn");
+    writeFileSync(kept, "bin");
+    expect(verificationView({ ...verification("v1", "h2", "passed"), binary_path: kept }, 3).binary).toBe(kept);
+    rmSync(kept);
+    expect(verificationView({ ...verification("v1", "h2", "passed"), binary_path: kept }, 3).binary).toBe(`${kept} (removed)`);
+    expect(verificationView(verification("v1", "h2", "passed"), 3).binary).toBe("-");
+  });
+});
+
 describe("local green at the merge gate", () => {
   test("assumption: GitHub's not-started annotation reads as it did on PR #37", () => {
     expect(NOT_STARTED_ANNOTATION.test(NOT_STARTED_MESSAGE)).toBe(true);
@@ -355,11 +375,11 @@ describe("local green at the merge gate", () => {
 
   test("checks GitHub never started, and a passing verify at exactly this head: the merge goes ahead and names it", () => {
     const passed = verification("v4", "h2", "passed");
-    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.name], atHead: passed, lastPassed: passed } }), approved)).toEqual({ waived: null, alreadyMerged: false, localGreen: "v4" });
+    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved)).toEqual({ waived: null, alreadyMerged: false, localGreen: "v4" });
   });
 
   test("a verify that passed at an older head is head_moved", () => {
-    const r = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.name], atHead: null, lastPassed: verification("v3", "h1", "passed") } }), approved));
+    const r = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: null, lastPassed: verification("v3", "h1", "passed") } }), approved));
     expect(r.code).toBe("head_moved");
     expect(r.message).toContain("v3 passed at h1");
     expect(r.help).toBe("verify this head: flowryn verify t");
@@ -370,7 +390,7 @@ describe("local green at the merge gate", () => {
     expect(none.code).toBe("red_checks");
     expect(none.message).toContain("CI never started at h2");
     expect(none.help).toContain("flowryn verify t");
-    const failed = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.name], atHead: verification("v5", "h2", "failed"), lastPassed: verification("v3", "h1", "passed") } }), approved));
+    const failed = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: verification("v5", "h2", "failed"), lastPassed: verification("v3", "h1", "passed") } }), approved));
     expect(failed.code).toBe("red_checks");
     expect(failed.message).toContain("v5 at this head failed");
   });
@@ -378,17 +398,25 @@ describe("local green at the merge gate", () => {
   test("a check that ran and failed is never covered, nor is a pending one, nor a missing approval", () => {
     const passed = verification("v4", "h2", "passed");
     const ran: Check = { name: "lint", state: "red", detail: "failure", id: 8, app: "github-actions", annotations: 1 };
-    const mixed = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, ran]), local: { notStarted: [NOT_STARTED.name], atHead: passed, lastPassed: passed } }), approved));
+    const mixed = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, ran]), local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved));
     expect(mixed.code).toBe("red_checks");
     expect(mixed.message).toContain("2 red checks");
     const pending: Check = { name: "deploy", state: "pending", detail: "in_progress" };
-    expect(refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, pending]), local: { notStarted: [NOT_STARTED.name], atHead: passed, lastPassed: passed } }), approved)).code).toBe("checks_pending");
-    expect(refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.name], atHead: passed, lastPassed: passed } }), { choice: null, why: "none" })).code).toBe("approval_required");
+    expect(refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, pending]), local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved)).code).toBe("checks_pending");
+    expect(refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), { choice: null, why: "none" })).code).toBe("approval_required");
+  });
+
+  test("a red run that ran and failed is not covered by a not-started run of the same name", () => {
+    const passed = verification("v4", "h2", "passed");
+    const rerun: Check = { ...NOT_STARTED, id: 9, annotations: 1 };
+    const r = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, rerun]), local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved));
+    expect(r.code).toBe("red_checks");
+    expect(r.message).toContain("2 red checks");
   });
 
   test("assumption: local green is evidence, not a waiver, so yolo may merge on it", () => {
     const passed = verification("v4", "h2", "passed");
-    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.name], atHead: passed, lastPassed: passed } }), { choice: { kind: "yolo" }, why: "" }).localGreen).toBe("v4");
+    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), { choice: { kind: "yolo" }, why: "" }).localGreen).toBe("v4");
   });
 });
 
@@ -414,7 +442,12 @@ describe("which red checks GitHub never started", () => {
 
   test("a github-actions run that failed with GitHub's not-started annotation counts", async () => {
     const f = forge({ 7: [failure(NOT_STARTED_MESSAGE), { level: "notice", message: "label migration" }] });
-    expect(await notStartedChecks(f, ref, summarize([NOT_STARTED, { name: "ok", state: "green", detail: "success" }]))).toEqual([NOT_STARTED.name]);
+    expect(await notStartedChecks(f, ref, summarize([NOT_STARTED, { name: "ok", state: "green", detail: "success" }]))).toEqual([NOT_STARTED.id!]);
+  });
+
+  test("two red runs sharing a name: only the one GitHub never started counts", async () => {
+    const f = forge({ 7: [failure(NOT_STARTED_MESSAGE)], 9: [failure("Process completed with exit code 1.")] });
+    expect(await notStartedChecks(f, ref, summarize([NOT_STARTED, { ...NOT_STARTED, id: 9, annotations: 1 }]))).toEqual([NOT_STARTED.id!]);
   });
 
   test("a job that ran and failed, a notice in the same words, or any red that is not a github-actions run counts as nothing, and is not even asked", async () => {

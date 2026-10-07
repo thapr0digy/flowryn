@@ -76,7 +76,8 @@ export interface MergeFacts {
 
 /** Red checks GitHub never ran, and the local verifications that may stand in for them. */
 export interface LocalEvidence {
-  notStarted: string[];
+  /** The check run ids GitHub never started. */
+  notStarted: number[];
   /** The newest finished verification of this PR at exactly this head. */
   atHead: Verification | null;
   /** The newest passing verification of this PR at any head. */
@@ -87,19 +88,19 @@ export interface LocalEvidence {
 export const NOT_STARTED_ANNOTATION = /^The job was not started because/;
 
 /**
- * The red checks GitHub never started: a github-actions check run that
- * failed with a failure annotation in GitHub's not-started words. Asked only
- * when every red check could be one; otherwise none (fails closed).
+ * The ids of the red check runs GitHub never started: a github-actions check
+ * run that failed with a failure annotation in GitHub's not-started words.
+ * Asked only when every red check could be one; otherwise none (fails closed).
  */
-export async function notStartedChecks(forge: Forge, ref: PrRef, checks: ChecksSummary): Promise<string[]> {
+export async function notStartedChecks(forge: Forge, ref: PrRef, checks: ChecksSummary): Promise<number[]> {
   const red = checks.checks.filter((c) => c.state === "red");
   if (red.length === 0 || !red.every((c) => c.app === "github-actions" && c.detail === "failure" && c.id !== undefined && (c.annotations ?? 0) > 0)) return [];
-  const names: string[] = [];
+  const ids: number[] = [];
   for (const check of red) {
     const annotations = await forge.annotations(ref, check.id!);
-    if (annotations.some((a) => a.level === "failure" && NOT_STARTED_ANNOTATION.test(a.message))) names.push(check.name);
+    if (annotations.some((a) => a.level === "failure" && NOT_STARTED_ANNOTATION.test(a.message))) ids.push(check.id!);
   }
-  return names;
+  return ids;
 }
 
 async function out(git: GitRunner, cwd: string, args: string[]): Promise<string | null> {
@@ -138,18 +139,19 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
       }
     }
     let local: LocalEvidence | undefined;
+    let annotationsUnread = false;
     if (checks && checks.state === "red") {
-      let notStarted: string[];
+      let notStarted: number[] = [];
       try {
         notStarted = await notStartedChecks(mc.forge, ref, checks);
       } catch (error) {
         noteMergeBlocked(mc, error);
-        throw new FlowrynError("forge_unavailable", `cannot read the annotations of the red checks of ${delivered.ref} (${(error as Error).message})`, "try again later");
+        annotationsUnread = true;
       }
       const url = canonicalPrUrl(ref, mc.github.web_url);
       if (notStarted.length > 0) local = { notStarted, atHead: finishedAtHead(mc.db, url, pr.headSha), lastPassed: lastPassed(mc.db, url) };
     }
-    tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
+    if (!annotationsUnread) tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
     return { ...base, head: pr.headSha, pr, checks, remote, ...(local ? { local } : {}) };
   }
@@ -303,7 +305,8 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   let localGreen: string | null = null;
   const checks = facts.checks;
   const asked = chosen.allowRed ?? null;
-  const red = checks ? checks.checks.filter((c) => c.state === "red").map((c) => c.name) : [];
+  const redRuns = checks ? checks.checks.filter((c) => c.state === "red") : [];
+  const red = redRuns.map((c) => c.name);
   // A merge that names a check to waive goes ahead only when that check is the one failing now.
   if (asked !== null && !(red.length === 1 && red[0] === asked)) {
     const failing = red.length > 0 ? `failing now: ${red.map((name) => JSON.stringify(name)).join(", ")}` : checks ? "no check is failing" : "there are no checks to waive";
@@ -321,7 +324,7 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
     const waiver = waiverOf(chosen.choice);
     if (red.length > 0) {
       if (red.length === 1 && waiver === red[0]) waived = red[0]!;
-      else if (facts.local && red.every((name) => facts.local!.notStarted.includes(name))) localGreen = localGreenOf(facts, red);
+      else if (facts.local && redRuns.every((c) => c.id !== undefined && facts.local!.notStarted.includes(c.id))) localGreen = localGreenOf(facts, red);
       else {
         throw new FlowrynError(
           "red_checks",

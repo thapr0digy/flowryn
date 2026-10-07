@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
  * (its "origin"): then a PR's head follows the pushed branch, as on GitHub,
  * and a merge really lands on the bare repo's base branch (a squash or a
  * merge commit), so the cleanup guard sees what it would see after a real
- * merge. Knobs make the forge unreachable, rate limited, or accept a merge it
+ * merge. Knobs make the forge unreachable, rate limited, fail annotation reads, or accept a merge it
  * never reports (the unproven-merge case). Nothing here reaches the network.
  */
 
@@ -84,6 +84,8 @@ export class FakeGitHub {
   unreachable = false;
   /** Every request answers 403 with the rate limit spent. */
   rateLimited = false;
+  /** Check-run annotation reads answer 500. */
+  annotationsDown = false;
   readonly webUrl: string;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private nextNumber = 1;
@@ -299,6 +301,7 @@ export class FakeGitHub {
     }
     const annotations = /^check-runs\/(\d+)\/annotations$/.exec(rest);
     if (req.method === "GET" && annotations) {
+      if (this.annotationsDown) return this.json(req, path, 500, { message: "Server Error" });
       const check = this.checkRuns.get(Number(annotations[1]));
       if (!check) return this.json(req, path, 404, { message: "Not Found" });
       const list = check.notStarted

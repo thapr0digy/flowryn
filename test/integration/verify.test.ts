@@ -126,6 +126,26 @@ describe("flowryn verify", () => {
   );
 
   test(
+    "annotations GitHub cannot serve: the merge is not blocked on them; red_checks without a waiver, and --allow-red still merges",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: VERIFY_CONFIG });
+      const e = env;
+      const { task } = await unstartedShip(e, "annotations-down");
+      e.github.annotationsDown = true;
+      const plain = await e.call("merge", { task });
+      expect(plain.ok).toBe(false);
+      expect(plain.error).toMatchObject({ code: "red_checks" });
+      expect(plain.error!.message).not.toContain("CI never started");
+
+      expect((await e.approve(task, { allowRed: CI })).ok).toBe(true);
+      const waived = await e.call("merge", { task });
+      expect(waived.ok).toBe(true);
+      expect(waived.data).toMatchObject({ state: "merged", waived: CI, local_green: "-" });
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
     "a project without verify steps is refused with what to paste",
     async () => {
       env = await makeShipEnv({ mode: "direct-PR" });
