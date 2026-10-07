@@ -10,8 +10,9 @@ mkdir -p "$(dirname "$OUT")"
 
 # The build stamp (src/build-stamp.ts): the commit, whether the tree was clean,
 # and this checkout. The daemon applies a new build by itself only when it is a
-# clean build of a merged commit. FLOWRYN_BUILD_COMMIT and FLOWRYN_BUILD_DIRTY
-# override them, for tests that need two distinct builds.
+# clean build of a merged commit. FLOWRYN_BUILD_COMMIT, FLOWRYN_BUILD_DIRTY and
+# FLOWRYN_BUILD_SOURCE override them, for tests that need a build of a commit
+# in a scratch repository.
 COMMIT="${FLOWRYN_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
 if [ -n "${FLOWRYN_BUILD_DIRTY:-}" ]; then
   DIRTY="$FLOWRYN_BUILD_DIRTY"
@@ -22,7 +23,7 @@ else
 fi
 STAMP=()
 if [ -n "$COMMIT" ]; then
-  STAMP=(--define "FLOWRYN_BUILD_COMMIT=\"$COMMIT\"" --define "FLOWRYN_BUILD_DIRTY=\"$DIRTY\"" --define "FLOWRYN_BUILD_SOURCE=\"$ROOT\"")
+  STAMP=(--define "FLOWRYN_BUILD_COMMIT=\"$COMMIT\"" --define "FLOWRYN_BUILD_DIRTY=\"$DIRTY\"" --define "FLOWRYN_BUILD_SOURCE=\"${FLOWRYN_BUILD_SOURCE:-$ROOT}\"")
 fi
 
 bun build "$ROOT/src/main.ts" --compile ${STAMP[@]+"${STAMP[@]}"} --outfile "$OUT"
