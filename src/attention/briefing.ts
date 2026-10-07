@@ -9,6 +9,7 @@ import { taskTitle } from "../lifecycle/runs.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { restartsSince } from "../daemon/restart.ts";
+import { leaderRecordLine } from "../contracts/grant.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
@@ -164,6 +165,16 @@ function restartLines(db: Db): string[] {
   });
 }
 
+/** Contract passes the leader recorded since the last briefing, each shown once (src/contracts/verbs.ts). */
+function leaderRecordLines(db: Db): string[] {
+  const since = Number(getMeta(db, "last_briefing_at") ?? "0");
+  const rows = db.query("SELECT ts, payload FROM events WHERE kind = 'contract.passed' AND ts > ?1 ORDER BY seq").all(since) as { ts: number; payload: string }[];
+  return rows
+    .map((r) => ({ ts: r.ts, ...(JSON.parse(r.payload) as { harness: string; version: string; by: string; build?: string | null }) }))
+    .filter((r) => r.by === "leader")
+    .map((r) => `Contract ${hhmm(r.ts)}: ${leaderRecordLine(r.harness, r.version, r.build ?? null)}.`);
+}
+
 /** Is the morning section due: at or after the morning hour, and not yet shown today? */
 export function morningDue(db: Db, now: number, morningHour: number): boolean {
   const date = new Date(now);
@@ -183,6 +194,7 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   lines.push(...needs.lines);
   // Before decisionLines, which moves last_briefing_at on.
   lines.push(...restartLines(db));
+  lines.push(...leaderRecordLines(db));
   lines.push(...decisionLines(db, input.now, input.markMorning));
   lines.push(fleetLine(db));
   const todos = todoFacts(db, today);
