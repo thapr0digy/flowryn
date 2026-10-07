@@ -18,7 +18,7 @@ GitHub refuses to start any Actions job on this private repository (free tier, b
 
 - The `CI` workflow is disabled on GitHub (`gh workflow disable CI`, a repository setting), so pull requests have no checks. Flowryn's merge gate passes a pull request with no checks (`src/policy/merge.ts`: checks state `none`).
 - `.no-mistakes.yaml` declares `no_ci: true`, so the no-mistakes CI step counts a zero-check pull request as green. It trusts that only from the default branch.
-- Only the Linux run is lost: no-mistakes' test step still runs the full `bun test` on the Mac before every pull request.
+- Only the Linux run is lost: no-mistakes' test step still runs the full `bun test` on the Mac before every pull request. The workflow's other steps, `bun run build` and the two cleanup-guard fixture sets, run nowhere automatically, so a change to the build or the cleanup guard runs them by hand (the commands are in `.github/workflows/ci.yml`).
 
 Once billing is back (about 2026-11-07), re-enable both: run `gh workflow enable CI`, then remove `no_ci: true` from `.no-mistakes.yaml` (and this section and the README line) in a pull request. The leader holds a to-do due 2026-11-07 for it.
 
