@@ -19,6 +19,7 @@ import { isAlive, terminate } from "../runtime/proc.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "./cleanup.ts";
+import { pinDrift, pinHarness, type HarnessPin } from "./pin.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
@@ -89,7 +90,8 @@ function scratchRepo(dir: string): string {
   return dir;
 }
 
-function scratchConfig(options: ContractOptions, home: string, branchPrefix: string): string {
+/** The scratch home's config.toml: the real config's tools, workers and style, with the harness pinned. */
+export function scratchConfig(options: ContractOptions, pin: HarnessPin, home: string, branchPrefix: string): string {
   const real = options.config;
   const workers: Record<string, unknown> = { ...(real.extra.workers as Record<string, unknown> | undefined) };
   workers.worktree_root = join(home, "wt");
@@ -101,7 +103,8 @@ function scratchConfig(options: ContractOptions, home: string, branchPrefix: str
     data_dir: join(home, "data"),
     state_dir: join(home, "state"),
     tasks: { backlog: join(home, "data", "backlog.md"), todos: join(home, "data", "todos.md") },
-    tools: { ...real.tools },
+    // Launch and resume run the pinned file, so an update mid-run cannot change the version under test.
+    tools: { ...real.tools, [pin.harness]: pin.binary },
     herdr: { socket: options.herdrSocket },
     workers,
     reconcile: CONTRACT_TIMING,
@@ -119,13 +122,15 @@ function scratchConfig(options: ContractOptions, home: string, branchPrefix: str
  * start; the caller records a real pass only if every step passes.
  */
 export async function runContract(options: ContractOptions): Promise<ContractResult> {
-  const binary = resolveTool(options.config, options.harness);
-  if (!binary) throw new Error(`${options.harness} is not installed or not in [tools]`);
-  const version = await harnessVersion(options.harness, binary);
-  if (!version) throw new Error(`cannot read the ${options.harness} version from ${binary} --version`);
+  const configured = resolveTool(options.config, options.harness);
+  if (!configured) throw new Error(`${options.harness} is not installed or not in [tools]`);
+  const pin = await pinHarness(options.harness, configured, harnessVersion);
+  const { version } = pin;
+  options.log(`${options.harness} ${version} pinned at ${pin.binary}`);
+  const drift = () => pinDrift(pin, harnessVersion);
   const home = realpathSync(mkdtempSync(join(tmpdir(), "fwc-")));
   const { prefix } = contractPrefix();
-  writeFileSync(join(home, "config.toml"), scratchConfig(options, home, prefix));
+  writeFileSync(join(home, "config.toml"), scratchConfig(options, pin, home, prefix));
   const stateDir = join(home, "state");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
@@ -224,6 +229,9 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         for (;;) {
           const value = check();
           if (value) return value;
+          // A harness updated mid-wait would be refused (contract_unverified) and the wait would only time out.
+          const drifted = await drift();
+          if (drifted) throw new Error(drifted);
           if (Date.now() > until) throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${what}`);
           await Bun.sleep(WAIT_POLL_MS);
         }
@@ -237,7 +245,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       isAlive: (pid, start, exe) => isAlive({ pid, start, exe }),
       log: options.log,
     };
-    steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log)));
+    steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log, drift)));
   } finally {
     await cleanup();
     process.off("SIGINT", onSignal);
@@ -247,14 +255,26 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   return { harness: options.harness, version, passed, steps, scratch: home };
 }
 
-/** Run the steps in order, logging step N/M as each starts and ends; stop at the first failure. */
-export async function runContractSteps(steps: ContractStep[], env: ContractEnv, state: ContractState, log: (line: string) => void): Promise<StepResult[]> {
+/**
+ * Run the steps in order, logging step N/M as each starts and ends; stop at
+ * the first failure. `drift` says why the harness under test changed, and a
+ * step that would start on a changed harness fails at once with that reason.
+ */
+export async function runContractSteps(
+  steps: ContractStep[],
+  env: ContractEnv,
+  state: ContractState,
+  log: (line: string) => void,
+  drift: () => Promise<string | null> = async () => null,
+): Promise<StepResult[]> {
   const results: StepResult[] = [];
   for (const [index, step] of steps.entries()) {
     const position = `step ${index + 1}/${steps.length}`;
     log(`${position} ${step.name} (usually ~${step.typicalSeconds}s)`);
     const started = Date.now();
     try {
+      const drifted = await drift();
+      if (drifted) throw new Error(drifted);
       const detail = await step.run(env, state);
       const seconds = Math.round((Date.now() - started) / 100) / 10;
       results.push({ step: step.name, ok: true, detail, seconds });

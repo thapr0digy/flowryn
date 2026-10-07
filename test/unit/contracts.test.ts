@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractPrefix, removeOwnWorktrees, type GitRun } from "../../src/contracts/cleanup.ts";
 import { contractBody, contractEstimateSeconds, contractSteps, type ContractEnv, type ContractState, type ContractStep } from "../../src/contracts/suite.ts";
-import { runContractSteps } from "../../src/contracts/runner.ts";
+import { runContractSteps, scratchConfig, type ContractOptions } from "../../src/contracts/runner.ts";
+import { pinDrift, pinHarness } from "../../src/contracts/pin.ts";
+import type { FlowrynConfig } from "../../src/config/config.ts";
+import { harnessVersion } from "../../src/lifecycle/fleet-services.ts";
 import { contractPlan } from "../../src/cli/commands/setup.ts";
 
 const dirs: string[] = [];
@@ -133,5 +136,72 @@ describe("contract progress", () => {
     const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
     expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 22 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");
+  });
+});
+
+/** A fake Claude native install: versions/<ver> files and a `claude` symlink the updater repoints. */
+function fakeClaudeInstall(): { link: string; install(version: string): string; repoint(version: string): void } {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "fw-pin-")));
+  dirs.push(base);
+  mkdirSync(join(base, "versions"));
+  const link = join(base, "claude");
+  const install = (version: string) => {
+    const file = join(base, "versions", version);
+    writeFileSync(file, `#!/bin/sh\necho "${version} (Claude Code)"\n`, { mode: 0o755 });
+    return file;
+  };
+  const repoint = (version: string) => {
+    rmSync(link, { force: true });
+    symlinkSync(join(base, "versions", version), link);
+  };
+  return { link, install, repoint };
+}
+
+describe("contract harness pin", () => {
+  test("pins the versioned file behind the claude symlink, so an auto-update mid-run does not change the version under test", async () => {
+    const claude = fakeClaudeInstall();
+    const started = claude.install("2.1.291");
+    claude.repoint("2.1.291");
+    const pin = await pinHarness("claude", claude.link, harnessVersion);
+    expect(pin).toEqual({ harness: "claude", binary: started, version: "2.1.291" });
+
+    const options = { harness: "claude", config: { tools: { claude: claude.link }, extra: {} } as unknown as FlowrynConfig, herdrSocket: "/missing", model: null } as ContractOptions;
+    expect(scratchConfig(options, pin, "/scratch", "flowryn/contract-x-")).toContain(`claude = ${JSON.stringify(started)}`);
+
+    claude.install("2.1.292");
+    claude.repoint("2.1.292");
+    expect(await harnessVersion("claude", claude.link)).toBe("2.1.292");
+    expect(await pinDrift(pin, harnessVersion)).toBeNull();
+  });
+
+  test("a pinned file replaced in place or removed mid-run fails fast with the reason", async () => {
+    const claude = fakeClaudeInstall();
+    const file = claude.install("2.1.291");
+    claude.repoint("2.1.291");
+    const pin = await pinHarness("claude", claude.link, harnessVersion);
+
+    writeFileSync(file, `#!/bin/sh\necho "2.1.292 (Claude Code)"\n`, { mode: 0o755 });
+    // The version cache keys on mtime; a same-millisecond rewrite must still read as a change.
+    utimesSync(file, new Date(), new Date(Date.now() + 5_000));
+    const updated = (await pinDrift(pin, harnessVersion))!;
+    expect(updated).toBe("claude updated to 2.1.292 mid-run (the run started on 2.1.291); re-run flowryn doctor --contracts --harness claude");
+
+    const ran: string[] = [];
+    const results = await runContractSteps(
+      [step("resume", async () => (ran.push("resume"), "resumed"))],
+      {} as ContractEnv,
+      state,
+      () => undefined,
+      () => pinDrift(pin, harnessVersion),
+    );
+    expect(ran).toEqual([]);
+    expect(results.map((r) => [r.step, r.ok, r.detail])).toEqual([["resume", false, updated]]);
+
+    unlinkSync(file);
+    expect(await pinDrift(pin, harnessVersion)).toStartWith(`claude 2.1.291 at ${file} was removed`);
+  });
+
+  test("refuses a configured harness path that does not exist", async () => {
+    await expect(pinHarness("pi", "/nonexistent/pi", harnessVersion)).rejects.toThrow("pi is configured at /nonexistent/pi, which does not exist");
   });
 });
