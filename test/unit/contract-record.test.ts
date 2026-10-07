@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { hashToken, mintToken } from "../../src/api/auth.ts";
@@ -25,7 +25,7 @@ import { inertDelivery } from "../../src/policy/services.ts";
 import { inertSched } from "../../src/sched/services.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
-import { SKILL_BODY } from "../../src/bridges/skill.ts";
+import { writeLeaderFiles } from "../../src/bridges/files.ts";
 
 const INSTALLED = "ab12cd34ef56";
 const PR_BUILD = "0f0f0f0f0f0f";
@@ -291,13 +291,27 @@ describe("contract reports", () => {
     symlinkSync(outside, link);
     expect(() => checkLeaderReport(config.data_dir, link, { harness: "claude", version: "2.1.300", build: INSTALLED })).toThrow("is not in");
   });
+
+  test("checkLeaderReport names the missing contracts directory, not the report, when data_dir/contracts is gone", () => {
+    useConfig("");
+    const report = join(dir, "report.json");
+    writeFileSync(report, "{}");
+    const contractsDir = join(config.data_dir, "contracts");
+    expect(existsSync(contractsDir)).toBe(false);
+    expect(() => checkLeaderReport(config.data_dir, report, { harness: "claude", version: "2.1.300", build: INSTALLED })).toThrow(`${contractsDir} does not exist`);
+    expect(() => checkLeaderReport(config.data_dir, join(dir, "missing.json"), { harness: "claude", version: "2.1.300", build: INSTALLED })).toThrow(`${join(dir, "missing.json")} does not exist`);
+  });
 });
 
 describe("the leader skill", () => {
-  test("runs a worker-path PR's build verify-only itself, and the recording check after a harness update, asking the user only when refused", () => {
-    expect(SKILL_BODY).toContain("bun <worktree>/src/main.ts doctor --contracts --verify-only");
-    expect(SKILL_BODY).toContain("doctor --contracts --harness <h>");
-    expect(SKILL_BODY).toContain("on `human_only` (strict policy) or `not_installed_build`, ask the user to run it");
-    expect(SKILL_BODY).not.toContain("ask the user to run `flowryn doctor --contracts` in their own terminal and merge");
+  test("the SKILL.md written for both harnesses runs a worker-path PR's build verify-only itself, and the recording check after a harness update, asking the user only when refused", async () => {
+    const files = await writeLeaderFiles({ home: dir, command: ["flowryn"], socket: join(dir, "s"), style: null });
+    for (const path of [join(files.skillDir, "SKILL.md"), join(files.claudePlugin, "skills", basename(files.skillDir), "SKILL.md")]) {
+      const skill = readFileSync(path, "utf8");
+      expect(skill).toContain("bun <worktree>/src/main.ts doctor --contracts --verify-only");
+      expect(skill).toContain("doctor --contracts --harness <h>");
+      expect(skill).toContain("on `human_only` (strict policy) or `not_installed_build`, ask the user to run it");
+      expect(skill).not.toContain("ask the user to run `flowryn doctor --contracts` in their own terminal and merge");
+    }
   });
 });

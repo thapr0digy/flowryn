@@ -216,13 +216,16 @@ const doctor: VerbSpec = {
     const contracts = boolArg(args, "contracts");
     const verifyOnly = boolArg(args, "verify-only");
     if (verifyOnly && !contracts) return print(io, errorReply({ code: "bad_args", message: "--verify-only goes with --contracts" }));
+    const restore = boolArg(args, "restore");
     const identity = agentIdentity(io.env);
+    if (identity && restore) return print(io, errorReply({ code: "human_only", message: `doctor --restore runs only in your own terminal: ${identity} is set` }));
+    if (restore && contracts) return print(io, errorReply({ code: "bad_args", message: "--restore does not go with --contracts" }));
     if (identity && !contracts) return print(io, errorReply({ code: "human_only", message: `doctor runs only in your own terminal: ${identity} is set`, help: "an agent may run flowryn doctor --contracts --verify-only" }));
     if (contracts && !verifyOnly) {
       const refusal = await recordRefusal(contractCaller(io.env), buildIdOf(selfCommand()), io);
       if (refusal) return print(io, refusal);
     }
-    if (boolArg(args, "restore")) {
+    if (restore) {
       try {
         const { config } = loadConfig(flowrynHome(io.env));
         const result = restoreBackup(config, stringArg(args, "backup"));

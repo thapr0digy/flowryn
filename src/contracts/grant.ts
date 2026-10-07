@@ -79,7 +79,8 @@ function reportRefusal(why: string): FlowrynError {
 export function checkLeaderReport(dataDir: string, report: string | null, expected: { harness: string; version: string; build: string }): void {
   if (!report) throw reportRefusal("no --report");
   const dir = join(dataDir, "contracts");
-  if (!existsSync(report) || !existsSync(dir)) throw reportRefusal(`${report} does not exist`);
+  if (!existsSync(report)) throw reportRefusal(`${report} does not exist`);
+  if (!existsSync(dir)) throw reportRefusal(`${dir} does not exist`);
   if (!isUnder(realpathSync(report), realpathSync(dir))) throw reportRefusal(`${report} is not in ${dir}`);
   let parsed: Record<string, unknown>;
   try {

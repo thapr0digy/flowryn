@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { stateFiles } from "../../src/config/paths.ts";
 import { cli } from "../helpers/harness.ts";
 import { makeLeaderEnv, type LeaderEnv } from "../helpers/leader-env.ts";
 
@@ -104,5 +105,26 @@ describe("doctor --contracts from an agent pane", () => {
     const result = await doctor(env, ["--verify-only"], { FLOWRYN_TOKEN: leader.token });
     expect(result.code).toBe(3);
     expect(result.reply.error!.code).toBe("bad_args");
+  });
+  test("--restore refuses an agent pane whatever flags come with it, and never goes with --contracts", async () => {
+    env = await makeLeaderEnv();
+    const e = env;
+    const leader = await leaderSession(e);
+    const db = stateFiles(e.h.stateDir).db;
+    const before = statSync(db).ino;
+    const identities: Record<string, string>[] = [{ FLOWRYN_TOKEN: leader.token }, { FLOWRYN_TOKEN: e.worker.token, FLOWRYN_RUN: e.worker.runId }];
+    for (const identity of identities) {
+      for (const args of [["--contracts", "--verify-only", "--restore"], ["--contracts", "--restore"]]) {
+        const result = await doctor(e, args, identity);
+        expect(result.code).toBe(77);
+        expect(result.reply.error!.code).toBe("human_only");
+        expect(suiteStarted(result.stderr)).toBe(false);
+      }
+    }
+    expect(statSync(db).ino).toBe(before);
+    expect(readdirSync(e.h.stateDir).filter((f) => f.includes(".replaced-"))).toEqual([]);
+    const human = await doctor(e, ["--contracts", "--verify-only", "--restore"], {});
+    expect(human.code).toBe(3);
+    expect(human.reply.error!.code).toBe("bad_args");
   });
 });
