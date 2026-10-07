@@ -55,6 +55,12 @@ describe("the questions file and the ask rule, checked in code", () => {
     expect(parsed.decided).toEqual(QUESTIONS.decided);
   });
 
+  test("a long question parses whole; only one past the hard cap is refused", () => {
+    const long = `${"Which store, and why? ".repeat(300)}the end`;
+    expect(parseGateQuestions(withQuestion({ question: long })).questions[0]!.question).toBe(long);
+    expect(() => parseGateQuestions(withQuestion({ question: "q".repeat(16 * 1024 + 1) }))).toThrow(/longer than 16384/);
+  });
+
   test("a question must name the choice it blocks", () => {
     expect(() => parseGateQuestions(withQuestion({ blocks: undefined }))).toThrow(/blocks/);
     expect(() => parseGateQuestions(withQuestion({ blocks: "stuff" }))).toThrow(/at least 10/);

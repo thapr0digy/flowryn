@@ -5,6 +5,8 @@ const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 export const MAX_LINE_CHARS = 200;
+/** The hard cap on a stored question: generous, so a worker's question is kept whole. */
+export const MAX_STORED_TEXT_CHARS = 16 * 1024;
 
 /**
  * Make untrusted text safe for a one-line digest: strip ANSI escapes and
@@ -24,4 +26,13 @@ export function sanitizeLine(text: string, max: number = MAX_LINE_CHARS): string
 export function sanitizeBlock(text: string): string {
   // oxlint-disable-next-line no-control-regex
   return text.replace(ANSI_ESCAPE, "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+/**
+ * Cap text for storage, not display: keep it whole up to `max`, and past it
+ * say how much was cut, so a reader never mistakes a cut question for the whole.
+ */
+export function capStoredText(text: string, max: number = MAX_STORED_TEXT_CHARS): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n[truncated ${text.length - max} chars]`;
 }
