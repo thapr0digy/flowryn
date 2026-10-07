@@ -56,9 +56,18 @@ describe("bun's test summary", () => {
   });
 });
 
-describe("[projects.<id>] verify", () => {
-  const config = (text: string) => parseConfig(text, "/h");
+const config = (text: string) => parseConfig(text, "/h");
 
+function bad(text: string): string {
+  try {
+    verifyConfig(config(text), "web");
+  } catch (error) {
+    return (error as FlowrynError).code;
+  }
+  return "accepted";
+}
+
+describe("[projects.<id>] verify", () => {
   test("a project without verify steps has none; a full table reads", () => {
     expect(verifyConfig(config(""), "web")).toBeNull();
     expect(verifyConfig(config("[projects.other]\nverify = [\"true\"]\n"), "web")).toBeNull();
@@ -67,14 +76,6 @@ describe("[projects.<id>] verify", () => {
   });
 
   test("malformed settings are refused, and a binary must stay inside the worktree", () => {
-    const bad = (text: string) => {
-      try {
-        verifyConfig(config(text), "web");
-      } catch (error) {
-        return (error as FlowrynError).code;
-      }
-      return "accepted";
-    };
     expect(bad('[projects.web]\nverify = []\n')).toBe("config_invalid");
     expect(bad('[projects.web]\nverify = "bun test"\n')).toBe("config_invalid");
     expect(bad('[projects.web]\nverify = ["  "]\n')).toBe("config_invalid");
@@ -391,23 +392,25 @@ describe("local green at the merge gate", () => {
   });
 });
 
+function forge(annotations: Record<number, Annotation[]>): Forge & { asked: number[] } {
+  const asked: number[] = [];
+  return {
+    asked,
+    pull: async () => pr(),
+    pullsForBranch: async () => [],
+    checks: async () => summarize([]),
+    merge: async () => ({ merged: false, sha: null, message: "" }),
+    annotations: async (_repo, id) => {
+      asked.push(id);
+      return annotations[id] ?? [];
+    },
+  };
+}
+
+const failure = (message: string): Annotation => ({ level: "failure", message });
+
 describe("which red checks GitHub never started", () => {
-  function forge(annotations: Record<number, Annotation[]>): Forge & { asked: number[] } {
-    const asked: number[] = [];
-    return {
-      asked,
-      pull: async () => pr(),
-      pullsForBranch: async () => [],
-      checks: async () => summarize([]),
-      merge: async () => ({ merged: false, sha: null, message: "" }),
-      annotations: async (_repo, id) => {
-        asked.push(id);
-        return annotations[id] ?? [];
-      },
-    };
-  }
   const ref = { owner: "acme", repo: "web", number: 1 };
-  const failure = (message: string): Annotation => ({ level: "failure", message });
 
   test("a github-actions run that failed with GitHub's not-started annotation counts", async () => {
     const f = forge({ 7: [failure(NOT_STARTED_MESSAGE), { level: "notice", message: "label migration" }] });

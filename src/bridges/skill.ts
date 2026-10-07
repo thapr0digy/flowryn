@@ -35,6 +35,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 - \`flowryn interrupt|cancel|resume <task>\`.
 - \`flowryn merge <task>\`: merge a delivered ship. Claude asks the user first, except for a yolo task that is not sensitive, which merges under yolo with no prompt; on Pi use the \`flowryn_merge\` tool, never the shell. Refusals name the gate: approval_required, red_checks, checks_pending, head_moved.
 - Exactly one red check the user wants waived: \`flowryn merge <task> --allow-red '<check>'\` (the exact name, one single-quoted word); Claude always asks the user, naming the check. On Pi: \`flowryn_merge\` with \`allow_red\`. Never waive unless the user said so.
+- CI that never started (red_checks saying "CI never started"): \`flowryn verify <task>\` runs the project's verify steps at the PR head in a clean worktree (minutes: give the Bash call a long timeout, or \`--detach\` then \`flowryn verify show <id>\`); once it passes at the current head, \`flowryn merge <task>\` counts it as local green. A check that ran and failed it never covers.
 - \`flowryn decline <task> --body-file -\`: send a delivered ship back with the user's words.
 - \`flowryn cleanup <task>\`: remove a landed, cancelled or failed task's worktree (merges clean up by themselves). \`--discard\` only after the user ran \`flowryn approve <task> --discard\`.
 - \`flowryn todo add "<title>" --due <date>\`, \`todo list\`, \`todo done <id>\`, \`todo due <id> <date>\`, \`todo edit <id> --title <t>\`, \`todo rm <id>\`.

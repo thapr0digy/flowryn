@@ -3,7 +3,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
 import { canonicalPrUrl, parsePrUrl, repoOf } from "../forge/github.ts";
-import type { PrRef, PullRequest } from "../forge/types.ts";
+import { ForgeError, type PrRef, type PullRequest } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
 import { getProject, listProjects, type ProjectRow } from "../lifecycle/projects.ts";
 import { runAndProject } from "../policy/verbs.ts";
@@ -131,6 +131,7 @@ const verifyStart: VerbSpec = {
     try {
       pr = await ctx.delivery.forge().pull(target.ref);
     } catch (error) {
+      if (error instanceof ForgeError && error.kind === "not_found") throw new FlowrynError("not_found", `GitHub has no ${target.url}`);
       if (isForgeOutage(error)) tx(ctx.db, () => noteForgeDown(ctx.db, error, "github", ctx.now()));
       throw new FlowrynError("forge_unavailable", `cannot read ${target.url} from GitHub (${(error as Error).message})`, "try again later");
     }

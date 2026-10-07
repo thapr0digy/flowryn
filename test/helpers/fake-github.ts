@@ -33,6 +33,8 @@ export interface FakePr {
   /** Fixed head; when the repo has a bare origin and the PR is open, the pushed branch wins. */
   headSha: string;
   baseRef: string;
+  /** owner/repo the head branch lives in, when it is a fork; the repo itself otherwise. */
+  headRepo?: string;
   state: "open" | "closed";
   draft: boolean;
   merged: boolean;
@@ -141,6 +143,7 @@ export class FakeGitHub {
       headRef: pr.headRef,
       headSha,
       baseRef: pr.baseRef ?? "main",
+      ...(pr.headRepo ? { headRepo: pr.headRepo } : {}),
       state: pr.state ?? "open",
       draft: pr.draft ?? false,
       merged: pr.merged ?? false,
@@ -208,7 +211,7 @@ export class FakeGitHub {
       merged_at: pr.mergedAt,
       // GitHub reports a test merge commit for an open PR too; only a merged PR's is a landing.
       merge_commit_sha: pr.merged ? pr.mergeSha : "0000000000000000000000000000000000000000",
-      head: { ref: pr.headRef, sha: this.headOf(repo, pr), repo: { full_name: full } },
+      head: { ref: pr.headRef, sha: this.headOf(repo, pr), repo: { full_name: pr.headRepo ?? full } },
       base: { ref: pr.baseRef, repo: { full_name: full } },
     };
   }
