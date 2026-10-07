@@ -422,6 +422,14 @@ const ATTEMPT_WAIVER_SQL = /* sql */ `
 ALTER TABLE approval_attempts ADD COLUMN allow_red_check TEXT;
 `;
 
+/**
+ * An item's line is cut to one digest line (200 characters); full_line keeps
+ * the whole sanitized line when it was cut, for `flowryn show <item> --full`.
+ */
+const ITEM_FULL_LINE_SQL = /* sql */ `
+ALTER TABLE items ADD COLUMN full_line TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -436,6 +444,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
   { version: 12, name: "gate-comment", sql: GATE_COMMENT_SQL },
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
+  { version: 14, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

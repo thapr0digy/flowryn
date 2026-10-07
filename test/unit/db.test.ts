@@ -157,8 +157,19 @@ describe("migrations", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 12));
     db.exec("INSERT INTO approval_attempts (id, session_id, tool_use_id, args_hash, permission_mode, created_at) VALUES ('a1', 'L1', 't1', 'h', 'auto', 1)");
-    expect(migrate(db)).toEqual([13]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13))).toEqual([13]);
     expect(db.query("SELECT id, allow_red_check FROM approval_attempts").all()).toEqual([{ id: "a1", allow_red_check: null }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13))).toEqual([]);
+    db.close();
+  });
+
+  test("an item gains a whole-line column; items opened before it carry none", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 13));
+    db.exec("INSERT INTO events (ulid, ts, source, kind, payload) VALUES ('u1', 1, 'cli', 'test.item', '{}')");
+    db.exec("INSERT INTO items (id, event_seq, class, lane, kind, line, opened_at) VALUES ('i1', 1, 'actionable', 'P1', 'worker_question', 'a line', 1)");
+    expect(migrate(db)).toEqual([14]);
+    expect(db.query("SELECT id, line, full_line FROM items").all()).toEqual([{ id: "i1", line: "a line", full_line: null }]);
     expect(migrate(db)).toEqual([]);
     db.close();
   });

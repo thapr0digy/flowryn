@@ -21,6 +21,7 @@ import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
+import { ShowText } from "./show-text.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
   const run = findRun(db, ref);
@@ -282,9 +283,9 @@ function gatesView(ctx: ReadCtx, runId: string): string[] | null {
   return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
 }
 
-function planLine(ctx: ReadCtx, taskId: string): string {
+function planLine(ctx: ReadCtx, taskId: string, text: ShowText): string {
   const phase = phaseOfTask(ctx.db, taskId)!;
-  return `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}: ${sanitizeLine(phase.plan_title, 80)}`;
+  return `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}: ${text.line(phase.plan_title, 80)}`;
 }
 
 const MAX_FLEET_ROWS = 20;
@@ -389,7 +390,7 @@ function filedLine(ctx: ReadCtx, q: QueuedTask): string {
 }
 
 /** `show` for a Queued task no run has started: what it is, what it waits for, and what starts it. */
-function queuedView(ctx: ReadCtx, q: QueuedTask): { data: Record<string, unknown>; hints: string[] } {
+function queuedView(ctx: ReadCtx, q: QueuedTask, text: ShowText): { data: Record<string, unknown>; hints: string[] } {
   const policy = q.policy;
   const runs = (ctx.db.query("SELECT id, state, started_at FROM runs WHERE task_id = ?1 ORDER BY started_at").all(q.id) as { id: string; state: string; started_at: number }[]).map(
     (r) => `${r.id} ${r.state} ${age(ctx.now, r.started_at)} ago`,
@@ -397,16 +398,11 @@ function queuedView(ctx: ReadCtx, q: QueuedTask): { data: Record<string, unknown
   const events = (ctx.db.query("SELECT ts, kind FROM events WHERE task_id = ?1 ORDER BY seq DESC LIMIT 8").all(q.id) as { ts: number; kind: string }[])
     .toReversed()
     .map((e) => `${age(ctx.now, e.ts)} ago ${e.kind}`);
-  const body = q.body
-    .split("\n")
-    .slice(0, QUEUED_BODY_LINES)
-    .map((line) => sanitizeLine(line, 120))
-    .join("\n");
   const hold = q.hold ? [q.hold.kind, q.hold.reason, q.hold.until ? `until ${q.hold.until}` : null].filter((s) => s).join(" · ") : "-";
   return {
     data: {
       task: q.id,
-      title: sanitizeLine(q.title, 120),
+      title: text.line(q.title, 120),
       state: "queued",
       status: q.status,
       next: q.next,
@@ -417,44 +413,54 @@ function queuedView(ctx: ReadCtx, q: QueuedTask): { data: Record<string, unknown
       auto: q.auto,
       blocked_by: q.blockedBy,
       waits: q.waits,
-      hold: sanitizeLine(hold, 120),
-      ...(q.plan ? { plan: `${q.plan.id} phase ${q.plan.phase} of ${q.plan.of}: ${sanitizeLine(q.plan.title, 80)}` } : {}),
+      hold: text.line(hold, 120),
+      ...(q.plan ? { plan: `${q.plan.id} phase ${q.plan.phase} of ${q.plan.of}: ${text.line(q.plan.title, 80)}` } : {}),
       filed: filedLine(ctx, q),
-      body,
+      body: text.block(q.body, QUEUED_BODY_LINES, 120),
       runs,
       events,
+      ...text.pointer(q.id),
     },
     hints: queuedHints(q),
   };
 }
 
-/** `flowryn show <task|run>`: one run in detail, at most about 40 lines. */
+/** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
-  summary: "One task or run in detail: state, evidence, steers, questions, recent events",
-  positionals: [{ name: "target", required: true, help: "task, run or item id" }],
-  flags: {},
+  summary: "One task, run, item, decision, plan or divergence in detail; --full for untruncated text",
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan or divergence id" }],
+  flags: { full: { type: "boolean", help: "untruncated titles, lines and bodies" } },
   kind: "read",
   roles: ["leader", "reader", "human"],
   read(ctx, args) {
-    let target = stringArg(args, "target")!;
+    const asked = stringArg(args, "target")!;
+    let target = asked;
+    const text = new ShowText(boolArg(args, "full"));
     if (/^[kq]\d+$/.test(target)) {
       const d = getDecision(ctx.db, target);
-      if (d) return { data: decisionView(d), hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };
+      if (d) return { data: { ...decisionView(d, text), ...text.pointer(asked) }, hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };
     }
-    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target) : null;
-    if (plan) return { data: plan, hints: ["flowryn fleet"] };
+    const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, text.full) : null;
+    if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
     if (divergence) return { data: divergenceView(divergence), hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
-    const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as { task_id: string | null; run_id: string | null; line: string; lane: string; state: string } | null;
+    const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as {
+      task_id: string | null;
+      run_id: string | null;
+      line: string;
+      full_line: string | null;
+      lane: string;
+      state: string;
+    } | null;
     if (item) target = item.run_id ?? item.task_id ?? target;
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
-      if (item) return { data: { item: target, lane: item.lane, state: item.state, line: item.line } };
+      if (item) return { data: { item: target, lane: item.lane, state: item.state, line: text.stored(item.line, item.full_line, Number.POSITIVE_INFINITY), ...text.pointer(asked) } };
       const queued = queuedTask(ctx.db, target);
-      if (queued) return queuedView(ctx, queued);
+      if (queued) return queuedView(ctx, queued, text);
       const phase = phaseOfTask(ctx.db, target);
-      if (phase) return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...planView(ctx.db, phase.plan_id) }, hints: [`flowryn show ${phase.plan_id}`] };
+      if (phase) return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...planView(ctx.db, phase.plan_id, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
       throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
     }
     const policy = ctx.db.query("SELECT project_id, kind, delivery_mode, mode_reason FROM task_policy WHERE task_id = ?1").get(run.task_id) as {
@@ -466,18 +472,19 @@ const show: VerbSpec = {
     // A task Queued again after its run failed or was cancelled: the run's evidence, and what starts it again.
     const requeued = isTerminal(run.state) ? queuedTask(ctx.db, run.task_id) : null;
     // Delivery is "seen" (in a model request); the ack is compliance. Times are after the steer was created.
-    const steers = recentSteers(ctx.db, run.id, 5).map((m) => ({ id: m.id, rings: m.rings, delivery: steerStatus(m, ctx.now), body: sanitizeLine(m.body, 60) }));
+    const steers = recentSteers(ctx.db, run.id, 5).map((m) => ({ id: m.id, rings: m.rings, delivery: steerStatus(m, ctx.now), body: text.line(m.body, 60) }));
     const decisions = (ctx.db.query("SELECT id, state, question, answer FROM decisions WHERE run_id = ?1 ORDER BY id").all(run.id) as {
       id: string;
       state: string;
       question: string;
       answer: string | null;
-    }[]).map((d) => ({ id: d.id, state: d.state, question: sanitizeLine(d.question, 80), answer: d.answer ?? "-" }));
-    const items = (ctx.db.query("SELECT id, lane, line FROM items WHERE run_id = ?1 AND state IN ('open','presented') ORDER BY opened_at").all(run.id) as {
+    }[]).map((d) => ({ id: d.id, state: d.state, question: text.line(d.question, 80), answer: d.answer ?? "-" }));
+    const items = (ctx.db.query("SELECT id, lane, line, full_line FROM items WHERE run_id = ?1 AND state IN ('open','presented') ORDER BY opened_at").all(run.id) as {
       id: string;
       lane: string;
       line: string;
-    }[]).map((i) => ({ id: i.id, lane: i.lane, line: sanitizeLine(i.line, 100) }));
+      full_line: string | null;
+    }[]).map((i) => ({ id: i.id, lane: i.lane, line: text.stored(i.line, i.full_line, 100) }));
     const artifacts = (ctx.db.query("SELECT kind, ref FROM artifacts WHERE task_id = ?1 ORDER BY created_at").all(run.task_id) as { kind: string; ref: string }[]).map(
       (a) => `${a.kind}: ${a.ref}`,
     );
@@ -487,7 +494,7 @@ const show: VerbSpec = {
     return {
       data: {
         task: run.task_id,
-        title: taskTitle(ctx.db, run.task_id),
+        title: text.line(taskTitle(ctx.db, run.task_id), 120),
         run: run.id,
         kind: policy.kind,
         project: policy.project_id,
@@ -500,7 +507,7 @@ const show: VerbSpec = {
         ...(requeued ? { queued: `${requeued.status} · ${requeued.next}` } : {}),
         ...(gatesView(ctx, run.id) ? { gates: gatesView(ctx, run.id) } : {}),
         leases: runLeases(ctx.db, run.id).map((l) => l.pool).join(" ") || "-",
-        ...(phaseOfTask(ctx.db, run.task_id) ? { plan: planLine(ctx, run.task_id) } : {}),
+        ...(phaseOfTask(ctx.db, run.task_id) ? { plan: planLine(ctx, run.task_id, text) } : {}),
         pane: run.pane_id ?? "-",
         pid: run.proc_pid ?? "-",
         resumes: run.resume_count,
@@ -512,6 +519,7 @@ const show: VerbSpec = {
         decisions,
         items,
         events,
+        ...text.pointer(asked),
       },
       hints: run.state === "ready" && policy.kind === "ship" ? [`flowryn merge ${run.task_id}`, `flowryn decline ${run.task_id} --body-file -`] : [`flowryn steer ${run.task_id} --body-file -`, `flowryn cancel ${run.task_id}`],
     };

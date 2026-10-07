@@ -104,6 +104,7 @@ The features that let Flowryn replace the previous orchestrator (docs/cutover-no
 | Worker questions wake the leader: every open worker question reaches the leader without your message, batched per 30 s into one wake, a busy turn taking them at its Stop, on its own hourly budget; only a blocking one raises an OS alert; the daemon listens on every review page and wakes the leader with what you send from it | Done (docs/m5-notes.md "Worker questions wake the leader") |
 | Clickable review answers: one Send carries every answer, an Other choice with your words, an "anything else" note and a pass request (a leader item; the gate still passes only through a human channel); the design and QA skills never list questions as text | Done: docs/m5-notes.md, "Gate questions", "One Send" |
 | Away mode (autonomy spec 2, ship B): `flowryn away [--until] [--body-file -]` and `flowryn back`; while away every new item only you can move wakes the leader for the remote-control chat, on `[away] max_wakes_per_hour`; your messages never end it; `back` or the expiry gives one return brief (waiting on you, decided for you, landed, failed, spend); delivery only, no grants | Done: docs/m5-notes.md, "Away mode" |
+| `flowryn show --full`: whole titles, lines and bodies for a task, run, item, decision or plan; the backlog snapshot holds the whole text tasks-axi's `list` cuts | Done: docs/m5-notes.md, "`flowryn show --full`" |
 
 ## Not in v1
 
