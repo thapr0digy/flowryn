@@ -146,6 +146,33 @@ describe("flowryn verify", () => {
   );
 
   test(
+    "one verification runs at a time: the same PR and head attaches to it, another PR is verify_busy",
+    async () => {
+      const slow = `[projects.web]\nverify = ${JSON.stringify(["sleep 3", ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: slow });
+      const e = env;
+      await unstartedShip(e, "one-at-a-time");
+      e.github.addPr("acme/web", { number: 51, headRef: "main" });
+
+      const first = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(first.code).toBe(0);
+      expect(first.reply.data).toMatchObject({ verification: "v1", attached: false });
+
+      const again = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(again.code).toBe(0);
+      expect(again.reply.data).toMatchObject({ verification: "v1", attached: true });
+
+      const other = await e.fleet.json(["verify", "51"]);
+      expect(other.code).toBe(2);
+      expect(other.reply.error).toMatchObject({ code: "verify_busy" });
+
+      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE id = 'v1'")[0]?.state === "passed", 30_000, "v1 passed");
+      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
     "a project without verify steps is refused with what to paste",
     async () => {
       env = await makeShipEnv({ mode: "direct-PR" });
