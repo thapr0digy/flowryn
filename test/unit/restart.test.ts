@@ -156,7 +156,7 @@ describe("binary check", () => {
       expect(env.FLOWRYN_TOKEN).toBeUndefined();
       return good;
     });
-    expect(result).toEqual({ version: "0.6.0", proto: 5, build: null });
+    expect(result).toEqual({ version: "0.6.0", proto: 5, build: null, schema: null, commit: null, dirty: null, source: null });
     expect(calls).toEqual([["bun", join(dir, "flowryn.db"), "version", "--json"]]);
   });
 
@@ -217,7 +217,7 @@ function controller(opts: { supervisor?: Supervisor; build?: string | null; targ
     supervisor: () => supervisor,
     smoke: async (command) => {
       if (opts.smokeFails) throw new FlowrynError("binary_broken", `${command.join(" ")} failed its smoke check`);
-      return { version: "0.5.0", proto: 4, build: opts.targetBuild === undefined ? "bbbbbbbbbbbb" : opts.targetBuild };
+      return { version: "0.5.0", proto: 4, build: opts.targetBuild === undefined ? "bbbbbbbbbbbb" : opts.targetBuild, schema: null, commit: null, dirty: null, source: null };
     },
   });
 }
