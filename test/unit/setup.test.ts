@@ -9,6 +9,7 @@ import { migrate, openDb, schemaVersion, LATEST_SCHEMA_VERSION } from "../../src
 import { backupIfDue } from "../../src/db/backup.ts";
 import { notifyMacosCheck, restoreBackup } from "../../src/doctor/doctor.ts";
 import { runInit, type InitDeps } from "../../src/init/init.ts";
+import { POLICY_MODE_LINES } from "../../src/config/policy.ts";
 import { renderPlist, plistSpecFor, serviceLabel, BASE_LABEL } from "../../src/service/launchd.ts";
 import { stateFiles } from "../../src/config/paths.ts";
 import { tryExclusiveLock } from "../../src/util/flock.ts";
@@ -122,6 +123,29 @@ describe("init", () => {
     const off = tempDir();
     expect(await runInit(initDeps(off, scriptedIo({ "Add a project": "" }, { "Post macOS notifications": false, Write: true, Install: false }).io))).toBe(0);
     expect(loadConfig(off).config.extra.notify).toMatchObject({ macos: false });
+  });
+
+  test("asks the leader policy once, strict by default, and writes it explicitly", async () => {
+    const strict = tempDir();
+    const { io, printed } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(strict, io))).toBe(0);
+    expect(loadConfig(strict).config.extra.policy).toEqual({ mode: "strict" });
+    expect(printed).toContain(`  strict: ${POLICY_MODE_LINES.strict}`);
+    expect(printed).toContain(`  relaxed: ${POLICY_MODE_LINES.relaxed}`);
+    const relaxed = tempDir();
+    expect(await runInit(initDeps(relaxed, scriptedIo({ "Policy mode": "relaxed", "Add a project": "" }, { Write: true, Install: false }).io))).toBe(0);
+    expect(loadConfig(relaxed).config.extra.policy).toEqual({ mode: "relaxed" });
+    // Re-running offers the current mode as the default.
+    expect(await runInit(initDeps(relaxed, scriptedIo({ "Add a project": "" }, { Write: true, Install: false }).io))).toBe(0);
+    expect(loadConfig(relaxed).config.extra.policy).toEqual({ mode: "relaxed" });
+  });
+
+  test("refuses a policy mode that is neither strict nor relaxed and writes nothing", async () => {
+    const home = tempDir();
+    const { io, printed } = scriptedIo({ "Policy mode": "lax" }, { Write: true, Install: false });
+    expect(await runInit(initDeps(home, io))).toBe(1);
+    expect(existsSync(join(home, "config.toml"))).toBe(false);
+    expect(printed.at(-1)).toBe("refused: lax is not strict or relaxed; nothing was written");
   });
 
   test("re-running fills keys an existing table lacks, keeping every current value", async () => {
