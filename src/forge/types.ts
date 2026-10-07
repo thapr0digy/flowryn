@@ -40,6 +40,17 @@ export interface Check {
   state: CheckState;
   /** The forge's own word: a check run's conclusion or status, a commit status's state. */
   detail: string;
+  /** A check run's id (a commit status has none), for its annotations. */
+  id?: number;
+  /** The app that made the check run, such as github-actions. */
+  app?: string;
+  /** How many annotations the check run has. */
+  annotations?: number;
+}
+
+export interface Annotation {
+  level: string;
+  message: string;
 }
 
 export interface ChecksSummary {
@@ -77,6 +88,8 @@ export interface Forge {
   /** PRs whose head is `branch` in this repo, newest first, any state. */
   pullsForBranch(repo: RepoRef, branch: string): Promise<PullRequest[]>;
   checks(repo: RepoRef, sha: string): Promise<ChecksSummary>;
+  /** A check run's annotations: how the merge gate tells a job GitHub never started from one that failed. */
+  annotations(repo: RepoRef, checkRunId: number): Promise<Annotation[]>;
   /** Merge at exactly `sha`: the forge refuses when the head moved (design section 7: bound to the head). */
   merge(ref: PrRef, sha: string, method: string, title: string): Promise<MergeResult>;
 }

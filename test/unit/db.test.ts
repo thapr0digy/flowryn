@@ -157,8 +157,23 @@ describe("migrations", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 12));
     db.exec("INSERT INTO approval_attempts (id, session_id, tool_use_id, args_hash, permission_mode, created_at) VALUES ('a1', 'L1', 't1', 'h', 'auto', 1)");
-    expect(migrate(db)).toEqual([13]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13))).toEqual([13]);
     expect(db.query("SELECT id, allow_red_check FROM approval_attempts").all()).toEqual([{ id: "a1", allow_red_check: null }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 13))).toEqual([]);
+    db.close();
+  });
+
+  test("verifications arrive with migration 14 on a database already in use, and a state outside the four is refused", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 13));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    expect(migrate(db)).toEqual([14]);
+    const insert = (state: string) =>
+      db
+        .query("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES (?1, 'web', 'https://github.com/a/w/pull/1', 'h', ?2, '[]', '/d', '/d/wt', '/w', 1)")
+        .run(`v${state}`, state);
+    for (const state of ["running", "passed", "failed", "error"]) insert(state);
+    expect(() => insert("green")).toThrow("CHECK");
     expect(migrate(db)).toEqual([]);
     db.close();
   });

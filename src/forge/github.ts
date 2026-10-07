@@ -1,4 +1,4 @@
-import { summarize, ForgeError, type Check, type ChecksSummary, type Forge, type MergeResult, type PrRef, type PullRequest, type RepoRef } from "./types.ts";
+import { summarize, ForgeError, type Annotation, type Check, type ChecksSummary, type Forge, type MergeResult, type PrRef, type PullRequest, type RepoRef } from "./types.ts";
 
 /**
  * GitHub's REST API (v3, api version 2022-11-28) for the calls Flowryn makes:
@@ -207,8 +207,12 @@ export class GitHubForge implements Forge {
       const { body } = await this.request("GET", `${base}/check-runs?per_page=${PER_PAGE}&page=${page}`);
       const runs = (body as { check_runs?: unknown; total_count?: unknown } | null)?.check_runs;
       if (!Array.isArray(runs)) throw new ForgeError("protocol", "check runs answer has no check_runs list");
-      for (const run of runs as { name?: unknown; status?: unknown; conclusion?: unknown }[]) {
-        checks.push({ name: str(run.name) || "check", state: checkRunState(run), detail: str(run.conclusion) || str(run.status) });
+      for (const run of runs as { id?: unknown; name?: unknown; status?: unknown; conclusion?: unknown; app?: { slug?: unknown } | null; output?: { annotations_count?: unknown } | null }[]) {
+        const check: Check = { name: str(run.name) || "check", state: checkRunState(run), detail: str(run.conclusion) || str(run.status) };
+        if (typeof run.id === "number") check.id = run.id;
+        if (typeof run.app?.slug === "string") check.app = run.app.slug;
+        if (typeof run.output?.annotations_count === "number") check.annotations = run.output.annotations_count;
+        checks.push(check);
       }
       const total = Number((body as { total_count?: unknown }).total_count ?? runs.length);
       if (runs.length < PER_PAGE || checks.length >= total) break;
@@ -221,6 +225,12 @@ export class GitHubForge implements Forge {
       }
     }
     return summarize(checks);
+  }
+
+  async annotations(repo: RepoRef, checkRunId: number): Promise<Annotation[]> {
+    const { body } = await this.request("GET", `/repos/${enc(repo.owner)}/${enc(repo.repo)}/check-runs/${checkRunId}/annotations?per_page=${PER_PAGE}`);
+    if (!Array.isArray(body)) throw new ForgeError("protocol", "an annotations answer is not a list");
+    return (body as { annotation_level?: unknown; message?: unknown }[]).map((a) => ({ level: str(a.annotation_level), message: str(a.message) }));
   }
 
   async merge(ref: PrRef, sha: string, method: string, title: string): Promise<MergeResult> {

@@ -18,7 +18,13 @@ export interface FakeCheck {
   state: FakeCheckState;
   /** A commit status instead of a check run. */
   status?: boolean;
+  /** A red check run GitHub never started (Actions billing): its failure annotation says so. */
+  notStarted?: boolean;
 }
+
+/** GitHub's annotation on a job it never started, verbatim from a real PR whose Actions minutes ran out. */
+export const NOT_STARTED_MESSAGE =
+  "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings";
 
 export interface FakePr {
   number: number;
@@ -79,6 +85,8 @@ export class FakeGitHub {
   readonly webUrl: string;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private nextNumber = 1;
+  /** Check runs served so far, by id, for their annotations. */
+  private readonly checkRuns = new Map<number, FakeCheck>();
 
   constructor(webUrl = "https://github.com") {
     this.webUrl = webUrl;
@@ -268,18 +276,42 @@ export class FakeGitHub {
     if (req.method === "GET" && commit) {
       const checks = repo.checks.get(commit[1]!) ?? repo.defaultChecks;
       if (commit[2] === "check-runs") {
-        const runs = checks.filter((c) => !c.status).map((c) => ({
-          name: c.name,
-          status: c.state === "pending" ? "in_progress" : "completed",
-          conclusion: c.state === "pending" ? null : c.state === "green" ? "success" : "failure",
-        }));
+        const runs = checks.filter((c) => !c.status).map((c) => {
+          const id = this.checkRunId(`${repo.owner}/${repo.repo}`, commit[1]!, c.name);
+          this.checkRuns.set(id, c);
+          return {
+            id,
+            name: c.name,
+            status: c.state === "pending" ? "in_progress" : "completed",
+            conclusion: c.state === "pending" ? null : c.state === "green" ? "success" : "failure",
+            app: { slug: "github-actions" },
+            output: { title: null, summary: null, annotations_count: c.notStarted ? 2 : 0 },
+          };
+        });
         return this.json(req, path, 200, { total_count: runs.length, check_runs: runs });
       }
       const statuses = checks.filter((c) => c.status).map((c) => ({ context: c.name, state: c.state === "green" ? "success" : c.state === "red" ? "failure" : "pending" }));
       const state = statuses.some((s) => s.state === "failure") ? "failure" : statuses.some((s) => s.state === "pending") ? "pending" : "success";
       return this.json(req, path, 200, { state, total_count: statuses.length, statuses });
     }
+    const annotations = /^check-runs\/(\d+)\/annotations$/.exec(rest);
+    if (req.method === "GET" && annotations) {
+      const check = this.checkRuns.get(Number(annotations[1]));
+      if (!check) return this.json(req, path, 404, { message: "Not Found" });
+      const list = check.notStarted
+        ? [
+            { path: ".github", annotation_level: "failure", title: "", message: NOT_STARTED_MESSAGE },
+            { path: ".github", annotation_level: "notice", title: "", message: "The ubuntu-latest label will migrate to a newer image." },
+          ]
+        : [];
+      return this.json(req, path, 200, list);
+    }
     return this.json(req, path, 404, { message: "Not Found" });
+  }
+
+  /** A stable id for a check run: the same check at the same head always gets the same one. */
+  private checkRunId(repo: string, sha: string, name: string): number {
+    return Number.parseInt(createHash("sha1").update(`${repo}@${sha}#${name}`).digest("hex").slice(0, 8), 16);
   }
 
   private merge(req: Request, path: string, repo: FakeRepo, pr: FakePr, body: Record<string, unknown>): Response {
