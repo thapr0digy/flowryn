@@ -47,6 +47,8 @@ export const ERROR_CODES = {
   not_supervised: EXIT.policy,
   binary_broken: EXIT.policy,
   restart_dropped: EXIT.policy,
+  // a leader contract record from a build the daemon does not run
+  not_installed_build: EXIT.policy,
   // M5: workflows and autonomy
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
