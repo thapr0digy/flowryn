@@ -1,4 +1,4 @@
-import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
+import { findOpenItem, itemLines, openItem, resolveItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -99,8 +99,10 @@ export function noteUsageLimit(db: Db, who: string, detail: string, now: number,
   savePause(db, pause);
   const event = appendEvent(db, { source: "hook", kind: "sched.usage_limit", payload: { who, detail, until: pause.until, backoff_ms: backoffMs, rearmed: current !== null }, ts: now });
   const open = findOpenItem(db, "usage_limit", null);
-  if (open) db.query("UPDATE items SET line = ?2 WHERE id = ?1").run(open.id, sanitizeLine(pauseLine(pause)));
-  else openItem(db, { kind: "usage_limit", eventSeq: event.seq, line: pauseLine(pause), now });
+  if (open) {
+    const lines = itemLines(pauseLine(pause));
+    db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(open.id, lines.line, lines.full_line);
+  } else openItem(db, { kind: "usage_limit", eventSeq: event.seq, line: pauseLine(pause), now });
   return true;
 }
 

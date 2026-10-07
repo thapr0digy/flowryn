@@ -9,6 +9,8 @@ import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { LEADER_RUN_VERBS } from "../../src/lifecycle/leader-verbs.ts";
 import { recordPlan } from "../../src/lifecycle/plans.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
+import { recordDelivery } from "../../src/lifecycle/delivery.ts";
+import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { makeHome, type TestHome } from "../helpers/harness.ts";
 
 let h: TestHome;
@@ -83,6 +85,14 @@ describe("show --full on a queued task", () => {
     expect(whole.truncated).toBeUndefined();
   });
 
+  test("a body ending in a newline after its sixth line has no pointer", () => {
+    policy("web-six-q1");
+    tx(db, () => writeSnapshot(db, "backlog", "h", [task("web-six-q1", { title: "Short", body: "one\ntwo\nthree\nfour\nfive\nsix\n" })], 1));
+    const view = show("web-six-q1").data;
+    expect((view.body as string).split("\n")).toHaveLength(6);
+    expect(view.truncated).toBeUndefined();
+  });
+
   test("a view that cut nothing has no pointer", () => {
     policy("web-short-q1");
     tx(db, () => writeSnapshot(db, "backlog", "h", [task("web-short-q1", { title: "Short", body: "one line" })], 1));
@@ -124,6 +134,16 @@ describe("show --full on an item", () => {
     expect(stored.full_line).toBe(LONG_LINE);
     expect(show(id).data).toMatchObject({ item: id, line: stored.line, truncated: `flowryn show ${id} --full for the complete text` });
     expect(show(id, true).data).toEqual({ item: id, lane: "P1", state: "open", line: LONG_LINE });
+  });
+
+  test("a delivery again rewrites the whole line along with the digest line", () => {
+    policy("web-ship-a1");
+    tx(db, () => writeSnapshot(db, "backlog", "h", [task("web-ship-a1", { title: LONG_TITLE, state: "in_flight" })], 1));
+    run("web-ship-a1", "r01SHIP");
+    tx(db, () => recordDelivery(db, getRunWithPolicy(db, "r01SHIP")!, { kind: "local", head: "abc", commits: 1 }, "test", 1));
+    tx(db, () => recordDelivery(db, getRunWithPolicy(db, "r01SHIP")!, { kind: "local", head: "def", commits: 2 }, "test", 2));
+    const whole = show("web-ship-a1", true).data as { items: { line: string }[] };
+    expect(whole.items.map((i) => i.line)).toEqual([`Branch ready to merge: ${LONG_TITLE} (web), local-only, 2 commit(s)`]);
   });
 
   test("a short item stores no second copy and needs no pointer", () => {

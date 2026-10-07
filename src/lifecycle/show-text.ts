@@ -28,7 +28,7 @@ export class ShowText {
   /** A body: its first `maxLines` lines, each cut to `max`, by default; every line as written with --full. */
   block(text: string, maxLines: number, max: number): string {
     if (this.full) return sanitizeBlock(text);
-    const lines = text.split("\n");
+    const lines = text.replace(/\n+$/, "").split("\n");
     if (lines.length > maxLines) this.cut = true;
     return lines
       .slice(0, maxLines)
