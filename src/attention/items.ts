@@ -23,6 +23,8 @@ export type ItemClass = "actionable" | "info";
  * review_feedback: what you sent from a review page the daemon polls.
  * pass_requested: the user asked on a review page to pass its gate; the
  * leader confirms it with them through a human channel.
+ * contract_recorded: the leader recorded a harness contract pass (relaxed
+ * policy, installed build); informational, so you see every one.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -57,6 +59,7 @@ export const LANE_TABLE = {
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
+  contract_recorded: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
   steer_acked: { lane: "P1", class: "info" },

@@ -4,6 +4,7 @@ import { configProblems, defaultConfig, loadConfig, TOOL_NAMES, whichTool, type 
 import { configPath, flowrynHome, runDir, toAbsolute } from "../config/paths.ts";
 import { renderConfig } from "../config/toml.ts";
 import { workerConfigProblems } from "../config/workers.ts";
+import { DEFAULT_POLICY_MODE, POLICY_MODE_LINES, POLICY_MODES, type PolicyMode } from "../config/policy.ts";
 import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI } from "../version.ts";
 
@@ -51,6 +52,21 @@ export function withMissingDefaults(current: Record<string, unknown>, defaults: 
 function currentMacosNotifications(extra: Record<string, unknown>): boolean | null {
   const notify = extra.notify;
   return isTable(notify) && typeof notify.macos === "boolean" ? notify.macos : null;
+}
+
+function currentPolicyMode(extra: Record<string, unknown>): PolicyMode {
+  const policy = extra.policy;
+  return isTable(policy) && (POLICY_MODES as readonly unknown[]).includes(policy.mode) ? (policy.mode as PolicyMode) : DEFAULT_POLICY_MODE;
+}
+
+/** The leader policy: one line per mode, the current one as the default; null (and a refusal printed) for anything else. */
+async function askPolicyMode(io: InitIo, fallback: PolicyMode): Promise<PolicyMode | null> {
+  io.print("Leader policy:");
+  for (const mode of POLICY_MODES) io.print(`  ${mode}: ${POLICY_MODE_LINES[mode]}`);
+  const answer = (await io.ask("Policy mode (strict or relaxed)", fallback)).trim().toLowerCase() || fallback;
+  if ((POLICY_MODES as readonly string[]).includes(answer)) return answer as PolicyMode;
+  io.print(`refused: ${answer} is not strict or relaxed; nothing was written`);
+  return null;
 }
 
 export interface InitIo {
@@ -188,6 +204,11 @@ export async function runInit(deps: InitDeps): Promise<number> {
   const macos = await io.confirm("Post macOS notifications when something needs you?", currentMacosNotifications(current.extra) ?? true);
   const extra = withMissingDefaults(current.extra, LATER_SECTION_DEFAULTS);
   extra.notify = { ...(isTable(extra.notify) ? extra.notify : (LATER_SECTION_DEFAULTS.notify as Record<string, unknown>)), macos };
+
+  // [policy] mode, asked once and written explicitly
+  const mode = await askPolicyMode(io, currentPolicyMode(current.extra));
+  if (!mode) return 1;
+  extra.policy = { ...(isTable(extra.policy) ? extra.policy : {}), mode };
 
   const config: FlowrynConfig = {
     home,

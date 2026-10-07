@@ -11,6 +11,7 @@ import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERIFIED_LAVISH_AXI, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
 import { workerConfigProblems } from "../config/workers.ts";
+import { POLICY_MODE_LINES, policyMode } from "../config/policy.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
@@ -280,8 +281,20 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(await herdrCheck(config));
   checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
+  const policy = policyCheck(config);
+  if (policy) checks.push(policy);
   checks.push(await hostCheckNow(config));
   return checks;
+}
+
+/** The [policy] mode in force, in one line; a bad value is already a config failure above. */
+export function policyCheck(config: FlowrynConfig): Check | null {
+  try {
+    const mode = policyMode(config);
+    return { check: "policy", status: "ok", detail: `${mode}: ${POLICY_MODE_LINES[mode]}` };
+  } catch {
+    return null;
+  }
 }
 
 /** The capacity host check against this machine now (design section 11): a host that fails it starts no worker. */
