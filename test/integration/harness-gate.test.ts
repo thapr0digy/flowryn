@@ -49,9 +49,9 @@ function eventKinds(env: FleetEnv, kind: string): Record<string, unknown>[] {
   }
 }
 
-/** What `flowryn doctor --contracts` does once a suite passes: the daemon records the version. */
+/** What `flowryn doctor --contracts` in your own terminal does once a suite passes: the daemon records the version. */
 async function recordContract(env: FleetEnv, harness: string, version: string): Promise<void> {
-  const answer = (await request(join(env.h.home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb: "contracts.record", token: env.leader, args: { harness, version } }, { connectMs: 1_000, replyMs: 10_000 })) as { ok: boolean };
+  const answer = (await request(join(env.h.home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb: "contracts.record", token: null, channel: "tty", args: { harness, version } }, { connectMs: 1_000, replyMs: 10_000 })) as { ok: boolean };
   expect(answer.ok).toBe(true);
 }
 
