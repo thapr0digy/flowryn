@@ -23,6 +23,7 @@ import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
+import { markLost } from "./steers.ts";
 
 /**
  * fresh: the run's first launch; resume: its stored session again; stage: a
@@ -277,6 +278,8 @@ export class Launcher {
     tx(db, () => {
       db.query("UPDATE runs SET launched_at = ?2, liveness = 'starting', busy_until = NULL, idle_since = NULL, updated_at = ?2 WHERE id = ?1").run(run.id, now());
       appendEvent(db, { source: "daemon", kind: "run.launching", runId: run.id, taskId: run.task_id, payload: { mode, pane: paneId, trust: trust.detail, args: plan.args.length } });
+      // A steer carried to the old process (its waiter outlives it) and never seen went with it: ring it to the new one.
+      markLost(db, run, "worker relaunched", now());
     });
     await runtime.startAgent(paneId, { kind: plan.kind, name: `flowryn-${run.id.slice(-8).toLowerCase()}-${now().toString(36)}`, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
