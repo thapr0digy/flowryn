@@ -7,8 +7,8 @@ import { appendFileSync } from "node:fs";
  * real `perl -e sleep N` child of the fake (the command line ps shows for the
  * live tool), so the suite's process-table wait sees it running. The suite's
  * 25, 60 and 120 second commands then take 2.5, 6 and 12 seconds: still
- * longer than the urgent steer's 3 s cut and the interrupt step's 3 s wait,
- * so every step sees the same order of events as a live run.
+ * longer than the urgent steer's 3 s cut, so every step sees the same
+ * order of events as a live run.
  */
 export const SLEEP_MS_PER_SECOND = 100;
 
