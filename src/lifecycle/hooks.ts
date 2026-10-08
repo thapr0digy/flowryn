@@ -21,6 +21,7 @@ import { guardTurnEnd } from "./turn-end-guard.ts";
 import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
+import { ulidTime } from "../util/ulid.ts";
 
 /**
  * The hook verbs (design section 12, role "hook"). A worker's Claude hooks
@@ -655,6 +656,18 @@ function idleNow(run: RunWithPolicy, now: number): boolean {
 }
 
 /**
+ * A waiter armed before the run's latest launch belongs to a harness process
+ * that is gone (its id is a ULID minted when it was armed). The daemon's side
+ * of its call outlives the process for up to wait_poll_ms, and while it is the
+ * run's newest waiter it would take an idle steer meant for the resumed
+ * worker, whose next hook then marks the steer seen: lost, never re-rung.
+ */
+function armedBeforeLaunch(waiter: string, run: RunWithPolicy): boolean {
+  const armedAt = ulidTime(waiter);
+  return armedAt !== null && run.launched_at !== null && armedAt < run.launched_at;
+}
+
+/**
  * `hook wait-steer`: the idle-delivery channel. Claude runs it as an
  * asyncRewake Stop hook; it fires only while the worker is idle (a busy worker
  * gets steers through PostToolUse and Stop). The Pi extension holds it as a
@@ -681,7 +694,7 @@ const waitSteer: VerbSpec = {
     for (;;) {
       if (bus.closed) return { wait: true };
       const run = getRunWithPolicy(ctx.db, runId);
-      if (!run || isTerminal(run.state) || !bus.isCurrent(runId, waiter)) return { exit: true };
+      if (!run || isTerminal(run.state) || !bus.isCurrent(runId, waiter) || armedBeforeLaunch(waiter, run)) return { exit: true };
       if (harness === "pi") {
         const command = bus.takeCommand(runId);
         if (command) return { command };
