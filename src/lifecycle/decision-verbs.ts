@@ -285,12 +285,13 @@ export function openDecisions(ctx: { db: ReadCtx["db"]; now: number }, filter: "
   return picked.toSorted((a, b) => weight.get(b.id)! - weight.get(a.id)! || (a.created_at ?? 0) - (b.created_at ?? 0));
 }
 
+/** What `flowryn show` prints for a decision: its question, context and why whole, never cut for display. */
 export function decisionView(d: DecisionRow): Record<string, unknown> {
   return {
     decision: d.id,
     task: d.task_id,
     state: d.state,
-    question: sanitizeLine(d.question, 200),
+    question: sanitizeBlock(d.question),
     options: (JSON.parse(d.options) as string[]).join(" | ") || "-",
     recommend: d.recommendation ?? "-",
     origin: d.origin ?? "-",
@@ -304,8 +305,8 @@ export function decisionView(d: DecisionRow): Record<string, unknown> {
     ...(d.kind ? { kind: d.kind } : {}),
     ...(d.gate_id ? { gate: d.gate_id } : {}),
     ...(d.blocks ? { blocks: sanitizeLine(d.blocks, 200) } : {}),
-    ...(d.note ? { why: sanitizeLine(d.note, 400) } : {}),
-    ...(d.context ? { context: sanitizeLine(d.context, 400) } : {}),
+    ...(d.note ? { why: sanitizeBlock(d.note) } : {}),
+    ...(d.context ? { context: sanitizeBlock(d.context) } : {}),
   };
 }
 

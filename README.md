@@ -94,6 +94,7 @@ flowryn decide q7 other --by captain --words "redis"  # your own answer to a rev
 flowryn capacity                    # pools over their caps, the host check, and what waits for a grant
 flowryn capacity resume --harness claude  # lift the Claude usage-limit pause now, in your own terminal
 flowryn decision list               # open decisions; --reserved (only you may answer), --deferred, --all
+flowryn show q7                     # one decision: its question, context and why in full (lists cut them to a line)
 flowryn decision add --key db --question "SQLite or Postgres?" --options sqlite,postgres --body-file -
 flowryn decide k3 sqlite --rationale "one process"   # the leader's answer; reserved ones need your word
 flowryn decide k3 sqlite --rationale -              # the same, the rationale read from stdin

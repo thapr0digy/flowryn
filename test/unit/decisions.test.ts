@@ -3,6 +3,7 @@ import { tx, type Db } from "../../src/db/db.ts";
 import { LATEST_SCHEMA_VERSION } from "../../src/db/schema.ts";
 import { createStandaloneDecision, getDecision } from "../../src/lifecycle/decisions.ts";
 import { takenIds } from "../../src/lifecycle/plans.ts";
+import { capStoredText, MAX_STORED_TEXT_CHARS } from "../../src/util/sanitize.ts";
 import { makeHome, type TestHome } from "../helpers/harness.ts";
 
 let h: TestHome;
@@ -60,5 +61,24 @@ describe("standalone decisions", () => {
     // takenIds must still see it (through the decisions table itself), not through a pending intent.
     db.query("UPDATE intents SET state = 'applied' WHERE task_id = ?1").run(made.taskId);
     expect(takenIds(db)(made.taskId)).toBe(true);
+  });
+
+  test("a long question is stored whole, and only past the hard cap is it cut, saying how much", () => {
+    const long = `${"Allow Bash(gh:*), Bash(sqlite3:*), more.\n".repeat(200)}the last line`;
+    expect(long.length).toBeGreaterThan(2_000);
+    const made = tx(db, () => createStandaloneDecision(db, { key: "long", question: long, options: [], origin: "o", now: 1 }));
+    expect(getDecision(db, made.id)!.question).toBe(long);
+
+    const huge = "x".repeat(MAX_STORED_TEXT_CHARS + 500);
+    const cut = tx(db, () => createStandaloneDecision(db, { key: "huge", question: huge, options: [], origin: "o", now: 2 }));
+    expect(getDecision(db, cut.id)!.question).toBe(`${"x".repeat(MAX_STORED_TEXT_CHARS)}\n[truncated 500 chars]`);
+  });
+});
+
+describe("capStoredText", () => {
+  test("keeps text up to the cap whole and marks only what it cuts", () => {
+    expect(capStoredText("short")).toBe("short");
+    expect(capStoredText("y".repeat(MAX_STORED_TEXT_CHARS))).toBe("y".repeat(MAX_STORED_TEXT_CHARS));
+    expect(capStoredText("abcdef", 4)).toBe("abcd\n[truncated 2 chars]");
   });
 });

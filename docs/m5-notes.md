@@ -291,6 +291,16 @@ Gates and questions sat for hours overnight because nothing reached you where yo
 - **Version**: 0.8.0. `PROTO` stays 5: two new verbs and no changed argument, so an older CLI never sends anything this daemon reads differently (a newer CLI against an older daemon gets `unknown_verb` for `away`/`back`).
 - **Not run live**: whether an asyncRewake wake of a remote-controlled Claude session shows in the remote chat, and whether Claude's confirm prompt for `gate pass` or `decide --by captain` can be answered there. Neither the tests nor the lab can drive remote control.
 
+## Questions stored whole
+
+Decision q30's question was stored cut mid-word at 2,000 characters, losing the end of the worker's list. A question is now cut only for display.
+
+- **Storage** (`capStoredText`, `src/util/sanitize.ts`): `flowryn ask` (`src/lifecycle/worker.ts`) and standalone decisions (`createStandaloneDecision`: `decision add` and a scout's open decisions) keep the question whole up to `MAX_STORED_TEXT_CHARS` (16 KiB); past it they keep the first 16 KiB and add a line `[truncated N chars]`, so a cut question never passes for the whole. A no-mistakes ask-user finding reaches the decisions table through `flowryn ask`, so it is covered by the same path.
+- **Review-gate questions** (`src/lavish/questions.ts`): the questions file was already all or nothing, refusing a question over 2,000 characters rather than cutting it; the limit is now the same 16 KiB, still a refusal, since the agent writing the file can shorten it and a review page should never show a cut question.
+- **Display**: `flowryn show q<N>` (`decisionView`) prints the question, its context and its why whole (control characters still cleaned); the item lines (120), the briefing (120 and 80), the fleet and run views (80), `decision list` (100), the digest and the answer steer keep cutting to one line as before.
+- **Left as is**: a scout decision's context keeps its 4,000-character cap, and the "cut at ~700 of 1034 chars" notes in older questions are no-mistakes' own output cut before the worker copied it, which Flowryn cannot recover.
+- **Tests**: `test/unit/decisions.test.ts` (a long standalone question stored whole, the marker past the cap, `capStoredText`), `test/unit/gate-questions.test.ts` (a long gate question parses whole, one past the cap is refused) and `test/integration/decisions.test.ts` (a long `ask` stored whole, printed whole by `show`, cut in `decision list` and its item line).
+
 ## Leader contract checks
 
 You ran every contract check by hand, after each harness update and before each worker-path merge, because `flowryn doctor` refused any agent pane. Now the leader runs them; the boundary, its two modes and the threat are in docs/cutover-notes.md, "Approval channels · contract records from the leader". Plain code throughout: a build-id comparison, a report check, a config key; no model.
