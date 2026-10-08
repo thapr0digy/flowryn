@@ -3,17 +3,21 @@ import { appendFileSync } from "node:fs";
 /**
  * What the contract fakes (fake-contract-claude.ts, fake-contract-pi.ts)
  * share: the contract's shell commands, run the way a model's Bash tool would,
- * except that `perl -e 'sleep N'` sleeps N tenths of a second. The suite's
+ * except that `perl -e 'sleep N'` lasts N tenths of a second. It is still a
+ * real `perl -e sleep N` child of the fake (the command line ps shows for the
+ * live tool), so the suite's process-table wait sees it running. The suite's
  * 25, 60 and 120 second commands then take 2.5, 6 and 12 seconds: still
  * longer than the urgent steer's 3 s cut and the interrupt step's 3 s wait,
  * so every step sees the same order of events as a live run.
  */
 export const SLEEP_MS_PER_SECOND = 100;
 
-/** The milliseconds a contract `perl -e 'sleep N'` command sleeps here, or null for any other command. */
-export function contractSleepMs(command: string): number | null {
+/** A contract `perl -e 'sleep N'` command: the seconds it asks for and the milliseconds it lasts here, or null for any other command. */
+export function contractSleep(command: string): { seconds: number; ms: number } | null {
   const match = /^perl -e 'sleep (\d+)'$/.exec(command.trim());
-  return match ? Number(match[1]) * SLEEP_MS_PER_SECOND : null;
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  return { seconds, ms: seconds * SLEEP_MS_PER_SECOND };
 }
 
 /** One Bash tool call in flight: `abort` (an interrupt, an abort) ends it early. */
@@ -26,16 +30,23 @@ export class ToolCall {
     this.stop?.();
   }
 
-  /** Run a contract shell command; resolves with its exit code (130 when aborted). */
+  /**
+   * Run a contract shell command; resolves with its exit code (130 when aborted).
+   * A contract sleep runs as a real `perl -e sleep N` process, killed once its
+   * scaled time is up (exit 0) or on abort (exit 130).
+   */
   run(command: string, env: Record<string, string | undefined>, cwd: string): Promise<number> {
-    const ms = contractSleepMs(command);
-    if (ms !== null) {
+    const sleep = contractSleep(command);
+    if (sleep !== null) {
+      const proc = Bun.spawn(["perl", "-e", `sleep ${sleep.seconds}`], { cwd, env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
       return new Promise((resolve) => {
-        const timer = setTimeout(() => resolve(0), ms);
-        this.stop = () => {
+        const finish = (code: number) => {
           clearTimeout(timer);
-          resolve(130);
+          proc.kill("SIGKILL");
+          resolve(code);
         };
+        const timer = setTimeout(() => finish(0), sleep.ms);
+        this.stop = () => finish(130);
       });
     }
     const proc = Bun.spawn(["sh", "-c", command], { cwd, env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });

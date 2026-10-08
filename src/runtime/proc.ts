@@ -176,7 +176,8 @@ export function descendantCommands(rows: ProcRow[], root: number): string[] {
 
 /** The whole process table, read through the given ps. */
 export async function readProcessTable(ps = "/bin/ps"): Promise<ProcRow[]> {
-  const proc = Bun.spawn([ps, "-A", "-o", "pid=,ppid=,command="], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { ...process.env, LC_ALL: "C" } });
-  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  const proc = Bun.spawn([ps, "-A", "-o", "pid=,ppid=,command="], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LC_ALL: "C" } });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  if (code !== 0) throw new Error(`${ps} exited ${code} reading the process table: ${err.trim() || "no stderr"}`);
   return parseProcessTable(out);
 }
