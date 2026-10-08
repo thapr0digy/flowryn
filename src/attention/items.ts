@@ -25,6 +25,10 @@ export type ItemClass = "actionable" | "info";
  * leader confirms it with them through a human channel.
  * contract_recorded: the leader recorded a harness contract pass (relaxed
  * policy, installed build); informational, so you see every one.
+ * build_refused: the build watcher found an installed build it will not apply
+ * (older than the running daemon, or failing its binary check).
+ * build_held: an installed build the watcher leaves to you (unstamped, built
+ * from a dirty tree, or not merged yet); informational.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -58,8 +62,10 @@ export const LANE_TABLE = {
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
+  build_refused: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
+  build_held: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
   steer_acked: { lane: "P1", class: "info" },

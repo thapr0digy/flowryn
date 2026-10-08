@@ -5,6 +5,7 @@ import { adapterFor } from "../harness/registry.ts";
 import type { HarnessId, Verified } from "../harness/types.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { selfCommand } from "../service/launchd.ts";
+import { pinnedLink, unpinForScript } from "../daemon/caller-binary.ts";
 import { ensureDir } from "../util/fsx.ts";
 import { SteerBus } from "./steers.ts";
 import { inertUrgent, type UrgentServices } from "./urgent.ts";
@@ -56,14 +57,17 @@ export function inertFleet(overrides: Partial<FleetServices> = {}): FleetService
 }
 
 /**
- * The absolute flowryn command a worker calls (FLOWRYN_BIN). The compiled
- * binary is used directly; a development checkout run under bun gets a small
- * wrapper script, because workers need one executable path.
+ * The absolute flowryn command a worker calls (FLOWRYN_BIN). A compiled
+ * daemon's callers run the copy of its own build it pinned at startup
+ * (src/daemon/caller-binary.ts), falling back to the binary itself; a
+ * development checkout run under bun gets a small wrapper script, because
+ * workers need one executable path.
  */
 export function workerBinary(stateDir: string, command: string[] = selfCommand()): string {
-  if (command.length === 1) return command[0]!;
+  if (command.length === 1) return pinnedLink(stateDir) ?? command[0]!;
   const dir = join(stateDir, "bin");
   ensureDir(dir, 0o700);
+  unpinForScript(stateDir);
   const path = join(dir, "flowryn");
   const script = `#!/bin/sh\nexec ${command.map((c) => JSON.stringify(c)).join(" ")} "$@"\n`;
   if (!existsSync(path) || readFileSync(path, "utf8") !== script) writeFileSync(path, script, { mode: 0o700 });

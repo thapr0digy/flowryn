@@ -1,4 +1,8 @@
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { BuildWatcher } from "./build-watch.ts";
+import { daemonConfig } from "../config/daemon.ts";
+import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
+import { BUILD_STAMP } from "../build-stamp.ts";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig, resolveTool, type FlowrynConfig } from "../config/config.ts";
@@ -52,7 +56,7 @@ import type { SchedServices } from "../sched/services.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
 import { checkHarnessesAtStartup, gateHarness } from "../lifecycle/harness-gate.ts";
 import { alertHerdrIfDue, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
-import { PENDING_POLL_MS, RestartController, buildIdOf, recordRestarted, scriptSupervisor } from "./restart.ts";
+import { PENDING_POLL_MS, RestartController, buildIdOfBytes, recordRestarted, scriptSupervisor } from "./restart.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 
 export interface DaemonOptions {
@@ -121,6 +125,35 @@ function missingTools(config: FlowrynConfig): string[] {
  * then the backlog watcher and the steady-state loop. Resolves with the exit
  * code.
  */
+/**
+ * This daemon's build id, from the bytes it hashes once; a compiled daemon
+ * also pins them for its callers (src/daemon/caller-binary.ts). If pinning
+ * fails, the link goes, so callers fall back to the installed binary rather
+ * than an older pinned build. A development command has no build.
+ */
+function pinOwnBuild(stateDir: string, command: readonly string[], log: Log): string | null {
+  if (command.length !== 1) return null;
+  let bytes: Uint8Array;
+  try {
+    bytes = readFileSync(command[0]!);
+  } catch (error) {
+    log(`build: cannot read ${command[0]}: ${(error as Error).message}`);
+    return null;
+  }
+  const build = buildIdOfBytes(bytes);
+  try {
+    pinCallerBinary(stateDir, build, bytes);
+  } catch (error) {
+    log(`caller binary: not pinned, callers run ${command[0]}: ${(error as Error).message}`);
+    try {
+      unpinForScript(stateDir);
+    } catch {
+      // nothing to remove
+    }
+  }
+  return build;
+}
+
 export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   const env = options.env ?? process.env;
   const home = flowrynHome(env);
@@ -157,13 +190,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     }
     const migrated = migrate(db);
     const database = db;
-    const build = buildIdOf(selfCommand());
+    const build = pinOwnBuild(config.state_dir, selfCommand(), log);
+    const commit = BUILD_STAMP?.commit ?? null;
     const startedAt = Date.now();
     const { instance, restarted } = tx(database, () => {
       const id = ensureInstanceId(database);
-      appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, build, migrated, instance: id } });
+      appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, build, commit, migrated, instance: id } });
       // A restart the old daemon asked for: record who asked, with the build before and after.
-      return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build }, startedAt) };
+      return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
 
     const journalFiles = (): Record<JournalFile, string> => ({ backlog: config.tasks.backlog, todos: config.tasks.todos });
@@ -190,7 +224,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
     };
-    const info: DaemonInfo = { pid: process.pid, version: VERSION, proto: PROTO, instance, startedAt, execPath: process.execPath, build, socket: sock, stateDir: config.state_dir };
+    const info: DaemonInfo = { pid: process.pid, version: VERSION, proto: PROTO, instance, startedAt, execPath: process.execPath, build, commit, socket: sock, stateDir: config.state_dir };
 
     // M2: the Herdr runtime, launcher and reconciler (design sections 5 and 6).
     const herdrSocket = await resolveHerdrSocket(config);
@@ -423,6 +457,18 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }),
       supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
     });
+    // The build watcher: a new installed build applies by itself, through the restart's guards.
+    const buildWatch = new BuildWatcher({
+      db: database,
+      env,
+      now: Date.now,
+      log,
+      config: () => daemonConfig(config),
+      info: () => info,
+      supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
+      restart,
+      git: (args, cwd) => git(args, cwd),
+    });
     // A review gate's questions: the widget beside its page, and a lavish-axi poll per open gate.
     const lavishTool = (): string | null => {
       const found = resolveTool(config, "lavish_axi");
@@ -513,6 +559,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       void notifyPump.tick();
     }, ATTENTION_TICK_MS);
 
+    buildWatch.start();
     const pendingRestart = setInterval(() => void restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`)), PENDING_POLL_MS);
 
     let passing = false;
@@ -558,6 +605,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(steady);
     clearInterval(attentionTick);
     clearInterval(pendingRestart);
+    buildWatch.stop();
     reconciler.stop();
     scheduler.stop();
     lavishPoller.stop();
