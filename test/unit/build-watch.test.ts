@@ -303,16 +303,17 @@ describe("downgrades and versions", () => {
   });
 });
 
+const withDaemon = (daemon: Record<string, unknown>) => ({ ...defaultConfig("/h"), extra: { daemon } });
+
 describe("[daemon] config", () => {
   test("defaults: merged, 30 s poll, 10 s settle", () => {
     expect(daemonConfig(defaultConfig("/h"))).toEqual({ auto_restart: "merged", build_poll_ms: 30_000, build_settle_ms: 10_000 });
   });
 
   test("off, and the clocks, are read; an unknown key or mode is refused", () => {
-    const with_ = (daemon: Record<string, unknown>) => ({ ...defaultConfig("/h"), extra: { daemon } });
-    expect(daemonConfig(with_({ auto_restart: "off", build_poll_ms: 200, build_settle_ms: 300 }))).toEqual({ auto_restart: "off", build_poll_ms: 200, build_settle_ms: 300 });
-    expect(() => daemonConfig(with_({ auto_restart: "always" }))).toThrow(/auto_restart must be/);
-    expect(() => daemonConfig(with_({ restart: true }))).toThrow(/not a known setting/);
-    expect(() => daemonConfig(with_({ build_poll_ms: 0 }))).toThrow(/positive integer/);
+    expect(daemonConfig(withDaemon({ auto_restart: "off", build_poll_ms: 200, build_settle_ms: 300 }))).toEqual({ auto_restart: "off", build_poll_ms: 200, build_settle_ms: 300 });
+    expect(() => daemonConfig(withDaemon({ auto_restart: "always" }))).toThrow(/auto_restart must be/);
+    expect(() => daemonConfig(withDaemon({ restart: true }))).toThrow(/not a known setting/);
+    expect(() => daemonConfig(withDaemon({ build_poll_ms: 0 }))).toThrow(/positive integer/);
   });
 });

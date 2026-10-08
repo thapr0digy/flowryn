@@ -17,8 +17,8 @@ let bin: string;
 beforeAll(async () => {
   h = makeHome();
   bin = join(h.home, "bin", "flowryn");
-  const build = Bun.spawnSync([join(REPO_ROOT, "scripts/build.sh"), bin], { cwd: REPO_ROOT, env: { ...process.env, BUN_TMPDIR: process.env.BUN_TMPDIR ?? process.env.TMPDIR } });
-  if (build.exitCode !== 0) throw new Error(`build failed: ${build.stdout.toString()}${build.stderr.toString()}`);
+  const built = Bun.spawnSync([join(REPO_ROOT, "scripts/build.sh"), bin], { cwd: REPO_ROOT, env: { ...process.env, BUN_TMPDIR: process.env.BUN_TMPDIR ?? process.env.TMPDIR } });
+  if (built.exitCode !== 0) throw new Error(`build failed: ${built.stdout.toString()}${built.stderr.toString()}`);
 }, 120_000);
 
 afterAll(() => h.cleanup());
