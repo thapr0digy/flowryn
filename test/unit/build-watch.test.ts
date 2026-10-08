@@ -197,20 +197,23 @@ describe("build watcher", () => {
     expect(openItems("build_held")[0]).toContain("no build stamp");
   });
 
-  test("an unmerged commit fetches once, is held, and applies by itself once origin/main has it", async () => {
+  test("an unmerged commit fetches once and stays held even once origin/main has it", async () => {
     const w = world();
     w.smoke = target({ commit: "feed000" });
     const bw = watcher(w);
     await settled(w, bw);
     expect(w.gitCalls.filter((a) => a.includes("fetch"))).toHaveLength(1);
     expect(w.gitCalls.find((a) => a.includes("fetch"))).toEqual(["-C", "/src/flowryn", "fetch", "--quiet", "origin", "main"]);
-    expect(openItems("build_held")[0]).toContain("not on origin/main");
+    expect(openItems("build_held")[0]).toContain("never applied by itself");
+    expect(openItems("build_held")[0]).toContain("rebuild from the default branch");
     await bw.tick();
     expect(readPending(db)).toBeNull();
     w.merged.add("feed000");
     await bw.tick();
-    expect(readPending(db)).toMatchObject({ by: "auto", build: NEW, commit: "feed000" });
-    expect(openItems("build_held")).toHaveLength(0);
+    w.now += w.config.build_poll_ms;
+    await bw.tick();
+    expect(readPending(db)).toBeNull();
+    expect(openItems("build_held")).toHaveLength(1);
     expect(w.gitCalls.filter((a) => a.includes("fetch"))).toHaveLength(1);
     expect(w.hashCalls).toBe(1);
   });

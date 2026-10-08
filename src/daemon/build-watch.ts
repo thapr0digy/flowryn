@@ -37,9 +37,6 @@ export interface Judged {
   commit: string | null;
   verdict: Verdict["verdict"];
   reason?: string;
-  /** For an unmerged build: where its commit must appear before it applies. */
-  source?: string;
-  branch?: string;
 }
 
 export interface GitResult {
@@ -184,26 +181,15 @@ export class BuildWatcher {
       this.changedAt = now;
       return;
     }
-    if (now - this.changedAt < config.build_settle_ms) return;
-    const judged = readJudged(db);
-    if (this.judgedKey !== key) {
-      const build = (this.deps.hash ?? buildIdOf)(command);
-      if (build === null) return;
-      this.judgedKey = key;
-      if (build === running) {
-        this.settle("the daemon runs this build");
-        return;
-      }
-      if (judged?.build !== build) {
-        await this.judge(command, build);
-        return;
-      }
+    if (now - this.changedAt < config.build_settle_ms || this.judgedKey === key) return;
+    const build = (this.deps.hash ?? buildIdOf)(command);
+    if (build === null) return;
+    this.judgedKey = key;
+    if (build === running) {
+      this.settle("the daemon runs this build");
+      return;
     }
-    // The same file as last judged: only an unmerged build can change its verdict, once its commit is merged.
-    if (judged?.reason === "unmerged" && judged.source && judged.commit && judged.branch) {
-      // A local ref read only; the one fetch happened when it was judged.
-      if (await this.onBranch(judged.source, judged.commit, judged.branch)) this.apply(judged.build, judged.commit);
-    }
+    if (readJudged(db)?.build !== build) await this.judge(command, build);
   }
 
   /** The installed build is the running one: close what the watcher opened, and forget the verdict. */
@@ -240,10 +226,10 @@ export class BuildWatcher {
       return;
     }
     const branch = this.defaultBranch(target.source);
-    if (!(await this.onBranch(target.source, target.commit, branch, true))) {
+    if (!(await this.onBranch(target.source, target.commit, branch))) {
       this.record(
-        { build, commit: target.commit, verdict: "held", reason: "unmerged", source: target.source, branch },
-        `Installed build ${build} (${short(target.commit)}) is not on origin/${branch}, so it is not applied by itself; it applies once merged, or flowryn daemon restart applies it now`,
+        { build, commit: target.commit, verdict: "held", reason: "unmerged" },
+        `Installed build ${build} (${short(target.commit)}) is not on origin/${branch}, so it is never applied by itself; after merging, rebuild from the default branch, or flowryn daemon restart applies it now`,
       );
       return;
     }
@@ -257,11 +243,10 @@ export class BuildWatcher {
     return projects.find((p) => real(p.path) === want)?.default_branch ?? "main";
   }
 
-  /** Is the commit on the remote's default branch? With `fetch`, one fetch of that branch when the local ref does not have it yet. */
-  private async onBranch(source: string, commit: string, branch: string, fetch = false): Promise<boolean> {
+  /** Is the commit on the remote's default branch? One fetch of that branch when the local ref does not have it yet. */
+  private async onBranch(source: string, commit: string, branch: string): Promise<boolean> {
     const check = async () => (await this.deps.git(["-C", source, "merge-base", "--is-ancestor", commit, `refs/remotes/origin/${branch}`], source)).exitCode === 0;
     if (await check()) return true;
-    if (!fetch) return false;
     const fetched = await this.deps.git(["-C", source, "fetch", "--quiet", "origin", branch], source);
     if (fetched.exitCode !== 0) this.deps.log(`build watch: git fetch origin ${branch} in ${source} failed: ${fetched.stderr.trim().split("\n")[0] ?? ""}`);
     return check();
