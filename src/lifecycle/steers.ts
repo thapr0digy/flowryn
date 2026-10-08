@@ -14,8 +14,8 @@ import { taskTitle, type RunRow } from "./runs.ts";
  * Pi: the extension's context event), and only the worker's `ack` proves it was acted
  * on. A steer not acknowledged within ring_interval_ms rings again, up to
  * max_rings deliveries in all (the first plus three re-rings), and then opens
- * a P1. A carry known to be lost (an interrupt or a failed turn before it was
- * seen, or an idle carry not seen within seen_timeout_ms) rings again at once.
+ * a P1. A carry known to be lost (an interrupt, a failed turn or a relaunch
+ * before it was seen, or an idle carry not seen within seen_timeout_ms) rings again at once.
  */
 
 export interface MessageRow {

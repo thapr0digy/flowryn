@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tx, type Db } from "../../src/db/db.ts";
 import type { Timing } from "../../src/config/workers.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
-import { FakeHerdr } from "./fake-herdr.ts";
+import { FakeHerdr, type FakeHerdrOptions } from "./fake-herdr.ts";
 import { cli, cliJson, killNextDaemon, makeHome, seedLeader, startDaemon, superviseWithScript, waitUntil, type CliOptions, type DaemonProc, type RunResult, type TestHome } from "./harness.ts";
 
 /** Fast clocks for the reconciler, so recovery paths finish in seconds. */
@@ -112,6 +112,8 @@ export interface FleetOptions {
   supervised?: boolean;
   /** [workers] turn_end_guard (default on). */
   turnEndGuard?: boolean;
+  /** The fake Herdr starts these scripts in place of the FAKE: worker, per harness kind. */
+  harnessScripts?: FakeHerdrOptions["harnessScripts"];
 }
 
 export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv> {
@@ -144,7 +146,8 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   mkdirSync(store, { recursive: true });
   const logDir = join(home, "harness-logs");
   mkdirSync(logDir, { recursive: true });
-  let herdr = await FakeHerdr.start(join(home, "herdr.sock"), { env: h.env, logDir });
+  const herdrOptions = { env: h.env, logDir, harnessScripts: options.harnessScripts };
+  let herdr = await FakeHerdr.start(join(home, "herdr.sock"), herdrOptions);
   let herdrUp = true;
   const leader = seedLeader(h);
   if (options.contracts !== false) {
@@ -215,7 +218,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
       await herdr.stop();
     },
     async startHerdr() {
-      herdr = await FakeHerdr.start(join(home, "herdr.sock"), { env: h.env, logDir });
+      herdr = await FakeHerdr.start(join(home, "herdr.sock"), herdrOptions);
       herdrUp = true;
     },
     clearScreen(runId) {

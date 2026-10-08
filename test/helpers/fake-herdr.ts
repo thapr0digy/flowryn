@@ -45,6 +45,8 @@ export interface FakeHerdrOptions {
   env: Record<string, string>;
   /** Where each harness's stdout and stderr go. */
   logDir: string;
+  /** A fake harness script per kind in place of FAKE_HARNESS (the contract tests' instruction-following workers). */
+  harnessScripts?: Partial<Record<string, string>>;
 }
 
 export class FakeHerdr {
@@ -255,7 +257,7 @@ export class FakeHerdr {
 
   private startHarness(pane: FakePane, kind: string, args: string[]): void {
     const log = openSync(join(this.options.logDir, `${pane.paneId.replace(":", "-")}-${++pane.starts}.log`), "a");
-    const child = spawn("bun", [FAKE_HARNESS, kind, ...args], {
+    const child = spawn("bun", [this.options.harnessScripts?.[kind] ?? FAKE_HARNESS, kind, ...args], {
       cwd: pane.cwd,
       env: { ...this.options.env, ...pane.env },
       detached: true,
