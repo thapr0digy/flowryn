@@ -1,6 +1,6 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import type { Db } from "../db/db.ts";
-import { appendEvent } from "../db/events.ts";
+import { appendEvent, type EventSource } from "../db/events.ts";
 import { transcriptSize } from "./control.ts";
 import type { RunRow } from "./runs.ts";
 
@@ -90,15 +90,15 @@ interface StartPayload {
 }
 
 /** The transcript from `fromByte` on, or null when it cannot be read. */
-function readFrom(path: string, fromByte: number): string | null {
+function readFrom(path: string, fromByte: number): Buffer | null {
   let fd: number | null = null;
   try {
     const size = statSync(path).size;
-    if (size <= fromByte) return "";
+    if (size <= fromByte) return Buffer.alloc(0);
     fd = openSync(path, "r");
     const buffer = Buffer.alloc(size - fromByte);
-    readSync(fd, buffer, 0, buffer.length, fromByte);
-    return buffer.toString("utf8");
+    const read = readSync(fd, buffer, 0, buffer.length, fromByte);
+    return buffer.subarray(0, read);
   } catch {
     return null;
   } finally {
@@ -106,27 +106,48 @@ function readFrom(path: string, fromByte: number): string | null {
   }
 }
 
-/** Where the transcript tail first shows the job ended, from `from` on, and how; null while it runs. */
-function endNotice(tail: string, from: number, start: StartPayload): { status: string | null } | null {
-  const notice = tail.indexOf(`<tool-use-id>${start.tool_use_id}</tool-use-id>`, from);
-  if (notice >= 0) return { status: /<status>([a-z_]+)<\/status>/.exec(tail.slice(notice, notice + 2_000))?.[1] ?? null };
-  if (start.job && tail.indexOf(`<agent-message from=\\"${start.job}\\"`, from) >= 0) return { status: "handed_back" };
+/** Where the transcript bytes first show the job ended, from byte `from` on, and how; null while it runs. */
+function endNotice(tail: Buffer, from: number, start: StartPayload): { status: string | null } | null {
+  const notice = tail.indexOf(`<tool-use-id>${start.tool_use_id}</tool-use-id>`, from, "utf8");
+  if (notice >= 0) return { status: /<status>([a-z_]+)<\/status>/.exec(tail.subarray(notice, notice + 2_000).toString("utf8"))?.[1] ?? null };
+  if (start.job && tail.indexOf(`<agent-message from=\\"${start.job}\\"`, from, "utf8") >= 0) return { status: "handed_back" };
   return null;
+}
+
+/**
+ * Bytes re-read before a job's scan cursor, so a notice the transcript was
+ * still writing at the last scan is found whole at the next.
+ */
+const SCAN_OVERLAP = 4_096;
+
+/**
+ * Per run, how far each running job's transcript has been scanned, so a
+ * check reads only what was appended since. In memory: after a daemon
+ * restart a job is scanned once more from its start.
+ */
+const scanCursors = new Map<string, Map<string, number>>();
+
+function cursorKey(start: StartPayload, path: string): string {
+  return `${path}\0${start.offset}\0${start.tool_use_id}`;
 }
 
 /**
  * The run's background jobs still running: started by the current worker
  * process (a relaunch or resume starts with none) with no end recorded. Ends
- * the transcript now shows are recorded first. A transcript that cannot be
- * read leaves its jobs running: the guard then stays quiet, and the
- * worker_idle pointer is the backstop. Call inside the transaction.
+ * the transcript now shows are recorded first, with the caller's source. A
+ * transcript that cannot be read leaves its jobs running: the guard then
+ * stays quiet, and the worker_idle pointer is the backstop. Call inside the
+ * transaction.
  */
-export function runningBackgroundJobs(db: Db, run: RunRow, now: number): BackgroundJob[] {
+export function runningBackgroundJobs(db: Db, run: RunRow, now: number, source: EventSource): BackgroundJob[] {
   const since = run.worker_started_at ?? run.started_at;
   const starts = (db
     .query("SELECT ts, payload FROM events WHERE run_id = ?1 AND kind = ?2 AND ts >= ?3 ORDER BY seq")
     .all(run.id, BACKGROUND_STARTED, since) as { ts: number; payload: string }[]).map((e) => ({ ts: e.ts, ...(JSON.parse(e.payload) as StartPayload) }));
-  if (starts.length === 0) return [];
+  if (starts.length === 0) {
+    scanCursors.delete(run.id);
+    return [];
+  }
   const ended = new Set(
     (db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = ?2 AND ts >= ?3").all(run.id, BACKGROUND_ENDED, since) as { payload: string }[]).map(
       (e) => (JSON.parse(e.payload) as { tool_use_id: string }).tool_use_id,
@@ -134,23 +155,26 @@ export function runningBackgroundJobs(db: Db, run: RunRow, now: number): Backgro
   );
   const pending = starts.filter((s) => !ended.has(s.tool_use_id));
   const pathOf = (s: StartPayload) => s.transcript ?? run.transcript_path;
-  // Each transcript is read once, from the earliest pending start in it.
-  const tails = new Map<string, { from: number; tail: string | null }>();
+  const cursors = scanCursors.get(run.id) ?? new Map<string, number>();
+  const nextCursors = new Map<string, number>();
+  const cursorOf = (s: StartPayload, path: string) => Math.max(s.offset, cursors.get(cursorKey(s, path)) ?? s.offset);
+  // Each transcript is read once, from the earliest scan cursor of a pending job in it.
+  const tails = new Map<string, { from: number; tail: Buffer | null }>();
   for (const start of pending) {
     const path = pathOf(start);
     if (!path || tails.has(path)) continue;
-    const from = Math.min(...pending.filter((s) => pathOf(s) === path).map((s) => s.offset));
+    const from = Math.min(...pending.filter((s) => pathOf(s) === path).map((s) => cursorOf(s, path)));
     tails.set(path, { from, tail: readFrom(path, from) });
   }
   const running: BackgroundJob[] = [];
   for (const start of pending) {
     const path = pathOf(start);
-    const read = path ? tails.get(path)! : { from: 0, tail: null };
-    const tail = read.tail;
-    const end = tail === null ? null : endNotice(tail, start.offset - read.from, start);
+    const read = path ? tails.get(path)! : null;
+    const tail = read?.tail ?? null;
+    const end = path && read && tail ? endNotice(tail, cursorOf(start, path) - read.from, start) : null;
     if (end) {
       appendEvent(db, {
-        source: "hook",
+        source,
         kind: BACKGROUND_ENDED,
         runId: run.id,
         taskId: run.task_id,
@@ -159,8 +183,14 @@ export function runningBackgroundJobs(db: Db, run: RunRow, now: number): Backgro
       });
       continue;
     }
+    if (path && read) {
+      const scanned = tail ? Math.max(cursorOf(start, path), read.from + tail.length - SCAN_OVERLAP) : cursorOf(start, path);
+      nextCursors.set(cursorKey(start, path), scanned);
+    }
     running.push({ toolUseId: start.tool_use_id, tool: start.tool, job: start.job, startedAt: start.ts });
   }
+  if (nextCursors.size > 0) scanCursors.set(run.id, nextCursors);
+  else scanCursors.delete(run.id);
   return running;
 }
 

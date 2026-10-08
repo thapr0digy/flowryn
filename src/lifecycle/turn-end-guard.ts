@@ -68,7 +68,7 @@ export function pendingWait(db: Db, run: RunRow, now: number): string | null {
   if (waitingOnOthers(db, run)) return "an open question";
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog";
   if (toldToEndTurn(db, run)) return WAIT_END_TURN;
-  if (runningBackgroundJobs(db, run, now).length > 0) return WAIT_BACKGROUND;
+  if (runningBackgroundJobs(db, run, now, "hook").length > 0) return WAIT_BACKGROUND;
   return null;
 }
 

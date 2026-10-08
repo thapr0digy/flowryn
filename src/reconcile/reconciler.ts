@@ -360,7 +360,7 @@ export class Reconciler {
       const idleFrom = !busy && !waiting && run.state === "running" && run.idle_since !== null ? idleEpisodeStart(db, run) : null;
       if (idleFrom !== null && t - idleFrom >= tm.idle_alert_ms && idleAlertDue(db, run.id, idleFrom, t, tm.idle_realert_ms)) {
         const ignored = reminderIgnored(db, run);
-        const jobs = runningBackgroundJobs(db, run, t);
+        const jobs = runningBackgroundJobs(db, run, t, "reconciler");
         const payload = { idle_ms: t - idleFrom, ignored_reminder: ignored, ...(jobs.length > 0 ? { background_jobs: jobs.map((j) => j.job ?? j.toolUseId) } : {}) };
         const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload });
         const idleFor = `has been idle ${Math.round((t - idleFrom) / 60_000)}m`;

@@ -206,7 +206,7 @@ function endedMidTurn(toolUseId: string, job: string): void {
 }
 
 function running(): string[] {
-  return tx(db, () => runningBackgroundJobs(db, run(), clock)).map((j) => j.job ?? j.toolUseId);
+  return tx(db, () => runningBackgroundJobs(db, run(), clock, "hook")).map((j) => j.job ?? j.toolUseId);
 }
 
 describe("misfires from the data (2026-10-05 to 10-07): a worker waiting on its own background job", () => {
@@ -304,6 +304,35 @@ describe("what counts as a background job", () => {
     update("UPDATE runs SET worker_started_at = ?2 WHERE id = ?1", "r1", clock);
     expect(running()).toEqual([]);
     expect(stop()).toBe(TURN_END_REMINDER);
+  });
+
+  test("multi-byte output between two job starts does not hide the later job's notice", () => {
+    started(BASH_BACKGROUND("toolu_mb1", "bmb1"));
+    appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "✓".repeat(3_000) } }) + "\n");
+    started(BASH_BACKGROUND("toolu_mb2", "bmb2"));
+    appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "x".repeat(2_000) } }) + "\n");
+    endedMidTurn("toolu_mb2", "bmb2");
+    expect(running()).toEqual(["bmb1"]);
+  });
+
+  test("repeated checks find a notice appended after the last scan, even one written across two scans", () => {
+    started(BASH_BACKGROUND("toolu_inc", "binc"));
+    appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: "y".repeat(20_000) } }) + "\n");
+    expect(running()).toEqual(["binc"]);
+    const line = JSON.stringify({ type: "user", message: { role: "user", content: notification("toolu_inc", "binc") } }) + "\n";
+    const cut = line.indexOf("toolu_inc") + 4;
+    appendFileSync(transcript, line.slice(0, cut));
+    expect(running()).toEqual(["binc"]);
+    appendFileSync(transcript, line.slice(cut));
+    expect(running()).toEqual([]);
+  });
+
+  test("an end is recorded with the caller's source", () => {
+    started(BASH_BACKGROUND("toolu_src", "bsrc"));
+    wokenBy("toolu_src", "bsrc");
+    clock += 10;
+    expect(tx(db, () => runningBackgroundJobs(db, run(), clock, "reconciler"))).toEqual([]);
+    expect(db.query("SELECT source FROM events WHERE kind = ?1").all(BACKGROUND_ENDED)).toEqual([{ source: "reconciler" }]);
   });
 
   test("a transcript that cannot be read leaves the job running: the guard stays quiet", () => {
