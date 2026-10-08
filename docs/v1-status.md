@@ -12,6 +12,16 @@ v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the 
 | M5 · Workflows, capacity, autonomy | https://github.com/thapr0digy/flowryn/pull/7 |
 | v1 completion · the items M1 to M5 left not built or partly built | the pull request that marks them Done here |
 
+## CI is off (2026-10-07)
+
+GitHub refuses to start any Actions job on this private repository (free tier, billing/spending limit) until about 2026-11-07, so every pull request's one check, "typecheck, lint, test, build, fixtures", would stay red. Until billing returns:
+
+- The `CI` workflow is disabled on GitHub (`gh workflow disable CI`, a repository setting), so pull requests have no checks. Flowryn's merge gate passes a pull request with no checks (`src/policy/merge.ts`: checks state `none`).
+- `.no-mistakes.yaml` declares `no_ci: true`, so the no-mistakes CI step counts a zero-check pull request as green. It trusts that only from the default branch.
+- Only the Linux run is lost: no-mistakes' test step still runs the full `bun test` on the Mac before every pull request. The workflow's other steps, `bun run build` and the two cleanup-guard fixture sets, run nowhere automatically, so a change to the build or the cleanup guard runs them by hand (the commands are in `.github/workflows/ci.yml`).
+
+Once billing is back (about 2026-11-07), re-enable both: run `gh workflow enable CI`, then remove `no_ci: true` from `.no-mistakes.yaml` (and this section and the README line) in a pull request. The leader holds a to-do due 2026-11-07 for it.
+
 ## The milestone items (section 17)
 
 | Item | Status |

@@ -1,0 +1,7 @@
+# Repository settings for the no-mistakes gate. It trusts this file only from the default branch.
+
+# GitHub Actions is off (free-tier billing/spending limit) until about 2026-11-07, so pull requests
+# have no checks. `no_ci: true` makes the gate's CI step count a zero-check PR as green; the gate's
+# test step still runs the full `bun test` on the Mac. Remove this line when CI is re-enabled
+# (`gh workflow enable CI`), see docs/v1-status.md "CI is off".
+no_ci: true
