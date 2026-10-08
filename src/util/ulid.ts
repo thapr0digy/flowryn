@@ -47,3 +47,11 @@ export function ulid(now: number = Date.now()): string {
 export function isUlid(value: unknown): value is string {
   return typeof value === "string" && ULID_PATTERN.test(value);
 }
+
+/** When a ULID was minted (ms since the epoch), or null for anything else. */
+export function ulidTime(value: string): number | null {
+  if (!isUlid(value)) return null;
+  let ms = 0;
+  for (const char of value.slice(0, 10)) ms = ms * 32 + CROCKFORD.indexOf(char);
+  return ms;
+}
