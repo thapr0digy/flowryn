@@ -14,6 +14,7 @@ import { openDivergence } from "./divergence.ts";
 import { clearPrompt, idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
 import { idleAlertDue, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
 import { reminderIgnored } from "../lifecycle/turn-end-guard.ts";
+import { describeJobs, runningBackgroundJobs } from "../lifecycle/background-jobs.ts";
 import { carryIdleSteer, idleCarryBlocker } from "../lifecycle/idle-carry.ts";
 import { noteHerdrUp } from "./herdr-health.ts";
 import { applyDocker, listLabelled } from "./docker.ts";
@@ -359,8 +360,12 @@ export class Reconciler {
       const idleFrom = !busy && !waiting && run.state === "running" && run.idle_since !== null ? idleEpisodeStart(db, run) : null;
       if (idleFrom !== null && t - idleFrom >= tm.idle_alert_ms && idleAlertDue(db, run.id, idleFrom, t, tm.idle_realert_ms)) {
         const ignored = reminderIgnored(db, run);
-        const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload: { idle_ms: t - idleFrom, ignored_reminder: ignored } });
-        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)}${ignored ? " ignored the turn-end reminder and" : ""} has been idle ${Math.round((t - idleFrom) / 60_000)}m without an outcome`, t);
+        const jobs = runningBackgroundJobs(db, run, t);
+        const payload = { idle_ms: t - idleFrom, ignored_reminder: ignored, ...(jobs.length > 0 ? { background_jobs: jobs.map((j) => j.job ?? j.toolUseId) } : {}) };
+        const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload });
+        const idleFor = `has been idle ${Math.round((t - idleFrom) / 60_000)}m`;
+        const why = jobs.length > 0 ? `${idleFor} waiting on ${describeJobs(jobs, t)}` : ignored ? `got the turn-end reminder, ended its turn again, and ${idleFor} without an outcome` : `${idleFor} without an outcome`;
+        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} ${why}`, t);
       }
       if (herdrStatus === "working" && t - lastHook >= tm.stale_hook_ms && idleAlertDue(db, run.id, lastHook, t, tm.idle_realert_ms)) {
         const event = appendEvent(db, { source: "reconciler", kind: "run.stale_hooks", runId: run.id, taskId: run.task_id, payload: { since: lastHook } });

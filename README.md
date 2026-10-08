@@ -62,6 +62,7 @@ flowryn fleet                       # every worker: state, liveness, its oldest 
 flowryn show <task>                 # one run in detail, with each steer's carried, seen and acked times; or a Queued task: its blockers, hold and what starts it
 flowryn steer <task> --body-file -  # words for a worker, delivered at its next tool call or idle wake
 flowryn steer <task> --urgent --body-file -  # cut in: block its next tool call, and cut a tool past 3 s (never through a dialog)
+flowryn steer <task> --end-turn --body-file -  # it tells the worker to end its turn (wait, or it only informs): no turn-end reminder follows
 flowryn answer <decision> <choice>  # answer a worker's question; it arrives as a steer
 flowryn interrupt <task>            # stop the current turn (verified; refused while a dialog may be open); cancel <task>; resume <task>
 flowryn doctor --contracts          # run the harness contract suites (steps and a time estimate up front, then step N/M) and record each passing version
