@@ -18,7 +18,6 @@ import {
   readPending,
   recordRestarted,
   VALIDATION_STATUS_FRESH_MS,
-  durationSeconds,
   guardLines,
   restartGuards,
   smokeCheck,
@@ -29,7 +28,7 @@ import {
 import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { recordEvidence } from "../../src/lifecycle/runs.ts";
-import { parseActiveSteps, parseNmStatus, waitsOnlyOnCi } from "../../src/policy/nomistakes.ts";
+import { durationSeconds, parseActiveSteps, parseNmStatus, waitsOnlyOnCi } from "../../src/policy/nomistakes.ts";
 import { agentPid, launchdSupervisor, plistDrift, type LaunchdDeps, type PlistSpec } from "../../src/service/launchd.ts";
 
 let dir: string;

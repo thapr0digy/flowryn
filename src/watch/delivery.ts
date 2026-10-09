@@ -4,12 +4,13 @@ import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
+import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { parseNmStatus, readNmStatus } from "../policy/nomistakes.ts";
+import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
 import { applyNmObservation, applyPrObservation, noteNmOutage } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
@@ -18,7 +19,8 @@ import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../
  * and checks for every delivered ship (conditional requests with ETags, so a
  * quiet poll costs nothing), the proof of a merge still unproven, local-only
  * merges, the read-only no-mistakes status of validating runs, and landed
- * runs whose cleanup never ran (the daemon stopped in between). They observe;
+ * runs whose cleanup never ran (the daemon stopped in between), and the
+ * CI-wait watchdog's question (src/lifecycle/ci-wait.ts). They observe;
  * src/reconcile/delivery.ts applies. A failing forge backs off, it is never
  * retried in a tight loop.
  */
@@ -32,6 +34,8 @@ export interface DeliveryWatcherDeps {
   nmTimeoutMs(): number;
   pollMs(): number;
   inFlight: ReadonlySet<string>;
+  /** `[validation] ci_wait_alert`: minutes a pipeline may wait on CI with no checks before the user is asked (0: off). */
+  ciWaitAlertMin(): number;
   /** Clean up a run that landed (the daemon's own cleanup after a proven merge). */
   cleanup(runId: string): void;
   log(line: string): void;
@@ -220,6 +224,9 @@ export class DeliveryWatcher {
     const { db, now } = this.deps;
     const noMistakes = this.deps.noMistakes();
     if (!noMistakes) return;
+    if (!leasedOnly) {
+      for (const run of strandedCiWaits(db)) tx(db, () => closeCiWaits(db, run, `the run is ${run.state}`, now()));
+    }
     const runs = this.runs(
       `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id
        WHERE p.kind = 'ship' AND p.delivery_mode = 'no-mistakes' AND r.state IN ('running','validating')
@@ -238,10 +245,58 @@ export class DeliveryWatcher {
       if (this.nmFailures > 0) tx(db, () => noteNmOutage(db, false, "", now()));
       this.nmFailures = 0;
       const nm = parseNmStatus(status.text);
-      tx(db, () => {
+      const observed = tx(db, () => {
         const current = getRunWithPolicy(db, run.id);
-        if (current) applyNmObservation(db, current, nm, now());
+        return current ? applyNmObservation(db, current, nm, now()) : null;
       });
+      // The poll asks the watchdog; the restart guard's read only refreshes the status.
+      if (observed && !leasedOnly) await this.watchCiWait(run, nm, observed.ciSince);
+    }
+  }
+
+  /**
+   * The CI-wait watchdog (src/lifecycle/ci-wait.ts): a pipeline that has
+   * waited only on CI for `[validation] ci_wait_alert` minutes with no checks
+   * on its PR opens one decision for the user. A question whose wait ended
+   * (CI started, another pipeline run, no run) is closed unanswered.
+   */
+  private async watchCiWait(run: RunWithPolicy, nm: NmRun | null, ciSince: number | null): Promise<void> {
+    const { db, now } = this.deps;
+    const minutes = nm && nm.branch === run.branch ? ciWaitMinutes(nm, ciSince, now()) : null;
+    if (nm === null || minutes === null) {
+      tx(db, () => closeCiWaits(db, run, nm ? "the pipeline is no longer waiting only on CI" : "no-mistakes names no run", now()));
+      return;
+    }
+    tx(db, () => closeCiWaits(db, run, "a new pipeline run", now(), nm.id));
+    const alert = this.deps.ciWaitAlertMin();
+    if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return;
+    const checks = await this.prCheckCount(nm.pr);
+    if (checks === null || checks > 0) return;
+    const project = getProject(db, run.project_id);
+    if (!project) return;
+    const facts = await readBranchFacts(this.deps.git, run.worktree_path, project.default_branch);
+    const opened = tx(db, () => {
+      const current = getRunWithPolicy(db, run.id);
+      if (!current || (current.state !== "validating" && current.state !== "running")) return null;
+      if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return null;
+      return openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: project.default_branch }, facts, alert, now());
+    });
+    if (opened) this.deps.log(`delivery watcher: ${run.task_id} waited ${minutes} min on CI with no checks; asked the user (${opened})`);
+  }
+
+  /** How many checks the PR's head has; 0 with no PR named; null when unknown (GitHub failed, not a PR here, or no longer open). */
+  private async prCheckCount(prUrl: string): Promise<number | null> {
+    if (!prUrl) return 0;
+    const ref = parsePrUrl(prUrl, this.deps.webUrl());
+    if (!ref) return null;
+    try {
+      const forge = this.deps.forge();
+      const pr = await forge.pull(ref);
+      if (pr.state !== "open") return null;
+      return (await forge.checks(ref, pr.headSha)).checks.length;
+    } catch (error) {
+      this.deps.log(`delivery watcher: CI-wait check of ${prUrl} skipped: ${(error as Error).message}`);
+      return null;
     }
   }
 

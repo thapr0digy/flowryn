@@ -98,6 +98,13 @@ export function waitsOnlyOnCi(run: Pick<NmRun, "outcome" | "activeSteps">): bool
   return run.outcome === "" && steps !== null && steps.length > 0 && steps.every((s) => s.step === "ci" && s.agentPid === "");
 }
 
+/** "2h17m", "9m24s", "35s" (no-mistakes' own durations) in seconds; unreadable reads as 0. */
+export function durationSeconds(text: string): number {
+  let total = 0;
+  for (const [, n, unit] of text.matchAll(/(\d+)\s*(h|m(?!s)|s)/g)) total += Number(n) * (unit === "h" ? 3600 : unit === "m" ? 60 : 1);
+  return total;
+}
+
 const NOT_PARKED = new Set(["completed", "failed", "cancelled", "passed", "checks-passed", "running", "fixing", "ci"]);
 const TERMINAL_OUTCOMES = new Set(["cancelled", "failed", "passed", "checks-passed"]);
 /** Statuses of a run that is still going (executing or parked). */
