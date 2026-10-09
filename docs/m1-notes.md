@@ -1,5 +1,7 @@
 # M1 notes
 
+> **Frozen on 2026-10-09.** New work goes in its own file under [`docs/notes/`](notes/README.md). Fix this file in place; never add a section to it.
+
 M1 builds section 17's "M1 · Core" of [`design-v3.html`](design-v3.html). This file records where the design left room and what M1 chose, so M2 to M5 build on the same ground. Each item names the code that holds it.
 
 ## Roles in M1

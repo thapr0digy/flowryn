@@ -4,7 +4,7 @@ import { findOpenItem } from "../../src/attention/items.ts";
 import { hashToken } from "../../src/api/auth.ts";
 import { tx } from "../../src/db/db.ts";
 import { MAX_REAPPLY_DEPTH } from "../../src/journal/watcher.ts";
-import { readSnapshot } from "../../src/journal/snapshot.ts";
+import { readSnapshot, writeSnapshot } from "../../src/journal/snapshot.ts";
 import { countOccurrences } from "../helpers/harness.ts";
 import { eventKinds, intents, makeJournalEnv, type JournalEnv } from "../helpers/journal-env.ts";
 
@@ -53,6 +53,25 @@ describe("backlog watcher (fake hand edits)", () => {
     // The journal's own write is not an edit: it stored the new hash.
     expect((await env.watcher.check("todos", "test")).outcome).toBe("unchanged");
     expect(eventKinds(env.db)).not.toContain("backlog.edited");
+  });
+
+  test("a snapshot holding list's cut text is read again once, whole, though the file has not changed", async () => {
+    env = makeJournalEnv();
+    const title = `long ${"t".repeat(100)}`;
+    addTodo("a-a1", title, `notes ${"n".repeat(600)}`);
+    await env.journal.drain();
+    // The journal's own read after the add already holds the whole text.
+    expect((await env.watcher.check("todos", "test")).outcome).toBe("unchanged");
+    const whole = readSnapshot(env.db, "todos")!;
+    expect(whole.tasks[0]!.title).toBe(title);
+    // What an earlier version stored: list's cut title, under the file's current hash.
+    const cut = whole.tasks.map((t) => ({ ...t, title: `${t.title.slice(0, 80)}\n... (truncated, ${t.title.length} chars total - use show ${t.id} --full to see complete text)` }));
+    tx(env.db, () => writeSnapshot(env.db, "todos", whole.contentHash, cut, env.clock.now));
+    expect((await env.watcher.check("todos", "test")).outcome).toBe("restored");
+    expect(readSnapshot(env.db, "todos")!.tasks[0]!.title).toBe(title);
+    expect(eventKinds(env.db)).toContain("backlog.restored");
+    expect(eventKinds(env.db)).not.toContain("backlog.edited");
+    expect((await env.watcher.check("todos", "test")).outcome).toBe("unchanged");
   });
 
   test("your edit wins: title, body and done state edited by hand are recorded, not reverted", async () => {
