@@ -31,6 +31,12 @@ export interface PullRequest {
   /** Set only once the PR reads merged: the merge commit, the proof that it landed. */
   mergeSha: string | null;
   mergedAt: string | null;
+  /**
+   * GitHub's word on an open PR: false when it conflicts with its base, true
+   * when it merges cleanly, null while GitHub is still computing it (or for a
+   * PR that is not open).
+   */
+  mergeable: boolean | null;
 }
 
 export type CheckState = "green" | "red" | "pending";

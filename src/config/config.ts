@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, sep } from "node:path";
 import { configPath, flowrynHome, toAbsolute } from "./paths.ts";
 import { FlowrynError } from "../api/errors.ts";
 
-export const TOOL_NAMES = ["tasks_axi", "node", "git", "gh", "herdr", "claude", "pi", "no_mistakes", "docker", "lavish_axi"] as const;
+export const TOOL_NAMES = ["tasks_axi", "node", "git", "gh", "herdr", "claude", "pi", "no_mistakes", "docker", "lavish_axi", "bun"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 /**
@@ -23,6 +23,7 @@ export const TOOL_BINARIES: Record<ToolName, readonly string[]> = {
   no_mistakes: ["no-mistakes"],
   docker: ["docker"],
   lavish_axi: ["lavish-axi"],
+  bun: ["bun"],
 };
 
 /** First executable on PATH among a tool's names. */

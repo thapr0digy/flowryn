@@ -39,6 +39,7 @@ const OPTIONAL_TOOLS: Partial<Record<ToolName, string>> = {
   no_mistakes: "not found (optional: the no-mistakes delivery mode needs it)",
   docker: "not found (optional: visual QA runs Docker environments, and the capacity check counts them)",
   lavish_axi: "not found (optional: a review's questions are then answered only through the leader)",
+  bun: "not found (optional: without it the daemon does not build Flowryn after a Flowryn merge)",
 };
 
 const STALE_LOCK_MS = 30_000;

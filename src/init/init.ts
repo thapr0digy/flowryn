@@ -20,6 +20,7 @@ export const INSTALL_HINTS: Record<ToolName, string> = {
   no_mistakes: "install no-mistakes (optional; the no-mistakes delivery mode needs it)",
   docker: "install Docker Desktop (optional; visual QA runs the app's environments in it, and the capacity check counts them)",
   lavish_axi: "npm install -g lavish-axi (optional; review pages, and the answers to a review's questions)",
+  bun: "curl -fsSL https://bun.sh/install | bash (optional; the daemon builds Flowryn after a Flowryn merge with it)",
 };
 
 /** Defaults for the sections later milestones read; written once so they are there to edit. */

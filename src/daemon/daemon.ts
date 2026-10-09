@@ -1,6 +1,10 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { BuildWatcher } from "./build-watch.ts";
 import { daemonConfig } from "../config/daemon.ts";
+import { upkeepConfig } from "../config/upkeep.ts";
+import { MergeBuilder } from "../upkeep/build.ts";
+import { Upkeep } from "../upkeep/upkeep.ts";
+import { listProjects } from "../lifecycle/projects.ts";
 import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
 import { join } from "node:path";
@@ -56,7 +60,7 @@ import type { SchedServices } from "../sched/services.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
 import { checkHarnessesAtStartup, gateHarness } from "../lifecycle/harness-gate.ts";
 import { alertHerdrIfDue, herdrEpisode, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
-import { PENDING_POLL_MS, RestartController, buildIdOfBytes, handoffPending, readPending, recordRestarted, scriptSupervisor } from "./restart.ts";
+import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestarted, scriptSupervisor } from "./restart.ts";
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 
@@ -379,6 +383,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     };
     const cleanups = new Map<string, Promise<CleanupReport>>();
     let deliveryWatcher: DeliveryWatcher | null = null;
+    let upkeep: Upkeep | null = null;
     const delivery: DeliveryServices = {
       forge,
       github,
@@ -393,6 +398,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           cleanups.delete(runId);
           scheduler?.kick();
         });
+        // A landing moved a default branch: the upkeep pass syncs the checkout and builds a Flowryn merge.
+        void attempt.then((report) => (report.state === "cleaned" ? upkeep?.kick() : undefined)).catch(() => undefined);
         cleanups.set(runId, attempt);
         return attempt;
       },
@@ -409,6 +416,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       inFlight: delivery.inFlight,
       cleanup: (runId) =>
         void delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => log(`cleanup ${runId}: ${(error as Error).stack ?? String(error)}`)),
+      nudgeConflicts: () => upkeepConfig(config).nudge_conflicts,
+      kickScheduler: () => scheduler?.kick(),
       log,
       now: Date.now,
     });
@@ -445,6 +454,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     // Leader-safe restart: the guards read this daemon's in-memory work; launchd (or a test's script) restarts it.
     const supervisorFile = env.FLOWRYN_SUPERVISOR;
     let autoCheck: AutoContractChecker | null = null;
+    let builder: MergeBuilder | null = null;
     const restart = new RestartController({
       db: database,
       env,
@@ -457,6 +467,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         launching: launcher.activeRuns(),
         approvalTasks: delivery.challenges.openTasks(Date.now()),
         contractChecks: autoCheck?.running() ?? [],
+        builds: builder?.building() ?? [],
       }),
       supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
     });
@@ -472,6 +483,43 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       restart,
       git: (args, cwd) => git(args, cwd),
     });
+    // Spec 3, phase 3: the build after a Flowryn merge, and the upkeep hooks (src/upkeep/).
+    const supervisor = () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env));
+    builder = new MergeBuilder({
+      db: database,
+      env,
+      now: Date.now,
+      log,
+      git: gitRunner(resolveTool(config, "git") ?? "git", 300_000),
+      running: () => ({ build: info.build ?? null, commit: info.commit ?? null }),
+      source: () => BUILD_STAMP?.source ?? null,
+      target: async () => {
+        const sup = supervisor();
+        if (await sup.supervised()) return null;
+        const target = await sup.target();
+        if ("refusal" in target) return null;
+        const command = commandOf(target.program);
+        return command.length === 1 ? command[0]! : null;
+      },
+      bun: () => resolveTool(config, "bun"),
+      workDir: join(config.data_dir, "build"),
+      logDir: stateFiles(config.state_dir).logs,
+    });
+    const restartBusy = () => restart.inProgress || readPending(database) !== null || handoffPending(database);
+    upkeep = new Upkeep({
+      db: database,
+      config: () => upkeepConfig(config),
+      now: Date.now,
+      log,
+      git: deliveryGit,
+      projects: () => listProjects(database),
+      builder,
+      busy: () => (restartBusy() ? "a restart is asked for or under way" : cleanups.size > 0 ? "a cleanup is running" : null),
+      sweep: async (runId) => {
+        const report = await delivery.cleanup(runId, { discardApproval: null, auto: false, sweep: true });
+        return { outcome: report.outcome, reason: report.reason, task: report.task };
+      },
+    });
     // Relaxed policy: the daemon runs the recording contract check on a new harness version itself, from its own build.
     autoCheck = new AutoContractChecker({
       db: database,
@@ -481,7 +529,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
       info: () => info,
       harnessVersion,
-      restartBusy: () => restart.inProgress || readPending(database) !== null || handoffPending(database),
+      restartBusy,
       herdrDown: () => {
         if (!runtime) return "no Herdr socket";
         const episode = herdrEpisode(database);
@@ -584,6 +632,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     buildWatch.start();
     autoCheck.start();
+    upkeep.start();
     const pendingRestart = setInterval(() => void restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`)), PENDING_POLL_MS);
 
     let passing = false;
@@ -630,6 +679,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(attentionTick);
     clearInterval(pendingRestart);
     buildWatch.stop();
+    upkeep.stop();
     await autoCheck.stop();
     reconciler.stop();
     scheduler.stop();

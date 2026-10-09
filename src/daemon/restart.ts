@@ -31,7 +31,7 @@ const HANDOFF_KEY = "restart_handoff";
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
 
-export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check";
+export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check" | "build";
 
 /** One thing a restart now would break. */
 export interface Guard {
@@ -48,6 +48,8 @@ export interface InMemoryWork {
   approvalTasks: Iterable<string>;
   /** The daemon's automatic contract check (src/contracts/auto.ts): launchd's restart kills its process group, the check with it. */
   contractChecks?: Iterable<{ harness: string; version: string; startedAt: number }>;
+  /** The daemon's build after a Flowryn merge (src/upkeep/build.ts): a restart now would kill it mid-build. */
+  builds?: Iterable<{ commit: string; startedAt: number }>;
 }
 
 function taskOfRun(db: Db, runId: string): string | null {
@@ -102,6 +104,7 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
   for (const task of work.approvalTasks) guards.push({ kind: "approval", task, detail: "flowryn approve is waiting for its code" });
   for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
+  for (const b of work.builds ?? []) guards.push({ kind: "build", task: null, detail: `building ${b.commit.slice(0, 8)} after a merge for ${ago(now - b.startedAt)}` });
   return guards;
 }
 
