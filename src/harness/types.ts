@@ -32,8 +32,10 @@ export interface RunContext {
   daemonSocket: string;
   /** Directories the worker's CLI and reports write outside the worktree (its spool, its report directory). */
   writable: string[];
-  /** Paths the worker's sandbox must never write, even inside a writable one (the project's git hooks and config). */
+  /** Paths the worker's sandbox must never write, even inside a writable one (the project's git hooks and config, Flowryn's backlog and to-dos). */
   readOnly: string[];
+  /** Claude permission rules the worker can never pass (the toolkit's static layer, src/policy/static.ts). */
+  permissionsDeny: string[];
   /** The Claude plugin holding the stage skills (design section 11); Pi reads the SKILL.md a stage names. */
   stagePlugin?: string;
   /** The prompt a resume starts with, when not the plain "continue" (a relaunch under a changed contract). */

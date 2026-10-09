@@ -1,5 +1,7 @@
 # M3 notes
 
+> **Frozen on 2026-10-09.** New work goes in its own file under [`docs/notes/`](notes/README.md). Fix this file in place; never add a section to it.
+
 M3 builds section 17's "M3 · Leaders and attention" of [`design-v3.html`](design-v3.html) on top of [M1](m1-notes.md) and [M2](m2-notes.md): the Claude leader bridge (M3a), the Pi leader bridge (M3b), one shared bridge contract suite both pass, the lane table with items, presentations and notifications, the briefing with its morning section and to-dos, the leader lease and handover, the read-only board, and the `todo edit` and `todo rm` verbs M1 deferred. This file records where the design left room, what M3 chose, and what the live runs showed. Each item names the code that holds it.
 
 ## Leader sessions and the lease

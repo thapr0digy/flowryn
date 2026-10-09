@@ -62,6 +62,7 @@ function context(overrides: Partial<RunContext> = {}): RunContext {
     daemonSocket: "/h/run/flowrynd.sock",
     writable: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"],
     readOnly: [],
+    permissionsDeny: [],
     ...overrides,
   };
 }

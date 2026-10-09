@@ -153,3 +153,22 @@ test("show describes a waiting task and a hand-added one; fleet lists both", asy
   // A hand-added task's backlog date is a local day: added just now, it is "today", not hours old.
   expect(queued.find((q) => q.id === "hand-note")!.age).toBe("today");
 });
+
+test("show --full prints a queued task's whole title and body, which tasks-axi list cuts", async () => {
+  const env = await makeFleetEnv();
+  envs.push(env);
+  const title = `Make show print whole text ${"t".repeat(150)} END`;
+  const body = `${"b".repeat(700)} END\nsecond line`;
+  const db = env.h.db();
+  tx(db, () => queueTask(db, { taskId: "web-long-q1", title, body, kind: "ship", project: getProject(db, "web")!, priority: null, blockedBy: [], now: Date.now() }));
+  db.close();
+  await waitUntil(() => (readSnapshot(env.h.db(), "backlog")?.tasks ?? []).some((t) => t.id === "web-long-q1"), 10_000, "in the snapshot");
+  expect((readSnapshot(env.h.db(), "backlog")?.tasks ?? []).find((t) => t.id === "web-long-q1")).toMatchObject({ title, body });
+  const cut = await env.json(["show", "web-long-q1"]);
+  expect(cut.code).toBe(0);
+  expect(cut.reply.data).toMatchObject({ title: `${title.slice(0, 119)}…`, truncated: "flowryn show web-long-q1 --full for the complete text" });
+  const whole = await env.json(["show", "web-long-q1", "--full"]);
+  expect(whole.code).toBe(0);
+  expect(whole.reply.data).toMatchObject({ title, body });
+  expect((whole.reply.data as { truncated?: string }).truncated).toBeUndefined();
+});

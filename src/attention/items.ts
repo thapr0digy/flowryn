@@ -107,6 +107,8 @@ export interface ItemRow {
   run_id: string | null;
   decision_id: string | null;
   line: string;
+  /** The whole line when `line` was cut, else null. */
+  full_line: string | null;
   state: string;
   resolved_by: string | null;
   opened_at: number;
@@ -130,14 +132,25 @@ export interface OpenItem {
   now?: number;
 }
 
+/** The most of a cut item line kept for `show --full`. */
+export const MAX_FULL_LINE_CHARS = 4_000;
+
+/** An item's stored lines: the digest line, and its whole text only when the digest cut it. */
+export function itemLines(text: string): { line: string; full_line: string | null } {
+  const line = sanitizeLine(text);
+  const whole = sanitizeLine(text, MAX_FULL_LINE_CHARS);
+  return { line, full_line: whole === line ? null : whole };
+}
+
 /** Open an item for an event. Call inside the event's transaction. */
 export function openItem(db: Db, item: OpenItem): string {
   const { lane, class: klass } = LANE_TABLE[item.kind];
   const id = nextItemId(db);
+  const { line, full_line } = itemLines(item.line);
   db.query(
-    `INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, due, opened_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
-  ).run(id, item.eventSeq, klass, lane, item.kind, item.taskId ?? null, item.runId ?? null, sanitizeLine(item.line), item.due ?? null, item.now ?? Date.now());
+    `INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, full_line, due, opened_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+  ).run(id, item.eventSeq, klass, lane, item.kind, item.taskId ?? null, item.runId ?? null, line, full_line, item.due ?? null, item.now ?? Date.now());
   return id;
 }
 
