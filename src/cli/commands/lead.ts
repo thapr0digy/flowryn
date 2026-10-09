@@ -9,6 +9,7 @@ import { loadConfig, resolveTool } from "../../config/config.ts";
 import { leaderTiming } from "../../config/leader.ts";
 import { styleBlock } from "../../config/workflows.ts";
 import { flowrynHome, socketPath } from "../../config/paths.ts";
+import { configStaticLayers } from "../../policy/static.ts";
 import { BLANKED_ENV } from "../../lifecycle/launcher.ts";
 import { selfCommand } from "../../service/launchd.ts";
 import { request, TransportError } from "../../transport/unix.ts";
@@ -112,7 +113,7 @@ const lead: VerbSpec = {
     // A compiled leader's hooks run the build the daemon runs (src/daemon/caller-binary.ts), so a rebuild never strands them on a newer protocol.
     const self = selfCommand();
     const command = self.length === 1 ? [pinnedLink(config.state_dir) ?? self[0]!] : self;
-    const files = await writeLeaderFiles({ home, socket: socketPath(home, io.env), command, style: styleBlock(config) });
+    const files = await writeLeaderFiles({ home, socket: socketPath(home, io.env), command, style: styleBlock(config), toolkit: configStaticLayers(config) });
     const launchArgs = harness === "claude" ? claudeLeaderArgs(files, passthrough) : piLeaderArgs(files, passthrough);
     const env = leaderEnv(io.env, { token, session, files, inactiveMs: leaderTiming(config).inactive_ms });
     io.stderr(`flowryn: leader session ${session} (${harness}); ${basename(binary)} starting\n`);

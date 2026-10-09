@@ -12,6 +12,8 @@ import { FakeGitHub } from "./fake-github.ts";
 import { FakePiLeader } from "./fake-pi-leader.ts";
 import { makeFleetEnv, type FleetEnv, type FleetOptions } from "./fleet-env.ts";
 import { REPO_ROOT, waitUntil } from "./harness.ts";
+import { loadConfig } from "../../src/config/config.ts";
+import { configStaticLayers } from "../../src/policy/static.ts";
 
 /**
  * A daemon with everything a ship needs from dispatch to cleaned: the fake
@@ -60,7 +62,7 @@ export async function makeShipEnv(options: FleetOptions = {}): Promise<ShipEnv> 
   const fleet = await makeFleetEnv({ origin: true, ...options, extraConfig: `${SHIP_TEST_CONFIG(github.apiUrl)}\n${options.extraConfig ?? ""}` });
   github.addRepo("acme", "web", { bare: fleet.origin });
   const sock = join(fleet.h.home, "run", "flowrynd.sock");
-  const files = await writeLeaderFiles({ home: fleet.h.home, socket: sock, command: ["bun", join(REPO_ROOT, "src/main.ts")], style: STYLE_BLOCK });
+  const files = await writeLeaderFiles({ home: fleet.h.home, socket: sock, command: ["bun", join(REPO_ROOT, "src/main.ts")], style: STYLE_BLOCK, toolkit: configStaticLayers(loadConfig(fleet.h.home).config) });
   const cwd = join(fleet.h.home, "leader-cwd");
   mkdirSync(cwd, { recursive: true });
   const fakes: { kill(): void }[] = [];
