@@ -645,7 +645,7 @@ export function stop(ctx: HandlerCtx): HandlerResult {
     }
     // Worker questions ride the turn that is ending at once: the batch window only holds back a wake.
     // Items to relay (a worker's report, a dropped restart) ride in the same continuation, each once.
-    const carryNow = (item: RankedItem) => carry(ctx.db, { itemId: item.id, session: s.session_id, turn: s.turn_no, path: "continuation", now });
+    const carryNow = (pushed: RankedItem) => carry(ctx.db, { itemId: pushed.id, session: s.session_id, turn: s.turn_no, path: "continuation", now });
     const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
     const questions = (batch?.items ?? []).filter(carryNow);
     const relay = relayBatch(ctx.db, s.session_id);

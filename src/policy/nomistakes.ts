@@ -48,6 +48,10 @@ function field(text: string, name: string): string {
   return match ? stripQuotes(match[1]!) : "";
 }
 
+function cell(row: Record<string, unknown>, name: string): string {
+  return row[name] === undefined || row[name] === null ? "" : String(row[name]);
+}
+
 /**
  * The `active_steps` table of `run`, read with the TOON decoder by column
  * name, so a column a later no-mistakes adds or moves still reads. Null when
@@ -63,7 +67,6 @@ export function parseActiveSteps(text: string): NmActiveStep[] | null {
   }
   const rows = (doc as { run?: { active_steps?: unknown } } | null)?.run?.active_steps;
   if (!Array.isArray(rows)) return null;
-  const cell = (row: Record<string, unknown>, name: string) => (row[name] === undefined || row[name] === null ? "" : String(row[name]));
   if (!rows.every((r) => r !== null && typeof r === "object" && typeof (r as Record<string, unknown>).step === "string")) return null;
   return (rows as Record<string, unknown>[]).map((r) => ({ step: cell(r, "step"), status: cell(r, "status"), activeFor: cell(r, "active_for"), agentPid: cell(r, "agent_pid") }));
 }
