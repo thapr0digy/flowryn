@@ -67,7 +67,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     ...(style ? ["Be terse: outcomes only, no recaps."] : []),
     "- Your task runs in stages; your task file names the current one and its skill.",
     "  Stage finished: $FLOWRYN_BIN stage done [--review <lavish url>]; then end your",
-    "  turn and wait: a steer starts the next stage or brings the review verdict. A turn ended with no outcome brings one reminder; if you wait on your own background work, say so and end your turn.",
+    "  turn and wait: a steer starts the next stage or brings the review verdict. Ending a turn to wait on your own background job or agent is fine; any other turn ended with no outcome brings one reminder.",
     "- Report only changes a supervisor would act on:",
     "  $FLOWRYN_BIN report blocked --body-file -",
     "- Work autonomously: decide what you can; record each choice and why (design page or PR).",

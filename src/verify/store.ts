@@ -4,7 +4,7 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import type { TestCounts } from "./summary.ts";
 
 /**
- * The verifications table (migration 14) and its events: `pr.verify_started`
+ * The verifications table (migration 15) and its events: `pr.verify_started`
  * when a run begins, `pr.verify_step` as each step ends, `pr.verified` when it
  * finishes. Every write goes with its event, inside the caller's transaction.
  */

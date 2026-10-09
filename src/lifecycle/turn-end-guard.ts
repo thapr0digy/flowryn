@@ -2,6 +2,7 @@ import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { findOpenRunItem } from "../attention/items.ts";
 import { TURN_END_REMINDER } from "../harness/contract-text.ts";
+import { runningBackgroundJobs } from "./background-jobs.ts";
 import { waitingOnOthers } from "./idle-alert.ts";
 import type { RunRow } from "./runs.ts";
 
@@ -12,11 +13,16 @@ import type { RunRow } from "./runs.ts";
  * second outcome-less turn end in the same episode gets none; the worker_idle
  * pointer then says it ignored the reminder. Deterministic: database reads and
  * a fixed string. Each reminder and its result are events, so how often one
- * is obeyed can be counted (docs/m5-notes.md, "Turn-end guard").
+ * is obeyed can be counted (docs/m5-notes.md, "Turn-end guard"). A worker that
+ * ends its turn to wait on its own background job, or because the leader's
+ * steer said to (steer --end-turn), is waiting, not stuck: no reminder.
  */
 
 /** What a worker records when it finishes or hands a turn over: stage done or begin, deliver, ask, report (any status), fail. */
 export const OUTCOME_KINDS = ["stage.done", "stage.requested", "stage.delivered", "run.delivered", "decision.opened", "worker.report", "worker.failed"] as const;
+
+export const WAIT_BACKGROUND = "its own background job";
+export const WAIT_END_TURN = "the leader said end the turn";
 
 export const REMINDER_KIND = "run.turn_end_reminder";
 export const RESULT_KIND = "run.turn_end_reminder_result";
@@ -40,17 +46,29 @@ function outcomeSince(db: Db, runId: string, since: { seq?: number; ts?: number 
   return row?.kind ?? null;
 }
 
+/** The episode's instruction is a steer the leader sent with --end-turn: it told the worker to end its turn. */
+function toldToEndTurn(db: Db, run: RunRow): boolean {
+  const latest = db
+    .query("SELECT carried_at, end_turn FROM messages WHERE run_id = ?1 AND carried_at IS NOT NULL ORDER BY carried_at DESC, created_at DESC LIMIT 1")
+    .get(run.id) as { carried_at: number; end_turn: number } | null;
+  return latest !== null && latest.end_turn === 1 && latest.carried_at >= instructionAt(db, run);
+}
+
 /**
  * Why the worker may rightly sit idle: the run is past running (validating,
- * ready, merging), or it waits on a grant, a gate, a question, a launch or a
- * permission dialog. Null when nothing holds it.
+ * ready, merging), or it waits on a grant, a gate, a question, a launch, a
+ * permission dialog or its own background job, or the leader told it to end
+ * its turn. Null when nothing holds it. Call inside the transaction: it
+ * records background jobs the transcript shows ended.
  */
-export function pendingWait(db: Db, run: RunRow): string | null {
+export function pendingWait(db: Db, run: RunRow, now: number): string | null {
   if (run.state !== "running") return `run ${run.state}`;
   if (run.stage_state !== "active") return `stage ${run.stage_state}`;
   if (run.pending_launch !== null) return `pending launch ${run.pending_launch}`;
   if (waitingOnOthers(db, run)) return "an open question";
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog";
+  if (toldToEndTurn(db, run)) return WAIT_END_TURN;
+  if (runningBackgroundJobs(db, run, now, "hook").length > 0) return WAIT_BACKGROUND;
   return null;
 }
 
@@ -79,7 +97,7 @@ function settleReminder(db: Db, run: RunRow, now: number): void {
   const last = latestReminderEvent(db, run.id);
   if (!last || last.kind !== REMINDER_KIND) return;
   const outcome = outcomeSince(db, run.id, { seq: last.seq });
-  const wait = outcome ? null : pendingWait(db, run);
+  const wait = outcome ? null : pendingWait(db, run, now);
   appendEvent(db, {
     source: "hook",
     kind: RESULT_KIND,
@@ -114,7 +132,7 @@ export function guardTurnEnd(db: Db, run: RunRow, turn: TurnEnd, now: number): s
   settleReminder(db, run, now);
   if (turn.steerDue) return null;
   if (turn.continuationsUsed >= turn.maxContinuations) return null;
-  if (pendingWait(db, run) !== null) return null;
+  if (pendingWait(db, run, now) !== null) return null;
   const episodeFrom = instructionAt(db, run);
   if (outcomeSince(db, run.id, { ts: episodeFrom }) !== null) return null;
   if (remindedThisEpisode(db, run.id, episodeFrom)) return null;

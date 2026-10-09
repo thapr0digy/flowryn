@@ -136,16 +136,26 @@ export function commandOf(program: readonly string[]): string[] {
 export function buildIdOf(command: readonly string[]): string | null {
   if (command.length !== 1) return null;
   try {
-    return sha256Hex(readFileSync(command[0]!)).slice(0, 12);
+    return buildIdOfBytes(readFileSync(command[0]!));
   } catch {
     return null;
   }
+}
+
+export function buildIdOfBytes(bytes: Uint8Array): string {
+  return sha256Hex(bytes).slice(0, 12);
 }
 
 export interface SmokeResult {
   version: string;
   proto: number;
   build: string | null;
+  /** The newest schema migration the binary knows; null from a binary older than the build stamp. */
+  schema: number | null;
+  /** The build stamp (src/build-stamp.ts); all null for a development command or an unstamped binary. */
+  commit: string | null;
+  dirty: boolean | null;
+  source: string | null;
 }
 
 export interface ProcResult {
@@ -200,7 +210,7 @@ export async function smokeCheck(command: readonly string[], env: NodeJS.Process
   const result = await run([...command, "version", "--json"], smokeEnv(env), SMOKE_TIMEOUT_MS);
   if (result.timedOut) throw broken(command, `version did not answer within ${SMOKE_TIMEOUT_MS / 1000} s`);
   if (result.exitCode !== 0) throw broken(command, `version exited ${result.exitCode ?? "on a signal"}${result.stderr.trim() ? `: ${result.stderr.trim().split("\n")[0]}` : ""}`);
-  let reply: { ok?: unknown; data?: { flowryn?: unknown; proto?: unknown } };
+  let reply: { ok?: unknown; data?: { flowryn?: unknown; proto?: unknown; schema?: unknown; commit?: unknown; dirty?: unknown; source?: unknown } };
   try {
     reply = JSON.parse(result.stdout) as typeof reply;
   } catch {
@@ -213,7 +223,16 @@ export async function smokeCheck(command: readonly string[], env: NodeJS.Process
     const signed = await run(["/usr/bin/codesign", "--verify", "--strict", command[0]!], smokeEnv(env), SMOKE_TIMEOUT_MS);
     if (signed.exitCode !== 0) throw broken(command, `codesign --verify --strict failed: ${(signed.stderr || signed.stdout).trim().split("\n")[0] ?? ""}`);
   }
-  return { version, proto, build: buildIdOf(command) };
+  const data = reply.data!;
+  return {
+    version,
+    proto,
+    build: buildIdOf(command),
+    schema: typeof data.schema === "number" && Number.isInteger(data.schema) ? data.schema : null,
+    commit: typeof data.commit === "string" && data.commit.length > 0 ? data.commit : null,
+    dirty: typeof data.dirty === "boolean" ? data.dirty : null,
+    source: typeof data.source === "string" && data.source.length > 0 ? data.source : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +311,8 @@ export interface DaemonSnapshot {
   version: string;
   proto: number;
   build: string | null;
+  /** The commit the build was stamped with; absent before the build stamp, null for an unstamped build. */
+  commit?: string | null;
   uptime_s: number;
 }
 
@@ -302,7 +323,13 @@ export interface PendingRestart {
   requested_at: number;
   expires_at: number;
   force: boolean;
+  /** An automatic request (by "auto", src/daemon/build-watch.ts): the build it is for, and its commit. */
+  build?: string;
+  commit?: string | null;
 }
+
+/** Who asks for an automatic restart, as events, status and the briefing show it. */
+export const AUTO_REQUESTER = "auto";
 
 /** What the old daemon leaves the new one (meta.restart_handoff), so it can record who asked. */
 export interface Handoff {
@@ -338,7 +365,7 @@ export function requester(caller: Caller): { by: string; session: string | null 
 }
 
 export function snapshotOf(info: DaemonInfo, now: number): DaemonSnapshot {
-  return { pid: info.pid, version: info.version, proto: info.proto, build: info.build ?? null, uptime_s: Math.round((now - info.startedAt) / 1000) };
+  return { pid: info.pid, version: info.version, proto: info.proto, build: info.build ?? null, commit: info.commit ?? null, uptime_s: Math.round((now - info.startedAt) / 1000) };
 }
 
 /**
@@ -470,6 +497,37 @@ export class RestartController {
     return this.handoff(who, opts.preflight, opts.whenIdle);
   }
 
+  /**
+   * The build watcher's request (src/daemon/build-watch.ts): park an automatic
+   * restart onto this build, waiting as long as a `--when-idle` may. A request
+   * the leader or you already parked is kept, since it restarts onto the same
+   * installed binary; an earlier automatic one is replaced. Call inside a
+   * transaction.
+   */
+  requestAuto(trigger: { build: string; commit: string | null }): "parked" | "kept" {
+    const { db } = this.deps;
+    const now = this.deps.now();
+    const earlier = readPending(db);
+    if (earlier && earlier.by !== AUTO_REQUESTER) return "kept";
+    const expires = now + MAX_WAIT_MIN * 60_000;
+    const pending: PendingRestart = { by: AUTO_REQUESTER, session: null, requested_at: now, expires_at: expires, force: false, build: trigger.build, commit: trigger.commit };
+    setMeta(db, PENDING_KEY, JSON.stringify(pending));
+    appendEvent(db, {
+      source: "daemon",
+      kind: "daemon.restart_requested",
+      payload: { by: AUTO_REQUESTER, session: null, when_idle: true, build: trigger.build, commit: trigger.commit, waiting_on: guardLines(this.guards()), expires_at: expires },
+      ts: now,
+    });
+    return "parked";
+  }
+
+  /** Drop a parked automatic request without a P1: the build it was for is no longer the one to apply. Call inside a transaction. */
+  private withdrawAuto(reason: string): void {
+    const { db } = this.deps;
+    clearMeta(db, PENDING_KEY);
+    appendEvent(db, { source: "daemon", kind: "daemon.restart_withdrawn", payload: { by: AUTO_REQUESTER, reason }, ts: this.deps.now() });
+  }
+
   private handoff(who: { by: string; session: string | null }, preflight: Preflight, whenIdle: boolean): RequestOutcome {
     const { db } = this.deps;
     const now = this.deps.now();
@@ -553,19 +611,33 @@ export class RestartController {
         return;
       }
       if (this.guards().length > 0) return;
+      const auto = pending.by === AUTO_REQUESTER;
       let preflight: Preflight;
       try {
         preflight = await this.preflight(pending.force);
       } catch (error) {
         const reason = error instanceof FlowrynError ? error.message : String(error);
         tx(db, () => {
-          clearMeta(db, PENDING_KEY);
-          this.drop(reason);
+          // Someone restarted onto this build already: nothing is left to do, and nothing to tell.
+          if (auto && error instanceof FlowrynError && error.code === "no_change") this.withdrawAuto(reason);
+          else {
+            clearMeta(db, PENDING_KEY);
+            this.drop(reason);
+          }
+        });
+        return;
+      }
+      if (auto && pending.build && preflight.target.build !== pending.build) {
+        // A newer build landed after the watcher parked this one; the watcher judges that one afresh.
+        tx(db, () => {
+          if (readPending(db)?.build === pending.build) this.withdrawAuto(`the installed build is now ${preflight.target.build ?? "unknown"}, not ${pending.build}`);
         });
         return;
       }
       const started = tx(db, () => {
-        if (!readPending(db) || this.guards().length > 0) return false;
+        const current = readPending(db);
+        if (!current || this.guards().length > 0) return false;
+        if (auto && current.build !== pending.build) return false;
         clearMeta(db, PENDING_KEY);
         this.handoff({ by: pending.by, session: pending.session }, preflight, true);
         return true;

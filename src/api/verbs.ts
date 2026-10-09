@@ -65,6 +65,8 @@ export interface DaemonInfo {
   execPath: string;
   /** The build this daemon runs (src/daemon/restart.ts buildIdOf); null for a development command. */
   build?: string | null;
+  /** The commit its build was stamped with (src/build-stamp.ts); null for a development command or an unstamped build. */
+  commit?: string | null;
   socket: string;
   stateDir: string;
 }

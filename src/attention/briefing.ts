@@ -8,7 +8,7 @@ import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { restartsSince } from "../daemon/restart.ts";
+import { AUTO_REQUESTER, restartsSince } from "../daemon/restart.ts";
 import { leaderRecordLine } from "../contracts/grant.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { openActionable, type RankedItem } from "./router.ts";
@@ -159,9 +159,10 @@ function hhmm(ts: number): string {
 function restartLines(db: Db): string[] {
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
   return restartsSince(db, since).map((r) => {
-    const who = r.by === "leader" ? `the leader${r.session ? ` (${r.session})` : ""}` : r.by === "human" ? "you" : r.by;
+    const who = r.by === "leader" ? ` by the leader${r.session ? ` (${r.session})` : ""}` : r.by === "human" ? " by you" : r.by === AUTO_REQUESTER ? " automatically" : ` by ${r.by}`;
     const proto = r.old.proto === r.new.proto ? `proto ${r.new.proto}` : `proto ${r.old.proto}→${r.new.proto}`;
-    return `Daemon restarted ${hhmm(r.ts)} by ${who}: build ${r.old.build ?? "dev"}→${r.new.build ?? "dev"}, ${r.new.version}, ${proto}.`;
+    const commit = r.new.commit ? ` (commit ${r.new.commit.slice(0, 7)})` : "";
+    return `Daemon restarted ${hhmm(r.ts)}${who}: build ${r.old.build ?? "dev"}→${r.new.build ?? "dev"}${commit}, ${r.new.version}, ${proto}.`;
   });
 }
 
