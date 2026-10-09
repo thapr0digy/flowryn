@@ -1,6 +1,10 @@
+import { resolveRunItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { WORKER_POOL } from "../config/workflows.ts";
+
+/** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
+const VALIDATION_POOL = "validation";
 
 /**
  * Capacity pool leases (design section 11): a slot is a pool_leases row tied
@@ -60,6 +64,8 @@ export function grantLeases(db: Db, runId: string, taskId: string, stage: string
 
 /**
  * Release a run's live leases: its stage pools (keepWorker) or every one.
+ * A released validation slot resolves the run's validation_stuck item: the
+ * delivery, a failure, a cancel or a dead worker ends that episode.
  * Call inside a transaction. Returns the pools released.
  */
 export function releaseLeases(db: Db, runId: string, taskId: string | null, opts: { keepWorker: boolean }, reason: string, now: number): string[] {
@@ -68,5 +74,6 @@ export function releaseLeases(db: Db, runId: string, taskId: string | null, opts
   for (const lease of live) db.query("UPDATE pool_leases SET released_at = ?2, released_by = ?3 WHERE id = ?1").run(lease.id, now, reason);
   const pools = live.map((l) => l.pool);
   appendEvent(db, { source: "daemon", kind: "pool.released", runId, taskId, payload: { pools, reason }, ts: now });
+  if (pools.includes(VALIDATION_POOL)) resolveRunItems(db, runId, ["validation_stuck"], `slot released: ${reason}`, now);
   return pools;
 }

@@ -6,7 +6,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { Caller, DaemonInfo } from "../api/verbs.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
-import { waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
+import { oldestStep, waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
 
 /**
@@ -146,20 +146,13 @@ function freshStatus(v: ValidationRow, now: number): NmStatusRead {
   return { status: { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null } };
 }
 
-/** "2h17m", "9m24s", "35s" (no-mistakes' own durations) in seconds; unreadable reads as 0. */
-export function durationSeconds(text: string): number {
-  let total = 0;
-  for (const [, n, unit] of text.matchAll(/(\d+)\s*(h|m(?!s)|s)/g)) total += Number(n) * (unit === "h" ? 3600 : unit === "m" ? 60 : 1);
-  return total;
-}
-
 /** Why a validation blocks: its longest-running step and that step's local agent, or why no status says. */
 function validationDetail(v: ValidationRow, read: NmStatusRead, now: number): string {
   const held = `validating for ${ago(now - v.granted_at)}`;
   if ("unusable" in read) return `${held}; ${read.unusable}`;
   const steps = read.status.activeSteps ?? [];
   if (steps.length === 0) return held;
-  const oldest = steps.reduce((a, b) => (durationSeconds(b.activeFor) > durationSeconds(a.activeFor) ? b : a));
+  const oldest = oldestStep(steps)!;
   const agent = oldest.agentPid ? `, agent pid ${oldest.agentPid}` : "";
   return `no-mistakes step ${oldest.step}${oldest.activeFor ? `, running ${oldest.activeFor}` : ""}${agent}; ${held}`;
 }

@@ -30,6 +30,8 @@ export interface DeliveryWatcherDeps {
   git: GitRunner;
   noMistakes(): string | null;
   nmTimeoutMs(): number;
+  /** A validation slot held this long with no progress opens a validation_stuck P1 ([sched] validation_stuck_ms). */
+  validationStuckMs(): number;
   pollMs(): number;
   inFlight: ReadonlySet<string>;
   /** Clean up a run that landed (the daemon's own cleanup after a proven merge). */
@@ -240,7 +242,7 @@ export class DeliveryWatcher {
       const nm = parseNmStatus(status.text);
       tx(db, () => {
         const current = getRunWithPolicy(db, run.id);
-        if (current) applyNmObservation(db, current, nm, now());
+        if (current) applyNmObservation(db, current, nm, this.deps.validationStuckMs(), now());
       });
     }
   }

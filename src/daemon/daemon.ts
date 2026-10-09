@@ -44,6 +44,7 @@ import { NotifyPump, recordingNotify } from "../attention/notify.ts";
 import { lastItemNo } from "../attention/items.ts";
 import { syncOverdueTodos } from "../attention/todos-due.ts";
 import { cleanupConfig, githubConfig, type GitHubConfig } from "../config/delivery.ts";
+import { schedTiming } from "../config/workflows.ts";
 import { GitHubForge, tokenSource } from "../forge/github.ts";
 import { cleanupRun, type CleanupReport, type LandingDeps } from "../lifecycle/landing.ts";
 import { getRun } from "../lifecycle/runs.ts";
@@ -405,6 +406,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       git: deliveryGit,
       noMistakes: () => resolveTool(config, "no_mistakes"),
       nmTimeoutMs: () => cleanupConfig(config).nomistakes_timeout_ms,
+      validationStuckMs: () => schedTiming(config).validation_stuck_ms,
       pollMs: () => github().poll_ms,
       inFlight: delivery.inFlight,
       cleanup: (runId) =>
