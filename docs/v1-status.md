@@ -12,6 +12,16 @@ v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the 
 | M5 · Workflows, capacity, autonomy | https://github.com/thapr0digy/flowryn/pull/7 |
 | v1 completion · the items M1 to M5 left not built or partly built | the pull request that marks them Done here |
 
+## CI is off (2026-10-07)
+
+GitHub refuses to start any Actions job on this private repository (free tier, billing/spending limit) until about 2026-11-07, so every pull request's one check, "typecheck, lint, test, build, fixtures", would stay red. Until billing returns:
+
+- The `CI` workflow is disabled on GitHub (`gh workflow disable CI`, a repository setting), so pull requests have no checks. Flowryn's merge gate passes a pull request with no checks (`src/policy/merge.ts`: checks state `none`).
+- `.no-mistakes.yaml` declares `no_ci: true`, so the no-mistakes CI step counts a zero-check pull request as green. It trusts that only from the default branch.
+- Only the Linux run is lost: no-mistakes' test step still runs the full `bun test` on the Mac before every pull request. The workflow's other steps, `bun run build` and the two cleanup-guard fixture sets, run nowhere automatically, so a change to the build or the cleanup guard runs them by hand (the commands are in `.github/workflows/ci.yml`).
+
+Once billing is back (about 2026-11-07), re-enable both: run `gh workflow enable CI`, then remove `no_ci: true` from `.no-mistakes.yaml` (and this section and the README line) in a pull request. The leader holds a to-do due 2026-11-07 for it.
+
 ## The milestone items (section 17)
 
 | Item | Status |
@@ -104,7 +114,9 @@ The features that let Flowryn replace the previous orchestrator (docs/cutover-no
 | Worker questions wake the leader: every open worker question reaches the leader without your message, batched per 30 s into one wake, a busy turn taking them at its Stop, on its own hourly budget; only a blocking one raises an OS alert; the daemon listens on every review page and wakes the leader with what you send from it | Done (docs/m5-notes.md "Worker questions wake the leader") |
 | Clickable review answers: one Send carries every answer, an Other choice with your words, an "anything else" note and a pass request (a leader item; the gate still passes only through a human channel); the design and QA skills never list questions as text | Done: docs/m5-notes.md, "Gate questions", "One Send" |
 | Away mode (autonomy spec 2, ship B): `flowryn away [--until] [--body-file -]` and `flowryn back`; while away every new item only you can move wakes the leader for the remote-control chat, on `[away] max_wakes_per_hour`; your messages never end it; `back` or the expiry gives one return brief (waiting on you, decided for you, landed, failed, spend); delivery only, no grants | Done: docs/m5-notes.md, "Away mode" |
+| Questions stored whole: a worker's `ask`, a standalone decision and a review question keep their full text up to 16 KiB (past it, a `[truncated N chars]` marker); only display cuts them, and `flowryn show q<N>` prints the whole question | Done (docs/m5-notes.md "Questions stored whole") |
 | Leader contract checks: `doctor --contracts --verify-only` for any caller (the leader runs a worker-path PR's build before merging it); `[policy] mode` strict (default: only you record) or relaxed (the leader also records, from the installed build only, each record shown to you); workers never record | Done: docs/cutover-notes.md, "Approval channels · contract records from the leader"; docs/m5-notes.md, "Leader contract checks". A live leader run outside the Bash sandbox not yet done |
+| Automatic restarts (spec 3, phase 1): a new installed build that is a clean build of a merged commit, not older than the running daemon, applies by itself through the restart guards (`[daemon] auto_restart`); a branch, dirty or unstamped build gets an info line, a downgrade or broken build a P1; workers and the leader's hooks run a pinned copy of the running build, so a rebuild never strands them on a newer protocol | Done: docs/m5-notes.md, "Automatic restarts". `kickstart -k` by the job itself not yet run live. Phases 2 (automatic contract checks) and 3 (build after a Flowryn merge, upkeep hooks) follow |
 
 ## Not in v1
 

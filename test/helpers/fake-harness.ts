@@ -49,6 +49,10 @@
  *   FAKE: dialog-tool <ms> <text...> a tool call whose PreToolUse raises a permission dialog: pre-tool, the screen
  *                                    shows <text>, hook notify permission_prompt, then (once the test clears the
  *                                    screen) the tool runs <ms> and post-tool follows
+ *   FAKE: bg-start <job>             (Claude) a Bash tool call run in the background: its post-tool input carries
+ *                                    backgroundTaskId <job>, as Claude's does
+ *   FAKE: bg-end <job>               that job ends: its <task-notification> goes into the fake transcript, as the
+ *                                    prompt of a woken turn
  *   FAKE: stop-no-outcome            end the turn with no outcome. A turn-end reminder (appended to
  *                                    $FLOWRYN_REPORT_DIR/fake-reminders.txt) continues it: the steps after it run
  *                                    at once, so a report or stage-done next obeys it. With none, the turn ends and
@@ -183,6 +187,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 let toolNo = 0;
+/** bg-start's jobs: job id to the tool use id that started it. */
+const backgroundJobs = new Map<string, string>();
 /** When the running tool started, or null (the fake Pi extension times urgent steers from it). */
 let toolStartedAt: number | null = null;
 
@@ -197,7 +203,7 @@ function denyOf(stdout: string): string | null {
 }
 
 /** One tool call, with the busy lease refreshed and a steer possibly riding back on PostToolUse (or blocking it at PreToolUse). */
-async function tool(run: () => Promise<void>, beforeRun?: () => Promise<void>): Promise<void> {
+async function tool(run: () => Promise<void>, beforeRun?: () => Promise<void>, post: Record<string, unknown> = {}): Promise<void> {
   const id = `toolu_fake_${++toolNo}`;
   const pre = await hook("pre-tool", { tool_name: "Bash", tool_use_id: id });
   const denied = denyOf(pre.stdout);
@@ -211,8 +217,8 @@ async function tool(run: () => Promise<void>, beforeRun?: () => Promise<void>): 
   await run();
   toolStartedAt = null;
   if (interrupted) return;
-  const post = await hook("post-tool", { tool_name: "Bash", tool_use_id: id });
-  const context = contextOf(post.stdout);
+  const posted = await hook("post-tool", { tool_name: "Bash", tool_use_id: id, transcript_path: transcript, ...post });
+  const context = contextOf(posted.stdout);
   if (context) await onSteer(context);
 }
 
@@ -454,6 +460,21 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
         },
       );
       return interrupted ? "end-turn" : "continue";
+    }
+    case "bg-start": {
+      const job = rest[0] ?? "bfake";
+      backgroundJobs.set(job, `toolu_fake_${toolNo + 1}`);
+      await tool(async () => {}, undefined, {
+        tool_input: { command: "bun test", run_in_background: true },
+        tool_response: { stdout: "", stderr: "", interrupted: false, backgroundTaskId: job },
+      });
+      return "continue";
+    }
+    case "bg-end": {
+      const job = rest[0] ?? "bfake";
+      const notice = `<task-notification>\n<task-id>${job}</task-id>\n<tool-use-id>${backgroundJobs.get(job) ?? "none"}</tool-use-id>\n<status>completed</status>\n</task-notification>`;
+      appendFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: notice } }) + "\n");
+      return "continue";
     }
     case "stop-no-outcome": {
       if ((await stopOnce()) === "reminded") return "continue";

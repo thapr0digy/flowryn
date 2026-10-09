@@ -9,6 +9,8 @@ import { runInit } from "../../init/init.ts";
 import { listTasks, processRunner } from "../../journal/tasks-axi.ts";
 import { installService, plistPath, plistSpecFor } from "../../service/launchd.ts";
 import { PROTO, VERSION } from "../../version.ts";
+import { BUILD_STAMP } from "../../build-stamp.ts";
+import { LATEST_SCHEMA_VERSION } from "../../db/schema.ts";
 import { callServerVerb, runServerVerb } from "../client.ts";
 import { agentIdentity, notHumanReason } from "../human.ts";
 import { LineReader } from "../line-reader.ts";
@@ -280,7 +282,7 @@ const version: VerbSpec = {
   kind: "local",
   roles: ["leader", "reader", "worker", "human", "anonymous"],
   async local(_args, io) {
-    return print(io, okReply({ flowryn: VERSION, proto: PROTO, bun: Bun.version, exec: process.execPath }));
+    return print(io, okReply({ flowryn: VERSION, proto: PROTO, schema: LATEST_SCHEMA_VERSION, commit: BUILD_STAMP?.commit ?? null, dirty: BUILD_STAMP?.dirty ?? null, source: BUILD_STAMP?.source ?? null, bun: Bun.version, exec: process.execPath }));
   },
 };
 

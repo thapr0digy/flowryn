@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { DECISION_KEY, DECISION_OPTION } from "../lifecycle/decisions.ts";
-import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { MAX_STORED_TEXT_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 
 /**
  * A review gate's questions (`stage done --questions-file`): what the worker
@@ -23,7 +23,7 @@ export const OTHER_ANSWER = "other";
 export const MAX_DECIDED = 30;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 8;
-const MAX_QUESTION = 2_000;
+const MAX_QUESTION = MAX_STORED_TEXT_CHARS;
 const MAX_WHY = 1_000;
 const MIN_BLOCKS = 10;
 const MAX_BLOCKS = 200;

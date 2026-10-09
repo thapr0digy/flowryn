@@ -3,7 +3,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
-import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { capStoredText, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { mintTaskId } from "./ids.ts";
 import { takenIds } from "./plans.ts";
 import { holdReason } from "./runs.ts";
@@ -18,7 +18,6 @@ import { holdReason } from "./runs.ts";
 export const DECISION_KEY = /^[a-z0-9][a-z0-9-]{0,47}$/;
 /** A choice as a decision lists it: short, so it fits a prompt line and a CLI argument. */
 export const DECISION_OPTION = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$/;
-const MAX_QUESTION = 2_000;
 const MAX_CONTEXT = 4_000;
 
 export interface DecisionRow {
@@ -106,7 +105,7 @@ export function createStandaloneDecision(db: Db, d: NewStandalone): { id: string
     const reservedReason = d.reservedReason ? reserveDecision(db, existing, d.reservedReason, d.now) : existing.reserved_reason;
     return { id: existing.id, taskId: existing.task_id, created: false, reservedReason };
   }
-  const question = sanitizeBlock(d.question).trim().slice(0, MAX_QUESTION);
+  const question = capStoredText(sanitizeBlock(d.question).trim());
   if (question.length === 0) throw new FlowrynError("bad_args", "a decision needs a question");
   const context = d.context ? sanitizeBlock(d.context).trim().slice(0, MAX_CONTEXT) : null;
   const id = nextStandaloneId(db);

@@ -422,6 +422,15 @@ const ATTEMPT_WAIVER_SQL = /* sql */ `
 ALTER TABLE approval_attempts ADD COLUMN allow_red_check TEXT;
 `;
 
+/**
+ * A steer the leader sent with --end-turn tells the worker to end its turn
+ * (to wait, or because it only informs): the turn-end guard stands aside for
+ * that episode.
+ */
+const STEER_END_TURN_SQL = /* sql */ `
+ALTER TABLE messages ADD COLUMN end_turn INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -436,6 +445,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
   { version: 12, name: "gate-comment", sql: GATE_COMMENT_SQL },
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
+  { version: 14, name: "steer-end-turn", sql: STEER_END_TURN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

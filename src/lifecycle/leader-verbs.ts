@@ -35,7 +35,9 @@ function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
  * re-rung until the worker acknowledges it (design section 6). An urgent one
  * also blocks the worker's next tool call and cuts a tool that has run past
  * steer_preempt_after_ms (never while a dialog may be open): the cut tool's
- * work is lost, so keep it for "stop doing that now".
+ * work is lost, so keep it for "stop doing that now". With --end-turn the
+ * steer tells the worker to end its turn (to wait, or because it only
+ * informs): the turn-end guard sends no reminder for that turn end.
  */
 const steer: VerbSpec = {
   name: "steer",
@@ -44,6 +46,7 @@ const steer: VerbSpec = {
   flags: {
     "body-file": { type: "string", help: "the steer, from a file or - for stdin", fileFor: "body" },
     urgent: { type: "boolean", help: "block the worker's next tool call with it, and cut a tool running over 3s (its work is lost)" },
+    "end-turn": { type: "boolean", help: "the steer tells the worker to end its turn (wait, or just informs): no turn-end reminder follows" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -52,8 +55,9 @@ const steer: VerbSpec = {
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim();
     if (body.length === 0) throw new FlowrynError("bad_args", "the steer goes in --body-file -");
     const urgent = boolArg(args, "urgent");
-    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent);
-    return { data: { steer: message.id, run: run.id, task: run.task_id, liveness: run.liveness, urgent }, hints: [`flowryn show ${run.task_id}`] };
+    const endTurn = boolArg(args, "end-turn");
+    const message = createSteer(ctx.db, run, body, ctx.now(), null, urgent, endTurn);
+    return { data: { steer: message.id, run: run.id, task: run.task_id, liveness: run.liveness, urgent, ...(endTurn ? { end_turn: true } : {}) }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
     const runId = String(result.data.run);

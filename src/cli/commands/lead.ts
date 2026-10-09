@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { pinnedLink } from "../../daemon/caller-binary.ts";
 import type { Reply } from "../../api/envelope.ts";
 import { errorReply } from "../../api/envelope.ts";
 import { EXIT } from "../../api/errors.ts";
@@ -110,7 +111,10 @@ const lead: VerbSpec = {
     if (!opened.ok) return print(io, opened);
     const { session, token } = opened.data as { session: string; token: string };
 
-    const files = await writeLeaderFiles({ home, socket: socketPath(home, io.env), command: selfCommand(), style: styleBlock(config) });
+    // A compiled leader's hooks run the build the daemon runs (src/daemon/caller-binary.ts), so a rebuild never strands them on a newer protocol.
+    const self = selfCommand();
+    const command = self.length === 1 ? [pinnedLink(config.state_dir) ?? self[0]!] : self;
+    const files = await writeLeaderFiles({ home, socket: socketPath(home, io.env), command, style: styleBlock(config) });
     const launchArgs = harness === "claude" ? claudeLeaderArgs(files, passthrough) : piLeaderArgs(files, passthrough);
     const env = leaderEnv(io.env, { token, session, files, inactiveMs: leaderTiming(config).inactive_ms });
     io.stderr(`flowryn: leader session ${session} (${harness}); ${basename(binary)} starting\n`);

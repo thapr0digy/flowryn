@@ -18,8 +18,10 @@ import { gateQuestionsLine } from "./gate-questions.ts";
 import { dueSteers, dueUrgent, getMessage, loseUnseenUrgent, markLost, markRung, markSeen, nextDueAt, noteDeliveryMode, type RingPath } from "./steers.ts";
 import { piPreempt } from "./urgent.ts";
 import { guardTurnEnd } from "./turn-end-guard.ts";
+import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
+import { ulidTime } from "../util/ulid.ts";
 
 /**
  * The hook verbs (design section 12, role "hook"). A worker's Claude hooks
@@ -47,6 +49,10 @@ export interface HookInput {
   tool_use_id?: string | null;
   /** Claude tool hooks inside a subagent carry the subagent's id; the main agent's carry none. */
   agent_id?: string | null;
+  /** Claude PreToolUse/PostToolUse: the tool, its input and (PostToolUse) its response; a background job is read from them. */
+  tool_name?: string | null;
+  tool_input?: unknown;
+  tool_response?: unknown;
 }
 
 /** At most two consecutive Stop continuations, far below Claude's cap of 8 (design section 5). */
@@ -412,7 +418,12 @@ const preTool = signalVerb(
   (ctx, input) => leader.preToolUse(ctx, input),
 );
 
-/** PostToolUse carries a pending steer beside the next tool result, the documented mid-turn channel (M0 c07). */
+/**
+ * PostToolUse carries a pending steer beside the next tool result, the
+ * documented mid-turn channel (M0 c07). It also records a background job the
+ * tool started (a background Bash call, an asynchronous agent), which the
+ * turn-end guard counts as a wait.
+ */
 const postTool = signalVerb(
   "post-tool",
   "Hook: a tool finished; a worker gets a pending steer as context",
@@ -422,6 +433,9 @@ const postTool = signalVerb(
     const tool = mainTool(args);
     if (tool !== null) ctx.fleet.urgent.tools.end(run.id, tool);
     if (harnessOf(args) !== "claude") return { data: { run: run.id } };
+    const input = parseInput(args);
+    const background = backgroundStartOf(input);
+    if (background) recordBackgroundStart(ctx.db, run, background, typeof input.transcript_path === "string" ? input.transcript_path : null, ctx.now());
     const steer = takeSteer(ctx, run, "post-tool");
     return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
   },
@@ -642,6 +656,18 @@ function idleNow(run: RunWithPolicy, now: number): boolean {
 }
 
 /**
+ * A waiter armed before the run's latest launch belongs to a harness process
+ * that is gone (its id is a ULID minted when it was armed). The daemon's side
+ * of its call outlives the process for up to wait_poll_ms, and while it is the
+ * run's newest waiter it would take an idle steer meant for the resumed
+ * worker, whose next hook then marks the steer seen: lost, never re-rung.
+ */
+function armedBeforeLaunch(waiter: string, run: RunWithPolicy): boolean {
+  const armedAt = ulidTime(waiter);
+  return armedAt !== null && run.launched_at !== null && armedAt < run.launched_at;
+}
+
+/**
  * `hook wait-steer`: the idle-delivery channel. Claude runs it as an
  * asyncRewake Stop hook; it fires only while the worker is idle (a busy worker
  * gets steers through PostToolUse and Stop). The Pi extension holds it as a
@@ -668,7 +694,7 @@ const waitSteer: VerbSpec = {
     for (;;) {
       if (bus.closed) return { wait: true };
       const run = getRunWithPolicy(ctx.db, runId);
-      if (!run || isTerminal(run.state) || !bus.isCurrent(runId, waiter)) return { exit: true };
+      if (!run || isTerminal(run.state) || !bus.isCurrent(runId, waiter) || armedBeforeLaunch(waiter, run)) return { exit: true };
       if (harness === "pi") {
         const command = bus.takeCommand(runId);
         if (command) return { command };

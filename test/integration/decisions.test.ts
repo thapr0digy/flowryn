@@ -416,4 +416,32 @@ describe("ask --key", () => {
     expect(asked.code).toBe(3);
     expect(JSON.stringify(asked.reply)).toContain(standalone.id);
   });
+
+  test("a long ask is stored whole: show prints all of it, list and the item line cut it for display", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const question = `Which permissions should the per-run settings allow?\n${Array.from({ length: 120 }, (_, i) => `- Bash(tool${i}:*), so step ${i} runs`).join("\n")}\nThe last item is the one that matters.`;
+    expect(question.length).toBeGreaterThan(2_000);
+    const asked = await cliJson(h, ["ask", "--options", "allow,deny", "--blocks", "the per-run settings allow list", "--body-file", "-"], { env: worker, stdin: question });
+    expect(asked.code).toBe(0);
+    const id = (asked.reply.data as { decision: string }).decision;
+    const db = h.db();
+    const stored = db.query("SELECT question FROM decisions WHERE id = ?1").get(id) as { question: string };
+    const item = db.query("SELECT line FROM items WHERE decision_id = ?1").get(id) as { line: string };
+    db.close();
+    expect(stored.question).toBe(question);
+    expect(item.line.length).toBeLessThan(400);
+
+    const leader = { FLOWRYN_TOKEN: seedLeader(h) };
+    const shown = await cliJson(h, ["show", id], { env: leader });
+    expect(shown.code).toBe(0);
+    expect((shown.reply.data as { question: string }).question).toBe(question);
+    const listed = await cliJson(h, ["decision", "list"], { env: leader });
+    const row = (listed.reply.data as { decisions: { id: string; question: string }[] }).decisions.find((r) => r.id === id)!;
+    expect(row.question.length).toBeLessThanOrEqual(100);
+  });
 });

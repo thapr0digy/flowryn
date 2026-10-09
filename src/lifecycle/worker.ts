@@ -6,7 +6,7 @@ import { openItem, resolveRunItems } from "../attention/items.ts";
 import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
-import { MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { capStoredText, MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
 import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, nextRunDecisionId } from "./decisions.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
@@ -20,7 +20,6 @@ import { landScout } from "./landing.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
-const MAX_QUESTION_CHARS = 2_000;
 const MAX_REPORT_BYTES = 1024 * 1024;
 const OPTION = DECISION_OPTION;
 const MIN_BLOCKS_CHARS = 10;
@@ -171,7 +170,7 @@ const ask: VerbSpec = {
   spool: true,
   apply(ctx, args) {
     const run = activeRun(ctx);
-    const question = sanitizeBlock(stringArg(args, "body") ?? "").trim().slice(0, MAX_QUESTION_CHARS);
+    const question = capStoredText(sanitizeBlock(stringArg(args, "body") ?? "").trim());
     if (question.length === 0) throw new FlowrynError("bad_args", "the question goes in --body-file -");
     const options = (stringArg(args, "options") ?? "")
       .split(",")
