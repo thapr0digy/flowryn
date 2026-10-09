@@ -21,6 +21,7 @@ Almost every pull request appended a section to `docs/m5-notes.md`, added or edi
 - every file in `docs/notes/` has a dated kebab-case name, a title and a valid `Status` line;
 - the `#` headings of each frozen file equal a fixed list, so a new section fails with a message naming `docs/notes/`; edits in place that keep the headings pass;
 - two branches of a scratch git repository that each add a notes file merge without a conflict, while two that each append a section to the same file do conflict (the problem this layout removes);
-- the parser's cases, and that `renderIndex` gives the same bytes for the same input.
+- the parser's cases, and that `renderIndex` gives the same bytes for the same input;
+- the build skill a worker is given and the leader's skill carry the docs rule.
 
 A pull request in flight that adds a section to a frozen file goes red on the heading test after its next merge of main: move the section into its own file here.

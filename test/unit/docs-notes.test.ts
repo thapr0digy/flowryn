@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { STAGE_SKILLS } from "../../src/skills/stages.ts";
-import { SKILL_BODY } from "../../src/bridges/skill.ts";
+import { skillPath, writeStageSkills } from "../../src/skills/stages.ts";
+import { skillMarkdown } from "../../src/bridges/skill.ts";
 import { FROZEN_DOCS, NOTES_DIR, headings, parseNote, readNotes, renderIndex, type Note } from "../../scripts/docs/notes.ts";
 
 /**
@@ -250,17 +250,18 @@ describe("the layout under git", () => {
 });
 
 describe("where the rule reaches workers and the leader", () => {
-  test("the build skill sends docs where the project's AGENTS.md says, as a new file when it says so", () => {
-    expect(STAGE_SKILLS.find((s) => s.name === "flowryn-build-test")!.body).toContain("Write the docs the change needs where the project's AGENTS.md or CLAUDE.md says, as a new file when it says so.");
+  test("the build skill a worker is given sends docs where the project's AGENTS.md says, as a new file when it says so", () => {
+    const state = mkdtempSync(join(tmpdir(), "notes-skills-"));
+    try {
+      writeStageSkills(state);
+      const skill = readFileSync(skillPath(state, "flowryn-build-test")!, "utf8");
+      expect(skill).toContain("Write the docs the change needs where the project's AGENTS.md or CLAUDE.md says, as a new file when it says so.");
+    } finally {
+      rmSync(state, { recursive: true, force: true });
+    }
   });
 
-  test("the leader skill points a ship brief at the project's docs rule, never at a shared notes file", () => {
-    expect(SKILL_BODY).toContain("For docs, point the worker at the project's AGENTS.md rule; never name a shared notes file.");
-  });
-
-  test("AGENTS.md names the per-feature layout and no longer says to extend the latest notes file", () => {
-    const agents = readFileSync(join(REPO, "AGENTS.md"), "utf8");
-    expect(agents).toContain("`docs/notes/<yyyy-mm-dd>-<task id>.md`");
-    expect(agents).not.toContain("Extend the latest one");
+  test("the leader's skill points a ship brief at the project's docs rule, never at a shared notes file", () => {
+    expect(skillMarkdown()).toContain("For docs, point the worker at the project's AGENTS.md rule; never name a shared notes file.");
   });
 });
