@@ -18,7 +18,7 @@
  *   FAKE: verb <args...>             run flowryn <args> --json; the reply goes to $FLOWRYN_REPORT_DIR/fake-replies.jsonl
  *   FAKE: ask <a,b> <question...>    ask (blocking), then end the turn
  *   FAKE: fail <reason...>           fail
- *   FAKE: report <status>            report
+ *   FAKE: report <status> [body...]  report, with the body on stdin when given (literal \n tokens become newlines)
  *   FAKE: crash                      exit 1 at once, like a killed process
  *   FAKE: no-start                   never report worker-start (a trust wedge)
  *   FAKE: cwd <path>                 report this cwd at worker-start (isolation test)
@@ -334,7 +334,8 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       return "end-turn";
     case "report":
       await tool(async () => {
-        await flowryn(["report", rest[0] ?? "progress"]);
+        const [status = "progress", ...body] = rest;
+        await flowryn(body.length > 0 ? ["report", status, "--body-file", "-"] : ["report", status], body.join(" ").replaceAll("\\n", "\n") || undefined);
       });
       return "continue";
     case "commit": {

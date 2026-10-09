@@ -29,6 +29,8 @@ export type ItemClass = "actionable" | "info";
  * (older than the running daemon, or failing its binary check).
  * build_held: an installed build the watcher leaves to you (unstamped, built
  * from a dirty tree, or not merged yet); informational.
+ * worker_report: a worker's `flowryn report` whose status word opens an item
+ * (REPORT_EFFECT in src/lifecycle/worker.ts), such as a finding or a blocker.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -63,6 +65,7 @@ export const LANE_TABLE = {
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
   build_refused: { lane: "P1", class: "actionable" },
+  worker_report: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   build_held: { lane: "P1", class: "info" },

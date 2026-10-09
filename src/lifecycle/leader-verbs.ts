@@ -240,6 +240,7 @@ interface FleetRow extends RunRow {
 function needs(ctx: ReadCtx, run: FleetRow): string {
   if (ctx.db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open'").get(run.id)) return "answer";
   if (ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND lane = 'P0' AND state IN ('open','presented')").get(run.id)) return "you";
+  if (ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND kind = 'worker_report' AND state IN ('open','presented')").get(run.id)) return "report";
   if (run.stage_state === "review") return "review";
   // A scout's report stays to be read after its run landed and was cleaned.
   if (run.kind === "scout" && ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND kind = 'report_ready' AND state IN ('open','presented')").get(run.id)) return "read";
@@ -429,6 +430,41 @@ function queuedView(ctx: ReadCtx, q: QueuedTask, text: ShowText): { data: Record
   };
 }
 
+/** A worker_report item in `show`: the report itself, with the whole body its event keeps. */
+function workerReportView(
+  ctx: ReadCtx,
+  id: string,
+  item: { event_seq: number; task_id: string | null; run_id: string | null; lane: string; state: string; opened_at: number },
+): { data: Record<string, unknown>; hints: string[] } {
+  const event = ctx.db.query("SELECT payload FROM events WHERE seq = ?1").get(item.event_seq) as { payload: string } | null;
+  const payload = event ? (JSON.parse(event.payload) as { status?: string; body?: string }) : {};
+  const open = item.state === "open" || item.state === "presented";
+  return {
+    data: {
+      item: id,
+      kind: "worker_report",
+      lane: item.lane,
+      state: item.state,
+      status: payload.status ?? "-",
+      task: item.task_id ?? "-",
+      title: item.task_id ? taskTitle(ctx.db, item.task_id) : "-",
+      run: item.run_id ?? "-",
+      reported: `${age(ctx.now, item.opened_at)} ago`,
+      body: payload.body || "-",
+    },
+    hints: open && item.task_id ? [`flowryn dismiss ${id}`, `flowryn steer ${item.task_id} --body-file -`] : ["flowryn fleet"],
+  };
+}
+
+/** A run's latest `flowryn report` of any status, as one line for `show`. */
+function latestReport(ctx: ReadCtx, runId: string, text: ShowText): string | null {
+  const row = ctx.db.query("SELECT ts, payload FROM events WHERE run_id = ?1 AND kind = 'worker.report' ORDER BY seq DESC LIMIT 1").get(runId) as { ts: number; payload: string } | null;
+  if (!row) return null;
+  const payload = JSON.parse(row.payload) as { status?: string; summary?: string };
+  const summary = payload.summary ? ` · ${text.line(payload.summary, 80)}` : "";
+  return `${payload.status ?? "-"} · ${age(ctx.now, row.ts)} ago${summary}`;
+}
+
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
@@ -450,13 +486,17 @@ const show: VerbSpec = {
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
     if (divergence) return { data: divergenceView(divergence), hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
     const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as {
+      kind: string;
+      event_seq: number;
       task_id: string | null;
       run_id: string | null;
       line: string;
       full_line: string | null;
       lane: string;
       state: string;
+      opened_at: number;
     } | null;
+    if (item?.kind === "worker_report") return workerReportView(ctx, target, item);
     if (item) target = item.run_id ?? item.task_id ?? target;
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
@@ -495,6 +535,7 @@ const show: VerbSpec = {
     const events = (ctx.db.query("SELECT ts, kind FROM events WHERE run_id = ?1 ORDER BY seq DESC LIMIT 8").all(run.id) as { ts: number; kind: string }[])
       .toReversed()
       .map((e) => `${age(ctx.now, e.ts)} ago ${e.kind}`);
+    const report = latestReport(ctx, run.id, text);
     return {
       data: {
         task: run.task_id,
@@ -521,6 +562,7 @@ const show: VerbSpec = {
         ...(deliveryView(ctx, run) ? { delivery: deliveryView(ctx, run) } : {}),
         steers,
         decisions,
+        ...(report ? { report } : {}),
         items,
         events,
         ...text.pointer(asked),
