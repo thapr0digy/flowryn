@@ -186,6 +186,60 @@ export function parseListOutput(stdout: string): BacklogTask[] {
   return tasks.map((row) => taskFromListRow(row as Record<string, unknown>));
 }
 
+/**
+ * tasks-axi 0.2.5's `list` cuts a title at 80 characters and a body at 500,
+ * then appends this sentinel; only `show <id> --full` prints the whole text.
+ */
+const LIST_CUT_SENTINEL = /\n\.\.\. \(truncated, (\d+) chars total - use show (\S+) --full to see complete text\)$/;
+
+/** Whether `list` cut this task's title or body: the sentinel names the task and a longer total than it kept. */
+export function cutByList(text: string, taskId: string): boolean {
+  const match = LIST_CUT_SENTINEL.exec(text);
+  return match !== null && match[2] === taskId && Number(match[1]) > match.index;
+}
+
+export function hasListCuts(tasks: BacklogTask[]): boolean {
+  return tasks.some((t) => cutByList(t.title, t.id) || cutByList(t.body, t.id));
+}
+
+const FULL_TEXT_CONCURRENCY = 4;
+
+/** Parse `tasks-axi show <id> --full` output: the task's whole title and body. */
+export function parseShowOutput(stdout: string): { title: string; body: string } {
+  const parsed = decodeToon(stdout);
+  const task = parsed?.task;
+  if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error(`could not parse tasks-axi show output: ${stdout.slice(0, 200)}`);
+  const row = task as Record<string, unknown>;
+  return { title: String(row.title ?? ""), body: typeof row.body === "string" ? row.body : row.body === undefined || row.body === null ? "" : String(row.body) };
+}
+
+async function fullText(runner: TasksAxiRunner, file: string, taskId: string): Promise<{ title: string; body: string }> {
+  const raw = await runner.run(["show", taskId, "--file", file, "--full"]);
+  if (raw.spawnError) throw new Error(`could not run tasks-axi: ${raw.spawnError}`);
+  if (raw.timedOut) throw new Error(`tasks-axi show ${taskId} --full timed out`);
+  if (raw.exitCode !== 0) {
+    const parsed = decodeToon(raw.stdout);
+    throw new Error(`tasks-axi show ${taskId} --full failed: ${String(parsed?.error ?? raw.stdout.trim())} (${String(parsed?.code ?? `exit ${raw.exitCode}`)})`);
+  }
+  return parseShowOutput(raw.stdout);
+}
+
+/** Replace each title and body `list` cut with the whole text, a few `show --full` runs at a time. */
+async function restoreListCuts(runner: TasksAxiRunner, file: string, tasks: BacklogTask[]): Promise<BacklogTask[]> {
+  const cut = tasks.filter((t) => cutByList(t.title, t.id) || cutByList(t.body, t.id));
+  const whole = new Map<string, { title: string; body: string }>();
+  for (let i = 0; i < cut.length; i += FULL_TEXT_CONCURRENCY) {
+    const batch = cut.slice(i, i + FULL_TEXT_CONCURRENCY);
+    const texts = await Promise.all(batch.map((t) => fullText(runner, file, t.id)));
+    batch.forEach((t, n) => whole.set(t.id, texts[n]!));
+  }
+  return tasks.map((t) => {
+    const text = whole.get(t.id);
+    return text ? { ...t, title: cutByList(t.title, t.id) ? text.title : t.title, body: cutByList(t.body, t.id) ? text.body : t.body } : t;
+  });
+}
+
+/** Every task in the file, with whole titles and bodies (the snapshot never holds list's cut text). */
 export async function listTasks(runner: TasksAxiRunner, file: string): Promise<BacklogTask[]> {
   const raw = await runner.run(["list", "--file", file, "--fields", LIST_FIELDS.join(",")]);
   if (raw.spawnError) throw new Error(`could not run tasks-axi: ${raw.spawnError}`);
@@ -194,7 +248,7 @@ export async function listTasks(runner: TasksAxiRunner, file: string): Promise<B
     const parsed = decodeToon(raw.stdout);
     throw new Error(`tasks-axi list failed: ${String(parsed?.error ?? raw.stdout.trim())} (${String(parsed?.code ?? `exit ${raw.exitCode}`)})`);
   }
-  return parseListOutput(raw.stdout);
+  return restoreListCuts(runner, file, parseListOutput(raw.stdout));
 }
 
 /** tasks-axi's version string, or null when it cannot run. */

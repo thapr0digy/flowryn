@@ -62,6 +62,7 @@ Find where the login redirect loop comes from.
 EOF
 flowryn fleet                       # every worker: state, liveness, its oldest open steer, what it needs; then queued work: blockers, --auto, what starts it
 flowryn show <task>                 # one run in detail, with each steer's carried, seen and acked times; or a Queued task: its blockers, hold and what starts it
+flowryn show <id> --full            # the same with every title, line and body whole (task, run, item, decision, plan); the default view says when it cut something
 flowryn steer <task> --body-file -  # words for a worker, delivered at its next tool call or idle wake
 flowryn steer <task> --urgent --body-file -  # cut in: block its next tool call, and cut a tool past 3 s (never through a dialog)
 flowryn steer <task> --end-turn --body-file -  # it tells the worker to end its turn (wait, or it only informs): no turn-end reminder follows

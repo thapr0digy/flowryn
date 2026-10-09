@@ -2,7 +2,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { findOpenRunItem, openItem, resolveRunItems } from "../attention/items.ts";
+import { findOpenRunItem, itemLines, openItem, resolveRunItems } from "../attention/items.ts";
 import { canonicalPrUrl, parsePrUrl, repoOf } from "../forge/github.ts";
 import { checksLine, ForgeError, type ChecksSummary, type Forge, type PullRequest, type RepoRef } from "../forge/types.ts";
 import { recordIntent } from "../journal/journal.ts";
@@ -215,7 +215,8 @@ function artifactId(now: number): string {
 function openReadyItem(db: Db, run: RunWithPolicy, eventSeq: number, line: string, now: number): void {
   const kind = run.sensitive ? "sensitive_action_waiting" : "pr_ready";
   if (findOpenRunItem(db, kind, run.id)) {
-    db.query("UPDATE items SET line = ?3 WHERE run_id = ?1 AND kind = ?2 AND state IN ('open','presented')").run(run.id, kind, line);
+    const lines = itemLines(line);
+    db.query("UPDATE items SET line = ?3, full_line = ?4 WHERE run_id = ?1 AND kind = ?2 AND state IN ('open','presented')").run(run.id, kind, lines.line, lines.full_line);
     return;
   }
   openItem(db, { kind, eventSeq, taskId: run.task_id, runId: run.id, line, now });
