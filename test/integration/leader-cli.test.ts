@@ -11,6 +11,8 @@ import { TOOL_MAP } from "../../src/policy/toolkit.ts";
 import { localDate } from "../../src/lifecycle/dates.ts";
 import { cli, cliJson, readText, REPO_ROOT } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { defaultConfig, loadConfig } from "../../src/config/config.ts";
+import { configStaticLayers } from "../../src/policy/static.ts";
 
 let env: LeaderEnv | null = null;
 
@@ -24,8 +26,13 @@ describe("flowryn lead", () => {
     env = await makeLeaderEnv();
     const { files } = env;
     const settings = JSON.parse(readFileSync(files.claudeSettings, "utf8"));
-    expect(settings.permissions).toEqual({ allow: [...LEADER_PERMISSIONS.allow], ask: [...LEADER_PERMISSIONS.ask], deny: [...LEADER_PERMISSIONS.deny] });
-    expect(settings.permissions.deny).toEqual(["Bash(flowryn approve*)", "Bash(flowryn hook *)"]);
+    const toolkit = configStaticLayers(loadConfig(env.h.home).config);
+    expect(settings.permissions).toEqual({ allow: [...LEADER_PERMISSIONS.allow], ask: [...LEADER_PERMISSIONS.ask], deny: [...LEADER_PERMISSIONS.deny, ...toolkit.permissionsDeny] });
+    expect(settings.permissions.deny.slice(0, 2)).toEqual(["Bash(flowryn approve*)", "Bash(flowryn hook *)"]);
+    // The toolkit's static layer: claude-in-chrome hidden, Flowryn's own task files never edited or written.
+    expect(settings.permissions.deny).toContain("mcp__claude-in-chrome");
+    expect(settings.permissions.deny).toContain(`Edit(/${loadConfig(env.h.home).config.tasks.backlog})`);
+    expect(settings.sandbox.filesystem.denyWrite).toEqual(toolkit.denyWrite);
     expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
     for (const event of ["SessionStart", "Stop"]) {
       const waiter = settings.hooks[event][0].hooks.find((h: { asyncRewake?: boolean }) => h.asyncRewake);
@@ -47,9 +54,9 @@ describe("flowryn lead", () => {
     const home = mkdtempSync(join(tmpdir(), "fw-"));
     mkdirSync(join(home, "leader"), { recursive: true });
     writeFileSync(join(home, "leader", "preferences.md"), "# Your preferences\n- Decide autonomously.\n");
-    const on = await writeLeaderFiles({ home, command: ["flowryn"], socket: "/tmp/s", style: "Be terse." });
+    const on = await writeLeaderFiles({ home, command: ["flowryn"], socket: "/tmp/s", style: "Be terse.", toolkit: configStaticLayers(defaultConfig(home)) });
     expect(readFileSync(on.appendPrompt, "utf8")).toBe(`Be terse.\n\n# Your preferences\n- Decide autonomously.\n\n${TOOL_MAP}\n`);
-    const off = await writeLeaderFiles({ home, command: ["flowryn"], socket: "/tmp/s", style: null });
+    const off = await writeLeaderFiles({ home, command: ["flowryn"], socket: "/tmp/s", style: null, toolkit: configStaticLayers(defaultConfig(home)) });
     expect(readFileSync(off.appendPrompt, "utf8")).toBe(`# Your preferences\n- Decide autonomously.\n\n${TOOL_MAP}\n`);
     expect(readFileSync(join(home, "leader", "preferences.md"), "utf8")).toContain("Decide autonomously");
     expect(claudeLeaderArgs(off, [])).toContain(off.appendPrompt);

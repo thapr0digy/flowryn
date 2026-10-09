@@ -1,5 +1,7 @@
 # Cutover notes
 
+> **Frozen on 2026-10-09.** New work goes in its own file under [`docs/notes/`](notes/README.md). Fix this file in place; never add a section to it.
+
 The work that let Flowryn replace the previous orchestrator: decisions (C1), prompt wedges (C2), the one-time import (C3, since removed). Spec: the cutover spec in the superpowers vault. Each section records the choices made where the spec left room, and live results.
 
 ## C1 · Decisions

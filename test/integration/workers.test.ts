@@ -11,6 +11,8 @@ import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
+import { loadConfig } from "../../src/config/config.ts";
+import { configStaticLayers } from "../../src/policy/static.ts";
 
 const envs: FleetEnv[] = [];
 async function fleet(options: Parameters<typeof makeFleetEnv>[0] = {}): Promise<FleetEnv> {
@@ -282,6 +284,24 @@ describe("safeguards at start", () => {
       const { realpathSync } = await import("node:fs");
       expect(store.projects[realpathSync(r.worktree_path)]?.hasTrustDialogAccepted).toBe(true);
       expect(store.projects[realpathSync(env.repo)]?.hasTrustDialogAccepted).toBe(true);
+    },
+    { timeout: 30_000 },
+  );
+
+  test(
+    "the per-run Claude settings carry the toolkit's static layer from this home's config",
+    async () => {
+      const env = await fleet();
+      const { run } = await env.dispatch("Build\nFAKE: sleep 100");
+      await env.waitRun(run, (x) => x.proc_pid !== null, "launched");
+      const config = loadConfig(env.h.home).config;
+      const settings = JSON.parse(readFileSync(join(config.state_dir, "runs", run, "claude-settings.json"), "utf8")) as {
+        permissions: { deny: string[] };
+        sandbox: { filesystem: { denyWrite: string[] } };
+      };
+      expect(settings.permissions.deny).toEqual(configStaticLayers(config).permissionsDeny);
+      expect(settings.permissions.deny).toContain("mcp__claude-in-chrome");
+      expect(settings.sandbox.filesystem.denyWrite).toEqual(expect.arrayContaining([config.tasks.backlog, config.tasks.todos, `${config.tasks.backlog}.lock`]));
     },
     { timeout: 30_000 },
   );

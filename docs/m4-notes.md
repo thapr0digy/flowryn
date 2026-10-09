@@ -1,5 +1,7 @@
 # M4 notes
 
+> **Frozen on 2026-10-09.** New work goes in its own file under [`docs/notes/`](notes/README.md). Fix this file in place; never add a section to it.
+
 M4 builds section 17's "M4 · Delivery and policy" of [`design-v3.html`](design-v3.html) on top of [M1](m1-notes.md), [M2](m2-notes.md) and [M3](m3-notes.md): the no-mistakes, direct-PR and local-only delivery modes; the GitHub watcher; the named-head gate; the approval channel from all four channels; the merge gate with red refusal, a single-check human waiver and proof; the cleanup guard with both fixture sets; and the board's approve key. This file records where the design left room, what M4 chose, and what the live runs showed. Each item names the code that holds it.
 
 ## The forge

@@ -173,6 +173,17 @@ describe("migrations", () => {
     db.exec("INSERT INTO messages (id, run_id, body, created_at) VALUES ('m1', 'r1', 'carry on', 1)");
     expect(migrate(db, MIGRATIONS.slice(0, 14))).toEqual([14]);
     expect(db.query("SELECT id, end_turn FROM messages").all()).toEqual([{ id: "m1", end_turn: 0 }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 14))).toEqual([]);
+    db.close();
+  });
+
+  test("an item gains a whole-line column; items opened before it carry none", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 14));
+    db.exec("INSERT INTO events (ulid, ts, source, kind, payload) VALUES ('u1', 1, 'cli', 'test.item', '{}')");
+    db.exec("INSERT INTO items (id, event_seq, class, lane, kind, line, opened_at) VALUES ('i1', 1, 'actionable', 'P1', 'worker_question', 'a line', 1)");
+    expect(migrate(db)).toEqual([15]);
+    expect(db.query("SELECT id, line, full_line FROM items").all()).toEqual([{ id: "i1", line: "a line", full_line: null }]);
     expect(migrate(db)).toEqual([]);
     db.close();
   });

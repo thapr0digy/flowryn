@@ -9,6 +9,7 @@ import { requireNotificationsOff } from "../config/leader.ts";
 import { socketPath, stateFiles } from "../config/paths.ts";
 import { renderToml } from "../config/toml.ts";
 import { workersConfig } from "../config/workers.ts";
+import { claudeConfigDir } from "../harness/claude/trust.ts";
 import { migrate, openDb, tx, type Db } from "../db/db.ts";
 import { PING_VERB } from "../daemon/system-verbs.ts";
 import type { HarnessId } from "../harness/types.ts";
@@ -270,6 +271,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         return pid !== null && descendantCommands(await readProcessTable(), pid).includes(command);
       },
       log: options.log,
+      claudeStore: options.harness === "claude" ? (workersConfig(options.config).claude.config_dir ?? claudeConfigDir(process.env)) : null,
     };
     steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log, drift)));
   } finally {

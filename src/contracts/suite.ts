@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { HarnessId } from "../harness/types.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
 import { steerStatus, type MessageRow } from "../lifecycle/steers.ts";
@@ -5,13 +7,13 @@ import { steerStatus, type MessageRow } from "../lifecycle/steers.ts";
 /**
  * The harness contract suite (design section 5, "Contract tests gate every
  * harness version"): launch, capture the session id, observe busy and idle,
- * deliver while busy and while idle, interrupt, exit, resume, then a verified
- * deliver. Every step runs against one real worker in a real Herdr session,
+ * deliver while busy and while idle, interrupt, (Claude only) the toolkit's
+ * live check, exit, resume, then a verified deliver. Every step runs against one real worker in a real Herdr session,
  * dispatched through a scratch flowrynd, so it exercises the same adapter,
  * hooks or extension, and reconciler as production.
  *
- * The steps are the same for both harnesses; only the worker's instructions
- * differ. Each steer step reports the steer's own carried, seen and acked
+ * The steps are the same for both harnesses, except Claude's toolkit step;
+ * only the worker's instructions differ. Each steer step reports the steer's own carried, seen and acked
  * times from the scratch database beside the step's seconds, so the numbers
  * measure the steer rather than the step's other waits or the runner's
  * polling. Every steer is acknowledged before the worker exits, so the
@@ -44,6 +46,8 @@ export interface ContractEnv {
   exitWorker(): Promise<{ ok: boolean; detail: string }>;
   isAlive(pid: number, start: number, exe: string): Promise<boolean>;
   log(line: string): void;
+  /** The directory holding the Claude worker's `.claude.json` ([workers.claude] config_dir, CLAUDE_CONFIG_DIR or HOME); null for Pi. */
+  claudeStore: string | null;
 }
 
 export interface ContractStep {
@@ -154,6 +158,82 @@ async function waitToolStart(env: ContractEnv, what: string, since: number, time
     return last !== null && last.hook === "pre-tool" && last.at >= since;
   });
 }
+
+/** The MCP server the toolkit's static layer must hide from a Claude worker (src/policy/static.ts). */
+const HIDDEN_PREFIX = "mcp__claude-in-chrome__";
+
+/** Whether the user's Claude offers claude-in-chrome at all: only then can the step show it hidden. */
+export function chromeEnabled(store: string): boolean {
+  try {
+    return (JSON.parse(readFileSync(join(store, ".claude.json"), "utf8")) as { claudeInChromeDefaultEnabled?: unknown }).claudeInChromeDefaultEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The tools a Claude session was offered, from its transcript: Claude records
+ * its deferred tools as `deferred_tools_delta` attachments (seen on 2.1.295),
+ * which include the built-in deferred tools, so a session always has one.
+ */
+export function offeredTools(transcript: string): string[] {
+  const names = new Set<string>();
+  for (const line of transcript.split("\n")) {
+    if (!line.includes("deferred_tools_delta")) continue;
+    try {
+      const record = JSON.parse(line) as { attachment?: { type?: string; addedNames?: unknown; readdedNames?: unknown } };
+      if (record.attachment?.type !== "deferred_tools_delta") continue;
+      for (const list of [record.attachment.addedNames, record.attachment.readdedNames]) {
+        if (Array.isArray(list)) for (const name of list) if (typeof name === "string") names.add(name);
+      }
+    } catch {
+      // A torn last line while Claude writes: the records before it still count.
+    }
+  }
+  return [...names];
+}
+
+/** The hidden-tools verdict: an error message, or null with a detail for the step's line. */
+export function hiddenToolsVerdict(offered: string[], enabled: boolean): { error: string | null; detail: string } {
+  const shown = offered.filter((name) => name.startsWith(HIDDEN_PREFIX));
+  if (shown.length > 0) return { error: `the worker was offered ${shown.length} claude-in-chrome tools (${shown[0]}, ...)`, detail: "" };
+  if (!enabled) return { error: null, detail: "claude-in-chrome is not enabled in this Claude config, so hiding it is not shown" };
+  // A check that cannot see the tool list must not pass: Claude may have changed how it records it.
+  if (offered.length === 0) return { error: "the transcript lists no deferred tools, so hiding claude-in-chrome cannot be shown", detail: "" };
+  return { error: null, detail: `none of its ${offered.length} deferred tools is claude-in-chrome` };
+}
+
+/**
+ * Claude only: the toolkit's live check (ship 2). A raw `gh` is denied by the
+ * PreToolUse hook in bypassPermissions, and the bare-name `permissions.deny`
+ * keeps claude-in-chrome out of the tools the model is offered.
+ */
+const toolkitStep: ContractStep = {
+  name: "toolkit",
+  typicalSeconds: 15,
+  async run(env, state) {
+    const id = await sendSteer(
+      env,
+      state,
+      "Acknowledge this steer. Then run exactly this command once: gh --version. Flowryn's toolkit refuses it on purpose and that refusal is the test: do not retry it or run anything else. Then reply with the single word SIX and end your turn.",
+    );
+    await waitAcked(env, id, LONG_MS);
+    const denied = await env.waitFor("the toolkit to deny gh", LONG_MS, () =>
+      env.events().find((e) => e.kind === "toolkit.denied" && e.payload.rule === "github" && e.payload.harness === "claude"),
+    );
+    await env.waitFor("idle again", LONG_MS, () => env.run().liveness === "idle");
+    const transcriptPath = env.run().transcript_path;
+    let transcript = "";
+    try {
+      transcript = transcriptPath ? readFileSync(transcriptPath, "utf8") : "";
+    } catch {
+      transcript = "";
+    }
+    const hidden = hiddenToolsVerdict(offeredTools(transcript), env.claudeStore !== null && chromeEnabled(env.claudeStore));
+    if (hidden.error) throw new Error(hidden.error);
+    return `gh denied (${String(denied.payload.rule)} rule); ${hidden.detail}; ${timings(env, id)}`;
+  },
+};
 
 export function contractSteps(harness: HarnessId): ContractStep[] {
   return [
@@ -267,6 +347,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         return `verified by ${String(reply.data.evidence)}; the worker stayed alive; then ${timings(env, after)}`;
       },
     },
+    ...(harness === "claude" ? [toolkitStep] : []),
     {
       name: "exit",
       typicalSeconds: 2,

@@ -15,7 +15,7 @@
  * tmpdir and cannot fail this check.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractSteps } from "../../src/contracts/suite.ts";
@@ -36,6 +36,8 @@ beforeAll(async () => {
     contracts: false,
     harnessScripts: { claude: `${import.meta.dir}/../helpers/fake-contract-claude.ts`, pi: `${import.meta.dir}/../helpers/fake-contract-pi.ts` },
   });
+  // claude-in-chrome on, as on this Mac: the toolkit step must then see it hidden, not skip the check.
+  writeFileSync(join(fleet.claudeStore, ".claude.json"), JSON.stringify({ claudeInChromeDefaultEnabled: true }));
 });
 afterAll(async () => {
   await fleet.cleanup();

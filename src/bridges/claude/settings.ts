@@ -1,4 +1,5 @@
 import { USAGE_NOTIFICATIONS } from "../../harness/claude/adapter.ts";
+import type { StaticLayers } from "../../policy/static.ts";
 
 /**
  * The Claude leader bridge (design sections 5, 7 and 12): a hook set in a
@@ -41,6 +42,8 @@ export interface LeaderSettingsInput {
   bin: string;
   /** The daemon socket: a sandboxed Bash tool must be allowed to reach it (found live in M2). */
   socket: string;
+  /** The toolkit's static layer (src/policy/static.ts), built from Flowryn's paths by the caller: the bridge only writes it. */
+  toolkit: StaticLayers;
 }
 
 export function leaderSettings(input: LeaderSettingsInput): Record<string, unknown> {
@@ -50,7 +53,7 @@ export function leaderSettings(input: LeaderSettingsInput): Record<string, unkno
     permissions: {
       allow: [...LEADER_PERMISSIONS.allow],
       ask: [...LEADER_PERMISSIONS.ask],
-      deny: [...LEADER_PERMISSIONS.deny],
+      deny: [...LEADER_PERMISSIONS.deny, ...input.toolkit.permissionsDeny],
     },
     hooks: {
       // Arming the waiter at SessionStart also wakes a fresh idle session (M0 c01).
@@ -64,6 +67,6 @@ export function leaderSettings(input: LeaderSettingsInput): Record<string, unkno
       // idle_prompt: you went inactive; the quota types: Claude continued after a usage limit reset (design section 16).
       Notification: [{ matcher: `idle_prompt|${USAGE_NOTIFICATIONS}`, hooks: [command("notify")] }],
     },
-    sandbox: { network: { allowUnixSockets: [input.socket] } },
+    sandbox: { network: { allowUnixSockets: [input.socket] }, filesystem: { denyWrite: [...input.toolkit.denyWrite] } },
   };
 }
