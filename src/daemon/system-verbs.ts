@@ -93,6 +93,8 @@ export function systemVerbs(): VerbSpec[] {
         if (waitMin !== undefined && (waitMin < 1 || waitMin > MAX_WAIT_MIN)) throw new FlowrynError("bad_args", `--wait-min must be 1 to ${MAX_WAIT_MIN}`);
         if (boolArg(args, "cancel")) return { preflight: null };
         // Guards first, so a refusal (or a parked --when-idle) is fast; the binary check runs once they are clear.
+        // A validation is judged on a fresh no-mistakes read: one only waiting on external CI does not block.
+        await ctx.restart.refreshValidations();
         if (ctx.restart.guards().length > 0) return { preflight: null };
         return { preflight: await ctx.restart.preflight(boolArg(args, "force")) };
       },
