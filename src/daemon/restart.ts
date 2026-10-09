@@ -5,6 +5,8 @@ import { appendEvent } from "../db/events.ts";
 import { FlowrynError } from "../api/errors.ts";
 import type { Caller, DaemonInfo } from "../api/verbs.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
+import { taskTitle } from "../lifecycle/runs.ts";
+import { waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
 
 /**
@@ -30,6 +32,12 @@ const PENDING_KEY = "restart_pending";
 const HANDOFF_KEY = "restart_handoff";
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
+/**
+ * A validation that only waits on external CI does not block a restart, read
+ * from a no-mistakes status at most this old: twice the watcher's default
+ * poll, and the controller asks for a fresh read before it decides.
+ */
+export const VALIDATION_STATUS_FRESH_MS = 2 * 60_000;
 
 export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check";
 
@@ -37,6 +45,8 @@ export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" 
 export interface Guard {
   kind: GuardKind;
   task: string | null;
+  /** The task's title, when the backlog has one other than its id. */
+  title?: string;
   detail: string;
 }
 
@@ -93,16 +103,59 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   }
   const validating = db
     .query(
-      `SELECT r.task_id, l.granted_at FROM pool_leases l JOIN runs r ON r.id = l.run_id
+      `SELECT r.task_id, r.branch, l.granted_at, e.value AS status, e.observed_at FROM pool_leases l JOIN runs r ON r.id = l.run_id
+       LEFT JOIN run_evidence e ON e.run_id = r.id AND e.source = 'nomistakes'
        WHERE l.pool = ?1 AND l.released_at IS NULL ORDER BY l.granted_at`,
     )
-    .all(VALIDATION_POOL) as { task_id: string; granted_at: number }[];
-  for (const v of validating) guards.push({ kind: "validation", task: v.task_id, detail: `validating for ${ago(now - v.granted_at)}` });
+    .all(VALIDATION_POOL) as ValidationRow[];
+  for (const v of validating) {
+    const status = freshStatus(v, now);
+    if (status && waitsOnlyOnCi(status)) continue;
+    guards.push({ kind: "validation", task: v.task_id, detail: validationDetail(v, status, now) });
+  }
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
   for (const task of work.approvalTasks) guards.push({ kind: "approval", task, detail: "flowryn approve is waiting for its code" });
   for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
+  for (const g of guards) {
+    const title = g.task ? taskTitle(db, g.task) : null;
+    if (title && title !== g.task) g.title = title;
+  }
   return guards;
+}
+
+interface ValidationRow {
+  task_id: string;
+  branch: string;
+  granted_at: number;
+  status: string | null;
+  observed_at: number | null;
+}
+
+/** The run's own no-mistakes status (src/reconcile/delivery.ts records it), when read recently enough to decide on. */
+function freshStatus(v: ValidationRow, now: number): { outcome: string; activeSteps: NmActiveStep[] | null } | null {
+  if (v.status === null || v.observed_at === null || now - v.observed_at > VALIDATION_STATUS_FRESH_MS) return null;
+  const read = JSON.parse(v.status) as { branch?: unknown; outcome?: unknown; active_steps?: unknown };
+  if (read.branch !== v.branch || typeof read.outcome !== "string") return null;
+  return { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null };
+}
+
+/** "2h17m", "9m24s", "35s" (no-mistakes' own durations) in seconds; unreadable reads as 0. */
+export function durationSeconds(text: string): number {
+  let total = 0;
+  for (const [, n, unit] of text.matchAll(/(\d+)\s*(h|m(?!s)|s)/g)) total += Number(n) * (unit === "h" ? 3600 : unit === "m" ? 60 : 1);
+  return total;
+}
+
+/** Why a validation blocks: its longest-running step and that step's local agent, or that no recent status says. */
+function validationDetail(v: ValidationRow, status: ReturnType<typeof freshStatus>, now: number): string {
+  const held = `validating for ${ago(now - v.granted_at)}`;
+  if (!status) return `${held}; no no-mistakes status read in the last ${VALIDATION_STATUS_FRESH_MS / 60_000} min`;
+  const steps = status.activeSteps ?? [];
+  if (steps.length === 0) return held;
+  const oldest = steps.reduce((a, b) => (durationSeconds(b.activeFor) > durationSeconds(a.activeFor) ? b : a));
+  const agent = oldest.agentPid ? `, agent pid ${oldest.agentPid}` : "";
+  return `no-mistakes step ${oldest.step}${oldest.activeFor ? `, running ${oldest.activeFor}` : ""}${agent}; ${held}`;
 }
 
 /** "2026-10-05 14:32" in local time, for a person reading a deadline. */
@@ -117,7 +170,7 @@ export function localStamp(ts: number): string {
 
 /** One line per guard, for a refusal or a status. */
 export function guardLines(guards: readonly Guard[]): string[] {
-  return guards.map((g) => `${g.kind}: ${g.task ?? "-"} (${g.detail})`);
+  return guards.map((g) => `${g.kind}: ${g.task ?? "-"}${g.title ? ` "${g.title}"` : ""} (${g.detail})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +460,8 @@ export interface RestartDeps {
   work(): InMemoryWork;
   supervisor(): Supervisor;
   smoke?: (command: readonly string[], env: NodeJS.ProcessEnv) => Promise<SmokeResult>;
+  /** Read every validating run's no-mistakes status now (the delivery watcher), so the validation guard decides on a fresh read. */
+  readValidations?: () => Promise<void>;
 }
 
 export interface Preflight {
@@ -439,6 +494,12 @@ export class RestartController {
 
   guards(): Guard[] {
     return restartGuards(this.deps.db, this.deps.work(), this.deps.now());
+  }
+
+  /** Fresh no-mistakes reads for the validation guard, when anything validates; call before deciding. */
+  async refreshValidations(): Promise<void> {
+    const live = this.deps.db.query("SELECT 1 FROM pool_leases WHERE pool = ?1 AND released_at IS NULL LIMIT 1").get(VALIDATION_POOL);
+    if (live && this.deps.readValidations) await this.deps.readValidations();
   }
 
   /** Supervised, the target unchanged since install, its binary sound, and (unless forced) a different build. Throws a FlowrynError. */
@@ -611,6 +672,7 @@ export class RestartController {
         });
         return;
       }
+      await this.refreshValidations();
       if (this.guards().length > 0) return;
       const auto = pending.by === AUTO_REQUESTER;
       let preflight: Preflight;

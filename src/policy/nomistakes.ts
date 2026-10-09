@@ -1,3 +1,4 @@
+import { decode as decodeToon } from "@toon-format/toon";
 import type { GitRunner } from "./landed.ts";
 import { runCommand } from "./command.ts";
 
@@ -25,6 +26,16 @@ export interface NmRun {
   pr: string;
   awaiting: boolean;
   gate: boolean;
+  /** The steps running now (`active_steps`); null when the status has no such table (an older no-mistakes). */
+  activeSteps: NmActiveStep[] | null;
+}
+
+/** One row of `active_steps`: the step, how long it has run (no-mistakes' own "2h17m"), and its local agent's pid, if any. */
+export interface NmActiveStep {
+  step: string;
+  status: string;
+  activeFor: string;
+  agentPid: string;
 }
 
 function stripQuotes(value: string): string {
@@ -35,6 +46,26 @@ function stripQuotes(value: string): string {
 function field(text: string, name: string): string {
   const match = new RegExp(`^\\s*${name}:[ \\t]*(.*)$`, "m").exec(text);
   return match ? stripQuotes(match[1]!) : "";
+}
+
+/**
+ * The `active_steps` table of `run`, read with the TOON decoder by column
+ * name, so a column a later no-mistakes adds or moves still reads. Null when
+ * the status does not decode or has no such table: the caller then knows
+ * nothing about what runs locally.
+ */
+export function parseActiveSteps(text: string): NmActiveStep[] | null {
+  let doc: unknown;
+  try {
+    doc = decodeToon(text);
+  } catch {
+    return null;
+  }
+  const rows = (doc as { run?: { active_steps?: unknown } } | null)?.run?.active_steps;
+  if (!Array.isArray(rows)) return null;
+  const cell = (row: Record<string, unknown>, name: string) => (row[name] === undefined || row[name] === null ? "" : String(row[name]));
+  if (!rows.every((r) => r !== null && typeof r === "object" && typeof (r as Record<string, unknown>).step === "string")) return null;
+  return (rows as Record<string, unknown>[]).map((r) => ({ step: cell(r, "step"), status: cell(r, "status"), activeFor: cell(r, "active_for"), agentPid: cell(r, "agent_pid") }));
 }
 
 /** Parse `no-mistakes axi status` TOON; null when it names no run. */
@@ -50,7 +81,18 @@ export function parseNmStatus(text: string): NmRun | null {
     pr: field(text, "pr"),
     awaiting: /^\s*awaiting_agent:/m.test(text),
     gate: /^\s*gate:/m.test(text),
+    activeSteps: parseActiveSteps(text),
   };
+}
+
+/**
+ * The run only waits on external CI: it is active, and every step running
+ * now is `ci` with no local agent process (no `agent_pid`), so nothing on
+ * this machine is working for it. A status without the table never counts.
+ */
+export function waitsOnlyOnCi(run: Pick<NmRun, "outcome" | "activeSteps">): boolean {
+  const steps = run.activeSteps;
+  return run.outcome === "" && steps !== null && steps.length > 0 && steps.every((s) => s.step === "ci" && s.agentPid === "");
 }
 
 const NOT_PARKED = new Set(["completed", "failed", "cancelled", "passed", "checks-passed", "running", "fixing", "ci"]);

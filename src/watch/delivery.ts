@@ -179,6 +179,19 @@ export class DeliveryWatcher {
     }
   }
 
+  /**
+   * Read the no-mistakes status of every validating run now, outside the
+   * poll: the restart guard asks for it so its decision rests on a read
+   * seconds old (src/daemon/restart.ts). Never throws.
+   */
+  async readValidations(): Promise<void> {
+    try {
+      await this.watchNoMistakes();
+    } catch (error) {
+      this.deps.log(`delivery watcher: no-mistakes read for the restart guard: ${(error as Error).message}`);
+    }
+  }
+
   private async watchNoMistakes(): Promise<void> {
     const { db, now } = this.deps;
     const noMistakes = this.deps.noMistakes();
