@@ -111,7 +111,9 @@ function flagOutsideCap(db: Db, run: RunWithPolicy, nm: NmRun, now: number): voi
 
 /** Apply one no-mistakes status read for a run's worktree (read-only: flowrynd never drives the pipeline). Call inside a transaction. */
 export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, now: number): void {
-  recordEvidence(db, run.id, "nomistakes", 1, nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr } : { run: null }, now);
+  // The active steps let the restart guard tell a CI wait from local work (src/daemon/restart.ts).
+  const evidence = nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps } : { run: null };
+  recordEvidence(db, run.id, "nomistakes", 1, evidence, now);
   const active = nm !== null && nm.branch === run.branch && isActive(nm);
   if (active && run.state === "running") {
     db.query("UPDATE runs SET state = 'validating', updated_at = ?2 WHERE id = ?1").run(run.id, now);

@@ -86,6 +86,13 @@ export type ItemKind = keyof typeof LANE_TABLE;
  */
 export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_question_blocking", "review_feedback"];
 
+/**
+ * Items the leader handles by relaying them to you or dismissing them: a
+ * Claude leader's turn end carries each once (relayBatch in router.ts), so a
+ * worker's report or a dropped restart is not left for your next message.
+ */
+export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped"];
+
 export interface ItemRow {
   id: string;
   event_seq: number;
