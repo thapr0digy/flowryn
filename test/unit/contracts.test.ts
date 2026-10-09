@@ -8,6 +8,8 @@ import { removeScratchHome, runContractSteps, scratchConfig, type ContractOption
 import { pinDrift, pinHarness } from "../../src/contracts/pin.ts";
 import type { FlowrynConfig } from "../../src/config/config.ts";
 import { harnessVersion } from "../../src/lifecycle/fleet-services.ts";
+import type { RunRow } from "../../src/lifecycle/runs.ts";
+import type { MessageRow } from "../../src/lifecycle/steers.ts";
 import { contractPlan } from "../../src/cli/commands/setup.ts";
 
 const dirs: string[] = [];
@@ -137,6 +139,73 @@ describe("contract progress", () => {
     expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 22 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");
   });
+});
+
+/**
+ * A Pi worker behind a slow model, as the extension treats an urgent steer
+ * (src/harness/pi/extension/flowryn-worker.ts): every steer is acknowledged at
+ * once, and the long command starts `startMs` after the acknowledgement that
+ * asked for it. An urgent steer that arrives while the command runs cuts it;
+ * one that arrives before blocks the command's tool call and is read without
+ * a cut, which is what the live suite met on a free model.
+ */
+function slowPiWorker(startMs: number): { env: ContractEnv; asked: string[] } {
+  const steers: MessageRow[] = [];
+  const asked: string[] = [];
+  let commandAt = Number.POSITIVE_INFINITY;
+  const running = () => Date.now() >= commandAt;
+  const env: ContractEnv = {
+    harness: "pi",
+    scripted: false,
+    async call(verb, args) {
+      const now = Date.now();
+      const id = `m${steers.length + 1}`;
+      const urgent = args.urgent === true;
+      steers.push({ id, created_at: now, carried_at: now, seen_at: now, acked_at: now, urgent: urgent ? 1 : 0, preempted_at: urgent && running() ? now : null } as MessageRow);
+      if (!urgent) commandAt = now + startMs;
+      return { ok: verb === "steer", data: { steer: id } };
+    },
+    run: () => ({ proc_pid: 1, proc_start: 1, proc_exe: "pi", liveness: "idle" }) as RunRow,
+    events: () => [],
+    steers: () => steers,
+    lastHook: () => null,
+    async waitFor(what, timeoutMs, check) {
+      const until = Date.now() + timeoutMs;
+      for (;;) {
+        const value = await check();
+        if (value) return value;
+        if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
+        await Bun.sleep(10);
+      }
+    },
+    exitWorker: async () => ({ ok: true, detail: "" }),
+    isAlive: async () => true,
+    async commandRunning(command) {
+      asked.push(command);
+      return running();
+    },
+    log: () => {},
+  };
+  return { env, asked };
+}
+
+const urgentStep = contractSteps("pi").find((s) => s.name === "urgent while busy")!;
+
+describe("contract urgent step on Pi", () => {
+  test("sends the urgent steer only once the long command runs, however long the model takes to call it", async () => {
+    // A fixed two seconds after the acknowledgement was the old wait; this model takes longer.
+    const { env, asked } = slowPiWorker(2_500);
+    const detail = await urgentStep.run(env, { ...state });
+    expect(detail).toContain("cut a tool");
+    expect(asked.at(-1)).toBe("perl -e sleep 60");
+  }, 10_000);
+
+  test("still fails a steer acknowledged without a cut", async () => {
+    // The process check reads a command that is not the one the steer meets: the steer blocks a tool call instead.
+    const { env } = slowPiWorker(60_000);
+    const blocking: ContractEnv = { ...env, commandRunning: async () => true };
+    await expect(urgentStep.run(blocking, { ...state })).rejects.toThrow("m2 was acknowledged without cutting the running tool");
+  }, 10_000);
 });
 
 /** A fake Claude native install: versions/<ver> files and a `claude` symlink the updater repoints. */

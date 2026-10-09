@@ -4,6 +4,7 @@ import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { VERSION } from "../version.ts";
 import { leaderSettings } from "./claude/settings.ts";
 import { SKILL_NAME, skillMarkdown } from "./skill.ts";
+import { TOOL_MAP } from "../policy/toolkit.ts";
 // Embedded by `bun build --compile` (a $bunfs path there); the source path in development.
 import leaderExtensionAsset from "./pi/flowryn-leader.ts" with { type: "file" };
 
@@ -11,7 +12,7 @@ import leaderExtensionAsset from "./pi/flowryn-leader.ts" with { type: "file" };
  * The leader files (design section 15): the Claude settings file, the flowryn
  * skill (as a Claude plugin and as a Pi skill), the Pi leader extension, a
  * `flowryn` command on PATH, and the appended system prompt (cutover C3: the
- * terse style block plus your own `preferences.md`, concatenated into
+ * terse style block plus your own `preferences.md` and the toolkit's tool map, concatenated into
  * `system-prompt.md`), all under `<home>/leader/`. `flowryn lead` rewrites
  * them on every launch, so they always match the binary that runs;
  * `preferences.md` itself is yours, written by the retired cutover import or the
@@ -26,8 +27,8 @@ export interface LeaderFiles {
   skillDir: string;
   /** The style block file, or null when [style] terse = false. */
   style: string | null;
-  /** The file the harness appends to its system prompt: the style block and your preferences. */
-  appendPrompt: string | null;
+  /** The file the harness appends to its system prompt: the style block, your preferences and the tool map. */
+  appendPrompt: string;
   /** A directory holding a `flowryn` command, put first on the leader's PATH. */
   binDir: string;
   /** The absolute flowryn command the hooks and the extension run. */
@@ -99,12 +100,9 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
   const preferencesPath = join(dir, "preferences.md");
   const preferences = existsSync(preferencesPath) ? readFileSync(preferencesPath, "utf8").trimEnd() : null;
   const appendPath = join(dir, "system-prompt.md");
-  const parts = [input.style, preferences].filter((p): p is string => typeof p === "string" && p.length > 0);
-  let appendPrompt: string | null = null;
-  if (parts.length > 0) {
-    writeIfChanged(appendPath, parts.join("\n\n") + "\n");
-    appendPrompt = appendPath;
-  } else if (existsSync(appendPath)) rmSync(appendPath, { force: true });
+  // The tool map is always there, even with [style] terse = false: the leader is held to the same toolkit rules.
+  const parts = [input.style, preferences, TOOL_MAP].filter((p): p is string => typeof p === "string" && p.length > 0);
+  writeIfChanged(appendPath, parts.join("\n\n") + "\n");
 
-  return { dir, claudeSettings, claudePlugin, piExtension, skillDir, style, appendPrompt, binDir, bin };
+  return { dir, claudeSettings, claudePlugin, piExtension, skillDir, style, appendPrompt: appendPath, binDir, bin };
 }
