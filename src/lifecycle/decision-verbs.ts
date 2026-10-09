@@ -13,6 +13,7 @@ import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { createStandaloneDecision, DECISION_OPTION, getDecision, type DecisionRow } from "./decisions.ts";
+import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject } from "./projects.ts";
 import { getRun, isTerminal } from "./runs.ts";
@@ -76,8 +77,9 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
   const held = d.gate_id !== null && (ctx.db.query("SELECT state FROM gates WHERE id = ?1").get(d.gate_id) as { state: string } | null)?.state === "open";
   let steer: string | null = null;
   if (run && !isTerminal(run.state) && !held) {
-    const text = `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
-    steer = createSteer(ctx.db, run, text, now, d.id).id;
+    // The CI-wait watchdog's question was never the worker's: its answer is carried out as an instruction (keep-waiting sends none).
+    const text = d.origin === CI_WAIT_ORIGIN ? ciWaitSteer(d.id, a.choice, a.words) : `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
+    if (text !== null) steer = createSteer(ctx.db, run, text, now, d.id).id;
   }
   return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [], held };
 }

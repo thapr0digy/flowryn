@@ -8,7 +8,7 @@ import { recordEvidence, taskTitle, type RunWithPolicy } from "../lifecycle/runs
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
-import { isActive, type NmRun } from "../policy/nomistakes.ts";
+import { isActive, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
 import { openDivergence } from "./divergence.ts";
 
 /**
@@ -109,10 +109,23 @@ function flagOutsideCap(db: Db, run: RunWithPolicy, nm: NmRun, now: number): voi
   });
 }
 
-/** Apply one no-mistakes status read for a run's worktree (read-only: flowrynd never drives the pipeline). Call inside a transaction. */
-export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, now: number): void {
+/**
+ * When flowrynd first saw this pipeline run waiting only on CI: kept across
+ * reads of the same run (the CI-wait watchdog's clock when no-mistakes'
+ * own `active_for` is unreadable), null once it is not a CI wait.
+ */
+function ciSinceOf(db: Db, runId: string, nm: NmRun | null, now: number): number | null {
+  if (!nm || !waitsOnlyOnCi(nm)) return null;
+  const row = db.query("SELECT value FROM run_evidence WHERE run_id = ?1 AND source = 'nomistakes'").get(runId) as { value: string } | null;
+  const before = row ? (JSON.parse(row.value) as { id?: unknown; ci_since?: unknown }) : null;
+  return before && before.id === nm.id && typeof before.ci_since === "number" ? before.ci_since : now;
+}
+
+/** Apply one no-mistakes status read for a run's worktree (read-only: flowrynd never drives the pipeline). Call inside a transaction. Returns the CI wait's start as flowrynd saw it. */
+export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, now: number): { ciSince: number | null } {
   // The active steps let the restart guard tell a CI wait from local work (src/daemon/restart.ts).
-  const evidence = nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps } : { run: null };
+  const ciSince = ciSinceOf(db, run.id, nm, now);
+  const evidence = nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps, ci_since: ciSince } : { run: null };
   recordEvidence(db, run.id, "nomistakes", 1, evidence, now);
   const active = nm !== null && nm.branch === run.branch && isActive(nm);
   if (active && run.state === "running") {
@@ -123,6 +136,7 @@ export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null,
     db.query("UPDATE runs SET state = 'running', updated_at = ?2 WHERE id = ?1").run(run.id, now);
     appendEvent(db, { source: "nomistakes", kind: "run.validated", runId: run.id, taskId: run.task_id, payload: { nm_run: nm?.id ?? null, outcome: nm?.outcome ?? null, pr: nm?.pr ?? null }, ts: now });
   }
+  return { ciSince };
 }
 
 /** no-mistakes cannot be read (its daemon is down): one P1 until it answers again; flowrynd never restarts it. Call inside a transaction. */
