@@ -1,6 +1,9 @@
 import type { Reply } from "../../api/envelope.ts";
 import { stringArg, type CliIo, type VerbSpec } from "../../api/verbs.ts";
-import { flowrynHome, socketPath } from "../../config/paths.ts";
+import { homedir } from "node:os";
+import { defaultConfig, loadConfig, type FlowrynConfig } from "../../config/config.ts";
+import { flowrynHome, socketPath, stateFiles } from "../../config/paths.ts";
+import { toolkitVerdict, type ToolkitPaths, type ToolkitVerdict } from "../../policy/toolkit.ts";
 import { request, TransportError } from "../../transport/unix.ts";
 import { ulid } from "../../util/ulid.ts";
 import { PROTO } from "../../version.ts";
@@ -74,6 +77,52 @@ function harnessOf(value: string | undefined): Harness {
   return value === "pi" ? "pi" : "claude";
 }
 
+/** Flowryn's own files for the toolkit rules; the defaults when the config cannot be read (the rules still hold). */
+function toolkitPaths(io: CliIo): ToolkitPaths {
+  const home = flowrynHome(io.env);
+  let config: FlowrynConfig;
+  try {
+    config = loadConfig(home).config;
+  } catch {
+    config = defaultConfig(home);
+  }
+  return {
+    home: io.env.HOME ?? homedir(),
+    flowrynBacklog: config.tasks.backlog,
+    flowrynTodos: config.tasks.todos,
+    flowrynDb: stateFiles(config.state_dir).db,
+    tasksAxiFile: io.env.TASKS_AXI_FILE ?? null,
+  };
+}
+
+/**
+ * The toolkit verdict for a hook's tool call, made here in the hook process
+ * so it holds with the daemon down or slow (src/policy/toolkit.ts). The role
+ * comes from the token's readable prefix: a leader session's token is `fwl_`.
+ */
+function localVerdict(io: CliIo, harness: Harness, raw: string): ToolkitVerdict | null {
+  let input: Record<string, unknown>;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    input = value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (typeof input.tool_name !== "string" || input.tool_name.length === 0) return null;
+  const toolInput = input.tool_input && typeof input.tool_input === "object" && !Array.isArray(input.tool_input) ? (input.tool_input as Record<string, unknown>) : {};
+  return toolkitVerdict(
+    {
+      harness,
+      role: io.env.FLOWRYN_TOKEN?.startsWith("fwl_") ? "leader" : "worker",
+      toolName: input.tool_name,
+      toolInput,
+      cwd: typeof input.cwd === "string" && input.cwd.length > 0 ? input.cwd : process.cwd(),
+    },
+    toolkitPaths(io),
+  );
+}
+
 /** Hooks that read GitHub before they answer (the Pi merge confirm) wait longer than a busy-signal hook. */
 const SLOW_HOOKS: Record<string, { connectMs: number; replyMs: number }> = { "merge-summary": { connectMs: 300, replyMs: 60_000 } };
 
@@ -88,7 +137,16 @@ function signalHook(name: string, summary: string): VerbSpec {
     async local(args, io) {
       const harness = harnessOf(stringArg(args, "harness"));
       const input = await readInput(io);
-      const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart() }, SLOW_HOOKS[name] ?? HOOK_TIMEOUTS).catch(() => null);
+      const verdict = name === "pre-tool" ? localVerdict(io, harness, input) : null;
+      const toolkit = verdict ? { toolkit: JSON.stringify({ rule: verdict.rule, tool: verdict.tool }) } : {};
+      const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart(), ...toolkit }, SLOW_HOOKS[name] ?? HOOK_TIMEOUTS).catch(() => null);
+      // A toolkit denial never waits on the daemon: down, slow or refusing, the call is still denied.
+      if (verdict && harness === "claude" && !io.json) {
+        const data = reply?.ok ? ((reply.data ?? {}) as Record<string, unknown>) : {};
+        const steer = data.permission === "deny" && typeof data.reason === "string" ? `${data.reason} ` : "";
+        io.stdout(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: steer + verdict.reason } }) + "\n");
+        return 0;
+      }
       if (!reply || !reply.ok) return 0;
       const data = (reply.data ?? {}) as Record<string, unknown>;
       if (io.json) {
@@ -108,6 +166,35 @@ function signalHook(name: string, summary: string): VerbSpec {
     },
   };
 }
+
+/**
+ * Both Pi extensions' tool_call check: the toolkit verdict for one call
+ * ({tool_name, tool_input, cwd} on stdin), made here without the daemon. It
+ * prints {"block": true, "reason": ...} or {}, and tells the daemon of a
+ * denial best effort (hook.tool-denied, the toolkit.denied event).
+ */
+const toolCheck: VerbSpec = {
+  name: "hook tool-check",
+  summary: "Hook (Pi): may this tool call run under the toolkit rules; prints {block, reason} or {}",
+  positionals: [],
+  flags: { harness: { type: "string", help: "pi (default here) or claude", placeholder: "harness" } },
+  kind: "local",
+  roles: ["worker", "hook"],
+  async local(args, io) {
+    const harness = stringArg(args, "harness") === "claude" ? "claude" : "pi";
+    const input = await readInput(io);
+    const verdict = localVerdict(io, harness, input);
+    if (!verdict) {
+      io.stdout("{}\n");
+      return 0;
+    }
+    // Only the tool's name goes to the daemon: the event never holds the command.
+    const named = JSON.stringify({ tool_name: (JSON.parse(input) as { tool_name?: unknown }).tool_name });
+    await call(io, "hook.tool-denied", { harness, input: named, toolkit: JSON.stringify({ rule: verdict.rule, tool: verdict.tool }) }, HOOK_TIMEOUTS).catch(() => null);
+    io.stdout(JSON.stringify({ block: true, reason: verdict.reason, rule: verdict.rule }) + "\n");
+    return 0;
+  },
+};
 
 /**
  * The waiter. Claude: an asyncRewake Stop hook; exit 2 with one line on stderr
@@ -219,7 +306,8 @@ const waitP0: VerbSpec = {
 export const HOOK_CLI_VERBS: VerbSpec[] = [
   signalHook("worker-start", "Worker hook: session start; reports the session id and cwd for the isolation check"),
   signalHook("prompt", "Hook: a turn started; a leader gets its P1 digest"),
-  signalHook("pre-tool", "Hook: a tool is about to run; an urgent steer may block it"),
+  signalHook("pre-tool", "Hook: a tool is about to run; the toolkit rules or an urgent steer may block it"),
+  toolCheck,
   signalHook("post-tool", "Hook: a tool finished; may print a pending steer as context"),
   signalHook("tool-failed", "Hook: a tool failed; its urgent-steer clock stops"),
   signalHook("stop", "Hook: a turn ended; may continue it with a steer (worker) or a P0 (leader)"),

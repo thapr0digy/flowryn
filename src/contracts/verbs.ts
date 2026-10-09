@@ -3,10 +3,43 @@ import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type Caller, type DaemonInfo, type VerbSpec } from "../api/verbs.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { policyMode } from "../config/policy.ts";
-import { appendEvent } from "../db/events.ts";
+import type { Db } from "../db/db.ts";
+import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { noteContractPassed } from "../lifecycle/harness-gate.ts";
 import { checkLeaderReport, leaderRecordLine, recordGrant } from "./grant.ts";
+
+export interface PassRecord {
+  harness: HarnessId;
+  version: string;
+  report: string | null;
+  /** Who recorded it: "human", "leader", or "daemon" for its automatic check. */
+  by: string;
+  build: string | null;
+  session: string | null;
+  source: EventSource;
+}
+
+/**
+ * Write a passing harness version: the record, its `contract.passed` event,
+ * and the settled P1 about it. The verb and the daemon's automatic check
+ * (src/contracts/auto.ts) both record through here. Call inside a
+ * transaction; returns the event's seq.
+ */
+export function recordPass(db: Db, pass: PassRecord, now: number): number {
+  db.query(
+    `INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, ?4)
+     ON CONFLICT(harness, version) DO UPDATE SET passed_at = excluded.passed_at, report_path = excluded.report_path`,
+  ).run(pass.harness, pass.version, now, pass.report);
+  const event = appendEvent(db, {
+    source: pass.source,
+    kind: "contract.passed",
+    payload: { harness: pass.harness, version: pass.version, report: pass.report, by: pass.by, build: pass.build, session: pass.session },
+    ts: now,
+  });
+  noteContractPassed(db, pass.harness, pass.version, now);
+  return event.seq;
+}
 
 const VERSION = /^\d+\.\d+\.\d+[\w.+-]*$/;
 
@@ -47,15 +80,8 @@ export const recordContract: VerbSpec = {
     const byLeader = ctx.caller.role === "leader";
     if (byLeader) checkLeaderReport(ctx.config().data_dir, report, { harness, version, build: info.build! });
     const now = ctx.now();
-    ctx.db
-      .query(
-        `INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(harness, version) DO UPDATE SET passed_at = excluded.passed_at, report_path = excluded.report_path`,
-      )
-      .run(harness, version, now, report);
-    const event = appendEvent(ctx.db, { source: "cli", kind: "contract.passed", payload: { harness, version, report, by: ctx.caller.role, build, session: ctx.caller.session ?? null } });
-    if (byLeader) openItem(ctx.db, { kind: "contract_recorded", eventSeq: event.seq, line: leaderRecordLine(harness, version, build), now });
-    noteContractPassed(ctx.db, harness as HarnessId, version, now);
+    const seq = recordPass(ctx.db, { harness: harness as HarnessId, version, report, by: ctx.caller.role, build, session: ctx.caller.session ?? null, source: "cli" }, now);
+    if (byLeader) openItem(ctx.db, { kind: "contract_recorded", eventSeq: seq, line: leaderRecordLine(harness, version, build), now });
     return { data: { harness, version, recorded: true, by: ctx.caller.role } };
   },
   async settle(ctx, result) {

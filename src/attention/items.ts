@@ -23,8 +23,9 @@ export type ItemClass = "actionable" | "info";
  * review_feedback: what you sent from a review page the daemon polls.
  * pass_requested: the user asked on a review page to pass its gate; the
  * leader confirms it with them through a human channel.
- * contract_recorded: the leader recorded a harness contract pass (relaxed
- * policy, installed build); informational, so you see every one.
+ * contract_recorded: the leader, or the daemon's automatic check, recorded a
+ * harness contract pass (relaxed policy, installed build); informational, so
+ * you see every one.
  * build_refused: the build watcher found an installed build it will not apply
  * (older than the running daemon, or failing its binary check).
  * build_held: an installed build the watcher leaves to you (unstamped, built

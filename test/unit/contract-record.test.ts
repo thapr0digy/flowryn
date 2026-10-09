@@ -59,7 +59,7 @@ describe("[policy] mode", () => {
   test("doctor shows the mode in force", () => {
     expect(policyCheck(defaultConfig("/h"))).toMatchObject({ check: "policy", status: "ok" });
     expect(policyCheck(defaultConfig("/h"))!.detail).toStartWith("strict: only your own terminal records");
-    expect(policyCheck(parseConfig('[policy]\nmode = "relaxed"\n', "/h"))!.detail).toStartWith("relaxed: the leader may also record");
+    expect(policyCheck(parseConfig('[policy]\nmode = "relaxed"\n', "/h"))!.detail).toStartWith("relaxed: the daemon checks a new harness version itself and the leader may record");
   });
 });
 

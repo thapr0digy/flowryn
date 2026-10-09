@@ -20,6 +20,7 @@ import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { gateQuestionsLine } from "../lifecycle/gate-questions.ts";
 import { isRoutineMerge, recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
+import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { readShellWords } from "../util/shell-word.ts";
 
@@ -217,7 +218,7 @@ function wokenQuestions(db: Db, session: string, turn: number): RankedItem[] {
 
 /** Compose the holder's briefing and carry every item it lists for `turn`. Inside a transaction. */
 function brief(ctx: HandlerCtx, s: LeaderSessionRow, turn: number, now: number): { text: string; listed: number } {
-  const briefing = composeBriefing(ctx.db, { session: s.session_id, now, morningHour: ctx.config().morning_hour, ageMs: ageMs(ctx), markMorning: true });
+  const briefing = composeBriefing(ctx.db, { session: s.session_id, now, morningHour: ctx.config().morning_hour, ageMs: ageMs(ctx), markMorning: true, config: ctx.config() });
   for (const item of briefing.listed) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "briefing", now });
   setSession(ctx.db, s.session_id, { brief_pending: 0 });
   return { text: briefing.text, listed: briefing.listed.length };
@@ -552,12 +553,17 @@ function routineMerge(ctx: HandlerCtx, ref: string): boolean {
  * same way, so a decline that ends the turn or your next message also
  * kills it.
  */
-export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
+export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: ToolkitDenial | null = null): HandlerResult {
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
   if (s.harness !== "claude") return result;
   const now = ctx.now();
   voidPendingAttempts(ctx.db, s.session_id, now);
+  // The hook process denied this call by the toolkit rules: it never runs, so nothing is gated or recorded as an attempt.
+  if (denied) {
+    recordToolkitDenied(ctx.db, denied, { session: s.session_id, harness: "claude", toolName: String(input.tool_name ?? "") }, now);
+    return result;
+  }
   if (input.tool_name !== "Bash") return result;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const gated = gatedCommands(command);
@@ -588,6 +594,13 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResu
   }
   if (lines.length === 0) return result;
   return { data: { permission: "ask", reason: `Flowryn needs your word: ${lines.join("; ")}. Approve only if you want this.` } };
+}
+
+/** Pi: the leader extension's tool call that `hook tool-check` denied by the toolkit rules. */
+export function toolDenied(ctx: HandlerCtx, input: LeaderHookInput, denied: ToolkitDenial | null, harness: "claude" | "pi"): HandlerResult {
+  const s = leaderSession(ctx);
+  if (denied) recordToolkitDenied(ctx.db, denied, { session: s.session_id, harness, toolName: String(input.tool_name ?? "") }, ctx.now());
+  return { data: { recorded: denied !== null } };
 }
 
 /**

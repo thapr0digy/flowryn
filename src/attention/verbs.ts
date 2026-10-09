@@ -27,6 +27,7 @@ const brief: VerbSpec = {
       morningHour: ctx.config.morning_hour,
       ageMs: leaderTiming(ctx.config).age_ms,
       markMorning: false,
+      config: ctx.config,
     });
     return { data: { briefing: briefing.text.split("\n") }, hints: ["flowryn fleet", "flowryn show <id>"] };
   },

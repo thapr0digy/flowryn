@@ -126,7 +126,7 @@ export async function checkStart(deps: StartDeps, project: ProjectRow, harness: 
   tx(deps.db, () => noteHerdrUp(deps.db, "cli", deps.now()));
   // The installed version, checked at every dispatch; an untested one refuses and opens its P1 (sections 5 and 16).
   const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
-  if (check.state !== "verified") throw harnessRefusal(check);
+  if (check.state !== "verified") throw harnessRefusal(check, deps.db, deps.config());
   const version = check.version;
   const branch = await deps.git(project.path, ["branch", "--show-current"]);
   if (branch !== project.default_branch) {

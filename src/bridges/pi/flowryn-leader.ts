@@ -23,8 +23,9 @@
 //     followUp, while idle and you inactive as a followUp with triggerTurn
 //     (a half-typed draft stays untouched, M0 p03); it re-checks what it sees
 //     first and declines otherwise, and always passes deliverAs (M0 finding 14);
-//   - blocks shell calls to flowryn merge, gate pass, approve, decide --by
-//     captain and hook (M0 p08);
+//   - asks `hook tool-check` before every tool call and blocks what it denies
+//     (M0 p08): shell calls to flowryn merge, gate pass, approve, decide --by
+//     captain and hook, and the toolkit rules (src/policy/toolkit.ts);
 //   - registers the flowryn_merge tool, the Pi leader's human-confirmation
 //     channel (design section 7): it shows the PR, head and checks with
 //     ctx.ui.confirm() (M0 p07) and, on yes, merges with the approval key the
@@ -43,12 +44,6 @@ const BIN = process.env.FLOWRYN_BIN ?? "";
 const INACTIVE_MS = Number(process.env.FLOWRYN_LEADER_INACTIVE_MS ?? "60000") || 60_000;
 const TOOL_PING_MS = 60_000;
 const EXIT_BACKOFF_MS = 10_000;
-// Over-matches by design (the controller's ruling): a precise `decide ... --by captain` anchor
-// misses `--by=captain`, quoted `captain`, reordered flags and a backslash-newline continuation.
-// Not exported: importing this module from a unit test breaks files.ts's `with { type: "file" }`
-// asset import of the same path elsewhere in the same test process (test/helpers/fake-pi-leader.ts
-// drives it through the real extension instead).
-const SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass)\b|flowryn\b[\s\S]*\bdecide\b[\s\S]*captain/;
 
 function runHook(name: string, input: Json): Promise<Json | null> {
   return new Promise((resolve) => {
@@ -272,13 +267,13 @@ export default function flowrynLeader(pi: any): void {
     await enqueue("session-end", { reason: String(event?.reason ?? "quit") });
   });
 
-  pi.on("tool_call", async (event: any) => {
-    const name = String(event?.toolName ?? "");
-    const command = name === "bash" ? String(event?.input?.command ?? "") : "";
-    if (command !== "" && SHELL_GATE.test(command)) {
-      return { block: true, reason: "flowryn: merge, gate pass, approve and a captain decision need the user (use the flowryn_merge, flowryn_gate_pass and flowryn_decide tools), and hook verbs belong to the harness; this session cannot run them from the shell" };
-    }
-    return undefined;
+  // The shell gate and the toolkit rules live in src/policy/toolkit.ts; `hook tool-check` decides.
+  // A check that does not answer blocks the call: the shell gate never failed open.
+  pi.on("tool_call", async (event: any, c: any) => {
+    remember(c);
+    const verdict = await runHook("tool-check", { tool_name: String(event?.toolName ?? ""), tool_input: event?.input ?? {}, cwd: c?.cwd ?? process.cwd() });
+    if (!verdict) return { block: true, reason: "flowryn: its tool check did not answer (flowryn hook tool-check), so this call is blocked; retry once" };
+    return verdict.block === true ? { block: true, reason: String(verdict.reason ?? "flowryn: blocked by the toolkit rules") } : undefined;
   });
 
   /**

@@ -21,6 +21,7 @@ import { guardTurnEnd } from "./turn-end-guard.ts";
 import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
+import { parseToolkitDenial, recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { ulidTime } from "../util/ulid.ts";
 
 /**
@@ -85,6 +86,7 @@ function hookFlags() {
     input: { type: "string" as const, help: "the hook's JSON input" },
     waiter: { type: "string" as const, help: "a waiter's id (a ULID minted when it was armed)" },
     "started-at": { type: "int" as const, help: "when the hook process started (ms); a digest it cannot hand over in time is not carried" },
+    toolkit: { type: "string" as const, help: "the toolkit rule the hook process denied this tool call by (JSON), for the toolkit.denied event" },
   };
 }
 
@@ -293,7 +295,7 @@ type LeaderBody = (ctx: HandlerCtx, input: leader.LeaderHookInput, args: Args, p
  * this worker or leader session.
  */
 function signalVerb(
-  hook: HookName | "notify",
+  hook: HookName | "notify" | "tool-denied",
   summary: string,
   body: (ctx: HandlerCtx, run: RunWithPolicy, args: Args, prepared: unknown) => HandlerResult,
   leaderBody: LeaderBody,
@@ -393,11 +395,23 @@ const prompt = signalVerb(
   async (ctx, args) => leader.digestDeadline(ctx, intArg(args, "started-at")),
 );
 
+function toolkitArg(args: Args): ToolkitDenial | null {
+  return parseToolkitDenial(stringArg(args, "toolkit"));
+}
+
+function toolNameOf(args: Args): string {
+  const input = parseInput(args) as { tool_name?: unknown };
+  return typeof input.tool_name === "string" ? input.tool_name : "";
+}
+
 /**
  * PreToolUse: busy. For a Claude worker's main agent, an urgent steer that is
  * due blocks this tool call with the steer as the deny reason, the model's
  * next read (Tier 2; a hook reply, never a key, so it is safe even with a
- * dialog about); otherwise the tool starts its clock for the preempter.
+ * dialog about); otherwise the tool starts its clock for the preempter. A
+ * call the hook process already denied by the toolkit rules is recorded
+ * (toolkit.denied) and starts no clock, since it never runs; the hook process
+ * prints that denial whatever the daemon answers.
  */
 const preTool = signalVerb(
   "pre-tool",
@@ -405,6 +419,8 @@ const preTool = signalVerb(
   (ctx, run, args) => {
     claudeSaw(ctx, run, args, "pre-tool");
     markBusy(ctx, run, HOOK_SIGNALS["pre-tool"], "pre-tool");
+    const denied = toolkitArg(args);
+    if (denied) recordToolkitDenied(ctx.db, denied, { runId: run.id, taskId: run.task_id, harness: harnessOf(args), toolName: toolNameOf(args) }, ctx.now());
     const tool = mainTool(args);
     if (tool === null) return { data: { run: run.id } };
     const urgent = dueUrgent(ctx.db, run.id, ctx.now(), ctx.fleet.timing());
@@ -412,10 +428,22 @@ const preTool = signalVerb(
       markRung(ctx.db, urgent, run, "pre-tool", ctx.now(), false, ctx.fleet.timing());
       return { data: { run: run.id, steer: urgent.id, permission: "deny", reason: urgentBlockLine(urgent.id, urgent.body) } };
     }
-    ctx.fleet.urgent.tools.start(run.id, tool, ctx.now());
+    if (!denied) ctx.fleet.urgent.tools.start(run.id, tool, ctx.now());
     return { data: { run: run.id } };
   },
-  (ctx, input) => leader.preToolUse(ctx, input),
+  (ctx, input, args) => leader.preToolUse(ctx, input, toolkitArg(args)),
+);
+
+/** A Pi extension's tool call that `hook tool-check` denied by the toolkit rules: only the toolkit.denied event. */
+const toolDenied = signalVerb(
+  "tool-denied",
+  "Hook (Pi): the toolkit rules denied a tool call; records toolkit.denied",
+  (ctx, run, args) => {
+    const denied = toolkitArg(args);
+    if (denied) recordToolkitDenied(ctx.db, denied, { runId: run.id, taskId: run.task_id, harness: harnessOf(args), toolName: toolNameOf(args) }, ctx.now());
+    return { data: { run: run.id, recorded: denied !== null } };
+  },
+  (ctx, input, args) => leader.toolDenied(ctx, input, toolkitArg(args), harnessOf(args)),
 );
 
 /**
@@ -784,4 +812,4 @@ const preempt = piWorkerVerb("preempt", "Worker hook (Pi): may the extension cut
   return { data: { run: run.id, steer: id, ...piPreempt(ctx.db, run, id, toolMs, ctx.fleet.timing(), ctx.fleet.urgent.deferrals, ctx.now()) } };
 });
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, postTool, toolFailed, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, toolDenied, postTool, toolFailed, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];
