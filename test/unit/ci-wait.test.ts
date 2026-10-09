@@ -211,6 +211,7 @@ describe("the CI-wait watchdog", () => {
     expect(steer).toContain(`The user chose merge-main for ${d!.id}`);
     expect(steer).toContain("git merge origin/main");
     expect(steer).toContain("never rebase or force-push");
+    expect(steer).toContain("no-mistakes rerun");
     expect(steer).toContain('The user\'s words: "go ahead"');
     expect(openItems()).toEqual([]);
     now += 3 * 60 * 60_000;
