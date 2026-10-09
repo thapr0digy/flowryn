@@ -30,6 +30,7 @@ let statusFile: string;
 let noMistakes: string;
 let checks: ChecksSummary | Error;
 let alertMin: number;
+let githubCalls: number;
 const git = gitRunner("git", 30_000);
 const PR = "https://github.com/acme/web/pull/7";
 
@@ -66,9 +67,12 @@ function nmSays(text: string): void {
 }
 
 const forge = {
-  pull: async (): Promise<PullRequest> =>
-    ({ number: 7, url: PR, title: "t", state: "open", draft: false, headSha: "abc", headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null }) satisfies PullRequest,
+  pull: async (): Promise<PullRequest> => {
+    githubCalls++;
+    return { number: 7, url: PR, title: "t", state: "open", draft: false, headSha: "abc", headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null } satisfies PullRequest;
+  },
   checks: async (): Promise<ChecksSummary> => {
+    githubCalls++;
     if (checks instanceof Error) throw checks;
     return checks;
   },
@@ -127,6 +131,7 @@ beforeEach(() => {
   chmodSync(noMistakes, 0o755);
   checks = { state: "none", checks: [] };
   alertMin = 60;
+  githubCalls = 0;
   now = 1_000_000_000;
 
   db = openDb(join(dir, "flowryn.db"));
@@ -184,6 +189,24 @@ describe("the CI-wait watchdog", () => {
     checks = { state: "none", checks: [] };
     await watcher().pass();
     expect(ciWaits()).toEqual([]);
+  });
+
+  test("a rate-limited GitHub read quiets the watchdog until the limit ends, then it asks", async () => {
+    nmSays(CI_WAIT("2h"));
+    const w = watcher();
+    checks = new ForgeError("rate_limited", "secondary rate limit", 403, now + 10 * 60_000);
+    await w.pass();
+    expect(ciWaits()).toEqual([]);
+    checks = { state: "none", checks: [] };
+    const callsWhenLimited = githubCalls;
+    now += 9 * 60_000;
+    await w.pass();
+    expect(githubCalls).toBe(callsWhenLimited);
+    expect(ciWaits()).toEqual([]);
+    now += 60_000;
+    await w.pass();
+    expect(githubCalls).toBeGreaterThan(callsWhenLimited);
+    expect(ciWaits()).toHaveLength(1);
   });
 
   test("a CI fix round runs a local agent: not a wait", async () => {

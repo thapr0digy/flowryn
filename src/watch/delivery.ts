@@ -157,15 +157,21 @@ export class DeliveryWatcher {
           this.deps.log(`delivery watcher: ${delivered.ref} is not found on GitHub`);
           continue;
         }
-        // Unavailable or rate-limited while a merge waits: one P1 for the outage (design section 16).
-        if (isForgeOutage(error)) tx(db, () => noteForgeDown(db, error, "github", now()));
-        this.backoffMs = Math.min(MAX_BACKOFF_MS, this.backoffMs === 0 ? this.deps.pollMs() : this.backoffMs * 2);
-        const retryAt = error instanceof ForgeError && error.retryAt ? error.retryAt : now() + this.backoffMs;
-        this.forgeQuietUntil = retryAt;
-        this.deps.log(`delivery watcher: GitHub failed (${(error as Error).message}); quiet until ${new Date(retryAt).toISOString()}`);
+        this.forgeFailed(error);
         return;
       }
     }
+  }
+
+  /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
+  private forgeFailed(error: unknown): void {
+    const { db, now } = this.deps;
+    // Unavailable or rate-limited while a merge waits: one P1 for the outage (design section 16).
+    if (isForgeOutage(error)) tx(db, () => noteForgeDown(db, error, "github", now()));
+    this.backoffMs = Math.min(MAX_BACKOFF_MS, this.backoffMs === 0 ? this.deps.pollMs() : this.backoffMs * 2);
+    const retryAt = error instanceof ForgeError && error.retryAt ? error.retryAt : now() + this.backoffMs;
+    this.forgeQuietUntil = retryAt;
+    this.deps.log(`delivery watcher: GitHub failed (${(error as Error).message}); quiet until ${new Date(retryAt).toISOString()}`);
   }
 
   /** A local-only merge whose proof was not seen (the daemon stopped mid-merge): look at the local default branch. */
@@ -284,18 +290,23 @@ export class DeliveryWatcher {
     if (opened) this.deps.log(`delivery watcher: ${run.task_id} waited ${minutes} min on CI with no checks; asked the user (${opened})`);
   }
 
-  /** How many checks the PR's head has; 0 with no PR named; null when unknown (GitHub failed, not a PR here, or no longer open). */
+  /** How many checks the PR's head has; 0 with no PR named; null when unknown (GitHub failed or backing off, not a PR here, or no longer open). */
   private async prCheckCount(prUrl: string): Promise<number | null> {
     if (!prUrl) return 0;
     const ref = parsePrUrl(prUrl, this.deps.webUrl());
-    if (!ref) return null;
+    if (!ref || this.deps.now() < this.forgeQuietUntil) return null;
     try {
       const forge = this.deps.forge();
       const pr = await forge.pull(ref);
-      if (pr.state !== "open") return null;
-      return (await forge.checks(ref, pr.headSha)).checks.length;
+      const count = pr.state === "open" ? (await forge.checks(ref, pr.headSha)).checks.length : null;
+      this.backoffMs = 0;
+      return count;
     } catch (error) {
-      this.deps.log(`delivery watcher: CI-wait check of ${prUrl} skipped: ${(error as Error).message}`);
+      if (error instanceof ForgeError && error.kind === "not_found") {
+        this.deps.log(`delivery watcher: CI-wait check of ${prUrl} skipped: it is not found on GitHub`);
+        return null;
+      }
+      this.forgeFailed(error);
       return null;
     }
   }
