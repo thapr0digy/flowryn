@@ -94,6 +94,15 @@ function builder(k: Knobs = {}): MergeBuilder {
   });
 }
 
+/** The watcher's git, through the same runner. */
+async function watchGit(args: string[], cwd: string): Promise<GitResult> {
+  const result = await git(args, cwd);
+  return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** build.sh hangs; every other step runs. */
+const slow: StepRunner = (argv, opts) => runStep(argv[1]?.endsWith("build.sh") ? ["/bin/sleep", "5"] : argv, opts);
+
 function tip(): string {
   return sh(repos.other, ["rev-parse", "HEAD"]);
 }
@@ -131,10 +140,6 @@ describe("the build after a Flowryn merge", () => {
     const info = (): DaemonInfo => ({ pid: 1, version: "0.11.0", proto: 6, instance: "i", startedAt: 0, execPath: target, build: running, socket: "/s", stateDir: dir });
     const restart = new RestartController({ db, env: {}, now: Date.now, log: () => {}, info, work: () => ({ mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] }), supervisor: () => supervisor, smoke: async () => ({ version: "0.11.0", proto: 6, build: null, schema: 13, commit: null, dirty: null, source: null }) });
     let now = 1_000_000;
-    const watchGit = async (args: string[], cwd: string): Promise<GitResult> => {
-      const result = await git(args, cwd);
-      return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
-    };
     const watcher = new BuildWatcher({
       db,
       env: {},
@@ -192,7 +197,6 @@ describe("the build after a Flowryn merge", () => {
   });
 
   test("a step that hangs is killed at its limit and counts as a failure", async () => {
-    const slow: StepRunner = (argv, opts) => runStep(argv[1]?.endsWith("build.sh") ? ["/bin/sleep", "5"] : argv, opts);
     const result = await builder({ run: slow, stepTimeoutMs: 1_000 }).pass();
     expect(result).toMatchObject({ outcome: "failed", detail: "scripts/build.sh did not finish within 1 s" });
     expect(readFileSync(target, "utf8")).toBe(OLD_BINARY);
