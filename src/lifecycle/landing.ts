@@ -28,7 +28,7 @@ import { dismissRunQuestions } from "./gate-questions.ts";
  */
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked"] as const;
+const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report"] as const;
 
 /** The run landed: the merge is proven. Call inside a transaction. */
 export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; how: "merge" | "merged_elsewhere"; mergeId?: string }, now: number): void {
@@ -107,7 +107,7 @@ export function doneFlags(db: Db, run: Pick<RunWithPolicy, "task_id" | "kind">, 
 export function landScout(db: Db, run: RunWithPolicy, report: string, now: number): void {
   if (run.state === "landed" || isTerminal(run.state)) return;
   db.query("UPDATE runs SET state = 'landed', updated_at = ?2 WHERE id = ?1").run(run.id, now);
-  resolveRunItems(db, run.id, ["worker_idle", "steer_unacked"], "run.landed report", now);
+  resolveRunItems(db, run.id, ["worker_idle", "steer_unacked", "worker_report"], "run.landed report", now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   appendEvent(db, { source: "daemon", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { how: "report", report }, ts: now });
   run.state = "landed";
