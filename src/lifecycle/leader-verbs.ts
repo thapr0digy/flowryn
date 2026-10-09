@@ -164,7 +164,7 @@ const resume: VerbSpec = {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     // Design section 5: the installed version is checked before a resume, as at dispatch.
     const check = await gateHarness(ctx.db, ctx.config(), run.harness, ctx.fleet.harnessVersion, "cli", "resume", ctx.now);
-    if (check.state !== "verified") throw harnessRefusal(check);
+    if (check.state !== "verified") throw harnessRefusal(check, ctx.db);
     return null;
   },
   apply(ctx, args) {

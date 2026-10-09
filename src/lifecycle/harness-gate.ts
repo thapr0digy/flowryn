@@ -1,6 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import { openItem, resolveItems } from "../attention/items.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
+import { policyMode } from "../config/policy.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
@@ -13,6 +14,9 @@ import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
  * record refuses (contract_unverified) and opens one P1 with the doctor
  * command (section 16, "harness updated to an untested version"), once per
  * harness version; it resolves when that harness's installed version passes.
+ * Under `[policy] mode = "relaxed"`, on a daemon that can run the check from
+ * its own build, the P1 waits: the daemon runs the recording check itself
+ * (src/contracts/auto.ts) and opens the P1 only if it cannot pass.
  */
 
 export type VersionOf = (harness: HarnessId, binary: string) => Promise<string | null>;
@@ -36,9 +40,57 @@ export function contractsCommand(harness: HarnessId): string {
 }
 
 /** What a dispatch, a resume or a launch gets when the harness is not verified. */
-export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>): FlowrynError {
+export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>, db?: Db): FlowrynError {
   if (check.state === "missing") return new FlowrynError("tool_missing", check.detail, "flowryn init");
-  return new FlowrynError("contract_unverified", `no passing contract run for ${check.harness} ${check.version}`, `run the contract suite: ${contractsCommand(check.harness)}`);
+  const attempt = db ? autoAttempt(db, check.harness) : null;
+  const help =
+    attempt?.version === check.version && (attempt.state === "running" || attempt.state === "waiting")
+      ? `an automatic contract check is ${attempt.state === "running" ? "running" : `queued (${attempt.wait ?? "waiting"})`}; dispatch and resume work once it passes`
+      : `run the contract suite: ${contractsCommand(check.harness)}`;
+  return new FlowrynError("contract_unverified", `no passing contract run for ${check.harness} ${check.version}`, help);
+}
+
+// ---------------------------------------------------------------------------
+// Automatic checks (src/contracts/auto.ts): what the gate needs to know of them
+
+/** Set by a daemon that can run the recording check from its own build (its build id); absent otherwise. */
+export const AUTO_BUILD_KEY = "contract_auto_build";
+
+const attemptKey = (harness: HarnessId) => `contract_auto:${harness}`;
+
+/** The daemon's automatic check of one harness version (meta.contract_auto:<harness>). */
+export interface AutoAttempt {
+  version: string;
+  state: "waiting" | "running" | "passed" | "failed";
+  /** While waiting: what it waits for. */
+  wait?: string;
+  started_at?: number;
+  ended_at?: number;
+  build?: string;
+  report?: string | null;
+  log?: string | null;
+  detail?: string;
+}
+
+export function autoAttempt(db: Db, harness: HarnessId): AutoAttempt | null {
+  const raw = getMeta(db, attemptKey(harness));
+  return raw ? (JSON.parse(raw) as AutoAttempt) : null;
+}
+
+/** Call inside the transaction that appends the event for the change. */
+export function saveAutoAttempt(db: Db, harness: HarnessId, attempt: AutoAttempt): void {
+  setMeta(db, attemptKey(harness), JSON.stringify(attempt));
+}
+
+/** Does the daemon run the recording check itself: relaxed mode, on a daemon that can (AUTO_BUILD_KEY)? */
+export function autoChecksOn(db: Db, config: FlowrynConfig): boolean {
+  let relaxed = false;
+  try {
+    relaxed = policyMode(config) === "relaxed";
+  } catch {
+    // An invalid [policy] never loosens anything.
+  }
+  return relaxed && Boolean(getMeta(db, AUTO_BUILD_KEY));
 }
 
 /** The item key: one harness_unverified P1 per harness. */
@@ -51,10 +103,12 @@ const flaggedKey = (harness: HarnessId) => `harness_flagged:${harness}`;
 /**
  * Record what a check found. An unverified version opens its P1 once (a
  * dismissed one is not reopened for the same version); a verified one
- * resolves any open P1 for that harness. Call inside a transaction. Returns
- * the id of an item it opened.
+ * resolves any open P1 for that harness. With `auto` (autoChecksOn), the
+ * version is flagged without a P1: the daemon's automatic check decides
+ * whether one opens. Call inside a transaction. Returns the id of an item it
+ * opened.
  */
-export function noteHarnessCheck(db: Db, check: HarnessCheck, source: EventSource, where: string, now: number): string | null {
+export function noteHarnessCheck(db: Db, check: HarnessCheck, source: EventSource, where: string, now: number, auto = false): string | null {
   const key = harnessItemKey(check.harness);
   if (check.state === "verified") {
     if (getMeta(db, flaggedKey(check.harness))) setMeta(db, flaggedKey(check.harness), "");
@@ -68,14 +122,30 @@ export function noteHarnessCheck(db: Db, check: HarnessCheck, source: EventSourc
   if (getMeta(db, flaggedKey(check.harness)) === check.version) return null;
   resolveItems(db, "harness_unverified", key, `superseded by ${check.version}`, now);
   setMeta(db, flaggedKey(check.harness), check.version);
-  const event = appendEvent(db, { source, kind: "harness.unverified", payload: { harness: check.harness, version: check.version, where }, ts: now });
-  return openItem(db, {
-    kind: "harness_unverified",
-    eventSeq: event.seq,
-    taskId: key,
-    line: `${check.harness} ${check.version} has no passing contract run, so dispatch and resume on ${check.harness} are refused until it passes: ${contractsCommand(check.harness)}`,
-    now,
-  });
+  const event = appendEvent(db, { source, kind: "harness.unverified", payload: { harness: check.harness, version: check.version, where, ...(auto ? { auto: true } : {}) }, ts: now });
+  if (auto) return null;
+  return openUnverifiedItem(db, check.harness, check.version, event.seq, now);
+}
+
+function unverifiedLine(harness: HarnessId, version: string): string {
+  return `${harness} ${version} has no passing contract run, so dispatch and resume on ${harness} are refused until it passes: ${contractsCommand(harness)}`;
+}
+
+/** The harness_unverified P1. `line` replaces the default (an automatic check's failure names its report). Call inside a transaction. */
+export function openUnverifiedItem(db: Db, harness: HarnessId, version: string, eventSeq: number, now: number, line?: string): string {
+  return openItem(db, { kind: "harness_unverified", eventSeq, taskId: harnessItemKey(harness), line: line ?? unverifiedLine(harness, version), now });
+}
+
+/** Has a harness_unverified P1 ever opened for this version (open, resolved or dismissed)? */
+export function unverifiedItemOpened(db: Db, harness: HarnessId, version: string): boolean {
+  return (
+    db
+      .query(
+        `SELECT 1 FROM items i JOIN events e ON e.seq = i.event_seq
+         WHERE i.kind = 'harness_unverified' AND i.task_id = ?1 AND json_extract(e.payload, '$.version') = ?2 LIMIT 1`,
+      )
+      .get(harnessItemKey(harness), version) !== null
+  );
 }
 
 /** A contract run just passed for this version: the P1 about it is settled. Call inside a transaction. */
@@ -98,7 +168,7 @@ export function unverifiedVersion(db: Db, harness: string): string | null {
 /** Check a harness and record the result in its own transaction; resolves the check. */
 export async function gateHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf, source: EventSource, where: string, now: () => number): Promise<HarnessCheck> {
   const check = await checkHarness(db, config, harness, versionOf);
-  tx(db, () => noteHarnessCheck(db, check, source, where, now()));
+  tx(db, () => noteHarnessCheck(db, check, source, where, now(), autoChecksOn(db, config)));
   return check;
 }
 
@@ -130,7 +200,7 @@ export async function checkHarnessesAtStartup(db: Db, config: FlowrynConfig, ver
         payload: check.state === "missing" ? { harness, state: check.state, detail: check.detail } : { harness, state: check.state, version: check.version },
         ts: now(),
       });
-      noteHarnessCheck(db, check, "daemon", "startup", now());
+      noteHarnessCheck(db, check, "daemon", "startup", now(), autoChecksOn(db, config));
     });
     checks.push(check);
   }
