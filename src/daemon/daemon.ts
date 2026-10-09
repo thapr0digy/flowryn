@@ -459,6 +459,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         contractChecks: autoCheck?.running() ?? [],
       }),
       supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
+      readValidations: () => deliveryWatcher?.readValidations() ?? Promise.resolve(),
     });
     // The build watcher: a new installed build applies by itself, through the restart's guards.
     const buildWatch = new BuildWatcher({
