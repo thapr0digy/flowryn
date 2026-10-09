@@ -458,7 +458,7 @@ Ship 1's rules live in the hook. If the hook binary did not run, nothing stopped
   - `test/integration/workers.test.ts` checks that a launched run's `claude-settings.json` carries the layer.
   - `test/integration/leader-cli.test.ts` checks the leader's settings.
   - `test/integration/contracts-offline.test.ts` runs the new step.
-- **Version:** 0.13.0. `PROTO` stays 6, because no verb or argument changed. An older binary refuses a config that has the new `[tools]` keys (`config_invalid`). Init runs from the new build, and the daemon restarts onto a merged build by itself, so the window is short. The unknown-key check stays, because it catches typos.
+- **Version:** 0.14.0 (0.12.0 and 0.13.0 went to #47 and #48). `PROTO` stays 6, because no verb or argument changed. An older binary refuses a config that has the new `[tools]` keys (`config_invalid`). Init runs from the new build, and the daemon restarts onto a merged build by itself, so the window is short. The unknown-key check stays, because it catches typos.
 
 ## Leader Stop items and restarts past CI
 
