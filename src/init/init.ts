@@ -140,7 +140,7 @@ async function offerInstall(deps: InitDeps, missing: ToolName[]): Promise<ToolNa
       continue;
     }
     installed.push(name);
-    if (installer.then) io.print(`  ${name}: next, ${installer.then}`);
+    if (installer.next) io.print(`  ${name}: next, ${installer.next}`);
   }
   return installed;
 }

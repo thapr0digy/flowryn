@@ -76,8 +76,10 @@ describe("contract cleanup", () => {
 });
 
 describe("contract suite", () => {
-  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, exit, resume, deliver", () => {
-    expect(contractSteps("claude").map((s) => s.name)).toEqual([
+  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, (Claude) toolkit, exit, resume, deliver", () => {
+    const pi = contractSteps("pi").map((s) => s.name);
+    expect(contractSteps("claude").map((s) => s.name)).toEqual([...pi.slice(0, pi.indexOf("exit")), "toolkit", ...pi.slice(pi.indexOf("exit"))]);
+    expect(pi).toEqual([
       "launch",
       "session id",
       "busy",
@@ -136,7 +138,7 @@ describe("contract progress", () => {
     expect(contractEstimateSeconds("claude")).toBeGreaterThan(60);
     expect(contractEstimateSeconds("pi")).toBeGreaterThan(contractEstimateSeconds("claude"));
     const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
-    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 22 steps, about ${minutes} min`);
+    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 23 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");
   });
 });
@@ -157,6 +159,7 @@ function slowPiWorker(startMs: number): { env: ContractEnv; asked: string[] } {
   const env: ContractEnv = {
     harness: "pi",
     scripted: false,
+    claudeStore: null,
     async call(verb, args) {
       const now = Date.now();
       const id = `m${steers.length + 1}`;

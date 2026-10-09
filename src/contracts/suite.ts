@@ -7,13 +7,13 @@ import { steerStatus, type MessageRow } from "../lifecycle/steers.ts";
 /**
  * The harness contract suite (design section 5, "Contract tests gate every
  * harness version"): launch, capture the session id, observe busy and idle,
- * deliver while busy and while idle, interrupt, exit, resume, then a verified
- * deliver. Every step runs against one real worker in a real Herdr session,
+ * deliver while busy and while idle, interrupt, (Claude only) the toolkit's
+ * live check, exit, resume, then a verified deliver. Every step runs against one real worker in a real Herdr session,
  * dispatched through a scratch flowrynd, so it exercises the same adapter,
  * hooks or extension, and reconciler as production.
  *
- * The steps are the same for both harnesses; only the worker's instructions
- * differ. Each steer step reports the steer's own carried, seen and acked
+ * The steps are the same for both harnesses, except Claude's toolkit step;
+ * only the worker's instructions differ. Each steer step reports the steer's own carried, seen and acked
  * times from the scratch database beside the step's seconds, so the numbers
  * measure the steer rather than the step's other waits or the runner's
  * polling. Every steer is acknowledged before the worker exits, so the

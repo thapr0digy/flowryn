@@ -28,7 +28,7 @@ export interface Installer {
   /** Commands run in order, no shell unless the step is `sh -c`. */
   steps: string[][];
   /** Printed after a successful install: the next thing you do yourself (it is interactive, so init never runs it). */
-  then?: string;
+  next?: string;
 }
 
 /**
@@ -39,9 +39,9 @@ export interface Installer {
 export const INSTALLERS: Partial<Record<ToolName, Installer>> = {
   tasks_axi: { needs: "npm", steps: [["npm", "install", "-g", `tasks-axi@${PINNED_TASKS_AXI}`]] },
   lavish_axi: { needs: "npm", steps: [["npm", "install", "-g", "lavish-axi"]] },
-  gh_axi: { needs: "npm", steps: [["npm", "install", "-g", "gh-axi"]], then: "gh-axi runs gh: sign in with gh auth login" },
-  jira_axi: { needs: "npm", steps: [["npm", "install", "-g", "jira-axi"]], then: "jira-axi runs acli for every call" },
-  acli: { needs: "brew", steps: [["brew", "tap", "atlassian/homebrew-acli"], ["brew", "install", "acli"]], then: "sign in with acli jira auth login" },
+  gh_axi: { needs: "npm", steps: [["npm", "install", "-g", "gh-axi"]], next: "gh-axi runs gh: sign in with gh auth login" },
+  jira_axi: { needs: "npm", steps: [["npm", "install", "-g", "jira-axi"]], next: "jira-axi runs acli for every call" },
+  acli: { needs: "brew", steps: [["brew", "tap", "atlassian/homebrew-acli"], ["brew", "install", "acli"]], next: "sign in with acli jira auth login" },
   // The global chrome-devtools-mcp keeps chrome-devtools-axi off `npx -y chrome-devtools-mcp@latest` on each start.
   chrome_devtools_axi: { needs: "npm", steps: [["npm", "install", "-g", "chrome-devtools-axi", "chrome-devtools-mcp"]] },
   sqlite_axi: { needs: "npm", steps: [["npm", "install", "-g", "sqlite-axi"]] },
