@@ -155,10 +155,10 @@ describe("show --full on an item", () => {
 });
 
 describe("show --full on a decision", () => {
-  test("prints the whole question and what it blocks", () => {
+  test("prints what it blocks whole; the question is whole either way", () => {
     decision("k1", "web-dec-k1", LONG_LINE);
     const cut = show("k1").data;
-    expect(cut.question as string).toHaveLength(200);
+    expect(cut.question).toBe(LONG_LINE);
     expect(cut.blocks as string).toHaveLength(200);
     expect(cut.truncated).toBe("flowryn show k1 --full for the complete text");
     const whole = show("k1", true).data;

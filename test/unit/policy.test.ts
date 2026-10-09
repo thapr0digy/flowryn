@@ -164,6 +164,13 @@ describe("the merge gate, in the design's order", () => {
     expect(code(() => checkGate(facts({ checks: summarize([{ name: "ci", state: "pending", detail: "in_progress" }]) }), { choice: row(), why: "" }))).toBe("checks_pending");
   });
 
+  test("a pull request with no checks registered (CI disabled) passes like green", () => {
+    const noChecks = summarize([]);
+    expect(noChecks.state).toBe("none");
+    expect(checkGate(facts({ checks: noChecks }), { choice: row(), why: "" })).toEqual({ waived: null, alreadyMerged: false });
+    expect(code(() => checkGate(facts({ checks: noChecks }), { choice: null, why: "none" }))).toBe("approval_required");
+  });
+
   test("one red check is waived only by a human record naming it; two never", () => {
     const oneRed = summarize([
       { name: "ci", state: "green", detail: "success" },

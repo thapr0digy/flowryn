@@ -286,13 +286,13 @@ export function openDecisions(ctx: { db: ReadCtx["db"]; now: number }, filter: "
   return picked.toSorted((a, b) => weight.get(b.id)! - weight.get(a.id)! || (a.created_at ?? 0) - (b.created_at ?? 0));
 }
 
-/** `flowryn show <decision>`; `text` cuts the long fields unless --full. */
+/** `flowryn show <decision>`: its question, context and why whole; `text` cuts what it blocks unless --full. */
 export function decisionView(d: DecisionRow, text: ShowText): Record<string, unknown> {
   return {
     decision: d.id,
     task: d.task_id,
     state: d.state,
-    question: text.line(d.question, 200),
+    question: sanitizeBlock(d.question),
     options: (JSON.parse(d.options) as string[]).join(" | ") || "-",
     recommend: d.recommendation ?? "-",
     origin: d.origin ?? "-",
@@ -306,8 +306,8 @@ export function decisionView(d: DecisionRow, text: ShowText): Record<string, unk
     ...(d.kind ? { kind: d.kind } : {}),
     ...(d.gate_id ? { gate: d.gate_id } : {}),
     ...(d.blocks ? { blocks: text.line(d.blocks, 200) } : {}),
-    ...(d.note ? { why: text.line(d.note, 400) } : {}),
-    ...(d.context ? { context: text.line(d.context, 400) } : {}),
+    ...(d.note ? { why: sanitizeBlock(d.note) } : {}),
+    ...(d.context ? { context: sanitizeBlock(d.context) } : {}),
   };
 }
 

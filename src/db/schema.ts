@@ -423,6 +423,15 @@ ALTER TABLE approval_attempts ADD COLUMN allow_red_check TEXT;
 `;
 
 /**
+ * A steer the leader sent with --end-turn tells the worker to end its turn
+ * (to wait, or because it only informs): the turn-end guard stands aside for
+ * that episode.
+ */
+const STEER_END_TURN_SQL = /* sql */ `
+ALTER TABLE messages ADD COLUMN end_turn INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
  * An item's line is cut to one digest line (200 characters); full_line keeps
  * the whole sanitized line when it was cut, for `flowryn show <item> --full`.
  */
@@ -444,7 +453,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 11, name: "gate-questions", sql: GATE_QUESTIONS_SQL },
   { version: 12, name: "gate-comment", sql: GATE_COMMENT_SQL },
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
-  { version: 14, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
+  { version: 14, name: "steer-end-turn", sql: STEER_END_TURN_SQL },
+  { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
