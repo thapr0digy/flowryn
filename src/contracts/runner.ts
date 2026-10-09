@@ -16,7 +16,7 @@ import type { HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
-import { isAlive, terminate } from "../runtime/proc.ts";
+import { descendantCommands, isAlive, readProcessTable, terminate } from "../runtime/proc.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "./cleanup.ts";
@@ -240,7 +240,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         const limitMs = Math.min(timeoutMs, maxWaitMs(process.env));
         const until = Date.now() + limitMs;
         for (;;) {
-          const value = check();
+          const value = await check();
           if (value) return value;
           // A harness updated mid-wait would be refused (contract_unverified) and the wait would only time out.
           const drifted = await drift();
@@ -256,6 +256,10 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         return { ok: result.ok, detail: `${result.signal}, ${result.evidence}` };
       },
       isAlive: (pid, start, exe) => isAlive({ pid, start, exe }),
+      async commandRunning(command) {
+        const pid = contractEnv.run().proc_pid;
+        return pid !== null && descendantCommands(await readProcessTable(), pid).includes(command);
+      },
       log: options.log,
       claudeStore: options.harness === "claude" ? (workersConfig(options.config).claude.config_dir ?? claudeConfigDir(process.env)) : null,
     };

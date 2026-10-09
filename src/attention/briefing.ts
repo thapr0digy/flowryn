@@ -9,7 +9,10 @@ import { taskTitle } from "../lifecycle/runs.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { AUTO_REQUESTER, restartsSince } from "../daemon/restart.ts";
-import { leaderRecordLine } from "../contracts/grant.ts";
+import { autoRecordLine, leaderRecordLine } from "../contracts/grant.ts";
+import { activeAutoAttempt } from "../lifecycle/harness-gate.ts";
+import type { FlowrynConfig } from "../config/config.ts";
+import { HARNESS_IDS } from "../harness/types.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
@@ -34,6 +37,8 @@ export interface BriefingInput {
   ageMs: number;
   /** Record that today's morning section was shown (a session start does; a read cannot). */
   markMorning: boolean;
+  /** The config, so an automatic contract check is listed only while checks are on; without it none is. */
+  config?: FlowrynConfig;
 }
 
 export interface Briefing {
@@ -166,14 +171,30 @@ function restartLines(db: Db): string[] {
   });
 }
 
-/** Contract passes the leader recorded since the last briefing, each shown once (src/contracts/verbs.ts). */
-function leaderRecordLines(db: Db): string[] {
+/**
+ * Contract passes the leader or the daemon's automatic check recorded since
+ * the last briefing, each shown once (src/contracts/verbs.ts, auto.ts).
+ */
+function recordLines(db: Db): string[] {
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
   const rows = db.query("SELECT ts, payload FROM events WHERE kind = 'contract.passed' AND ts > ?1 ORDER BY seq").all(since) as { ts: number; payload: string }[];
   return rows
     .map((r) => ({ ts: r.ts, ...(JSON.parse(r.payload) as { harness: string; version: string; by: string; build?: string | null }) }))
-    .filter((r) => r.by === "leader")
-    .map((r) => `Contract ${hhmm(r.ts)}: ${leaderRecordLine(r.harness, r.version, r.build ?? null)}.`);
+    .filter((r) => r.by === "leader" || r.by === "daemon")
+    .map((r) => `Contract ${hhmm(r.ts)}: ${(r.by === "leader" ? leaderRecordLine : autoRecordLine)(r.harness, r.version, r.build ?? null)}.`);
+}
+
+/** An automatic contract check queued or running now (src/contracts/auto.ts): shown while it lasts. */
+function autoCheckLines(db: Db, config: FlowrynConfig | undefined): string[] {
+  const lines: string[] = [];
+  if (!config) return lines;
+  for (const harness of HARNESS_IDS) {
+    const attempt = activeAutoAttempt(db, config, harness);
+    if (!attempt) continue;
+    if (attempt.state === "running") lines.push(`Contract check running: ${harness} ${attempt.version} since ${hhmm(attempt.started_at ?? 0)} (automatic).`);
+    else if (attempt.state === "waiting") lines.push(`Contract check queued: ${harness} ${attempt.version}, waiting for ${attempt.wait ?? "its turn"} (automatic).`);
+  }
+  return lines;
 }
 
 /** Is the morning section due: at or after the morning hour, and not yet shown today? */
@@ -195,7 +216,8 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   lines.push(...needs.lines);
   // Before decisionLines, which moves last_briefing_at on.
   lines.push(...restartLines(db));
-  lines.push(...leaderRecordLines(db));
+  lines.push(...recordLines(db));
+  lines.push(...autoCheckLines(db, input.config));
   lines.push(...decisionLines(db, input.now, input.markMorning));
   lines.push(fleetLine(db));
   const todos = todoFacts(db, today);

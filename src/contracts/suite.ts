@@ -39,7 +39,9 @@ export interface ContractEnv {
   /** The latest worker hook as the run's hook evidence records it, or null. */
   lastHook(): { hook: string | null; signal: string; at: number } | null;
   /** Poll `check` until it returns a truthy value, or fail with `what` after `timeoutMs`. */
-  waitFor<T>(what: string, timeoutMs: number, check: () => T | null | undefined | false): Promise<T>;
+  waitFor<T>(what: string, timeoutMs: number, check: () => T | null | undefined | false | Promise<T | null | undefined | false>): Promise<T>;
+  /** Is a process under the worker's harness process running this command line (its argv joined by spaces, as ps shows it)? */
+  commandRunning(command: string): Promise<boolean>;
   /** The design's exit: SIGTERM by pid, start time and executable, SIGKILL after the grace period. */
   exitWorker(): Promise<{ ok: boolean; detail: string }>;
   isAlive(pid: number, start: number, exe: string): Promise<boolean>;
@@ -133,6 +135,20 @@ export function contractEstimateSeconds(harness: HarnessId): number {
 function timings(env: ContractEnv, id: string): string {
   const m = env.steers().find((x) => x.id === id);
   return m ? `${id} ${steerStatus(m, Date.now())}` : `${id} not found`;
+}
+
+/**
+ * Wait until the worker's long command is running, so a steer sent then
+ * meets a running tool. Claude's pre-tool hook says so for every tool. Pi's
+ * extension pings a tool start at most once a minute, so for Pi the process
+ * table says it: until the command runs, an urgent steer meets the model's
+ * inference instead and blocks the tool call rather than cutting it (a real
+ * model can take half a minute to call it after the acknowledgement).
+ */
+async function waitLongCommand(env: ContractEnv, command: string, since: number): Promise<void> {
+  const what = `\`${command}\` to start`;
+  if (env.harness === "claude") await waitToolStart(env, what, since, MID_MS);
+  else await env.waitFor(what, MID_MS, () => env.commandRunning(command));
 }
 
 /** Wait until the worker starts a tool call after `since`: a steer sent then waits only for that tool. */
@@ -297,8 +313,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         // A long tool, then an urgent steer a second into it: the tool is cut at the threshold, never run to its end.
         const long = await sendSteer(env, state, "First acknowledge this steer. Then run exactly this command and wait for it: perl -e 'sleep 60'");
         const acked = await waitAcked(env, long, LONG_MS);
-        if (harness === "claude") await waitToolStart(env, "the long command to start", acked.acked_at!, MID_MS);
-        else await Bun.sleep(1_000);
+        await waitLongCommand(env, "perl -e sleep 60", acked.acked_at!);
         await Bun.sleep(1_000);
         const id = await sendSteer(
           env,
@@ -321,9 +336,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         // Acknowledged first, so the interrupted command leaves no open steer for the resumed worker to re-run.
         const long = await sendSteer(env, state, "First acknowledge this steer. Then run exactly this command and wait for it: perl -e 'sleep 120'");
         const acked = await waitAcked(env, long, LONG_MS);
-        // Pi pings tool starts at most once a minute, so its sleep may report none: give it a moment instead.
-        if (harness === "claude") await waitToolStart(env, "the long command to start", acked.acked_at!, MID_MS);
-        else await Bun.sleep(3_000);
+        await waitLongCommand(env, "perl -e sleep 120", acked.acked_at!);
         const reply = await env.call("interrupt", { target: state.task });
         if (!reply.ok) throw new Error(`interrupt not verified: ${reply.error?.message}`);
         const run = env.run();

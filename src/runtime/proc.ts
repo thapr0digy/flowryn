@@ -139,3 +139,45 @@ export async function terminate(identity: ProcIdentity, options: TerminateOption
   }
   return { ok: false, evidence: "timeout", signal: "SIGKILL" };
 }
+
+/** One row of `ps -A -o pid=,ppid=,command=`: the command is its argv joined by spaces. */
+export interface ProcRow {
+  pid: number;
+  ppid: number;
+  command: string;
+}
+
+export function parseProcessTable(text: string): ProcRow[] {
+  const rows: ProcRow[] = [];
+  for (const line of text.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (match) rows.push({ pid: Number(match[1]), ppid: Number(match[2]), command: match[3]!.trim() });
+  }
+  return rows;
+}
+
+/** The command lines of every process under `root` (children, grandchildren, ...), not root's own. */
+export function descendantCommands(rows: ProcRow[], root: number): string[] {
+  const children = new Map<number, ProcRow[]>();
+  for (const row of rows) children.set(row.ppid, [...(children.get(row.ppid) ?? []), row]);
+  const commands: string[] = [];
+  const seen = new Set<number>([root]);
+  const queue = [root];
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()!) ?? []) {
+      if (seen.has(child.pid)) continue;
+      seen.add(child.pid);
+      commands.push(child.command);
+      queue.push(child.pid);
+    }
+  }
+  return commands;
+}
+
+/** The whole process table, read through the given ps. */
+export async function readProcessTable(ps = "/bin/ps"): Promise<ProcRow[]> {
+  const proc = Bun.spawn([ps, "-A", "-o", "pid=,ppid=,command="], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LC_ALL: "C" } });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  if (code !== 0) throw new Error(`${ps} exited ${code} reading the process table: ${err.trim() || "no stderr"}`);
+  return parseProcessTable(out);
+}

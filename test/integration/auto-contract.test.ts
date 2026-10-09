@@ -1,0 +1,106 @@
+/**
+ * The automatic contract check end to end (spec 3, phase 2): a compiled
+ * daemon (only a compiled build may vouch for a version) in a fleet whose
+ * fake Herdr starts the instruction-following contract fakes
+ * (test/helpers/fake-contract-claude.ts, as in contracts-offline.test.ts). The
+ * stand-in Claude reports a new version and a dispatch trips the gate; under
+ * relaxed policy the daemon runs `doctor --contracts --for-daemon` from its
+ * pinned build and records the pass itself, under strict it only opens the P1.
+ */
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FAKE_VERSION, makeFleetEnv, setHarnessVersion, type FleetEnv } from "../helpers/fleet-env.ts";
+import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
+
+const NEW_VERSION = "9.9.10";
+let buildDir: string;
+let bin: string;
+
+beforeAll(() => {
+  buildDir = mkdtempSync(join(tmpdir(), "fw-autobin-"));
+  bin = join(buildDir, "flowryn");
+  const built = Bun.spawnSync([join(REPO_ROOT, "scripts/build.sh"), bin], { cwd: REPO_ROOT, env: { ...process.env, BUN_TMPDIR: process.env.BUN_TMPDIR ?? process.env.TMPDIR } });
+  if (built.exitCode !== 0) throw new Error(`build failed: ${built.stdout.toString()}${built.stderr.toString()}`);
+}, 120_000);
+
+afterAll(() => rmSync(buildDir, { recursive: true, force: true }));
+
+const envs: FleetEnv[] = [];
+afterEach(async () => {
+  for (const env of envs.splice(0)) await env.cleanup();
+});
+
+async function fleet(mode: "strict" | "relaxed"): Promise<FleetEnv> {
+  const env = await makeFleetEnv({
+    extraConfig: `[policy]\nmode = "${mode}"`,
+    daemonProgram: [bin, "daemon", "run"],
+    // Each contract step's wait, capped: the fakes answer in seconds, so a broken step fails fast.
+    daemonEnv: { FLOWRYN_CONTRACT_MAX_WAIT_MS: "15000" },
+    harnessScripts: { claude: `${import.meta.dir}/../helpers/fake-contract-claude.ts`, pi: `${import.meta.dir}/../helpers/fake-contract-pi.ts` },
+  });
+  envs.push(env);
+  return env;
+}
+
+function query<T>(env: FleetEnv, sql: string, ...params: string[]): T[] {
+  const db = env.h.db();
+  try {
+    return db.query(sql).all(...params) as T[];
+  } finally {
+    db.close();
+  }
+}
+
+const versions = (env: FleetEnv) => query<{ version: string }>(env, "SELECT version FROM harness_contracts WHERE harness = 'claude' ORDER BY version").map((r) => r.version);
+const items = (env: FleetEnv, kind: string) => query<{ state: string; line: string; class: string }>(env, "SELECT state, line, class FROM items WHERE kind = ?1", kind);
+const events = (env: FleetEnv, kind: string) => query<{ payload: string }>(env, "SELECT payload FROM events WHERE kind = ?1 ORDER BY seq", kind).map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+
+/** A dispatch on Claude: the gate reads the installed version, and refuses an untested one. */
+async function dispatchClaude(env: FleetEnv): Promise<{ code: number; error: { code?: string } }> {
+  const result = await env.json(["dispatch", "web", "--kind", "scout", "--harness", "claude", "--body-file", "-"], { stdin: "look around" });
+  return { code: result.code, error: (result.reply.error ?? {}) as { code?: string } };
+}
+
+describe("the automatic contract check", () => {
+  test(
+    "relaxed: a new Claude version is checked by the daemon from its pinned build and recorded, with no P1",
+    async () => {
+      const env = await fleet("relaxed");
+      setHarnessVersion(env.h, "claude", NEW_VERSION);
+      const refused = await dispatchClaude(env);
+      expect(refused.error.code).toBe("contract_unverified");
+      try {
+        await waitUntil(() => versions(env).includes(NEW_VERSION), 120_000, `the daemon to record claude ${NEW_VERSION}`);
+      } catch (error) {
+        throw new Error(`${(error as Error).message}; events: ${JSON.stringify(events(env, "contract.auto_failed"))}; daemon: ${await Promise.race([env.daemon.output(), Bun.sleep(100).then(() => "")])}`, { cause: error });
+      }
+      expect(versions(env).toSorted()).toEqual([FAKE_VERSION, NEW_VERSION].toSorted());
+      const [started] = events(env, "contract.auto_started");
+      expect(started).toMatchObject({ harness: "claude", version: NEW_VERSION });
+      const build = String(started!.build);
+      expect(build).toMatch(/^[0-9a-f]{12}$/);
+      expect(events(env, "contract.passed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, by: "daemon", build })]);
+      expect(items(env, "contract_recorded")).toEqual([expect.objectContaining({ class: "info", line: expect.stringContaining(`claude ${NEW_VERSION} passed, recorded automatically (build ${build})`) })]);
+      expect(items(env, "harness_unverified")).toEqual([]);
+      expect(env.herdr.livePanes()).toEqual([]);
+    },
+    180_000,
+  );
+
+  test(
+    "strict: the same bump only opens the P1; nothing runs",
+    async () => {
+      const env = await fleet("strict");
+      setHarnessVersion(env.h, "claude", NEW_VERSION);
+      expect(await dispatchClaude(env)).toMatchObject({ error: { code: "contract_unverified" } });
+      // Two of the checker's 5 s passes.
+      await Bun.sleep(11_000);
+      expect(items(env, "harness_unverified")).toEqual([expect.objectContaining({ state: "open", line: expect.stringContaining(`claude ${NEW_VERSION} has no passing contract run`) })]);
+      expect(events(env, "contract.auto_started")).toEqual([]);
+      expect(versions(env)).toEqual([FAKE_VERSION]);
+    },
+    60_000,
+  );
+});

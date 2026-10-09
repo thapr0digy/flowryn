@@ -60,26 +60,43 @@ async function recordRefusal(by: ReportStamp["by"], build: string | null, io: Cl
   return answer.ok ? null : errorReply(answer.error ?? { code: "internal", message: "the daemon did not say whether this run may record" });
 }
 
+/** How a contract run ends: recorded through the daemon, verify-only, or for the daemon's automatic check to record. */
+type ContractMode = "record" | "verify-only" | "for-daemon";
+
+interface ContractRun {
+  checks: Check[];
+  /** The last harness's report and version: what a --for-daemon run hands the daemon. */
+  report: string | null;
+  version: string | null;
+}
+
 /**
  * `flowryn doctor --contracts`: run each harness's contract suite in a
  * scratch home against a real Herdr session and harness (design section 5),
  * then record every passing version with the daemon, which is the only writer
  * of flowryn.db. `--verify-only` records nothing and is open to any caller;
  * recording is your own terminal's, or the leader's under recordGrant
- * (src/contracts/grant.ts).
+ * (src/contracts/grant.ts). `--for-daemon` is the daemon's automatic check
+ * (src/contracts/auto.ts): the daemon starts it from its own pinned build,
+ * and it writes a recording report and prints its path, recording nothing
+ * itself; the daemon checks that report and records it.
  */
-async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], io: CliIo, verifyOnly: boolean): Promise<Check[]> {
+async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], io: CliIo, mode: ContractMode): Promise<ContractRun> {
+  const run: ContractRun = { checks: [], report: null, version: null };
+  const fail = (detail: string): ContractRun => ({ ...run, checks: [{ check: "contracts", status: "fail", detail }] });
+  const verifyOnly = mode === "verify-only";
   const { config } = loadConfig(flowrynHome(io.env));
   const wanted = stringArg(args, "harness");
-  if (wanted && !(HARNESS_IDS as readonly string[]).includes(wanted)) return [{ check: "contracts", status: "fail", detail: "--harness must be claude or pi" }];
+  if (wanted && !(HARNESS_IDS as readonly string[]).includes(wanted)) return fail("--harness must be claude or pi");
+  if (mode === "for-daemon" && !wanted) return fail("--for-daemon runs one harness: pass --harness");
   const harnesses = (wanted ? [wanted] : HARNESS_IDS.filter((h) => resolveTool(config, h))) as HarnessId[];
   const socket = stringArg(args, "herdr-socket") ?? (await resolveHerdrSocket(config)).socket;
-  if (!socket) return [{ check: "contracts", status: "fail", detail: "no Herdr session to run in; pass --herdr-socket or set [herdr]" }];
-  const by = contractCaller(io.env);
+  if (!socket) return fail("no Herdr session to run in; pass --herdr-socket or set [herdr]");
+  const by = mode === "for-daemon" ? "daemon" : contractCaller(io.env);
   const build = buildIdOf(selfCommand());
   const stamp: ReportStamp = { mode: verifyOnly ? "verify-only" : "record", build, by };
-  io.stderr(`${contractPlan(harnesses)}${verifyOnly ? "; verify-only: nothing is recorded" : ""}\n`);
-  const checks: Check[] = [];
+  io.stderr(`${contractPlan(harnesses)}${verifyOnly ? "; verify-only: nothing is recorded" : mode === "for-daemon" ? "; for the daemon to record" : ""}\n`);
+  const checks = run.checks;
   for (const [index, harness] of harnesses.entries()) {
     io.stderr(`contract ${harness} (${index + 1}/${harnesses.length}): ${contractSteps(harness).length} steps, about ${minutes(contractEstimateSeconds(harness))}\n`);
     try {
@@ -93,6 +110,8 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
         log: (line) => io.stderr(`contract ${harness}: ${line}\n`),
       });
       const report = dataDirReport(config, result, stamp);
+      run.report = report;
+      run.version = result.version;
       for (const step of result.steps) checks.push({ check: `contract ${harness} ${step.step}`, status: step.ok ? "ok" : "fail", detail: `${step.detail} (${step.seconds}s)` });
       if (!result.passed) {
         checks.push({ check: `contract ${harness}`, status: "fail", detail: `${result.version} did not pass; report ${report}${boolArg(args, "keep") ? `; scratch ${result.scratch}` : ""}` });
@@ -100,6 +119,10 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
       }
       if (verifyOnly) {
         checks.push({ check: `contract ${harness}`, status: "ok", detail: `${result.version} passed (verify-only, not recorded); report ${report}` });
+        continue;
+      }
+      if (mode === "for-daemon") {
+        checks.push({ check: `contract ${harness}`, status: "ok", detail: `${result.version} passed; the daemon records it; report ${report}` });
         continue;
       }
       const recorded = await callServerVerb(serverVerb("contracts.record")!, { harness, version: result.version, report, ...(build ? { build } : {}) }, io);
@@ -112,7 +135,7 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
       checks.push({ check: `contract ${harness}`, status: "fail", detail: (error as Error).message });
     }
   }
-  return checks;
+  return run;
 }
 
 function print(io: CliIo, reply: Reply): number {
@@ -210,6 +233,7 @@ const doctor: VerbSpec = {
     "herdr-socket": { type: "string", help: "with --contracts: the Herdr session socket to run in (default: [herdr])", placeholder: "path" },
     model: { type: "string", help: "with --contracts: the worker model for the run", placeholder: "model" },
     keep: { type: "boolean", help: "with --contracts: keep the scratch home for inspection" },
+    "for-daemon": { type: "boolean", help: "with --contracts: the daemon's automatic check (it starts this itself); writes the report, records nothing" },
     restore: { type: "boolean", help: "replace flowryn.db with a nightly backup (daemon stopped)" },
     backup: { type: "string", help: "which backup to restore: a date or file name (default: newest)", placeholder: "date" },
   },
@@ -218,13 +242,17 @@ const doctor: VerbSpec = {
   async local(args, io) {
     const contracts = boolArg(args, "contracts");
     const verifyOnly = boolArg(args, "verify-only");
+    const forDaemon = boolArg(args, "for-daemon");
     if (verifyOnly && !contracts) return print(io, errorReply({ code: "bad_args", message: "--verify-only goes with --contracts" }));
+    if (forDaemon && !contracts) return print(io, errorReply({ code: "bad_args", message: "--for-daemon goes with --contracts" }));
+    if (forDaemon && verifyOnly) return print(io, errorReply({ code: "bad_args", message: "--for-daemon does not go with --verify-only" }));
     const restore = boolArg(args, "restore");
     const identity = agentIdentity(io.env);
     if (identity && restore) return print(io, errorReply({ code: "human_only", message: `doctor --restore runs only in your own terminal: ${identity} is set` }));
     if (restore && contracts) return print(io, errorReply({ code: "bad_args", message: "--restore does not go with --contracts" }));
     if (identity && !contracts) return print(io, errorReply({ code: "human_only", message: `doctor runs only in your own terminal: ${identity} is set`, help: "an agent may run flowryn doctor --contracts --verify-only" }));
-    if (contracts && !verifyOnly) {
+    if (forDaemon && identity) return print(io, errorReply({ code: "human_only", message: `--for-daemon is the daemon's own check: ${identity} is set`, help: "an agent may run flowryn doctor --contracts --verify-only" }));
+    if (contracts && !verifyOnly && !forDaemon) {
       const refusal = await recordRefusal(contractCaller(io.env), buildIdOf(selfCommand()), io);
       if (refusal) return print(io, refusal);
     }
@@ -237,10 +265,12 @@ const doctor: VerbSpec = {
         return print(io, errorReply({ ...toErrorBody(error), code: "internal" }));
       }
     }
-    const checks = contracts ? await contractRun(args, io, verifyOnly) : await runChecks({ env: io.env, ping: () => ping(io.env) });
+    const run = contracts ? await contractRun(args, io, forDaemon ? "for-daemon" : verifyOnly ? "verify-only" : "record") : null;
+    const checks = run ? run.checks : await runChecks({ env: io.env, ping: () => ping(io.env) });
     const failed = checks.filter((c) => c.status === "fail").length;
     const warned = checks.filter((c) => c.status === "warn").length;
-    io.stdout(renderReply(okReply({ checks, summary: `${failed} failed · ${warned} warnings` }), { json: io.json }));
+    const handed = forDaemon && run ? { report: run.report ?? "-", version: run.version ?? "-" } : {};
+    io.stdout(renderReply(okReply({ checks, summary: `${failed} failed · ${warned} warnings`, ...handed }), { json: io.json }));
     return doctorExitCode(checks);
   },
 };
