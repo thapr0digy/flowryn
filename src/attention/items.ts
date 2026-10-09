@@ -25,6 +25,8 @@ export type ItemClass = "actionable" | "info";
  * leader confirms it with them through a human channel.
  * contract_recorded: the leader recorded a harness contract pass (relaxed
  * policy, installed build); informational, so you see every one.
+ * worker_report: a worker's `flowryn report` whose status word opens an item
+ * (REPORT_EFFECT in src/lifecycle/worker.ts), such as a finding or a blocker.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -58,6 +60,7 @@ export const LANE_TABLE = {
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
+  worker_report: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },

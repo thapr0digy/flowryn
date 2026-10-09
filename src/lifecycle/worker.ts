@@ -6,7 +6,7 @@ import { openItem, resolveRunItems } from "../attention/items.ts";
 import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
-import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
 import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, nextRunDecisionId } from "./decisions.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
@@ -40,14 +40,76 @@ function activeRun(ctx: HandlerCtx): RunWithPolicy {
 }
 
 /**
+ * What a report's status word does, by plain lookup: "item" also opens a P1
+ * worker_report item for the leader, "record" only appends the event. A word
+ * not in the table opens an item: the contract tells workers to report only
+ * what a supervisor would act on, so an unknown word is far likelier a finding
+ * under another name than chatter, and a missed finding costs more than a
+ * dismissable P1.
+ */
+export const REPORT_EFFECT: Readonly<Record<string, "item" | "record">> = {
+  blocked: "item",
+  finding: "item",
+  failed: "item",
+  failing: "item",
+  error: "item",
+  broken: "item",
+  stuck: "item",
+  regression: "item",
+  risk: "item",
+  progress: "record",
+  started: "record",
+  update: "record",
+  note: "record",
+  info: "record",
+  done: "record",
+  ok: "record",
+};
+
+export function reportOpensItem(status: string): boolean {
+  return (REPORT_EFFECT[status] ?? "item") === "item";
+}
+
+const MORE_IN_SHOW = " (flowryn show for the full text)";
+/** The run's open worker_report item already carrying this exact status and body, if any. */
+function openIdenticalReport(db: HandlerCtx["db"], runId: string, status: string, body: string): string | null {
+  const row = db
+    .query(
+      `SELECT i.id FROM items i JOIN events e ON e.seq = i.event_seq
+       WHERE i.kind = 'worker_report' AND i.run_id = ?1 AND i.state IN ('open','presented')
+         AND json_extract(e.payload, '$.status') = ?2 AND json_extract(e.payload, '$.body') = ?3
+       LIMIT 1`,
+    )
+    .get(runId, status, body) as { id: string } | null;
+  return row?.id ?? null;
+}
+
+/**
+ * The item's one line: status, task and as much of the body as fits the line
+ * limit, with a pointer to `flowryn show` when the body was cut.
+ */
+export function reportLine(title: string, status: string, body: string): string {
+  const head = `Report (${status}) from ${sanitizeLine(title, 60)}`;
+  const summary = sanitizeLine(body, MAX_REPORT_CHARS);
+  if (summary.length === 0) return head;
+  const whole = `${head}: "${summary}"`;
+  if (whole.length <= MAX_LINE_CHARS) return whole;
+  const room = MAX_LINE_CHARS - head.length - `: ""`.length - MORE_IN_SHOW.length;
+  return `${head}: "${sanitizeLine(summary, room)}"${MORE_IN_SHOW}`;
+}
+
+/**
  * `flowryn report <status>`: a worker's own account of a change a supervisor
  * would act on. Rank-4 evidence (design section 6): recorded, never trusted
- * over what the process table, hooks or systems of record show.
+ * over what the process table, hooks or systems of record show. A status that
+ * opens an item (REPORT_EFFECT) reaches the leader as a P1: the digest, the
+ * briefing and `fleet` needs. An identical report while its item is open adds
+ * no second item; dismissing it or the run's end closes it.
  */
 const report: VerbSpec = {
   name: "report",
   summary: "Report a change your supervisor would act on (workers only)",
-  positionals: [{ name: "status", required: true, help: "one word, such as blocked or progress" }],
+  positionals: [{ name: "status", required: true, help: "one word: finding, blocked or failed open an item for your leader; progress is only recorded" }],
   flags: {
     "body-file": { type: "string", help: "details, read from a file or - for stdin", fileFor: "body" },
   },
@@ -58,14 +120,29 @@ const report: VerbSpec = {
     const status = stringArg(args, "status")!;
     if (!STATUS.test(status)) throw new FlowrynError("bad_args", "status must be one lowercase word, such as blocked or progress");
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim().slice(0, MAX_REPORT_CHARS);
+    const now = ctx.now();
     const event = appendEvent(ctx.db, {
       source: "cli",
       kind: "worker.report",
       runId: ctx.caller.runId,
       taskId: ctx.caller.taskId,
       payload: { status, summary: sanitizeLine(body), body, via: ctx.via },
+      ts: now,
     });
-    return { data: { run: ctx.caller.runId, status, event: event.seq } };
+    const run = ctx.caller.runId ? getRunWithPolicy(ctx.db, ctx.caller.runId) : null;
+    // A run that has ended closed its report items; one opened now would never close.
+    if (!run || isTerminal(run.state) || !reportOpensItem(status)) return { data: { run: ctx.caller.runId, status, event: event.seq, item: "-" } };
+    const existing = openIdenticalReport(ctx.db, run.id, status, body);
+    if (existing) return { data: { run: run.id, status, event: event.seq, item: existing, duplicate: true } };
+    const item = openItem(ctx.db, {
+      kind: "worker_report",
+      eventSeq: event.seq,
+      taskId: run.task_id,
+      runId: run.id,
+      line: reportLine(taskTitle(ctx.db, run.task_id), status, body),
+      now,
+    });
+    return { data: { run: run.id, status, event: event.seq, item } };
   },
 };
 

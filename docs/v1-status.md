@@ -76,7 +76,7 @@ The milestone lists name the main work. These are the other v1 items in sections
 | 11, 16 | Pause while a Claude usage limit is active; P1 once | Done (M5): from Claude's `StopFailure` `rate_limit` and `quota_auto_resume_fired` hook signals; the pause also expires after a backoff with one probe run, and `flowryn capacity resume --harness claude` lifts it (docs/m5-notes.md) |
 | 12 | Leader verbs: dispatch, plan, steer, answer, dismiss, merge, decline, gate pass/changes, cleanup, fleet, show, brief, todo, project, leader status/claim | Done (M1 to M5) |
 | 12 | `flowryn promote` (a scout promoted to a ship) | Done (v1 completion): a scout at work keeps its run, worker, worktree and session (the worker is relaunched into its own session under a ship's contract); a scout whose run is over becomes a ship on the same task with a new run that names its report |
-| 12 | Worker verbs: report, ask, inbox, ack, stage done, deliver, fail | Done (M1 to M5) |
+| 12 | Worker verbs: report, ask, inbox, ack, stage done, deliver, fail | Done (M1 to M5); a report whose status word opens an item reaches the leader as a P1 (worker reports, docs/m5-notes.md) |
 | 12 | Human verbs: approve [--gate], board, init, doctor, daemon, lead, leader claim --session, config | Done (M1 to M5) |
 | 12 | Spool when the daemon is down; read-only reads; exit 69 for leader mutations | Done (M1 #3) |
 | 13 | The SQLite schema (every table of section 13) | Done (M1 #3 to M5) |
