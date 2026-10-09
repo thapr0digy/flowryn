@@ -8,10 +8,14 @@
  * plays the scripted provider's FLOWRYN-SCRIPT). No model, no network, no
  * terminal of yours: a change to the worker path that breaks a step (as the
  * turn-end guard in #32 broke "idle") fails here, naming the step. The
- * passing version is recorded in the test home's database only.
+ * passing version is recorded in the test home's database only. Each run's
+ * TMPDIR is a directory of this test's own, so the scratch home it must leave
+ * nothing of is its own: a `doctor --contracts` elsewhere on the machine (another
+ * worker's suite, the leader's merge check) makes its fwc-* homes in the shared
+ * tmpdir and cannot fail this check.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractSteps } from "../../src/contracts/suite.ts";
@@ -24,7 +28,10 @@ import { Pty } from "../helpers/pty.ts";
 const MAX_WAIT_MS = 15_000;
 
 let fleet: FleetEnv;
+/** The doctor's TMPDIR: the runner makes its scratch home here and nowhere else. */
+let scratchRoot: string;
 beforeAll(async () => {
+  scratchRoot = mkdtempSync(join(tmpdir(), "fwt-"));
   fleet = await makeFleetEnv({
     contracts: false,
     harnessScripts: { claude: `${import.meta.dir}/../helpers/fake-contract-claude.ts`, pi: `${import.meta.dir}/../helpers/fake-contract-pi.ts` },
@@ -34,6 +41,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await fleet.cleanup();
+  if (process.env.FLOWRYN_TEST_KEEP !== "1") rmSync(scratchRoot, { recursive: true, force: true });
 });
 
 interface Check {
@@ -49,7 +57,7 @@ interface Check {
 async function doctorContracts(harness: HarnessId, extra: string[] = []): Promise<{ code: number; checks: Check[]; screen: string }> {
   const keep = process.env.FLOWRYN_TEST_KEEP === "1" ? ["--keep"] : [];
   const argv = ["bun", join(REPO_ROOT, "src/main.ts"), "doctor", "--contracts", "--harness", harness, "--herdr-socket", fleet.herdr.socket, ...extra, ...keep, "--json"];
-  const pty = Pty.spawn(argv, { ...fleet.h.env, FLOWRYN_CONTRACT_MAX_WAIT_MS: String(MAX_WAIT_MS) }, REPO_ROOT);
+  const pty = Pty.spawn(argv, { ...fleet.h.env, TMPDIR: scratchRoot, FLOWRYN_CONTRACT_MAX_WAIT_MS: String(MAX_WAIT_MS) }, REPO_ROOT);
   try {
     const [line] = await pty.waitFor(/^\{"ok".*\}\s*$/m, 80_000);
     const code = await pty.exited;
@@ -68,9 +76,9 @@ function recorded(harness: HarnessId): { version: string; report_path: string | 
   }
 }
 
-/** Scratch homes the runner made and did not remove. */
+/** Scratch homes this test's runs made and did not remove. */
 function scratchHomes(): string[] {
-  return readdirSync(tmpdir()).filter((name) => name.startsWith("fwc-"));
+  return readdirSync(scratchRoot).filter((name) => name.startsWith("fwc-"));
 }
 
 describe("the harness contract suite against fakes", () => {

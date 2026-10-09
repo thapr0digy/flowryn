@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractPrefix, removeOwnWorktrees, type GitRun } from "../../src/contracts/cleanup.ts";
 import { contractBody, contractEstimateSeconds, contractSteps, type ContractEnv, type ContractState, type ContractStep } from "../../src/contracts/suite.ts";
-import { runContractSteps, scratchConfig, type ContractOptions } from "../../src/contracts/runner.ts";
+import { removeScratchHome, runContractSteps, scratchConfig, type ContractOptions } from "../../src/contracts/runner.ts";
 import { pinDrift, pinHarness } from "../../src/contracts/pin.ts";
 import type { FlowrynConfig } from "../../src/config/config.ts";
 import { harnessVersion } from "../../src/lifecycle/fleet-services.ts";
@@ -275,5 +275,39 @@ describe("contract harness pin", () => {
 
   test("refuses a configured harness path that does not exist", async () => {
     await expect(pinHarness("pi", "/nonexistent/pi", harnessVersion)).rejects.toThrow("pi is configured at /nonexistent/pi, which does not exist");
+  });
+});
+
+/** A scratch home with a spooled hook in it. */
+function scratchHome(): string {
+  const root = mkdtempSync(join(tmpdir(), "fwc-unit-"));
+  dirs.push(root);
+  mkdirSync(join(root, "data", "spool", "r1"), { recursive: true });
+  writeFileSync(join(root, "data", "spool", "r1", "hook.json"), "{}");
+  return root;
+}
+
+describe("removeScratchHome", () => {
+  test("removes it again when a straggler recreates part of it just after", async () => {
+    const root = scratchHome();
+    // A worker's hook spooling after the daemon stopped: it lands once, inside the quiet spell.
+    const straggler = setTimeout(() => mkdirSync(join(root, "data", "spool", "r1"), { recursive: true }), 50);
+    const lines: string[] = [];
+    expect(await removeScratchHome(root, (l) => lines.push(l))).toBe(true);
+    clearTimeout(straggler);
+    expect(existsSync(root)).toBe(false);
+    expect(lines).toEqual([]);
+  });
+
+  test("says so, with the reason, when it keeps coming back past the deadline", async () => {
+    const root = scratchHome();
+    const straggler = setInterval(() => mkdirSync(join(root, "data"), { recursive: true }), 20);
+    const lines: string[] = [];
+    try {
+      expect(await removeScratchHome(root, (l) => lines.push(l), 600)).toBe(false);
+    } finally {
+      clearInterval(straggler);
+    }
+    expect(lines).toEqual([`scratch home ${root} was not removed: something recreated it after removal`]);
   });
 });
