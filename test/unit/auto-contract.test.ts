@@ -61,18 +61,18 @@ function fakeRun(job: AutoJob): AutoProcess {
     timedOut: false,
   };
   if (!plan.hold) return { done: Promise.resolve(outcome), terminate: () => {}, kill: () => {} };
-  const gate = { resolve: () => {}, terminated: false };
+  const latch = { resolve: () => {}, terminated: false };
   const done = new Promise<AutoOutcome>((resolve) => {
-    gate.resolve = () => resolve(outcome);
+    latch.resolve = () => resolve(outcome);
   });
-  held.push(gate);
+  held.push(latch);
   return {
     done,
     terminate: () => {
-      gate.terminated = true;
-      gate.resolve();
+      latch.terminated = true;
+      latch.resolve();
     },
-    kill: () => gate.resolve(),
+    kill: () => latch.resolve(),
   };
 }
 

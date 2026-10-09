@@ -127,4 +127,28 @@ describe("doctor --contracts from an agent pane", () => {
     expect(human.code).toBe(3);
     expect(human.reply.error!.code).toBe("bad_args");
   });
+
+  test("--for-daemon is the daemon's own run: refused from an agent pane, needs --harness, and records nothing", async () => {
+    env = await makeLeaderEnv();
+    const e = env;
+    const leader = await leaderSession(e);
+    const identities: Record<string, string>[] = [{ FLOWRYN_TOKEN: leader.token }, { FLOWRYN_TOKEN: e.worker.token, FLOWRYN_RUN: e.worker.runId }];
+    for (const identity of identities) {
+      const result = await doctor(e, ["--contracts", "--for-daemon", "--harness", "claude"], identity);
+      expect(result.code).toBe(77);
+      expect(result.reply.error!.code).toBe("human_only");
+      expect(suiteStarted(result.stderr)).toBe(false);
+    }
+    for (const args of [["--for-daemon"], ["--contracts", "--for-daemon", "--verify-only", "--harness", "claude"]]) {
+      const result = await doctor(e, args, {});
+      expect(result.code).toBe(3);
+      expect(result.reply.error!.code).toBe("bad_args");
+    }
+    const noHarness = await doctor(e, ["--contracts", "--for-daemon"], {});
+    expect(noHarness.reply.data!.checks).toEqual([{ check: "contracts", status: "fail", detail: "--for-daemon runs one harness: pass --harness" }]);
+    // With no Herdr to run in, it fails without a report, and hands the daemon none.
+    const run = await doctor(e, ["--contracts", "--for-daemon", "--harness", "claude"], {});
+    expect(run.reply.data).toMatchObject({ report: "-", version: "-" });
+    expect(contractRows(e)).toBe(0);
+  });
 });
