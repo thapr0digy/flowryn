@@ -432,6 +432,14 @@ ALTER TABLE messages ADD COLUMN end_turn INTEGER NOT NULL DEFAULT 0;
 `;
 
 /**
+ * An item's line is cut to one digest line (200 characters); full_line keeps
+ * the whole sanitized line when it was cut, for `flowryn show <item> --full`.
+ */
+const ITEM_FULL_LINE_SQL = /* sql */ `
+ALTER TABLE items ADD COLUMN full_line TEXT;
+`;
+
+/**
  * `flowryn verify`: one row per local run of a project's verify steps at a
  * PR head, in a clean worktree. A passing one at the current head counts as
  * local green for checks GitHub never started (src/policy/merge.ts).
@@ -462,7 +470,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 12, name: "gate-comment", sql: GATE_COMMENT_SQL },
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
   { version: 14, name: "steer-end-turn", sql: STEER_END_TURN_SQL },
-  { version: 15, name: "verifications", sql: VERIFICATIONS_SQL },
+  { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
+  { version: 16, name: "verifications", sql: VERIFICATIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

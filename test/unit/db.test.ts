@@ -177,11 +177,22 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("verifications arrive with migration 15 on a database already in use, and a state outside the four is refused", () => {
+  test("an item gains a whole-line column; items opened before it carry none", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 14));
+    db.exec("INSERT INTO events (ulid, ts, source, kind, payload) VALUES ('u1', 1, 'cli', 'test.item', '{}')");
+    db.exec("INSERT INTO items (id, event_seq, class, lane, kind, line, opened_at) VALUES ('i1', 1, 'actionable', 'P1', 'worker_question', 'a line', 1)");
+    expect(migrate(db, MIGRATIONS.slice(0, 15))).toEqual([15]);
+    expect(db.query("SELECT id, line, full_line FROM items").all()).toEqual([{ id: "i1", line: "a line", full_line: null }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15))).toEqual([]);
+    db.close();
+  });
+
+  test("verifications arrive with migration 16 on a database already in use, and a state outside the four is refused", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 15));
     db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
-    expect(migrate(db)).toEqual([15]);
+    expect(migrate(db)).toEqual([16]);
     const insert = (state: string) =>
       db
         .query("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES (?1, 'web', 'https://github.com/a/w/pull/1', 'h', ?2, '[]', '/d', '/d/wt', '/w', 1)")

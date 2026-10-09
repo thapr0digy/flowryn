@@ -470,8 +470,8 @@ export const planVerb: VerbSpec = {
   },
 };
 
-/** `flowryn show <plan>`: the plan's phases and where each is. */
-export function planView(db: Db, planId: string): Record<string, unknown> | null {
+/** `flowryn show <plan>`: the plan's phases and where each is; with --full (`bodies`), each phase's body too. */
+export function planView(db: Db, planId: string, bodies = false): Record<string, unknown> | null {
   const plan = getPlan(db, planId);
   if (!plan) return null;
   const backlog = readSnapshot(db, "backlog")?.tasks ?? null;
@@ -489,6 +489,7 @@ export function planView(db: Db, planId: string): Record<string, unknown> | null
         task: p.task_id,
         title: p.title,
         at: run ? `${run.state} · ${run.stage} ${run.stage_state}` : plan.state !== "approved" ? plan.state : waiting.length > 0 ? `queued, waits for ${waiting.join(" ")}` : "queued, ready",
+        ...(bodies ? { body: sanitizeBlock(p.body) } : {}),
       };
     }),
   };
