@@ -116,7 +116,8 @@ export function oldestStep(steps: readonly NmActiveStep[]): NmActiveStep | null 
   return steps.reduce((a, b) => (durationSeconds(b.activeFor) > durationSeconds(a.activeFor) ? b : a));
 }
 
-const ACTIVITY_AGE = /^((?:\d+(?:ms|h|m|s))+)\s+ago\b/;
+/** "9m24s ago: ...", or with the `quiet` marker later no-mistakes versions put on a step past their own quiet warning. */
+const ACTIVITY_AGE = /^(?:quiet:?\s+)?((?:\d+(?:ms|h|m|s))+)\s+ago\b/;
 
 /**
  * How long a step has shown no activity, in seconds: its last activity's age

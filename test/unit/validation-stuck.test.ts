@@ -81,6 +81,11 @@ describe("how long a no-mistakes step has been quiet", () => {
     expect(quietSeconds({ activeFor: "3h", lastActivity: "350ms ago: log: x" })).toBe(0);
   });
 
+  test("a later no-mistakes' quiet marker before the age still reads", () => {
+    expect(quietSeconds({ activeFor: "3h", lastActivity: "quiet 41m ago: log: waiting for checks" })).toBe(2460);
+    expect(quietSeconds({ activeFor: "3h", lastActivity: "quiet: 2h ago: agent: thinking" })).toBe(7200);
+  });
+
   test("a step with no activity yet has been quiet for its whole run", () => {
     expect(quietSeconds({ activeFor: "3m", lastActivity: "" })).toBe(180);
     expect(quietSeconds({ activeFor: "", lastActivity: "" })).toBeNull();
