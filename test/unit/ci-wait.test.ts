@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../../src/config/config.ts";
 import { validationConfig } from "../../src/config/validation.ts";
-import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { ChecksSummary, Forge, PullRequest } from "../../src/forge/types.ts";
 import { ForgeError } from "../../src/forge/types.ts";
 import { acceptedWithoutCi, CI_WAIT_ORIGIN, CI_WAIT_RESERVED, ciWaitMinutes, ciWaitSteer, declaresNoCi } from "../../src/lifecycle/ci-wait.ts";
@@ -207,6 +207,20 @@ describe("the CI-wait watchdog", () => {
     await w.pass();
     expect(githubCalls).toBeGreaterThan(callsWhenLimited);
     expect(ciWaits()).toHaveLength(1);
+  });
+
+  test("a GitHub outage seen by the CI-wait read ends when that read succeeds again", async () => {
+    nmSays(CI_WAIT("2h"));
+    const w = watcher();
+    checks = new ForgeError("unreachable", "down");
+    await w.pass();
+    expect(getMeta(db, "forge_down_since")).toBe(String(now));
+    checks = { state: "none", checks: [] };
+    now += 10 * 60_000;
+    await w.pass();
+    expect(getMeta(db, "forge_down_since") || null).toBeNull();
+    const [available] = db.query("SELECT payload FROM events WHERE kind = 'forge.available'").all() as { payload: string }[];
+    expect(JSON.parse(available!.payload)).toEqual({ down_ms: 10 * 60_000 });
   });
 
   test("a CI fix round runs a local agent: not a wait", async () => {
