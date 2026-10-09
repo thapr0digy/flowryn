@@ -299,6 +299,7 @@ export class DeliveryWatcher {
       const forge = this.deps.forge();
       const pr = await forge.pull(ref);
       const count = pr.state === "open" ? (await forge.checks(ref, pr.headSha)).checks.length : null;
+      tx(this.deps.db, () => noteForgeUp(this.deps.db, "github", this.deps.now()));
       this.backoffMs = 0;
       return count;
     } catch (error) {
