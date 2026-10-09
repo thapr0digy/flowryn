@@ -15,7 +15,7 @@ import type { HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
-import { descendantCommands, isAlive, readProcessTable, terminate } from "../runtime/proc.ts";
+import { descendantCommands, isAlive, readProcessTable, terminate, type ProcIdentity } from "../runtime/proc.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "./cleanup.ts";
@@ -63,6 +63,10 @@ const CONTRACT_TIMING = { pass_ms: 1_000, ring_interval_ms: 600_000, launch_time
 
 /** How often the runner re-reads the scratch database while it waits; step seconds carry at most this much slack. */
 const WAIT_POLL_MS = 100;
+
+/** How long the runner keeps removing its scratch home while something recreates part of it, and the quiet spell that proves it gone. */
+const REMOVE_DEADLINE_MS = 10_000;
+const REMOVE_QUIET_MS = 250;
 
 /**
  * FLOWRYN_CONTRACT_MAX_WAIT_MS caps every step's wait. The offline contract
@@ -180,13 +184,19 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       db?.close();
       db = null;
       const workspaces = createdWorkspaces(stateDir);
+      const harnesses = harnessProcesses(stateDir);
       await teardown(call, state, daemon);
       // A run that failed is not cancellable, so its workspace may still be open; close it by id.
       const runtime = new HerdrRuntime(new HerdrClient(options.herdrSocket));
       for (const ws of workspaces) await runtime.closeWorkspace(ws).catch(() => undefined);
+      // Nothing that writes into the scratch home may outlive it: a worker still exiting would spool its hooks there.
+      for (const proc of harnesses) {
+        const ended = await terminate(proc, { group: true });
+        if (!ended.ok) options.log(`harness pid ${proc.pid} did not exit (${ended.signal}, ${ended.evidence})`);
+      }
       // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
       if (options.project && project) removeOwnWorktrees(project, createdWorktrees(stateFiles(stateDir).db), prefix, join(home, "wt"), git, options.log);
-      if (!options.keep) rmSync(home, { recursive: true, force: true });
+      if (!options.keep) await removeScratchHome(home, options.log);
     })());
   const onSignal = (signal: NodeJS.Signals) => {
     options.log(`${signal}: cleaning up before exit`);
@@ -316,7 +326,53 @@ function createdWorkspaces(stateDir: string): string[] {
   }
 }
 
-/** Stop the worker (cancel exits it and closes its workspace), then stop the scratch daemon. */
+/** The harness processes the scratch daemon recorded, to make sure each is gone before the scratch home goes. */
+function harnessProcesses(stateDir: string): ProcIdentity[] {
+  const path = stateFiles(stateDir).db;
+  if (!existsSync(path)) return [];
+  const db = openDb(path, { readonly: true });
+  try {
+    const rows = db.query("SELECT proc_pid, proc_start, proc_exe FROM runs WHERE proc_pid IS NOT NULL AND proc_start IS NOT NULL AND proc_exe IS NOT NULL").all() as {
+      proc_pid: number;
+      proc_start: number;
+      proc_exe: string;
+    }[];
+    return rows.map((r) => ({ pid: r.proc_pid, start: r.proc_start, exe: r.proc_exe }));
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Remove the scratch home and see that it stays gone: a straggler that writes
+ * into it as it goes (rmSync then fails ENOTEMPTY) or just after (a directory
+ * comes back) gets another pass, until the deadline. A home that will not go
+ * is logged with the reason, never skipped in silence.
+ */
+export async function removeScratchHome(home: string, log: (line: string) => void, deadlineMs = REMOVE_DEADLINE_MS): Promise<boolean> {
+  const until = Date.now() + deadlineMs;
+  let lastError = "";
+  for (;;) {
+    try {
+      rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+      lastError = "";
+    } catch (error) {
+      lastError = (error as Error).message;
+    }
+    if (!existsSync(home)) {
+      await Bun.sleep(REMOVE_QUIET_MS);
+      if (!existsSync(home)) return true;
+      lastError = "something recreated it after removal";
+    }
+    if (Date.now() > until) {
+      log(`scratch home ${home} was not removed: ${lastError || "it is still there"}`);
+      return false;
+    }
+    await Bun.sleep(REMOVE_QUIET_MS);
+  }
+}
+
+/** Stop the worker (cancel exits it and closes its workspace), then stop the scratch daemon and wait for it to exit. */
 async function teardown(
   call: (verb: string, args: Record<string, unknown>) => Promise<{ ok: boolean }>,
   state: ContractState | null,
@@ -326,6 +382,9 @@ async function teardown(
   if (daemon.exitCode === null) {
     daemon.kill("SIGTERM");
     await Promise.race([daemon.exited, Bun.sleep(15_000)]);
-    if (daemon.exitCode === null) daemon.kill("SIGKILL");
+    if (daemon.exitCode === null) {
+      daemon.kill("SIGKILL");
+      await Promise.race([daemon.exited, Bun.sleep(5_000)]);
+    }
   }
 }
