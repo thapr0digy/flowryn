@@ -185,7 +185,11 @@ describe("the build after a Flowryn merge", () => {
     expect(readFileSync(target, "utf8")).toBe(OLD_BINARY);
     const log = join(dir, "logs", `build-${failing.slice(0, 12)}.log`);
     expect(readFileSync(log, "utf8")).toContain("compile error (stub)");
-    expect(openItems("build_failed")).toEqual([`Build after merge failed for flowryn at ${failing.slice(0, 8)}: scripts/build.sh exited 3; the installed binary is unchanged. Log: ${log}`]);
+    // The log comes before the detail, so the 200-character item line keeps it whole; the event keeps everything.
+    expect(openItems("build_failed")).toHaveLength(1);
+    expect(openItems("build_failed")[0]).toStartWith(`Build after merge failed for flowryn at ${failing.slice(0, 8)}, the installed binary unchanged; log ${log}`);
+    const failed = db.query("SELECT payload FROM events WHERE kind = 'upkeep.build_failed'").get() as { payload: string };
+    expect(JSON.parse(failed.payload)).toMatchObject({ commit: failing, log, detail: "scripts/build.sh exited 3" });
     expect((await builder().pass()).outcome).toBe("skipped");
     expect(openItems("build_failed")).toHaveLength(1);
 
