@@ -172,6 +172,7 @@ const init: VerbSpec = {
           },
         },
         which: (binary) => Bun.which(binary),
+        install: async (argv) => await Bun.spawn(argv, { stdio: ["inherit", "inherit", "inherit"] }).exited,
         version: firstLine,
         listTasks: async (tasksAxi, node, file) => (await listTasks(processRunner(tasksAxi, node), file)).length,
         installService: async (config, home) => {

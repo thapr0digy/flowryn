@@ -7,20 +7,7 @@ import { workerConfigProblems } from "../config/workers.ts";
 import { DEFAULT_POLICY_MODE, POLICY_MODE_LINES, POLICY_MODES, type PolicyMode } from "../config/policy.ts";
 import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI } from "../version.ts";
-
-/** How to install each tool; init prints these and installs nothing itself. */
-export const INSTALL_HINTS: Record<ToolName, string> = {
-  tasks_axi: `npm install -g tasks-axi@${PINNED_TASKS_AXI}`,
-  node: "brew install node",
-  git: "xcode-select --install",
-  gh: "brew install gh, then gh auth login",
-  herdr: "install Herdr 0.7.5 or newer (protocol 17); needed from M2",
-  claude: "npm install -g @anthropic-ai/claude-code",
-  pi: "npm install -g @earendil-works/pi-coding-agent (or the signed Pi Launcher, found as pi-signed)",
-  no_mistakes: "install no-mistakes (optional; the no-mistakes delivery mode needs it)",
-  docker: "install Docker Desktop (optional; visual QA runs the app's environments in it, and the capacity check counts them)",
-  lavish_axi: "npm install -g lavish-axi (optional; review pages, and the answers to a review's questions)",
-};
+import { commandLine, INSTALL_HINTS, INSTALLERS } from "./install.ts";
 
 /** Defaults for the sections later milestones read; written once so they are there to edit. */
 export const LATER_SECTION_DEFAULTS: Record<string, unknown> = {
@@ -88,6 +75,8 @@ export interface InitDeps {
   addProject(path: string): Promise<string>;
   doctor(): Promise<string>;
   platform: NodeJS.Platform;
+  /** Run one install command with your terminal attached; returns its exit code. */
+  install(argv: string[]): Promise<number>;
 }
 
 const VERSION_SEGMENT = /^v?\d+(\.\d+)+/;
@@ -110,6 +99,50 @@ export function recordedToolPath(found: string): string {
   } catch {
     return found;
   }
+}
+
+/**
+ * Q5: one y/N, default No, for every missing tool that has an installer (init
+ * runs only in a terminal, so there is always someone to answer). Each command
+ * runs in turn, a failure is reported and the rest carry on. Returns the tools
+ * whose every step succeeded.
+ */
+async function offerInstall(deps: InitDeps, missing: ToolName[]): Promise<ToolName[]> {
+  const { io } = deps;
+  const ready: ToolName[] = [];
+  for (const name of missing) {
+    const installer = INSTALLERS[name];
+    if (!installer) continue;
+    if (installer.needs !== "sh" && !deps.which(installer.needs)) {
+      io.print(`  ${name}: ${installer.needs} is not on PATH, so it cannot be installed from here: ${INSTALL_HINTS[name]}`);
+      continue;
+    }
+    ready.push(name);
+  }
+  if (ready.length === 0) return [];
+  const commands = ready.flatMap((name) => INSTALLERS[name]!.steps.map(commandLine));
+  io.print(`These commands install the ${ready.length} missing tool${ready.length === 1 ? "" : "s"}:`);
+  for (const command of commands) io.print(`  ${command}`);
+  if (!(await io.confirm("Run these install commands now?", false))) return [];
+  const installed: ToolName[] = [];
+  for (const name of ready) {
+    const installer = INSTALLERS[name]!;
+    let failed: string | null = null;
+    for (const step of installer.steps) {
+      const code = await deps.install(step).catch(() => -1);
+      if (code !== 0) {
+        failed = `${commandLine(step)} exited ${code}`;
+        break;
+      }
+    }
+    if (failed) {
+      io.print(`  ${name}: install failed (${failed}); install it yourself, then re-run flowryn init`);
+      continue;
+    }
+    installed.push(name);
+    if (installer.then) io.print(`  ${name}: next, ${installer.then}`);
+  }
+  return installed;
 }
 
 async function askPath(io: InitIo, question: string, fallback: string, home: string): Promise<string> {
@@ -137,17 +170,27 @@ export async function runInit(deps: InitDeps): Promise<number> {
   // 1. Preflight
   if (deps.platform !== "darwin") io.print(`warning: macOS is the v1 platform; this is ${deps.platform}`);
   const tools: Partial<Record<ToolName, string>> = {};
+  const record = async (name: ToolName, found: string) => {
+    const recorded = recordedToolPath(found);
+    tools[name] = recorded;
+    const version = await deps.version(recorded);
+    io.print(`  ${name}: ${recorded}${version ? ` (${version})` : ""}`);
+  };
+  const missing: ToolName[] = [];
   io.print("Tools:");
   for (const name of TOOL_NAMES) {
     const found = current.tools[name] && existsSync(current.tools[name]!) ? current.tools[name]! : whichTool(name, deps.which);
     if (!found) {
       io.print(`  ${name}: missing. Install: ${INSTALL_HINTS[name]}`);
+      missing.push(name);
       continue;
     }
-    const recorded = recordedToolPath(found);
-    tools[name] = recorded;
-    const version = await deps.version(recorded);
-    io.print(`  ${name}: ${recorded}${version ? ` (${version})` : ""}`);
+    await record(name, found);
+  }
+  for (const name of await offerInstall(deps, missing)) {
+    const found = whichTool(name, deps.which);
+    if (found) await record(name, found);
+    else io.print(`  ${name}: installed, but not found on PATH; add its directory to PATH and re-run flowryn init`);
   }
   if (!tools.tasks_axi) {
     io.print(`tasks-axi is required. Install it (${INSTALL_HINTS.tasks_axi}) and re-run flowryn init.`);

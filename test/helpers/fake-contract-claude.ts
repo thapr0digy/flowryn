@@ -17,14 +17,19 @@
  *     inside its running turn (c01);
  *   - the interrupt key (the fake Herdr's Escape is SIGINT) ends the running
  *     tool and the turn, fires no hook, and writes the marker to the
- *     transcript (c04).
+ *     transcript (c04);
+ *   - at startup it records the deferred tools it was offered as a
+ *     `deferred_tools_delta` transcript attachment (Claude 2.1.295), leaving
+ *     out every MCP server the settings' `permissions.deny` names bare, as
+ *     Claude does (verified live for the toolkit's static layer).
  *
  * Its "model" follows the contract suite's instructions (contractBody and each
  * steer's text in src/contracts/suite.ts) by fixed rules, no model involved:
  * run the `perl -e 'sleep N'` it is told to (N tenths of a second here,
  * fake-contract-shared.ts), acknowledge each steer (first when the steer says
  * so, otherwise once its work is done), write and deliver the report it is
- * told to, and otherwise end its turn. Anything else that continues a turn
+ * told to, run the command the toolkit step names once and never retry a
+ * toolkit denial, and otherwise end its turn. Anything else that continues a turn
  * (a Stop continuation that is not a steer, such as the turn-end guard's
  * reminder) is outside the contract: it has no rule for it and keeps working,
  * as Claude 2.1.291 did in the #32 regression, so the run never goes idle.
@@ -50,7 +55,8 @@ function flag(name: string): string | null {
 const session = flag("--session-id") ?? flag("--resume") ?? "no-session";
 const resumed = flag("--resume") !== null;
 const settingsPath = flag("--settings") ?? "";
-const hooks = (JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, { hooks: HookCommand[] }[]> }).hooks;
+const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks: Record<string, { hooks: HookCommand[] }[]>; permissions?: { deny?: string[] } };
+const hooks = settings.hooks;
 const transcript = join(dirname(env.FLOWRYN_TASK_FILE ?? settingsPath), `fake-transcript-${session}.jsonl`);
 const cwd = process.cwd();
 
@@ -127,6 +133,8 @@ function workOf(text: string): string[] {
   const commands: string[] = [];
   const sleep = /perl -e 'sleep \d+'/.exec(text);
   if (sleep) commands.push(sleep[0]);
+  const once = /run exactly this command once: (gh --version)/.exec(text);
+  if (once) commands.push(once[1]!);
   const report = /Write one line, "([^"]*)", to (\S+), then run (\$FLOWRYN_BIN deliver --report \S+)/.exec(text);
   if (report) commands.push(`mkdir -p "$(dirname ${report[2]})" && printf '%s\\n' '${report[1]}' > ${report[2]}`, report[3]!);
   return commands;
@@ -180,7 +188,8 @@ async function work(queue: string[]): Promise<boolean> {
     const denied = denyOf(await runHooks("PreToolUse", tool));
     if (denied !== null) {
       log(`denied ${command}: ${denied}`);
-      const redo = /do not run it again/.test(denied) ? [] : [command];
+      // A toolkit denial is final (the toolkit step says not to retry it); an urgent steer's cut is redone unless it says otherwise.
+      const redo = /do not run it again|toolkit rule/.test(denied) ? [] : [command];
       queue.unshift(...(await plan(denied)), ...redo);
       continue;
     }
@@ -227,6 +236,16 @@ process.on("SIGTERM", () => {
   for (const waiter of waiters) waiter.kill("SIGTERM");
   process.exit(0);
 });
+
+/** The tools this fake Claude has, before `permissions.deny`: a built-in deferred tool and three MCP servers' tools. */
+const OFFERED_TOOLS = ["WebFetch", "mcp__claude-in-chrome__tabs_context_mcp", "mcp__claude_ai_Atlassian_MCP__getJiraIssue", "mcp__claude_ai_Docs__read"];
+
+function offeredTools(): string[] {
+  const deniedServers = (settings.permissions?.deny ?? []).filter((rule) => rule.startsWith("mcp__") && !rule.slice(5).includes("__"));
+  return OFFERED_TOOLS.filter((name) => !deniedServers.some((server) => name.startsWith(`${server}__`)));
+}
+
+if (!resumed) appendJson(transcript, { type: "attachment", attachment: { type: "deferred_tools_delta", addedNames: offeredTools(), removedNames: [], readdedNames: [] } });
 
 // An idle session with no waiter running still lives until it is told to exit.
 setInterval(() => {}, 60_000);

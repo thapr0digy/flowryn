@@ -18,6 +18,7 @@ import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate } from "../runtime/proc.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
+import { configStaticLayers } from "../policy/static.ts";
 import { PROTO } from "../version.ts";
 import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
@@ -226,6 +227,7 @@ export class Launcher {
 
     const flowrynBin = await this.deps.flowrynBin();
     const gitAccess = run.kind === "ship" ? await shipGitAccess((args) => this.deps.git(args), worktree) : { writable: [], readOnly: [] };
+    const toolkit = configStaticLayers(config);
     const context: RunContext = {
       runId: run.id,
       taskId: run.task_id,
@@ -241,7 +243,8 @@ export class Launcher {
       binary,
       daemonSocket: this.deps.socketPath,
       writable: [spool, reportDir, ...gitAccess.writable],
-      readOnly: gitAccess.readOnly,
+      readOnly: [...gitAccess.readOnly, ...toolkit.denyWrite],
+      permissionsDeny: toolkit.permissionsDeny,
       stagePlugin: skills.claudePlugin,
       ...(mode === "relaunch" ? { resumePrompt: relaunchPrompt(instructionsFile) } : {}),
     };
