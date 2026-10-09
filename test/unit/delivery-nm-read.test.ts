@@ -55,6 +55,7 @@ function watcher(): DeliveryWatcher {
     git: async () => ({ code: 0, stdout: "", stderr: "" }),
     noMistakes: () => noMistakes,
     nmTimeoutMs: () => 5_000,
+    validationStuckMs: () => 30 * 60_000,
     pollMs: () => 60_000,
     inFlight: new Set(),
     cleanup: () => {},

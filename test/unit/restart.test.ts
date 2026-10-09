@@ -18,7 +18,6 @@ import {
   readPending,
   recordRestarted,
   VALIDATION_STATUS_FRESH_MS,
-  durationSeconds,
   guardLines,
   restartGuards,
   smokeCheck,
@@ -29,7 +28,7 @@ import {
 import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { recordEvidence } from "../../src/lifecycle/runs.ts";
-import { parseActiveSteps, parseNmStatus, waitsOnlyOnCi } from "../../src/policy/nomistakes.ts";
+import { durationSeconds, parseActiveSteps, parseNmStatus, waitsOnlyOnCi } from "../../src/policy/nomistakes.ts";
 import { agentPid, launchdSupervisor, plistDrift, type LaunchdDeps, type PlistSpec } from "../../src/service/launchd.ts";
 
 let dir: string;
@@ -169,7 +168,9 @@ const NM_REVIEW = `run:
 
 describe("no-mistakes active steps", () => {
   test("assumption: the status names its active steps by column, and a CI wait has no agent pid", () => {
-    expect(parseActiveSteps(NM_CI_WAIT)).toEqual([{ step: "ci", status: "running", activeFor: "2h17m", agentPid: "" }]);
+    expect(parseActiveSteps(NM_CI_WAIT)).toEqual([
+      { step: "ci", status: "running", activeFor: "2h17m", lastActivity: "9m24s ago: log: repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed", agentPid: "" },
+    ]);
     const review = parseActiveSteps(NM_REVIEW)!;
     expect(review.map((s) => [s.step, s.agentPid])).toEqual([
       ["review", "81234"],
@@ -185,11 +186,11 @@ describe("no-mistakes active steps", () => {
     expect(waitsOnlyOnCi(parseNmStatus(old)!)).toBe(false);
     expect(parseActiveSteps("run:\n  active_steps[2]{step}:\n    ci\n")).toBeNull();
     expect(waitsOnlyOnCi({ outcome: "", activeSteps: [] })).toBe(false);
-    expect(waitsOnlyOnCi({ outcome: "passed", activeSteps: [{ step: "ci", status: "running", activeFor: "1m", agentPid: "" }] })).toBe(false);
+    expect(waitsOnlyOnCi({ outcome: "passed", activeSteps: [{ step: "ci", status: "running", activeFor: "1m", lastActivity: "", agentPid: "" }] })).toBe(false);
   });
 
   test("a CI fix round runs a local agent: it is not a CI wait", () => {
-    expect(waitsOnlyOnCi({ outcome: "", activeSteps: [{ step: "ci", status: "fixing", activeFor: "4m", agentPid: "777" }] })).toBe(false);
+    expect(waitsOnlyOnCi({ outcome: "", activeSteps: [{ step: "ci", status: "fixing", activeFor: "4m", lastActivity: "", agentPid: "777" }] })).toBe(false);
   });
 
   test("durations read as no-mistakes prints them", () => {
