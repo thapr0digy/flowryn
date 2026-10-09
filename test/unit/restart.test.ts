@@ -236,6 +236,20 @@ describe("the validation guard and a CI wait", () => {
     expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.task)).toEqual(["t1", "t2"]);
   });
 
+  test("each blocking read says why: none recent, another branch's run, or no run", () => {
+    validating("r1", null);
+    validating("r2", NM_CI_WAIT.replace("branch: b", "branch: other"));
+    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.detail)).toEqual([
+      "validating for 34 min; no no-mistakes status read in the last 2 min",
+      "validating for 34 min; the latest no-mistakes status is a run on branch other, not b",
+    ]);
+    tx(db, () => recordEvidence(db, "r2", "nomistakes", 1, { run: null }, Date.now() - 5_000));
+    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.detail)).toEqual([
+      "validating for 34 min; no no-mistakes status read in the last 2 min",
+      "validating for 34 min; the latest no-mistakes status names no run",
+    ]);
+  });
+
   test("a guard line names the task's title when the backlog has one", () => {
     tx(db, () => writeSnapshot(db, "backlog", "h", [{ id: "t1", title: "Leader Stop hook", links: [] } as unknown as BacklogTask]));
     validating("r1", NM_REVIEW);

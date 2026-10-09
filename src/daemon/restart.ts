@@ -109,9 +109,9 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
     )
     .all(VALIDATION_POOL) as ValidationRow[];
   for (const v of validating) {
-    const status = freshStatus(v, now);
-    if (status && waitsOnlyOnCi(status)) continue;
-    guards.push({ kind: "validation", task: v.task_id, detail: validationDetail(v, status, now) });
+    const read = freshStatus(v, now);
+    if ("status" in read && waitsOnlyOnCi(read.status)) continue;
+    guards.push({ kind: "validation", task: v.task_id, detail: validationDetail(v, read, now) });
   }
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
@@ -132,12 +132,18 @@ interface ValidationRow {
   observed_at: number | null;
 }
 
-/** The run's own no-mistakes status (src/reconcile/delivery.ts records it), when read recently enough to decide on. */
-function freshStatus(v: ValidationRow, now: number): { outcome: string; activeSteps: NmActiveStep[] | null } | null {
-  if (v.status === null || v.observed_at === null || now - v.observed_at > VALIDATION_STATUS_FRESH_MS) return null;
+type NmStatusRead = { status: { outcome: string; activeSteps: NmActiveStep[] | null } } | { unusable: string };
+
+/** The run's own no-mistakes status (src/reconcile/delivery.ts records it) when read recently enough to decide on, or why there is none. */
+function freshStatus(v: ValidationRow, now: number): NmStatusRead {
+  if (v.status === null || v.observed_at === null || now - v.observed_at > VALIDATION_STATUS_FRESH_MS) {
+    return { unusable: `no no-mistakes status read in the last ${VALIDATION_STATUS_FRESH_MS / 60_000} min` };
+  }
   const read = JSON.parse(v.status) as { branch?: unknown; outcome?: unknown; active_steps?: unknown };
-  if (read.branch !== v.branch || typeof read.outcome !== "string") return null;
-  return { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null };
+  if (read.branch === undefined) return { unusable: "the latest no-mistakes status names no run" };
+  if (read.branch !== v.branch) return { unusable: `the latest no-mistakes status is a run on branch ${String(read.branch)}, not ${v.branch}` };
+  if (typeof read.outcome !== "string") return { unusable: "the latest no-mistakes status has no readable outcome" };
+  return { status: { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null } };
 }
 
 /** "2h17m", "9m24s", "35s" (no-mistakes' own durations) in seconds; unreadable reads as 0. */
@@ -147,11 +153,11 @@ export function durationSeconds(text: string): number {
   return total;
 }
 
-/** Why a validation blocks: its longest-running step and that step's local agent, or that no recent status says. */
-function validationDetail(v: ValidationRow, status: ReturnType<typeof freshStatus>, now: number): string {
+/** Why a validation blocks: its longest-running step and that step's local agent, or why no status says. */
+function validationDetail(v: ValidationRow, read: NmStatusRead, now: number): string {
   const held = `validating for ${ago(now - v.granted_at)}`;
-  if (!status) return `${held}; no no-mistakes status read in the last ${VALIDATION_STATUS_FRESH_MS / 60_000} min`;
-  const steps = status.activeSteps ?? [];
+  if ("unusable" in read) return `${held}; ${read.unusable}`;
+  const steps = read.status.activeSteps ?? [];
   if (steps.length === 0) return held;
   const oldest = steps.reduce((a, b) => (durationSeconds(b.activeFor) > durationSeconds(a.activeFor) ? b : a));
   const agent = oldest.agentPid ? `, agent pid ${oldest.agentPid}` : "";

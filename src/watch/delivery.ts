@@ -41,6 +41,10 @@ export interface DeliveryWatcherDeps {
 const MAX_BACKOFF_MS = 10 * 60_000;
 /** Consecutive failed status reads before no-mistakes counts as down. */
 const NM_DOWN_AFTER = 3;
+/** A read for the restart guard is skipped when a status read finished this recently. */
+export const VALIDATION_READ_MIN_GAP_MS = 15_000;
+/** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
+const VALIDATION_POOL = "validation";
 
 export class DeliveryWatcher {
   private readonly deps: DeliveryWatcherDeps;
@@ -52,6 +56,8 @@ export class DeliveryWatcher {
   private backoffMs = 0;
   private forgeQuietUntil = 0;
   private nmFailures = 0;
+  private nmRead: Promise<void> | null = null;
+  private nmReadAt = Number.NEGATIVE_INFINITY;
 
   constructor(deps: DeliveryWatcherDeps) {
     this.deps = deps;
@@ -111,8 +117,8 @@ export class DeliveryWatcher {
     }
   }
 
-  private runs(sql: string): RunWithPolicy[] {
-    const ids = this.deps.db.query(sql).all() as { id: string }[];
+  private runs(sql: string, ...params: (string | number)[]): RunWithPolicy[] {
+    const ids = this.deps.db.query(sql).all(...params) as { id: string }[];
     return ids.map((r) => getRunWithPolicy(this.deps.db, r.id)).filter((r): r is RunWithPolicy => r !== null);
   }
 
@@ -180,25 +186,46 @@ export class DeliveryWatcher {
   }
 
   /**
-   * Read the no-mistakes status of every validating run now, outside the
-   * poll: the restart guard asks for it so its decision rests on a read
-   * seconds old (src/daemon/restart.ts). Never throws.
+   * Read the no-mistakes status of every run holding a validation slot now,
+   * outside the poll: the restart guard asks for it so its decision rests on
+   * a read seconds old (src/daemon/restart.ts). A read in progress is shared,
+   * and one that finished under VALIDATION_READ_MIN_GAP_MS ago is enough.
+   * Never throws.
    */
   async readValidations(): Promise<void> {
     try {
-      await this.watchNoMistakes();
+      if (this.nmRead) await this.nmRead;
+      else if (this.deps.now() - this.nmReadAt >= VALIDATION_READ_MIN_GAP_MS) await this.readNoMistakes(true);
     } catch (error) {
       this.deps.log(`delivery watcher: no-mistakes read for the restart guard: ${(error as Error).message}`);
     }
   }
 
   private async watchNoMistakes(): Promise<void> {
+    while (this.nmRead) await this.nmRead.catch(() => undefined);
+    await this.readNoMistakes(false);
+  }
+
+  /** One status read at a time: the poll's (every watched run) or the restart guard's (validation slots only). */
+  private readNoMistakes(leasedOnly: boolean): Promise<void> {
+    const read: Promise<void> = this.readNmRuns(leasedOnly).finally(() => {
+      if (this.nmRead === read) this.nmRead = null;
+      this.nmReadAt = this.deps.now();
+    });
+    this.nmRead = read;
+    return read;
+  }
+
+  private async readNmRuns(leasedOnly: boolean): Promise<void> {
     const { db, now } = this.deps;
     const noMistakes = this.deps.noMistakes();
     if (!noMistakes) return;
     const runs = this.runs(
       `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id
-       WHERE p.kind = 'ship' AND p.delivery_mode = 'no-mistakes' AND r.state IN ('running','validating')`,
+       WHERE p.kind = 'ship' AND p.delivery_mode = 'no-mistakes' AND r.state IN ('running','validating')
+         AND (?1 = 0 OR EXISTS (SELECT 1 FROM pool_leases l WHERE l.run_id = r.id AND l.pool = ?2 AND l.released_at IS NULL))`,
+      leasedOnly ? 1 : 0,
+      VALIDATION_POOL,
     );
     for (const run of runs) {
       if (this.stopped || !existsSync(run.worktree_path)) continue;
