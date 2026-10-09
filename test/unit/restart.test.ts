@@ -9,6 +9,7 @@ import type { Caller, DaemonInfo } from "../../src/api/verbs.ts";
 import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import {
+  MAX_WAIT_MIN,
   RESTART_COOLDOWN_MS,
   RestartController,
   buildIdOf,
@@ -156,8 +157,14 @@ describe("binary check", () => {
       expect(env.FLOWRYN_TOKEN).toBeUndefined();
       return good;
     });
-    expect(result).toEqual({ version: "0.6.0", proto: 5, build: null });
+    expect(result).toEqual({ version: "0.6.0", proto: 5, build: null, schema: null, commit: null, dirty: null, source: null });
     expect(calls).toEqual([["bun", join(dir, "flowryn.db"), "version", "--json"]]);
+  });
+
+  test("a stamped target also reports its schema and build stamp", async () => {
+    const stamped = ok(JSON.stringify({ ok: true, data: { flowryn: "0.9.0", proto: 6, schema: 13, commit: "a1b2c3d4", dirty: false, source: "/src/flowryn" } }));
+    const result = await smokeCheck(["bun", join(dir, "flowryn.db")], {}, async () => stamped);
+    expect(result).toEqual({ version: "0.9.0", proto: 6, build: null, schema: 13, commit: "a1b2c3d4", dirty: false, source: "/src/flowryn" });
   });
 
   for (const [name, reply, why] of [
@@ -217,7 +224,7 @@ function controller(opts: { supervisor?: Supervisor; build?: string | null; targ
     supervisor: () => supervisor,
     smoke: async (command) => {
       if (opts.smokeFails) throw new FlowrynError("binary_broken", `${command.join(" ")} failed its smoke check`);
-      return { version: "0.5.0", proto: 4, build: opts.targetBuild === undefined ? "bbbbbbbbbbbb" : opts.targetBuild };
+      return { version: "0.5.0", proto: 4, build: opts.targetBuild === undefined ? "bbbbbbbbbbbb" : opts.targetBuild, schema: null, commit: null, dirty: null, source: null };
     },
   });
 }
@@ -361,6 +368,65 @@ describe("restart controller", () => {
     expect(openItemsOf("restart_dropped")).toHaveLength(1);
   });
 
+  test("auto: the build watcher's request parks for the longest wait and restarts once the guards clear, by auto", async () => {
+    seedMerge("t1", "requested");
+    const fake = fakeSupervisor();
+    const c = controller({ supervisor: fake.supervisor });
+    const now = Date.now();
+    expect(tx(db, () => c.requestAuto({ build: "bbbbbbbbbbbb", commit: "c0ffee1234" }))).toBe("parked");
+    const pending = readPending(db)!;
+    expect(pending).toMatchObject({ by: "auto", session: null, build: "bbbbbbbbbbbb", commit: "c0ffee1234", force: false });
+    expect(pending.expires_at - now).toBeGreaterThanOrEqual(MAX_WAIT_MIN * 60_000 - 1_000);
+    expect(events("daemon.restart_requested")[0]).toMatchObject({ by: "auto", build: "bbbbbbbbbbbb", waiting_on: [expect.stringContaining("merging: t1")] });
+    await c.tryPending();
+    expect(fake.calls.restart).toBe(0);
+    tx(db, () => db.query("UPDATE merges SET state = 'merged' WHERE id = 'm-t1'").run());
+    await c.tryPending();
+    await Bun.sleep(120);
+    expect(fake.calls.restart).toBe(1);
+    expect(JSON.parse(getMeta(db, "restart_handoff")!)).toMatchObject({ by: "auto", session: null });
+  });
+
+  test("auto: a request the leader already parked is kept, an earlier automatic one replaced", () => {
+    const c = controller();
+    tx(db, () => c.requestAuto({ build: "bbbbbbbbbbbb", commit: null }));
+    expect(tx(db, () => c.requestAuto({ build: "cccccccccccc", commit: null }))).toBe("parked");
+    expect(readPending(db)).toMatchObject({ by: "auto", build: "cccccccccccc" });
+    tx(db, () => c.request(LEADER, { ...BASE, whenIdle: true, preflight: null }));
+    expect(tx(db, () => c.requestAuto({ build: "dddddddddddd", commit: null }))).toBe("kept");
+    expect(readPending(db)).toMatchObject({ by: "leader" });
+  });
+
+  test("auto: already restarted onto the build (no_change) withdraws quietly, with no P1", async () => {
+    const fake = fakeSupervisor();
+    const c = controller({ supervisor: fake.supervisor, targetBuild: "aaaaaaaaaaaa" });
+    tx(db, () => c.requestAuto({ build: "aaaaaaaaaaaa", commit: null }));
+    await c.tryPending();
+    expect(readPending(db)).toBeNull();
+    expect(fake.calls.restart).toBe(0);
+    expect(events("daemon.restart_withdrawn")).toHaveLength(1);
+    expect(openItemsOf("restart_dropped")).toHaveLength(0);
+  });
+
+  test("auto: a newer build installed after the request withdraws it, so the watcher judges the newer one", async () => {
+    const fake = fakeSupervisor();
+    const c = controller({ supervisor: fake.supervisor, targetBuild: "eeeeeeeeeeee" });
+    tx(db, () => c.requestAuto({ build: "bbbbbbbbbbbb", commit: null }));
+    await c.tryPending();
+    expect(readPending(db)).toBeNull();
+    expect(fake.calls.restart).toBe(0);
+    expect(events("daemon.restart_withdrawn")[0]!.reason).toContain("eeeeeeeeeeee");
+    expect(openItemsOf("restart_dropped")).toHaveLength(0);
+  });
+
+  test("auto: a broken binary when the guards clear drops it with the usual P1", async () => {
+    const c = controller({ smokeFails: true });
+    tx(db, () => c.requestAuto({ build: "bbbbbbbbbbbb", commit: null }));
+    await c.tryPending();
+    expect(readPending(db)).toBeNull();
+    expect(openItemsOf("restart_dropped")).toHaveLength(1);
+  });
+
   test("a supervisor that refuses withdraws the handoff and opens a P1", async () => {
     const fake = fakeSupervisor({ restart: { ok: false, detail: "Could not find service" } });
     const c = controller({ supervisor: fake.supervisor });
@@ -413,6 +479,18 @@ describe("the new daemon's record", () => {
   test("no handoff (a crash restart or a manual start): nothing recorded", () => {
     expect(tx(db, () => recordRestarted(db, { pid: 1, version: "0.5.0", proto: 4, build: null }, Date.now()))).toBeNull();
     expect(events("daemon.restarted")).toHaveLength(0);
+  });
+
+  test("the briefing says an automatic restart happened automatically, with the new build's commit", () => {
+    tx(db, () =>
+      appendEvent(db, {
+        source: "daemon",
+        kind: "daemon.restarted",
+        payload: { by: "auto", session: null, old: { pid: 1, version: "0.9.0", proto: 6, build: "3f9a1c22d0b1", uptime_s: 5 }, new: { pid: 2, version: "0.9.0", proto: 7, build: "a07e55c9e1f4", commit: "a1b2c3d4e5f6" }, downtime_ms: 900 },
+      }),
+    );
+    const text = tx(db, () => composeBriefing(db, { session: null, now: Date.now() + 1, morningHour: 99, ageMs: 86_400_000, markMorning: true })).text;
+    expect(text).toMatch(/Daemon restarted \d\d:\d\d automatically: build 3f9a1c22d0b1→a07e55c9e1f4 \(commit a1b2c3d\), 0\.9\.0, proto 6→7\./);
   });
 
   test("the briefing shows a restart once: after the briefing that marks it, it is gone", () => {
