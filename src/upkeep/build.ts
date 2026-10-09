@@ -186,7 +186,7 @@ export class MergeBuilder {
     const staging = join(dirname(target), STAGING_DIR);
     const step = async (what: string, argv: string[], cwd: string) => {
       const result = await run(argv, { cwd, env, logPath, timeoutMs });
-      if (result.timedOut) throw new StepFailed(`${what} did not finish within ${Math.round(timeoutMs / 60_000)} min`);
+      if (result.timedOut) throw new StepFailed(`${what} did not finish within ${timeoutMs < 60_000 ? `${Math.round(timeoutMs / 1000)} s` : `${Math.round(timeoutMs / 60_000)} min`}`);
       if (result.exitCode !== 0) throw new StepFailed(`${what} exited ${result.exitCode ?? "on a signal"}`);
     };
     try {
