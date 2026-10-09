@@ -138,6 +138,8 @@ describe("sync the primary checkout after a merge", () => {
       expect(merged).not.toBe(before);
       await waitUntil(() => git(e.fleet.repo, ["rev-parse", "HEAD"]) === merged, 15_000, "the primary checkout at origin's main");
       expect(git(e.fleet.repo, ["show", "HEAD:fix.txt"])).toBe("fixed");
+      // The fast-forward moves HEAD before its event is written.
+      await waitUntil(() => events(e, "upkeep.synced").length > 0, 5_000, "the sync's event");
       expect(events(e, "upkeep.synced")).toEqual([{ project: "web", from: before, to: merged }]);
     },
     { timeout: 90_000 },
