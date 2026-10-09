@@ -74,6 +74,7 @@ interface Knobs {
   source?: string | null;
   run?: StepRunner;
   stepTimeoutMs?: number;
+  bun?: string | null;
 }
 
 function builder(k: Knobs = {}): MergeBuilder {
@@ -86,7 +87,7 @@ function builder(k: Knobs = {}): MergeBuilder {
     running: () => ({ build: k.build === undefined ? "aaaaaaaaaaaa" : k.build, commit: k.commit ?? null }),
     source: () => (k.source === undefined ? repos.primary : k.source),
     target: async () => target,
-    bun: () => process.execPath,
+    bun: () => (k.bun === undefined ? process.execPath : k.bun),
     workDir: join(dir, "build"),
     logDir: join(dir, "logs"),
     run: k.run,
@@ -193,6 +194,15 @@ describe("the build after a Flowryn merge", () => {
     sh(repos.other, ["push", "-q", "origin", "main"]);
     expect((await builder().pass()).outcome).toBe("built");
     expect(installed().commit).toBe(tip());
+    expect(openItems("build_failed")).toEqual([]);
+  });
+
+  test("no bun: one build_failed P1 that says so, kept until a build runs", async () => {
+    expect(await builder({ bun: null }).pass()).toMatchObject({ outcome: "skipped", reason: "bun is not found ([tools] bun)" });
+    await builder({ bun: null }).pass();
+    expect(openItems("build_failed")).toEqual(["Build after merge cannot run for flowryn: bun is not found; set [tools] bun in config.toml, or turn [upkeep] build_after_merge off"]);
+    expect(readAttempt(db)).toBeNull();
+    expect((await builder().pass()).outcome).toBe("built");
     expect(openItems("build_failed")).toEqual([]);
   });
 

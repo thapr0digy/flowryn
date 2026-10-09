@@ -9,6 +9,7 @@ import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { loadConfig, resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { assertSocketPathFits, flowrynHome, runDir, socketPath, spoolDir, stateFiles } from "../config/paths.ts";
 import { getMeta, integrityProblems, migrate, openDb, setMeta, tx, type Db } from "../db/db.ts";
@@ -501,7 +502,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         const command = commandOf(target.program);
         return command.length === 1 ? command[0]! : null;
       },
-      bun: () => resolveTool(config, "bun"),
+      // Bun's own installer puts it in ~/.bun/bin, which launchd's PATH does not have.
+      bun: () => resolveTool(config, "bun") ?? (existsSync(join(homedir(), ".bun", "bin", "bun")) ? join(homedir(), ".bun", "bin", "bun") : null),
       workDir: join(config.data_dir, "build"),
       logDir: stateFiles(config.state_dir).logs,
     });

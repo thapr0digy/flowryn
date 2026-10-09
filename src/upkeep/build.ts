@@ -1,6 +1,6 @@
 import { closeSync, existsSync, mkdirSync, openSync, realpathSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join, relative, isAbsolute } from "node:path";
-import { openItem, resolveItems } from "../attention/items.ts";
+import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import { smokeEnv } from "../daemon/restart.ts";
 import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -161,7 +161,10 @@ export class MergeBuilder {
     const target = await this.deps.target();
     if (!target) return { outcome: "skipped", reason: "the supervisor's target is not a single installed binary" };
     const bun = this.deps.bun();
-    if (!bun) return { outcome: "skipped", reason: "bun is not found ([tools] bun)" };
+    if (!bun) {
+      this.noteNoBun(project);
+      return { outcome: "skipped", reason: "bun is not found ([tools] bun)" };
+    }
     this.current = { commit: tip, startedAt: this.deps.now() };
     try {
       return await this.build(project, tip, target, bun);
@@ -250,6 +253,19 @@ export class MergeBuilder {
     const status = await must(["status", "--porcelain"], worktree);
     if (status !== "") throw new StepFailed("the build worktree is not clean after checkout");
     return worktree;
+  }
+
+  /** No bun to build with: one `build_failed` P1 until a build runs, so a merge never goes unbuilt in silence. */
+  private noteNoBun(project: ProjectRow): void {
+    const { db } = this.deps;
+    const now = this.deps.now();
+    const line = `Build after merge cannot run for ${project.id}: bun is not found; set [tools] bun in config.toml, or turn [upkeep] build_after_merge off`;
+    tx(db, () => {
+      if (findOpenItem(db, "build_failed", null)?.line === line) return;
+      resolveItems(db, "build_failed", null, "bun is not found", now);
+      const event = appendEvent(db, { source: "daemon", kind: "upkeep.build_failed", payload: { project: project.id, detail: "bun is not found" }, ts: now });
+      openItem(db, { kind: "build_failed", eventSeq: event.seq, line, now });
+    });
   }
 
   private recordFailure(project: ProjectRow, commit: string, logPath: string, detail: string): void {

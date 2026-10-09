@@ -34,6 +34,21 @@ fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"   
 
 After `bun run build` rewrites the binary the launchd agent runs, the daemon applies it by itself once nothing would break (`[daemon] auto_restart = "merged"`, the default): it notices the new build within 30 s, and restarts onto it through the same guards as `--when-idle` when the build is a clean build of a commit on `origin/<default branch>` and not older than the running daemon (protocol, version, schema). A build from a branch or a dirty tree gets an info line instead and is never applied by itself (after merging, rebuild from the default branch), and a downgrade a P1; `"off"` leaves every restart to you. Workers and the leader's hooks run a copy of the running daemon's build (`<state_dir>/bin/flowryn`), so a rebuild never strands them on a protocol the running daemon refuses (docs/m5-notes.md, "Automatic restarts"). `flowryn daemon restart` (or the leader) applies any build at once: it refuses while a restart would break a merge, a blocked prompt or a validation (`--when-idle` waits instead), smoke-checks the new binary first, and has launchd restart the daemon (docs/cutover-notes.md, "Leader-safe daemon restart"). After relinking a new build into a different place (for example `ln -sf "$PWD/dist/flowryn" ~/.local/bin/flowryn`), run `flowryn daemon uninstall && flowryn daemon install`: the launchd plist records the resolved binary path, so a daemon installed from the old build keeps running the old binary until it is reinstalled. Install waits for launchd to finish unloading the old agent and retries the bootstrap with a short backoff, so the two can run back to back.
 
+The daemon also does the routine upkeep the leader did by hand (`[upkeep]`, each hook on by default; docs/m5-notes.md, "Upkeep hooks"):
+
+- `build_after_merge`: when `origin/<default branch>` of the Flowryn checkout moves past the running build, the daemon builds that commit in its own clean worktree (`<data_dir>/build/`, `bun install --frozen-lockfile`, then `scripts/build.sh`) into a staging file beside the installed binary and renames it into place, so the build watcher applies it as above. A failed build is one `build_failed` P1 naming the log (`<state_dir>/logs/build-<commit>.log`) and is not retried for that commit. It needs `bun`: `[tools] bun`, else PATH, else `~/.bun/bin/bun`; with none, a `build_failed` P1 says so.
+- `sync_primary`: each project's primary checkout is fast-forwarded to `origin/<default branch>`, only when it is on that branch with no tracked changes and nothing of its own; otherwise it is left as it is, with an info line saying why (new runs branch from it).
+- `clean_ended_hours = 24`: a failed or cancelled run's worktree goes through the cleanup guard once the run has been idle that long, with no discard: one with unlanded work is kept (only `flowryn cleanup --discard` removes it). `0` turns it off.
+- `nudge_conflicts`: a delivered PR GitHub reads as not mergeable sends its ship back, the way `decline` does, told to merge `origin/<base>` and deliver again; once per delivered head and at most 3 times per run, then a `pr_conflict` P1.
+
+```toml
+[upkeep]
+build_after_merge = true
+sync_primary = true
+clean_ended_hours = 24
+nudge_conflicts = true
+```
+
 The tests start real daemons on Unix sockets, watch files with FSEvents, run the real tasks-axi and drive `flowryn approve` and the board through a pty (`script` on macOS, Python's `pty` on Linux), so run them outside any command sandbox. They never reach GitHub or the real no-mistakes: a local fake GitHub and a stand-in no-mistakes answer instead.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs all of the above on `ubuntu-latest` on every pull request and on pushes to `main` (a macOS runner bills 10x). A few tests need macOS (the plist lint and the live launchd supervisor, the binary's codesign check, Claude's Seatbelt sandbox, the FSEvents file watch, BSD `script`); they are marked `test.skipIf(process.platform !== "darwin")` with the reason beside them, so CI reports them as skipped. They run on the Mac: no-mistakes runs the full `bun test` there before every pull request, so run it locally before you open one.
