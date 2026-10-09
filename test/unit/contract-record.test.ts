@@ -26,6 +26,7 @@ import { inertSched } from "../../src/sched/services.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
 import { writeLeaderFiles } from "../../src/bridges/files.ts";
+import { configStaticLayers } from "../../src/policy/static.ts";
 
 const INSTALLED = "ab12cd34ef56";
 const PR_BUILD = "0f0f0f0f0f0f";
@@ -305,7 +306,7 @@ describe("contract reports", () => {
 
 describe("the leader skill", () => {
   test("the SKILL.md written for both harnesses runs a worker-path PR's build verify-only itself, and the recording check after a harness update, asking the user only when refused", async () => {
-    const files = await writeLeaderFiles({ home: dir, command: ["flowryn"], socket: join(dir, "s"), style: null });
+    const files = await writeLeaderFiles({ home: dir, command: ["flowryn"], socket: join(dir, "s"), style: null, toolkit: configStaticLayers(defaultConfig(dir)) });
     for (const path of [join(files.skillDir, "SKILL.md"), join(files.claudePlugin, "skills", basename(files.skillDir), "SKILL.md")]) {
       const skill = readFileSync(path, "utf8");
       expect(skill).toContain("bun <worktree>/src/main.ts doctor --contracts --verify-only");

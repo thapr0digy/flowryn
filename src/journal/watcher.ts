@@ -7,7 +7,7 @@ import { openDivergence } from "../reconcile/divergence.ts";
 import { diffTasks, intentErased, isEmptyDiff, type BacklogDiff } from "./diff.ts";
 import { pendingIntents, recordIntent, type AppliedPayload, type Journal } from "./journal.ts";
 import { hashFile, readSnapshot, writeSnapshot, JOURNAL_FILES, type JournalFile } from "./snapshot.ts";
-import { listTasks, type BacklogTask, type TasksAxiRunner } from "./tasks-axi.ts";
+import { hasListCuts, listTasks, type BacklogTask, type TasksAxiRunner } from "./tasks-axi.ts";
 
 /**
  * How far back an intent counts as "just written by the CLI". Inside this
@@ -26,7 +26,7 @@ function chainRoot(applied: AppliedPayload): string {
 }
 const DEBOUNCE_MS = 150;
 
-export type CheckOutcome = "unchanged" | "baseline" | "edited" | "no_runner" | "read_failed";
+export type CheckOutcome = "unchanged" | "baseline" | "restored" | "edited" | "no_runner" | "read_failed";
 
 export interface CheckResult {
   outcome: CheckOutcome;
@@ -166,7 +166,9 @@ export class BacklogWatcher {
     const path = this.deps.files()[file];
     const contentHash = hashFile(path);
     const snapshot = readSnapshot(db, file);
-    if (snapshot && snapshot.contentHash === contentHash) return { outcome: "unchanged" };
+    // A snapshot written before list's cut text was restored is re-read once, though the file has not changed.
+    const unchanged = snapshot !== null && snapshot.contentHash === contentHash;
+    if (snapshot && unchanged && !hasListCuts(snapshot.tasks)) return { outcome: "unchanged" };
     const runner = this.deps.runner();
     if (!runner) return { outcome: "no_runner" };
     let tasks: BacklogTask[];
@@ -177,6 +179,13 @@ export class BacklogWatcher {
       return { outcome: "read_failed" };
     }
     const now = this.now();
+    if (unchanged) {
+      tx(db, () => {
+        writeSnapshot(db, file, contentHash, tasks, now);
+        appendEvent(db, { source: "backlog", kind: "backlog.restored", payload: { file, path, tasks: tasks.length, reason }, ts: now });
+      });
+      return { outcome: "restored" };
+    }
     if (!snapshot) {
       tx(db, () => {
         writeSnapshot(db, file, contentHash, tasks, now);

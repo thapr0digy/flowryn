@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyMutation, listTasks, parseListOutput, processRunner, taskFromJson, tasksAxiVersion } from "../../src/journal/tasks-axi.ts";
+import { classifyMutation, cutByList, listTasks, parseListOutput, processRunner, taskFromJson, tasksAxiVersion } from "../../src/journal/tasks-axi.ts";
 import { diffTasks, intentErased, normalizedTitle } from "../../src/journal/diff.ts";
 import type { AppliedPayload } from "../../src/journal/journal.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
@@ -63,6 +63,17 @@ describe("reading tasks-axi", () => {
 function ok(stdout: string) {
   return { exitCode: 0, stdout, stderr: "", timedOut: false };
 }
+
+describe("text tasks-axi list cut", () => {
+  const sentinel = (id: string, total: number) => `\n... (truncated, ${total} chars total - use show ${id} --full to see complete text)`;
+
+  test("is recognized by its sentinel naming the task and a longer total than it kept", () => {
+    expect(cutByList(`${"T".repeat(80)}${sentinel("t-a1", 100)}`, "t-a1")).toBe(true);
+    expect(cutByList(`${"T".repeat(80)}${sentinel("t-b2", 100)}`, "t-a1")).toBe(false);
+    expect(cutByList(`${"T".repeat(80)}${sentinel("t-a1", 80)}`, "t-a1")).toBe(false);
+    expect(cutByList("a short title", "t-a1")).toBe(false);
+  });
+});
 
 describe("classifying tasks-axi results", () => {
   test("success needs exit 0 and an ok JSON result", () => {
@@ -128,6 +139,27 @@ describe("against the real tasks-axi", () => {
       expect(again.ok && again.json.already).toBe(true);
       const bad = classifyMutation(await runner.run(["add", "x-b2", "since (since 2026-01-01)", "--file", join(dir, "t.md"), "--json"]));
       expect(bad).toMatchObject({ ok: false, kind: "permanent", code: "VALIDATION_ERROR" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("list cuts a long title and body; listTasks reads them whole with show --full", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fw-tx-"));
+    try {
+      const runner = processRunner(realTasksAxi(), Bun.which("node"));
+      const file = join(dir, "b.md");
+      const title = `A long title ${"t".repeat(120)} end`;
+      const body = `first line ${"b".repeat(700)}\nlast line`;
+      expect(classifyMutation(await runner.run(["add", "long-a1", title, "--body", body, "--file", file, "--json"])).ok).toBe(true);
+      expect(classifyMutation(await runner.run(["add", "short-b2", "short", "--body", "small", "--file", file, "--json"])).ok).toBe(true);
+      const listed = parseListOutput((await runner.run(["list", "--file", file, "--fields", "body"])).stdout);
+      const cut = listed.find((t) => t.id === "long-a1")!;
+      expect(cutByList(cut.title, "long-a1")).toBe(true);
+      expect(cutByList(cut.body, "long-a1")).toBe(true);
+      const tasks = await listTasks(runner, file);
+      expect(tasks.find((t) => t.id === "long-a1")).toMatchObject({ title, body });
+      expect(tasks.find((t) => t.id === "short-b2")).toMatchObject({ title: "short", body: "small" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

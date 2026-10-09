@@ -1,6 +1,6 @@
 import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { configProblems, loadConfig, resolveTool, TOOL_NAMES, type FlowrynConfig, type ToolName } from "../config/config.ts";
+import { configProblems, loadConfig, resolveTool, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
 import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
@@ -17,7 +17,8 @@ import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
-import { capacityConfig } from "../config/workflows.ts";
+import { capacityConfig, workflowsConfig } from "../config/workflows.ts";
+import { INSTALL_HINTS } from "../init/install.ts";
 import { checkHost } from "../sched/host.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -39,8 +40,59 @@ const OPTIONAL_TOOLS: Partial<Record<ToolName, string>> = {
   no_mistakes: "not found (optional: the no-mistakes delivery mode needs it)",
   docker: "not found (optional: visual QA runs Docker environments, and the capacity check counts them)",
   lavish_axi: "not found (optional: a review's questions are then answered only through the leader)",
+  gh_axi: "not found (every GitHub job uses it; the github rule names it)",
+  chrome_devtools_axi: "not found (the browser for visual QA; the browser rule names it)",
+  acli: "not found (jira-axi runs it for every call)",
+  jira_axi: "not found (optional: Jira; the jira rule names it)",
+  sqlite_axi: "not found (optional: SQLite reads; the sqlite rule names it)",
+  treehouse: "not found (optional: git worktrees; the worktree rule names it)",
+  quota_axi: "not found (optional: usage quotas)",
   bun: "not found (optional: without it the daemon does not build Flowryn after a Flowryn merge)",
 };
+
+/** Some workflow holds the browser pool in a stage (visual QA; the default feature-ui does). */
+function usesBrowser(config: FlowrynConfig): boolean {
+  try {
+    return Object.values(workflowsConfig(config)).some((wf) => wf.stages.some((stage) => stage.pools.includes("browser")));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A missing optional tool is info, except the toolkit's while something
+ * depends on it (Q6): gh-axi always (every GitHub job), chrome-devtools-axi
+ * while a workflow runs a browser stage, and acli while jira-axi is installed.
+ */
+function missingStatus(config: FlowrynConfig, name: ToolName, which: Which): CheckStatus {
+  if (REQUIRED_TOOLS.includes(name)) return "fail";
+  if (name === "gh_axi") return "warn";
+  if (name === "chrome_devtools_axi") return usesBrowser(config) ? "warn" : "info";
+  if (name === "acli") return locate(config, "jira_axi", which) ? "warn" : "info";
+  return "info";
+}
+
+type Which = (binary: string) => string | null;
+
+/** resolveTool, with the PATH lookup passed in (tests). */
+function locate(config: FlowrynConfig, name: ToolName, which: Which): string | null {
+  return config.tools[name] ?? whichTool(name, which);
+}
+
+/**
+ * chrome-devtools-axi starts chrome-devtools-mcp from a global install, or else
+ * fetches `npx -y chrome-devtools-mcp@latest` on every start (unpinned, and off
+ * the registry for a sandboxed run): suggest the global install.
+ */
+export function chromeMcpCheck(config: FlowrynConfig, env: NodeJS.ProcessEnv, which: Which = Bun.which): Check | null {
+  if (!locate(config, "chrome_devtools_axi", which)) return null;
+  if (env.CHROME_DEVTOOLS_AXI_MCP_PATH || which("chrome-devtools-mcp")) return null;
+  return {
+    check: "chrome-devtools-mcp",
+    status: "info",
+    detail: "not installed globally: chrome-devtools-axi fetches chrome-devtools-mcp@latest with npx on each start. Install: npm install -g chrome-devtools-mcp",
+  };
+}
 
 const STALE_LOCK_MS = 30_000;
 
@@ -53,12 +105,12 @@ function executable(path: string): boolean {
   }
 }
 
-function toolChecks(config: FlowrynConfig): Check[] {
+export function toolChecks(config: FlowrynConfig, which: Which = Bun.which): Check[] {
   const checks: Check[] = [];
   for (const name of TOOL_NAMES) {
     const required = REQUIRED_TOOLS.includes(name);
     const configured = config.tools[name];
-    const found = resolveTool(config, name);
+    const found = locate(config, name, which);
     if (configured && !existsSync(configured)) {
       checks.push({ check: `tool ${name}`, status: required ? "fail" : "warn", detail: `configured path is missing: ${configured}` });
     } else if (found && !executable(found)) {
@@ -68,7 +120,8 @@ function toolChecks(config: FlowrynConfig): Check[] {
     } else if (found) {
       checks.push({ check: `tool ${name}`, status: required ? "warn" : "info", detail: `found on PATH, not recorded in config: ${found} (flowryn init records it)` });
     } else {
-      checks.push({ check: `tool ${name}`, status: required ? "fail" : "info", detail: required ? "not found" : (OPTIONAL_TOOLS[name] ?? "not found (needed from M2)") });
+      const detail = required ? "not found" : (OPTIONAL_TOOLS[name] ?? "not found (needed from M2)");
+      checks.push({ check: `tool ${name}`, status: missingStatus(config, name, which), detail: `${detail}. Install: ${INSTALL_HINTS[name]}` });
     }
   }
   return checks;
@@ -274,6 +327,8 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const binary = binaryCheck();
   if (binary) checks.push(binary);
   checks.push(...toolChecks(config));
+  const chromeMcp = chromeMcpCheck(config, env.env);
+  if (chromeMcp) checks.push(chromeMcp);
   checks.push(...(await tasksChecks(config)));
   checks.push(...(await lavishCheck(config)));
   checks.push(...databaseChecks(config));

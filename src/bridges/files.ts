@@ -5,6 +5,7 @@ import { VERSION } from "../version.ts";
 import { leaderSettings } from "./claude/settings.ts";
 import { SKILL_NAME, skillMarkdown } from "./skill.ts";
 import { TOOL_MAP } from "../policy/toolkit.ts";
+import type { StaticLayers } from "../policy/static.ts";
 // Embedded by `bun build --compile` (a $bunfs path there); the source path in development.
 import leaderExtensionAsset from "./pi/flowryn-leader.ts" with { type: "file" };
 
@@ -43,6 +44,8 @@ export interface LeaderFilesInput {
   command: string[];
   /** The style block ([style], design section 11), or null when it is off. */
   style: string | null;
+  /** The toolkit's static layer for the Claude settings (src/policy/static.ts). */
+  toolkit: StaticLayers;
 }
 
 let extensionSource: string | null = null;
@@ -70,7 +73,7 @@ export async function writeLeaderFiles(input: LeaderFilesInput): Promise<LeaderF
   writeIfChanged(bin, `#!/bin/sh\nexec ${input.command.map((c) => JSON.stringify(c)).join(" ")} "$@"\n`, 0o700);
 
   const claudeSettings = join(dir, "claude-settings.json");
-  writeIfChanged(claudeSettings, JSON.stringify(leaderSettings({ bin, socket: input.socket }), null, 2) + "\n");
+  writeIfChanged(claudeSettings, JSON.stringify(leaderSettings({ bin, socket: input.socket, toolkit: input.toolkit }), null, 2) + "\n");
 
   const skill = skillMarkdown();
   const skillDir = join(dir, "skills", SKILL_NAME);

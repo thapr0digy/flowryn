@@ -84,6 +84,9 @@ function initDeps(home: string, io: InitDeps["io"], overrides: Partial<InitDeps>
     installService: async () => "installed",
     addProject: async (path) => `project: ${path}`,
     doctor: async () => "doctor ran",
+    install: async (argv) => {
+      throw new Error(`unexpected install: ${argv.join(" ")}`);
+    },
     ...overrides,
   };
 }
@@ -240,6 +243,61 @@ describe("init", () => {
     expect(await runInit(deps)).toBe(1);
     expect(printed.some((l) => l.includes("cannot read"))).toBe(true);
     expect(existsSync(join(home, "config.toml"))).toBe(false);
+  });
+
+  test("Q5: offers the missing tools' installers under one y/N that defaults to no, and installs nothing then", async () => {
+    const home = tempDir();
+    const { io, printed } = scriptedIo({ "Add a project": "" }, { Write: true, "Install the launchd": false });
+    const onPath = (binary: string) => (binary === "tasks-axi" ? "/opt/bin/tasks-axi" : binary === "npm" ? "/opt/bin/npm" : null);
+    expect(await runInit(initDeps(home, io, { which: onPath }))).toBe(0);
+    expect(printed).toContain("  npm install -g gh-axi");
+    expect(printed).not.toContain("  brew tap atlassian/homebrew-acli");
+    expect(printed.some((l) => l.startsWith("  acli: brew is not on PATH"))).toBe(true);
+    expect(printed).toContain("  sh -c 'curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh'");
+    // Harnesses, gh and Docker get a hint only.
+    expect(printed.some((l) => /^\s+(npm install -g @anthropic-ai|brew install gh)/.test(l))).toBe(false);
+    expect(loadConfig(home).config.tools.gh_axi).toBeUndefined();
+  });
+
+  test("Q5: on yes, runs each command in turn, reports a failure and carries on, and records what installed", async () => {
+    const home = tempDir();
+    const ran: string[] = [];
+    const installed = new Set<string>();
+    const { io, printed } = scriptedIo({ "Add a project": "" }, { Write: true, "Run these install": true, "Install the launchd": false });
+    const which = (binary: string) => {
+      if (["tasks-axi", "npm", "brew"].includes(binary)) return `/opt/bin/${binary}`;
+      return installed.has(binary) ? `/opt/bin/${binary}` : null;
+    };
+    const install = async (argv: string[]) => {
+      ran.push(argv.join(" "));
+      if (argv[0] === "brew" && argv[1] === "tap") return 1;
+      if (argv[0] === "npm") for (const pkg of argv.slice(3)) installed.add(pkg);
+      return 0;
+    };
+    expect(await runInit(initDeps(home, io, { which, install }))).toBe(0);
+    expect(ran).toContain("npm install -g gh-axi");
+    // acli's tap failed, so its install step never ran; the tools after it still did.
+    expect(ran).not.toContain("brew install acli");
+    expect(ran).toContain("npm install -g sqlite-axi");
+    expect(printed.some((l) => l.startsWith("  acli: install failed (brew tap atlassian/homebrew-acli exited 1)"))).toBe(true);
+    expect(printed).toContain("  gh_axi: next, gh-axi runs gh: sign in with gh auth login");
+    const tools = loadConfig(home).config.tools;
+    expect(tools.gh_axi).toBe("/opt/bin/gh-axi");
+    expect(tools.chrome_devtools_axi).toBe("/opt/bin/chrome-devtools-axi");
+    expect(tools.acli).toBeUndefined();
+  });
+
+  test("Q5: a missing tasks-axi installed from the offer no longer stops init", async () => {
+    const home = tempDir();
+    let have = false;
+    const { io } = scriptedIo({ "Add a project": "" }, { Write: true, "Run these install": true, "Install the launchd": false });
+    const which = (binary: string) => (binary === "npm" ? "/opt/bin/npm" : binary === "tasks-axi" && have ? "/opt/bin/tasks-axi" : null);
+    const install = async (argv: string[]) => {
+      if (argv.join(" ") === "npm install -g tasks-axi@0.2.5") have = true;
+      return 0;
+    };
+    expect(await runInit(initDeps(home, io, { which, install }))).toBe(0);
+    expect(loadConfig(home).config.tools.tasks_axi).toBe("/opt/bin/tasks-axi");
   });
 
   test("installs the service and registers projects when asked", async () => {

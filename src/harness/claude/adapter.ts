@@ -32,12 +32,18 @@ function hookCommand(bin: string, hook: string): string {
  * this one socket, and writes to the run's spool and report directories (for a
  * ship, also what a commit in its linked worktree writes, while the project's
  * git hooks and config stay denied); they change nothing when the sandbox is
- * off.
+ * off. `deny` is the toolkit's static layer (src/policy/static.ts): Claude
+ * permission rules that hold in bypassPermissions, and hide a denied MCP
+ * server's tools from the model.
  */
-export function workerSettings(bin: string, access: { socket: string; writable: string[]; readOnly?: string[] } = { socket: "", writable: [] }): Record<string, unknown> {
+export function workerSettings(
+  bin: string,
+  access: { socket: string; writable: string[]; readOnly?: string[]; deny?: string[] } = { socket: "", writable: [] },
+): Record<string, unknown> {
   const command = (hook: string) => ({ type: "command", command: hookCommand(bin, hook) });
   const waiter = { ...command("wait-steer"), asyncRewake: true, timeout: WAITER_TIMEOUT_S };
   return {
+    ...(access.deny && access.deny.length > 0 ? { permissions: { deny: access.deny } } : {}),
     hooks: {
       SessionStart: [{ hooks: [command("worker-start")] }],
       // The waiter is armed at every turn start as well as every Stop: Claude fires no hook on an
@@ -80,7 +86,7 @@ function plan(run: RunContext, config: WorkersConfig, sessionArgs: string[], pro
     kind: "claude",
     args: [...sessionArgs, ...sharedArgs(run, config, settingsPath), prompt],
     env,
-    files: [{ path: settingsPath, content: JSON.stringify(workerSettings(run.flowrynBin, { socket: run.daemonSocket, writable: run.writable, readOnly: run.readOnly }), null, 2) + "\n", mode: 0o600 }],
+    files: [{ path: settingsPath, content: JSON.stringify(workerSettings(run.flowrynBin, { socket: run.daemonSocket, writable: run.writable, readOnly: run.readOnly, deny: run.permissionsDeny }), null, 2) + "\n", mode: 0o600 }],
   };
 }
 

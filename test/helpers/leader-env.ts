@@ -15,6 +15,8 @@ import { FakeClaudeLeader } from "./fake-claude-leader.ts";
 import { FakePiLeader } from "./fake-pi-leader.ts";
 import { FakeHerdr } from "./fake-herdr.ts";
 import { cliJson, makeHome, REPO_ROOT, seedRun, startDaemon, waitUntil, type DaemonProc, type SeededRun, type TestHome } from "./harness.ts";
+import { loadConfig } from "../../src/config/config.ts";
+import { configStaticLayers } from "../../src/policy/static.ts";
 
 /** Leader clocks short enough for tests: an interrupt's busy lease, your inactivity, the P0 coalescing window. */
 export const LEADER_TEST_CONFIG = [
@@ -87,7 +89,7 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
     db.close();
   }
   const daemon = await startDaemon(h);
-  const files = await writeLeaderFiles({ home: h.home, socket: join(h.home, "run", "flowrynd.sock"), command: ["bun", join(REPO_ROOT, "src/main.ts")], style: STYLE_BLOCK });
+  const files = await writeLeaderFiles({ home: h.home, socket: join(h.home, "run", "flowrynd.sock"), command: ["bun", join(REPO_ROOT, "src/main.ts")], style: STYLE_BLOCK, toolkit: configStaticLayers(loadConfig(h.home).config) });
   const fakes: { kill(): void }[] = [];
   const cwd = join(h.home, "leader-cwd");
   mkdirSync(cwd, { recursive: true });

@@ -4,7 +4,27 @@ import { dirname, isAbsolute, join, sep } from "node:path";
 import { configPath, flowrynHome, toAbsolute } from "./paths.ts";
 import { FlowrynError } from "../api/errors.ts";
 
-export const TOOL_NAMES = ["tasks_axi", "node", "git", "gh", "herdr", "claude", "pi", "no_mistakes", "docker", "lavish_axi", "bun"] as const;
+export const TOOL_NAMES = [
+  "tasks_axi",
+  "node",
+  "git",
+  "gh",
+  "herdr",
+  "claude",
+  "pi",
+  "no_mistakes",
+  "docker",
+  "lavish_axi",
+  // The toolkit (src/policy/toolkit.ts): the one tool for each job; acli is jira-axi's dependency.
+  "gh_axi",
+  "jira_axi",
+  "acli",
+  "chrome_devtools_axi",
+  "sqlite_axi",
+  "quota_axi",
+  "treehouse",
+  "bun",
+] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 /**
@@ -23,6 +43,13 @@ export const TOOL_BINARIES: Record<ToolName, readonly string[]> = {
   no_mistakes: ["no-mistakes"],
   docker: ["docker"],
   lavish_axi: ["lavish-axi"],
+  gh_axi: ["gh-axi"],
+  jira_axi: ["jira-axi"],
+  acli: ["acli"],
+  chrome_devtools_axi: ["chrome-devtools-axi"],
+  sqlite_axi: ["sqlite-axi"],
+  quota_axi: ["quota-axi"],
+  treehouse: ["treehouse"],
   bun: ["bun"],
 };
 
