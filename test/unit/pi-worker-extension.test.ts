@@ -26,6 +26,13 @@ async function emit(name: string, event: Record<string, unknown> = {}): Promise<
   for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
 }
 
+/** A tool_call as Pi emits it: what its handlers return (a {block, reason} blocks the call). */
+async function toolCall(toolName: string, input: Record<string, unknown>): Promise<unknown[]> {
+  const results: unknown[] = [];
+  for (const handler of handlers.get("tool_call") ?? []) results.push(await handler({ type: "tool_call", toolName, input }, ctx));
+  return results;
+}
+
 /** The stand-in flowryn's calls: "hook <name> --harness pi ... <stdin>", one per line. */
 function calls(): string[] {
   return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : [];
@@ -44,6 +51,12 @@ echo "$* $input" >> ${JSON.stringify(log)}
 case "$2" in
   wait-steer)
     if [ -f ${JSON.stringify(join(dir, "fired"))} ]; then echo '{"exit":true}'; else touch ${JSON.stringify(join(dir, "fired"))}; echo '${JSON.stringify({ steer: { id: "m1", line: LINE } })}'; fi ;;
+  tool-check)
+    case "$input" in
+      *'gh pr'*) echo '{"block":true,"reason":"use gh-axi","rule":"github"}' ;;
+      *'no answer'*) ;;
+      *) echo '{}' ;;
+    esac ;;
   stop)
     if [ -f ${JSON.stringify(join(dir, "reminded"))} ]; then echo '{"run":"r1"}'; else touch ${JSON.stringify(join(dir, "reminded"))}; echo '${JSON.stringify({ run: "r1", reminder: true, context: TURN_END_REMINDER })}'; fi ;;
 esac
@@ -101,5 +114,21 @@ describe("the Pi worker extension's steer delivery", () => {
     await waitUntil(() => calls().filter((c) => c.startsWith("hook stop")).length === 2, 5_000, "the second stop");
     await Bun.sleep(200);
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe("the Pi worker extension's toolkit check", () => {
+  test("every tool call asks hook tool-check with the tool, its input and the cwd, and blocks what it denies", async () => {
+    expect(await toolCall("bash", { command: "gh pr list" })).toEqual([{ block: true, reason: "use gh-axi" }]);
+    const asked = calls().filter((c) => c.startsWith("hook tool-check")).at(-1)!;
+    expect(asked).toStartWith("hook tool-check --harness pi ");
+    expect(JSON.parse(asked.slice("hook tool-check --harness pi ".length))).toEqual({ tool_name: "bash", tool_input: { command: "gh pr list" }, cwd: "/w" });
+    expect(await toolCall("edit", { path: "src/a.ts" })).toEqual([undefined]);
+  });
+
+  test("a check that does not answer blocks the call (fails closed)", async () => {
+    const [result] = (await toolCall("bash", { command: "echo no answer" })) as { block: boolean; reason: string }[];
+    expect(result).toMatchObject({ block: true });
+    expect(result!.reason).toContain("tool check did not answer");
   });
 });
