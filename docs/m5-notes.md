@@ -1,5 +1,7 @@
 # M5 notes
 
+> **Frozen on 2026-10-09.** New work goes in its own file under [`docs/notes/`](notes/README.md). Fix this file in place; never add a section to it.
+
 M5 builds section 17's "M5 · Workflows, capacity, autonomy" of [`design-v3.html`](design-v3.html) on top of [M1](m1-notes.md) to [M4](m4-notes.md): workflow stages and review gates, capacity pools with the host check and Docker label evidence, plans and auto-dispatch on landing, the terse style block, and the three stage skills. This file records where the design left room, what M5 chose, and what the exit runs showed. Each item names the code that holds it. [`v1-status.md`](v1-status.md) lists every v1 item and where it landed.
 
 ## Workflows and stages
