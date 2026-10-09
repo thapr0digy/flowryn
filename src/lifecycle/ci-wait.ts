@@ -185,7 +185,7 @@ export function ciWaitSteer(decisionId: string, choice: string, words: string | 
     return (
       `The user chose merge-main for ${decisionId}: your no-mistakes pipeline waited in CI with no checks registered. ` +
       "Merge origin/main into your branch with a new commit (git fetch origin, then git merge origin/main; never rebase or force-push), run the tests, " +
-      "then run the no-mistakes pipeline again so it pushes the merge. If it says a run is still active, end only that run's CI wait first: no-mistakes axi abort. " +
+      "then no-mistakes rerun (it cancels this run's CI wait and validates the branch again) and drive it with no-mistakes axi as usual. " +
       `Then deliver as usual.${said}`
     );
   }
