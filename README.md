@@ -18,6 +18,8 @@ The v1 completion pass built the items M1 to M5 left open: the harness version c
 
 The architecture spec is [`docs/design-v3.html`](docs/design-v3.html); open it in a browser. [`docs/m0-verdicts.md`](docs/m0-verdicts.md) records every M0 spike's verdict (Claude Code, Herdr, tasks-axi, no-mistakes and Pi), the tool versions tested, and each edit the verdicts made to the design. [`docs/m1-notes.md`](docs/m1-notes.md), [`docs/m2-notes.md`](docs/m2-notes.md), [`docs/m3-notes.md`](docs/m3-notes.md), [`docs/m4-notes.md`](docs/m4-notes.md) and [`docs/m5-notes.md`](docs/m5-notes.md) list the choices each milestone made where the design leaves room, and the live results of M2 to M5 (the v1 completion pass is the last section of the M5 notes).
 
+Work after 2026-10-09 has one notes file per feature in [`docs/notes/`](docs/notes/README.md): the choices it made, its live results, its status and the configuration keys it adds. The milestone notes, the cutover notes and `docs/v1-status.md` are frozen records of the work before that. `bun run notes` prints every feature with its status, pull request and configuration keys.
+
 ## Development
 
 Requirements: macOS, [Bun](https://bun.sh) 1.3.8, Node with `tasks-axi` 0.2.5 on PATH (`npm install -g tasks-axi@0.2.5`), `git`, and `jq` for the fixtures.

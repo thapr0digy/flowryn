@@ -1,5 +1,7 @@
 # Flowryn v1 status
 
+> **Frozen on 2026-10-09.** Work after that records its status in the `Status` line of its own file under [`docs/notes/`](notes/README.md); `bun run notes` lists them. Fix this file in place; never add a row or section to it.
+
 v1 is M1 through M5 of [`design-v3.html`](design-v3.html) section 17, after the M0 spikes, completed by one more pass for the items the milestones left open. This file lists every v1 item of the design: done, with the milestone and pull request that delivered it, or not built, with the reason. Each milestone's notes ([M1](m1-notes.md), [M2](m2-notes.md), [M3](m3-notes.md), [M4](m4-notes.md), [M5](m5-notes.md)) record the choices it made and its live results; the completion pass is the last section of the [M5 notes](m5-notes.md#the-v1-completion-pass); [`m0-verdicts.md`](m0-verdicts.md) records the spikes.
 
 | Milestone | Pull request |
