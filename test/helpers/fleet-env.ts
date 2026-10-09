@@ -114,6 +114,10 @@ export interface FleetOptions {
   turnEndGuard?: boolean;
   /** The fake Herdr starts these scripts in place of the FAKE: worker, per harness kind. */
   harnessScripts?: FakeHerdrOptions["harnessScripts"];
+  /** Run the daemon from this command (a compiled binary's `daemon run`) rather than the source. */
+  daemonProgram?: string[];
+  /** More environment for the daemon. */
+  daemonEnv?: Record<string, string>;
 }
 
 export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv> {
@@ -159,8 +163,8 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   }
   const origin = options.origin ? makeOriginRepo(join(home, "proj")) : null;
   const repo = origin ? origin.repo : makeRepo(join(home, "repo"));
-  const daemonEnv = options.supervised ? superviseWithScript(h) : {};
-  let daemon = await startDaemon(h, daemonEnv);
+  const daemonEnv = { ...(options.supervised ? superviseWithScript(h) : {}), ...options.daemonEnv };
+  let daemon = await startDaemon(h, daemonEnv, options.daemonProgram);
   const env = { FLOWRYN_TOKEN: leader };
   const addArgs = ["project", "add", repo, "--id", "web", "--mode", options.mode ?? "local-only"];
   if (origin) addArgs.push("--repo-url", "https://github.com/acme/web.git");
@@ -211,7 +215,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
       return last!;
     },
     async restartDaemon() {
-      daemon = await startDaemon(h, daemonEnv);
+      daemon = await startDaemon(h, daemonEnv, options.daemonProgram);
     },
     async stopHerdr() {
       herdrUp = false;

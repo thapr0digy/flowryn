@@ -31,7 +31,7 @@ const HANDOFF_KEY = "restart_handoff";
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
 
-export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "verifying";
+export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "verifying" | "contract_check";
 
 /** One thing a restart now would break. */
 export interface Guard {
@@ -46,6 +46,8 @@ export interface InMemoryWork {
   cleanups: Iterable<string>;
   launching: Iterable<string>;
   approvalTasks: Iterable<string>;
+  /** The daemon's automatic contract check (src/contracts/auto.ts): launchd's restart kills its process group, the check with it. */
+  contractChecks?: Iterable<{ harness: string; version: string; startedAt: number }>;
 }
 
 function taskOfRun(db: Db, runId: string): string | null {
@@ -99,6 +101,7 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
   for (const task of work.approvalTasks) guards.push({ kind: "approval", task, detail: "flowryn approve is waiting for its code" });
+  for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
   const verifying = db.query("SELECT id, task_id, pr_url, started_at FROM verifications WHERE state = 'running' ORDER BY started_at").all() as { id: string; task_id: string | null; pr_url: string; started_at: number }[];
   for (const v of verifying) guards.push({ kind: "verifying", task: v.task_id, detail: `flowryn verify ${v.id} of ${v.pr_url} has run for ${ago(now - v.started_at)}` });
   return guards;

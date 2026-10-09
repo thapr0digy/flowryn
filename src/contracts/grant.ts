@@ -54,12 +54,17 @@ export function leaderRecordLine(harness: string, version: string, build: string
   return `${harness} ${version} passed, recorded by the leader (build ${build ?? "dev"})`;
 }
 
+/** "claude 2.1.300 passed, recorded automatically (build ab12cd34ef56)": the user's line for the daemon's own record. */
+export function autoRecordLine(harness: string, version: string, build: string | null): string {
+  return `${harness} ${version} passed, recorded automatically (build ${build ?? "dev"})`;
+}
+
 /** What a recording run writes to its report (src/contracts/report.ts) besides the result. */
 export interface ReportStamp {
   mode: "record" | "verify-only";
   build: string | null;
-  /** Who ran it, by the caller's environment: a run token is a worker, another token the leader. */
-  by: "human" | "leader" | "worker";
+  /** Who ran it, by the caller's environment: a run token is a worker, another token the leader; "daemon" for its automatic check. */
+  by: "human" | "leader" | "worker" | "daemon";
 }
 
 function isUnder(path: string, dir: string): boolean {
@@ -67,29 +72,34 @@ function isUnder(path: string, dir: string): boolean {
 }
 
 /**
- * A leader's record must point at the report its run wrote: in
- * `<data_dir>/contracts/`, a passing recording run of this harness, version
- * and build. Not proof against a forged file (docs/cutover-notes.md), but a
- * confused leader cannot record a failed or verify-only run by mistake.
+ * A record must point at the report its run wrote: in `<data_dir>/contracts/`,
+ * a passing recording run of this harness, version and build. Not proof
+ * against a forged file (docs/cutover-notes.md), but a confused leader cannot
+ * record a failed or verify-only run by mistake, and the daemon's automatic
+ * check (src/contracts/auto.ts) records only what its own build proved.
+ * Returns why the report does not do, or null when it does.
  */
-function reportRefusal(why: string): FlowrynError {
-  return new FlowrynError("not_installed_build", `the leader's record needs its run's report: ${why}`, "run flowryn doctor --contracts again with the installed build");
-}
-
-export function checkLeaderReport(dataDir: string, report: string | null, expected: { harness: string; version: string; build: string }): void {
-  if (!report) throw reportRefusal("no --report");
+export function reportProblem(dataDir: string, report: string | null, expected: { harness: string; version: string; build: string }): string | null {
+  if (!report) return "no --report";
   const dir = join(dataDir, "contracts");
-  if (!existsSync(report)) throw reportRefusal(`${report} does not exist`);
-  if (!existsSync(dir)) throw reportRefusal(`${dir} does not exist`);
-  if (!isUnder(realpathSync(report), realpathSync(dir))) throw reportRefusal(`${report} is not in ${dir}`);
+  if (!existsSync(report)) return `${report} does not exist`;
+  if (!existsSync(dir)) return `${dir} does not exist`;
+  if (!isUnder(realpathSync(report), realpathSync(dir))) return `${report} is not in ${dir}`;
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(readFileSync(report, "utf8")) as Record<string, unknown>;
   } catch {
-    throw reportRefusal(`${report} is not a contract report`);
+    return `${report} is not a contract report`;
   }
-  if (parsed.passed !== true) throw reportRefusal(`${report} is not a passing run`);
-  if (parsed.mode !== "record") throw reportRefusal(`${report} is a ${String(parsed.mode ?? "unmarked")} run, not a recording one`);
-  if (parsed.harness !== expected.harness || parsed.version !== expected.version) throw reportRefusal(`${report} is for ${String(parsed.harness)} ${String(parsed.version)}`);
-  if (parsed.build !== expected.build) throw reportRefusal(`${report} was written by build ${String(parsed.build)}`);
+  if (parsed.passed !== true) return `${report} is not a passing run`;
+  if (parsed.mode !== "record") return `${report} is a ${String(parsed.mode ?? "unmarked")} run, not a recording one`;
+  if (parsed.harness !== expected.harness || parsed.version !== expected.version) return `${report} is for ${String(parsed.harness)} ${String(parsed.version)}`;
+  if (parsed.build !== expected.build) return `${report} was written by build ${String(parsed.build)}`;
+  return null;
+}
+
+/** The leader's record: its report must do (reportProblem), or the record is refused. */
+export function checkLeaderReport(dataDir: string, report: string | null, expected: { harness: string; version: string; build: string }): void {
+  const problem = reportProblem(dataDir, report, expected);
+  if (problem) throw new FlowrynError("not_installed_build", `the leader's record needs its run's report: ${problem}`, "run flowryn doctor --contracts again with the installed build");
 }

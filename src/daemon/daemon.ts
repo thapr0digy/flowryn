@@ -55,8 +55,9 @@ import { Scheduler } from "../sched/scheduler.ts";
 import type { SchedServices } from "../sched/services.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
 import { checkHarnessesAtStartup, gateHarness } from "../lifecycle/harness-gate.ts";
-import { alertHerdrIfDue, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
-import { PENDING_POLL_MS, RestartController, buildIdOfBytes, recordRestarted, scriptSupervisor } from "./restart.ts";
+import { alertHerdrIfDue, herdrEpisode, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
+import { PENDING_POLL_MS, RestartController, buildIdOfBytes, handoffPending, readPending, recordRestarted, scriptSupervisor } from "./restart.ts";
+import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 
@@ -444,6 +445,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     // Leader-safe restart: the guards read this daemon's in-memory work; launchd (or a test's script) restarts it.
     const supervisorFile = env.FLOWRYN_SUPERVISOR;
+    let autoCheck: AutoContractChecker | null = null;
     const restart = new RestartController({
       db: database,
       env,
@@ -455,6 +457,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         cleanups: cleanups.keys(),
         launching: launcher.activeRuns(),
         approvalTasks: delivery.challenges.openTasks(Date.now()),
+        contractChecks: autoCheck?.running() ?? [],
       }),
       supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
     });
@@ -469,6 +472,26 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
       restart,
       git: (args, cwd) => git(args, cwd),
+    });
+    // Relaxed policy: the daemon runs the recording contract check on a new harness version itself, from its own build.
+    autoCheck = new AutoContractChecker({
+      db: database,
+      config: () => config,
+      env,
+      now: Date.now,
+      log,
+      info: () => info,
+      harnessVersion,
+      restartBusy: () => restart.inProgress || readPending(database) !== null || handoffPending(database),
+      herdrDown: () => {
+        if (!runtime) return "no Herdr socket";
+        const episode = herdrEpisode(database);
+        return episode ? episode.detail || "unreachable" : null;
+      },
+      afterPass: () => {
+        scheduler?.kick();
+        reconciler?.schedule();
+      },
     });
     // A review gate's questions: the widget beside its page, and a lavish-axi poll per open gate.
     const lavishTool = (): string | null => {
@@ -568,6 +591,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     }, ATTENTION_TICK_MS);
 
     buildWatch.start();
+    autoCheck.start();
     const pendingRestart = setInterval(() => void restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`)), PENDING_POLL_MS);
 
     let passing = false;
@@ -615,6 +639,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(attentionTick);
     clearInterval(pendingRestart);
     buildWatch.stop();
+    await autoCheck.stop();
     reconciler.stop();
     scheduler.stop();
     lavishPoller.stop();

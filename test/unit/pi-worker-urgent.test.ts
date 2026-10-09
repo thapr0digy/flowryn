@@ -75,6 +75,7 @@ case "$2" in
     if [ -f ${JSON.stringify(join(dir, "stop"))} ]; then echo '{"exit":true}'; exit 0; fi
     if [ -f ${next} ]; then cat ${next}; rm -f ${next}; else sleep 0.05; echo '{"wait":true}'; fi ;;
   preempt) echo "$reply" ;;
+  tool-check) echo '{}' ;;
 esac
 `,
   );

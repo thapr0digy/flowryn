@@ -286,11 +286,15 @@ export async function waitUntil(check: () => boolean | Promise<boolean>, timeout
   throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
 }
 
-/** Start flowrynd as a subprocess and wait until it answers the handshake; refused without FLOWRYN_NOTIFY=off. */
-export async function startDaemon(h: TestHome, extraEnv: Record<string, string> = {}): Promise<DaemonProc> {
+/**
+ * Start flowrynd as a subprocess and wait until it answers the handshake;
+ * refused without FLOWRYN_NOTIFY=off. `program` runs another command (a
+ * compiled binary's `daemon run`) in place of the source.
+ */
+export async function startDaemon(h: TestHome, extraEnv: Record<string, string> = {}, program: string[] = ["bun", MAIN, "daemon", "run"]): Promise<DaemonProc> {
   const env = { ...h.env, ...extraEnv, FLOWRYN_LOG_STDERR: "1" };
   requireNotificationsOff(env, "the test harness");
-  const proc = Bun.spawn(["bun", MAIN, "daemon", "run"], {
+  const proc = Bun.spawn(program, {
     cwd: REPO_ROOT,
     env,
     stdin: "ignore",

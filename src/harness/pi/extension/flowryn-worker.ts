@@ -25,6 +25,8 @@
 //   - aborts the current run when the daemon asks for an interrupt (ctx.abort,
 //     M0 p14). A steer queued before an abort is dropped by Pi, so the daemon
 //     counts delivery only by the worker's ack and re-rings otherwise;
+//   - asks `hook tool-check` before every tool call and blocks what the
+//     toolkit rules deny (src/policy/toolkit.ts; the check decides, not this file);
 //   - for an urgent steer (Tier 2) delivered into a busy turn: blocks every
 //     tool call until the steer is seen (tool_call {block}, M0 p08), so the
 //     batch ends and the queued steer goes into the next request; and once the
@@ -164,10 +166,18 @@ export default function flowrynWorker(pi: any): void {
   });
 
   // While an urgent steer is unseen, no tool starts: the batch ends and the queued steer goes next (M0 p08, p13).
-  pi.on("tool_call", async (_event: any, c: any) => {
+  // Otherwise the toolkit rules decide, in `hook tool-check`; a check that does not answer blocks the call.
+  pi.on("tool_call", async (event: any, c: any) => {
     remember(c);
-    if (!urgent) return undefined;
-    return { block: true, reason: `Blocked by Flowryn: urgent steer [${urgent.id}] is waiting; read it, then redo this call if it still applies.` };
+    if (urgent) return { block: true, reason: `Blocked by Flowryn: urgent steer [${urgent.id}] is waiting; read it, then redo this call if it still applies.` };
+    const reply = await runHook("tool-check", { tool_name: String(event?.toolName ?? ""), tool_input: event?.input ?? {}, cwd: c?.cwd ?? process.cwd() });
+    let verdict: Json;
+    try {
+      verdict = JSON.parse(reply.stdout.trim().split("\n").pop() ?? "");
+    } catch {
+      return { block: true, reason: "Blocked by Flowryn: its tool check did not answer ($FLOWRYN_BIN hook tool-check); retry once, then $FLOWRYN_BIN report blocked." };
+    }
+    return verdict?.block === true ? { block: true, reason: String(verdict.reason ?? "Blocked by Flowryn's toolkit rules.") } : undefined;
   });
 
   pi.on("tool_execution_end", async (event: any, c: any) => {
