@@ -17,12 +17,19 @@ import {
   localStamp,
   readPending,
   recordRestarted,
+  VALIDATION_STATUS_FRESH_MS,
+  durationSeconds,
+  guardLines,
   restartGuards,
   smokeCheck,
   type InMemoryWork,
   type ProcResult,
   type Supervisor,
 } from "../../src/daemon/restart.ts";
+import { writeSnapshot } from "../../src/journal/snapshot.ts";
+import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
+import { recordEvidence } from "../../src/lifecycle/runs.ts";
+import { parseActiveSteps, parseNmStatus, waitsOnlyOnCi } from "../../src/policy/nomistakes.ts";
 import { agentPid, launchdSupervisor, plistDrift, type LaunchdDeps, type PlistSpec } from "../../src/service/launchd.ts";
 
 let dir: string;
@@ -124,6 +131,129 @@ describe("restart guards", () => {
       ["launching", "t2"],
       ["approval", "t2"],
     ]);
+  });
+});
+
+/** `no-mistakes axi status` of a ship waiting at CI, as v1.53.0 printed it on this machine (2026-10-09). */
+const NM_CI_WAIT = `run:
+  id: "01M4F3XPC6MZ2H5KEF20EJWGVN"
+  branch: b
+  status: running
+  head: 9b7fd75f
+  pr: "https://github.com/thapr0digy/flowryn/pull/47"
+  findings: 1 info
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,1601
+    review,completed,1,318555
+    test,completed,0,124084
+    document,completed,0,60499
+    lint,completed,0,19
+    push,completed,0,2957
+    pr,completed,0,21437
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
+    ci,running,2h17m,"9m24s ago: log: repository declares no CI (no_ci: true) - treating as all checks passed - still monitoring until merged or closed","",starting
+`;
+
+/** The same run earlier, in its review step with a local agent. */
+const NM_REVIEW = `run:
+  id: "01M4F3XPC6MZ2H5KEF20EJWGVN"
+  branch: b
+  status: running
+  head: 9b7fd75f
+  active_steps[2]{step,status,active_for,last_activity,agent_pid,round}:
+    review,running,42m,"1m ago: agent: reading src/a.ts, src/b.ts",81234,1
+    ci,running,3m,"",,starting
+`;
+
+describe("no-mistakes active steps", () => {
+  test("assumption: the status names its active steps by column, and a CI wait has no agent pid", () => {
+    expect(parseActiveSteps(NM_CI_WAIT)).toEqual([{ step: "ci", status: "running", activeFor: "2h17m", agentPid: "" }]);
+    const review = parseActiveSteps(NM_REVIEW)!;
+    expect(review.map((s) => [s.step, s.agentPid])).toEqual([
+      ["review", "81234"],
+      ["ci", ""],
+    ]);
+    expect(waitsOnlyOnCi(parseNmStatus(NM_CI_WAIT)!)).toBe(true);
+    expect(waitsOnlyOnCi(parseNmStatus(NM_REVIEW)!)).toBe(false);
+  });
+
+  test("a status without the table, or that does not decode, says nothing about local work", () => {
+    const old = NM_CI_WAIT.slice(0, NM_CI_WAIT.indexOf("  active_steps"));
+    expect(parseActiveSteps(old)).toBeNull();
+    expect(waitsOnlyOnCi(parseNmStatus(old)!)).toBe(false);
+    expect(parseActiveSteps("run:\n  active_steps[2]{step}:\n    ci\n")).toBeNull();
+    expect(waitsOnlyOnCi({ outcome: "", activeSteps: [] })).toBe(false);
+    expect(waitsOnlyOnCi({ outcome: "passed", activeSteps: [{ step: "ci", status: "running", activeFor: "1m", agentPid: "" }] })).toBe(false);
+  });
+
+  test("a CI fix round runs a local agent: it is not a CI wait", () => {
+    expect(waitsOnlyOnCi({ outcome: "", activeSteps: [{ step: "ci", status: "fixing", activeFor: "4m", agentPid: "777" }] })).toBe(false);
+  });
+
+  test("durations read as no-mistakes prints them", () => {
+    expect(durationSeconds("2h17m")).toBe(8220);
+    expect(durationSeconds("9m24s")).toBe(564);
+    expect(durationSeconds("350ms")).toBe(0);
+    expect(durationSeconds("")).toBe(0);
+  });
+});
+
+describe("the validation guard and a CI wait", () => {
+  function validating(run: string, status: string | null, observedAgo = 5_000): void {
+    tx(db, () => {
+      db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', ?1, 'ship', ?2)").run(run, Date.now() - 34 * 60_000);
+      if (status !== null) {
+        const nm = parseNmStatus(status)!;
+        recordEvidence(db, run, "nomistakes", 1, { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps }, Date.now() - observedAgo);
+      }
+    });
+  }
+
+  test("a validation that only waits on external CI does not block", () => {
+    validating("r1", NM_CI_WAIT);
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+  });
+
+  test("a step with a local agent blocks, naming the oldest step and its agent", () => {
+    validating("r1", NM_REVIEW);
+    const guards = restartGuards(db, NO_WORK, Date.now());
+    expect(guards.map((g) => [g.kind, g.task])).toEqual([["validation", "t1"]]);
+    expect(guards[0]!.detail).toBe("no-mistakes step review, running 42m, agent pid 81234; validating for 34 min");
+  });
+
+  test("a status read too long ago blocks (fail closed)", () => {
+    validating("r1", NM_CI_WAIT, VALIDATION_STATUS_FRESH_MS + 60_000);
+    const guards = restartGuards(db, NO_WORK, Date.now());
+    expect(guards.map((g) => g.kind)).toEqual(["validation"]);
+    expect(guards[0]!.detail).toContain("no no-mistakes status read in the last 2 min");
+  });
+
+  test("no status at all, or another branch's run, blocks", () => {
+    validating("r1", null);
+    validating("r2", NM_CI_WAIT.replace("branch: b", "branch: other"));
+    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.task)).toEqual(["t1", "t2"]);
+  });
+
+  test("each blocking read says why: none recent, another branch's run, or no run", () => {
+    validating("r1", null);
+    validating("r2", NM_CI_WAIT.replace("branch: b", "branch: other"));
+    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.detail)).toEqual([
+      "validating for 34 min; no no-mistakes status read in the last 2 min",
+      "validating for 34 min; the latest no-mistakes status is a run on branch other, not b",
+    ]);
+    tx(db, () => recordEvidence(db, "r2", "nomistakes", 1, { run: null }, Date.now() - 5_000));
+    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.detail)).toEqual([
+      "validating for 34 min; no no-mistakes status read in the last 2 min",
+      "validating for 34 min; the latest no-mistakes status names no run",
+    ]);
+  });
+
+  test("a guard line names the task's title when the backlog has one", () => {
+    tx(db, () => writeSnapshot(db, "backlog", "h", [{ id: "t1", title: "Leader Stop hook", links: [] } as unknown as BacklogTask]));
+    validating("r1", NM_REVIEW);
+    expect(guardLines(restartGuards(db, NO_WORK, Date.now()))).toEqual(['validation: t1 "Leader Stop hook" (no-mistakes step review, running 42m, agent pid 81234; validating for 34 min)']);
   });
 });
 

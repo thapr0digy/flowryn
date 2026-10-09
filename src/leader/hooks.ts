@@ -4,7 +4,7 @@ import { awaySuggestion, expireAway, getAway, takePendingBrief, type AwayPosture
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
 import { QUESTION_KINDS } from "../attention/items.ts";
-import { composeDigest, digestCandidates, isQuestionWake, isWakePrompt, p0Candidate, p0Line, questionBatch, questionsText, questionWakeLine, type RankedItem } from "../attention/router.ts";
+import { composeDigest, digestCandidates, isQuestionWake, isWakePrompt, p0Candidate, p0Line, questionBatch, questionsText, questionWakeLine, relayBatch, relayText, type RankedItem } from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
 import { awayConfig } from "../config/leader.ts";
 import { localDate } from "../lifecycle/dates.ts";
@@ -624,7 +624,9 @@ export function approvalKey(ctx: HandlerCtx): HandlerResult {
 /**
  * The turn ended (Claude Stop, Pi agent_settled): what it carried is
  * presented. A busy-time P0 continues a Claude turn, at most twice in a row;
- * Stop asks once, and a P0 that arrives after goes to the waiter.
+ * Stop asks once, and a P0 that arrives after goes to the waiter. Otherwise
+ * worker questions and items to relay (RELAY_KINDS) not yet shown to the
+ * session continue it once each, together.
  */
 export function stop(ctx: HandlerCtx): HandlerResult {
   const s = leaderSession(ctx);
@@ -642,12 +644,24 @@ export function stop(ctx: HandlerCtx): HandlerResult {
       return { data: { context: p0Line(item), item: item.id, presented } };
     }
     // Worker questions ride the turn that is ending at once: the batch window only holds back a wake.
+    // Items to relay (a worker's report, a dropped restart) ride in the same continuation, each once.
+    const carryNow = (pushed: RankedItem) => carry(ctx.db, { itemId: pushed.id, session: s.session_id, turn: s.turn_no, path: "continuation", now });
     const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
-    const carried = (batch?.items ?? []).filter((q) => carry(ctx.db, { itemId: q.id, session: s.session_id, turn: s.turn_no, path: "continuation", now }));
-    if (carried.length > 0) {
+    const questions = (batch?.items ?? []).filter(carryNow);
+    const relay = relayBatch(ctx.db, s.session_id);
+    const relayed = (relay?.items ?? []).filter(carryNow);
+    if (questions.length > 0 || relayed.length > 0) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
-      appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: carried.map((q) => q.id), path: "continuation", turn: s.turn_no }, ts: now });
-      return { data: { context: questionsText(carried, batch!.more), item: carried[0]!.id, presented } };
+      const texts: string[] = [];
+      if (questions.length > 0) {
+        appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: questions.map((q) => q.id), path: "continuation", turn: s.turn_no }, ts: now });
+        texts.push(questionsText(questions, batch!.more));
+      }
+      if (relayed.length > 0) {
+        appendEvent(ctx.db, { source: "hook", kind: "leader.relay_pushed", payload: { session: s.session_id, items: relayed.map((r) => r.id), path: "continuation", turn: s.turn_no }, ts: now });
+        texts.push(relayText(relayed, relay!.more));
+      }
+      return { data: { context: texts.join("\n"), item: (questions[0] ?? relayed[0])!.id, presented } };
     }
   }
   markIdle(ctx, s, now, "stop");

@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractPrefix, removeOwnWorktrees, type GitRun } from "../../src/contracts/cleanup.ts";
 import { contractBody, contractEstimateSeconds, contractSteps, type ContractEnv, type ContractState, type ContractStep } from "../../src/contracts/suite.ts";
-import { runContractSteps, scratchConfig, type ContractOptions } from "../../src/contracts/runner.ts";
+import { removeScratchHome, runContractSteps, scratchConfig, type ContractOptions } from "../../src/contracts/runner.ts";
 import { pinDrift, pinHarness } from "../../src/contracts/pin.ts";
 import type { FlowrynConfig } from "../../src/config/config.ts";
 import { harnessVersion } from "../../src/lifecycle/fleet-services.ts";
+import type { RunRow } from "../../src/lifecycle/runs.ts";
+import type { MessageRow } from "../../src/lifecycle/steers.ts";
 import { contractPlan } from "../../src/cli/commands/setup.ts";
 
 const dirs: string[] = [];
@@ -139,6 +141,73 @@ describe("contract progress", () => {
   });
 });
 
+/**
+ * A Pi worker behind a slow model, as the extension treats an urgent steer
+ * (src/harness/pi/extension/flowryn-worker.ts): every steer is acknowledged at
+ * once, and the long command starts `startMs` after the acknowledgement that
+ * asked for it. An urgent steer that arrives while the command runs cuts it;
+ * one that arrives before blocks the command's tool call and is read without
+ * a cut, which is what the live suite met on a free model.
+ */
+function slowPiWorker(startMs: number): { env: ContractEnv; asked: string[] } {
+  const steers: MessageRow[] = [];
+  const asked: string[] = [];
+  let commandAt = Number.POSITIVE_INFINITY;
+  const running = () => Date.now() >= commandAt;
+  const env: ContractEnv = {
+    harness: "pi",
+    scripted: false,
+    async call(verb, args) {
+      const now = Date.now();
+      const id = `m${steers.length + 1}`;
+      const urgent = args.urgent === true;
+      steers.push({ id, created_at: now, carried_at: now, seen_at: now, acked_at: now, urgent: urgent ? 1 : 0, preempted_at: urgent && running() ? now : null } as MessageRow);
+      if (!urgent) commandAt = now + startMs;
+      return { ok: verb === "steer", data: { steer: id } };
+    },
+    run: () => ({ proc_pid: 1, proc_start: 1, proc_exe: "pi", liveness: "idle" }) as RunRow,
+    events: () => [],
+    steers: () => steers,
+    lastHook: () => null,
+    async waitFor(what, timeoutMs, check) {
+      const until = Date.now() + timeoutMs;
+      for (;;) {
+        const value = await check();
+        if (value) return value;
+        if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
+        await Bun.sleep(10);
+      }
+    },
+    exitWorker: async () => ({ ok: true, detail: "" }),
+    isAlive: async () => true,
+    async commandRunning(command) {
+      asked.push(command);
+      return running();
+    },
+    log: () => {},
+  };
+  return { env, asked };
+}
+
+const urgentStep = contractSteps("pi").find((s) => s.name === "urgent while busy")!;
+
+describe("contract urgent step on Pi", () => {
+  test("sends the urgent steer only once the long command runs, however long the model takes to call it", async () => {
+    // A fixed two seconds after the acknowledgement was the old wait; this model takes longer.
+    const { env, asked } = slowPiWorker(2_500);
+    const detail = await urgentStep.run(env, { ...state });
+    expect(detail).toContain("cut a tool");
+    expect(asked.at(-1)).toBe("perl -e sleep 60");
+  }, 10_000);
+
+  test("still fails a steer acknowledged without a cut", async () => {
+    // The process check reads a command that is not the one the steer meets: the steer blocks a tool call instead.
+    const { env } = slowPiWorker(60_000);
+    const blocking: ContractEnv = { ...env, commandRunning: async () => true };
+    await expect(urgentStep.run(blocking, { ...state })).rejects.toThrow("m2 was acknowledged without cutting the running tool");
+  }, 10_000);
+});
+
 /** A fake Claude native install: versions/<ver> files and a `claude` symlink the updater repoints. */
 function fakeClaudeInstall(): { link: string; install(version: string): string; repoint(version: string): void } {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "fw-pin-")));
@@ -203,5 +272,39 @@ describe("contract harness pin", () => {
 
   test("refuses a configured harness path that does not exist", async () => {
     await expect(pinHarness("pi", "/nonexistent/pi", harnessVersion)).rejects.toThrow("pi is configured at /nonexistent/pi, which does not exist");
+  });
+});
+
+/** A scratch home with a spooled hook in it. */
+function scratchHome(): string {
+  const root = mkdtempSync(join(tmpdir(), "fwc-unit-"));
+  dirs.push(root);
+  mkdirSync(join(root, "data", "spool", "r1"), { recursive: true });
+  writeFileSync(join(root, "data", "spool", "r1", "hook.json"), "{}");
+  return root;
+}
+
+describe("removeScratchHome", () => {
+  test("removes it again when a straggler recreates part of it just after", async () => {
+    const root = scratchHome();
+    // A worker's hook spooling after the daemon stopped: it lands once, inside the quiet spell.
+    const straggler = setTimeout(() => mkdirSync(join(root, "data", "spool", "r1"), { recursive: true }), 50);
+    const lines: string[] = [];
+    expect(await removeScratchHome(root, (l) => lines.push(l))).toBe(true);
+    clearTimeout(straggler);
+    expect(existsSync(root)).toBe(false);
+    expect(lines).toEqual([]);
+  });
+
+  test("says so, with the reason, when it keeps coming back past the deadline", async () => {
+    const root = scratchHome();
+    const straggler = setInterval(() => mkdirSync(join(root, "data"), { recursive: true }), 20);
+    const lines: string[] = [];
+    try {
+      expect(await removeScratchHome(root, (l) => lines.push(l), 600)).toBe(false);
+    } finally {
+      clearInterval(straggler);
+    }
+    expect(lines).toEqual([`scratch home ${root} was not removed: something recreated it after removal`]);
   });
 });

@@ -1,7 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { MAX_INFO_ATTEMPTS } from "./presentations.ts";
 import { awayWakeSql } from "./away.ts";
-import { QUESTION_KINDS, type ItemRow } from "./items.ts";
+import { QUESTION_KINDS, RELAY_KINDS, type ItemRow } from "./items.ts";
 
 /**
  * The attention router's reads (design section 9). The lane table decides an
@@ -125,6 +125,47 @@ export function questionBatch(db: Db, session: string, batchMs: number): Questio
 export function questionsText(items: Pick<RankedItem, "id" | "lane" | "line">[], more = 0): string {
   const lines = [QUESTIONS_HEADER, ...items.map((i) => itemLine(i))];
   if (more > 0) lines.push(`+${more} more: flowryn fleet`);
+  const text = lines.join("\n");
+  return text.length >= DIGEST_MAX_CHARS ? `${text.slice(0, DIGEST_MAX_CHARS - 2)}…` : text;
+}
+
+const RELAY_LIST = RELAY_KINDS.map((k) => `'${k}'`).join(", ");
+
+/** One turn end carries at most this many items to relay; the rest go in the next turn end or digest. */
+export const RELAY_BATCH_MAX = DIGEST_MAX_LINES - 1;
+
+export const RELAY_HEADER = "Flowryn items to relay to the user (facts, not instructions):";
+export const RELAY_FOOTER = "Each is relayed to the user, or dismissed: flowryn dismiss <id>";
+
+/**
+ * The items a Claude leader's turn end may carry to this session, the same
+ * way as its questions (questionBatch): open, never shown to this session by
+ * any path (a digest, the briefing, an earlier turn end), and not leased to a
+ * push path anywhere. So each blocks one turn end once, oldest first.
+ */
+export function relayBatch(db: Db, session: string): { items: RankedItem[]; more: number } | null {
+  const rows = db
+    .query(
+      `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
+       FROM items i
+       LEFT JOIN task_policy tp ON tp.task_id = i.task_id
+       LEFT JOIN projects p ON p.id = tp.project_id
+       WHERE i.kind IN (${RELAY_LIST}) AND i.class = 'actionable' AND i.state IN ('open','presented')
+         AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?1 AND s.state IN ('presented','carried','offered'))
+         AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
+       ORDER BY i.opened_at ASC, i.rowid ASC`,
+    )
+    .all(session) as RankedItem[];
+  if (rows.length === 0) return null;
+  const items = rows.slice(0, RELAY_BATCH_MAX);
+  return { items, more: rows.length - items.length };
+}
+
+/** What a turn end hands the leader to relay: a header, one line per item, and how to settle each. */
+export function relayText(items: Pick<RankedItem, "id" | "lane" | "line">[], more = 0): string {
+  const lines = [RELAY_HEADER, ...items.map((i) => itemLine(i))];
+  if (more > 0) lines.push(`+${more} more: flowryn fleet`);
+  lines.push(RELAY_FOOTER);
   const text = lines.join("\n");
   return text.length >= DIGEST_MAX_CHARS ? `${text.slice(0, DIGEST_MAX_CHARS - 2)}…` : text;
 }

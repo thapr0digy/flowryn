@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { HerdrClient, HerdrError, type HerdrTransport } from "../../src/runtime/herdr/client.ts";
 import { HerdrRuntime, eventPaneId } from "../../src/runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../../src/runtime/herdr/socket.ts";
-import { isAlive, parseLstart, parsePsLine, readIdentity, sameProcess, terminate, type PsRunner } from "../../src/runtime/proc.ts";
+import { descendantCommands, isAlive, parseLstart, parseProcessTable, parsePsLine, readIdentity, readProcessTable, sameProcess, terminate, type PsRunner } from "../../src/runtime/proc.ts";
 import { defaultConfig } from "../../src/config/config.ts";
 
 const dirs: string[] = [];
@@ -78,6 +78,34 @@ async function fakeSocket(respond: (method: string, params: Record<string, unkno
   await new Promise<void>((done) => server.listen(path, () => done()));
   return { path, seen, close: () => server.close() };
 }
+
+describe("process tree", () => {
+  test("finds a command anywhere under the root, never the root's own or another tree's", () => {
+    const rows = parseProcessTable(
+      [
+        "  100     1 /Applications/Pi Launcher.app/Contents/MacOS/pi-signed",
+        "  101   100 node pi",
+        "  102   101 /bin/bash -c perl -e 'sleep 60'",
+        "  103   102 perl -e sleep 60",
+        "  200     1 perl -e sleep 120",
+        "garbage",
+      ].join("\n"),
+    );
+    expect(rows).toHaveLength(5);
+    expect(descendantCommands(rows, 100)).toEqual(["node pi", "/bin/bash -c perl -e 'sleep 60'", "perl -e sleep 60"]);
+    expect(descendantCommands(rows, 100)).not.toContain("perl -e sleep 120");
+    expect(descendantCommands(rows, 103)).toEqual([]);
+  });
+
+  test("reads the real table: this test's own child shows under its pid", async () => {
+    const child = Bun.spawn(["sleep", "7"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    try {
+      expect(descendantCommands(await readProcessTable(), process.pid)).toContain("sleep 7");
+    } finally {
+      child.kill();
+    }
+  });
+});
 
 describe("Herdr client", () => {
   test("refuses server and session lifecycle methods before sending anything", async () => {
