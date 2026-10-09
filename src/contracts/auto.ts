@@ -20,6 +20,7 @@ import {
   saveAutoAttempt,
   unverifiedItemOpened,
   unverifiedVersion,
+  type AutoAttempt,
   type VersionOf,
 } from "../lifecycle/harness-gate.ts";
 import { usageGate } from "../sched/usage.ts";
@@ -41,7 +42,9 @@ import { recordPass } from "./verbs.ts";
  *   Herdr is unreachable or Claude is usage-paused, since a failure is final.
  * - Once per version: a failed check opens one P1 with its report path and
  *   is never retried for that version. A check cut off by a daemon stop
- *   runs again at the next start: it never finished, so it never failed.
+ *   runs again at the next start: it never finished, so it never failed. A
+ *   pass that ends after a reload to strict is not recorded (`unrecorded`)
+ *   and runs again once relaxed is back.
  * - From the running build: the child is the pinned copy of this daemon's own
  *   binary (`<state>/bin/flowryn-<build>`), never the installed one, which
  *   may already be newer. It runs `doctor --contracts --for-daemon`, writes a
@@ -157,8 +160,22 @@ export function parseHandoff(stdout: string): { report: string | null; version: 
  * contract.auto_failed event and the home directory is written as ~.
  */
 export function autoFailureLine(harness: HarnessId, version: string, path: string, home: string): string {
-  const shown = home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
-  return `${harness} ${version} failed its automatic contract check: ${shown}; rerun: ${contractsCommand(harness)}`;
+  return `${harness} ${version} failed its automatic contract check: ${homeShort(path, home)}; rerun: ${contractsCommand(harness)}`;
+}
+
+/** The P1 for a pass that ended after a reload to strict: not recorded, with its report and the command that records one. Fits 200 characters, as the failure line does. */
+export function autoUnrecordedLine(harness: HarnessId, version: string, report: string, home: string): string {
+  return `${harness} ${version} passed, not recorded as [policy] is strict now: ${homeShort(report, home)}; record it: ${contractsCommand(harness)}`;
+}
+
+function homeShort(path: string, home: string): string {
+  return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
+/** Is this attempt final for the version: passed or failed, or a pass strict left unrecorded while strict lasts? */
+function settled(attempt: AutoAttempt | null, version: string, relaxedNow: boolean): boolean {
+  if (attempt?.version !== version) return false;
+  return attempt.state === "passed" || attempt.state === "failed" || (attempt.state === "unrecorded" && !relaxedNow);
 }
 
 export class AutoContractChecker {
@@ -238,29 +255,43 @@ export class AutoContractChecker {
       for (const harness of HARNESS_IDS) {
         const flagged = unverifiedVersion(this.deps.db, harness);
         if (!flagged) continue;
-        const attempt = autoAttempt(this.deps.db, harness);
-        if (attempt?.version === flagged && (attempt.state === "failed" || attempt.state === "passed")) continue;
+        const relaxedNow = relaxed(this.deps.config());
+        if (settled(autoAttempt(this.deps.db, harness), flagged, relaxedNow)) continue;
         const binary = this.pinnedBinary();
-        if (!relaxed(this.deps.config()) || !binary) {
+        if (!relaxedNow || !binary) {
           this.ensureItem(harness, flagged);
           continue;
         }
-        const wait = this.waitReason(harness);
-        if (wait) {
-          this.noteWaiting(harness, flagged, wait);
-          continue;
+        if (this.holdFor(harness, flagged)) continue;
+        // The probe counts as the check: a restart that starts meanwhile waits on its guard, and a stop sees it.
+        this.current = { harness, version: flagged, startedAt: this.deps.now(), process: null };
+        try {
+          // The installed version now: a harness updated again since it was flagged is judged afresh (and a verified one settles).
+          const check = await gateHarness(this.deps.db, this.deps.config(), harness, this.deps.harnessVersion, "daemon", "auto-check", this.deps.now);
+          if (this.stopping) return;
+          if (check.state !== "unverified") continue;
+          if (!relaxed(this.deps.config())) {
+            this.ensureItem(harness, check.version);
+            continue;
+          }
+          if (settled(autoAttempt(this.deps.db, harness), check.version, true)) continue;
+          if (this.holdFor(harness, check.version)) continue;
+          await this.runCheck(harness, check.version, binary);
+          return;
+        } finally {
+          this.current = null;
         }
-        // The installed version now: a harness updated again since it was flagged is judged afresh (and a verified one settles).
-        const check = await gateHarness(this.deps.db, this.deps.config(), harness, this.deps.harnessVersion, "daemon", "auto-check", this.deps.now);
-        if (check.state !== "unverified") continue;
-        const again = autoAttempt(this.deps.db, harness);
-        if (again?.version === check.version && (again.state === "failed" || again.state === "passed")) continue;
-        await this.runCheck(harness, check.version, binary);
-        return;
       }
     } finally {
       this.ticking = false;
     }
+  }
+
+  /** Note the check waiting, if it must; true when it does. */
+  private holdFor(harness: HarnessId, version: string): boolean {
+    const wait = this.waitReason(harness);
+    if (wait) this.noteWaiting(harness, version, wait);
+    return wait !== null;
   }
 
   private waitReason(harness: HarnessId): string | null {
@@ -336,7 +367,11 @@ export class AutoContractChecker {
         ? `it wrote no report (exit ${outcome.exitCode ?? "on a signal"}${handed.detail ? `: ${handed.detail}` : ""})`
         : reportProblem(this.deps.config().data_dir, handed.report, { harness, version: tested, build });
     const strict = !relaxed(this.deps.config());
-    if (!problem && !strict) {
+    if (!problem && strict) {
+      this.leaveUnrecorded(harness, tested, build, logPath, startedAt, handed.report!);
+      return;
+    }
+    if (!problem) {
       tx(db, () => {
         const seq = recordPass(db, { harness, version: tested, report: handed.report, by: "daemon", build, session: null, source: "daemon" }, now);
         openItem(db, { kind: "contract_recorded", eventSeq: seq, line: `${autoRecordLine(harness, tested, build)}; report ${handed.report}`, now });
@@ -347,7 +382,7 @@ export class AutoContractChecker {
       return;
     }
     // The report's own path is in the line already: say "the report" in the reason.
-    const why = (problem ?? "[policy] mode is strict now, so the daemon did not record its pass").replace(`${handed.report} `, "the report ");
+    const why = problem!.replace(`${handed.report} `, "the report ");
     const where = handed.report ? `report ${handed.report}` : `log ${logPath}`;
     tx(db, () => {
       const event = appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, build, report: handed.report, log: logPath, detail: why }, ts: now });
@@ -356,5 +391,19 @@ export class AutoContractChecker {
       openUnverifiedItem(db, harness, tested, event.seq, now, autoFailureLine(harness, tested, handed.report ?? logPath, homedir()));
     });
     log(`contracts: the automatic check of ${harness} ${tested} did not pass: ${why}; ${where}`);
+  }
+
+  /** A pass that ended after a reload to strict: never recorded while strict; a P1 says so, and a reload to relaxed runs the check again. */
+  private leaveUnrecorded(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, report: string): void {
+    const { db, log } = this.deps;
+    const now = this.deps.now();
+    const detail = "[policy] mode is strict now, so the daemon did not record its pass";
+    tx(db, () => {
+      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_unrecorded", payload: { harness, version, build, report, log: logPath, detail }, ts: now });
+      saveAutoAttempt(db, harness, { version, state: "unrecorded", started_at: startedAt, ended_at: now, build, report, log: logPath, detail });
+      resolveItems(db, "harness_unverified", harnessItemKey(harness), `automatic contract check of ${version} passed unrecorded`, now);
+      openUnverifiedItem(db, harness, version, event.seq, now, autoUnrecordedLine(harness, version, report, homedir()));
+    });
+    log(`contracts: ${harness} ${version} passed its automatic check, but ${detail}; report ${report}`);
   }
 }

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { DaemonInfo } from "../../src/api/verbs.ts";
 import { composeBriefing } from "../../src/attention/briefing.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
-import { AutoContractChecker, autoFailureLine, parseHandoff, type AutoJob, type AutoOutcome, type AutoProcess } from "../../src/contracts/auto.ts";
+import { AutoContractChecker, autoFailureLine, autoUnrecordedLine, parseHandoff, type AutoJob, type AutoOutcome, type AutoProcess } from "../../src/contracts/auto.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
 import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
@@ -32,6 +32,7 @@ let passes: number;
 let jobs: AutoJob[];
 let script: (job: AutoJob) => { passed?: boolean; build?: string | null; mode?: "record" | "verify-only"; report?: boolean; hold?: boolean };
 let held: { resolve: () => void; terminated: boolean }[];
+let probe: Promise<void> | null;
 
 function useConfig(mode: "strict" | "relaxed"): void {
   config = parseConfig(`data_dir = ${JSON.stringify(join(dir, "data"))}\n[tools]\nclaude = "/x/claude"\npi = "/x/pi"\n[policy]\nmode = "${mode}"\n`, dir);
@@ -84,7 +85,10 @@ function checker(): AutoContractChecker {
     now: Date.now,
     log: () => {},
     info,
-    harnessVersion: async (harness) => versions[harness],
+    harnessVersion: async (harness) => {
+      if (probe) await probe;
+      return versions[harness];
+    },
     restartBusy: () => busy,
     herdrDown: () => herdr,
     afterPass: () => {
@@ -112,7 +116,7 @@ function events(kind: string): Record<string, unknown>[] {
 }
 
 function briefing(): string {
-  return composeBriefing(db, { now: Date.now(), ageMs: 0, markMorning: false, session: null, morningHour: 25 }).text;
+  return composeBriefing(db, { now: Date.now(), ageMs: 0, markMorning: false, session: null, morningHour: 25, config }).text;
 }
 
 beforeEach(() => {
@@ -129,6 +133,7 @@ beforeEach(() => {
   jobs = [];
   held = [];
   script = () => ({});
+  probe = null;
 });
 
 afterEach(() => {
@@ -236,7 +241,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [], contractChecks: auto.running() }, Date.now());
     expect(guards).toEqual([expect.objectContaining({ kind: "contract_check", detail: expect.stringContaining("automatic contract check claude 2.1.300 running for") })]);
     expect(briefing()).toMatch(/Contract check running: claude 2\.1\.300 since \d\d:\d\d \(automatic\)\./);
-    const refusal = harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db);
+    const refusal = harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config);
     expect(refusal.code).toBe("contract_unverified");
     expect(refusal.help).toContain("an automatic contract check is running");
 
@@ -263,7 +268,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(jobs).toEqual([]);
     expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "a daemon restart" });
     expect(briefing()).toContain("Contract check queued: claude 2.1.300, waiting for a daemon restart (automatic).");
-    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db).help).toContain("queued (a daemon restart)");
+    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config).help).toContain("queued (a daemon restart)");
     await auto.tick();
     expect(events("contract.auto_waiting")).toHaveLength(1);
 
@@ -308,6 +313,40 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
   });
 
+  test("a stop during the version probe starts no check; the probe is a restart guard, and a restart pending after it makes the check wait", async () => {
+    let release = () => {};
+    probe = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    const stopped = auto.tick();
+    await Bun.sleep(20);
+    expect(restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [], contractChecks: auto.running() }, Date.now())).toEqual([
+      expect.objectContaining({ kind: "contract_check" }),
+    ]);
+    await auto.stop();
+    release();
+    await stopped;
+    expect(jobs).toEqual([]);
+    expect(auto.running()).toEqual([]);
+
+    probe = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const next = checker();
+    next.init();
+    const ticked = next.tick();
+    await Bun.sleep(20);
+    busy = true;
+    release();
+    await ticked;
+    expect(jobs).toEqual([]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "a daemon restart" });
+    expect(next.running()).toEqual([]);
+  });
+
   test("a harness updated again since it was flagged: the installed version is the one checked", async () => {
     const auto = checker();
     auto.init();
@@ -328,7 +367,7 @@ describe("strict, and daemons that cannot run the check", () => {
     await auto.tick();
     expect(jobs).toEqual([]);
     expect(items("harness_unverified")).toEqual([expect.objectContaining({ state: "open", line: expect.stringContaining("claude 2.1.300 has no passing contract run") })]);
-    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
+    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
   });
 
   test("a development daemon (no build) opens the P1 as strict does", async () => {
@@ -378,9 +417,12 @@ describe("strict, and daemons that cannot run the check", () => {
     await auto.tick();
     expect(items("harness_unverified")).toHaveLength(1);
     expect(jobs).toEqual([]);
+    // Nothing will run now: the help names the doctor command, and the briefing lists no queued check.
+    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
+    expect(briefing()).not.toContain("Contract check queued");
   });
 
-  test("a pass that ends after a reload to strict is not recorded; the P1 says why", async () => {
+  test("a pass that ends after a reload to strict is left unrecorded with a P1 saying so; a reload to relaxed runs it again", async () => {
     const auto = checker();
     auto.init();
     script = () => ({ hold: true });
@@ -391,8 +433,23 @@ describe("strict, and daemons that cannot run the check", () => {
     held[0]!.resolve();
     await running;
     expect(recorded()).toEqual([]);
-    expect(items("harness_unverified")).toHaveLength(1);
-    expect(events("contract.auto_failed")[0]).toMatchObject({ detail: "[policy] mode is strict now, so the daemon did not record its pass" });
+    expect(events("contract.auto_failed")).toEqual([]);
+    expect(events("contract.auto_unrecorded")).toEqual([expect.objectContaining({ harness: "claude", version: "2.1.300", detail: "[policy] mode is strict now, so the daemon did not record its pass" })]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.300", state: "unrecorded" });
+    const [p1] = items("harness_unverified");
+    expect(p1).toMatchObject({ state: "open" });
+    expect(p1!.line).toStartWith(`claude 2.1.300 passed, not recorded as [policy] is strict now: ${join(dir, "data", "contracts", "claude-2.1.300-")}`);
+
+    await auto.tick();
+    expect(jobs).toHaveLength(1);
+    expect(recorded()).toEqual([]);
+
+    useConfig("relaxed");
+    script = () => ({});
+    await auto.tick();
+    expect(jobs).toHaveLength(2);
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+    expect(items("harness_unverified")).toEqual([expect.objectContaining({ state: "resolved" })]);
   });
 });
 
@@ -402,6 +459,12 @@ describe("the failure line", () => {
     expect(line).toBe("claude 2.1.300 failed its automatic contract check: ~/.flowryn/data/contracts/claude-2.1.300-2026-10-09T00-55-08-590Z.json; rerun: flowryn doctor --contracts --harness claude");
     expect(line.length).toBeLessThanOrEqual(200);
     expect(autoFailureLine("pi", "0.90.0", "/opt/data/contracts/r.json", "/Users/somebody")).toContain(": /opt/data/contracts/r.json;");
+  });
+
+  test("the unrecorded-pass line fits too", () => {
+    const line = autoUnrecordedLine("claude", "2.1.300", "/Users/somebody/.flowryn/data/contracts/claude-2.1.300-2026-10-09T00-55-08-590Z.json", "/Users/somebody");
+    expect(line).toBe("claude 2.1.300 passed, not recorded as [policy] is strict now: ~/.flowryn/data/contracts/claude-2.1.300-2026-10-09T00-55-08-590Z.json; record it: flowryn doctor --contracts --harness claude");
+    expect(line.length).toBeLessThanOrEqual(200);
   });
 });
 

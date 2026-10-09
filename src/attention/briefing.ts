@@ -10,7 +10,8 @@ import { describeSession, getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { AUTO_REQUESTER, restartsSince } from "../daemon/restart.ts";
 import { autoRecordLine, leaderRecordLine } from "../contracts/grant.ts";
-import { autoAttempt, unverifiedVersion } from "../lifecycle/harness-gate.ts";
+import { activeAutoAttempt } from "../lifecycle/harness-gate.ts";
+import type { FlowrynConfig } from "../config/config.ts";
 import { HARNESS_IDS } from "../harness/types.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { openActionable, type RankedItem } from "./router.ts";
@@ -36,6 +37,8 @@ export interface BriefingInput {
   ageMs: number;
   /** Record that today's morning section was shown (a session start does; a read cannot). */
   markMorning: boolean;
+  /** The config, so an automatic contract check is listed only while checks are on; without it none is. */
+  config?: FlowrynConfig;
 }
 
 export interface Briefing {
@@ -182,11 +185,12 @@ function recordLines(db: Db): string[] {
 }
 
 /** An automatic contract check queued or running now (src/contracts/auto.ts): shown while it lasts. */
-function autoCheckLines(db: Db): string[] {
+function autoCheckLines(db: Db, config: FlowrynConfig | undefined): string[] {
   const lines: string[] = [];
+  if (!config) return lines;
   for (const harness of HARNESS_IDS) {
-    const attempt = autoAttempt(db, harness);
-    if (!attempt || unverifiedVersion(db, harness) !== attempt.version) continue;
+    const attempt = activeAutoAttempt(db, config, harness);
+    if (!attempt) continue;
     if (attempt.state === "running") lines.push(`Contract check running: ${harness} ${attempt.version} since ${hhmm(attempt.started_at ?? 0)} (automatic).`);
     else if (attempt.state === "waiting") lines.push(`Contract check queued: ${harness} ${attempt.version}, waiting for ${attempt.wait ?? "its turn"} (automatic).`);
   }
@@ -213,7 +217,7 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   // Before decisionLines, which moves last_briefing_at on.
   lines.push(...restartLines(db));
   lines.push(...recordLines(db));
-  lines.push(...autoCheckLines(db));
+  lines.push(...autoCheckLines(db, input.config));
   lines.push(...decisionLines(db, input.now, input.markMorning));
   lines.push(fleetLine(db));
   const todos = todoFacts(db, today);

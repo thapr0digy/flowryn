@@ -39,10 +39,10 @@ export function contractsCommand(harness: HarnessId): string {
   return `flowryn doctor --contracts --harness ${harness}`;
 }
 
-/** What a dispatch, a resume or a launch gets when the harness is not verified. */
-export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>, db?: Db): FlowrynError {
+/** What a dispatch, a resume or a launch gets when the harness is not verified. With the database and config, the help names an automatic check that is queued or running. */
+export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>, db?: Db, config?: FlowrynConfig): FlowrynError {
   if (check.state === "missing") return new FlowrynError("tool_missing", check.detail, "flowryn init");
-  const attempt = db ? autoAttempt(db, check.harness) : null;
+  const attempt = db && config ? activeAutoAttempt(db, config, check.harness) : null;
   const help =
     attempt?.version === check.version && (attempt.state === "running" || attempt.state === "waiting")
       ? `an automatic contract check is ${attempt.state === "running" ? "running" : `queued (${attempt.wait ?? "waiting"})`}; dispatch and resume work once it passes`
@@ -61,7 +61,8 @@ const attemptKey = (harness: HarnessId) => `contract_auto:${harness}`;
 /** The daemon's automatic check of one harness version (meta.contract_auto:<harness>). */
 export interface AutoAttempt {
   version: string;
-  state: "waiting" | "running" | "passed" | "failed";
+  /** `unrecorded`: it passed after a reload to strict, so nothing was recorded; a reload to relaxed runs it again. */
+  state: "waiting" | "running" | "passed" | "failed" | "unrecorded";
   /** While waiting: what it waits for. */
   wait?: string;
   started_at?: number;
@@ -91,6 +92,14 @@ export function autoChecksOn(db: Db, config: FlowrynConfig): boolean {
     // An invalid [policy] never loosens anything.
   }
   return relaxed && Boolean(getMeta(db, AUTO_BUILD_KEY));
+}
+
+/** The attempt queued or running for the flagged untested version, while automatic checks are on; null otherwise (strict, or a daemon that cannot run one, shows the doctor command instead). */
+export function activeAutoAttempt(db: Db, config: FlowrynConfig, harness: HarnessId): AutoAttempt | null {
+  const attempt = autoAttempt(db, harness);
+  if (!attempt || (attempt.state !== "waiting" && attempt.state !== "running")) return null;
+  if (unverifiedVersion(db, harness) !== attempt.version || !autoChecksOn(db, config)) return null;
+  return attempt;
 }
 
 /** The item key: one harness_unverified P1 per harness. */

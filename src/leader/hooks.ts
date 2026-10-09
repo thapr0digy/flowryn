@@ -217,7 +217,7 @@ function wokenQuestions(db: Db, session: string, turn: number): RankedItem[] {
 
 /** Compose the holder's briefing and carry every item it lists for `turn`. Inside a transaction. */
 function brief(ctx: HandlerCtx, s: LeaderSessionRow, turn: number, now: number): { text: string; listed: number } {
-  const briefing = composeBriefing(ctx.db, { session: s.session_id, now, morningHour: ctx.config().morning_hour, ageMs: ageMs(ctx), markMorning: true });
+  const briefing = composeBriefing(ctx.db, { session: s.session_id, now, morningHour: ctx.config().morning_hour, ageMs: ageMs(ctx), markMorning: true, config: ctx.config() });
   for (const item of briefing.listed) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "briefing", now });
   setSession(ctx.db, s.session_id, { brief_pending: 0 });
   return { text: briefing.text, listed: briefing.listed.length };
