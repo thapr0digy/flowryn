@@ -87,6 +87,7 @@ function watcher(): DeliveryWatcher {
     noMistakes: () => noMistakes,
     nmTimeoutMs: () => 5_000,
     pollMs: () => 60_000,
+    validationStuckMs: () => 30 * 60_000,
     ciWaitAlertMin: () => alertMin,
     inFlight: new Set(),
     cleanup: () => {},

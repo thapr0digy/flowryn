@@ -32,6 +32,8 @@ export interface DeliveryWatcherDeps {
   git: GitRunner;
   noMistakes(): string | null;
   nmTimeoutMs(): number;
+  /** A validation slot held this long with no progress opens a validation_stuck P1 ([sched] validation_stuck_ms). */
+  validationStuckMs(): number;
   pollMs(): number;
   inFlight: ReadonlySet<string>;
   /** `[validation] ci_wait_alert`: minutes a pipeline may wait on CI with no checks before the user is asked (0: off). */
@@ -258,7 +260,7 @@ export class DeliveryWatcher {
       const nm = parseNmStatus(status.text);
       const observed = tx(db, () => {
         const current = getRunWithPolicy(db, run.id);
-        return current ? applyNmObservation(db, current, nm, now()) : null;
+        return current ? applyNmObservation(db, current, nm, this.deps.validationStuckMs(), now()) : null;
       });
       // The poll asks the watchdog; the restart guard's read only refreshes the status.
       if (observed && !leasedOnly) await this.watchCiWait(run, nm, observed.ciSince);

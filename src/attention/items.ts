@@ -32,6 +32,8 @@ export type ItemClass = "actionable" | "info";
  * from a dirty tree, or not merged yet); informational.
  * worker_report: a worker's `flowryn report` whose status word opens an item
  * (REPORT_EFFECT in src/lifecycle/worker.ts), such as a finding or a blocker.
+ * validation_stuck: a ship holds its validation slot with no progress (its
+ * no-mistakes step quiet, or its run gone or ended with nothing delivered).
  * The upkeep hooks (src/upkeep/, spec 3 phase 3): build_failed, the daemon's
  * build after a Flowryn merge failed; checkout_unsynced, a primary checkout
  * the sync left alone (informational); conflict_nudged, a delivered PR that
@@ -67,6 +69,7 @@ export const LANE_TABLE = {
   usage_limit: { lane: "P1", class: "actionable" },
   quota_low: { lane: "P1", class: "actionable" },
   validation_outside_cap: { lane: "P1", class: "actionable" },
+  validation_stuck: { lane: "P1", class: "actionable" },
   harness_unverified: { lane: "P1", class: "actionable" },
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
@@ -99,9 +102,10 @@ export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_q
 /**
  * Items the leader handles by relaying them to you or dismissing them: a
  * Claude leader's turn end carries each once (relayBatch in router.ts), so a
- * worker's report or a dropped restart is not left for your next message.
+ * worker's report, a dropped restart or a stuck validation is not left for
+ * your next message.
  */
-export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped"];
+export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "validation_stuck"];
 
 export interface ItemRow {
   id: string;

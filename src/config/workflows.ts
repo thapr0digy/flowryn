@@ -111,6 +111,8 @@ export interface SchedTiming {
   wait_alert_ms: number;
   /** A host check result is reused this long. */
   host_cache_ms: number;
+  /** A validation slot held this long with no progress (a quiet no-mistakes step, or no run going) opens one P1. */
+  validation_stuck_ms: number;
   /** The Claude usage-limit pause expires after this, then one run probes it. */
   usage_backoff_ms: number;
   /** Each re-arm doubles the backoff, up to this. */
@@ -122,6 +124,7 @@ export interface SchedTiming {
 export const DEFAULT_SCHED: SchedTiming = {
   pass_ms: 30_000,
   wait_alert_ms: 30 * 60_000,
+  validation_stuck_ms: 30 * 60_000,
   host_cache_ms: 5_000,
   usage_backoff_ms: 15 * 60_000,
   usage_backoff_max_ms: 2 * 60 * 60_000,

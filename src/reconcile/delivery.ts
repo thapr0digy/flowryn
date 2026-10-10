@@ -8,7 +8,7 @@ import { recordEvidence, taskTitle, type RunWithPolicy } from "../lifecycle/runs
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
-import { isActive, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
+import { isActive, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
 import { openDivergence } from "./divergence.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 
@@ -18,8 +18,9 @@ import { sendBack } from "../lifecycle/send-back.ts";
  * here are the lifecycle's own transitions: a PR that reads merged lands the
  * run (a merge Flowryn asked for, or one you made on GitHub), a closed PR is a
  * P1, a head that moved after delivery or a PR turned draft is a divergence,
- * red checks are a P1 until they turn green, and an active no-mistakes run
- * makes the run `validating`.
+ * red checks are a P1 until they turn green, an active no-mistakes run
+ * makes the run `validating`, and a validation slot held with no progress
+ * is a P1.
  */
 
 export interface PrObservation {
@@ -191,7 +192,7 @@ function ciSinceOf(db: Db, runId: string, nm: NmRun | null, now: number): number
 }
 
 /** Apply one no-mistakes status read for a run's worktree (read-only: flowrynd never drives the pipeline). Call inside a transaction. Returns the CI wait's start as flowrynd saw it. */
-export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, now: number): { ciSince: number | null } {
+export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, stuckAfterMs: number, now: number): { ciSince: number | null } {
   // The active steps let the restart guard tell a CI wait from local work (src/daemon/restart.ts).
   const ciSince = ciSinceOf(db, run.id, nm, now);
   const evidence = nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps, ci_since: ciSince } : { run: null };
@@ -205,7 +206,75 @@ export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null,
     db.query("UPDATE runs SET state = 'running', updated_at = ?2 WHERE id = ?1").run(run.id, now);
     appendEvent(db, { source: "nomistakes", kind: "run.validated", runId: run.id, taskId: run.task_id, payload: { nm_run: nm?.id ?? null, outcome: nm?.outcome ?? null, pr: nm?.pr ?? null }, ts: now });
   }
+  noteValidationProgress(db, run, active ? nm : null, nm, stuckAfterMs, now);
   return { ciSince };
+}
+
+/** What one status read says about a held validation slot: stuck (with the line's detail and evidence), moving, or nothing this read can tell. */
+type Progress = { stuck: true; detail: string; quietMs: number; step: string | null } | { stuck: false } | null;
+
+function shortDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60 > 0 ? `${m % 60}m` : ""}`;
+}
+
+/**
+ * Judge the slot: an active run is stuck when its oldest step shows no
+ * activity for over the threshold (no-mistakes' own clock, read from the
+ * status); a run gone or ended is stuck once the slot has gone that long
+ * since it was granted or the run last stopped validating (rows, so a
+ * restart keeps the clock). A status without the steps table, a run parked
+ * with no step, or an activity this copy cannot read tells nothing.
+ */
+function judgeProgress(db: Db, run: RunWithPolicy, active: NmRun | null, nm: NmRun | null, grantedAt: number, stuckAfterMs: number, now: number): Progress {
+  if (active) {
+    const step = oldestStep(active.activeSteps ?? []);
+    const quiet = step ? quietSeconds(step) : null;
+    if (!step || quiet === null) return null;
+    const quietMs = quiet * 1000;
+    return quietMs > stuckAfterMs ? { stuck: true, quietMs, step: step.step, detail: `no-mistakes step ${step.step} quiet for ${shortDuration(quietMs)}` } : { stuck: false };
+  }
+  const stopped = db.query("SELECT MAX(ts) AS ts FROM events WHERE run_id = ?1 AND kind = 'run.validated'").get(run.id) as { ts: number | null };
+  const quietMs = now - Math.max(grantedAt, stopped.ts ?? 0);
+  if (quietMs <= stuckAfterMs) return { stuck: false };
+  const ended = nm !== null && nm.branch === run.branch && nm.outcome !== "";
+  const what = ended ? `no-mistakes run ${nm.id} ended (${nm.outcome})` : `no no-mistakes run on ${run.branch}`;
+  return { stuck: true, quietMs, step: null, detail: `${what}, quiet for ${shortDuration(quietMs)} with the slot held and nothing delivered` };
+}
+
+/**
+ * A ship holding its validation slot with no progress: one validation_stuck
+ * P1 per run per episode. An episode opens with run.validation_stuck and
+ * ends with run.validation_moving (a read that says the run moves), counted
+ * from the slot's grant, so a dismissed item does not come back until the run
+ * moved and stalled again. Releasing the slot resolves the item
+ * (releaseLeases, src/sched/pools.ts). Call inside a transaction.
+ */
+export function noteValidationProgress(db: Db, run: RunWithPolicy, active: NmRun | null, nm: NmRun | null, stuckAfterMs: number, now: number): void {
+  const lease = db.query("SELECT granted_at FROM pool_leases WHERE run_id = ?1 AND pool = 'validation' AND released_at IS NULL").get(run.id) as { granted_at: number } | null;
+  if (!lease) return;
+  const progress = judgeProgress(db, run, active, nm, lease.granted_at, stuckAfterMs, now);
+  if (progress === null) return;
+  const last = db
+    .query("SELECT kind FROM events WHERE run_id = ?1 AND kind IN ('run.validation_stuck','run.validation_moving') AND ts >= ?2 ORDER BY seq DESC LIMIT 1")
+    .get(run.id, lease.granted_at) as { kind: string } | null;
+  const inEpisode = last?.kind === "run.validation_stuck";
+  if (progress.stuck && !inEpisode) {
+    const event = appendEvent(db, { source: "nomistakes", kind: "run.validation_stuck", runId: run.id, taskId: run.task_id, payload: { nm_run: nm?.id ?? null, step: progress.step, quiet_ms: progress.quietMs }, ts: now });
+    openItem(db, {
+      kind: "validation_stuck",
+      eventSeq: event.seq,
+      taskId: run.task_id,
+      runId: run.id,
+      line: `Validation stuck: ${taskTitle(db, run.task_id)} (${run.project_id}): ${progress.detail}; flowryn show ${run.task_id}`,
+      now,
+    });
+  } else if (!progress.stuck && inEpisode) {
+    appendEvent(db, { source: "nomistakes", kind: "run.validation_moving", runId: run.id, taskId: run.task_id, payload: { nm_run: nm?.id ?? null }, ts: now });
+    resolveRunItems(db, run.id, ["validation_stuck"], "step moved", now);
+  }
 }
 
 /** no-mistakes cannot be read (its daemon is down): one P1 until it answers again; flowrynd never restarts it. Call inside a transaction. */

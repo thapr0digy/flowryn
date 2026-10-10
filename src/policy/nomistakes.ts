@@ -30,11 +30,16 @@ export interface NmRun {
   activeSteps: NmActiveStep[] | null;
 }
 
-/** One row of `active_steps`: the step, how long it has run (no-mistakes' own "2h17m"), and its local agent's pid, if any. */
+/**
+ * One row of `active_steps`: the step, how long it has run (no-mistakes' own
+ * "2h17m"), its last activity ("9m24s ago: log: ...", empty before the first),
+ * and its local agent's pid, if any.
+ */
 export interface NmActiveStep {
   step: string;
   status: string;
   activeFor: string;
+  lastActivity: string;
   agentPid: string;
 }
 
@@ -68,7 +73,7 @@ export function parseActiveSteps(text: string): NmActiveStep[] | null {
   const rows = (doc as { run?: { active_steps?: unknown } } | null)?.run?.active_steps;
   if (!Array.isArray(rows)) return null;
   if (!rows.every((r) => r !== null && typeof r === "object" && typeof (r as Record<string, unknown>).step === "string")) return null;
-  return (rows as Record<string, unknown>[]).map((r) => ({ step: cell(r, "step"), status: cell(r, "status"), activeFor: cell(r, "active_for"), agentPid: cell(r, "agent_pid") }));
+  return (rows as Record<string, unknown>[]).map((r) => ({ step: cell(r, "step"), status: cell(r, "status"), activeFor: cell(r, "active_for"), lastActivity: cell(r, "last_activity"), agentPid: cell(r, "agent_pid") }));
 }
 
 /** Parse `no-mistakes axi status` TOON; null when it names no run. */
@@ -103,6 +108,28 @@ export function durationSeconds(text: string): number {
   let total = 0;
   for (const [, n, unit] of text.matchAll(/(\d+)\s*(h|m(?!s)|s)/g)) total += Number(n) * (unit === "h" ? 3600 : unit === "m" ? 60 : 1);
   return total;
+}
+
+/** The step that has run longest: the one a stalled pipeline is stuck in. */
+export function oldestStep(steps: readonly NmActiveStep[]): NmActiveStep | null {
+  if (steps.length === 0) return null;
+  return steps.reduce((a, b) => (durationSeconds(b.activeFor) > durationSeconds(a.activeFor) ? b : a));
+}
+
+/** "9m24s ago: ...", or with the `quiet` marker later no-mistakes versions put on a step past their own quiet warning. */
+const ACTIVITY_AGE = /^(?:quiet:?\s+)?((?:\d+(?:ms|h|m|s))+)\s+ago\b/;
+
+/**
+ * How long a step has shown no activity, in seconds: its last activity's age
+ * ("9m24s ago: ..."), or its whole run when it has none yet. Null when
+ * neither reads (a shape this copy does not know): the caller then judges
+ * nothing rather than raise a false alarm.
+ */
+export function quietSeconds(step: Pick<NmActiveStep, "activeFor" | "lastActivity">): number | null {
+  const last = step.lastActivity.trim();
+  if (last === "") return step.activeFor.trim() === "" ? null : durationSeconds(step.activeFor);
+  const age = ACTIVITY_AGE.exec(last);
+  return age ? durationSeconds(age[1]!) : null;
 }
 
 const NOT_PARKED = new Set(["completed", "failed", "cancelled", "passed", "checks-passed", "running", "fixing", "ci"]);
