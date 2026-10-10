@@ -34,6 +34,11 @@ export type ItemClass = "actionable" | "info";
  * (REPORT_EFFECT in src/lifecycle/worker.ts), such as a finding or a blocker.
  * validation_stuck: a ship holds its validation slot with no progress (its
  * no-mistakes step quiet, or its run gone or ended with nothing delivered).
+ * The upkeep hooks (src/upkeep/, spec 3 phase 3): build_failed, the daemon's
+ * build after a Flowryn merge failed; checkout_unsynced, a primary checkout
+ * the sync left alone (informational); conflict_nudged, a delivered PR that
+ * conflicts sent its ship back to merge its base (informational); and
+ * pr_conflict, one that still conflicts after its nudges.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -70,9 +75,13 @@ export const LANE_TABLE = {
   restart_dropped: { lane: "P1", class: "actionable" },
   build_refused: { lane: "P1", class: "actionable" },
   worker_report: { lane: "P1", class: "actionable" },
+  build_failed: { lane: "P1", class: "actionable" },
+  pr_conflict: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   build_held: { lane: "P1", class: "info" },
+  checkout_unsynced: { lane: "P1", class: "info" },
+  conflict_nudged: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
   steer_acked: { lane: "P1", class: "info" },

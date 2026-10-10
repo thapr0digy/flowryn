@@ -10,6 +10,7 @@ import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
 import { isActive, oldestStep, quietSeconds, type NmRun } from "../policy/nomistakes.ts";
 import { openDivergence } from "./divergence.ts";
+import { sendBack } from "../lifecycle/send-back.ts";
 
 /**
  * What the delivery watchers saw, applied to the runs (design section 6: the
@@ -30,10 +31,74 @@ export interface PrObservation {
 export interface Applied {
   /** The run landed in this observation: its cleanup should follow. */
   landed: boolean;
+  /** The run was sent back to merge its base (the conflict nudge): the scheduler should look. */
+  nudged?: boolean;
+}
+
+export interface ObservationOptions {
+  /** `[upkeep] nudge_conflicts`: a delivered PR that conflicts with its base sends its ship back. */
+  nudgeConflicts: boolean;
+}
+
+/** Nudges per run before a conflict stops sending the ship back and asks you instead. */
+export const MAX_CONFLICT_NUDGES = 3;
+
+/** Nudge again, or ask you: a head already nudged, or a run past the limit, is yours. */
+export function conflictAction(nudgedHeads: readonly (string | null)[], head: string): "nudge" | "ask" {
+  return nudgedHeads.length >= MAX_CONFLICT_NUDGES || nudgedHeads.includes(head) ? "ask" : "nudge";
+}
+
+/**
+ * A delivered PR GitHub reads as not mergeable (spec 3, phase 3: nudge a ship
+ * whose PR conflicts). Once per delivered head, and at most
+ * MAX_CONFLICT_NUDGES times per run, the ship goes back to work as `decline`
+ * sends it, told to merge its base and deliver again; a P1 info line says so.
+ * A head already nudged (the worker delivered it again unchanged), or a run
+ * past the limit, opens one `pr_conflict` P1 instead. Call inside a
+ * transaction.
+ */
+function nudgeConflict(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, title: string, now: number): boolean {
+  const nudges = (db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.conflict_nudged' ORDER BY seq").all(run.id) as { payload: string }[]).map(
+    (e) => (JSON.parse(e.payload) as { head?: string | null }).head ?? null,
+  );
+  if (conflictAction(nudges, delivered.head) === "ask") {
+    if (!findOpenRunItem(db, "pr_conflict", run.id)) {
+      const event = appendEvent(db, { source: "github", kind: "pr.conflict", runId: run.id, taskId: run.task_id, payload: { pr: pr.url, head: pr.headSha, nudges: nudges.length }, ts: now });
+      openItem(db, {
+        kind: "pr_conflict",
+        eventSeq: event.seq,
+        taskId: run.task_id,
+        runId: run.id,
+        line: `PR still conflicts with ${pr.baseRef} after ${nudges.length} nudge${nudges.length === 1 ? "" : "s"}: ${title} (${run.project_id}) at ${pr.headSha.slice(0, 8)}; steer it or flowryn decline ${run.task_id}`,
+        now,
+      });
+    }
+    return false;
+  }
+  const base = pr.baseRef || "main";
+  const text = `Your PR ${pr.url} conflicts with ${base}: GitHub reads it as not mergeable at ${pr.headSha.slice(0, 8)}. Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}), resolve the conflicts, run the tests, then ship it again and deliver. Never rebase or force-push.`;
+  const { seq } = sendBack(db, run, { text, feedback: `conflicts with ${base}`, why: "the PR conflicts with its base", event: { source: "github", kind: "run.conflict_nudged", payload: { pr: pr.url, base, nudge: nudges.length + 1 } } }, now);
+  openItem(db, {
+    kind: "conflict_nudged",
+    eventSeq: seq,
+    taskId: run.task_id,
+    runId: run.id,
+    line: `PR conflicts with ${base}: ${title} (${run.project_id}); sent back to merge origin/${base} and deliver again (nudge ${nudges.length + 1} of ${MAX_CONFLICT_NUDGES})`,
+    now,
+  });
+  return true;
 }
 
 /** Apply one observation of a run's PR. Call inside a transaction. */
-export function applyPrObservation(db: Db, run: RunWithPolicy, delivered: Delivered, obs: PrObservation, inFlight: ReadonlySet<string>, now: number): Applied {
+export function applyPrObservation(
+  db: Db,
+  run: RunWithPolicy,
+  delivered: Delivered,
+  obs: PrObservation,
+  inFlight: ReadonlySet<string>,
+  now: number,
+  opts: ObservationOptions = { nudgeConflicts: false },
+): Applied {
   const { pr, checks } = obs;
   recordPrEvidence(db, run.id, prEvidenceFrom(pr, checks, now), now);
   const title = taskTitle(db, run.task_id);
@@ -71,6 +136,10 @@ export function applyPrObservation(db: Db, run: RunWithPolicy, delivered: Delive
   }
   if (pr.draft) {
     openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary: `the delivered PR ${pr.url} was turned into a draft` }, now);
+  }
+  if (pr.mergeable === true) resolveRunItems(db, run.id, ["pr_conflict"], "mergeable", now);
+  if (opts.nudgeConflicts && pr.mergeable === false && pr.headSha === delivered.head && !pr.draft && nudgeConflict(db, run, delivered, pr, title, now)) {
+    return { landed: false, nudged: true };
   }
   if (checks?.state === "red") {
     const red = checks.checks.filter((c) => c.state === "red").map((c) => c.name);
