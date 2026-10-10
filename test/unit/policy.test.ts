@@ -154,7 +154,7 @@ const parked = (branch: string, head: string) => `run:\n  id: "01RUN"\n  branch:
 
 describe("the merge gate, in the design's order", () => {
   test("green with an approval passes; each failing condition refuses with its code", () => {
-    expect(checkGate(facts(), { choice: row(), why: "" })).toEqual({ waived: null, alreadyMerged: false });
+    expect(checkGate(facts(), { choice: row(), why: "" })).toEqual({ waived: null, alreadyMerged: false, localGreen: null });
     expect(code(() => checkGate(facts(), { choice: null, why: "none" }))).toBe("approval_required");
     expect(code(() => checkGate(facts({ pr: pr({ state: "closed" }) }), { choice: row(), why: "" }))).toBe("pr_closed");
     expect(checkGate(facts({ pr: pr({ state: "merged", mergeSha: "m" }) }), { choice: null, why: "" }).alreadyMerged).toBe(true);
@@ -167,7 +167,7 @@ describe("the merge gate, in the design's order", () => {
   test("a pull request with no checks registered (CI disabled) passes like green", () => {
     const noChecks = summarize([]);
     expect(noChecks.state).toBe("none");
-    expect(checkGate(facts({ checks: noChecks }), { choice: row(), why: "" })).toEqual({ waived: null, alreadyMerged: false });
+    expect(checkGate(facts({ checks: noChecks }), { choice: row(), why: "" })).toEqual({ waived: null, alreadyMerged: false, localGreen: null });
     expect(code(() => checkGate(facts({ checks: noChecks }), { choice: null, why: "none" }))).toBe("approval_required");
   });
 

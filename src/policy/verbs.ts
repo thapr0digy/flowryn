@@ -138,10 +138,10 @@ const merge: VerbSpec = {
     if (run.state !== "ready" && run.state !== "merging") throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}`);
     const channel = channelOf(chosen.choice!);
     const approval = takeApproval(ctx.db, facts, chosen.choice!, "merge", now);
-    const mergeId = recordMergeRequest(ctx.db, facts, approval, channel, gate.waived, ctx.delivery.github().merge_method, now);
+    const mergeId = recordMergeRequest(ctx.db, facts, approval, channel, gate.waived, ctx.delivery.github().merge_method, now, gate.localGreen);
     // In flight from here: the watcher leaves a requested merge alone until this daemon has asked GitHub.
     ctx.delivery.inFlight.add(mergeId);
-    return { data: { task: run.task_id, run: run.id, merge: mergeId, head: facts.head, approval, channel, waived: gate.waived ?? "-", state: "merging" } };
+    return { data: { task: run.task_id, run: run.id, merge: mergeId, head: facts.head, approval, channel, waived: gate.waived ?? "-", local_green: gate.localGreen ?? "-", state: "merging" } };
   },
   async settle(ctx, result) {
     const runId = String(result.data.run ?? "");

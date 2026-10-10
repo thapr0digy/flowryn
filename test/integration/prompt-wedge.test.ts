@@ -70,7 +70,7 @@ describe("a worker stopped by a confirmation prompt", () => {
     const env = await makeFleetEnv({ timing: { prompt_suspect_ms: 1_000 } });
     envs.push(env);
     await env.json(["project", "set", "web", "--workflow", "feature"]);
-    const { run } = await env.dispatch("Feature\nFAKE: stage-done --review https://lavish.test/x\nFAKE: sleep 60000", { kind: "ship" });
+    const { run } = await env.dispatch("Feature\nFAKE: stage-done --review lavish:x.html\nFAKE: sleep 60000", { kind: "ship" });
     await env.waitRun(run, (r) => r.stage_state === "review", "the review");
     // "blocked" (not "idle"): the Claude backstop's own status gate would already suppress "idle" for free,
     // so idleByDesign (the review) must be what is actually doing the work here, not a vacuously wrong status.

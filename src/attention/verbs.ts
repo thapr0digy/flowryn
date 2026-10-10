@@ -3,6 +3,7 @@ import { stringArg, type VerbSpec } from "../api/verbs.ts";
 import { awayConfig, leaderTiming } from "../config/leader.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
+import { CI_WAIT_ORIGIN } from "../lifecycle/ci-wait.ts";
 import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
 import { AWAY_MAX_MS, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief } from "./away.ts";
@@ -49,6 +50,7 @@ interface DecisionRef {
   run_id: string | null;
   blocking: number;
   state: string;
+  origin: string | null;
 }
 
 /**
@@ -80,13 +82,14 @@ const dismiss: VerbSpec = {
     ctx.db.query("UPDATE items SET state = 'dismissed', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1").run(id, `dismissed by ${ctx.caller.role}`, now);
     appendEvent(ctx.db, { source: "cli", kind: "item.dismissed", runId: item.run_id, taskId: item.task_id, payload: { item: id, kind: item.kind, by: ctx.caller.role } });
     let steer: string | null = null;
-    const decision = item.decision_id ? (ctx.db.query("SELECT id, task_id, run_id, blocking, state FROM decisions WHERE id = ?1").get(item.decision_id) as DecisionRef | null) : null;
+    const decision = item.decision_id ? (ctx.db.query("SELECT id, task_id, run_id, blocking, state, origin FROM decisions WHERE id = ?1").get(item.decision_id) as DecisionRef | null) : null;
     if (decision && decision.state === "open") {
       ctx.db.query("UPDATE decisions SET state = 'dismissed', answered_via = ?2, answered_at = ?3 WHERE id = ?1").run(decision.id, ctx.caller.role, now);
       appendEvent(ctx.db, { source: "cli", kind: "decision.dismissed", runId: decision.run_id, taskId: decision.task_id, payload: { decision: decision.id, by: ctx.caller.role } });
       if (decision.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: decision.task_id, positional: [decision.task_id], now });
       const run = decision.run_id ? getRun(ctx.db, decision.run_id) : null;
-      if (run && !isTerminal(run.state)) {
+      // The CI-wait watchdog's question was not the worker's: nothing to tell it (the watchdog asks again later).
+      if (run && !isTerminal(run.state) && decision.origin !== CI_WAIT_ORIGIN) {
         steer = createSteer(ctx.db, run, `Your question ${decision.id} was dismissed: no answer is coming. Decide yourself and carry on.`, now, decision.id).id;
       }
     }

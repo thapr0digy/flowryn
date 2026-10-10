@@ -446,6 +446,22 @@ ALTER TABLE items ADD COLUMN full_line TEXT;
 `;
 
 /**
+ * `flowryn verify`: one row per local run of a project's verify steps at a
+ * PR head, in a clean worktree. A passing one at the current head counts as
+ * local green for checks GitHub never started (src/policy/merge.ts).
+ */
+const VERIFICATIONS_SQL = /* sql */ `
+CREATE TABLE verifications (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, pr_url TEXT NOT NULL, task_id TEXT,
+  head_sha TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running','passed','failed','error')),
+  steps TEXT NOT NULL, tests TEXT, detail TEXT, binary_path TEXT,
+  dir TEXT NOT NULL, worktree_path TEXT NOT NULL, project_path TEXT NOT NULL,
+  started_at INTEGER NOT NULL, finished_at INTEGER);
+CREATE INDEX verifications_pr ON verifications(pr_url, started_at);
+`;
+
+/**
  * Chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md): a leader
  * AskUserQuestion answer authorises the one action it names. chat_questions holds each binding
  * question the Claude leader's PreToolUse hook let through (one row per tool use, so a replayed or
@@ -454,16 +470,16 @@ ALTER TABLE items ADD COLUMN full_line TEXT;
  * (merges and gates reference it, so foreign keys are off while it is swapped).
  */
 const CHAT_GRANTS_SQL = /* sql */ `
-CREATE TABLE approvals_v16 (
+CREATE TABLE approvals_v17 (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
   channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','yolo')),
   actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
   allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   consumed_at INTEGER);
-INSERT INTO approvals_v16 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+INSERT INTO approvals_v17 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
   SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
 DROP TABLE approvals;
-ALTER TABLE approvals_v16 RENAME TO approvals;
+ALTER TABLE approvals_v17 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 CREATE TABLE chat_questions (
   tool_use_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input_hash TEXT NOT NULL,
@@ -495,7 +511,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
   { version: 14, name: "steer-end-turn", sql: STEER_END_TURN_SQL },
   { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
-  { version: 16, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
+  { version: 16, name: "verifications", sql: VERIFICATIONS_SQL },
+  { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

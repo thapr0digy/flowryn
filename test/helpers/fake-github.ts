@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
  * (its "origin"): then a PR's head follows the pushed branch, as on GitHub,
  * and a merge really lands on the bare repo's base branch (a squash or a
  * merge commit), so the cleanup guard sees what it would see after a real
- * merge. Knobs make the forge unreachable, rate limited, or accept a merge it
+ * merge. Knobs make the forge unreachable, rate limited, fail annotation reads, or accept a merge it
  * never reports (the unproven-merge case). Nothing here reaches the network.
  */
 
@@ -18,7 +18,13 @@ export interface FakeCheck {
   state: FakeCheckState;
   /** A commit status instead of a check run. */
   status?: boolean;
+  /** A red check run GitHub never started (Actions billing): its failure annotation says so. */
+  notStarted?: boolean;
 }
+
+/** GitHub's annotation on a job it never started, verbatim from a real PR whose Actions minutes ran out. */
+export const NOT_STARTED_MESSAGE =
+  "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings";
 
 export interface FakePr {
   number: number;
@@ -27,6 +33,8 @@ export interface FakePr {
   /** Fixed head; when the repo has a bare origin and the PR is open, the pushed branch wins. */
   headSha: string;
   baseRef: string;
+  /** owner/repo the head branch lives in, when it is a fork; the repo itself otherwise. */
+  headRepo?: string;
   state: "open" | "closed";
   draft: boolean;
   merged: boolean;
@@ -82,9 +90,13 @@ export class FakeGitHub {
   unreachable = false;
   /** Every request answers 403 with the rate limit spent. */
   rateLimited = false;
+  /** Check-run annotation reads answer 500. */
+  annotationsDown = false;
   readonly webUrl: string;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private nextNumber = 1;
+  /** Check runs served so far, by id, for their annotations. */
+  private readonly checkRuns = new Map<number, FakeCheck>();
 
   constructor(webUrl = "https://github.com") {
     this.webUrl = webUrl;
@@ -139,6 +151,7 @@ export class FakeGitHub {
       headRef: pr.headRef,
       headSha,
       baseRef: pr.baseRef ?? "main",
+      ...(pr.headRepo ? { headRepo: pr.headRepo } : {}),
       state: pr.state ?? "open",
       draft: pr.draft ?? false,
       merged: pr.merged ?? false,
@@ -218,7 +231,7 @@ export class FakeGitHub {
       merged_at: pr.mergedAt,
       // GitHub reports a test merge commit for an open PR too; only a merged PR's is a landing.
       merge_commit_sha: pr.merged ? pr.mergeSha : "0000000000000000000000000000000000000000",
-      head: { ref: pr.headRef, sha: head, repo: { full_name: full } },
+      head: { ref: pr.headRef, sha: head, repo: { full_name: pr.headRepo ?? full } },
       base: { ref: pr.baseRef, repo: { full_name: full } },
       mergeable: this.mergeableOf(repo, pr, head),
     };
@@ -287,18 +300,43 @@ export class FakeGitHub {
     if (req.method === "GET" && commit) {
       const checks = repo.checks.get(commit[1]!) ?? repo.defaultChecks;
       if (commit[2] === "check-runs") {
-        const runs = checks.filter((c) => !c.status).map((c) => ({
-          name: c.name,
-          status: c.state === "pending" ? "in_progress" : "completed",
-          conclusion: c.state === "pending" ? null : c.state === "green" ? "success" : "failure",
-        }));
+        const runs = checks.filter((c) => !c.status).map((c) => {
+          const id = this.checkRunId(`${repo.owner}/${repo.repo}`, commit[1]!, c.name);
+          this.checkRuns.set(id, c);
+          return {
+            id,
+            name: c.name,
+            status: c.state === "pending" ? "in_progress" : "completed",
+            conclusion: c.state === "pending" ? null : c.state === "green" ? "success" : "failure",
+            app: { slug: "github-actions" },
+            output: { title: null, summary: null, annotations_count: c.notStarted ? 2 : 0 },
+          };
+        });
         return this.json(req, path, 200, { total_count: runs.length, check_runs: runs });
       }
       const statuses = checks.filter((c) => c.status).map((c) => ({ context: c.name, state: c.state === "green" ? "success" : c.state === "red" ? "failure" : "pending" }));
       const state = statuses.some((s) => s.state === "failure") ? "failure" : statuses.some((s) => s.state === "pending") ? "pending" : "success";
       return this.json(req, path, 200, { state, total_count: statuses.length, statuses });
     }
+    const annotations = /^check-runs\/(\d+)\/annotations$/.exec(rest);
+    if (req.method === "GET" && annotations) {
+      if (this.annotationsDown) return this.json(req, path, 500, { message: "Server Error" });
+      const check = this.checkRuns.get(Number(annotations[1]));
+      if (!check) return this.json(req, path, 404, { message: "Not Found" });
+      const list = check.notStarted
+        ? [
+            { path: ".github", annotation_level: "failure", title: "", message: NOT_STARTED_MESSAGE },
+            { path: ".github", annotation_level: "notice", title: "", message: "The ubuntu-latest label will migrate to a newer image." },
+          ]
+        : [];
+      return this.json(req, path, 200, list);
+    }
     return this.json(req, path, 404, { message: "Not Found" });
+  }
+
+  /** A stable id for a check run: the same check at the same head always gets the same one. */
+  private checkRunId(repo: string, sha: string, name: string): number {
+    return Number.parseInt(createHash("sha1").update(`${repo}@${sha}#${name}`).digest("hex").slice(0, 8), 16);
   }
 
   private merge(req: Request, path: string, repo: FakeRepo, pr: FakePr, body: Record<string, unknown>): Response {

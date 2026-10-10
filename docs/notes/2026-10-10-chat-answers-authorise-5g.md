@@ -88,4 +88,4 @@ All 82 recorded approval attempts on this machine ran in `auto` mode, so the lea
   - a divergence;
   - a gate's changes with the user's typed words, then a pass (channel `claude-chat`);
   - a merge bound to the PR head with no prompt, and Don't merge.
-- `test/unit/db.test.ts`: migration 16 keeps the approvals and the merges that reference them, and turns foreign keys back on.
+- `test/unit/db.test.ts`: migration 17 keeps the approvals and the merges that reference them, and turns foreign keys back on.

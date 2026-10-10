@@ -6,7 +6,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { Caller, DaemonInfo } from "../api/verbs.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
-import { waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
+import { durationSeconds, waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
 
 /**
@@ -39,7 +39,7 @@ const VALIDATION_POOL = "validation";
  */
 export const VALIDATION_STATUS_FRESH_MS = 2 * 60_000;
 
-export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check" | "build";
+export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "verifying" | "contract_check" | "build";
 
 /** One thing a restart now would break. */
 export interface Guard {
@@ -119,6 +119,8 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
   for (const task of work.approvalTasks) guards.push({ kind: "approval", task, detail: "flowryn approve is waiting for its code" });
   for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
+  const verifying = db.query("SELECT id, task_id, pr_url, started_at FROM verifications WHERE state = 'running' ORDER BY started_at").all() as { id: string; task_id: string | null; pr_url: string; started_at: number }[];
+  for (const v of verifying) guards.push({ kind: "verifying", task: v.task_id, detail: `flowryn verify ${v.id} of ${v.pr_url} has run for ${ago(now - v.started_at)}` });
   for (const g of guards) {
     const title = g.task ? taskTitle(db, g.task) : null;
     if (title && title !== g.task) g.title = title;
@@ -147,13 +149,6 @@ function freshStatus(v: ValidationRow, now: number): NmStatusRead {
   if (read.branch !== v.branch) return { unusable: `the latest no-mistakes status is a run on branch ${String(read.branch)}, not ${v.branch}` };
   if (typeof read.outcome !== "string") return { unusable: "the latest no-mistakes status has no readable outcome" };
   return { status: { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null } };
-}
-
-/** "2h17m", "9m24s", "35s" (no-mistakes' own durations) in seconds; unreadable reads as 0. */
-export function durationSeconds(text: string): number {
-  let total = 0;
-  for (const [, n, unit] of text.matchAll(/(\d+)\s*(h|m(?!s)|s)/g)) total += Number(n) * (unit === "h" ? 3600 : unit === "m" ? 60 : 1);
-  return total;
 }
 
 /** Why a validation blocks: its longest-running step and that step's local agent, or why no status says. */

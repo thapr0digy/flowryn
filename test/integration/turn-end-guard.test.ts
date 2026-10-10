@@ -104,7 +104,7 @@ describe("the turn-end guard's episodes", () => {
   test("a worker at its review gate is never reminded", async () => {
     const env = await fleet();
     await env.json(["project", "set", "web", "--workflow", "feature"]);
-    const { task, run } = await env.dispatch("Feature\nFAKE: stage-done --review https://lavish.test/x\nFAKE: sleep 60000", { kind: "ship" });
+    const { task, run } = await env.dispatch("Feature\nFAKE: stage-done --review lavish:x.html\nFAKE: sleep 60000", { kind: "ship" });
     await env.waitRun(run, (r) => r.stage_state === "review" && r.liveness === "idle", "idle at the review gate");
     await Bun.sleep(500);
     expect(payloads(env, run, "run.turn_end_reminder")).toEqual([]);

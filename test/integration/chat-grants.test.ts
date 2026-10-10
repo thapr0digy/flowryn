@@ -230,7 +230,7 @@ describe("chat answers authorise captain actions", () => {
       const f = e.fleet;
       expect((await f.json(["project", "set", "web", "--workflow", "feature-ui"])).code).toBe(0);
       const leader = await claudeLeader(e);
-      const steps = ["Feature chat", "FAKE: stage-done --review https://lavish.test/chat/design-1", "FAKE: stage-done --review https://lavish.test/chat/design-2", "FAKE: sleep 120000"].join("\n");
+      const steps = ["Feature chat", "FAKE: stage-done --review lavish:design-1/design.html", "FAKE: stage-done --review lavish:design-2/design.html", "FAKE: sleep 120000"].join("\n");
       const { task, run } = (await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { ...token(e), stdin: steps })).reply.data as { task: string; run: string };
       await f.waitRun(run, (r) => r.stage_state === "review", "the first design review");
       const first = rows<{ id: string }>(e, "SELECT id FROM gates WHERE run_id = ?1 AND state = 'open'", run)[0]!.id;

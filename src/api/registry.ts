@@ -15,6 +15,7 @@ import { systemVerbs } from "../daemon/system-verbs.ts";
 import { LEASE_VERBS } from "../lease/verbs.ts";
 import { ATTENTION_VERBS } from "../attention/verbs.ts";
 import { POLICY_VERBS } from "../policy/verbs.ts";
+import { VERIFY_VERBS } from "../verify/verbs.ts";
 import { GRANT_VERBS } from "../policy/grant-verbs.ts";
 import type { VerbSpec } from "./verbs.ts";
 
@@ -37,6 +38,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...LEASE_VERBS,
   ...ATTENTION_VERBS,
   ...POLICY_VERBS,
+  ...VERIFY_VERBS,
   ...GRANT_VERBS,
   ...systemVerbs(),
 ];

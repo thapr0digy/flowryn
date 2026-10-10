@@ -20,6 +20,7 @@ import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { capacityConfig, workflowsConfig } from "../config/workflows.ts";
 import { INSTALL_HINTS } from "../init/install.ts";
 import { checkHost } from "../sched/host.ts";
+import { judgeQuota, probeQuota, type QuotaReading } from "../sched/quota.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -46,7 +47,7 @@ const OPTIONAL_TOOLS: Partial<Record<ToolName, string>> = {
   jira_axi: "not found (optional: Jira; the jira rule names it)",
   sqlite_axi: "not found (optional: SQLite reads; the sqlite rule names it)",
   treehouse: "not found (optional: git worktrees; the worktree rule names it)",
-  quota_axi: "not found (optional: usage quotas)",
+  quota_axi: "not found (the quota floor reads it before a new Claude run; without it nothing waits on the quota)",
   bun: "not found (optional: without it the daemon does not build Flowryn after a Flowryn merge)",
 };
 
@@ -59,16 +60,27 @@ function usesBrowser(config: FlowrynConfig): boolean {
   }
 }
 
+/** The quota floor is on: the scheduler reads quota-axi before a new Claude run. */
+function quotaFloorOn(config: FlowrynConfig): boolean {
+  try {
+    return capacityConfig(config).quota.floor > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A missing optional tool is info, except the toolkit's while something
  * depends on it (Q6): gh-axi always (every GitHub job), chrome-devtools-axi
- * while a workflow runs a browser stage, and acli while jira-axi is installed.
+ * while a workflow runs a browser stage, acli while jira-axi is installed,
+ * and quota-axi while the quota floor is on.
  */
 function missingStatus(config: FlowrynConfig, name: ToolName, which: Which): CheckStatus {
   if (REQUIRED_TOOLS.includes(name)) return "fail";
   if (name === "gh_axi") return "warn";
   if (name === "chrome_devtools_axi") return usesBrowser(config) ? "warn" : "info";
   if (name === "acli") return locate(config, "jira_axi", which) ? "warn" : "info";
+  if (name === "quota_axi") return quotaFloorOn(config) ? "warn" : "info";
   return "info";
 }
 
@@ -340,6 +352,8 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const policy = policyCheck(config);
   if (policy) checks.push(policy);
   checks.push(await hostCheckNow(config));
+  const quota = await quotaCheck(config);
+  if (quota) checks.push(quota);
   return checks;
 }
 
@@ -366,6 +380,28 @@ async function hostCheckNow(config: FlowrynConfig): Promise<Check> {
   const now = verdict.sample ? `${verdict.sample.free_mem_gb.toFixed(1)} GB available, load ${verdict.sample.load_per_core.toFixed(2)} per core` : verdict.reason;
   if (verdict.ok) return { check: "host check", status: "ok", detail: `${now}; needs ${host.min_free_mem_gb} GB and at most ${host.max_load_per_core} per core; pools: ${pools}` };
   return { check: "host check", status: "warn", detail: `fails now (${verdict.reason}): no new worker or stage starts while it fails; lower [capacity.host] min_free_mem_gb or max_load_per_core if this machine never has that room` };
+}
+
+/**
+ * The quota floor's probe, run now as the scheduler runs it: the reading
+ * against the floor. Nothing when the floor is off or quota-axi is missing
+ * (its tool line says so).
+ */
+export async function quotaCheck(config: FlowrynConfig, probe: (tool: string, node: string | null) => Promise<QuotaReading> = probeQuota): Promise<Check | null> {
+  let floor: number;
+  try {
+    floor = capacityConfig(config).quota.floor;
+  } catch {
+    return null;
+  }
+  if (floor <= 0) return null;
+  const tool = resolveTool(config, "quota_axi");
+  if (!tool || !existsSync(tool)) return null;
+  const reading = await probe(tool, resolveTool(config, "node"));
+  if (reading.state === "unknown") return { check: "quota probe", status: "warn", detail: `${reading.detail}; new Claude runs never wait on the quota while it fails` };
+  const window = reading.window ? ` (${reading.window})` : "";
+  if (judgeQuota(reading, floor) === "low") return { check: "quota probe", status: "warn", detail: `claude ${reading.percent}%${window}, under the ${floor}% floor: new Claude runs wait (flowryn capacity resume --harness claude starts them anyway)` };
+  return { check: "quota probe", status: "ok", detail: `claude ${reading.percent}%${window} effective, floor ${floor}%` };
 }
 
 export interface RestoreResult {

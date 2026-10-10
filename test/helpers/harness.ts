@@ -63,6 +63,37 @@ while :; do
 done
 `;
 
+/** What the stand-in quota-axi prints unless a test writes its own: Claude at 80%, in quota-axi 0.1.37's schema. */
+export function quotaJson(percent: number, status = "known"): string {
+  return JSON.stringify({
+    schemaVersion: 5,
+    providers: [
+      {
+        provider: "claude",
+        windows: [
+          { id: "five_hour", kind: "session", resetsAt: "2026-10-10T22:00:00+00:00", percentRemaining: Math.min(100, percent + 10) },
+          { id: "seven_day", kind: "weekly", resetsAt: "2026-10-11T04:00:00+00:00", percentRemaining: percent },
+        ],
+        quotaSemantics: { status, effectiveAvailability: [{ scope: "all_models", status, effectivePercentRemaining: percent, limitingWindowIds: ["seven_day"] }] },
+      },
+    ],
+  });
+}
+
+/**
+ * The test homes' quota-axi: every call is logged to $FLOWRYN_HOME/quota-calls.log; it prints
+ * $FLOWRYN_HOME/quota.json when a test wrote one (quotaJson), else Claude at 80%, and exits 1 while
+ * $FLOWRYN_HOME/quota.fail exists. Nothing reaches the network or the keychain.
+ */
+const FAKE_QUOTA = `#!/bin/sh
+echo "$*" >> "$FLOWRYN_HOME/quota-calls.log"
+if [ -f "$FLOWRYN_HOME/quota.fail" ]; then echo "quota-axi: claude: network unreachable" >&2; exit 1; fi
+if [ -f "$FLOWRYN_HOME/quota.json" ]; then cat "$FLOWRYN_HOME/quota.json"; exit 0; fi
+cat <<'JSON'
+${quotaJson(80)}
+JSON
+`;
+
 /** The real tasks-axi. The journal tests run against it, never a reimplementation. */
 export function realTasksAxi(): string {
   const found = process.env.FLOWRYN_TEST_TASKS_AXI ?? Bun.which("tasks-axi");
@@ -116,6 +147,10 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   const lavish = join(bin, "lavish-axi");
   writeFileSync(lavish, FAKE_LAVISH);
   chmodSync(lavish, 0o755);
+  // Nor the real quota-axi (the network and the keychain): the scheduler and doctor read this one.
+  const quota = join(bin, "quota-axi");
+  writeFileSync(quota, FAKE_QUOTA);
+  chmodSync(quota, 0o755);
   const gh = join(bin, "gh-absent");
   writeFileSync(gh, "#!/bin/sh\necho 'gh is not available in tests' >&2\nexit 1\n");
   chmodSync(gh, 0o755);
@@ -138,6 +173,7 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     `no_mistakes = ${JSON.stringify(noMistakes)}`,
     `gh = ${JSON.stringify(gh)}`,
     ...(/^lavish_axi\s*=/m.test(extraConfig) ? [] : [`lavish_axi = ${JSON.stringify(lavish)}`]),
+    ...(/^quota_axi\s*=/m.test(extraConfig) ? [] : [`quota_axi = ${JSON.stringify(quota)}`]),
     ...harnessStandIns,
     extraConfig,
   ];

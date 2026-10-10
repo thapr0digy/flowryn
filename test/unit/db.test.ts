@@ -188,13 +188,28 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("chat grants: approvals is rebuilt for claude-chat, its rows and the merges that reference them kept, foreign keys back on", () => {
+  test("verifications arrive with migration 16 on a database already in use, and a state outside the four is refused", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 15));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    expect(migrate(db, MIGRATIONS.slice(0, 16))).toEqual([16]);
+    const insert = (state: string) =>
+      db
+        .query("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES (?1, 'web', 'https://github.com/a/w/pull/1', 'h', ?2, '[]', '/d', '/d/wt', '/w', 1)")
+        .run(`v${state}`, state);
+    for (const state of ["running", "passed", "failed", "error"]) insert(state);
+    expect(() => insert("green")).toThrow("CHECK");
+    expect(migrate(db, MIGRATIONS.slice(0, 16))).toEqual([]);
+    db.close();
+  });
+
+  test("chat grants: approvals is rebuilt for claude-chat, its rows and the merges that reference them kept, foreign keys back on", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 16));
     db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('a1', 't1', 'u', 'h', 'cli-tty', 'me', 'merge', 1, 2)");
     db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('m1', 't1', 'u', 'h', 'a1', 1, 'merged')");
     expect(() => db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'claude-chat', 'me', 1, 2)")).toThrow();
-    expect(migrate(db)).toEqual([16]);
+    expect(migrate(db)).toEqual([17]);
     expect(db.query("SELECT id, channel FROM approvals").all()).toEqual([{ id: "a1", channel: "cli-tty" }]);
     db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'claude-chat', 'me', 1, 2)");
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);

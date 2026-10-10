@@ -59,6 +59,10 @@ export const ERROR_CODES = {
   grant_mismatch: EXIT.policy,
   // steers and interrupts
   interrupt_refused: EXIT.policy,
+  // flowryn verify
+  verify_failed: EXIT.policy,
+  verify_busy: EXIT.policy,
+  fork_pr: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,
@@ -71,8 +75,12 @@ export const ERROR_CODES = {
   run_not_active: EXIT.validation,
   invalid_report: EXIT.validation,
   qa_page_invalid: EXIT.validation,
+  // a review URL that is not lavish's page for the review page (Q3)
+  review_invalid: EXIT.validation,
   // `flowryn back` with no away to end and no recent brief to reprint
   not_away: EXIT.validation,
+  // a project with no [projects.<id>] verify steps
+  not_configured: EXIT.validation,
   // not found
   not_found: EXIT.notFound,
   // transport
