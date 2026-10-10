@@ -1,10 +1,10 @@
 # CI-wait watchdog
 
 - Status: partial
-- Open: phase 2 (policy follow-through: a policy change on main steers in-flight ships to merge it) follows from plan p10; a real pipeline's `axi abort` of a CI wait and `no-mistakes rerun` after the merge not yet run live
+- Open: a real pipeline's `axi abort` of a CI wait and `no-mistakes rerun` after the merge not yet run live
 - Config: `[validation] ci_wait_alert`
 
-A ship's no-mistakes pipeline whose PR has no checks (Actions is off) waits in its `ci` step for no-mistakes' `ci_timeout` (168 h here) unless its branch has main's `no_ci: true`, and nothing said so: the run read `validating`, the worker waited and the validation slot stayed leased. Phase 1 of task pipeline-watchdog-and-pt; phase 2 (policy follow-through) is plan p10. Plain code throughout: the status flowrynd already reads, one GitHub read, git, fixed text; no model.
+A ship's no-mistakes pipeline whose PR has no checks (Actions is off) waits in its `ci` step for no-mistakes' `ci_timeout` (168 h here) unless its branch has main's `no_ci: true`, and nothing said so: the run read `validating`, the worker waited and the validation slot stayed leased. Phase 1 of task pipeline-watchdog-and-pt; phase 2 (policy follow-through) is `2026-10-10-policy-follow-through-fy.md`. Plain code throughout: the status flowrynd already reads, one GitHub read, git, fixed text; no model.
 
 - **The rule** (`src/lifecycle/ci-wait.ts`, run from the delivery watcher's poll after each status read, never from the restart guard's read): the pipeline waits only on CI (`waitsOnlyOnCi`: every active step `ci`, no `agent_pid`), on the run's own branch, for at least `[validation] ci_wait_alert` minutes, and the PR no-mistakes names has no checks at its head (`forge.pull`, then `forge.checks`; a PR not open, not on this GitHub, or a failed read skips the pass; no PR named counts as no checks). The clock is the `ci` step's `active_for` (no-mistakes' own, so a flowrynd restart does not reset it); when that is unreadable, `ci_since` in the run's `nomistakes` evidence, the first read of this pipeline run waiting (`applyNmObservation` keeps it across reads of the same run id).
 - **GitHub reads share the watcher's backoff**: the CI-wait read is skipped while the PR watcher is backing off, and its own failure backs off the same way (an outage or rate limit opens the same GitHub P1, a rate limit's `retryAt` is honoured); a successful read ends that outage, so a CI-wait read is never a tight retry loop.
