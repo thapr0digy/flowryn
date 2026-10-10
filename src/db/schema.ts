@@ -439,6 +439,22 @@ const ITEM_FULL_LINE_SQL = /* sql */ `
 ALTER TABLE items ADD COLUMN full_line TEXT;
 `;
 
+/**
+ * `flowryn verify`: one row per local run of a project's verify steps at a
+ * PR head, in a clean worktree. A passing one at the current head counts as
+ * local green for checks GitHub never started (src/policy/merge.ts).
+ */
+const VERIFICATIONS_SQL = /* sql */ `
+CREATE TABLE verifications (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, pr_url TEXT NOT NULL, task_id TEXT,
+  head_sha TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running','passed','failed','error')),
+  steps TEXT NOT NULL, tests TEXT, detail TEXT, binary_path TEXT,
+  dir TEXT NOT NULL, worktree_path TEXT NOT NULL, project_path TEXT NOT NULL,
+  started_at INTEGER NOT NULL, finished_at INTEGER);
+CREATE INDEX verifications_pr ON verifications(pr_url, started_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -455,6 +471,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
   { version: 14, name: "steer-end-turn", sql: STEER_END_TURN_SQL },
   { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
+  { version: 16, name: "verifications", sql: VERIFICATIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

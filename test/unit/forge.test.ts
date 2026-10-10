@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalPrUrl, GitHubForge, parsePrUrl, repoOf } from "../../src/forge/github.ts";
 import { checksLine, ForgeError } from "../../src/forge/types.ts";
-import { FakeGitHub } from "../helpers/fake-github.ts";
+import { FakeGitHub, NOT_STARTED_MESSAGE } from "../helpers/fake-github.ts";
 
 function git(cwd: string, args: string[]): string {
   const result = Bun.spawnSync(["git", ...args], {
@@ -64,6 +64,25 @@ describe("GitHub forge client", () => {
     git(clone, ["commit", "-q", "-m", "more"]);
     git(clone, ["push", "-q", "origin", "flowryn/t1"]);
     expect((await forge.pull({ owner: "acme", repo: "web", number })).headSha).toBe(git(clone, ["rev-parse", "HEAD"]));
+  });
+
+  test("a check run carries its id, app and annotation count, and its annotations read back", async () => {
+    await openPr();
+    const head = git(clone, ["rev-parse", "HEAD"]);
+    fake.setChecks("acme/web", head, [
+      { name: "build", state: "red", notStarted: true },
+      { name: "legacy", state: "red", status: true },
+    ]);
+    const summary = await forge.checks({ owner: "acme", repo: "web" }, head);
+    const build = summary.checks.find((c) => c.name === "build")!;
+    expect(build).toMatchObject({ state: "red", detail: "failure", app: "github-actions", annotations: 2 });
+    expect(typeof build.id).toBe("number");
+    expect(summary.checks.find((c) => c.name === "legacy")).toEqual({ name: "legacy", state: "red", detail: "failure" });
+    expect(await forge.annotations({ owner: "acme", repo: "web" }, build.id!)).toEqual([
+      { level: "failure", message: NOT_STARTED_MESSAGE },
+      { level: "notice", message: "The ubuntu-latest label will migrate to a newer image." },
+    ]);
+    await expect(forge.annotations({ owner: "acme", repo: "web" }, 1)).rejects.toMatchObject({ kind: "not_found" });
   });
 
   test("an unchanged read is a 304 from the ETag cache", async () => {

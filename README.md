@@ -87,6 +87,7 @@ flowryn approve <task>              # your word for a merge: shows the PR, head 
 flowryn approve <task> --allow-red lint   # waive exactly one failing check; --discard approves throwing work away
 flowryn merge <task>                # through the merge gate; it counts only once GitHub (or local main) proves it
 flowryn merge <task> --allow-red 'CI / build'  # the leader's waiver: Claude's prompt (or Pi's confirm) names the check, your yes waives it
+flowryn verify <task>               # or a PR number or URL: the project's verify steps at the PR head in a clean worktree, recorded for the merge gate; --detach; verify show v4
 flowryn decline <task> --body-file -  # send a delivered ship back with your words
 flowryn cleanup <task> [--discard]  # remove a landed, cancelled or failed task's worktree, through the cleanup guard
 flowryn dispatch web --kind ship --workflow feature --body-file -   # design, review, build, ship
