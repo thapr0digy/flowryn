@@ -28,7 +28,7 @@ import { dismissRunQuestions } from "./gate-questions.ts";
  */
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report"] as const;
+const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged"] as const;
 
 /** The run landed: the merge is proven. Call inside a transaction. */
 export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; how: "merge" | "merged_elsewhere"; mergeId?: string }, now: number): void {
@@ -75,6 +75,8 @@ export interface CleanupRequestOptions {
   discardAttempt?: DiscardAttempt | null;
   /** The daemon's own cleanup after a proven merge: a refusal is a P1 rather than an error. */
   auto: boolean;
+  /** The upkeep sweep of an ended run's worktree (src/upkeep/sweep.ts): recorded as such; a refusal opens no item. */
+  sweep?: boolean;
 }
 
 export interface CleanupReport extends CleanupOutcome {
@@ -156,7 +158,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
   const now = deps.now();
   tx(db, () => {
     const current = getRunWithPolicy(db, run.id) ?? run;
-    const payload = { outcome: outcome.outcome, reason: outcome.reason, detail: outcome.detail, lock: outcome.lock, aborted: outcome.aborted, reaped: outcome.reaped, branch_deleted: outcome.branchDeleted, discarded_head: outcome.discardedHead, steps: outcome.steps, auto: opts.auto };
+    const payload = { outcome: outcome.outcome, reason: outcome.reason, detail: outcome.detail, lock: outcome.lock, aborted: outcome.aborted, reaped: outcome.reaped, branch_deleted: outcome.branchDeleted, discarded_head: outcome.discardedHead, steps: outcome.steps, auto: opts.auto, ...(opts.sweep ? { sweep: true } : {}) };
     if (outcome.outcome === "refused") {
       db.query("UPDATE runs SET cleanup = 'refused', cleanup_detail = ?2, updated_at = ?3 WHERE id = ?1").run(run.id, `${outcome.reason}: ${outcome.detail}`, now);
       const event = appendEvent(db, { source: "daemon", kind: "cleanup.refused", runId: run.id, taskId: run.task_id, payload, ts: now });
