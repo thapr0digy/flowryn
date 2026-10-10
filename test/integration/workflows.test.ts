@@ -6,6 +6,7 @@ import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { M4_SHIP_WORKFLOW } from "../../src/db/schema.ts";
+import { lavishSessionKey } from "../../src/lavish/session-key.ts";
 
 /**
  * Workflows, review gates, capacity grants and the usage-limit pause (design
@@ -48,14 +49,14 @@ async function until(e: FleetEnv, what: string, check: () => boolean, timeoutMs 
 const FEATURE = (name: string) =>
   [
     `Feature ${name}`,
-    `FAKE: stage-done --review https://lavish.test/${name}/design`,
+    `FAKE: stage-done --review lavish:${name}/design.html`,
     `FAKE: commit ${name}.txt built`,
     "FAKE: stage-done",
     `FAKE: docker-up ${name}-web flowryn-${name}`,
     "FAKE: sleep 1500",
     `FAKE: docker-down ${name}-web`,
     "FAKE: qa-page",
-    `FAKE: stage-done --review https://lavish.test/${name}/qa`,
+    `FAKE: stage-done --review lavish:qa/evidence.html`,
     "FAKE: deliver-local",
     "FAKE: sleep 120000",
   ].join("\n");
@@ -76,9 +77,11 @@ describe("workflow stages and review gates", () => {
 
       // Design: the worker hands in its page; a P1 names the link; nothing moves without your word.
       await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
-      const gate = one<{ id: string; review_url: string }>(f, "SELECT id, review_url FROM gates WHERE run_id = ?1 AND kind = 'review' AND state = 'open'", run)!;
-      expect(gate.review_url).toBe("https://lavish.test/one/design");
-      expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'gate_ready' AND run_id = ?1 AND state IN ('open','presented')", run)!.line).toContain("https://lavish.test/one/design");
+      const gate = one<{ id: string; review_url: string; page_path: string }>(f, "SELECT id, review_url, page_path FROM gates WHERE run_id = ?1 AND kind = 'review' AND state = 'open'", run)!;
+      // The review URL is lavish's for the page the worker hosted, so the daemon listens on that page.
+      expect(gate.page_path.endsWith("/one/design.html")).toBe(true);
+      expect(gate.review_url).toBe(`http://127.0.0.1:4387/session/${lavishSessionKey(gate.page_path)}`);
+      expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'gate_ready' AND run_id = ?1 AND state IN ('open','presented')", run)!.line).toContain(gate.review_url);
       // Your own terminal without a record, and the leader without your prompt, are refused.
       const bare = await e.call("gate pass", { task });
       expect(bare.error?.code).toBe("approval_required");
@@ -135,16 +138,16 @@ describe("workflow stages and review gates", () => {
       const steps = [
         "Feature two",
         "FAKE: verb deliver --local",
-        "FAKE: stage-done --review https://lavish.test/two/design",
+        "FAKE: stage-done --review lavish:two/design.html",
         "FAKE: commit two.txt first try",
         "FAKE: stage-done",
-        "FAKE: verb stage done --review https://lavish.test/two/qa-0",
+        "FAKE: verb stage done --review lavish:qa/evidence.html",
         "FAKE: qa-page",
-        "FAKE: stage-done --review https://lavish.test/two/qa-1",
+        "FAKE: stage-done --review lavish:qa/evidence.html",
         "FAKE: commit two.txt second try",
         "FAKE: stage-done",
         "FAKE: qa-page works-with-caveats",
-        "FAKE: stage-done --review https://lavish.test/two/qa-2",
+        "FAKE: stage-done --review lavish:qa/evidence.html",
         "FAKE: deliver-local",
         "FAKE: sleep 120000",
       ].join("\n");
@@ -158,7 +161,7 @@ describe("workflow stages and review gates", () => {
       expect((await e.approve(task, { gate: "design" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.stage === "qa" && r.stage_state === "review", "the first QA review");
       // The QA review needs its page: without qa/evidence.html and its filled card, stage done is refused.
-      const noPage = (await e.replies(task, 5)).find((r) => r.args.includes("https://lavish.test/two/qa-0"))!;
+      const noPage = (await e.replies(task, 5)).find((r) => r.args.includes("lavish:qa/evidence.html"))!;
       expect(noPage.code).toBe(3);
       expect((noPage.reply.error as { code: string }).code).toBe("qa_page_invalid");
       const changes = await f.json(["gate", "changes", task, "--body-file", "-"], { stdin: "The button is off-screen on a phone." });
@@ -168,7 +171,7 @@ describe("workflow stages and review gates", () => {
       expect(steer.body).toContain("Changes requested at the qa review: The button is off-screen on a phone. Back to stage build.");
       expect(steer.body).toContain("Flowryn stage build (2 of 4");
 
-      await f.waitRun(run, (r) => r.stage === "qa" && r.stage_state === "review" && one(f, "SELECT 1 FROM gates WHERE run_id = ?1 AND review_url LIKE '%qa-2'", run) !== null, "the second QA review");
+      await f.waitRun(run, (r) => r.stage === "qa" && r.stage_state === "review" && one(f, "SELECT 1 FROM gates WHERE run_id = ?1 AND stage = 'qa' AND state = 'open' AND (SELECT COUNT(*) FROM gates WHERE run_id = ?1 AND stage = 'qa') = 2", run) !== null, "the second QA review");
       expect((await e.approve(task, { gate: "qa" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.state === "ready", "the delivery");
       const gates = rows<{ stage: string; state: string; feedback: string | null }>(f, "SELECT stage, state, feedback FROM gates WHERE run_id = ?1 AND kind = 'review' ORDER BY opened_at", run);
@@ -187,7 +190,7 @@ describe("workflow stages and review gates", () => {
       expect((await f.json(["project", "set", "web", "--workflow", "feature-ui"])).code).toBe(0);
       const leader = await e.claude();
       await leader.start();
-      const steps = ["Feature three", "FAKE: stage-done --review https://lavish.test/three/design-1", "FAKE: stage-done --review https://lavish.test/three/design-2", "FAKE: sleep 120000"].join("\n");
+      const steps = ["Feature three", "FAKE: stage-done --review lavish:three/design-1.html", "FAKE: stage-done --review lavish:three/design-2.html", "FAKE: sleep 120000"].join("\n");
       const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: steps });
       const { task, run } = dispatched.reply.data as { task: string; run: string };
       await f.waitRun(run, (r) => r.stage_state === "review", "the first design review");
