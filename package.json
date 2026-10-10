@@ -11,7 +11,8 @@
     "build": "scripts/build.sh",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint",
-    "test": "bun test"
+    "test": "bun test",
+    "notes": "bun scripts/docs/notes.ts"
   },
   "engines": {
     "bun": ">=1.3.8"
