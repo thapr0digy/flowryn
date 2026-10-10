@@ -14,7 +14,7 @@ A ship whose validation slot was live but whose pipeline made no progress (a ste
 - **Relayed**: `validation_stuck` is in `RELAY_KINDS`, so a Claude leader's Stop carries its line once, like a worker report.
 - **Choice**: the CI step follows the same rule; no-mistakes logs while it waits on checks, and a CI that logs nothing for the threshold is worth a look. Raise `validation_stuck_ms` if it is not.
 - **Tests**: `test/unit/validation-stuck.test.ts` (the `last_activity` age on the v1.53.0 shape, no activity yet, unreadable; quiet step, one per episode, under the threshold, no table or no step, moving and stalling again, dismissed not reopened, ended and gone runs from the grant or the last `run.validated`, no slot, release resolves, a new slot a new episode); `test/integration/validation-stuck.test.ts` (a ship through the real CLI, the fake worker and the no-mistakes stand-in: a quiet step opens the item, the leader's Stop carries it once, the step moving resolves it; an ended run opens it and the delivery resolves it).
-- **Version**: 0.15.0. `PROTO` stays 6.
+- **Version**: 0.17.0. `PROTO` stays 6.
 
 ## Config
 
