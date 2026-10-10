@@ -1,10 +1,10 @@
-import { lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
-import type { FlowrynConfig } from "../config/config.ts";
+import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, WORKER_POOL, type StageDef, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
@@ -15,6 +15,7 @@ import { QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaPageProblems } from "../skills/q
 import { skillPath } from "../skills/stages.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { parseGateQuestions } from "../lavish/questions.ts";
+import { findPageForKey, lavishSessionKey, lavishUrlKey } from "../lavish/session-key.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, openGateQuestions } from "./gate-questions.ts";
 import { reportDirFor } from "./launcher.ts";
 import { approvePlan, discardPlansOfGate, fileWorkerPlan, parsePlan } from "./plans.ts";
@@ -456,12 +457,58 @@ export function recordStageDelivered(db: Db, run: RunWithPolicy, skipped: string
 
 // --- the worker's verbs ----------------------------------------------------------------------------
 
-const REVIEW_URL = /^(?:https?|file):\/\/\S{1,480}$/;
+const MAX_REVIEW_URL = 512;
 
-function requireReviewUrl(stage: string, review: string | undefined): string {
-  if (!review) throw new FlowrynError("bad_args", `stage ${stage} has a review gate: pass --review <lavish url>`);
-  if (!REVIEW_URL.test(review)) throw new FlowrynError("bad_args", "--review must be an http(s) or file:// URL");
-  return review;
+interface ReviewTarget {
+  /** The page the gate is for: --page, or the QA stage's own evidence page. */
+  page: string | null;
+  reportDir: string;
+  /** lavish-axi is installed, so a file:// review is not accepted. */
+  lavishInstalled: boolean;
+}
+
+/**
+ * The review URL of a gate and the page Flowryn listens on (the toolkit
+ * report's Q3). It must be lavish's URL for a page under the report
+ * directory: its session key is that page's realpath hash (session-key.ts),
+ * so the check needs no network and gives the same verdict when a spooled
+ * stage done is replayed. With --page (or the QA page) the key must be that
+ * page's; without, the page under the report directory with that key is the
+ * one. A file:// URL is the fallback only while lavish-axi is not installed.
+ */
+function hostHint(page: string | null): string {
+  return `host it: lavish-axi ${page ?? "<the page under $FLOWRYN_REPORT_DIR>"} prints its URL; pass it with --page <that page>`;
+}
+
+function checkReviewUrl(review: string, target: ReviewTarget): { url: string; page: string } {
+  if (review.length > MAX_REVIEW_URL) throw new FlowrynError("review_invalid", `--review is over ${MAX_REVIEW_URL} characters`);
+  const key = lavishUrlKey(review);
+  if (key !== null) {
+    if (target.page !== null) {
+      const expected = lavishSessionKey(target.page);
+      if (key !== expected) throw new FlowrynError("review_invalid", `--review names lavish session ${key}, but ${target.page} is session ${expected}`, hostHint(target.page));
+      return { url: review, page: target.page };
+    }
+    const found = findPageForKey(realReportDir(target.reportDir), key);
+    if (!found) throw new FlowrynError("review_invalid", `no page under $FLOWRYN_REPORT_DIR is lavish session ${key}`, hostHint(null));
+    return { url: review, page: checkReviewPage(found, target.reportDir, { widget: false }) };
+  }
+  if (review.startsWith("file://")) {
+    if (target.lavishInstalled) throw new FlowrynError("review_invalid", "lavish-axi is installed, so a review is its URL, not a file:// one", hostHint(target.page));
+    const page = reviewFilePage(review, target.reportDir);
+    if (!page) throw new FlowrynError("review_invalid", "a file:// review must name an .html page under $FLOWRYN_REPORT_DIR");
+    if (target.page !== null && page !== target.page) throw new FlowrynError("review_invalid", `--review names ${page}, but the review page is ${target.page}`);
+    return { url: review, page };
+  }
+  throw new FlowrynError("review_invalid", "--review must be lavish's URL for the review page (http://<host>:<port>/session/<16 hex>)", hostHint(target.page));
+}
+
+function realReportDir(reportDir: string): string {
+  try {
+    return realpathSync(reportDir);
+  } catch {
+    throw new FlowrynError("review_invalid", "$FLOWRYN_REPORT_DIR does not exist, so it holds no review page");
+  }
 }
 
 function workerRun(ctx: { db: Db; caller: HandlerCtx["caller"] }): RunWithPolicy {
@@ -488,7 +535,7 @@ const QA_SKILL = "flowryn-visual-qa";
  * (src/skills/qa-template.ts). It lives at `$FLOWRYN_REPORT_DIR/qa/evidence.html`,
  * as the skill says; a symlink there is refused rather than followed.
  */
-export function checkQaPage(reportDir: string): void {
+export function checkQaPage(reportDir: string): string {
   const path = join(reportDir, "qa", "evidence.html");
   const hint = `copy ${QA_TEMPLATE_FILE} from the flowryn-visual-qa skill to ${path} and fill it`;
   let st;
@@ -501,6 +548,7 @@ export function checkQaPage(reportDir: string): void {
   if (st.size > QA_PAGE_MAX_BYTES) throw new FlowrynError("qa_page_invalid", `${path} is over ${QA_PAGE_MAX_BYTES / 1024 / 1024} MB`);
   const problems = qaPageProblems(readFileSync(path, "utf8"));
   if (problems.length > 0) throw new FlowrynError("qa_page_invalid", `${path}: ${problems.join("; ")}`, "fix the page, host it again, then run stage done");
+  return realpathSync(path);
 }
 
 /**
@@ -544,15 +592,23 @@ const stageDone: VerbSpec = {
     const reportDir = reportDirFor(ctx.config(), run.task_id);
     const pagePath = page !== undefined ? checkReviewPage(page, reportDir, { widget: questions !== null }) : null;
     const title = taskTitle(ctx.db, run.task_id);
-    const gateReview = pos.stage.gate === "review" ? requireReviewUrl(pos.stage.id, review) : null;
-    if (gateReview !== null && pos.stage.skill === QA_SKILL) checkQaPage(reportDir);
+    let gateReview: string | null = null;
+    let listened: string | null = null;
+    if (pos.stage.gate === "review") {
+      if (!review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has a review gate: pass --review <lavish url>`);
+      const qaPage = pos.stage.skill === QA_SKILL ? checkQaPage(reportDir) : null;
+      if (qaPage !== null && pagePath !== null && pagePath !== qaPage) throw new FlowrynError("bad_args", `the QA review page is ${qaPage}; --page names another`);
+      const lavish = resolveTool(ctx.config(), "lavish_axi");
+      const checked = checkReviewUrl(review, { page: qaPage ?? pagePath, reportDir, lavishInstalled: lavish !== null && existsSync(lavish) });
+      gateReview = checked.url;
+      listened = checked.page;
+    }
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
     if (gateReview !== null) {
       const gateId = nextGateId(ctx.db);
       ctx.db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at) VALUES (?1, ?2, ?3, 'review', ?4, 'open', ?5)").run(gateId, run.id, pos.stage.id, gateReview, now);
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
-      // The daemon listens on the page itself (src/lavish/poller.ts): --page, or a file:// review URL under the report directory.
-      const listened = pagePath ?? reviewFilePage(gateReview, reportDir);
+      // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
       if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
       const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, pagePath, questions, now) : [];
       let plan: string | null = null;
@@ -567,7 +623,6 @@ const stageDone: VerbSpec = {
       const asking = asked.length > 0 ? ` with ${asked.length} question${asked.length === 1 ? "" : "s"} for you (${asked.join(", ")})` : "";
       openItem(ctx.db, { kind: "gate_ready", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `${pos.stage.id} ready for review (${gateId})${asking}: ${title} (${run.project_id}) ${sanitizeLine(gateReview, 120)}`, now });
       const hints = ["end your turn; a steer brings the verdict and the user's answers"];
-      if (!listened) hints.unshift("no --page: Flowryn cannot listen on the review page; next time pass --page <its .html file>");
       return { data: { stage: pos.stage.id, gate: gateId, state: "review", plan: plan ?? "-", questions: asked }, hints };
     }
     if (planText !== undefined) throw new FlowrynError("bad_args", "a plan rides with a review gate (approving the design approves the plan); this stage has none");

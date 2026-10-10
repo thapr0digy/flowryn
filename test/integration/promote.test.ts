@@ -216,7 +216,7 @@ describe("a scout in a review with questions", () => {
           "Scout the cache",
           `FAKE: write design/design.html ${page}`,
           `FAKE: write design/questions.json ${questions}`,
-          "FAKE: stage-done --review https://lavish.test/p/design --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json",
+          "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json",
           "FAKE: sleep 60000",
         ].join("\n"),
       });

@@ -2,9 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
-import type { FleetEnv } from "../helpers/fleet-env.ts";
+import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { ANSWER_MARK, encodeAnswer, encodeSend } from "../../src/lavish/poll-output.ts";
+import { lavishSessionKey } from "../../src/lavish/session-key.ts";
 
 /**
  * A review gate's questions, end to end on the fake fleet (design: "A
@@ -38,8 +39,8 @@ function steps(name: string, after: string[]): string {
     `FAKE: write design/design.html ${PAGE}`,
     `FAKE: write design/questions.json ${QUESTIONS}`,
     // Questions without the page they go on: refused, and nothing opens.
-    `FAKE: stage-done --review https://lavish.test/${name}/design --questions-file $FLOWRYN_REPORT_DIR/design/questions.json`,
-    `FAKE: stage-done --review https://lavish.test/${name}/design --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json`,
+    `FAKE: stage-done --review lavish:${name}/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json`,
+    `FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json`,
     ...after,
   ].join("\n");
 }
@@ -186,8 +187,8 @@ describe("a review gate's questions", () => {
       expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
       const after = [
         "FAKE: write design/bad.json {\"questions\": [{\"key\": \"x\", \"question\": \"Which?\", \"options\": [\"a\", \"b\"], \"recommend\": \"a\"}]}",
-        "FAKE: stage-done --review https://lavish.test/c/design-2 --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/bad.json",
-        "FAKE: stage-done --review https://lavish.test/c/design-2 --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json",
+        "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/bad.json",
+        "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html --questions-file $FLOWRYN_REPORT_DIR/design/questions.json",
         "FAKE: sleep 120000",
       ];
       const { task, run } = await f.dispatch(steps("c", after), { kind: "ship" });
@@ -284,7 +285,7 @@ describe("the daemon listens on every review page", () => {
       const body = [
         "Feature listen",
         `FAKE: write design/design.html ${plain}`,
-        "FAKE: stage-done --review https://lavish.test/listen/design --page $FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
         "FAKE: sleep 120000",
       ].join("\n");
       const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: body });
@@ -319,20 +320,72 @@ describe("the daemon listens on every review page", () => {
   );
 
   test(
-    "a file:// review URL under the report directory is the page; an https one without --page is not listened on, and says so",
+    "a lavish URL without --page finds its page under the report directory and is listened on; one naming no page, another page, or no lavish session is refused",
     async () => {
       ship = await makeShipEnv({ mode: "local-only" });
       const e = ship;
       const f = e.fleet;
       expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
-      const viaFile = await f.dispatch(["Feature file", "FAKE: write design/design.html <html></html>", "FAKE: stage-done --review file://$FLOWRYN_REPORT_DIR/design/design.html", "FAKE: sleep 120000"].join("\n"), { kind: "ship" });
-      const viaHttps = await f.dispatch(["Feature https", "FAKE: stage-done --review https://lavish.test/x/design", "FAKE: sleep 120000"].join("\n"), { kind: "ship" });
-      await f.waitRun(viaFile.run, (r) => r.stage_state === "review", "the file review");
-      await f.waitRun(viaHttps.run, (r) => r.stage_state === "review", "the https review");
-      expect(one<{ page_path: string | null }>(f, "SELECT page_path FROM gates WHERE run_id = ?1", viaFile.run)!.page_path).toEndWith("design/design.html");
-      expect(one<{ page_path: string | null }>(f, "SELECT page_path FROM gates WHERE run_id = ?1", viaHttps.run)!.page_path).toBeNull();
-      const [reply] = await e.replies(viaHttps.task, 1);
-      expect(reply!.reply.hints).toContain("no --page: Flowryn cannot listen on the review page; next time pass --page <its .html file>");
+      const handIns = [
+        "Feature review urls",
+        "FAKE: write design/design.html <html></html>",
+        "FAKE: verb stage done --review https://example.com/review",
+        "FAKE: verb stage done --review http://127.0.0.1:4387/session/0123456789abcdef",
+        "FAKE: verb stage done --review lavish:other.html --page $FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: verb stage done --review file://$FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: stage-done --review lavish:design/design.html",
+        "FAKE: sleep 120000",
+      ];
+      const { task, run } = await f.dispatch(handIns.join("\n"), { kind: "ship" });
+      await f.waitRun(run, (r) => r.stage_state === "review", "the review");
+      const replies = await e.replies(task, 5);
+      const refused = replies.slice(0, 4).map((r) => ({ code: r.code, error: (r.reply.error as { code: string; message: string }).code, message: (r.reply.error as { message: string }).message }));
+      expect(refused.map((r) => [r.code, r.error])).toEqual([
+        [3, "review_invalid"],
+        [3, "review_invalid"],
+        [3, "review_invalid"],
+        [3, "review_invalid"],
+      ]);
+      expect(refused[0]!.message).toContain("must be lavish's URL");
+      expect(refused[1]!.message).toContain("no page under $FLOWRYN_REPORT_DIR is lavish session 0123456789abcdef");
+      expect(refused[2]!.message).toMatch(/names lavish session [0-9a-f]{16}, but .*design\/design\.html is session [0-9a-f]{16}/);
+      expect(refused[3]!.message).toContain("lavish-axi is installed");
+      const gate = one<{ review_url: string; page_path: string }>(f, "SELECT review_url, page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+      expect(gate.page_path).toEndWith("design/design.html");
+      expect(gate.review_url).toBe(`http://127.0.0.1:4387/session/${lavishSessionKey(gate.page_path)}`);
+      const calls = join(f.h.home, "lavish-calls.log");
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
+    },
+    { timeout: 90_000 },
+  );
+});
+
+describe("a file:// review while lavish-axi is not installed", () => {
+  let fleet: FleetEnv | null = null;
+  afterEach(async () => {
+    await fleet?.cleanup();
+    fleet = null;
+  });
+
+  test(
+    "is accepted under the report directory and is the page; outside it, it is refused",
+    async () => {
+      fleet = await makeFleetEnv({ tools: ['lavish_axi = "/nonexistent/lavish-axi"'] });
+      const f = fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const handIns = [
+        "Feature file",
+        "FAKE: write design/design.html <html></html>",
+        "FAKE: verb stage done --review file:///etc/hosts.html",
+        "FAKE: stage-done --review file://$FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: sleep 120000",
+      ];
+      const { task, run } = await f.dispatch(handIns.join("\n"), { kind: "ship" });
+      await f.waitRun(run, (r) => r.stage_state === "review", "the file review");
+      expect(one<{ page_path: string | null }>(f, "SELECT page_path FROM gates WHERE run_id = ?1", run)!.page_path).toEndWith("design/design.html");
+      const first = JSON.parse(readFileSync(join(f.h.dataDir, task, "fake-replies.jsonl"), "utf8").split("\n")[0]!) as { code: number; reply: string };
+      expect(first.code).toBe(3);
+      expect(first.reply).toContain("review_invalid");
     },
     { timeout: 90_000 },
   );
