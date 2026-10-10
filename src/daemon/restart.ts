@@ -39,7 +39,7 @@ const VALIDATION_POOL = "validation";
  */
 export const VALIDATION_STATUS_FRESH_MS = 2 * 60_000;
 
-export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check";
+export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check" | "build";
 
 /** One thing a restart now would break. */
 export interface Guard {
@@ -58,6 +58,8 @@ export interface InMemoryWork {
   approvalTasks: Iterable<string>;
   /** The daemon's automatic contract check (src/contracts/auto.ts): launchd's restart kills its process group, the check with it. */
   contractChecks?: Iterable<{ harness: string; version: string; startedAt: number }>;
+  /** The daemon's build after a Flowryn merge (src/upkeep/build.ts): a restart now would kill it mid-build. */
+  builds?: Iterable<{ commit: string; startedAt: number }>;
 }
 
 function taskOfRun(db: Db, runId: string): string | null {
@@ -121,6 +123,7 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
     const title = g.task ? taskTitle(db, g.task) : null;
     if (title && title !== g.task) g.title = title;
   }
+  for (const b of work.builds ?? []) guards.push({ kind: "build", task: null, detail: `building ${b.commit.slice(0, 8)} after a merge for ${ago(now - b.startedAt)}` });
   return guards;
 }
 

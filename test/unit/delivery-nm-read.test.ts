@@ -61,6 +61,8 @@ function watcher(): DeliveryWatcher {
     cleanup: () => {},
     log: () => {},
     now: () => now,
+    nudgeConflicts: () => false,
+    kickScheduler: () => {},
   });
 }
 

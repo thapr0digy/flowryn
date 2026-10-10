@@ -69,7 +69,7 @@ function nmSays(text: string): void {
 const forge = {
   pull: async (): Promise<PullRequest> => {
     githubCalls++;
-    return { number: 7, url: PR, title: "t", state: "open", draft: false, headSha: "abc", headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null } satisfies PullRequest;
+    return { number: 7, url: PR, title: "t", state: "open", draft: false, headSha: "abc", headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: true } satisfies PullRequest;
   },
   checks: async (): Promise<ChecksSummary> => {
     githubCalls++;
@@ -90,6 +90,8 @@ function watcher(): DeliveryWatcher {
     ciWaitAlertMin: () => alertMin,
     inFlight: new Set(),
     cleanup: () => {},
+    nudgeConflicts: () => false,
+    kickScheduler: () => {},
     log: () => {},
     now: () => now,
   });
