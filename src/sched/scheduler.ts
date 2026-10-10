@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
-import type { FlowrynConfig } from "../config/config.ts";
+import { existsSync } from "node:fs";
+import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
@@ -17,6 +18,7 @@ import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../
 import { activateStage, neededPools, positionOf, type StagePos } from "../lifecycle/stages.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity } from "./pools.ts";
+import { probeQuota, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
 
 /**
@@ -48,6 +50,8 @@ export interface SchedulerDeps {
   startDeps: StartDeps;
   kickJournal(): void;
   host?(cfg: HostCheckConfig): Promise<HostVerdict>;
+  /** One quota-axi reading (tests); by default the configured quota-axi runs. */
+  quota?(): Promise<QuotaReading>;
 }
 
 interface Candidate {
@@ -84,6 +88,7 @@ export class Scheduler {
   private queued: Promise<void> | null = null;
   private stopped = false;
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
+  private quotaCache: { at: number; reading: QuotaReading } | null = null;
   private readonly relaunching = new Set<string>();
 
   constructor(deps: SchedulerDeps) {
@@ -189,6 +194,37 @@ export class Scheduler {
     this.deps.log(`sched: host check ${verdict.ok ? "passes" : `fails: ${verdict.reason}`}`);
   }
 
+  private async readQuota(): Promise<QuotaReading> {
+    if (this.deps.quota) return this.deps.quota();
+    const config = this.deps.config();
+    const tool = resolveTool(config, "quota_axi");
+    return probeQuota(tool && existsSync(tool) ? tool : null, resolveTool(config, "node"));
+  }
+
+  /**
+   * Whether new Claude runs wait on the quota floor now: quota-axi is read at
+   * most every quota_cache_ms, and only when a new Claude run could start.
+   * A floor of 0 reads nothing and lifts a low state recorded under an older floor.
+   */
+  private async quotaHeld(): Promise<boolean> {
+    const { db, now } = this.deps;
+    const config = this.deps.config();
+    const { floor } = capacityConfig(config).quota;
+    const previous = quotaState(db);
+    let reading: QuotaReading;
+    if (floor <= 0) {
+      if (!previous || previous.state !== "low") return false;
+      reading = { state: "known", percent: previous.percent ?? 0, window: previous.window, resets_at: previous.resets_at };
+    } else {
+      const ttl = schedTiming(config).quota_cache_ms;
+      if (!this.quotaCache || now() - this.quotaCache.at >= ttl) this.quotaCache = { at: now(), reading: await this.readQuota() };
+      reading = this.quotaCache.reading;
+    }
+    const state = tx(db, () => recordQuota(db, reading, floor, now()));
+    if (state.state !== previous?.state) this.deps.log(`sched: Claude quota ${quotaLine(state)}`);
+    return quotaHolds(db);
+  }
+
   private candidates(): Candidate[] {
     const { db, now } = this.deps;
     const rows = db
@@ -212,6 +248,7 @@ export class Scheduler {
   private async grant(): Promise<void> {
     const config = this.deps.config();
     const host = { verdict: null as HostVerdict | null };
+    if (quotaState(this.deps.db)?.state === "low") await this.quotaHeld();
     for (const c of this.candidates()) {
       if (this.stopped) return;
       await this.tryGrant(c, config, host, true);
@@ -224,6 +261,8 @@ export class Scheduler {
     const capacity = capacityConfig(config);
     const usage = c.run.harness === "claude" ? usageGate(db, now(), c.run.id) : "open";
     if (usage === "paused") return false;
+    // Under the quota floor a new Claude run waits; a live run's next stage, a resume or a relaunch drains.
+    if (c.run.harness === "claude" && c.run.pending_launch === "fresh" && (await this.quotaHeld())) return false;
     // A grant that launches a worker checks the installed harness version first (design section 5).
     if (c.run.pending_launch && !(await this.harnessVerified(c.run.harness, config))) return false;
     if (c.needs.length > 0) {
@@ -338,6 +377,7 @@ export class Scheduler {
       const harness = (phase.harness as HarnessId | null) ?? project.harness;
       const usage = harness === "claude" ? usageGate(db, now(), null) : "open";
       if (usage === "paused") continue;
+      if (harness === "claude" && (await this.quotaHeld())) continue;
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
@@ -416,7 +456,9 @@ export class Scheduler {
           ? `host check: ${host.reason}`
           : usageLimitSince(db) !== null
             ? "the Claude usage limit"
-            : untested
+            : quotaHolds(db)
+              ? "the Claude quota floor"
+              : untested
               ? `${untested[0]} ${untested[1]} has no passing contract, or full capacity pools`
               : "full capacity pools";
       tx(db, () => {

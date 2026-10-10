@@ -30,7 +30,7 @@ Ship 1's rules (docs/m5-notes.md, "Toolkit rules (toolkit enforcement, ship 1)")
   - A missing gh-axi warns (every GitHub job uses it).
   - chrome-devtools-axi warns while a workflow has a stage holding the `browser` pool. The built-in `feature-ui` does, so in practice it warns.
   - acli warns once jira-axi is installed.
-  - jira-axi, sqlite-axi, treehouse and quota-axi are info; quota-axi will warn once ship 3's probe uses it.
+  - jira-axi, sqlite-axi, treehouse and quota-axi are info; quota-axi warns while the quota floor is on (ship 3, docs/notes/2026-10-10-gates-lavish-review-2p.md).
   - A new `chrome-devtools-mcp` info line suggests the global install when chrome-devtools-axi is present without it (no `chrome-devtools-mcp` on PATH, no `CHROME_DEVTOOLS_AXI_MCP_PATH`).
 - **The live check** is the `toolkit` step in `src/contracts/suite.ts`. It runs for Claude only, after `interrupt` and before `exit`, so Pi's scripted steer ids are unchanged. The steps:
   1. A steer tells the worker to run `gh --version` once.

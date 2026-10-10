@@ -67,6 +67,7 @@ export const LANE_TABLE = {
   docker_leftover: { lane: "P1", class: "actionable" },
   phase_blocked: { lane: "P1", class: "actionable" },
   usage_limit: { lane: "P1", class: "actionable" },
+  quota_low: { lane: "P1", class: "actionable" },
   validation_outside_cap: { lane: "P1", class: "actionable" },
   validation_stuck: { lane: "P1", class: "actionable" },
   harness_unverified: { lane: "P1", class: "actionable" },

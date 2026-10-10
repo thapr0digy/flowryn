@@ -7,6 +7,7 @@ import { QUESTION_KINDS } from "../attention/items.ts";
 import { composeDigest, digestCandidates, isQuestionWake, isWakePrompt, p0Candidate, p0Line, questionBatch, questionsText, questionWakeLine, relayBatch, relayText, type RankedItem } from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
 import { awayConfig } from "../config/leader.ts";
+import { acceptedWithoutCi } from "../lifecycle/ci-wait.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { appendEvent } from "../db/events.ts";
 import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
@@ -510,7 +511,9 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
   const head = evidence?.head ?? shipped.head;
   const where = shipped.kind === "pr" ? `PR ${shipped.ref} at ${head.slice(0, 8)}, checks ${evidence?.checks?.line ?? "unknown"}` : `branch ${run.branch} at ${head.slice(0, 8)} into local main`;
   const agrees = gated.allowRed === undefined ? "" : waiverAgreement(gated.allowRed, shipped.kind === "pr" ? (evidence?.checks?.red ?? null) : []);
-  return { line: `${waive}merge ${run.task_id} (${title}): ${where}${agrees}`, prUrl: approvalRef(shipped), head };
+  const noCi = acceptedWithoutCi(ctx.db, run.id);
+  const accepted = noCi ? `; the user accepted it without CI (${noCi})` : "";
+  return { line: `${waive}merge ${run.task_id} (${title}): ${where}${agrees}${accepted}`, prUrl: approvalRef(shipped), head };
 }
 
 /**

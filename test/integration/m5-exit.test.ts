@@ -34,6 +34,13 @@ function query<T>(e: ShipEnv, sql: string, ...params: string[]): T[] {
   }
 }
 
+/** The open review gate's URL: lavish's for the page the worker hosted. */
+function openReviewUrl(e: ShipEnv, run: string): string {
+  const [gate] = query<{ review_url: string }>(e, "SELECT review_url FROM gates WHERE run_id = ?1 AND kind = 'review' AND state = 'open'", run);
+  expect(gate?.review_url).toMatch(/^http:\/\/127\.0\.0\.1:4387\/session\/[0-9a-f]{16}$/);
+  return gate!.review_url;
+}
+
 function backlogShow(e: ShipEnv, task: string): string {
   return Bun.spawnSync([realTasksAxi(), "show", task, "--file", e.fleet.h.backlog]).stdout.toString();
 }
@@ -42,14 +49,14 @@ const PHASE_ONE = (name: string) =>
   [
     `Checkout ${name}`,
     `FAKE: plan-phase ${name} phase two`,
-    `FAKE: stage-done --review https://lavish.test/${name}/design --plan-file $FLOWRYN_REPORT_DIR/plan.md`,
+    `FAKE: stage-done --review lavish:${name}/design.html --plan-file $FLOWRYN_REPORT_DIR/plan.md`,
     `FAKE: commit ${name}-api.txt api`,
     "FAKE: stage-done",
     `FAKE: docker-up ${name}-web flowryn-${name}`,
     "FAKE: sleep 500",
     `FAKE: docker-down ${name}-web`,
     "FAKE: qa-page",
-    `FAKE: stage-done --review https://lavish.test/${name}/qa`,
+    `FAKE: stage-done --review lavish:qa/evidence.html`,
     "FAKE: deliver-local",
     "FAKE: sleep 600000",
   ].join("\n");
@@ -108,7 +115,7 @@ describe("M5 exit: a two-phase feature, phase 2 by itself", () => {
       ptys.push(pty);
       const [, code] = await pty.waitFor(/Type ([A-Z]{4}) to approve/);
       expect(pty.text()).toContain(`Pass the qa review of ${task}`);
-      expect(pty.text()).toContain("https://lavish.test/alpha/qa");
+      expect(pty.text()).toContain(openReviewUrl(e, run));
       await pty.type(`${code}\n`);
       expect(await pty.exited).toBe(0);
 
@@ -152,7 +159,7 @@ describe("M5 exit: a two-phase feature, phase 2 by itself", () => {
       expect((await leader.bash(`flowryn gate pass ${task}`)).blocked).toBe(true);
       const no = await leader.callTool("flowryn_gate_pass", { task }, false);
       expect(no).toContain("declined");
-      expect(leader.confirms.at(-1)!.message).toContain("https://lavish.test/beta/design");
+      expect(leader.confirms.at(-1)!.message).toContain(openReviewUrl(e, run));
       expect(leader.confirms.at(-1)!.message).toContain(`also approves plan ${plan}, 1 phase`);
       expect(e.fleet.run(run).stage_state).toBe("review");
       const yes = await leader.callTool("flowryn_gate_pass", { task }, true);

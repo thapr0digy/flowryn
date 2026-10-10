@@ -135,7 +135,9 @@ writeFileSync(
       data_dir: join(home, "data"),
       state_dir: join(home, "state"),
       tasks: { backlog: join(home, "data", "backlog.md"), todos: join(home, "data", "todos.md") },
-      tools: { tasks_axi: which("tasks-axi"), node: which("node"), git: which("git"), claude: which("claude"), pi: PI_BIN, herdr: which("herdr"), docker: which("docker"), no_mistakes: join(bin, "no-mistakes"), gh: join(bin, "gh-absent") },
+      // lavish_axi names no file: the lab's workers hand in file:// review pages, the documented fallback while
+      // lavish-axi is not installed (a real lavish-axi on PATH would refuse them and open pages on your Mac).
+      tools: { tasks_axi: which("tasks-axi"), node: which("node"), git: which("git"), claude: which("claude"), pi: PI_BIN, herdr: which("herdr"), docker: which("docker"), no_mistakes: join(bin, "no-mistakes"), gh: join(bin, "gh-absent"), lavish_axi: join(bin, "lavish-axi-absent") },
       herdr: { socket: herdrSocket },
       github: { api_url: "http://127.0.0.1:9" },
       workers: {
