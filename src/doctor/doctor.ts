@@ -48,6 +48,7 @@ const OPTIONAL_TOOLS: Partial<Record<ToolName, string>> = {
   sqlite_axi: "not found (optional: SQLite reads; the sqlite rule names it)",
   treehouse: "not found (optional: git worktrees; the worktree rule names it)",
   quota_axi: "not found (the quota floor reads it before a new Claude run; without it nothing waits on the quota)",
+  bun: "not found (optional: without it the daemon does not build Flowryn after a Flowryn merge)",
 };
 
 /** Some workflow holds the browser pool in a stage (visual QA; the default feature-ui does). */

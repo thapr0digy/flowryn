@@ -20,6 +20,7 @@ export const INSTALL_HINTS: Record<ToolName, string> = {
   sqlite_axi: "npm install -g sqlite-axi",
   quota_axi: "npm install -g quota-axi",
   treehouse: "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh",
+  bun: "curl -fsSL https://bun.sh/install | bash (optional; the daemon builds Flowryn after a Flowryn merge with it)",
 };
 
 export interface Installer {

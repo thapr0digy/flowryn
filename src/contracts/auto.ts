@@ -169,7 +169,8 @@ export function autoUnrecordedLine(harness: HarnessId, version: string, report: 
   return `${harness} ${version} passed, not recorded as [policy] is strict now: ${homeShort(report, home)}; record it: ${contractsCommand(harness)}`;
 }
 
-function homeShort(path: string, home: string): string {
+/** A path under your home written with `~`, so an item line keeps more of what follows within its 200 characters. */
+export function homeShort(path: string, home: string): string {
   return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
 }
 
