@@ -86,7 +86,8 @@ function maxWaitMs(env: NodeJS.ProcessEnv): number {
  * machine is truly out of room; with the defaults (8 GB free) a busy laptop
  * never granted the launch, and the suite timed out at its first step.
  */
-const CONTRACT_CAPACITY = { worker: 1, host: { min_free_mem_gb: 1, max_load_per_core: 8 } };
+// You asked for this run: the quota floor does not hold it (the daemon's own auto check waits on it instead).
+const CONTRACT_CAPACITY = { worker: 1, host: { min_free_mem_gb: 1, max_load_per_core: 8 }, quota: { floor: 0 } };
 
 function git(args: string[], cwd: string): { code: number; out: string } {
   const result = Bun.spawnSync(["git", ...args], {
