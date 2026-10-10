@@ -196,6 +196,7 @@ export class PolicyFollower {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private kickTimer: ReturnType<typeof setTimeout> | null = null;
   private running: Promise<FollowReport> | null = null;
+  private rerun = false;
   private stopped = false;
   private lastFetchError = new Map<string, string>();
 
@@ -233,9 +234,16 @@ export class PolicyFollower {
     }, this.deps.config().follow_interval_ms);
   }
 
-  /** One pass; a pass already running is returned instead of starting another. Exposed for tests. */
+  /**
+   * One pass; a pass already running is returned instead of starting another,
+   * and one more pass follows it, since it may have read origin before the
+   * change that asked for this one. Exposed for tests.
+   */
   pass(): Promise<FollowReport> {
-    if (this.running) return this.running;
+    if (this.running) {
+      this.rerun = true;
+      return this.running;
+    }
     this.running = this.passOnce()
       .catch((error: unknown) => {
         this.deps.log(`policy follow-through: ${(error as Error).stack ?? String(error)}`);
@@ -243,6 +251,9 @@ export class PolicyFollower {
       })
       .finally(() => {
         this.running = null;
+        if (!this.rerun) return;
+        this.rerun = false;
+        if (!this.stopped) void this.pass();
       });
     return this.running;
   }

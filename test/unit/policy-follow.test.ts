@@ -9,6 +9,7 @@ import { CI_WAIT_ORIGIN } from "../../src/lifecycle/ci-wait.ts";
 import { landRun } from "../../src/lifecycle/landing.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { gitRunner } from "../../src/policy/git.ts";
+import type { GitRunner } from "../../src/policy/landed.ts";
 import { KICK_DELAY_MS, POLICY_EVENT, PolicyFollower, policyChangesSince, policyHash, policySteerText } from "../../src/upkeep/policy-follow.ts";
 import { projectAt, scratchRepos, sh } from "../helpers/scratch-git.ts";
 
@@ -72,13 +73,13 @@ function seedRun(id: string, opts: SeedOpts = {}): string {
   return worktree;
 }
 
-function follower(): PolicyFollower {
+function follower(runGit: GitRunner = git): PolicyFollower {
   return new PolicyFollower({
     db,
     config: () => ({ follow_paths: paths, follow_interval_ms: 60_000 }),
     now: () => now,
     log: () => {},
-    git,
+    git: runGit,
     projects: () => [{ ...projectAt(primary, "web"), delivery_mode: "no-mistakes" }],
     kickScheduler: () => {
       kicks++;
@@ -302,6 +303,31 @@ describe("the follow-through pass", () => {
     g.stop();
     await Bun.sleep(KICK_DELAY_MS + 300);
     expect(steers("r1")).toHaveLength(1);
+  });
+
+  test("a pass asked for while one is running, after its fetch, runs again once it ends", async () => {
+    seedRun("r1");
+    const firstFetched = Promise.withResolvers<void>();
+    const firstFetchHeld = Promise.withResolvers<void>();
+    let fetches = 0;
+    const gatedGit: GitRunner = async (args, cwd, input) => {
+      const result = await git(args, cwd, input);
+      if (args[0] === "fetch" && ++fetches === 1) {
+        firstFetched.resolve();
+        await firstFetchHeld.promise;
+      }
+      return result;
+    };
+    const f = follower(gatedGit);
+    const first = f.pass();
+    await firstFetched.promise;
+    mergeOnMain(".no-mistakes.yaml", "# settings\nno_ci: true\n");
+    void f.pass();
+    firstFetchHeld.resolve();
+    expect((await first).steered).toEqual([]);
+    for (let i = 0; i < 200 && steers("r1").length === 0; i++) await Bun.sleep(25);
+    expect(steers("r1")).toHaveLength(1);
+    expect(fetches).toBe(2);
   });
 });
 
