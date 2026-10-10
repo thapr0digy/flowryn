@@ -27,6 +27,7 @@ import {
 import type { GitRunner } from "./landed.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-health.ts";
 import { shellWord } from "../util/shell-word.ts";
+import { grantActor, takeGrant, voidItemGrants } from "./grants.ts";
 import { finishedAtHead, lastPassed, type Verification } from "../verify/store.ts";
 
 /**
@@ -166,6 +167,8 @@ export type ApprovalChoice =
   | { kind: "row"; row: ApprovalRow }
   | { kind: "attempt"; attempt: AttemptRow; session: string }
   | { kind: "key"; session: string; allowRed: string | null }
+  /** Your chat answer (docs/notes/2026-10-10-chat-answers-authorise-5g.md), already checked against Claude's transcript; never a waiver. */
+  | { kind: "grant"; grant: string; session: string }
   | { kind: "yolo" };
 
 export interface MergeAsk {
@@ -176,6 +179,8 @@ export interface MergeAsk {
   head?: string;
   /** `merge --allow-red`: the one red check this merge asks to waive. */
   allowRed?: string;
+  /** A chat-answer grant the merge's prepare step found for this task at this head. */
+  grant?: string | null;
 }
 
 export interface ChoiceResult {
@@ -212,6 +217,7 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
     const attempt = findAttempt(db, { session: leader.session_id, action, task, now, allowRed });
     if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) return { choice: { kind: "attempt", attempt, session: leader.session_id }, why: "" };
     if (attempt) return { choice: null, why: `the head moved from ${attempt.head_sha?.slice(0, 8)} since your prompt; it is now ${facts.head.slice(0, 8)}` };
+    if (ask.grant && allowRed === null) return { choice: { kind: "grant", grant: ask.grant, session: leader.session_id }, why: "" };
     reasons.push(
       allowRed === null
         ? "no confirmed Claude prompt for this command (under bypassPermissions there is none to trust)"
@@ -346,8 +352,8 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   return { waived, alreadyMerged: false, localGreen };
 }
 
-function channelOf(choice: ApprovalChoice): Channel {
-  return choice.kind === "row" ? choice.row.channel : choice.kind === "attempt" ? "claude-ask" : choice.kind === "key" ? "pi-confirm" : "yolo";
+export function channelOf(choice: ApprovalChoice): Channel {
+  return choice.kind === "row" ? choice.row.channel : choice.kind === "attempt" ? "claude-ask" : choice.kind === "key" ? "pi-confirm" : choice.kind === "grant" ? "claude-chat" : "yolo";
 }
 
 function user(): string {
@@ -361,14 +367,17 @@ export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, 
     const fresh = db.query("SELECT consumed_at FROM approvals WHERE id = ?1").get(choice.row.id) as { consumed_at: number | null } | null;
     if (!fresh || fresh.consumed_at !== null) throw new FlowrynError("approval_required", `approval ${choice.row.id} was just used by another merge`);
     consumeApproval(db, choice.row.id, now, `${action} ${task}`);
+    if (action === "merge") voidItemGrants(db, `merge:${task}`, "a standing approval approved it", now);
     return choice.row.id;
   }
   if (choice.kind === "attempt") {
     const fresh = db.query("SELECT matched_at FROM approval_attempts WHERE id = ?1").get(choice.attempt.id) as { matched_at: number | null } | null;
     if (!fresh || fresh.matched_at !== null) throw new FlowrynError("approval_required", "that Claude prompt was already used");
     matchAttempt(db, choice.attempt.id, now);
+    if (action === "merge") voidItemGrants(db, `merge:${task}`, "a confirmed prompt approved it", now);
   }
-  const actor = choice.kind === "attempt" ? `${user()} (Claude prompt, leader ${choice.session})` : choice.kind === "key" ? `${user()} (Pi confirm, leader ${choice.session})` : "yolo posture";
+  const used = choice.kind === "grant" ? takeGrant(db, choice.grant, `${action} ${task}`, now) : null;
+  const actor = used ? grantActor(used) : choice.kind === "attempt" ? `${user()} (Claude prompt, leader ${choice.session})` : choice.kind === "key" ? `${user()} (Pi confirm, leader ${choice.session})` : "yolo posture";
   const row = insertApproval(db, { task, ref: facts.ref, head: facts.head, channel: channelOf(choice), actor, action, allowRed: waiverOf(choice), now });
   consumeApproval(db, row.id, now, `${action} ${task}`);
   return row.id;

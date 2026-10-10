@@ -21,6 +21,7 @@ import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { gateQuestionsLine } from "../lifecycle/gate-questions.ts";
 import { isRoutineMerge, recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
+import { postAsk, preAsk, voidSessionGrants } from "../policy/grants.ts";
 import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { readShellWords } from "../util/shell-word.ts";
@@ -58,6 +59,8 @@ export interface LeaderHookInput {
   /** Claude PreToolUse: the tool, its input, its call id and the session's permission mode (M0 c09). */
   tool_name?: string;
   tool_input?: { command?: unknown } | null;
+  /** Claude PostToolUse: what the tool returned (AskUserQuestion: the questions, your answers and notes). */
+  tool_response?: unknown;
   tool_use_id?: string;
   permission_mode?: string;
   /** Pi merge-summary and gate-summary: the task the tool was asked about. */
@@ -246,7 +249,6 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
   setSession(ctx.db, s.session_id, {
     harness_session: input.session_id ?? s.harness_session,
     transcript_path: input.transcript_path ?? s.transcript_path,
-    cwd: input.cwd ?? s.cwd,
     has_ui: input.has_ui === undefined ? s.has_ui : input.has_ui ? 1 : 0,
     last_event_at: now,
   });
@@ -307,7 +309,11 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
   const now = ctx.now();
   // Fail-closed (design section 7): your next message also kills a declined attempt the Claude
   // leader is still holding, the same as the next Bash call does.
-  if (s.harness === "claude") voidPendingAttempts(ctx.db, s.session_id, now);
+  if (s.harness === "claude") {
+    voidPendingAttempts(ctx.db, s.session_id, now);
+    // A chat-answer grant lives only within the turn that asked: your next message ends it.
+    voidSessionGrants(ctx.db, s.session_id, "the user sent a new message", now);
+  }
   const late = deadline !== null && now > deadline;
   if (s.harness === "pi" && input.source === "run") {
     if (busyNow(s, now)) refreshBusy(ctx, s, now);
@@ -367,6 +373,27 @@ function awayLines(ctx: HandlerCtx, s: LeaderSessionRow, now: number): string[] 
     today: localDate(new Date(now)),
   });
   return suggestion ? [suggestion] : [];
+}
+
+/**
+ * Claude PostToolUse: busy and heartbeat as for any tool; after an AskUserQuestion, your answers
+ * to its binding questions become chat-answer grants, and the leader is told each one beside the
+ * tool result (docs/notes/2026-10-10-chat-answers-authorise-5g.md).
+ */
+export function postToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
+  const result = toolActivity(ctx);
+  const s = leaderSession(ctx);
+  if (s.harness !== "claude" || input.tool_name !== "AskUserQuestion") return result;
+  const lines = postAsk(ctx.db, {
+    session: s.session_id,
+    toolUseId: String(input.tool_use_id ?? ""),
+    input: input.tool_input,
+    response: input.tool_response,
+    claudeSession: String(input.session_id ?? ""),
+    transcriptPath: String(input.transcript_path ?? ""),
+    now: ctx.now(),
+  });
+  return lines.length > 0 ? { data: { context: lines.join("\n") } } : result;
 }
 
 /** Pre/PostToolUse: refresh the busy lease, and the heartbeat. A tool never starts a turn. */
@@ -528,6 +555,20 @@ function waiverAgreement(check: string, red: string[] | null): string {
   return `; flowrynd last read failing: ${failing}, so it is refused unless ${JSON.stringify(check)} is the only failing check when it runs`;
 }
 
+/** A live chat-answer grant of this session for merging this task at its current head. */
+function chatGrantedMerge(ctx: HandlerCtx, session: string, ref: string, now: number): boolean {
+  const run = findRun(ctx.db, ref);
+  if (!run) return false;
+  const shipped = deliveredOf(ctx.db, run.task_id);
+  if (!shipped) return false;
+  const head = (shipped.kind === "pr" ? prEvidence(ctx.db, run.id)?.head : null) ?? shipped.head;
+  return (
+    ctx.db
+      .query("SELECT 1 FROM captain_grants WHERE session_id = ?1 AND item = ?2 AND choice = 'merge' AND binds = ?3 AND consumed_at IS NULL AND voided_at IS NULL AND expires_at > ?4")
+      .get(session, `merge:${run.task_id}`, head, now) !== null
+  );
+}
+
 /** A yolo, non-sensitive merge: no prompt and no attempt, so the merge gate records yolo. */
 function routineMerge(ctx: HandlerCtx, ref: string): boolean {
   const run = findRun(ctx.db, ref);
@@ -567,6 +608,11 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: Tool
     recordToolkitDenied(ctx.db, denied, { session: s.session_id, harness: "claude", toolName: String(input.tool_name ?? "") }, now);
     return result;
   }
+  // A binding chat question must be exactly Flowryn's form and bring no answers of its own.
+  if (input.tool_name === "AskUserQuestion") {
+    const deny = preAsk(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), input: input.tool_input, now });
+    return deny ? { data: { permission: "deny", reason: deny } } : result;
+  }
   if (input.tool_name !== "Bash") return result;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const gated = gatedCommands(command);
@@ -576,6 +622,9 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: Tool
     // A waiver is never routine: only your word can make one, so it is always asked.
     const waiverAsked = g.allowRed !== undefined || g.unreadable !== undefined;
     if (g.action === "merge" && !waiverAsked && routineMerge(ctx, g.task)) continue;
+    // Your chat answer already covers this exact merge (its head included): no prompt and no
+    // attempt; the merge gate uses the grant, after checking it against Claude's transcript.
+    if (g.action === "merge" && !waiverAsked && chatGrantedMerge(ctx, s.session_id, g.task, now)) continue;
     const facts = promptFacts(ctx, g, command);
     // Refusal by construction: a line naming more than one captain decide, or a waiver whose check
     // cannot be read exactly, is gated and prompted, but no attempt is ever recorded for it, so the
@@ -636,7 +685,11 @@ export function stop(ctx: HandlerCtx): HandlerResult {
   const now = ctx.now();
   // Fail-closed (design section 7): a declined prompt that ends the turn here, rather than at the
   // next Bash call, must not leave its attempt live for the rest of its five-minute window.
-  if (s.harness === "claude") voidPendingAttempts(ctx.db, s.session_id, now);
+  if (s.harness === "claude") {
+    voidPendingAttempts(ctx.db, s.session_id, now);
+    // A chat-answer grant ends with the turn that asked (the user's choice, q43).
+    voidSessionGrants(ctx.db, s.session_id, "the turn ended", now);
+  }
   const presented = confirmTurn(ctx.db, s.session_id, s.turn_no, now);
   heartbeat(ctx.db, s.session_id, now);
   if (s.harness === "claude" && s.continuations < MAX_LEADER_CONTINUATIONS && isHolder(ctx.db, s.session_id)) {
@@ -685,6 +738,7 @@ export function sessionEnd(ctx: HandlerCtx, input: LeaderHookInput): HandlerResu
   const s = leaderSession(ctx);
   const now = ctx.now();
   const reason = input.reason ?? "other";
+  if (s.harness === "claude") voidSessionGrants(ctx.db, s.session_id, `the session ended (${reason})`, now);
   if (CONTINUES.has(reason)) {
     markIdle(ctx, s, now, `session-end:${reason}`);
     return { data: { closed: false } };

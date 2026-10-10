@@ -1,4 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { FlowrynConfig } from "./config.ts";
 
 /**
@@ -125,6 +127,27 @@ export function awayConfig(config: FlowrynConfig): AwayConfig {
     if (!(key in DEFAULT_AWAY)) throw new FlowrynError("config_invalid", `[away] ${key} is not a known setting`);
   }
   return positiveInts(raw, DEFAULT_AWAY, "[away]", Object.keys(DEFAULT_AWAY) as (keyof AwayConfig)[]);
+}
+
+/** [grants]: chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md). */
+export interface GrantsConfig {
+  /** Claude's projects directory, where a leader's transcript must live for its chat answers to count. */
+  claude_projects_dir: string;
+}
+
+/** Claude keeps transcripts in $CLAUDE_CONFIG_DIR/projects, by default ~/.claude/projects. */
+export function defaultClaudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.CLAUDE_CONFIG_DIR && env.CLAUDE_CONFIG_DIR.length > 0 ? env.CLAUDE_CONFIG_DIR : join(env.HOME ?? homedir(), ".claude"), "projects");
+}
+
+export function grantsConfig(config: FlowrynConfig, env: NodeJS.ProcessEnv = process.env): GrantsConfig {
+  const raw = table(config.extra.grants, "[grants]");
+  for (const key of Object.keys(raw)) {
+    if (key !== "claude_projects_dir") throw new FlowrynError("config_invalid", `[grants] ${key} is not a known setting`);
+  }
+  const dir = raw.claude_projects_dir;
+  if (dir !== undefined && (typeof dir !== "string" || dir.length === 0)) throw new FlowrynError("config_invalid", "[grants] claude_projects_dir must be a path");
+  return { claude_projects_dir: typeof dir === "string" ? dir : defaultClaudeProjectsDir(env) };
 }
 
 /**

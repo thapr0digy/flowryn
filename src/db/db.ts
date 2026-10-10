@@ -53,12 +53,22 @@ export function migrate(db: Db, migrations: readonly Migration[] = MIGRATIONS): 
   const applied: number[] = [];
   for (const migration of migrations) {
     if (migration.version <= current) continue;
-    tx(db, () => {
-      db.exec(migration.sql);
-      db.query("INSERT INTO meta (key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
-        String(migration.version),
-      );
-    });
+    // PRAGMA foreign_keys is a no-op inside a transaction, so it is switched around it.
+    if (migration.rebuildsReferencedTable) db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      tx(db, () => {
+        db.exec(migration.sql);
+        if (migration.rebuildsReferencedTable) {
+          const broken = db.query("PRAGMA foreign_key_check").all();
+          if (broken.length > 0) throw new Error(`migration ${migration.version} (${migration.name}) left ${broken.length} broken foreign key reference(s)`);
+        }
+        db.query("INSERT INTO meta (key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
+          String(migration.version),
+        );
+      });
+    } finally {
+      if (migration.rebuildsReferencedTable) db.exec("PRAGMA foreign_keys = ON");
+    }
     applied.push(migration.version);
   }
   return applied;

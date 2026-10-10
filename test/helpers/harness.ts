@@ -183,6 +183,8 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   if (!extraConfig.includes("[capacity.host]")) lines.push("[capacity.host]", "min_free_mem_gb = 0", "max_load_per_core = 1000");
   // Tests never reach a real Herdr: without a socket of their own they get one that does not exist. Such a
   // home has no Herdr by design, so its "Herdr unreachable" P1 (design section 16) is kept out of its items.
+  // Nor this machine's Claude transcripts: a chat-answer grant is checked against the fake leader's transcript in the home.
+  if (!extraConfig.includes("[grants]")) lines.push("[grants]", `claude_projects_dir = ${JSON.stringify(join(home, "claude-projects"))}`);
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`, "unreachable_alert_ms = 86400000");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");

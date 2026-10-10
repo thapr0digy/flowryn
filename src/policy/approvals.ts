@@ -10,7 +10,9 @@ import { ulid } from "../util/ulid.ts";
  * can create, bound to the task, the canonical PR (or a local-only branch)
  * and the head SHA, single use, and void after 24 hours or once the head
  * moves. The four channels: Claude's own prompt (claude-ask, matched to the
- * attempt its PreToolUse hook recorded), Pi's ctx.ui.confirm (pi-confirm,
+ * attempt its PreToolUse hook recorded), your answer to the Claude leader's
+ * AskUserQuestion (claude-chat, a chat-answer grant: src/policy/grants.ts),
+ * Pi's ctx.ui.confirm (pi-confirm,
  * carried by the approval key only the extension holds), `flowryn approve`
  * in your shell (cli-tty) and the board (board), both behind a code read
  * from /dev/tty. yolo is a project posture, recorded too so every merge
@@ -23,9 +25,9 @@ export const ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 /** A /dev/tty challenge must be answered this soon. */
 export const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 
-export type Channel = "claude-ask" | "pi-confirm" | "cli-tty" | "board" | "yolo";
+export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "yolo";
 export type ApprovalAction = "merge" | "discard" | "gate" | "decide";
-export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "pi-confirm", "cli-tty", "board"];
+export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "claude-chat", "pi-confirm", "cli-tty", "board"];
 
 export interface ApprovalRow {
   id: string;

@@ -10,6 +10,7 @@ import { getLease, getSession } from "../lease/lease.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { findAttempt, matchAttempt } from "../policy/approvals.ts";
+import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { createStandaloneDecision, DECISION_OPTION, getDecision, type DecisionRow } from "./decisions.ts";
@@ -135,8 +136,10 @@ export function captainChannel(ctx: HandlerCtx, d: DecisionRow, typed: string, a
   const now = ctx.now();
   if (session?.harness === "claude") {
     const attempt = findAttempt(ctx.db, { session: session.session_id, action: "decide", task: typed, now });
-    if (!attempt || attempt.pr_url !== decisionRef(d.id)) throw new FlowrynError("approval_required", "no confirmed Claude prompt for this answer (under bypassPermissions there is none to trust)", help);
+    if (!attempt || attempt.pr_url !== decisionRef(d.id)) throw new FlowrynError("approval_required", "no confirmed Claude prompt or chat answer for this answer (under bypassPermissions there is no prompt to trust)", `${help}; or ask in chat: flowryn chat-question ${d.id}, then flowryn grant use <grant>`);
     matchAttempt(ctx.db, attempt.id, now);
+    // Your word in the prompt is the later one: a chat answer to the same decision ends here.
+    voidItemGrants(ctx.db, d.id, "a confirmed prompt answered it", now);
     return "claude-ask";
   }
   if (session?.harness === "pi") {
@@ -206,7 +209,13 @@ const decide: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
-  apply(ctx, args) {
+  async prepare(ctx, args) {
+    // A chat answer (docs/notes/2026-10-10-chat-answers-authorise-5g.md): checked against Claude's transcript before the transaction.
+    const id = stringArg(args, "decision")!;
+    if (stringArg(args, "by") !== "captain") return { grant: null };
+    return { grant: prepareCaptainGrant(ctx, args, { item: id, choice: stringArg(args, "choice")! }, { action: "decide", task: id }) };
+  },
+  apply(ctx, args, prepared) {
     const id = stringArg(args, "decision")!;
     const typed = stringArg(args, "choice")!;
     const d = getDecision(ctx.db, id);
@@ -224,6 +233,16 @@ const decide: VerbSpec = {
     if (opts.length === 0 && gateKind !== "text" && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const asCaptain = stringArg(args, "by") === "captain" || ctx.caller.role === "human";
     if (stringArg(args, "by") !== undefined && stringArg(args, "by") !== "captain") throw new FlowrynError("bad_args", "--by takes only captain");
+    const grantId = (prepared as { grant: string | null } | undefined)?.grant ?? null;
+    if (asCaptain && grantId) {
+      const grant = takeGrant(ctx.db, grantId, `decide ${d.id}`, ctx.now());
+      // The user's own words: their answer and any note on it; the leader's text after, marked.
+      const theirs = [grant.answer, grant.words].filter((w): w is string => !!w).join("\n");
+      const leaderText = words ?? rationale;
+      const done = answerDecision(ctx, d, { choice, words: leaderText ? `${theirs}\n(leader) ${leaderText}` : theirs, by: "captain", via: "claude-chat" });
+      const out = reply(ctx, d, choice, "captain", done);
+      return { ...out, data: { ...out.data, grant: grant.id } };
+    }
     let via: string;
     if (asCaptain) via = captainChannel(ctx, d, id, args);
     else {

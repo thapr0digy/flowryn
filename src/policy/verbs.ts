@@ -8,11 +8,13 @@ import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import type { DiscardAttempt } from "../lifecycle/landing.ts";
 import { discardRef, findAttempt, findHumanApproval, insertApproval } from "./approvals.ts";
+import { prepareCaptainGrant } from "./grants.ts";
 import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import {
+  channelOf,
   checkGate,
   chooseApproval,
   executeMerge,
@@ -113,7 +115,9 @@ const merge: VerbSpec = {
     if (allowRed !== undefined && allowRed.length === 0) throw new FlowrynError("bad_args", "--allow-red needs the name of the one failing check to waive");
     const { run, project } = await mergeable(ctx, task);
     const facts = await gatherFacts(mergeContext(ctx), run, project);
-    const chosen = chooseApproval(ctx.db, facts, { caller: ctx.caller, approvalKey: stringArg(args, "approval_key")?.trim(), head: stringArg(args, "head"), allowRed }, "merge", ctx.now());
+    // A chat answer never waives a red check: with --allow-red only the prompt, Pi's confirm or your shell count.
+    const grant = allowRed === undefined ? prepareCaptainGrant(ctx, args, { item: `merge:${run.task_id}`, choice: "merge", head: facts.head }, { action: "merge", task }) : null;
+    const chosen = chooseApproval(ctx.db, facts, { caller: ctx.caller, approvalKey: stringArg(args, "approval_key")?.trim(), head: stringArg(args, "head"), allowRed, grant }, "merge", ctx.now());
     // The attempt the Claude hook recorded is matched by the task as you typed it.
     if (!chosen.choice && ctx.caller.role === "leader" && ctx.caller.session && task !== run.task_id) {
       const attempt = findAttempt(ctx.db, { session: ctx.caller.session, action: "merge", task, now: ctx.now(), allowRed: allowRed ?? null });
@@ -132,7 +136,7 @@ const merge: VerbSpec = {
       return { data: { task: run.task_id, run: run.id, state: "landed", merged: "already", sha: facts.pr!.mergeSha ?? "-" }, hints: [`flowryn show ${run.task_id}`] };
     }
     if (run.state !== "ready" && run.state !== "merging") throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}`);
-    const channel = chosen.choice!.kind === "row" ? chosen.choice!.row.channel : chosen.choice!.kind === "attempt" ? "claude-ask" : chosen.choice!.kind === "key" ? "pi-confirm" : "yolo";
+    const channel = channelOf(chosen.choice!);
     const approval = takeApproval(ctx.db, facts, chosen.choice!, "merge", now);
     const mergeId = recordMergeRequest(ctx.db, facts, approval, channel, gate.waived, ctx.delivery.github().merge_method, now, gate.localGreen);
     // In flight from here: the watcher leaves a requested merge alone until this daemon has asked GitHub.

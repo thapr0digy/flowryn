@@ -7,6 +7,7 @@ import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
+import { getGrant, grantLines, grantView } from "../policy/grants.ts";
 import { getDecision } from "./decisions.ts";
 import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
@@ -459,6 +460,12 @@ function workerReportView(
   };
 }
 
+/** The chat-answer grants of an item or a task (its gates and merges), when there are any. */
+function grantsField(ctx: ReadCtx, where: { item?: string; task?: string }): { grants?: string[] } {
+  const lines = grantLines(ctx.db, where, ctx.now);
+  return lines.length > 0 ? { grants: lines } : {};
+}
+
 /** A run's latest `flowryn report` of any status, as one line for `show`. */
 function latestReport(ctx: ReadCtx, runId: string, text: ShowText): string | null {
   const row = ctx.db.query("SELECT ts, payload FROM events WHERE run_id = ?1 AND kind = 'worker.report' ORDER BY seq DESC LIMIT 1").get(runId) as { ts: number; payload: string } | null;
@@ -471,8 +478,8 @@ function latestReport(ctx: ReadCtx, runId: string, text: ShowText): string | nul
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
-  summary: "One task, run, item, decision, plan or divergence in detail; --full for untruncated text",
-  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan or divergence id" }],
+  summary: "One task, run, item, decision, plan, divergence, review gate or chat-answer grant in detail; --full for untruncated text",
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>) or grant (c<N>) id" }],
   flags: { full: { type: "boolean", help: "untruncated titles, lines and bodies" } },
   kind: "read",
   roles: ["leader", "reader", "human"],
@@ -482,12 +489,17 @@ const show: VerbSpec = {
     const text = new ShowText(boolArg(args, "full"));
     if (/^[kq]\d+$/.test(target)) {
       const d = getDecision(ctx.db, target);
-      if (d) return { data: { ...decisionView(d, text), ...text.pointer(asked) }, hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };
+      if (d) return { data: { ...decisionView(d, text), ...grantsField(ctx, { item: d.id }), ...text.pointer(asked) }, hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };
     }
+    const grant = /^c\d+$/.test(target) ? getGrant(ctx.db, target) : null;
+    if (grant) return { data: grantView(grant, ctx.now), hints: [`flowryn show ${grant.item.replace(/^merge:/, "")}`] };
+    // A review gate shows as its task, whose gates and grants it lists.
+    const gateRun = /^g\d+$/.test(target) ? (ctx.db.query("SELECT run_id FROM gates WHERE id = ?1").get(target) as { run_id: string } | null) : null;
+    if (gateRun) target = gateRun.run_id;
     const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, text.full) : null;
     if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
-    if (divergence) return { data: divergenceView(divergence), hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
+    if (divergence) return { data: { ...divergenceView(divergence), ...grantsField(ctx, { item: divergence.id }) }, hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
     const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as {
       kind: string;
       event_seq: number;
@@ -554,6 +566,7 @@ const show: VerbSpec = {
         stage: stageLabel(run),
         ...(requeued ? { queued: `${requeued.status} · ${requeued.next}` } : {}),
         ...(gatesView(ctx, run.id) ? { gates: gatesView(ctx, run.id) } : {}),
+        ...grantsField(ctx, { task: run.task_id }),
         leases: runLeases(ctx.db, run.id).map((l) => l.pool).join(" ") || "-",
         ...(phaseOfTask(ctx.db, run.task_id) ? { plan: planLine(ctx, run.task_id, text) } : {}),
         pane: run.pane_id ?? "-",
