@@ -66,6 +66,7 @@ import { alertHerdrIfDue, herdrEpisode, noteHerdrDown, noteHerdrUp } from "../re
 import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestarted, scriptSupervisor } from "./restart.ts";
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
+import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -609,6 +610,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }
     };
     expireAwayIfDue();
+    // A verification the last daemon was running when it stopped: recorded as an error, its worktree removed.
+    try {
+      const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
+      if (recovered > 0) log(`verify: ${recovered} left running by the last daemon, recorded as errors`);
+    } catch (error) {
+      log(`verify: startup recovery failed: ${(error as Error).message}`);
+    }
     resolveReady();
 
     // Design section 5: every harness in use, its installed version against the passing contract records, before any launch.
@@ -681,6 +689,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     const reason = await stopped;
     log(`stopping: ${reason}`);
+    stopVerifications();
     clearInterval(pass);
     clearInterval(steady);
     clearInterval(attentionTick);

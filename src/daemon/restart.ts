@@ -39,7 +39,7 @@ const VALIDATION_POOL = "validation";
  */
 export const VALIDATION_STATUS_FRESH_MS = 2 * 60_000;
 
-export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "contract_check" | "build";
+export type GuardKind = "merging" | "blocked_prompt" | "validation" | "cleanup" | "launching" | "approval" | "verifying" | "contract_check" | "build";
 
 /** One thing a restart now would break. */
 export interface Guard {
@@ -119,6 +119,8 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
   for (const task of work.approvalTasks) guards.push({ kind: "approval", task, detail: "flowryn approve is waiting for its code" });
   for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
+  const verifying = db.query("SELECT id, task_id, pr_url, started_at FROM verifications WHERE state = 'running' ORDER BY started_at").all() as { id: string; task_id: string | null; pr_url: string; started_at: number }[];
+  for (const v of verifying) guards.push({ kind: "verifying", task: v.task_id, detail: `flowryn verify ${v.id} of ${v.pr_url} has run for ${ago(now - v.started_at)}` });
   for (const g of guards) {
     const title = g.task ? taskTitle(db, g.task) : null;
     if (title && title !== g.task) g.title = title;

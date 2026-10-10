@@ -1,4 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
+import { latestVerification, verificationLine } from "../verify/store.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
@@ -266,6 +267,8 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
     view.checks = pr.checks?.line ?? "unknown";
     view.seen = `${age(ctx.now, pr.observed_at)} ago`;
   }
+  const verified = delivered?.kind === "pr" ? latestVerification(ctx.db, delivered.ref) : null;
+  if (verified) view.verified = verificationLine(verified);
   const merge = latestMerge(ctx.db, run.task_id);
   if (merge) {
     const approval = ctx.db.query("SELECT channel, actor FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: string; actor: string } | null;

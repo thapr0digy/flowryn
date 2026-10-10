@@ -15,6 +15,7 @@ import { systemVerbs } from "../daemon/system-verbs.ts";
 import { LEASE_VERBS } from "../lease/verbs.ts";
 import { ATTENTION_VERBS } from "../attention/verbs.ts";
 import { POLICY_VERBS } from "../policy/verbs.ts";
+import { VERIFY_VERBS } from "../verify/verbs.ts";
 import type { VerbSpec } from "./verbs.ts";
 
 /** Every verb the daemon serves over the socket. The CLI adds its local verbs on top. */
@@ -36,6 +37,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...LEASE_VERBS,
   ...ATTENTION_VERBS,
   ...POLICY_VERBS,
+  ...VERIFY_VERBS,
   ...systemVerbs(),
 ];
 
