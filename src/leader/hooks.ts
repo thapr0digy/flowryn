@@ -248,7 +248,6 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
   setSession(ctx.db, s.session_id, {
     harness_session: input.session_id ?? s.harness_session,
     transcript_path: input.transcript_path ?? s.transcript_path,
-    cwd: input.cwd ?? s.cwd,
     has_ui: input.has_ui === undefined ? s.has_ui : input.has_ui ? 1 : 0,
     last_event_at: now,
   });

@@ -1,5 +1,5 @@
 import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
-import { basename, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type HandlerCtx } from "../api/verbs.ts";
 import { grantsConfig } from "../config/leader.ts";
@@ -205,6 +205,7 @@ export function postAsk(db: Db, a: PostAsk): string[] {
       refuse(mapped.why);
       continue;
     }
+    replaceEarlierGrants(db, a.session, ref, a.now);
     if (mapped.kind === "declined") {
       appendEvent(db, { source: "hook", kind: "grant.declined", taskId: form.task, payload: { session: a.session, tool_use: a.toolUseId, item: ref, answer: mapped.label }, ts: a.now });
       lines.push(`Flowryn: the user answered "${mapped.label}" to ${ref}; nothing is granted.`);
@@ -235,6 +236,12 @@ function voidRows(db: Db, rows: { id: string; task_id: string | null }[], reason
     appendEvent(db, { source: "hook", kind: "grant.voided", taskId: row.task_id, payload: { grant: row.id, why: reason }, ts: now });
   }
   return rows.length;
+}
+
+/** The user answered the same item again in this session: the later answer is the one that counts. */
+function replaceEarlierGrants(db: Db, session: string, item: string, now: number): number {
+  const rows = db.query("SELECT id, task_id FROM captain_grants WHERE session_id = ?1 AND item = ?2 AND consumed_at IS NULL AND voided_at IS NULL").all(session, item) as { id: string; task_id: string | null }[];
+  return voidRows(db, rows, "a later answer replaced it", now);
 }
 
 /** The turn ended (Stop, your next message, the session's end): its grants end with it. Call inside a transaction. */
@@ -318,6 +325,19 @@ function tailLines(path: string, bytes: number): string[] {
   }
 }
 
+/** The folder Claude keeps a directory's transcripts in: every character but A-Z, a-z and 0-9 becomes '-'. */
+export function claudeProjectSlug(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+function sameDir(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
 function within(dir: string, path: string): boolean {
   try {
     const root = realpathSync(dir);
@@ -329,13 +349,16 @@ function within(dir: string, path: string): boolean {
 
 /**
  * Claude's own record of the question and answer: the transcript the session started with,
- * inside Claude's projects directory, holding the AskUserQuestion tool use with the same
- * questions and, after the question was recorded, its tool result with the same answer.
- * Returns why it fails, or null.
+ * directly in Claude's project folder for the directory `flowryn lead` opened the session in,
+ * holding the AskUserQuestion tool use with the same questions and no answers of its own and,
+ * after the question was recorded, its tool result with the same answer. Returns why it fails,
+ * or null.
  */
-export function transcriptProblem(g: GrantRow, check: { sessionTranscript: string | null; projectsDir: string; askedAt: number; inputHash: string }): string | null {
+export function transcriptProblem(g: GrantRow, check: { sessionTranscript: string | null; projectsDir: string; cwd: string | null; askedAt: number; inputHash: string }): string | null {
   if (!check.sessionTranscript || check.sessionTranscript !== g.transcript_path) return "the transcript is not the one this leader session started with";
   if (!within(check.projectsDir, g.transcript_path)) return `the transcript is not inside Claude's projects directory (${check.projectsDir})`;
+  if (!check.cwd) return "the leader session has no working directory to find its transcript by";
+  if (!sameDir(dirname(g.transcript_path), join(check.projectsDir, claudeProjectSlug(check.cwd)))) return `the transcript is not in Claude's project folder for the leader's directory (${check.cwd})`;
   const claudeSession = basename(g.transcript_path).replace(/\.jsonl$/, "");
   let lines: string[];
   try {
@@ -344,6 +367,7 @@ export function transcriptProblem(g: GrantRow, check: { sessionTranscript: strin
     return "the transcript cannot be read";
   }
   let asked = false;
+  let prefilled = false;
   let answered = false;
   for (const line of lines) {
     if (!line.includes(g.tool_use_id)) continue;
@@ -362,6 +386,8 @@ export function transcriptProblem(g: GrantRow, check: { sessionTranscript: strin
       if (entry.type === "assistant" && p.type === "tool_use" && p.id === g.tool_use_id && p.name === "AskUserQuestion") {
         const qs = questionsOf(p.input);
         if (qs && questionsHash(qs) === check.inputHash) asked = true;
+        const input = (p.input && typeof p.input === "object" ? p.input : {}) as Record<string, unknown>;
+        if (nonEmpty(input.answers) || nonEmpty(input.annotations)) prefilled = true;
       }
       if (entry.type === "user" && p.type === "tool_result" && p.tool_use_id === g.tool_use_id) {
         const result = entry.toolUseResult as { answers?: Record<string, unknown> } | undefined;
@@ -369,6 +395,7 @@ export function transcriptProblem(g: GrantRow, check: { sessionTranscript: strin
       }
     }
   }
+  if (prefilled) return "the question carried its own answers";
   if (!asked) return "Claude's transcript has no such question";
   if (!answered) return "Claude's transcript has no such answer from the user";
   return null;
@@ -397,9 +424,9 @@ export function prepareGrant(ctx: { db: Db; now(): number }, ask: GrantAsk, proj
     return refuse(new FlowrynError("approval_required", `grant ${g.id} was for head ${g.binds?.slice(0, 8) ?? "?"}; the head is now ${ask.head?.slice(0, 8) ?? "?"}`, `ask the user again: flowryn chat-question merge:${g.task_id}`), g.id);
   }
   if (g.verified_at === null) {
-    const session = ctx.db.query("SELECT transcript_path FROM leader_sessions WHERE session_id = ?1").get(g.session_id) as { transcript_path: string | null } | null;
+    const session = ctx.db.query("SELECT transcript_path, cwd FROM leader_sessions WHERE session_id = ?1").get(g.session_id) as { transcript_path: string | null; cwd: string | null } | null;
     const asked = ctx.db.query("SELECT created_at, input_hash FROM chat_questions WHERE tool_use_id = ?1").get(g.tool_use_id) as { created_at: number; input_hash: string } | null;
-    const problem = asked ? transcriptProblem(g, { sessionTranscript: session?.transcript_path ?? null, projectsDir, askedAt: asked.created_at, inputHash: asked.input_hash }) : "the question was never recorded";
+    const problem = asked ? transcriptProblem(g, { sessionTranscript: session?.transcript_path ?? null, projectsDir, cwd: session?.cwd ?? null, askedAt: asked.created_at, inputHash: asked.input_hash }) : "the question was never recorded";
     if (problem) return refuse(new FlowrynError("approval_required", `grant ${g.id} cannot be used: ${problem}`), g.id);
     tx(ctx.db, () => {
       ctx.db.query("UPDATE captain_grants SET verified_at = ?2 WHERE id = ?1").run(g!.id, now);

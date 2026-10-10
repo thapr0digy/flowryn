@@ -293,6 +293,7 @@ export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, 
     const fresh = db.query("SELECT consumed_at FROM approvals WHERE id = ?1").get(choice.row.id) as { consumed_at: number | null } | null;
     if (!fresh || fresh.consumed_at !== null) throw new FlowrynError("approval_required", `approval ${choice.row.id} was just used by another merge`);
     consumeApproval(db, choice.row.id, now, `${action} ${task}`);
+    if (action === "merge") voidItemGrants(db, `merge:${task}`, "a standing approval approved it", now);
     return choice.row.id;
   }
   if (choice.kind === "attempt") {

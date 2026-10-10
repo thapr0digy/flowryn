@@ -9,7 +9,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { openSession } from "../../src/lease/lease.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { bindingRef, chatForm, mapAnswer, parseRef, questionsHash, sameQuestion } from "../../src/policy/chat-questions.ts";
-import { findGrant, getGrant, GRANT_TTL_MS, postAsk, preAsk, prepareGrant, takeGrant, voidSessionGrants } from "../../src/policy/grants.ts";
+import { claudeProjectSlug, findGrant, getGrant, GRANT_TTL_MS, postAsk, preAsk, prepareGrant, takeGrant, voidSessionGrants } from "../../src/policy/grants.ts";
 import { staticLayers, leaderStaticLayers } from "../../src/policy/static.ts";
 
 const dirs: string[] = [];
@@ -33,15 +33,15 @@ interface World {
   decision: string;
 }
 
-/** A migrated database with a Claude leader session (its transcript in a projects directory) and one open decision. */
+/** A migrated database with a Claude leader session opened in `dir` (its transcript in Claude's project folder for `dir`) and one open decision. */
 function world(options: string[] = ["yes", "no"]): World {
   const dir = tempDir();
   const db = openDb(join(dir, "flowryn.db"));
   migrate(db);
   const projects = join(dir, "projects");
-  mkdirSync(join(projects, "leader"), { recursive: true });
+  mkdirSync(join(projects, claudeProjectSlug(dir)), { recursive: true });
   const claudeSession = "3f1c0f0e-1111-4222-8333-944445555666";
-  const transcript = join(projects, "leader", `${claudeSession}.jsonl`);
+  const transcript = join(projects, claudeProjectSlug(dir), `${claudeSession}.jsonl`);
   writeFileSync(transcript, "");
   const { session } = tx(db, () => openSession(db, { harness: "claude", pane: null, cwd: dir, now: 1_000 }));
   db.query("UPDATE leader_sessions SET transcript_path = ?2 WHERE session_id = ?1").run(session, transcript);
@@ -212,6 +212,51 @@ describe("grant lifecycle", () => {
     w.db.query("UPDATE leader_sessions SET transcript_path = ?2 WHERE session_id = ?1").run(w.session, join(w.dir, "other.jsonl"));
     expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("not the one this leader session started with");
     expect(w.db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'grant.refused'").get()).toEqual({ n: 3 });
+  });
+
+  test("Claude's folder for a directory replaces every character but A-Z, a-z and 0-9 with '-'", () => {
+    expect(claudeProjectSlug("/Users/me/.flowryn/x")).toBe("-Users-me--flowryn-x");
+    expect(claudeProjectSlug("/srv/my_repo v2")).toBe("-srv-my-repo-v2");
+  });
+
+  test("a question whose tool use in Claude's transcript carried its own answers grants nothing, even with the hooks fooled", () => {
+    const w = world();
+    const now = Date.now();
+    const grant = grantIn(askAndAnswer(w, "toolu_pf", "yes (Recommended)", now, false));
+    const q = chatForm(w.db, w.decision).question;
+    const answers = { [q.question]: "yes (Recommended)" };
+    appendFileSync(w.transcript, JSON.stringify({ type: "assistant", sessionId: w.claudeSession, timestamp: new Date(now).toISOString(), message: { content: [{ type: "tool_use", id: "toolu_pf", name: "AskUserQuestion", input: { questions: [q], answers } }] } }) + "\n");
+    appendFileSync(w.transcript, JSON.stringify({ type: "user", sessionId: w.claudeSession, timestamp: new Date(now).toISOString(), toolUseResult: { questions: [q], answers, annotations: {} }, message: { content: [{ type: "tool_result", tool_use_id: "toolu_pf", content: "answered" }] } }) + "\n");
+    expect(() => prepareGrant({ db: w.db, now: () => now }, { session: w.session, item: w.decision, choice: "yes", grantId: grant }, w.projects)).toThrow("the question carried its own answers");
+    expect(getGrant(w.db, grant)!.verified_at).toBeNull();
+  });
+
+  test("the transcript must sit in Claude's project folder for the directory the session was opened in", () => {
+    const w = world();
+    const now = Date.now();
+    const other = join(w.projects, claudeProjectSlug(join(w.dir, "elsewhere")));
+    mkdirSync(other, { recursive: true });
+    w.transcript = join(other, `${w.claudeSession}.jsonl`);
+    writeFileSync(w.transcript, "");
+    w.db.query("UPDATE leader_sessions SET transcript_path = ?2 WHERE session_id = ?1").run(w.session, w.transcript);
+    const grant = grantIn(askAndAnswer(w, "toolu_cwd", "no", now));
+    const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+    expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("not in Claude's project folder for the leader's directory");
+    w.db.query("UPDATE leader_sessions SET cwd = NULL WHERE session_id = ?1").run(w.session);
+    expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("has no working directory");
+    w.db.query("UPDATE leader_sessions SET cwd = ?2 WHERE session_id = ?1").run(w.session, join(w.dir, "elsewhere"));
+    expect(prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toBe(grant);
+  });
+
+  test("a later answer to the same item replaces the earlier grant", () => {
+    const w = world();
+    const now = Date.now();
+    const first = grantIn(askAndAnswer(w, "toolu_r1", "yes (Recommended)", now));
+    const second = grantIn(askAndAnswer(w, "toolu_r2", "no", now + 1));
+    expect(getGrant(w.db, first)!.void_reason).toBe("a later answer replaced it");
+    expect(() => findGrant(w.db, { session: w.session, item: w.decision, choice: "yes", grantId: first }, now + 1)).toThrow("voided: a later answer replaced it");
+    expect(() => findGrant(w.db, { session: w.session, item: w.decision, choice: "yes", grantId: null }, now + 1)).toThrow(/was "no"/);
+    expect(findGrant(w.db, { session: w.session, item: w.decision, choice: "no", grantId: null }, now + 1)!.id).toBe(second);
   });
 
   test("a merge grant binds to the head it showed", () => {

@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BridgeDriver } from "../../src/contracts/bridge-suite.ts";
+import { claudeProjectSlug } from "../../src/policy/grants.ts";
 
 /**
  * A fake Claude Code leader for tests. It plays Claude only through the hooks
@@ -26,7 +27,8 @@ import type { BridgeDriver } from "../../src/contracts/bridge-suite.ts";
  *     tool_input and tool_response {questions, answers, annotations}; the
  *     transcript holds the tool use and, with a timestamp, its result with
  *     toolUseResult.answers (written here after PostToolUse, the latest it
- *     can be). The transcript lives at <dir>/claude-projects/leader/<session>.jsonl.
+ *     can be). The transcript lives where Claude keeps it, in the folder named
+ *     for its cwd: <dir>/claude-projects/<slug of cwd>/<session>.jsonl.
  */
 
 interface HookCommand {
@@ -83,7 +85,7 @@ export class FakeClaudeLeader implements BridgeDriver {
   constructor(opts: FakeClaudeOptions) {
     this.opts = opts;
     this.settings = JSON.parse(readFileSync(opts.settingsPath, "utf8"));
-    const projectDir = join(opts.dir, "claude-projects", "leader");
+    const projectDir = join(opts.dir, "claude-projects", claudeProjectSlug(opts.cwd));
     mkdirSync(projectDir, { recursive: true });
     this.transcript = join(projectDir, `${this.sessionId}.jsonl`);
     writeFileSync(this.transcript, "");
