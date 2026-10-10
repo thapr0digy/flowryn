@@ -7,6 +7,12 @@ export interface Migration {
   version: number;
   name: string;
   sql: string;
+  /**
+   * The migration rebuilds a table other tables reference (SQLite cannot alter a CHECK): it runs
+   * with foreign keys off, SQLite's documented table-rebuild procedure, and must leave
+   * `PRAGMA foreign_key_check` clean before it commits.
+   */
+  rebuildsReferencedTable?: boolean;
 }
 
 /** Design section 13, verbatim apart from the append-only triggers on events. */
@@ -439,6 +445,40 @@ const ITEM_FULL_LINE_SQL = /* sql */ `
 ALTER TABLE items ADD COLUMN full_line TEXT;
 `;
 
+/**
+ * Chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md): a leader
+ * AskUserQuestion answer authorises the one action it names. chat_questions holds each binding
+ * question the Claude leader's PreToolUse hook let through (one row per tool use, so a replayed or
+ * forged hook call for a tool use id already seen records nothing); captain_grants the grant each
+ * answer made, single use and short-lived. approvals is rebuilt for the new channel claude-chat
+ * (merges and gates reference it, so foreign keys are off while it is swapped).
+ */
+const CHAT_GRANTS_SQL = /* sql */ `
+CREATE TABLE approvals_v16 (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','yolo')),
+  actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
+  allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed_at INTEGER);
+INSERT INTO approvals_v16 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+  SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
+DROP TABLE approvals;
+ALTER TABLE approvals_v16 RENAME TO approvals;
+CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
+CREATE TABLE chat_questions (
+  tool_use_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input_hash TEXT NOT NULL,
+  refs TEXT NOT NULL, created_at INTEGER NOT NULL, answered_at INTEGER);
+CREATE TABLE captain_grants (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL, tool_use_id TEXT NOT NULL,
+  item TEXT NOT NULL, action TEXT NOT NULL, task_id TEXT, choice TEXT NOT NULL,
+  words TEXT, question TEXT NOT NULL, answer TEXT NOT NULL, binds TEXT, transcript_path TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, verified_at INTEGER,
+  consumed_at INTEGER, consumed_by TEXT, voided_at INTEGER, void_reason TEXT,
+  UNIQUE (tool_use_id, item));
+CREATE INDEX captain_grants_live ON captain_grants(session_id, item) WHERE consumed_at IS NULL AND voided_at IS NULL;
+CREATE INDEX captain_grants_task ON captain_grants(task_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -455,6 +495,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 13, name: "attempt-waiver", sql: ATTEMPT_WAIVER_SQL },
   { version: 14, name: "steer-end-turn", sql: STEER_END_TURN_SQL },
   { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
+  { version: 16, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

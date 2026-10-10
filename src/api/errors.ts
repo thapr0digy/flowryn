@@ -55,6 +55,8 @@ export const ERROR_CODES = {
   stage_waiting: EXIT.policy,
   // a review gate whose own questions are still open
   questions_open: EXIT.policy,
+  // a chat-answer grant names another item or choice than the command
+  grant_mismatch: EXIT.policy,
   // steers and interrupts
   interrupt_refused: EXIT.policy,
   // validation

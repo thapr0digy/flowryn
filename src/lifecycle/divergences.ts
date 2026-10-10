@@ -3,6 +3,7 @@ import { stringArg, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
+import { grantActor, prepareCaptainGrant, takeGrant } from "../policy/grants.ts";
 import { closeDivergence, getDivergence, isBacklogDivergence, RESOLUTIONS, resolveCommand, type DivergenceRow, type Resolution } from "../reconcile/divergence.ts";
 import { MAX_BACKLOG_BODY } from "./dispatch.ts";
 import { doneFlags } from "./landing.ts";
@@ -38,6 +39,8 @@ interface Planned {
   resolution: Resolution;
   action: Action;
   run: RunRow | null;
+  /** A chat answer that settles it; resolving needs no word from you, so it is the record that the answer was yours. */
+  grant: string | null;
 }
 
 function resolutionArg(value: string | undefined): Resolution {
@@ -54,10 +57,10 @@ function plan(db: Db, id: string, resolution: Resolution): Planned {
     if (resolution === "accept-edit") {
       throw new FlowrynError("bad_args", `divergence ${id} is between ${divergence.higher} and ${divergence.lower}, not a backlog edit: there is no edit to accept`, resolveCommand(divergence));
     }
-    return { divergence, resolution, action: "acknowledge", run };
+    return { divergence, resolution, action: "acknowledge", run, grant: null };
   }
-  if (resolution === "keep-run") return { divergence, resolution, action: "reapply", run };
-  return { divergence, resolution, action: run ? "cancel" : "accept", run };
+  if (resolution === "keep-run") return { divergence, resolution, action: "reapply", run, grant: null };
+  return { divergence, resolution, action: run ? "cancel" : "accept", run, grant: null };
 }
 
 /**
@@ -105,6 +108,7 @@ const resolve: VerbSpec = {
     // Judge against the backlog as it is now: a hand edit not yet seen is diffed first.
     await ctx.watcher.refreshIfIdle("backlog");
     const planned = plan(ctx.db, stringArg(args, "id")!, resolutionArg(stringArg(args, "resolution")));
+    planned.grant = prepareCaptainGrant(ctx, args, { item: planned.divergence.id, choice: planned.resolution }, null);
     if (planned.action === "cancel" && planned.run) {
       const exited = await ctx.fleet.exitRun(planned.run.id);
       if (!exited.ok) throw new FlowrynError("internal", `the worker for ${planned.run.task_id} did not exit (${exited.detail ?? exited.evidence}); nothing was resolved`);
@@ -129,9 +133,10 @@ const resolve: VerbSpec = {
         cancelled = run.id;
       }
     }
-    closeDivergence(ctx.db, d, planned.resolution, ctx.caller.role, "cli", now);
+    const used = planned.grant ? takeGrant(ctx.db, planned.grant, `divergence resolve ${d.id}`, now) : null;
+    closeDivergence(ctx.db, d, planned.resolution, used ? grantActor(used) : ctx.caller.role, "cli", now);
     return {
-      data: { divergence: d.id, resolution: planned.resolution, task: d.task_id ?? "-", backlog: changed.join(" ") || "unchanged", cancelled: cancelled ?? "-" },
+      data: { divergence: d.id, resolution: planned.resolution, task: d.task_id ?? "-", backlog: changed.join(" ") || "unchanged", cancelled: cancelled ?? "-", ...(used ? { grant: used.id } : {}) },
       hints: cancelled ? [`flowryn cleanup ${d.task_id} (the worktree is kept)`] : [`flowryn show ${d.task_id ?? d.id}`],
     };
   },

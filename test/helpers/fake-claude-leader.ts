@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BridgeDriver } from "../../src/contracts/bridge-suite.ts";
 
@@ -19,7 +19,14 @@ import type { BridgeDriver } from "../../src/contracts/bridge-suite.ts";
  *   - A Bash tool call obeys the settings' permissions (deny beats ask beats
  *     allow) and a PreToolUse hook's permissionDecision; "ask" puts a prompt
  *     in front of you, in auto mode and under bypass alike (c08), and the
- *     command runs only if you say yes.
+ *     command runs only if you say yes. A hook's "allow" never overrides an
+ *     ask rule (c15).
+ *   - AskUserQuestion (c15, Claude 2.1.296): PreToolUse sees the questions; a
+ *     deny stops it with no dialog; your answers come back in PostToolUse as
+ *     tool_input and tool_response {questions, answers, annotations}; the
+ *     transcript holds the tool use and, with a timestamp, its result with
+ *     toolUseResult.answers (written here after PostToolUse, the latest it
+ *     can be). The transcript lives at <dir>/claude-projects/leader/<session>.jsonl.
  */
 
 interface HookCommand {
@@ -72,7 +79,9 @@ export class FakeClaudeLeader implements BridgeDriver {
   constructor(opts: FakeClaudeOptions) {
     this.opts = opts;
     this.settings = JSON.parse(readFileSync(opts.settingsPath, "utf8"));
-    this.transcript = join(opts.dir, `transcript-${this.sessionId}.jsonl`);
+    const projectDir = join(opts.dir, "claude-projects", "leader");
+    mkdirSync(projectDir, { recursive: true });
+    this.transcript = join(projectDir, `${this.sessionId}.jsonl`);
     writeFileSync(this.transcript, "");
     this.sessionName = opts.env.FLOWRYN_LEADER_SESSION ?? "";
   }
@@ -263,6 +272,60 @@ export class FakeClaudeLeader implements BridgeDriver {
     const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     await this.fire("PostToolUse", { tool_name: "Bash", tool_input: toolInput, tool_use_id: toolUseId }, "Bash");
     return { denied: false, prompted: ask, ran: true, code, stdout, stderr };
+  }
+
+  /** The transcript file, for tests that check (or tamper with) what Claude recorded. */
+  transcriptPath(): string {
+    return this.transcript;
+  }
+
+  /** A PreToolUse decision from the hooks for one tool call. */
+  private async preDecision(tool: string, toolInput: unknown, toolUseId: string): Promise<{ decision: string | null; reason: string }> {
+    const input = this.input("PreToolUse", { tool_name: tool, tool_input: toolInput, tool_use_id: toolUseId });
+    let decision: string | null = null;
+    let reason = "";
+    for (const hook of this.groups("PreToolUse", tool)) {
+      const proc = Bun.spawn(["sh", "-c", hook.command], { env: this.opts.env, cwd: this.opts.cwd, stdin: new Blob([input]), stdout: "pipe", stderr: "pipe" });
+      const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+      try {
+        const parsed = JSON.parse(out.trim().split("\n").pop() ?? "") as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+        if (parsed.hookSpecificOutput?.permissionDecision) {
+          decision = parsed.hookSpecificOutput.permissionDecision;
+          reason = parsed.hookSpecificOutput.permissionDecisionReason ?? "";
+        }
+      } catch {
+        // no decision
+      }
+    }
+    return { decision, reason };
+  }
+
+  /**
+   * The model calls AskUserQuestion and you answer. `prefill` makes the model pass its own answers
+   * in the tool input. A deny stops it before any dialog. Otherwise your `answers` (question text to
+   * the label or text you chose) and `notes` come back through PostToolUse, whose context lines
+   * (the grants) are returned, and the transcript records the call and its result.
+   */
+  async ask(
+    questions: unknown[],
+    answer: { answers: Record<string, string>; notes?: Record<string, string> },
+    opts: { prefill?: Record<string, string>; toolUseId?: string } = {},
+  ): Promise<{ denied: boolean; reason: string; contexts: string[]; toolUseId: string }> {
+    const toolUseId = opts.toolUseId ?? `toolu_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`;
+    const preInput = opts.prefill ? { questions, answers: opts.prefill } : { questions };
+    const pre = await this.preDecision("AskUserQuestion", preInput, toolUseId);
+    if (pre.decision === "deny") return { denied: true, reason: pre.reason, contexts: [], toolUseId };
+    const now = () => new Date().toISOString();
+    appendFileSync(this.transcript, JSON.stringify({ type: "assistant", sessionId: this.sessionId, timestamp: now(), message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }] } }) + "\n");
+    const annotations = Object.fromEntries(Object.entries(answer.notes ?? {}).map(([q, notes]) => [q, { notes }]));
+    const result = { questions, answers: answer.answers, annotations };
+    const contexts = await this.fire("PostToolUse", { tool_name: "AskUserQuestion", tool_input: result, tool_response: result, tool_use_id: toolUseId }, "AskUserQuestion");
+    const text = Object.entries(answer.answers).map(([q, a]) => `"${q}"="${a}"`).join(", ");
+    appendFileSync(
+      this.transcript,
+      JSON.stringify({ type: "user", sessionId: this.sessionId, timestamp: now(), toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: `Your questions have been answered: ${text}.` }] } }) + "\n",
+    );
+    return { denied: false, reason: "", contexts, toolUseId };
   }
 
   /** Run a hook event directly, for race tests that need a precise order. */

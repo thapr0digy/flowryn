@@ -7,6 +7,7 @@ import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { changesTarget, openGate, passReviewGate, positionOf, sendBack, type GateRow } from "../lifecycle/stages.ts";
 import { consumeApproval, findAttempt, insertApproval, matchAttempt, type Channel } from "./approvals.ts";
+import { grantActor, prepareCaptainGrant, takeGrant, voidItemGrants } from "./grants.ts";
 import { runAndProject } from "./verbs.ts";
 
 /**
@@ -80,6 +81,8 @@ interface PassPrepared {
   runId: string;
   gateId: string;
   head: string;
+  /** A chat answer that passes this gate (docs/notes/2026-10-10-chat-answers-authorise-5g.md). */
+  grant: string | null;
 }
 
 const gatePass: VerbSpec = {
@@ -98,10 +101,11 @@ const gatePass: VerbSpec = {
     checkStage(gate, stringArg(args, "stage"));
     checkGateId(gate, stringArg(args, "gate-id"));
     requireGateAnswered(ctx.db, gate);
-    return { runId: run.id, gateId: gate.id, head: await reviewedHead(ctx, run) };
+    const grant = prepareCaptainGrant(ctx, args, { item: gate.id, choice: "pass" }, { action: "gate", task: stringArg(args, "task")! });
+    return { runId: run.id, gateId: gate.id, head: await reviewedHead(ctx, run), grant };
   },
   apply(ctx, args, prepared) {
-    const { runId, gateId, head } = prepared as PassPrepared;
+    const { runId, gateId, head, grant } = prepared as PassPrepared;
     const typed = stringArg(args, "task")!;
     const run = getRunWithPolicy(ctx.db, runId)!;
     const gate = openGate(ctx.db, run.id, "review");
@@ -110,14 +114,18 @@ const gatePass: VerbSpec = {
     const help = `in your shell: flowryn approve ${run.task_id} --gate ${gate.stage}`;
     const session = ctx.caller.role === "leader" && ctx.caller.session ? getSession(ctx.db, ctx.caller.session) : null;
     let approval: { channel: Channel; actor: string; head: string } | null = null;
-    if (session?.harness === "claude") {
+    if (session?.harness === "claude" && grant) {
+      const used = takeGrant(ctx.db, grant, `gate pass ${gate.id}`, now);
+      approval = { channel: "claude-chat", actor: grantActor(used), head };
+    } else if (session?.harness === "claude") {
       // The attempt Claude's PreToolUse hook recorded when it asked you, matched by the task as typed.
       const attempt = findAttempt(ctx.db, { session: session.session_id, action: "gate", task: typed, now });
-      if (!attempt) throw new FlowrynError("approval_required", "no confirmed Claude prompt for this gate pass (under bypassPermissions there is none to trust)", help);
+      if (!attempt) throw new FlowrynError("approval_required", "no confirmed Claude prompt or chat answer for this gate pass (under bypassPermissions there is no prompt to trust)", `${help}; or ask in chat: flowryn chat-question ${gate.id}, then flowryn grant use <grant>`);
       if (attempt.pr_url !== gateRef(gate)) {
         throw new FlowrynError("approval_required", `the prompt you confirmed showed ${attempt.pr_url?.replace(/^gate:/, "gate ") ?? "no open gate"}, but the open ${gate.stage} review is gate ${gate.id}`, "run the gate pass again, so Claude shows you this gate");
       }
       matchAttempt(ctx.db, attempt.id, now);
+      voidItemGrants(ctx.db, gate.id, "a confirmed prompt passed it", now);
       approval = { channel: "claude-ask", actor: `${user()} (Claude prompt, leader ${session.session_id})`, head };
     } else if (session?.harness === "pi") {
       const key = stringArg(args, "approval_key")?.trim();
@@ -155,9 +163,19 @@ const gateChanges: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
-  apply(ctx, args) {
+  async prepare(ctx, args) {
+    // Changes need no word from you; a chat answer is still taken (and a "Pass" answer refuses them).
+    const { gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
+    return { grant: prepareCaptainGrant(ctx, args, { item: gate.id, choice: "changes" }, null) };
+  },
+  apply(ctx, args, prepared) {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
-    const words = (stringArg(args, "body") ?? "").trim();
+    const grantId = (prepared as { grant: string | null } | undefined)?.grant ?? null;
+    const used = grantId ? takeGrant(ctx.db, grantId, `gate changes ${gate.id}`, ctx.now()) : null;
+    const leaderWords = (stringArg(args, "body") ?? "").trim();
+    // Free text the user typed as their answer is their words; the leader's relay comes after it.
+    const theirs = used?.words?.trim() ?? "";
+    const words = [theirs, leaderWords].filter((w) => w.length > 0).join("\n");
     if (words.length === 0) throw new FlowrynError("bad_args", "say what to change in --body-file -");
     const pos = positionOf(ctx.db, run, run.kind);
     const gateIndex = pos.def.stages.findIndex((s) => s.id === gate.stage);
@@ -167,8 +185,8 @@ const gateChanges: VerbSpec = {
       target = pos.def.stages.findIndex((s) => s.id === to);
       if (target < 0 || target > gateIndex) throw new FlowrynError("bad_args", `--to must name ${gate.stage} or a stage before it: ${pos.def.stages.slice(0, gateIndex + 1).map((s) => s.id).join(", ")}`);
     }
-    const stage = sendBack(ctx.db, run, gate, words, target, ctx.caller.role, ctx.now());
-    return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "changes", to: stage }, hints: [`flowryn show ${run.task_id}`] };
+    const stage = sendBack(ctx.db, run, gate, words, target, used ? grantActor(used) : ctx.caller.role, ctx.now());
+    return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "changes", to: stage, ...(used ? { grant: used.id } : {}) }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
     ctx.lavish.kick();

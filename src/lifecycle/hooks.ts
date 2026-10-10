@@ -467,7 +467,7 @@ const postTool = signalVerb(
     const steer = takeSteer(ctx, run, "post-tool");
     return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
   },
-  (ctx) => leader.toolActivity(ctx),
+  (ctx, input) => leader.postToolUse(ctx, input),
 );
 
 /**

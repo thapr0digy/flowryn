@@ -182,8 +182,25 @@ describe("migrations", () => {
     migrate(db, MIGRATIONS.slice(0, 14));
     db.exec("INSERT INTO events (ulid, ts, source, kind, payload) VALUES ('u1', 1, 'cli', 'test.item', '{}')");
     db.exec("INSERT INTO items (id, event_seq, class, lane, kind, line, opened_at) VALUES ('i1', 1, 'actionable', 'P1', 'worker_question', 'a line', 1)");
-    expect(migrate(db)).toEqual([15]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15))).toEqual([15]);
     expect(db.query("SELECT id, line, full_line FROM items").all()).toEqual([{ id: "i1", line: "a line", full_line: null }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 15))).toEqual([]);
+    db.close();
+  });
+
+  test("chat grants: approvals is rebuilt for claude-chat, its rows and the merges that reference them kept, foreign keys back on", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 15));
+    db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('a1', 't1', 'u', 'h', 'cli-tty', 'me', 'merge', 1, 2)");
+    db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('m1', 't1', 'u', 'h', 'a1', 1, 'merged')");
+    expect(() => db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'claude-chat', 'me', 1, 2)")).toThrow();
+    expect(migrate(db)).toEqual([16]);
+    expect(db.query("SELECT id, channel FROM approvals").all()).toEqual([{ id: "a1", channel: "cli-tty" }]);
+    db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'claude-chat', 'me', 1, 2)");
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
+    expect(() => db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('m2', 't1', 'u', 'h', 'nope', 1, 'merged')")).toThrow();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'approvals_open'").get()).toEqual({ name: "approvals_open" });
     expect(migrate(db)).toEqual([]);
     db.close();
   });

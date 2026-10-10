@@ -86,3 +86,15 @@ export function staticLayers(paths: StaticPaths): StaticLayers {
 export function configStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir">): StaticLayers {
   return staticLayers({ backlog: config.tasks.backlog, todos: config.tasks.todos, db: stateFiles(config.state_dir).db });
 }
+
+/**
+ * The leader's static layers: the toolkit's, plus a deny on writing Claude's own transcripts.
+ * A chat-answer grant counts only once the daemon finds your answer in the leader's transcript
+ * (src/policy/grants.ts), so the leader must not be able to write one. Only `.jsonl` files: the
+ * same directory holds Claude's memory notes, which the leader may keep writing. Bash cannot
+ * write there either inside Claude's sandbox, whose write allow-list leaves `~/.claude` out.
+ */
+export function leaderStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir">, claudeProjectsDir: string): StaticLayers {
+  const base = configStaticLayers(config);
+  return { permissionsDeny: [...base.permissionsDeny, absoluteRule("Edit", `${claudeProjectsDir}/**/*.jsonl`)], denyWrite: base.denyWrite };
+}
