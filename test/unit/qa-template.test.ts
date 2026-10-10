@@ -88,6 +88,19 @@ describe("the QA stage's page check", () => {
     writeFileSync(join(dir, "qa", "evidence.html"), filled("works-with-caveats"));
     expect(() => checkQaPage(dir)).not.toThrow();
   });
+
+  test("a qa/ directory that links outside the report dir is refused", () => {
+    const dir = scratch();
+    const outside = scratch();
+    writeFileSync(join(outside, "evidence.html"), filled());
+    symlinkSync(outside, join(dir, "qa"));
+    expect(() => checkQaPage(dir)).toThrow("outside $FLOWRYN_REPORT_DIR");
+    try {
+      checkQaPage(dir);
+    } catch (error) {
+      expect((error as { code: string }).code).toBe("qa_page_invalid");
+    }
+  });
 });
 
 describe("assumptions the design makes", () => {

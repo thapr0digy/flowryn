@@ -39,7 +39,7 @@ Ship 3 of the toolkit report (§6). It adds the two gates that have no raw comma
   - `doctor --contracts`, whose scratch home sets `floor = 0` because you asked for that run
 
   The usage-limit pause still stops everything once the quota really runs out.
-- **When it is read:** only when a new Claude run or a Claude phase could start, at most every `[sched] quota_cache_ms` (default 120 s). The reading falls slowly: 5% of a 5 h window lasts about 15 min at full burn. It rises only at a reset, so it does not flap around the floor, and there is no hysteresis.
+- **When it is read:** only when a new Claude run or a Claude phase could start, or on each scheduler pass while the recorded state is low (so a reset or a floor change lifts it with nothing new waiting), at most every `[sched] quota_cache_ms` (default 120 s). The reading falls slowly: 5% of a 5 h window lasts about 15 min at full burn. It rises only at a reset, so it does not flap around the floor, and there is no hysteresis.
 - **State and attention:**
   - The state (meta `claude_quota`) is written only when its verdict or the floor changes, with an event: `sched.quota_ok`, `sched.quota_low` or `sched.quota_unknown`.
   - `low` opens one P1 `quota_low`: "Claude quota 3% (seven_day), under the 5% floor; new Claude runs wait until it resets at 04:00; flowryn capacity resume --harness claude starts them anyway". Any other verdict resolves it.

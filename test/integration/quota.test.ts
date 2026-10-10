@@ -75,6 +75,22 @@ describe("the Claude quota floor", () => {
   );
 
   test(
+    "a recorded low state is read again while no new Claude run waits, so a reset lifts it",
+    async () => {
+      fleet = await makeFleetEnv({ extraConfig: FAST });
+      const f = fleet;
+      setQuota(f, 3);
+      const b = await f.dispatch("Held then cancelled\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
+      await waitUntil(() => lowItem(f)?.state === "open", 15_000, "the quota P1");
+      expect((await f.json(["cancel", b.task])).code).toBe(0);
+      setQuota(f, 50);
+      await waitUntil(() => lowItem(f)?.state === "resolved", 15_000, "the low state lifted by a pass with no new Claude run");
+      expect(quotaEvents(f)).toEqual(["sched.quota_low", "sched.quota_ok"]);
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
     "a live Claude run drains under the floor: its next stage starts while a new run waits, until you start Claude work anyway in your own terminal",
     async () => {
       fleet = await makeFleetEnv({ extraConfig: FAST });

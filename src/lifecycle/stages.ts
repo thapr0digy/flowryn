@@ -548,7 +548,12 @@ export function checkQaPage(reportDir: string): string {
   if (st.size > QA_PAGE_MAX_BYTES) throw new FlowrynError("qa_page_invalid", `${path} is over ${QA_PAGE_MAX_BYTES / 1024 / 1024} MB`);
   const problems = qaPageProblems(readFileSync(path, "utf8"));
   if (problems.length > 0) throw new FlowrynError("qa_page_invalid", `${path}: ${problems.join("; ")}`, "fix the page, host it again, then run stage done");
-  return realpathSync(path);
+  try {
+    return checkReviewPage(path, reportDir, { widget: false });
+  } catch (error) {
+    if (error instanceof FlowrynError) throw new FlowrynError("qa_page_invalid", error.message, error.help);
+    throw error;
+  }
 }
 
 /**

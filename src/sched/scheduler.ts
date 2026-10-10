@@ -248,6 +248,7 @@ export class Scheduler {
   private async grant(): Promise<void> {
     const config = this.deps.config();
     const host = { verdict: null as HostVerdict | null };
+    if (quotaState(this.deps.db)?.state === "low") await this.quotaHeld();
     for (const c of this.candidates()) {
       if (this.stopped) return;
       await this.tryGrant(c, config, host, true);
