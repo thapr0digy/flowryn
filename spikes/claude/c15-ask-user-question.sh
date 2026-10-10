@@ -6,8 +6,9 @@
 #       no dialog, no PostToolUse, the model gets the reason.
 #   A4  the transcript holds the AskUserQuestion tool result (toolUseResult.answers) by the
 #       time the next Bash PreToolUse runs.
-#   A5  a PreToolUse "allow" on a Bash command that a static ask rule matches runs it
-#       without a permission prompt.
+#   A5  whether a PreToolUse "allow" on a Bash command that a static ask rule matches runs it
+#       without a permission prompt. Recorded, not required: on 2.1.296 it still prompts, so a
+#       grant runs through `flowryn grant use`, which no ask rule matches.
 # A3 (the dialog over /remote-control) cannot be driven from the lab.
 #
 # Method: a fake `flowryn` on PATH records any invocation. Variant "answer": the model asks
@@ -131,7 +132,7 @@ if [ "$prefilled" != "0" ]; then
 fi
 
 evidence="model=$MODEL; A1=$A1 A2=$A2 A4=$A4 A5=$A5; $(printf '%s || ' "${RESULTS[@]}")"
-if [ "$A1" = yes ] && [ "$A2" = yes ] && [ "$A4" = yes ] && [ "$A5" = yes ]; then verdict=confirmed
+if [ "$A1" = yes ] && [ "$A2" = yes ] && [ "$A4" = yes ]; then verdict=confirmed
 elif [ "$A1" = yes ]; then verdict=partial
 else verdict=refuted
 fi

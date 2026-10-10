@@ -53,6 +53,10 @@ export interface FakeClaudeOptions {
 
 const MAX_CONTINUATIONS = 8;
 
+function isoNow(): string {
+  return new Date().toISOString();
+}
+
 export class FakeClaudeLeader implements BridgeDriver {
   readonly harness = "claude" as const;
   readonly seen: { text: string; via: string }[] = [];
@@ -315,15 +319,14 @@ export class FakeClaudeLeader implements BridgeDriver {
     const preInput = opts.prefill ? { questions, answers: opts.prefill } : { questions };
     const pre = await this.preDecision("AskUserQuestion", preInput, toolUseId);
     if (pre.decision === "deny") return { denied: true, reason: pre.reason, contexts: [], toolUseId };
-    const now = () => new Date().toISOString();
-    appendFileSync(this.transcript, JSON.stringify({ type: "assistant", sessionId: this.sessionId, timestamp: now(), message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }] } }) + "\n");
+    appendFileSync(this.transcript, JSON.stringify({ type: "assistant", sessionId: this.sessionId, timestamp: isoNow(), message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }] } }) + "\n");
     const annotations = Object.fromEntries(Object.entries(answer.notes ?? {}).map(([q, notes]) => [q, { notes }]));
     const result = { questions, answers: answer.answers, annotations };
     const contexts = await this.fire("PostToolUse", { tool_name: "AskUserQuestion", tool_input: result, tool_response: result, tool_use_id: toolUseId }, "AskUserQuestion");
     const text = Object.entries(answer.answers).map(([q, a]) => `"${q}"="${a}"`).join(", ");
     appendFileSync(
       this.transcript,
-      JSON.stringify({ type: "user", sessionId: this.sessionId, timestamp: now(), toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: `Your questions have been answered: ${text}.` }] } }) + "\n",
+      JSON.stringify({ type: "user", sessionId: this.sessionId, timestamp: isoNow(), toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: `Your questions have been answered: ${text}.` }] } }) + "\n",
     );
     return { denied: false, reason: "", contexts, toolUseId };
   }
