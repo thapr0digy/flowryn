@@ -34,6 +34,10 @@ export interface DeliveryWatcherDeps {
   inFlight: ReadonlySet<string>;
   /** Clean up a run that landed (the daemon's own cleanup after a proven merge). */
   cleanup(runId: string): void;
+  /** `[upkeep] nudge_conflicts`: a delivered PR that conflicts with its base sends its ship back. */
+  nudgeConflicts(): boolean;
+  /** A nudged ship's last stage waits for a grant: the scheduler looks now. */
+  kickScheduler(): void;
   log(line: string): void;
   now(): number;
 }
@@ -144,10 +148,11 @@ export class DeliveryWatcher {
         const applied = tx(db, () => {
           noteForgeUp(db, "github", now());
           const current = getRunWithPolicy(db, run.id);
-          return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now()) : { landed: false };
+          return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts() }) : { landed: false };
         });
         this.backoffMs = 0;
         if (applied.landed) this.deps.cleanup(run.id);
+        if (applied.nudged) this.deps.kickScheduler();
       } catch (error) {
         if (error instanceof ForgeError && error.kind === "not_found") {
           this.deps.log(`delivery watcher: ${delivered.ref} is not found on GitHub`);

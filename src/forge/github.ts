@@ -185,6 +185,8 @@ export class GitHubForge implements Forge {
       // An open PR's merge_commit_sha is GitHub's test merge, not a landing: only a merged PR's counts.
       mergeSha: merged && typeof pr.merge_commit_sha === "string" && pr.merge_commit_sha.length > 0 ? pr.merge_commit_sha : null,
       mergedAt: merged ? str(pr.merged_at) || null : null,
+      // Only a single-PR answer carries it; a list answer and a closed PR read null.
+      mergeable: !merged && pr.state === "open" && typeof pr.mergeable === "boolean" ? pr.mergeable : null,
     };
   }
 

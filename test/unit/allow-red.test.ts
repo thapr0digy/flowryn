@@ -136,7 +136,7 @@ describe("the CLI and the leader settings", () => {
 });
 
 function pr(over: Partial<PullRequest> = {}): PullRequest {
-  return { number: 1, url: "https://github.com/acme/web/pull/1", title: "t", state: "open", draft: false, headSha: "h1", headRef: "flowryn/t", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, ...over };
+  return { number: 1, url: "https://github.com/acme/web/pull/1", title: "t", state: "open", draft: false, headSha: "h1", headRef: "flowryn/t", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: null, ...over };
 }
 
 const oneRed = summarize([

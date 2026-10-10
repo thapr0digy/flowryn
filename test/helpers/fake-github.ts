@@ -42,6 +42,12 @@ export interface FakePr {
   mergeSha: string | null;
   /** Set by an accepted-but-unproven merge; `prove()` makes it read merged. */
   pendingMerge: string | null;
+  /**
+   * What GitHub's `mergeable` reads for the open PR: undefined computes it (a
+   * trial merge of the head into the base on the bare origin, true without
+   * one); a boolean or null (GitHub still computing) forces it.
+   */
+  mergeable?: boolean | null;
 }
 
 export type MergeMode = "real" | "accept-unproven" | "error-500" | "refuse";
@@ -152,6 +158,7 @@ export class FakeGitHub {
       mergedAt: pr.mergedAt ?? (pr.merged ? "2026-06-26T00:00:00Z" : null),
       mergeSha: pr.mergeSha ?? null,
       pendingMerge: null,
+      ...(pr.mergeable !== undefined ? { mergeable: pr.mergeable } : {}),
     };
     repo.prs.push(created);
     return created;
@@ -201,8 +208,19 @@ export class FakeGitHub {
     return pr.headSha;
   }
 
+  /** GitHub's `mergeable` for an open PR: whether the head merges into the base without conflicts. */
+  private mergeableOf(repo: FakeRepo, pr: FakePr, head: string): boolean | null {
+    if (pr.merged || pr.state !== "open") return null;
+    if (pr.mergeable !== undefined) return pr.mergeable;
+    if (!repo.bare) return true;
+    const base = gitSync(repo.bare, ["rev-parse", "--verify", "--quiet", `refs/heads/${pr.baseRef}^{commit}`]).out;
+    if (!base || !head) return null;
+    return gitSync(repo.bare, ["merge-tree", "--write-tree", base, head]).code === 0;
+  }
+
   private prJson(repo: FakeRepo, pr: FakePr): Record<string, unknown> {
     const full = `${repo.owner}/${repo.repo}`;
+    const head = this.headOf(repo, pr);
     return {
       number: pr.number,
       html_url: `${this.webUrl}/${full}/pull/${pr.number}`,
@@ -213,8 +231,9 @@ export class FakeGitHub {
       merged_at: pr.mergedAt,
       // GitHub reports a test merge commit for an open PR too; only a merged PR's is a landing.
       merge_commit_sha: pr.merged ? pr.mergeSha : "0000000000000000000000000000000000000000",
-      head: { ref: pr.headRef, sha: this.headOf(repo, pr), repo: { full_name: pr.headRepo ?? full } },
+      head: { ref: pr.headRef, sha: head, repo: { full_name: pr.headRepo ?? full } },
       base: { ref: pr.baseRef, repo: { full_name: full } },
+      mergeable: this.mergeableOf(repo, pr, head),
     };
   }
 

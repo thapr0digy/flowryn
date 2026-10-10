@@ -316,7 +316,7 @@ describe("a verification job", () => {
 // --- the merge gate's local green ---------------------------------------------------------------
 
 function pr(over: Partial<PullRequest> = {}): PullRequest {
-  return { number: 1, url: "https://github.com/acme/web/pull/1", title: "t", state: "open", draft: false, headSha: "h2", headRef: "flowryn/t", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, ...over };
+  return { number: 1, url: "https://github.com/acme/web/pull/1", title: "t", state: "open", draft: false, headSha: "h2", headRef: "flowryn/t", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: true, ...over };
 }
 
 const NOT_STARTED: Check = { name: "typecheck, lint, test, build, fixtures", state: "red", detail: "failure", id: 7, app: "github-actions", annotations: 2 };
