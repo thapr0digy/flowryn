@@ -23,6 +23,7 @@ import {
   type AutoAttempt,
   type VersionOf,
 } from "../lifecycle/harness-gate.ts";
+import { quotaHolds } from "../sched/quota.ts";
 import { usageGate } from "../sched/usage.ts";
 import { autoRecordLine, reportProblem } from "./grant.ts";
 import { recordPass } from "./verbs.ts";
@@ -300,6 +301,7 @@ export class AutoContractChecker {
     const herdr = this.deps.herdrDown();
     if (herdr) return `Herdr (${herdr})`;
     if (harness === "claude" && usageGate(this.deps.db, this.deps.now(), null) === "paused") return "the Claude usage pause";
+    if (harness === "claude" && quotaHolds(this.deps.db)) return "the Claude quota floor";
     return null;
   }
 

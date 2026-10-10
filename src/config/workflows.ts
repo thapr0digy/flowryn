@@ -86,12 +86,19 @@ export interface HostCheckConfig {
   probe: string | null;
 }
 
+export interface QuotaConfig {
+  /** No new Claude run starts while quota-axi reads Claude's effectivePercentRemaining under this; 0 turns it off. */
+  floor: number;
+}
+
 export interface CapacityConfig {
   pools: Record<string, number>;
   host: HostCheckConfig;
+  quota: QuotaConfig;
 }
 
 export const DEFAULT_HOST: HostCheckConfig = { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null };
+export const DEFAULT_QUOTA: QuotaConfig = { floor: 5 };
 
 export const AUTONOMY_MODES = ["plan", "manual"] as const;
 export type AutonomyMode = (typeof AUTONOMY_MODES)[number];
@@ -108,9 +115,18 @@ export interface SchedTiming {
   usage_backoff_ms: number;
   /** Each re-arm doubles the backoff, up to this. */
   usage_backoff_max_ms: number;
+  /** A quota-axi reading is reused this long. */
+  quota_cache_ms: number;
 }
 
-export const DEFAULT_SCHED: SchedTiming = { pass_ms: 30_000, wait_alert_ms: 30 * 60_000, host_cache_ms: 5_000, usage_backoff_ms: 15 * 60_000, usage_backoff_max_ms: 2 * 60 * 60_000 };
+export const DEFAULT_SCHED: SchedTiming = {
+  pass_ms: 30_000,
+  wait_alert_ms: 30 * 60_000,
+  host_cache_ms: 5_000,
+  usage_backoff_ms: 15 * 60_000,
+  usage_backoff_max_ms: 2 * 60 * 60_000,
+  quota_cache_ms: 120_000,
+};
 
 const STAGE_ID = /^[a-z][a-z0-9-]{0,23}$/;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
@@ -139,7 +155,7 @@ export function capacityConfig(config: FlowrynConfig): CapacityConfig {
   const raw = table(config.extra.capacity, "[capacity]");
   const pools: Record<string, number> = { ...DEFAULT_POOLS };
   for (const [name, value] of Object.entries(raw)) {
-    if (name === "host") continue;
+    if (name === "host" || name === "quota") continue;
     if (!POOL_NAME.test(name)) throw new FlowrynError("config_invalid", `[capacity] ${name} is not a pool name (lowercase letters, digits, _)`);
     if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw new FlowrynError("config_invalid", `[capacity] ${name} must be a positive integer`);
     pools[name] = value;
@@ -151,8 +167,13 @@ export function capacityConfig(config: FlowrynConfig): CapacityConfig {
     if (typeof host.probe !== "string" || host.probe.length === 0) throw new FlowrynError("config_invalid", "[capacity.host] probe must be the path of a command");
     probe = toAbsolute(host.probe, config.home);
   }
+  const quota = table(raw.quota, "[capacity.quota]");
+  unknownKeys(quota, ["floor"], "[capacity.quota]");
+  const floor = positiveNumber(quota.floor, "[capacity.quota] floor", DEFAULT_QUOTA.floor, true);
+  if (floor > 100) throw new FlowrynError("config_invalid", "[capacity.quota] floor is a percentage, at most 100");
   return {
     pools,
+    quota: { floor },
     host: {
       min_free_mem_gb: positiveNumber(host.min_free_mem_gb, "[capacity.host] min_free_mem_gb", DEFAULT_HOST.min_free_mem_gb, true),
       max_load_per_core: positiveNumber(host.max_load_per_core, "[capacity.host] max_load_per_core", DEFAULT_HOST.max_load_per_core),

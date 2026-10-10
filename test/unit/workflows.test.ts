@@ -67,11 +67,20 @@ describe("workflows (design section 11)", () => {
 
 describe("capacity, autonomy, the scheduler's clocks, the style block", () => {
   test("pools and the host check default to the design's numbers; [capacity] overrides and adds", () => {
-    expect(capacityConfig(cfg(""))).toEqual({ pools: { worker: 20, validation: 5, docker_env: 5, browser: 5 }, host: { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null } });
+    expect(capacityConfig(cfg(""))).toEqual({ pools: { worker: 20, validation: 5, docker_env: 5, browser: 5 }, host: { min_free_mem_gb: 8, max_load_per_core: 1.5, probe: null }, quota: { floor: 5 } });
     const c = capacityConfig(cfg('[capacity]\nworker = 3\ngpu = 1\n[capacity.host]\nmin_free_mem_gb = 0\nprobe = "bin/probe"\n'));
     expect(c.pools).toMatchObject({ worker: 3, gpu: 1, validation: 5 });
     expect(c.host).toEqual({ min_free_mem_gb: 0, max_load_per_core: 1.5, probe: `${HOME}/bin/probe` });
     for (const text of ["[capacity]\nworker = 0", "[capacity]\nworker = 1.5", "[capacity]\nBad = 1", "[capacity.host]\nmax_load_per_core = 0", "[capacity.host]\nspeed = 1"]) {
+      expect(workflowConfigProblems(cfg(text)).length).toBeGreaterThan(0);
+    }
+  });
+
+  test("the quota floor defaults to 5%; 0 turns it off; it is a percentage", () => {
+    expect(capacityConfig(cfg("[capacity.quota]\nfloor = 0")).quota).toEqual({ floor: 0 });
+    expect(capacityConfig(cfg("[capacity.quota]\nfloor = 12.5")).quota).toEqual({ floor: 12.5 });
+    expect(capacityConfig(cfg("[capacity.quota]\nfloor = 12.5")).pools).not.toHaveProperty("quota");
+    for (const text of ["[capacity.quota]\nfloor = -1", "[capacity.quota]\nfloor = 101", '[capacity.quota]\nfloor = "5"', "[capacity.quota]\nprobe = 1"]) {
       expect(workflowConfigProblems(cfg(text)).length).toBeGreaterThan(0);
     }
   });
@@ -82,7 +91,7 @@ describe("capacity, autonomy, the scheduler's clocks, the style block", () => {
     expect(() => defaultAutonomy(cfg('[autonomy]\ndefault = "yolo"'))).toThrow(FlowrynError);
     expect(schedTiming(cfg("")).wait_alert_ms).toBe(30 * 60_000);
     expect(schedTiming(cfg("[sched]\nwait_alert_ms = 500")).wait_alert_ms).toBe(500);
-    expect(schedTiming(cfg(""))).toMatchObject({ usage_backoff_ms: 15 * 60_000, usage_backoff_max_ms: 2 * 60 * 60_000 });
+    expect(schedTiming(cfg(""))).toMatchObject({ usage_backoff_ms: 15 * 60_000, usage_backoff_max_ms: 2 * 60 * 60_000, quota_cache_ms: 120_000 });
   });
 
   test("the style block is the design's by default, yours with text or file, and off with terse = false", () => {

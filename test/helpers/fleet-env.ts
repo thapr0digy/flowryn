@@ -105,6 +105,8 @@ export interface FleetOptions {
   origin?: boolean;
   /** More config after the fleet's own sections ([github], [cleanup], [leader], ...). */
   extraConfig?: string;
+  /** More [tools] lines (`name = "path"`); one naming lavish_axi or quota_axi replaces the home's stand-in. */
+  tools?: string[];
   yolo?: boolean;
   /** [herdr] unreachable_alert_ms: how long Herdr may be away before its P1. */
   herdrAlertMs?: number;
@@ -130,6 +132,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
         `claude = ${JSON.stringify(versionScript(bin, "claude"))}`,
         `pi = ${JSON.stringify(versionScript(bin, "pi"))}`,
         `docker = ${JSON.stringify(dockerScript(bin, home))}`,
+        ...(options.tools ?? []),
         "[herdr]",
         `socket = ${JSON.stringify(join(home, "herdr.sock"))}`,
         ...(options.herdrAlertMs ? [`unreachable_alert_ms = ${options.herdrAlertMs}`] : []),

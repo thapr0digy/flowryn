@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { BuildWatcher } from "./build-watch.ts";
 import { daemonConfig } from "../config/daemon.ts";
+import { validationConfig } from "../config/validation.ts";
 import { upkeepConfig } from "../config/upkeep.ts";
 import { MergeBuilder } from "../upkeep/build.ts";
 import { Upkeep } from "../upkeep/upkeep.ts";
@@ -415,6 +416,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       noMistakes: () => resolveTool(config, "no_mistakes"),
       nmTimeoutMs: () => cleanupConfig(config).nomistakes_timeout_ms,
       pollMs: () => github().poll_ms,
+      ciWaitAlertMin: () => validationConfig(config).ci_wait_alert,
       inFlight: delivery.inFlight,
       cleanup: (runId) =>
         void delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => log(`cleanup ${runId}: ${(error as Error).stack ?? String(error)}`)),

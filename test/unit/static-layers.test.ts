@@ -168,9 +168,14 @@ describe("the toolkit's tools", () => {
   });
 
   test("doctor (Q6): the rest are info, with the same hint as init", () => {
-    for (const name of ["jira_axi", "sqlite_axi", "treehouse", "quota_axi"] as ToolName[]) {
+    for (const name of ["jira_axi", "sqlite_axi", "treehouse"] as ToolName[]) {
       expect(lineFor(configWith([]), name)).toEqual({ check: `tool ${name}`, status: "info", detail: expect.stringContaining(`Install: ${INSTALL_HINTS[name]}`) });
     }
+  });
+
+  test("doctor: a missing quota-axi warns while the quota floor is on (the default), and is info with floor = 0", () => {
+    expect(lineFor(configWith([]), "quota_axi")).toEqual({ check: "tool quota_axi", status: "warn", detail: expect.stringContaining(`Install: ${INSTALL_HINTS.quota_axi}`) });
+    expect(lineFor(configWith([], { capacity: { quota: { floor: 0 } } }), "quota_axi").status).toBe("info");
   });
 
   test("doctor suggests a global chrome-devtools-mcp only when chrome-devtools-axi is there without one", () => {
