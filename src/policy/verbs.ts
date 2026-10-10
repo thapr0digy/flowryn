@@ -1,22 +1,18 @@
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
-import { resolveRunItems } from "../attention/items.ts";
 import { tx, type Db } from "../db/db.ts";
-import { appendEvent } from "../db/events.ts";
 import { checksLine } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import type { DiscardAttempt } from "../lifecycle/landing.ts";
-import { discardRef, findAttempt, findHumanApproval, insertApproval, voidApprovals } from "./approvals.ts";
+import { discardRef, findAttempt, findHumanApproval, insertApproval } from "./approvals.ts";
 import { prepareCaptainGrant } from "./grants.ts";
 import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
-import { closeMergeGate, positionOf, requestStage } from "../lifecycle/stages.ts";
-import { holdsLease } from "../sched/pools.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
+import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
-import { WORKER_POOL } from "../config/workflows.ts";
 import {
   channelOf,
   checkGate,
@@ -194,18 +190,14 @@ const decline: VerbSpec = {
     const now = ctx.now();
     const note = (stringArg(args, "body") ?? "").trim();
     const delivered = deliveredOf(ctx.db, run.task_id);
-    ctx.db.query("UPDATE runs SET state = 'running', updated_at = ?2 WHERE id = ?1").run(run.id, now);
-    voidApprovals(ctx.db, run.task_id, now, "the delivery was declined");
-    resolveRunItems(ctx.db, run.id, ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed"], "run.declined", now);
-    appendEvent(ctx.db, { source: "cli", kind: "run.declined", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, ref: delivered?.ref ?? null, head: delivered?.head ?? null }, ts: now });
     const text = `Your delivery ${delivered ? `(${delivered.ref} at ${delivered.head.slice(0, 8)}) ` : ""}was declined.${note ? ` ${note}` : " Ask your leader what to change."} Change it, then deliver again.`;
-    closeMergeGate(ctx.db, run, { passed: false, feedback: note || "declined" }, now);
-    // The last stage starts again, through the scheduler: its pools are granted again, and a worker
-    // that is gone meanwhile is resumed with the steer.
-    const pos = positionOf(ctx.db, run, run.kind);
-    if (run.liveness === "dead" || !holdsLease(ctx.db, run.id, WORKER_POOL)) run.pending_launch = "resume";
-    requestStage(ctx.db, run, pos.def, pos.index, text, now);
-    return { data: { task: run.task_id, run: run.id, state: "running", stage: pos.stage.id } };
+    const { stage } = sendBack(
+      ctx.db,
+      run,
+      { text, feedback: note || "declined", why: "the delivery was declined", event: { source: "cli", kind: "run.declined", payload: { by: ctx.caller.role } } },
+      now,
+    );
+    return { data: { task: run.task_id, run: run.id, state: "running", stage } };
   },
   async settle(ctx, result) {
     await ctx.sched.passNow();

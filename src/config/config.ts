@@ -23,6 +23,8 @@ export const TOOL_NAMES = [
   "sqlite_axi",
   "quota_axi",
   "treehouse",
+  // Builds Flowryn after a Flowryn merge (src/upkeep/build.ts).
+  "bun",
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -49,6 +51,7 @@ export const TOOL_BINARIES: Record<ToolName, readonly string[]> = {
   sqlite_axi: ["sqlite-axi"],
   quota_axi: ["quota-axi"],
   treehouse: ["treehouse"],
+  bun: ["bun"],
 };
 
 /** First executable on PATH among a tool's names. */
