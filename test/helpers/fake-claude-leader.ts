@@ -28,8 +28,8 @@ import { claudeProjectSlug } from "../../src/policy/grants.ts";
  *     transcript holds the tool use and, with a timestamp, its result with
  *     toolUseResult.answers (written here after PostToolUse, the latest it
  *     can be). The transcript lives where Claude keeps it, in the folder named
- *     for its cwd: <dir>/claude-projects/<slug of cwd>/<session>.jsonl, and each entry names
- *     that cwd, as Claude's do.
+ *     for its startup cwd: <dir>/claude-projects/<slug of cwd>/<session>.jsonl, and each entry (and
+ *     each hook input) names the current cwd, which follows a `cd` (`cd()`), as Claude's do.
  */
 
 interface HookCommand {
@@ -77,6 +77,8 @@ export class FakeClaudeLeader implements BridgeDriver {
   private readonly opts: FakeClaudeOptions;
   private readonly transcript: string;
   private readonly sessionId = crypto.randomUUID();
+  /** The session's current directory: hook inputs and transcript entries name it; the transcript folder stays the startup one. */
+  private cwd: string;
   private readonly waiters = new Set<ReturnType<typeof Bun.spawn>>();
   private sessionName = "";
   private busy = false;
@@ -85,6 +87,7 @@ export class FakeClaudeLeader implements BridgeDriver {
 
   constructor(opts: FakeClaudeOptions) {
     this.opts = opts;
+    this.cwd = opts.cwd;
     this.settings = JSON.parse(readFileSync(opts.settingsPath, "utf8"));
     const projectDir = join(opts.dir, "claude-projects", claudeProjectSlug(opts.cwd));
     mkdirSync(projectDir, { recursive: true });
@@ -98,7 +101,7 @@ export class FakeClaudeLeader implements BridgeDriver {
   }
 
   private input(event: string, extra: Record<string, unknown>): string {
-    return JSON.stringify({ session_id: this.sessionId, transcript_path: this.transcript, cwd: this.opts.cwd, permission_mode: this.permissionMode, hook_event_name: event, ...extra });
+    return JSON.stringify({ session_id: this.sessionId, transcript_path: this.transcript, cwd: this.cwd, permission_mode: this.permissionMode, hook_event_name: event, ...extra });
   }
 
   /** A matcher is a regular expression over the whole value, as Claude's are (`Edit|Write`, `idle_prompt|quota_...`). */
@@ -221,6 +224,14 @@ export class FakeClaudeLeader implements BridgeDriver {
     this.busy = false;
   }
 
+  /**
+   * A Bash `cd` in the session: Claude's later hook inputs and transcript entries name the new
+   * directory, but the transcript stays in the folder named for the startup one.
+   */
+  cd(dir: string): void {
+    this.cwd = dir;
+  }
+
   async compact(): Promise<void> {
     await this.turnChain;
     await this.fire("SessionStart", { source: "compact" });
@@ -275,7 +286,7 @@ export class FakeClaudeLeader implements BridgeDriver {
       this.prompts.push(reason || `Bash(${command})`);
       if (!answer.approve) return { denied: false, prompted: true, ran: false, code: -1, stdout: "", stderr: "" };
     }
-    const proc = Bun.spawn(["sh", "-c", command], { env: this.opts.env, cwd: this.opts.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["sh", "-c", command], { env: this.opts.env, cwd: this.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     await this.fire("PostToolUse", { tool_name: "Bash", tool_input: toolInput, tool_use_id: toolUseId }, "Bash");
     return { denied: false, prompted: ask, ran: true, code, stdout, stderr };
@@ -322,14 +333,14 @@ export class FakeClaudeLeader implements BridgeDriver {
     const preInput = opts.prefill ? { questions, answers: opts.prefill } : { questions };
     const pre = await this.preDecision("AskUserQuestion", preInput, toolUseId);
     if (pre.decision === "deny") return { denied: true, reason: pre.reason, contexts: [], toolUseId };
-    appendFileSync(this.transcript, JSON.stringify({ type: "assistant", sessionId: this.sessionId, cwd: this.opts.cwd, timestamp: isoNow(), message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }] } }) + "\n");
+    appendFileSync(this.transcript, JSON.stringify({ type: "assistant", sessionId: this.sessionId, cwd: this.cwd, timestamp: isoNow(), message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }] } }) + "\n");
     const annotations = Object.fromEntries(Object.entries(answer.notes ?? {}).map(([q, notes]) => [q, { notes }]));
     const result = { questions, answers: answer.answers, annotations };
     const contexts = await this.fire("PostToolUse", { tool_name: "AskUserQuestion", tool_input: result, tool_response: result, tool_use_id: toolUseId }, "AskUserQuestion");
     const text = Object.entries(answer.answers).map(([q, a]) => `"${q}"="${a}"`).join(", ");
     appendFileSync(
       this.transcript,
-      JSON.stringify({ type: "user", sessionId: this.sessionId, cwd: this.opts.cwd, timestamp: isoNow(), toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: `Your questions have been answered: ${text}.` }] } }) + "\n",
+      JSON.stringify({ type: "user", sessionId: this.sessionId, cwd: this.cwd, timestamp: isoNow(), toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: `Your questions have been answered: ${text}.` }] } }) + "\n",
     );
     return { denied: false, reason: "", contexts, toolUseId };
   }
