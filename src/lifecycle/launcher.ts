@@ -273,6 +273,8 @@ export class Launcher {
       FLOWRYN_WORKTREE: worktree,
       FLOWRYN_REPORT_DIR: reportDir,
       FLOWRYN_TASK_FILE: instructionsFile,
+      // The daemon opens review pages in the user's browser (src/lavish/opener.ts); a worker's lavish-axi never tries.
+      LAVISH_AXI_NO_OPEN: "1",
       PATH: `${this.shimDir(config, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     };
 

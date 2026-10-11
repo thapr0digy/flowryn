@@ -18,7 +18,7 @@ import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
 import { planView } from "./dispatch.ts";
-import { flowLine, gatesOf, runWorkflow } from "./stages.ts";
+import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
 import { latestMerge } from "../policy/merge.ts";
@@ -289,7 +289,25 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
 function gatesView(ctx: ReadCtx, runId: string): string[] | null {
   const gates = gatesOf(ctx.db, runId);
   if (gates.length === 0) return null;
-  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}`);
+  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}${g.state === "open" ? browserView(g) : ""}`);
+}
+
+/** An open review gate's browser state; unless it opened, the URL to open by hand (docs/notes/2026-10-10-review-pages-open-4b.md). */
+function browserView(g: GateRow): string {
+  if (!g.open_state || !g.review_url) return "";
+  const at = g.open_at ? ` ${new Date(g.open_at).toTimeString().slice(0, 5)}` : "";
+  const detail = g.open_detail ? ` (${sanitizeLine(g.open_detail, 160)})` : "";
+  const byHand = `; open by hand: ${sanitizeLine(g.review_url, 200)}`;
+  switch (g.open_state) {
+    case "opened":
+      return `; browser: opened${at}${detail}`;
+    case "pending":
+      return `; browser: waits for Flowryn's Lavish poll to listen${byHand}`;
+    case "opening":
+      return `; browser: opening, or the daemon stopped while opening${at}${byHand}`;
+    default:
+      return `; browser: ${g.open_state}${at}${detail}${byHand}`;
+  }
 }
 
 function planLine(ctx: ReadCtx, taskId: string, text: ShowText): string {

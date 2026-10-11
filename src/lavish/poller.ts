@@ -23,7 +23,9 @@ import { requirePageDir, writeWidget } from "./widget.ts";
  * Flowryn kills loses nothing: Lavish
  * keeps queued feedback until a poll delivers it. A poll that fails backs off
  * (2 s doubling to a minute); one that reports the user ended the session
- * stops for good. Nothing here decides anything: patterns and the database.
+ * stops for good. Once a gate's poll has started, the gate is offered to the
+ * opener (src/lavish/opener.ts), which opens the page in your browser.
+ * Nothing here decides anything: patterns and the database.
  */
 
 export interface PollerDeps {
@@ -38,6 +40,8 @@ export interface PollerDeps {
    * nothing reading them: the next daemon kills those before it polls.
    */
   pidDir?: string;
+  /** Opens a gate's page in your browser once its poll runs (src/lavish/opener.ts). */
+  opener?: { offer(gate: string): void };
 }
 
 interface Running {
@@ -150,6 +154,8 @@ export class LavishPoller {
       if (this.running.has(gate)) continue;
       if (!lavish) {
         this.warnOnce(gate, `lavish: lavish-axi is not installed; gate ${gate}'s questions are answered only through the leader`);
+        // A file:// page has nothing to listen for: it opens at once.
+        if (existsSync(page)) this.deps.opener?.offer(gate);
         continue;
       }
       const at = this.waitUntil.get(gate) ?? 0;
@@ -162,6 +168,8 @@ export class LavishPoller {
         continue;
       }
       this.start(lavish, gate, page, false);
+      // Its poll is running: the opener waits for Lavish to show it listening, then opens the page.
+      this.deps.opener?.offer(gate);
     }
     // A gate whose questions are all answered gets its reply all the same: one short poll carries it,
     // so Lavish's conversation shows what Flowryn recorded instead of waiting on an agent for good.
