@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../../src/config/config.ts";
-import { validationConfig } from "../../src/config/validation.ts";
+import { DEFAULT_VALIDATION, validationConfig } from "../../src/config/validation.ts";
 import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { ChecksSummary, Forge, PullRequest } from "../../src/forge/types.ts";
 import { ForgeError } from "../../src/forge/types.ts";
@@ -343,8 +343,8 @@ describe("CI-wait pieces", () => {
 
   test("[validation] ci_wait_alert: default 60, 0 allowed, unknown keys and bad values refused", () => {
     const at = (text: string) => validationConfig(parseConfig(text, "/x/config.toml"));
-    expect(at("")).toEqual({ ci_wait_alert: 60 });
-    expect(at("[validation]\nci_wait_alert = 0\n")).toEqual({ ci_wait_alert: 0 });
+    expect(at("")).toEqual({ ...DEFAULT_VALIDATION, ci_wait_alert: 60 });
+    expect(at("[validation]\nci_wait_alert = 0\n")).toEqual({ ...DEFAULT_VALIDATION, ci_wait_alert: 0 });
     expect(() => at("[validation]\nci_wait_alert = -1\n")).toThrow("whole number of minutes");
     expect(() => at("[validation]\nci_wait_alert = 1.5\n")).toThrow("whole number of minutes");
     expect(() => at('[validation]\nci_wait_alert = "60m"\n')).toThrow("whole number of minutes");

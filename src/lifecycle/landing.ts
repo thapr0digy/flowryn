@@ -28,7 +28,7 @@ import { dismissRunQuestions } from "./gate-questions.ts";
  */
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged"] as const;
+const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind"] as const;
 
 /** The run landed: the merge is proven. Call inside a transaction. */
 export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; how: "merge" | "merged_elsewhere"; mergeId?: string }, now: number): void {
