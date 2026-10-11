@@ -1,5 +1,5 @@
 import type { Db } from "../db/db.ts";
-import { appendEvent } from "../db/events.ts";
+import { appendEvent, type EventSource } from "../db/events.ts";
 import { findOpenRunItem } from "../attention/items.ts";
 import { TURN_END_REMINDER } from "../harness/contract-text.ts";
 import { runningBackgroundJobs } from "./background-jobs.ts";
@@ -59,16 +59,17 @@ function toldToEndTurn(db: Db, run: RunRow): boolean {
  * ready, merging), or it waits on a grant, a gate, a question, a launch, a
  * permission dialog or its own background job, or the leader told it to end
  * its turn. Null when nothing holds it. Call inside the transaction: it
- * records background jobs the transcript shows ended.
+ * records background jobs the transcript shows ended, as `source` (the
+ * turn-end guard's hook, or the reconciler's stale-hook pointer).
  */
-export function pendingWait(db: Db, run: RunRow, now: number): string | null {
+export function pendingWait(db: Db, run: RunRow, now: number, source: EventSource): string | null {
   if (run.state !== "running") return `run ${run.state}`;
   if (run.stage_state !== "active") return `stage ${run.stage_state}`;
   if (run.pending_launch !== null) return `pending launch ${run.pending_launch}`;
   if (waitingOnOthers(db, run)) return "an open question";
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog";
   if (toldToEndTurn(db, run)) return WAIT_END_TURN;
-  if (runningBackgroundJobs(db, run, now, "hook").length > 0) return WAIT_BACKGROUND;
+  if (runningBackgroundJobs(db, run, now, source).length > 0) return WAIT_BACKGROUND;
   return null;
 }
 
@@ -97,7 +98,7 @@ function settleReminder(db: Db, run: RunRow, now: number): void {
   const last = latestReminderEvent(db, run.id);
   if (!last || last.kind !== REMINDER_KIND) return;
   const outcome = outcomeSince(db, run.id, { seq: last.seq });
-  const wait = outcome ? null : pendingWait(db, run, now);
+  const wait = outcome ? null : pendingWait(db, run, now, "hook");
   appendEvent(db, {
     source: "hook",
     kind: RESULT_KIND,
@@ -132,7 +133,7 @@ export function guardTurnEnd(db: Db, run: RunRow, turn: TurnEnd, now: number): s
   settleReminder(db, run, now);
   if (turn.steerDue) return null;
   if (turn.continuationsUsed >= turn.maxContinuations) return null;
-  if (pendingWait(db, run, now) !== null) return null;
+  if (pendingWait(db, run, now, "hook") !== null) return null;
   const episodeFrom = instructionAt(db, run);
   if (outcomeSince(db, run.id, { ts: episodeFrom }) !== null) return null;
   if (remindedThisEpisode(db, run.id, episodeFrom)) return null;

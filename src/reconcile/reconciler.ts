@@ -14,6 +14,7 @@ import { openDivergence } from "./divergence.ts";
 import { clearPrompt, idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
 import { idleAlertDue, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
 import { reminderIgnored } from "../lifecycle/turn-end-guard.ts";
+import { staleHooksDue } from "../lifecycle/stale-hooks.ts";
 import { describeJobs, runningBackgroundJobs } from "../lifecycle/background-jobs.ts";
 import { carryIdleSteer, idleCarryBlocker } from "../lifecycle/idle-carry.ts";
 import { noteHerdrUp } from "./herdr-health.ts";
@@ -367,9 +368,10 @@ export class Reconciler {
         const why = jobs.length > 0 ? `${idleFor} waiting on ${describeJobs(jobs, t)}` : ignored ? `got the turn-end reminder, ended its turn again, and ${idleFor} without an outcome` : `${idleFor} without an outcome`;
         openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} ${why}`, t);
       }
-      if (herdrStatus === "working" && t - lastHook >= tm.stale_hook_ms && idleAlertDue(db, run.id, lastHook, t, tm.idle_realert_ms)) {
-        const event = appendEvent(db, { source: "reconciler", kind: "run.stale_hooks", runId: run.id, taskId: run.task_id, payload: { since: lastHook } });
-        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} looks busy but sent no hook event for ${Math.round((t - lastHook) / 60_000)}m; possibly stuck`, t);
+      const stale = staleHooksDue(db, run, herdrStatus, t, tm);
+      if (stale.due) {
+        const event = appendEvent(db, { source: "reconciler", kind: "run.stale_hooks", runId: run.id, taskId: run.task_id, payload: { since: lastHook, quiet_from: stale.quietFrom } });
+        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} looks busy but sent no hook event for ${Math.round((t - stale.quietFrom) / 60_000)}m; possibly stuck`, t);
       }
     });
     await this.idleCarry(run, runtime, herdrStatus, t);
