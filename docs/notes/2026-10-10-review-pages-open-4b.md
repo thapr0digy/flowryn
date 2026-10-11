@@ -88,4 +88,4 @@ The worker env gets `LAVISH_AXI_NO_OPEN=1` (`src/lifecycle/launcher.ts`), so a w
 
 ## Version
 
-0.20.0. `PROTO` stays 6: no verb's arguments changed (`stage done` only records one more column, and `gate.opened`'s payload has a `browser` field).
+0.21.0. `PROTO` stays 6: no verb's arguments changed (`stage done` only records one more column, and `gate.opened`'s payload has a `browser` field).
