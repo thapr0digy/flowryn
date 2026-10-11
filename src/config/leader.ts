@@ -5,7 +5,8 @@ import type { FlowrynConfig } from "./config.ts";
 
 /**
  * Typed views of the config sections M3 owns: [leader] (the leader clocks) and
- * [notify] (OS and Herdr notifications, design section 15). Like [reconcile],
+ * [notify] (OS and Herdr notifications, design section 15), and the later
+ * [away], [grants] and [review]. Like [reconcile],
  * [leader] exists for tests and the lab; every default is the design's number.
  */
 
@@ -150,6 +151,43 @@ export function grantsConfig(config: FlowrynConfig, env: NodeJS.ProcessEnv = pro
   return { claude_projects_dir: typeof dir === "string" ? dir : defaultClaudeProjectsDir(env) };
 }
 
+/** [review]: review pages opened in your browser when a gate opens (docs/notes/2026-10-10-review-pages-open-4b.md). */
+export interface ReviewConfig {
+  /** Open each review gate's page in your browser once Flowryn's Lavish poll listens on it. */
+  open_browser: boolean;
+  /** The macOS application `open -a` hands the page to. */
+  browser: string;
+}
+
+export const DEFAULT_REVIEW: ReviewConfig = { open_browser: true, browser: "Google Chrome" };
+
+const MAX_BROWSER_NAME = 100;
+
+function hasControlChars(text: string): boolean {
+  return [...text].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f);
+}
+
+export function reviewConfig(config: FlowrynConfig): ReviewConfig {
+  const raw = table(config.extra.review, "[review]");
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_REVIEW)) throw new FlowrynError("config_invalid", `[review] ${key} is not a known setting`);
+  }
+  const out = { ...DEFAULT_REVIEW };
+  if (raw.open_browser !== undefined) {
+    if (typeof raw.open_browser !== "boolean") throw new FlowrynError("config_invalid", "[review] open_browser must be true or false");
+    out.open_browser = raw.open_browser;
+  }
+  if (raw.browser !== undefined) {
+    const name = raw.browser;
+    // An application name goes to `open -a` as one argument; no control characters, no leading dash.
+    if (typeof name !== "string" || name.trim().length === 0 || name.length > MAX_BROWSER_NAME || hasControlChars(name) || name.startsWith("-")) {
+      throw new FlowrynError("config_invalid", `[review] browser must be an application name (at most ${MAX_BROWSER_NAME} characters), like "Google Chrome"`);
+    }
+    out.browser = name;
+  }
+  return out;
+}
+
 /**
  * The notification override for everything that is not your own setup: tests,
  * the fixtures, the spikes, the contract suites and the live runs set
@@ -170,6 +208,21 @@ export function requireNotificationsOff(env: NodeJS.ProcessEnv | Record<string, 
   if (env.FLOWRYN_NOTIFY !== "off") {
     throw new Error(`${launcher} starts no daemon without FLOWRYN_NOTIFY=off: it would post real notifications to your Mac`);
   }
+}
+
+/**
+ * How the daemon opens review pages: `record` appends each open to a file instead of running
+ * `open` (FLOWRYN_OPENER=record:<path>, which the test harness sets); `off` when notifications are
+ * off with no recorder (the lab, the contract homes, the spikes), so nothing outside your own setup
+ * ever opens a tab on your Mac; otherwise `open`.
+ */
+export type OpenerMode = { kind: "open" } | { kind: "record"; path: string } | { kind: "off"; why: string };
+
+export function openerMode(env: NodeJS.ProcessEnv): OpenerMode {
+  const value = env.FLOWRYN_OPENER;
+  if (value?.startsWith("record:") && value.length > "record:".length) return { kind: "record", path: value.slice("record:".length) };
+  if (notificationsOff(env)) return { kind: "off", why: "FLOWRYN_NOTIFY=off" };
+  return { kind: "open" };
 }
 
 /**

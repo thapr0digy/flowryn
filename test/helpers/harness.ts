@@ -189,11 +189,12 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
   // No daemon the tests start ever delivers a notification (FLOWRYN_NOTIFY=off, which startDaemon requires);
-  // behind it, the macOS channel only records, never runs osascript.
+  // behind it, the macOS channel only records, never runs osascript, and review pages are recorded to
+  // browser-opens.log, never opened (FLOWRYN_OPENER; src/lavish/opener.ts).
   // TZ=UTC: bun test pins the test file's own clock to UTC regardless of TZ, but a daemon/CLI spawned via
   // Bun.spawn runs in the box's real local zone unless told otherwise, so every spawned process agrees with
   // bun test's own "today" at any hour (see test/unit/tz.test.ts).
-  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}`, TZ: "UTC" };
+  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}`, FLOWRYN_OPENER: `record:${join(home, "browser-opens.log")}`, TZ: "UTC" };
   return {
     home,
     stateDir,
