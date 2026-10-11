@@ -232,12 +232,15 @@ const CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 export interface Challenge {
   id: string;
   code: string;
+  /** The task, or for a repin the leader session. */
   task: string;
-  action: ApprovalAction;
+  action: ApprovalAction | "repin";
   ref: string;
   head: string;
   allowRed: string | null;
   channel: "cli-tty" | "board";
+  /** A repin (`flowryn leader repin`): exactly the pin you were shown. */
+  repin?: { oldCwd: string | null; newCwd: string; transcript: string };
   expiresAt: number;
 }
 

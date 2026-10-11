@@ -28,7 +28,7 @@ describe("flowryn lead", () => {
     const settings = JSON.parse(readFileSync(files.claudeSettings, "utf8"));
     const toolkit = configStaticLayers(loadConfig(env.h.home).config);
     expect(settings.permissions).toEqual({ allow: [...LEADER_PERMISSIONS.allow], ask: [...LEADER_PERMISSIONS.ask], deny: [...LEADER_PERMISSIONS.deny, ...toolkit.permissionsDeny] });
-    expect(settings.permissions.deny.slice(0, 2)).toEqual(["Bash(flowryn approve*)", "Bash(flowryn hook *)"]);
+    expect(settings.permissions.deny.slice(0, 3)).toEqual(["Bash(flowryn approve*)", "Bash(flowryn hook *)", "Bash(flowryn leader repin*)"]);
     // The toolkit's static layer: claude-in-chrome hidden, Flowryn's own task files never edited or written.
     expect(settings.permissions.deny).toContain("mcp__claude-in-chrome");
     expect(settings.permissions.deny).toContain(`Edit(/${loadConfig(env.h.home).config.tasks.backlog})`);

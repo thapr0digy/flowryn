@@ -56,9 +56,9 @@ export const TOOL_MAP = [
 /** Pi leader only: shell calls that need the user or belong to the harness (moved here from the Pi leader bridge). */
 // Over-matches by design (the controller's ruling): a precise `decide ... --by captain` anchor
 // misses `--by=captain`, quoted `captain`, reordered flags and a backslash-newline continuation.
-const LEADER_SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass)\b|flowryn\b[\s\S]*\bdecide\b[\s\S]*captain/;
+const LEADER_SHELL_GATE = /\bflowryn\s+(merge|approve|hook|gate\s+pass|leader\s+repin)\b|flowryn\b[\s\S]*\bdecide\b[\s\S]*captain/;
 const LEADER_SHELL_REASON =
-  "flowryn: merge, gate pass, approve and a captain decision need the user (use the flowryn_merge, flowryn_gate_pass and flowryn_decide tools), and hook verbs belong to the harness; this session cannot run them from the shell";
+  "flowryn: merge, gate pass, approve and a captain decision need the user (use the flowryn_merge, flowryn_gate_pass and flowryn_decide tools), leader repin is the user's own terminal, and hook verbs belong to the harness; this session cannot run them from the shell";
 
 const SHELL_TOOLS = new Set(["bash"]);
 const FILE_TOOLS = new Set(["edit", "write", "multiedit", "notebookedit"]);

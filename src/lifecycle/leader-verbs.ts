@@ -8,6 +8,8 @@ import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
 import { getGrant, grantLines, grantView } from "../policy/grants.ts";
+import { getLease, getSession } from "../lease/lease.ts";
+import { pinHistory } from "../lease/repin.ts";
 import { getDecision } from "./decisions.ts";
 import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
@@ -461,7 +463,7 @@ function workerReportView(
 }
 
 /** The chat-answer grants of an item or a task (its gates and merges), when there are any. */
-function grantsField(ctx: ReadCtx, where: { item?: string; task?: string }): { grants?: string[] } {
+function grantsField(ctx: ReadCtx, where: { item?: string; task?: string; session?: string }): { grants?: string[] } {
   const lines = grantLines(ctx.db, where, ctx.now);
   return lines.length > 0 ? { grants: lines } : {};
 }
@@ -478,8 +480,8 @@ function latestReport(ctx: ReadCtx, runId: string, text: ShowText): string | nul
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
-  summary: "One task, run, item, decision, plan, divergence, review gate or chat-answer grant in detail; --full for untruncated text",
-  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>) or grant (c<N>) id" }],
+  summary: "One task, run, item, decision, plan, divergence, review gate, chat-answer grant or leader session in detail; --full for untruncated text",
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>) or leader session (L<N>) id" }],
   flags: { full: { type: "boolean", help: "untruncated titles, lines and bodies" } },
   kind: "read",
   roles: ["leader", "reader", "human"],
@@ -493,6 +495,23 @@ const show: VerbSpec = {
     }
     const grant = /^c\d+$/.test(target) ? getGrant(ctx.db, target) : null;
     if (grant) return { data: grantView(grant, ctx.now), hints: [`flowryn show ${grant.item.replace(/^merge:/, "")}`] };
+    const leader = /^L\d+$/.test(target) ? getSession(ctx.db, target) : null;
+    if (leader) {
+      return {
+        data: {
+          session: leader.session_id,
+          harness: leader.harness,
+          pane: leader.pane_id ?? "-",
+          lease: getLease(ctx.db).session_id === leader.session_id ? "holder" : "read-only",
+          state: leader.ended_at === null ? "open" : `ended ${new Date(leader.ended_at).toISOString()}`,
+          cwd: leader.cwd ?? "-",
+          transcript: leader.transcript_path ?? "-",
+          pin: pinHistory(ctx.db, leader.session_id, { cwd: leader.cwd, startedAt: leader.started_at }),
+          ...grantsField(ctx, { session: leader.session_id }),
+        },
+        hints: ["flowryn leader status"],
+      };
+    }
     // A review gate shows as its task, whose gates and grants it lists.
     const gateRun = /^g\d+$/.test(target) ? (ctx.db.query("SELECT run_id FROM gates WHERE id = ?1").get(target) as { run_id: string } | null) : null;
     if (gateRun) target = gateRun.run_id;

@@ -495,6 +495,15 @@ CREATE INDEX captain_grants_live ON captain_grants(session_id, item) WHERE consu
 CREATE INDEX captain_grants_task ON captain_grants(task_id);
 `;
 
+/**
+ * Leader repin (docs/notes/2026-10-11-flowryn-leader-repin-xv.md): when you last moved the
+ * session's pinned directory from your terminal; every chat-answer grant, question and answer
+ * from before it is refused.
+ */
+const LEADER_REPIN_SQL = /* sql */ `
+ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -513,6 +522,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
   { version: 16, name: "verifications", sql: VERIFICATIONS_SQL },
   { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
+  { version: 18, name: "leader-repin", sql: LEADER_REPIN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

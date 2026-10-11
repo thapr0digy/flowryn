@@ -39,6 +39,8 @@ export interface LeaderSessionRow {
   brief_pending: number;
   started_at: number | null;
   ended_at: number | null;
+  /** When you last repinned cwd (`flowryn leader repin`); grants from before it are refused. */
+  pinned_at: number | null;
 }
 
 export interface LeaseRow {
@@ -85,7 +87,7 @@ export function openSession(db: Db, input: { harness: LeaderHarness; pane: strin
     `INSERT INTO leader_sessions (session_id, harness, pane_id, token_hash, cwd, started_at, last_event_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)`,
   ).run(session, input.harness, input.pane, hashToken(token), input.cwd, input.now);
-  appendEvent(db, { source: "cli", kind: "leader.session_opened", payload: { session, harness: input.harness, pane: input.pane }, ts: input.now });
+  appendEvent(db, { source: "cli", kind: "leader.session_opened", payload: { session, harness: input.harness, pane: input.pane, cwd: input.cwd }, ts: input.now });
   return { session, token };
 }
 

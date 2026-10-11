@@ -26,6 +26,14 @@ export const GRANT_TTL_MS = 10 * 60_000;
 export const TRANSCRIPT_TAIL_BYTES = 16 * 1024 * 1024;
 /** Clock skew allowed between Claude's transcript timestamps and the hook's. */
 const SKEW_MS = 60_000;
+/** What a refusal that a repin fixes tells the leader to pass on (docs/notes/2026-10-11-flowryn-leader-repin-xv.md). */
+export const REPIN_FIX = "run flowryn leader repin in your terminal";
+const REPIN_HELP = "the user runs: flowryn leader repin (in their own terminal, not the leader's)";
+
+/** When the session's directory was last repinned from your terminal; nothing from before it counts. */
+export function pinnedAt(db: Db, session: string): number | null {
+  return (db.query("SELECT pinned_at FROM leader_sessions WHERE session_id = ?1").get(session) as { pinned_at: number | null } | null)?.pinned_at ?? null;
+}
 
 export interface GrantRow {
   id: string;
@@ -167,6 +175,8 @@ export function postAsk(db: Db, a: PostAsk): string[] {
   if (!asked || asked.session_id !== a.session) return ignore("Flowryn did not see this question asked");
   if (asked.answered_at !== null) return ignore("this question was already answered");
   if (asked.input_hash !== questionsHash(questions)) return ignore("the questions changed after they were asked");
+  const pin = pinnedAt(db, a.session);
+  if (pin !== null && asked.created_at < pin) return ignore("it was asked before the leader was repinned; ask again");
   if (basename(a.transcriptPath) !== `${a.claudeSession}.jsonl`) return ignore("the transcript does not belong to this session");
   db.query("UPDATE chat_questions SET answered_at = ?2 WHERE tool_use_id = ?1").run(a.toolUseId, a.now);
   const response = (a.response && typeof a.response === "object" ? a.response : {}) as Record<string, unknown>;
@@ -310,7 +320,7 @@ export function findGrant(db: Db, ask: GrantAsk, now: number): GrantRow | null {
 }
 
 /** The last bytes of a file, split into whole lines. */
-function tailLines(path: string, bytes: number): string[] {
+export function tailLines(path: string, bytes: number): string[] {
   const size = statSync(path).size;
   const start = Math.max(0, size - bytes);
   const fd = openSync(path, "r");
@@ -354,11 +364,18 @@ function within(dir: string, path: string): boolean {
  * after the question was recorded, its tool result with the same answer. Returns why it fails,
  * or null.
  */
-export function transcriptProblem(g: GrantRow, check: { sessionTranscript: string | null; projectsDir: string; cwd: string | null; askedAt: number; inputHash: string }): string | null {
+export function transcriptProblem(
+  g: GrantRow,
+  check: { sessionTranscript: string | null; projectsDir: string; cwd: string | null; askedAt: number; inputHash: string; pinnedAt?: number | null },
+): string | null {
+  const pin = check.pinnedAt ?? null;
   if (!check.sessionTranscript || check.sessionTranscript !== g.transcript_path) return "the transcript is not the one this leader session started with";
   if (!within(check.projectsDir, g.transcript_path)) return `the transcript is not inside Claude's projects directory (${check.projectsDir})`;
-  if (!check.cwd) return "the leader session has no working directory to find its transcript by";
-  if (!sameDir(dirname(g.transcript_path), join(check.projectsDir, claudeProjectSlug(check.cwd)))) return `the transcript is not in Claude's project folder for the leader's directory (${check.cwd})`;
+  if (!check.cwd) return `the leader session has no working directory to find its transcript by; ${REPIN_FIX}`;
+  if (!sameDir(dirname(g.transcript_path), join(check.projectsDir, claudeProjectSlug(check.cwd)))) return `the transcript is not in Claude's project folder for the leader's directory (${check.cwd}); ${REPIN_FIX}`;
+  if (pin !== null && (g.created_at < pin || check.askedAt < pin)) return "it was asked before the leader was repinned";
+  // After a repin no answer line older than the repin counts, whatever the skew allowance.
+  const answeredFrom = pin === null ? check.askedAt - SKEW_MS : Math.max(check.askedAt - SKEW_MS, pin);
   const claudeSession = basename(g.transcript_path).replace(/\.jsonl$/, "");
   let lines: string[];
   try {
@@ -391,7 +408,7 @@ export function transcriptProblem(g: GrantRow, check: { sessionTranscript: strin
       }
       if (entry.type === "user" && p.type === "tool_result" && p.tool_use_id === g.tool_use_id) {
         const result = entry.toolUseResult as { answers?: Record<string, unknown> } | undefined;
-        if (result?.answers?.[g.question] === g.answer && Number.isFinite(at) && at >= check.askedAt - SKEW_MS) answered = true;
+        if (result?.answers?.[g.question] === g.answer && Number.isFinite(at) && at >= answeredFrom) answered = true;
       }
     }
   }
@@ -424,10 +441,12 @@ export function prepareGrant(ctx: { db: Db; now(): number }, ask: GrantAsk, proj
     return refuse(new FlowrynError("approval_required", `grant ${g.id} was for head ${g.binds?.slice(0, 8) ?? "?"}; the head is now ${ask.head?.slice(0, 8) ?? "?"}`, `ask the user again: flowryn chat-question merge:${g.task_id}`), g.id);
   }
   if (g.verified_at === null) {
-    const session = ctx.db.query("SELECT transcript_path, cwd FROM leader_sessions WHERE session_id = ?1").get(g.session_id) as { transcript_path: string | null; cwd: string | null } | null;
+    const session = ctx.db.query("SELECT transcript_path, cwd, pinned_at FROM leader_sessions WHERE session_id = ?1").get(g.session_id) as { transcript_path: string | null; cwd: string | null; pinned_at: number | null } | null;
     const asked = ctx.db.query("SELECT created_at, input_hash FROM chat_questions WHERE tool_use_id = ?1").get(g.tool_use_id) as { created_at: number; input_hash: string } | null;
-    const problem = asked ? transcriptProblem(g, { sessionTranscript: session?.transcript_path ?? null, projectsDir, cwd: session?.cwd ?? null, askedAt: asked.created_at, inputHash: asked.input_hash }) : "the question was never recorded";
-    if (problem) return refuse(new FlowrynError("approval_required", `grant ${g.id} cannot be used: ${problem}`), g.id);
+    const problem = asked
+      ? transcriptProblem(g, { sessionTranscript: session?.transcript_path ?? null, projectsDir, cwd: session?.cwd ?? null, askedAt: asked.created_at, inputHash: asked.input_hash, pinnedAt: session?.pinned_at ?? null })
+      : "the question was never recorded";
+    if (problem) return refuse(new FlowrynError("approval_required", `grant ${g.id} cannot be used: ${problem}`, problem.endsWith(REPIN_FIX) ? REPIN_HELP : undefined), g.id);
     tx(ctx.db, () => {
       ctx.db.query("UPDATE captain_grants SET verified_at = ?2 WHERE id = ?1").run(g!.id, now);
       appendEvent(ctx.db, { source: "cli", kind: "grant.verified", taskId: g!.task_id, payload: { grant: g!.id }, ts: now });
@@ -443,16 +462,20 @@ export function takeGrant(db: Db, id: string, usedBy: string, now: number): Gran
   const dead = liveState(g, now);
   if (dead) throw new FlowrynError("approval_required", dead);
   if (g.verified_at === null) throw new FlowrynError("approval_required", `grant ${id} is not verified`);
+  const pin = pinnedAt(db, g.session_id);
+  if (pin !== null && g.created_at < pin) throw new FlowrynError("approval_required", `grant ${id} was made before the leader was repinned`);
   db.query("UPDATE captain_grants SET consumed_at = ?2, consumed_by = ?3 WHERE id = ?1").run(id, now, usedBy);
   appendEvent(db, { source: "cli", kind: "grant.used", taskId: g.task_id, payload: { grant: id, item: g.item, choice: g.choice, by: usedBy }, ts: now });
   return { ...g, consumed_at: now, consumed_by: usedBy };
 }
 
 /** Grants for `flowryn show`: one line each, newest first. */
-export function grantLines(db: Db, where: { item?: string; task?: string }, now: number): string[] {
+export function grantLines(db: Db, where: { item?: string; task?: string; session?: string }, now: number): string[] {
   const rows = (where.item
     ? db.query("SELECT * FROM captain_grants WHERE item = ?1 ORDER BY created_at DESC LIMIT 10").all(where.item)
-    : db.query("SELECT * FROM captain_grants WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 10").all(where.task ?? "")) as GrantRow[];
+    : where.session
+      ? db.query("SELECT * FROM captain_grants WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 10").all(where.session)
+      : db.query("SELECT * FROM captain_grants WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 10").all(where.task ?? "")) as GrantRow[];
   return rows.map((g) => {
     const state = g.consumed_at !== null ? `used by ${g.consumed_by ?? "?"}` : g.voided_at !== null ? `voided: ${g.void_reason ?? "?"}` : g.expires_at <= now ? "expired" : "live";
     const words = g.words ? ` · words "${sanitizeLine(g.words, 80)}"` : "";
