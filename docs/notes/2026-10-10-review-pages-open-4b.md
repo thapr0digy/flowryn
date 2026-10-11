@@ -13,9 +13,9 @@ When a review gate opens, flowrynd (outside any sandbox) opens its page in your 
 3. The daemon's poller (`src/lavish/poller.ts`) starts its `lavish-axi poll` for the gate, then offers the gate to the opener (`src/lavish/opener.ts`).
 4. The opener waits until Lavish itself shows the page's poll **listening**, at most 60 s (below).
 5. It claims the gate: `open_state = opening` and a `gate.browser_opening` event, committed **before** the spawn.
-6. It runs `/usr/bin/open -a <browser> <url>` (fixed argv, no shell, 10 s timeout) and records `opened` (exit 0) or `failed` with why, on the gate, its gate_ready item and a `gate.browser_opened` / `gate.browser_failed` event, in one transaction (precedent: `src/sched/usage.ts`).
+6. It runs `/usr/bin/open -a <browser> <url>` (fixed argv, no shell, 10 s timeout) and records `opened` (exit 0) or `failed` with why, on the gate, its gate_ready item and a `gate.browser_opened` / `gate.browser_failed` event, in one transaction (precedent: `src/sched/usage.ts`). The item's short line (200 characters) always ends with the result, ` · opened in <browser>` or ` · NOT opened (<why>); open it by hand`: a long title or URL is cut before it, and the whole text with the full URL stays in `full_line` (`show --full`) and in `flowryn show`.
 
-The claim makes it at most once: a restart, a spool replay or a second offer finds the gate past `pending` and does nothing. A daemon that dies between the claim and the result leaves `opening`, which `flowryn show` reads as "may not have opened; open by hand". "Opened" means `open` exited 0: Launch Services handed the URL to the app. Flowryn cannot see the tab render, and says only that.
+The claim makes it at most once: a restart, a spool replay or a second offer finds the gate past `pending` and does nothing. A daemon that dies between the claim and the result leaves `opening`, which `flowryn show` reads as "opening, or the daemon stopped while opening HH:MM; open by hand: <url>" (it is also the state for the at most 10 s a running daemon waits on `open`). "Opened" means `open` exited 0: Launch Services handed the URL to the app. Flowryn cannot see the tab render, and says only that.
 
 ## States
 

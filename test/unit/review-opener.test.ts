@@ -50,12 +50,12 @@ function seedRun(target: Db, runId = "r1", taskId = "web-a1"): void {
 }
 
 /** A review gate as stage done opens it, with its gate_ready item. */
-function seedGate(gateId: string, url: string, state = "pending", runId = "r1"): void {
+function seedGate(gateId: string, url: string, state = "pending", runId = "r1", title = "Feature"): void {
   const now = Date.now();
   tx(db, () => {
     db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state) VALUES (?1, ?2, 'design', 'review', ?3, 'open', ?4, ?5)").run(gateId, runId, url, now, state);
     const event = appendEvent(db, { source: "cli", kind: "stage.done", runId, taskId: "web-a1", payload: { gate: gateId } });
-    openItem(db, { kind: "gate_ready", eventSeq: event.seq, taskId: "web-a1", runId, line: `design ready for review (${gateId}): Feature (web) ${url}`, now });
+    openItem(db, { kind: "gate_ready", eventSeq: event.seq, taskId: "web-a1", runId, line: `design ready for review (${gateId}): ${title} (web) ${url}`, now });
   });
 }
 
@@ -141,6 +141,29 @@ describe("the opener", () => {
     r.opener.offer("g1");
     await r.opener.idle();
     expect(r.opens).toHaveLength(1);
+  });
+
+  test("a long title or URL gives way so the short item line still ends with the result; the full line keeps it all", async () => {
+    const title = "Rework the review page flow so the leader can relay every gate's link without opening the board first";
+    const longUrl = `${URL_A}?${"x".repeat(60)}`;
+    seedGate("g1", longUrl, "pending", "r1", title);
+    seedGate("g2", URL_B, "pending", "r1", title);
+    const why = "open exited 1: Unable to find application named 'Missing Browser'";
+    const failing = rig({ review: { browser: "Missing Browser" }, open: { ok: false, why } });
+    failing.opener.offer("g1");
+    await failing.opener.idle();
+    const ok = rig();
+    ok.opener.offer("g2");
+    await ok.opener.idle();
+    const rows = db.query("SELECT line, full_line FROM items WHERE kind = 'gate_ready' ORDER BY id").all() as { line: string; full_line: string | null }[];
+    const [failed, opened] = rows as [{ line: string; full_line: string | null }, { line: string; full_line: string | null }];
+    expect(failed.line.length).toBeLessThanOrEqual(200);
+    expect(failed.line.startsWith("design ready for review (g1): Rework")).toBe(true);
+    expect(failed.line.endsWith(`… · NOT opened (${why}); open it by hand`)).toBe(true);
+    expect(failed.full_line).toBe(`design ready for review (g1): ${title} (web) ${longUrl} · NOT opened (${why}); open it by hand`);
+    expect(opened.line.length).toBeLessThanOrEqual(200);
+    expect(opened.line.endsWith("… · opened in Google Chrome")).toBe(true);
+    expect(opened.full_line).toBe(`design ready for review (g2): ${title} (web) ${URL_B} · opened in Google Chrome`);
   });
 
   test("presence that never shows listening fails the gate without running open", async () => {

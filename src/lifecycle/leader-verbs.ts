@@ -304,7 +304,7 @@ function browserView(g: GateRow): string {
     case "pending":
       return `; browser: waits for Flowryn's Lavish poll to listen${byHand}`;
     case "opening":
-      return `; browser: may not have opened (the daemon stopped while opening${at})${byHand}`;
+      return `; browser: opening, or the daemon stopped while opening${at}${byHand}`;
     default:
       return `; browser: ${g.open_state}${at}${detail}${byHand}`;
   }

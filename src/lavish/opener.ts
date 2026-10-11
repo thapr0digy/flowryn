@@ -4,7 +4,7 @@ import type { OpenerMode, ReviewConfig } from "../config/leader.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { sanitizeLine } from "../util/sanitize.ts";
+import { MAX_LINE_CHARS, sanitizeLine } from "../util/sanitize.ts";
 import { lavishUrlKey } from "./session-key.ts";
 
 /**
@@ -168,7 +168,7 @@ export class ReviewOpener {
       .all(gate.run_id) as { id: string; line: string; full_line: string | null }[];
     const item = items.find((i) => (i.full_line ?? i.line).includes(`(${gate.id})`));
     if (!item) return;
-    const lines = itemLines(`${item.full_line ?? item.line}${suffix}`);
+    const lines = linesEndingWith(item.full_line ?? item.line, suffix);
     this.deps.db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(item.id, lines.line, lines.full_line);
   }
 
@@ -185,6 +185,16 @@ export class ReviewOpener {
     if (mode.kind === "record") return Promise.resolve(recordedPresence(mode.path));
     return lavishPresence(url, waitMs, signal);
   }
+}
+
+/** The digest line keeps the open result whole: the title and URL before it give way. */
+export function linesEndingWith(text: string, suffix: string): { line: string; full_line: string | null } {
+  const whole = itemLines(`${text}${suffix}`);
+  if (whole.full_line === null) return whole;
+  const tail = sanitizeLine(suffix);
+  const room = MAX_LINE_CHARS - tail.length - 1;
+  const line = room > 1 ? `${sanitizeLine(text, room)} ${tail}` : tail;
+  return { line, full_line: whole.full_line };
 }
 
 function failedSuffix(why: string): string {
