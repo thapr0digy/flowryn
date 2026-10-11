@@ -156,14 +156,15 @@ export function openCiWait(db: Db, run: RunRow, project: string, stall: CiStall,
 /**
  * Close the run's open CI-wait decisions unanswered: the wait ended before
  * the user answered (CI started, the pipeline moved on or ended, the run left
- * validation). No steer: the worker never asked. Call inside a transaction.
+ * validation), or the policy follow-through's steer superseded it (`via`
+ * policy). No steer: the worker never asked. Call inside a transaction.
  */
-export function closeCiWaits(db: Db, run: Pick<RunRow, "id" | "task_id">, why: string, now: number, keepNmRun: string | null = null): string[] {
+export function closeCiWaits(db: Db, run: Pick<RunRow, "id" | "task_id">, why: string, now: number, keepNmRun: string | null = null, via: "watchdog" | "policy" = "watchdog"): string[] {
   const open = db.query("SELECT id, key FROM decisions WHERE origin = ?1 AND run_id = ?2 AND state = 'open'").all(CI_WAIT_ORIGIN, run.id) as { id: string; key: string }[];
   const closed: string[] = [];
   for (const d of open) {
     if (keepNmRun !== null && d.key.startsWith(stallPrefix(keepNmRun))) continue;
-    db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2, answered_via = 'watchdog' WHERE id = ?1").run(d.id, now);
+    db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2, answered_via = ?3 WHERE id = ?1").run(d.id, now, via);
     appendEvent(db, { source: "nomistakes", kind: "decision.dismissed", runId: run.id, taskId: run.task_id, payload: { decision: d.id, origin: CI_WAIT_ORIGIN, why }, ts: now });
     resolveDecisionItems(db, d.id, `ci wait ended: ${why}`, now);
     closed.push(d.id);

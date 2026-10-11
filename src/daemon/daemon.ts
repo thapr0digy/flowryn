@@ -5,6 +5,7 @@ import { validationConfig } from "../config/validation.ts";
 import { upkeepConfig } from "../config/upkeep.ts";
 import { MergeBuilder } from "../upkeep/build.ts";
 import { Upkeep } from "../upkeep/upkeep.ts";
+import { PolicyFollower } from "../upkeep/policy-follow.ts";
 import { listProjects } from "../lifecycle/projects.ts";
 import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
@@ -388,6 +389,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const cleanups = new Map<string, Promise<CleanupReport>>();
     let deliveryWatcher: DeliveryWatcher | null = null;
     let upkeep: Upkeep | null = null;
+    let policyFollow: PolicyFollower | null = null;
     const delivery: DeliveryServices = {
       forge,
       github,
@@ -404,6 +406,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         });
         // A landing moved a default branch: the upkeep pass syncs the checkout and builds a Flowryn merge.
         void attempt.then((report) => (report.state === "cleaned" ? upkeep?.kick() : undefined)).catch(() => undefined);
+        // The merge moved main whatever the cleanup's outcome: in-flight ships may now lack its policy change.
+        void attempt.finally(() => policyFollow?.kick()).catch(() => undefined);
         cleanups.set(runId, attempt);
         return attempt;
       },
@@ -528,6 +532,16 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         return { outcome: report.outcome, reason: report.reason, task: report.task };
       },
     });
+    // Policy follow-through: a policy change on a default branch steers that project's in-flight ships to merge it.
+    policyFollow = new PolicyFollower({
+      db: database,
+      config: () => validationConfig(config),
+      now: Date.now,
+      log,
+      git: deliveryGit,
+      projects: () => listProjects(database),
+      kickScheduler: () => scheduler?.kick(),
+    });
     // Relaxed policy: the daemon runs the recording contract check on a new harness version itself, from its own build.
     autoCheck = new AutoContractChecker({
       db: database,
@@ -648,6 +662,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     buildWatch.start();
     autoCheck.start();
     upkeep.start();
+    policyFollow.start();
     const pendingRestart = setInterval(() => void restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`)), PENDING_POLL_MS);
 
     let passing = false;
@@ -696,6 +711,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(pendingRestart);
     buildWatch.stop();
     upkeep.stop();
+    policyFollow.stop();
     await autoCheck.stop();
     reconciler.stop();
     scheduler.stop();

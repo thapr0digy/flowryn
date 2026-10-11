@@ -39,6 +39,10 @@ export type ItemClass = "actionable" | "info";
  * the sync left alone (informational); conflict_nudged, a delivered PR that
  * conflicts sent its ship back to merge its base (informational); and
  * pr_conflict, one that still conflicts after its nudges.
+ * The policy follow-through (src/upkeep/policy-follow.ts): policy_sent_back,
+ * a delivered ship sent back to merge main's policy change (informational);
+ * policy_behind, a ship delivered again still behind a policy change it was
+ * already told to merge (informational).
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -83,6 +87,8 @@ export const LANE_TABLE = {
   build_held: { lane: "P1", class: "info" },
   checkout_unsynced: { lane: "P1", class: "info" },
   conflict_nudged: { lane: "P1", class: "info" },
+  policy_sent_back: { lane: "P1", class: "info" },
+  policy_behind: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
   steer_acked: { lane: "P1", class: "info" },
