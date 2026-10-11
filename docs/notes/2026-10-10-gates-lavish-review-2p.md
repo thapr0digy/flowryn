@@ -15,7 +15,7 @@ Ship 3 of the toolkit report (§6). It adds the two gates that have no raw comma
   - When `--page` is given, the URL's key must be that page's key. A QA stage counts its own `qa/evidence.html` as the page.
   - Without `--page`, the `.html` page under the report directory with that key is the page. The search goes at most 4 levels deep, looks at 500 entries at most, and never follows a symlink. The daemon now listens on that page too, so the old "no --page: Flowryn cannot listen" hint is gone.
   - A `file://` URL is accepted only while lavish-axi is not installed (`[tools] lavish_axi` or PATH names no file), and only for an `.html` page under the report directory.
-  - Anything else is refused with `review_invalid` (exit 3) and a hint: `lavish-axi <page>` prints the URL to pass.
+  - Anything else is refused with `review_invalid` (exit 3) and a hint: `lavish-axi --no-open <page>` prints the URL to pass (docs/notes/2026-10-10-review-pages-open-4b.md).
 - **No network.** `stage done` is spooled while the daemon is down and replayed later. A GET to lavish would make the verdict depend on timing, and the key check needs none.
 - **The QA page** is checked first (`checkQaPage` now returns its real path), so a missing card still answers `qa_page_invalid`.
 - **The m5 lab** (`scripts/lab/m5-live.ts`) hands in `file://` pages, so its home sets `lavish_axi` to a path that does not exist. That is the documented fallback, and it keeps a real lavish-axi from opening pages on your Mac.
