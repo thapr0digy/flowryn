@@ -139,7 +139,7 @@ describe("the build after a Flowryn merge", () => {
     const running = buildIdOfBytes(new TextEncoder().encode(OLD_BINARY));
     const supervisor: Supervisor = { name: "fake", supervised: async () => null, target: async () => ({ program: [target, "daemon", "run"] }), restart: async () => ({ ok: true, detail: "" }) };
     const info = (): DaemonInfo => ({ pid: 1, version: "0.11.0", proto: 6, instance: "i", startedAt: 0, execPath: target, build: running, socket: "/s", stateDir: dir });
-    const restart = new RestartController({ db, env: {}, now: Date.now, log: () => {}, info, work: () => ({ mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] }), supervisor: () => supervisor, smoke: async () => ({ version: "0.11.0", proto: 6, build: null, schema: 13, commit: null, dirty: null, source: null }) });
+    const restart = new RestartController({ db, env: {}, now: Date.now, log: () => {}, info, work: () => ({ mergesInFlight: [], cleanups: [], launching: [], challenges: [] }), supervisor: () => supervisor, smoke: async () => ({ version: "0.11.0", proto: 6, build: null, schema: 13, commit: null, dirty: null, source: null }) });
     let now = 1_000_000;
     const watcher = new BuildWatcher({
       db,
@@ -236,7 +236,7 @@ describe("the build after a Flowryn merge", () => {
     const b = builder({ run: held });
     const pass = b.pass();
     await Bun.sleep(300);
-    const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [], builds: b.building() }, Date.now());
+    const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [], builds: b.building() }, Date.now());
     expect(guards).toEqual([{ kind: "build", task: null, detail: expect.stringContaining(`building ${tip().slice(0, 8)} after a merge`) }]);
     expect(await b.pass()).toEqual({ outcome: "skipped", reason: "a build is under way" });
     release();

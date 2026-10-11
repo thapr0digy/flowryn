@@ -27,11 +27,11 @@ Type QZKM to repin (anything else cancels):
    - Exactly one must remain. With none, or with several (`/a-b` and `/a/b` share a folder), it refuses and asks for `<dir>`.
    - A `<dir>` you name must pass the same folder test. One that would not fix anything is refused, naming both folders.
 
-   An already-matching pin is refused (`no_change`). It also reads the live Claude process's cwd from the pid `flowryn lead` recorded (`lsof` on macOS, `/proc` on Linux, after checking the process identity; `unknown` otherwise). That is only shown, never gating (q53). The challenge lives in the in-memory `ChallengeStore` (action `repin`, 2 minutes, one use), bound to the session, the old and new directory and the transcript.
+   An already-matching pin is refused (`no_change`). It also reads the live Claude process's cwd from the pid `flowryn lead` recorded (`lsof` on macOS, at the path the daemon resolved since launchd's PATH may not reach `/usr/sbin`, with a 5-second timeout; `/proc` on Linux; after checking the process identity; `unknown` otherwise). That is only shown, never gating (q53). The challenge lives in the in-memory `ChallengeStore` (action `repin`, 2 minutes, one use), bound to the session, the old and new directory and the transcript.
 3. **`leader.repin.confirm`** (role `human`) takes the challenge and, in one transaction (`applyRepin`):
    - re-checks that the session still leads with the same pin and transcript;
    - sets `cwd` and `pinned_at`;
-   - voids the session's live grants (`the leader was repinned`);
+   - voids the session's live grants, every one neither consumed nor voided, expired or not, the same count the prompt showed (`the leader was repinned`);
    - appends `leader.repinned` {session, by, channel `cli-tty`, old_cwd, new_cwd, transcript, grants_voided}.
 
    `approve.confirm` refuses a repin challenge, and repin confirm refuses an approval challenge. Either way the challenge is used up.
@@ -78,7 +78,8 @@ So an old AskUserQuestion answer in the new folder (from an earlier session, or 
   - refusals: already pinned, a Pi leader, no lease, no transcript, outside the projects directory;
   - migration 18; the repin's row, voids and event; the binding (changed transcript, moved lease, ended session); the pin history for an older session;
   - grants: refused before the repin naming the fix, a fresh answer working after; a question that spans the repin; a replayed answer line inside the skew allowance; an unvoided old grant at use;
-  - the process cwd read through the real `lsof`/`/proc`, with a gone process reading as unknown.
+  - the shown live-grant count equals the voided one, an expired grant included;
+  - the process cwd read through the real `lsof`/`/proc`, with a gone process reading as unknown; on macOS through the daemon's resolved lsof path, unknown without one.
 - `test/integration/leader-repin.test.ts`: end to end through the real leader hooks, CLI and daemon, in a real pty:
   - a drifted fake Claude leader's grant is refused naming the fix, and a wrong code changes nothing;
   - the screen shows the old and new directory, and the code repins;

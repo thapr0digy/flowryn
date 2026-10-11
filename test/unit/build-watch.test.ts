@@ -76,7 +76,7 @@ function watcher(w: World) {
     now: () => w.now,
     log: () => {},
     info: () => info(w.running),
-    work: () => ({ mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] }),
+    work: () => ({ mergesInFlight: [], cleanups: [], launching: [], challenges: [] }),
     supervisor: () => supervisor,
     smoke: async () => target(),
   });

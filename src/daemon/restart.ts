@@ -6,6 +6,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { Caller, DaemonInfo } from "../api/verbs.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
+import type { OpenChallenge } from "../policy/approvals.ts";
 import { oldestStep, waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
 
@@ -55,7 +56,7 @@ export interface InMemoryWork {
   mergesInFlight: Iterable<string>;
   cleanups: Iterable<string>;
   launching: Iterable<string>;
-  approvalTasks: Iterable<string>;
+  challenges: Iterable<OpenChallenge>;
   /** The daemon's automatic contract check (src/contracts/auto.ts): launchd's restart kills its process group, the check with it. */
   contractChecks?: Iterable<{ harness: string; version: string; startedAt: number }>;
   /** The daemon's build after a Flowryn merge (src/upkeep/build.ts): a restart now would kill it mid-build. */
@@ -117,7 +118,7 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   }
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
-  for (const task of work.approvalTasks) guards.push({ kind: "approval", task, detail: /^L\d+$/.test(task) ? "flowryn leader repin is waiting for its code" : "flowryn approve is waiting for its code" });
+  for (const c of work.challenges) guards.push({ kind: "approval", task: c.task, detail: c.action === "repin" ? "flowryn leader repin is waiting for its code" : "flowryn approve is waiting for its code" });
   for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
   const verifying = db.query("SELECT id, task_id, pr_url, started_at FROM verifications WHERE state = 'running' ORDER BY started_at").all() as { id: string; task_id: string | null; pr_url: string; started_at: number }[];
   for (const v of verifying) guards.push({ kind: "verifying", task: v.task_id, detail: `flowryn verify ${v.id} of ${v.pr_url} has run for ${ago(now - v.started_at)}` });
@@ -724,7 +725,7 @@ export function inertRestart(db: Db, info: () => DaemonInfo): RestartController 
     now: Date.now,
     log: () => {},
     info,
-    work: () => ({ mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] }),
+    work: () => ({ mergesInFlight: [], cleanups: [], launching: [], challenges: [] }),
     supervisor: () => ({
       name: "none",
       supervised: async () => "no supervisor in this process",

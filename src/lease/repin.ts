@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
+import { runCommand } from "../policy/command.ts";
 import { claudeProjectSlug, tailLines, TRANSCRIPT_TAIL_BYTES, voidSessionGrants } from "../policy/grants.ts";
 import { isAlive, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
 import { getLease, getSession } from "./lease.ts";
@@ -76,8 +77,9 @@ export function repinCandidates(transcript: string, claudeSession: string, folde
   return [...seen].filter((cwd) => isAbsolute(cwd) && claudeProjectSlug(cwd) === folder && isDir(cwd)).toSorted();
 }
 
-function liveGrantCount(db: Db, session: string, now: number): number {
-  const row = db.query("SELECT COUNT(*) AS n FROM captain_grants WHERE session_id = ?1 AND consumed_at IS NULL AND voided_at IS NULL AND expires_at > ?2").get(session, now) as { n: number };
+/** The grants a repin would void: every one neither consumed nor voided, expired or not, as voidSessionGrants voids them. */
+function liveGrantCount(db: Db, session: string): number {
+  const row = db.query("SELECT COUNT(*) AS n FROM captain_grants WHERE session_id = ?1 AND consumed_at IS NULL AND voided_at IS NULL").get(session) as { n: number };
   return row.n;
 }
 
@@ -85,7 +87,7 @@ function liveGrantCount(db: Db, session: string, now: number): number {
  * What a repin of the lease holder would do, or why it would not help. `dir` is the directory you
  * named (absolute, from the CLI); without it the transcript names exactly one. Throws FlowrynError.
  */
-export function planRepin(db: Db, a: { dir: string | null; projectsDir: string; now: number }): RepinPlan {
+export function planRepin(db: Db, a: { dir: string | null; projectsDir: string }): RepinPlan {
   const lease = getLease(db);
   if (!lease.session_id) throw new FlowrynError("not_found", "no leader session holds the lease", "flowryn lead");
   const s = getSession(db, lease.session_id);
@@ -122,7 +124,7 @@ export function planRepin(db: Db, a: { dir: string | null; projectsDir: string; 
     newCwd = found[0]!;
     from = "transcript";
   }
-  return { session: s.session_id, pane: s.pane_id, transcript, claudeSession, folder, oldCwd: s.cwd, newCwd, from, liveGrants: liveGrantCount(db, s.session_id, a.now) };
+  return { session: s.session_id, pane: s.pane_id, transcript, claudeSession, folder, oldCwd: s.cwd, newCwd, from, liveGrants: liveGrantCount(db, s.session_id) };
 }
 
 /**
@@ -162,8 +164,11 @@ export function pinHistory(db: Db, session: string, opened: { cwd: string | null
   return lines;
 }
 
-/** The Claude process's working directory, for you to compare on the prompt; null when it is gone or cannot be read. */
-export async function processCwd(identity: ProcIdentity | null, ps?: PsRunner): Promise<string | null> {
+/**
+ * The Claude process's working directory, for you to compare on the prompt; null when it is gone
+ * or cannot be read. `lsof` is the daemon's resolved path (launchd's PATH may not reach /usr/sbin).
+ */
+export async function processCwd(identity: ProcIdentity | null, lsof: string | null, ps?: PsRunner): Promise<string | null> {
   if (!identity || !(await isAlive(identity, ps))) return null;
   if (process.platform === "linux") {
     try {
@@ -172,12 +177,9 @@ export async function processCwd(identity: ProcIdentity | null, ps?: PsRunner): 
       return null;
     }
   }
-  try {
-    const proc = Bun.spawn(["lsof", "-a", "-p", String(identity.pid), "-d", "cwd", "-Fn"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    const line = out.split("\n").find((l) => l.startsWith("n"));
-    return line ? line.slice(1) : null;
-  } catch {
-    return null;
-  }
+  if (!lsof) return null;
+  const result = await runCommand([lsof, "-a", "-p", String(identity.pid), "-d", "cwd", "-Fn"], { timeoutMs: 5_000 });
+  if (result.code !== 0) return null;
+  const line = result.stdout.split("\n").find((l) => l.startsWith("n"));
+  return line ? line.slice(1) : null;
 }

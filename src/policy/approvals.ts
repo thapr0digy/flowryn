@@ -244,6 +244,8 @@ export interface Challenge {
   expiresAt: number;
 }
 
+export type OpenChallenge = Pick<Challenge, "task" | "action">;
+
 /**
  * Pending /dev/tty challenges, in the daemon's memory only: a challenge binds
  * what `approve` showed you (the PR and head) to the code you type back, and
@@ -261,9 +263,9 @@ export class ChallengeStore {
     return challenge;
   }
 
-  /** Tasks with a challenge still waiting for its code; a restart would forget them. */
-  openTasks(now: number): string[] {
-    return [...this.pending.values()].filter((c) => c.expiresAt > now).map((c) => c.task);
+  /** Challenges still waiting for their code; a restart would forget them. */
+  openChallenges(now: number): OpenChallenge[] {
+    return [...this.pending.values()].filter((c) => c.expiresAt > now).map((c) => ({ task: c.task, action: c.action }));
   }
 
   /** The challenge, if the code matches and it is still fresh; it is used up either way. */

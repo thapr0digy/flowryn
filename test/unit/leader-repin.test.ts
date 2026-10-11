@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
@@ -11,6 +11,7 @@ import { applyRepin, pinHistory, planRepin, processCwd, repinCandidates } from "
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { chatForm } from "../../src/policy/chat-questions.ts";
 import { claudeProjectSlug, getGrant, postAsk, preAsk, prepareGrant, REPIN_FIX, takeGrant } from "../../src/policy/grants.ts";
+import { lsofPath } from "../../src/policy/locks.ts";
 import { readIdentity } from "../../src/runtime/proc.ts";
 
 /**
@@ -60,8 +61,8 @@ function world(): World {
   return { db, root, projects, pinned, real, session, claudeSession: CLAUDE_SESSION, transcript, decision: made.id };
 }
 
-function plan(w: World, dir: string | null = null, now = 2_000) {
-  return planRepin(w.db, { dir, projectsDir: w.projects, now });
+function plan(w: World, dir: string | null = null) {
+  return planRepin(w.db, { dir, projectsDir: w.projects });
 }
 
 function codeOf(fn: () => unknown): string {
@@ -75,7 +76,7 @@ function codeOf(fn: () => unknown): string {
 }
 
 function repin(w: World, now: number): { voided: number } {
-  const p = plan(w, null, now);
+  const p = plan(w);
   return tx(w.db, () => applyRepin(w.db, { session: p.session, oldCwd: p.oldCwd, newCwd: p.newCwd, transcript: p.transcript, actor: "tester", now }));
 }
 
@@ -144,7 +145,7 @@ describe("the target", () => {
     w.db.query("UPDATE leader_sessions SET cwd = ?2 WHERE session_id = ?1").run(w.session, w.real);
     expect(codeOf(() => plan(w))).toContain("no_change: L1 is already pinned");
     w.db.query("UPDATE leader_sessions SET cwd = ?2 WHERE session_id = ?1").run(w.session, w.pinned);
-    expect(codeOf(() => planRepin(w.db, { dir: null, projectsDir: join(w.root, "elsewhere"), now: 2_000 }))).toContain("not in a folder of Claude's projects directory");
+    expect(codeOf(() => planRepin(w.db, { dir: null, projectsDir: join(w.root, "elsewhere") }))).toContain("not in a folder of Claude's projects directory");
     w.db.query("UPDATE leader_sessions SET transcript_path = NULL WHERE session_id = ?1").run(w.session);
     expect(codeOf(() => plan(w))).toContain("not_found: L1 has no Claude transcript recorded yet");
     w.db.query("UPDATE leader_sessions SET harness = 'pi' WHERE session_id = ?1").run(w.session);
@@ -164,7 +165,7 @@ describe("the repin", () => {
   test("moves the pin, voids live grants and records who, old, new and when; show lists the history", () => {
     const w = world();
     const grant = grantIn(ask(w, "toolu_before", 2_000));
-    expect(plan(w, null, 2_500).liveGrants).toBe(1);
+    expect(plan(w).liveGrants).toBe(1);
     expect(repin(w, 3_000)).toEqual({ voided: 1 });
     expect(w.db.query("SELECT cwd, pinned_at FROM leader_sessions WHERE session_id = ?1").get(w.session)).toEqual({ cwd: w.real, pinned_at: 3_000 });
     expect(getGrant(w.db, grant)).toMatchObject({ void_reason: "the leader was repinned", voided_at: 3_000 });
@@ -175,6 +176,16 @@ describe("the repin", () => {
       `${new Date(1_000).toISOString()} opened at ${w.pinned}`,
       `${new Date(3_000).toISOString()} repinned by tester: ${w.pinned} → ${w.real} (1 grant voided)`,
     ]);
+  });
+
+  test("the live grants shown are the ones voided, an expired but unvoided grant included", () => {
+    const w = world();
+    const expired = grantIn(ask(w, "toolu_expired", 2_000));
+    w.db.query("UPDATE captain_grants SET expires_at = 2_001 WHERE id = ?1").run(expired);
+    const shown = plan(w).liveGrants;
+    expect(shown).toBe(1);
+    expect(repin(w, 900_000)).toEqual({ voided: shown });
+    expect(getGrant(w.db, expired)).toMatchObject({ void_reason: "the leader was repinned", voided_at: 900_000 });
   });
 
   test("bound to what you were shown: a changed pin or transcript, a moved lease or an ended session refuses it", () => {
@@ -254,8 +265,20 @@ describe("grants around a repin", () => {
 test("assumption: the Claude process's cwd can be read (lsof on macOS, /proc on Linux); a gone process reads as unknown", async () => {
   const self = await readIdentity(process.pid);
   expect(self).not.toBeNull();
-  const cwd = await processCwd(self);
+  const cwd = await processCwd(self, lsofPath());
   expect(cwd === null ? null : realpathSync(cwd)).toBe(realpathSync(process.cwd()));
-  expect(await processCwd({ ...self!, start: self!.start - 3_600_000 })).toBeNull();
-  expect(await processCwd(null)).toBeNull();
+  expect(await processCwd({ ...self!, start: self!.start - 3_600_000 }, lsofPath())).toBeNull();
+  expect(await processCwd(null, lsofPath())).toBeNull();
+});
+
+// The daemon's lsof path is the one used, not whatever `lsof` launchd's PATH finds; /proc needs none.
+test.skipIf(process.platform !== "darwin")("macOS: the process cwd is read with the lsof path the daemon resolved, and reads as unknown without one", async () => {
+  const self = await readIdentity(process.pid);
+  const bin = mkdtempSync(join(tmpdir(), "flowryn-lsof-"));
+  const fake = join(bin, "lsof");
+  writeFileSync(fake, "#!/bin/sh\necho p$3\necho n/from/the/resolved/lsof\n");
+  chmodSync(fake, 0o755);
+  expect(await processCwd(self, fake)).toBe("/from/the/resolved/lsof");
+  expect(await processCwd(self, null)).toBeNull();
+  expect(await processCwd(self, join(bin, "missing"))).toBeNull();
 });

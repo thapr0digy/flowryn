@@ -179,10 +179,10 @@ const leaderRepinBegin: VerbSpec = {
   ephemeral: true,
   async prepare(ctx, args): Promise<RepinPrepared> {
     const now = ctx.now();
-    const plan = planRepin(ctx.db, { dir: stringArg(args, "dir") ?? null, projectsDir: grantsConfig(ctx.config()).claude_projects_dir, now });
+    const plan = planRepin(ctx.db, { dir: stringArg(args, "dir") ?? null, projectsDir: grantsConfig(ctx.config()).claude_projects_dir });
     const s = getSession(ctx.db, plan.session)!;
     const identity = s.proc_pid !== null && s.proc_start !== null && s.proc_exe !== null ? { pid: s.proc_pid, start: s.proc_start, exe: s.proc_exe } : null;
-    const cwd = await processCwd(identity, ctx.attention.ps);
+    const cwd = await processCwd(identity, ctx.attention.lsof?.() ?? null, ctx.attention.ps);
     const challenge = ctx.delivery.challenges.create(
       { task: plan.session, action: "repin", ref: plan.newCwd, head: plan.transcript, allowRed: null, channel: "cli-tty", repin: { oldCwd: plan.oldCwd, newCwd: plan.newCwd, transcript: plan.transcript } },
       now,

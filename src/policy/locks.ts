@@ -1,5 +1,10 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { runCommand } from "./command.ts";
+
+/** The lsof to run; launchd's PATH may not reach /usr/sbin. */
+export function lsofPath(): string | null {
+  return Bun.which("lsof") ?? (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : null);
+}
 
 /**
  * Git index.lock handling for cleanup (design section 14, cleanup order:

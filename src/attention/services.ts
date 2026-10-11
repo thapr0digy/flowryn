@@ -20,6 +20,8 @@ export interface AttentionServices {
   /** Ask the notification pump to run now. */
   kick(): void;
   ps?: PsRunner;
+  /** The daemon's resolved lsof path (src/policy/locks.ts); without it a process cwd reads as unknown on macOS. */
+  lsof?: () => string | null;
   /** A Claude leader's transcript size at its turn start, for the fast interrupt check (M0 finding 6). */
   turnOffsets: Map<string, number>;
 }
