@@ -294,7 +294,7 @@ describe("rule: flowryn-tasks (Flowryn's own backlog)", () => {
 
 describe("rule: leader-shell (the Pi leader's gate, moved from the bridge)", () => {
   const pi = { harness: "pi" as const, role: "leader" as const };
-  test.each(["flowryn merge t1", "flowryn approve t1", "flowryn hook stop", "flowryn gate pass t1", "flowryn decide k1 yes --by captain", "flowryn decide k1 yes --by=captain"])("blocks %s for a Pi leader", (cmd) => {
+  test.each(["flowryn merge t1", "flowryn approve t1", "flowryn hook stop", "flowryn gate pass t1", "flowryn decide k1 yes --by captain", "flowryn decide k1 yes --by=captain", "flowryn leader repin", "flowryn leader repin /tmp"])("blocks %s for a Pi leader", (cmd) => {
     const v = toolkitVerdict(call("bash", { command: cmd }, pi), PATHS);
     expect(v?.rule).toBe("leader-shell");
     expect(v?.reason).toContain("flowryn_merge");
@@ -305,6 +305,7 @@ describe("rule: leader-shell (the Pi leader's gate, moved from the bridge)", () 
     expect(ruleOf("flowryn merge t1", { harness: "pi" })).toBeNull();
     expect(toolkitVerdict(call("bash", { command: "flowryn decide k1 yes --rationale fine" }, pi), PATHS)).toBeNull();
     expect(toolkitVerdict(call("bash", { command: "flowryn fleet" }, pi), PATHS)).toBeNull();
+    expect(toolkitVerdict(call("bash", { command: "flowryn leader status" }, pi), PATHS)).toBeNull();
   });
 });
 

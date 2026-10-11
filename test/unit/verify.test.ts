@@ -281,13 +281,13 @@ describe("a verification job", () => {
     );
     mkdirSync(v.dir, { recursive: true });
     git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
-    expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] }, Date.now()).map((g) => g.kind)).toEqual(["verifying"]);
+    expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now()).map((g) => g.kind)).toEqual(["verifying"]);
     expect(await recoverVerifications(f.deps)).toBe(1);
     const after = getVerification(f.db, v.id)!;
     expect(after.state).toBe("error");
     expect(after.detail).toContain("daemon stopped");
     expect(existsSync(v.worktree_path)).toBe(false);
-    expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] }, Date.now())).toEqual([]);
+    expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now())).toEqual([]);
   });
 
   test.skipIf(process.platform !== "darwin")(

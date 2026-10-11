@@ -19,9 +19,9 @@ function shellQuote(text: string): string {
 /**
  * Permission rules (design section 12): the leader may run flowryn; gate
  * passes, discards and captain answers ask you (a content-matching ask rule
- * still prompts in auto mode, M0 c08), and it can never run approve or a hook
- * verb itself. Merges have no static ask rule: the PreToolUse hook asks for
- * every merge that needs your word (its own ask prompts in auto mode too,
+ * still prompts in auto mode, M0 c08), and it can never run approve, leader
+ * repin or a hook verb itself. Merges have no static ask rule: the PreToolUse
+ * hook asks for every merge that needs your word (its own ask prompts in auto mode too,
  * M0 c08) and lets a routine yolo, non-sensitive merge run unprompted. A
  * merge that waives a red check (`--allow-red`) does have one, so Claude asks
  * from its own engine even when the hook fails open (its ask lost after the
@@ -34,7 +34,7 @@ function shellQuote(text: string): string {
 export const LEADER_PERMISSIONS = {
   allow: ["Bash(flowryn *)"],
   ask: ["Bash(flowryn gate pass *)", "Bash(flowryn cleanup * --discard*)", "Bash(flowryn decide *captain*)", "Bash(flowryn merge *allow-red*)"],
-  deny: ["Bash(flowryn approve*)", "Bash(flowryn hook *)"],
+  deny: ["Bash(flowryn approve*)", "Bash(flowryn hook *)", "Bash(flowryn leader repin*)"],
 } as const;
 
 export interface LeaderSettingsInput {

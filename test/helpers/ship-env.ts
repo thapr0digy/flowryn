@@ -44,7 +44,8 @@ export interface ShipEnv {
   fleet: FleetEnv;
   github: FakeGitHub;
   files: LeaderFiles;
-  claude(): Promise<FakeClaudeLeader>;
+  /** A Claude leader; `cwd` is where its Claude really runs when that is not the directory `flowryn lead` pinned. */
+  claude(opts?: { cwd?: string }): Promise<FakeClaudeLeader>;
   pi(): Promise<FakePiLeader>;
   /** The newest leader session's token (the leader once it claimed the lease), else the seeded lease token. */
   leaderToken(): string;
@@ -85,9 +86,9 @@ export async function makeShipEnv(options: FleetOptions = {}): Promise<ShipEnv> 
     files,
     call,
     leaderToken: () => lastToken ?? fleet.leader,
-    async claude() {
+    async claude(opts = {}) {
       const opened = await open("claude");
-      const fake = new FakeClaudeLeader({ settingsPath: files.claudeSettings, env: opened.env, dir: fleet.h.home, cwd, onQuit: async () => void (await call("lead.close", { reason: "test quit" }, opened.token)) });
+      const fake = new FakeClaudeLeader({ settingsPath: files.claudeSettings, env: opened.env, dir: fleet.h.home, cwd: opts.cwd ?? cwd, onQuit: async () => void (await call("lead.close", { reason: "test quit" }, opened.token)) });
       fakes.push(fake);
       return fake;
     },

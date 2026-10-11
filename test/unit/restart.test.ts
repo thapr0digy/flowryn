@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { composeBriefing } from "../../src/attention/briefing.ts";
 import { FlowrynError } from "../../src/api/errors.ts";
 import type { Caller, DaemonInfo } from "../../src/api/verbs.ts";
+import { ChallengeStore } from "../../src/policy/approvals.ts";
 import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import {
@@ -59,7 +60,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const NO_WORK: InMemoryWork = { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [] };
+const NO_WORK: InMemoryWork = { mergesInFlight: [], cleanups: [], launching: [], challenges: [] };
 const LEADER: Caller = { role: "leader", runId: null, taskId: null, session: "L3" };
 
 function info(build: string | null = "aaaaaaaaaaaa"): DaemonInfo {
@@ -123,12 +124,17 @@ describe("restart guards", () => {
     expect(restartGuards(db, NO_WORK, Date.now()).map((g) => [g.kind, g.task])).toEqual([["validation", "t1"]]);
   });
 
-  test("in-memory work: a cleanup, a launch and an approval challenge", () => {
-    const guards = restartGuards(db, { ...NO_WORK, cleanups: ["r1"], launching: ["r2"], approvalTasks: ["t2"] }, Date.now());
-    expect(guards.map((g) => [g.kind, g.task])).toEqual([
-      ["cleanup", "t1"],
-      ["launching", "t2"],
-      ["approval", "t2"],
+  test("in-memory work: a cleanup, a launch, an approval challenge and a repin challenge", () => {
+    const challenges = new ChallengeStore();
+    const now = Date.now();
+    challenges.create({ task: "t2", action: "merge", ref: "https://github.test/o/r/pull/1", head: "abc", allowRed: null, channel: "cli-tty" }, now);
+    challenges.create({ task: "L1", action: "repin", ref: "/new", head: "/t.jsonl", allowRed: null, channel: "cli-tty", repin: { oldCwd: "/old", newCwd: "/new", transcript: "/t.jsonl" } }, now);
+    const guards = restartGuards(db, { ...NO_WORK, cleanups: ["r1"], launching: ["r2"], challenges: challenges.openChallenges(now) }, now);
+    expect(guards.map((g) => [g.kind, g.task, g.kind === "approval" ? g.detail : null])).toEqual([
+      ["cleanup", "t1", null],
+      ["launching", "t2", null],
+      ["approval", "t2", "flowryn approve is waiting for its code"],
+      ["approval", "L1", "flowryn leader repin is waiting for its code"],
     ]);
   });
 });

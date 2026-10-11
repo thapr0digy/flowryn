@@ -154,7 +154,10 @@ describe("leaders", () => {
     const merge = await leader.bash("flowryn merge t1");
     expect(merge.blocked).toBe(true);
     expect(merge.reason).toContain("flowryn_merge");
+    const repin = await leader.bash("flowryn leader repin");
+    expect(repin.blocked).toBe(true);
+    expect(repin.reason).toContain("leader repin is the user's own terminal");
     expect((await leader.bash("echo fine")).blocked).toBe(false);
-    expect(denials(ship.fleet).map((d) => d.rule)).toEqual(["github", "leader-shell"]);
+    expect(denials(ship.fleet).map((d) => d.rule)).toEqual(["github", "leader-shell", "leader-shell"]);
   }, 60_000);
 });

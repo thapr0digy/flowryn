@@ -232,14 +232,19 @@ const CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 export interface Challenge {
   id: string;
   code: string;
+  /** The task, or for a repin the leader session. */
   task: string;
-  action: ApprovalAction;
+  action: ApprovalAction | "repin";
   ref: string;
   head: string;
   allowRed: string | null;
   channel: "cli-tty" | "board";
+  /** A repin (`flowryn leader repin`): exactly the pin you were shown. */
+  repin?: { oldCwd: string | null; newCwd: string; transcript: string };
   expiresAt: number;
 }
+
+export type OpenChallenge = Pick<Challenge, "task" | "action">;
 
 /**
  * Pending /dev/tty challenges, in the daemon's memory only: a challenge binds
@@ -258,9 +263,9 @@ export class ChallengeStore {
     return challenge;
   }
 
-  /** Tasks with a challenge still waiting for its code; a restart would forget them. */
-  openTasks(now: number): string[] {
-    return [...this.pending.values()].filter((c) => c.expiresAt > now).map((c) => c.task);
+  /** Challenges still waiting for their code; a restart would forget them. */
+  openChallenges(now: number): OpenChallenge[] {
+    return [...this.pending.values()].filter((c) => c.expiresAt > now).map((c) => ({ task: c.task, action: c.action }));
   }
 
   /** The challenge, if the code matches and it is still fresh; it is used up either way. */

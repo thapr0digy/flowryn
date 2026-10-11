@@ -1,7 +1,9 @@
 import { FlowrynError } from "../api/errors.ts";
 import { intArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import { appendEvent } from "../db/events.ts";
+import { grantsConfig } from "../config/leader.ts";
 import { readIdentity } from "../runtime/proc.ts";
+import { applyRepin, planRepin, processCwd, type RepinPlan } from "./repin.ts";
 import { attachProcess, claim, closeSession, getLease, getSession, openSession, openSessions, type LeaderHarness } from "./lease.ts";
 
 /**
@@ -153,4 +155,84 @@ const leaderClaim: VerbSpec = {
   },
 };
 
-export const LEASE_VERBS: VerbSpec[] = [leadOpen, leadAttach, leadClose, leaderStatus, leaderClaim];
+// --- leader repin (behind `flowryn leader repin`) ---------------------------------------------
+
+interface RepinPrepared {
+  plan: RepinPlan;
+  processCwd: string | null;
+  challenge: { id: string; code: string };
+}
+
+/**
+ * Start a repin from your terminal: what it would change, and the code to type back. Only the
+ * token-less caller on your own terminal (`human`) reaches it; `flowryn leader repin` reads the
+ * code from /dev/tty.
+ */
+const leaderRepinBegin: VerbSpec = {
+  name: "leader.repin.begin",
+  summary: "Start a /dev/tty repin: the leader's pinned and new directory, and the code to type back",
+  positionals: [],
+  flags: { dir: { type: "string", help: "the directory to pin (absolute); default: the one the transcript names" } },
+  kind: "mutation",
+  roles: ["human"],
+  // The reply carries the challenge code: never kept in the reply table.
+  ephemeral: true,
+  async prepare(ctx, args): Promise<RepinPrepared> {
+    const now = ctx.now();
+    const plan = planRepin(ctx.db, { dir: stringArg(args, "dir") ?? null, projectsDir: grantsConfig(ctx.config()).claude_projects_dir });
+    const s = getSession(ctx.db, plan.session)!;
+    const identity = s.proc_pid !== null && s.proc_start !== null && s.proc_exe !== null ? { pid: s.proc_pid, start: s.proc_start, exe: s.proc_exe } : null;
+    const cwd = await processCwd(identity, ctx.attention.lsof?.() ?? null, ctx.attention.ps);
+    const challenge = ctx.delivery.challenges.create(
+      { task: plan.session, action: "repin", ref: plan.newCwd, head: plan.transcript, allowRed: null, channel: "cli-tty", repin: { oldCwd: plan.oldCwd, newCwd: plan.newCwd, transcript: plan.transcript } },
+      now,
+    );
+    return { plan, processCwd: cwd, challenge: { id: challenge.id, code: challenge.code } };
+  },
+  apply(_ctx, _args, prepared) {
+    const { plan, processCwd: cwd, challenge } = prepared as RepinPrepared;
+    return {
+      data: {
+        challenge: challenge.id,
+        code: challenge.code,
+        session: plan.session,
+        pane: plan.pane ?? "-",
+        transcript: plan.transcript,
+        claude_session: plan.claudeSession,
+        process_cwd: cwd ?? "unknown",
+        old_cwd: plan.oldCwd ?? "-",
+        new_cwd: plan.newCwd,
+        from: plan.from,
+        live_grants: plan.liveGrants,
+      },
+    };
+  },
+};
+
+const leaderRepinConfirm: VerbSpec = {
+  name: "leader.repin.confirm",
+  summary: "Finish a /dev/tty repin: the code you typed back",
+  positionals: [],
+  flags: {
+    challenge: { type: "string", help: "the challenge id" },
+    code: { type: "string", help: "the code you typed" },
+    actor: { type: "string", help: "who you are ($USER)" },
+  },
+  kind: "mutation",
+  roles: ["human"],
+  apply(ctx, args) {
+    const taken = ctx.delivery.challenges.take(stringArg(args, "challenge") ?? "", stringArg(args, "code") ?? "", ctx.now());
+    if (taken === "unknown") throw new FlowrynError("challenge_failed", "no such repin challenge (a daemon restart forgets them)", "run flowryn leader repin again");
+    if (taken === "expired") throw new FlowrynError("challenge_failed", "the repin challenge expired", "run flowryn leader repin again");
+    if (taken === "wrong") throw new FlowrynError("challenge_failed", "the code does not match; nothing was repinned", "run flowryn leader repin again");
+    if (taken.action !== "repin" || !taken.repin) throw new FlowrynError("challenge_failed", "that challenge is not a repin; nothing was repinned", "run flowryn leader repin again");
+    const actor = (stringArg(args, "actor") ?? "").replace(/[^A-Za-z0-9._@-]/g, "").slice(0, 64) || "you";
+    const { voided } = applyRepin(ctx.db, { session: taken.task, ...taken.repin, actor, now: ctx.now() });
+    return {
+      data: { session: taken.task, old_cwd: taken.repin.oldCwd ?? "-", new_cwd: taken.repin.newCwd, grants_voided: voided },
+      hints: [`flowryn show ${taken.task}`],
+    };
+  },
+};
+
+export const LEASE_VERBS: VerbSpec[] = [leadOpen, leadAttach, leadClose, leaderStatus, leaderClaim, leaderRepinBegin, leaderRepinConfirm];

@@ -238,7 +238,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(jobs.map((j) => j.harness)).toEqual(["claude"]);
     await auto.tick();
     expect(jobs).toHaveLength(1);
-    const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [], contractChecks: auto.running() }, Date.now());
+    const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [], contractChecks: auto.running() }, Date.now());
     expect(guards).toEqual([expect.objectContaining({ kind: "contract_check", detail: expect.stringContaining("automatic contract check claude 2.1.300 running for") })]);
     expect(briefing()).toMatch(/Contract check running: claude 2\.1\.300 since \d\d:\d\d \(automatic\)\./);
     const refusal = harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config);
@@ -323,7 +323,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     await gate("claude");
     const stopped = auto.tick();
     await Bun.sleep(20);
-    expect(restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], approvalTasks: [], contractChecks: auto.running() }, Date.now())).toEqual([
+    expect(restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [], contractChecks: auto.running() }, Date.now())).toEqual([
       expect.objectContaining({ kind: "contract_check" }),
     ]);
     await auto.stop();

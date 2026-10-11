@@ -219,6 +219,16 @@ describe("migrations", () => {
     expect(migrate(db, MIGRATIONS.slice(0, 17))).toEqual([]);
     db.close();
   });
+
+  test("leader repin: migration 19 adds pinned_at to a database in use; sessions opened before it were never repinned", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 18));
+    db.exec("INSERT INTO leader_sessions (session_id, harness, cwd) VALUES ('L1', 'claude', '/p')");
+    expect(migrate(db, MIGRATIONS.slice(0, 19))).toEqual([19]);
+    expect(db.query("SELECT session_id, cwd, pinned_at FROM leader_sessions").all()).toEqual([{ session_id: "L1", cwd: "/p", pinned_at: null }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 19))).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {

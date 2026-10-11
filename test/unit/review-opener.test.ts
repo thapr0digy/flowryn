@@ -352,7 +352,7 @@ describe("migration 18", () => {
         old.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, closed_at) VALUES ('g2', 'r1', 'design', 'review', ?1, 'changes', ?2, ?2)").run(URL_A, now);
         old.query("INSERT INTO gates (id, run_id, stage, kind, state, opened_at) VALUES ('g3', 'r1', 'ship', 'merge', 'open', ?1)").run(now);
       });
-      expect(migrate(old)).toEqual([18]);
+      expect(migrate(old, MIGRATIONS.filter((m) => m.version <= 18))).toEqual([18]);
       const states = old.query("SELECT id, open_state, open_detail FROM gates ORDER BY id").all();
       expect(states).toEqual([
         { id: "g1", open_state: "skipped", open_detail: "open before Flowryn opened review pages" },

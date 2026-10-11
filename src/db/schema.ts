@@ -509,6 +509,15 @@ ALTER TABLE gates ADD COLUMN open_at INTEGER;
 UPDATE gates SET open_state = 'skipped', open_detail = 'open before Flowryn opened review pages' WHERE kind = 'review' AND state = 'open';
 `;
 
+/**
+ * Leader repin (docs/notes/2026-10-11-flowryn-leader-repin-xv.md): when you last moved the
+ * session's pinned directory from your terminal; every chat-answer grant, question and answer
+ * from before it is refused.
+ */
+const LEADER_REPIN_SQL = /* sql */ `
+ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -528,6 +537,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 16, name: "verifications", sql: VERIFICATIONS_SQL },
   { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
   { version: 18, name: "gate-browser-open", sql: GATE_BROWSER_OPEN_SQL },
+  { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

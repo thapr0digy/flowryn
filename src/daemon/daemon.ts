@@ -48,6 +48,7 @@ import { HerdrWatcher } from "../watch/herdr.ts";
 import { leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
 import { expireAway } from "../attention/away.ts";
 import type { AttentionServices } from "../attention/services.ts";
+import { lsofPath } from "../policy/locks.ts";
 import { NotifyPump, recordingNotify } from "../attention/notify.ts";
 import { lastItemNo } from "../attention/items.ts";
 import { syncOverdueTodos } from "../attention/todos-due.ts";
@@ -116,11 +117,6 @@ function ensureInstanceId(db: Db): string {
   const id = randomBytes(8).toString("hex");
   setMeta(db, "instance_id", id);
   return id;
-}
-
-/** lsof for the cleanup guard; launchd's PATH may not reach /usr/sbin. */
-function lsofPath(): string | null {
-  return Bun.which("lsof") ?? (existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : null);
 }
 
 function missingTools(config: FlowrynConfig): string[] {
@@ -351,6 +347,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       timing: () => leaderTiming(config),
       notify: () => notifyConfig(config),
       kick: () => void notifyPump.tick(),
+      lsof: lsofPath,
       turnOffsets: new Map(),
     };
 
@@ -476,7 +473,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         mergesInFlight: delivery.inFlight,
         cleanups: cleanups.keys(),
         launching: launcher.activeRuns(),
-        approvalTasks: delivery.challenges.openTasks(Date.now()),
+        challenges: delivery.challenges.openChallenges(Date.now()),
         contractChecks: autoCheck?.running() ?? [],
         builds: builder?.building() ?? [],
       }),
