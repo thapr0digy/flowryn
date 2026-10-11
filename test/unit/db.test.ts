@@ -209,14 +209,24 @@ describe("migrations", () => {
     db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('a1', 't1', 'u', 'h', 'cli-tty', 'me', 'merge', 1, 2)");
     db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('m1', 't1', 'u', 'h', 'a1', 1, 'merged')");
     expect(() => db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'claude-chat', 'me', 1, 2)")).toThrow();
-    expect(migrate(db)).toEqual([17]);
+    expect(migrate(db, MIGRATIONS.slice(0, 17))).toEqual([17]);
     expect(db.query("SELECT id, channel FROM approvals").all()).toEqual([{ id: "a1", channel: "cli-tty" }]);
     db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'claude-chat', 'me', 1, 2)");
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     expect((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
     expect(() => db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('m2', 't1', 'u', 'h', 'nope', 1, 'merged')")).toThrow();
     expect(db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'approvals_open'").get()).toEqual({ name: "approvals_open" });
-    expect(migrate(db)).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 17))).toEqual([]);
+    db.close();
+  });
+
+  test("leader repin: migration 18 adds pinned_at to a database in use; sessions opened before it were never repinned", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 17));
+    db.exec("INSERT INTO leader_sessions (session_id, harness, cwd) VALUES ('L1', 'claude', '/p')");
+    expect(migrate(db, MIGRATIONS.slice(0, 18))).toEqual([18]);
+    expect(db.query("SELECT session_id, cwd, pinned_at FROM leader_sessions").all()).toEqual([{ session_id: "L1", cwd: "/p", pinned_at: null }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 18))).toEqual([]);
     db.close();
   });
 });

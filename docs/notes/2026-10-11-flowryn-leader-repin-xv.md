@@ -85,4 +85,5 @@ So an old AskUserQuestion answer in the new folder (from an earlier session, or 
   - the old grant stays dead, a fresh answer works, and `show L<n>` lists the history;
   - refused under a leader token, without a terminal and from the leader's Bash (static deny); the daemon verb refuses a token caller;
   - approve and repin challenges cannot cross.
+- `test/unit/db.test.ts`: migration 18 on a database in use (an existing session reads as never repinned); the chat-grants migration test now pins itself to migration 17.
 - `test/unit/toolkit.test.ts` and `test/integration/toolkit.test.ts`: the Pi shell gate blocks `flowryn leader repin` (and not `leader status`).
