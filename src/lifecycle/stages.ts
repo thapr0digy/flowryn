@@ -5,6 +5,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
+import { reviewConfig } from "../config/leader.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, WORKER_POOL, type StageDef, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
@@ -14,6 +15,7 @@ import { grantLeases, holdsLease, releaseLeases, runLeases } from "../sched/pool
 import { QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaPageProblems } from "../skills/qa-template.ts";
 import { skillPath } from "../skills/stages.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import type { GateOpenState } from "../lavish/opener.ts";
 import { parseGateQuestions } from "../lavish/questions.ts";
 import { findPageForKey, lavishSessionKey, lavishUrlKey } from "../lavish/session-key.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, openGateQuestions } from "./gate-questions.ts";
@@ -98,7 +100,7 @@ export function stageInstructions(pos: StagePos, ctx: StageTextContext): string 
   }
   if (ctx.delivery.kind === "ship" && ctx.delivery.mode === "no-mistakes") parts.push(`Do not run the no-mistakes pipeline yet: it runs in stage ${def.stages[def.stages.length - 1]!.id}, once that stage has started.`);
   if (stage.gate === "review") {
-    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict. Flowryn listens on the page itself: do not hold a lavish-axi poll open.");
+    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict. Flowryn listens on the page itself and opens it in the user's browser: do not hold a lavish-axi poll open, and never say the page is open in their browser.");
     parts.push("Only a question you cannot proceed without goes to the user: add --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.");
   }
   else parts.push("When it is done: $FLOWRYN_BIN stage done, then end your turn; a steer starts the next stage.");
@@ -199,6 +201,10 @@ export interface GateRow {
   /** The review page's .html file (`stage done --page`), which Flowryn listens on. */
   page_path?: string | null;
   state: "open" | "passed" | "changes";
+  /** Opening the review page in your browser (src/lavish/opener.ts); null for a merge gate. */
+  open_state?: GateOpenState | null;
+  open_detail?: string | null;
+  open_at?: number | null;
   approval_id: string | null;
   feedback: string | null;
   opened_at: number;
@@ -477,7 +483,7 @@ interface ReviewTarget {
  * one. A file:// URL is the fallback only while lavish-axi is not installed.
  */
 function hostHint(page: string | null): string {
-  return `host it: lavish-axi ${page ?? "<the page under $FLOWRYN_REPORT_DIR>"} prints its URL; pass it with --page <that page>`;
+  return `host it: lavish-axi --no-open ${page ?? "<the page under $FLOWRYN_REPORT_DIR>"} prints its URL; pass it with --page <that page>`;
 }
 
 function checkReviewUrl(review: string, target: ReviewTarget): { url: string; page: string } {
@@ -611,7 +617,11 @@ const stageDone: VerbSpec = {
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
     if (gateReview !== null) {
       const gateId = nextGateId(ctx.db);
-      ctx.db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at) VALUES (?1, ?2, ?3, 'review', ?4, 'open', ?5)").run(gateId, run.id, pos.stage.id, gateReview, now);
+      // The daemon opens the page in your browser once its poll listens (src/lavish/opener.ts), unless [review] turns that off.
+      const browser = reviewConfig(ctx.config()).open_browser ? { state: "pending", detail: null } : { state: "off", detail: "[review] open_browser = false" };
+      ctx.db
+        .query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state, open_detail) VALUES (?1, ?2, ?3, 'review', ?4, 'open', ?5, ?6, ?7)")
+        .run(gateId, run.id, pos.stage.id, gateReview, now, browser.state, browser.detail);
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
       // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
       if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
@@ -623,7 +633,7 @@ const stageDone: VerbSpec = {
         plan = fileWorkerPlan(ctx.db, { project, sourceTask: run.task_id, gateId, phases: parsePlan(planText), workflow: project.workflow, now });
       }
       const event = appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, gate: gateId, review: gateReview, plan, questions: asked, via: ctx.via }, ts: now });
-      appendEvent(ctx.db, { source: "cli", kind: "gate.opened", runId: run.id, taskId: run.task_id, payload: { gate: gateId, stage: pos.stage.id, kind: "review", review: gateReview }, ts: now });
+      appendEvent(ctx.db, { source: "cli", kind: "gate.opened", runId: run.id, taskId: run.task_id, payload: { gate: gateId, stage: pos.stage.id, kind: "review", review: gateReview, browser: browser.state }, ts: now });
       resolveRunItems(ctx.db, run.id, ["worker_idle"], "stage.done", now);
       const asking = asked.length > 0 ? ` with ${asked.length} question${asked.length === 1 ? "" : "s"} for you (${asked.join(", ")})` : "";
       openItem(ctx.db, { kind: "gate_ready", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `${pos.stage.id} ready for review (${gateId})${asking}: ${title} (${run.project_id}) ${sanitizeLine(gateReview, 120)}`, now });
