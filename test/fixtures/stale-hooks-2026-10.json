@@ -1,0 +1,405 @@
+{
+  "about": "The 21 run.stale_hooks events flowryn.db recorded 2026-10-05 to 2026-10-10 (seq 5258 to 8435), each as the run state reconstructed from the run's events before it (last of run.validating / run.delivered / gate.opened / stage.started; open questions = decision.opened less decision.answered; background jobs = run.background_started less run.background_ended; carried_at = the latest steer carried by then), Herdr reading working, the verdict staleHooksDue must give (its first silencing check), and wait: what pendingWait alone says (null: only the instruction clock silences it). All 21 were noise. docs/notes/2026-10-10-quieter-stale-hook-3q.md.",
+  "events": [
+    {
+      "seq": 5258,
+      "local": "10-05 16:13",
+      "task": "worker-questions-wake-cd",
+      "at": 1791231181643,
+      "last_hook": 1791228605501,
+      "state": "validating",
+      "stage_state": "active",
+      "stage_started_at": 1791225998312,
+      "carried_at": 1791227988239,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "validating",
+      "wait": "run validating",
+      "expect": {
+        "due": false,
+        "why": "run validating"
+      }
+    },
+    {
+      "seq": 6122,
+      "local": "10-07 13:03",
+      "task": "rule-table-and-p3",
+      "at": 1791392595941,
+      "last_hook": 1791326942921,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791322153267,
+      "carried_at": 1791324169768,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready, merge gate",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 6472,
+      "local": "10-08 11:19",
+      "task": "spec-3-automation-5a",
+      "at": 1791472740824,
+      "last_hook": 1791469504726,
+      "state": "validating",
+      "stage_state": "active",
+      "stage_started_at": 1791397256183,
+      "carried_at": 1791469491831,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "validating (after q38 answer)",
+      "wait": "run validating",
+      "expect": {
+        "due": false,
+        "why": "run validating"
+      }
+    },
+    {
+      "seq": 6528,
+      "local": "10-08 14:36",
+      "task": "turn-end-guard-fm",
+      "at": 1791484618855,
+      "last_hook": 1791481379786,
+      "state": "validating",
+      "stage_state": "active",
+      "stage_started_at": 1791480099479,
+      "carried_at": 1791480099561,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "validating",
+      "wait": "run validating",
+      "expect": {
+        "due": false,
+        "why": "run validating"
+      }
+    },
+    {
+      "seq": 6569,
+      "local": "10-08 16:34",
+      "task": "rule-table-and-p3",
+      "at": 1791491692668,
+      "last_hook": 1791396525514,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791322153267,
+      "carried_at": 1791491692441,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready; steer m138 sent 1 min before",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "quiet 0m since its last instruction"
+      }
+    },
+    {
+      "seq": 6741,
+      "local": "10-08 17:45",
+      "task": "rule-table-and-p3",
+      "at": 1791495910153,
+      "last_hook": 1791492674507,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791322153267,
+      "carried_at": 1791491692441,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready (re-delivered)",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 6743,
+      "local": "10-08 17:45",
+      "task": "show-full-is-5w",
+      "at": 1791495957795,
+      "last_hook": 1791492721720,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791339292538,
+      "carried_at": 1791491692695,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready (re-delivered)",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 6745,
+      "local": "10-08 17:48",
+      "task": "flowryn-verify-pr-hs",
+      "at": 1791496128925,
+      "last_hook": 1791492899200,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791340199429,
+      "carried_at": 1791491692679,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready (re-delivered)",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 6751,
+      "local": "10-08 20:40",
+      "task": "automatic-contract-check-ys",
+      "at": 1791506442161,
+      "last_hook": 1791494740150,
+      "state": "running",
+      "stage_state": "review",
+      "stage_started_at": 1791494495632,
+      "carried_at": null,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "design review gate",
+      "wait": "stage review",
+      "expect": {
+        "due": false,
+        "why": "stage review"
+      }
+    },
+    {
+      "seq": 6826,
+      "local": "10-08 22:10",
+      "task": "title-worker-reports-df",
+      "at": 1791511831626,
+      "last_hook": 1791508597061,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791507690074,
+      "carried_at": 1791507690156,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready, merge gate",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 6829,
+      "local": "10-08 22:15",
+      "task": "automatic-contract-check-ys",
+      "at": 1791512118625,
+      "last_hook": 1791508882577,
+      "state": "validating",
+      "stage_state": "active",
+      "stage_started_at": 1791508781102,
+      "carried_at": 1791508781187,
+      "open_questions": 1,
+      "background_jobs": 0,
+      "was": "validating, q39 open",
+      "wait": "run validating",
+      "expect": {
+        "due": false,
+        "why": "run validating"
+      }
+    },
+    {
+      "seq": 7075,
+      "local": "10-09 13:06",
+      "task": "title-pi-contract-ka",
+      "at": 1791565606687,
+      "last_hook": 1791493596576,
+      "state": "validating",
+      "stage_state": "active",
+      "stage_started_at": 1791493478721,
+      "carried_at": 1791493478798,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "validating since 10-08 17:05",
+      "wait": "run validating",
+      "expect": {
+        "due": false,
+        "why": "run validating"
+      }
+    },
+    {
+      "seq": 7224,
+      "local": "10-09 13:51",
+      "task": "flowryn-verify-pr-hs",
+      "at": 1791568306101,
+      "last_hook": 1791564222481,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791340199429,
+      "carried_at": 1791568305625,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "ready; steer m158 sent 1 s before",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "quiet 0m since its last instruction"
+      }
+    },
+    {
+      "seq": 7515,
+      "local": "10-09 15:31",
+      "task": "build-after-a-7g",
+      "at": 1791574275431,
+      "last_hook": 1791571038379,
+      "state": "validating",
+      "stage_state": "active",
+      "stage_started_at": 1791569325805,
+      "carried_at": 1791570984159,
+      "open_questions": 1,
+      "background_jobs": 0,
+      "was": "validating, q40 open",
+      "wait": "run validating",
+      "expect": {
+        "due": false,
+        "why": "run validating"
+      }
+    },
+    {
+      "seq": 7677,
+      "local": "10-09 16:36",
+      "task": "static-layers-install-2r",
+      "at": 1791578163256,
+      "last_hook": 1791574927156,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791569504429,
+      "carried_at": 1791572699662,
+      "open_questions": 0,
+      "background_jobs": 3,
+      "was": "ready (background jobs started)",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 7798,
+      "local": "10-09 17:23",
+      "task": "stuck-validations-become-y6",
+      "at": 1791580992618,
+      "last_hook": 1791578391966,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791578023376,
+      "carried_at": 1791580991816,
+      "open_questions": 0,
+      "background_jobs": 1,
+      "was": "ready; steer m176 sent 1 s before",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "quiet 0m since its last instruction"
+      }
+    },
+    {
+      "seq": 7867,
+      "local": "10-09 18:32",
+      "task": "stuck-validations-become-y6",
+      "at": 1791585136535,
+      "last_hook": 1791581899537,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791578023376,
+      "carried_at": 1791580991816,
+      "open_questions": 1,
+      "background_jobs": 2,
+      "was": "ready, q42 open, background job",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 7869,
+      "local": "10-09 18:33",
+      "task": "pipeline-watchdog-and-pt",
+      "at": 1791585184368,
+      "last_hook": 1791581948601,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791577863196,
+      "carried_at": 1791580991861,
+      "open_questions": 0,
+      "background_jobs": 4,
+      "was": "ready (re-delivered)",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 8012,
+      "local": "10-10 07:20",
+      "task": "gates-lavish-review-2p",
+      "at": 1791631235492,
+      "last_hook": 1791598287665,
+      "state": "running",
+      "stage_state": "review",
+      "stage_started_at": 1791579271074,
+      "carried_at": null,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "design review gate",
+      "wait": "stage review",
+      "expect": {
+        "due": false,
+        "why": "stage review"
+      }
+    },
+    {
+      "seq": 8092,
+      "local": "10-10 08:51",
+      "task": "gates-lavish-review-2p",
+      "at": 1791636687654,
+      "last_hook": 1791633454180,
+      "state": "ready",
+      "stage_state": "active",
+      "stage_started_at": 1791632909835,
+      "carried_at": 1791632909936,
+      "open_questions": 0,
+      "background_jobs": 2,
+      "was": "ready, merge gate",
+      "wait": "run ready",
+      "expect": {
+        "due": false,
+        "why": "run ready"
+      }
+    },
+    {
+      "seq": 8435,
+      "local": "10-10 10:50",
+      "task": "flowryn-verify-pr-hs",
+      "at": 1791643802297,
+      "last_hook": 1791641840194,
+      "state": "running",
+      "stage_state": "active",
+      "stage_started_at": 1791643802172,
+      "carried_at": 1791643802173,
+      "open_questions": 0,
+      "background_jobs": 0,
+      "was": "running, ship stage started 0 s before (conflict nudge)",
+      "wait": null,
+      "note": "The run's events show 5 background starts with no recorded end; whether any still ran per its transcript was not checked, so none is seeded. The instruction clock silences it either way.",
+      "expect": {
+        "due": false,
+        "why": "quiet 0m since its last instruction"
+      }
+    }
+  ]
+}
