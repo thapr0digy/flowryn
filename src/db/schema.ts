@@ -496,6 +496,20 @@ CREATE INDEX captain_grants_task ON captain_grants(task_id);
 `;
 
 /**
+ * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md): a review
+ * gate's open_state (pending, opening once claimed, then opened or failed; off when the setting or
+ * the environment turns it off; skipped when the page was already opened for the run, or the gate
+ * was open before this), what happened (open_detail) and when (open_at). A gate open at upgrade
+ * is skipped: no burst of tabs for pages you may already have open.
+ */
+const GATE_BROWSER_OPEN_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN open_state TEXT CHECK (open_state IN ('pending','opening','opened','failed','off','skipped'));
+ALTER TABLE gates ADD COLUMN open_detail TEXT;
+ALTER TABLE gates ADD COLUMN open_at INTEGER;
+UPDATE gates SET open_state = 'skipped', open_detail = 'open before Flowryn opened review pages' WHERE kind = 'review' AND state = 'open';
+`;
+
+/**
  * Leader repin (docs/notes/2026-10-11-flowryn-leader-repin-xv.md): when you last moved the
  * session's pinned directory from your terminal; every chat-answer grant, question and answer
  * from before it is refused.
@@ -522,7 +536,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 15, name: "item-full-line", sql: ITEM_FULL_LINE_SQL },
   { version: 16, name: "verifications", sql: VERIFICATIONS_SQL },
   { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
-  { version: 18, name: "leader-repin", sql: LEADER_REPIN_SQL },
+  { version: 18, name: "gate-browser-open", sql: GATE_BROWSER_OPEN_SQL },
+  { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

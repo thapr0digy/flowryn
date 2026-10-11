@@ -38,7 +38,7 @@ Type QZKM to repin (anything else cancels):
 
 ## Nothing from before a repin counts
 
-With `pinned_at` set (migration 18):
+With `pinned_at` set (migration 19):
 
 - `postAsk` mints nothing for a question recorded before it ("it was asked before the leader was repinned; ask again").
 - `transcriptProblem` refuses a grant made, or a question asked, before it. It accepts no answer line timestamped before it, whatever the 60 s skew allowance.
@@ -67,7 +67,7 @@ So an old AskUserQuestion answer in the new folder (from an earlier session, or 
 - **Live grants voided at the repin** as well as the cutoff, so `show` reflects it at once.
 - **A Pi leader is refused**: grants are Claude-only.
 - **The root cause is out of scope** (q54): a separate follow-up scout looks at why the 2026-10-10 transcript landed under `~/projects`.
-- **Version**: 0.21.0.
+- **Version**: 0.22.0.
 
 ## Tests
 
@@ -76,7 +76,7 @@ So an old AskUserQuestion answer in the new folder (from an earlier session, or 
   - other sessions' entries, other folders and gone directories are ignored;
   - a named directory: right, wrong and missing;
   - refusals: already pinned, a Pi leader, no lease, no transcript, outside the projects directory;
-  - migration 18; the repin's row, voids and event; the binding (changed transcript, moved lease, ended session); the pin history for an older session;
+  - migration 19; the repin's row, voids and event; the binding (changed transcript, moved lease, ended session); the pin history for an older session;
   - grants: refused before the repin naming the fix, a fresh answer working after; a question that spans the repin; a replayed answer line inside the skew allowance; an unvoided old grant at use;
   - the shown live-grant count equals the voided one, an expired grant included;
   - the process cwd read through the real `lsof`/`/proc`, with a gone process reading as unknown; on macOS through the daemon's resolved lsof path, unknown without one.
@@ -86,5 +86,5 @@ So an old AskUserQuestion answer in the new folder (from an earlier session, or 
   - the old grant stays dead, a fresh answer works, and `show L<n>` lists the history;
   - refused under a leader token, without a terminal and from the leader's Bash (static deny); the daemon verb refuses a token caller;
   - approve and repin challenges cannot cross.
-- `test/unit/db.test.ts`: migration 18 on a database in use (an existing session reads as never repinned); the chat-grants migration test now pins itself to migration 17.
+- `test/unit/db.test.ts`: migration 19 on a database in use (an existing session reads as never repinned); the chat-grants migration test now pins itself to migration 17.
 - `test/unit/toolkit.test.ts` and `test/integration/toolkit.test.ts`: the Pi shell gate blocks `flowryn leader repin` (and not `leader status`).

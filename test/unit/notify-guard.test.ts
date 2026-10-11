@@ -10,6 +10,7 @@ import { appendEvent } from "../../src/db/events.ts";
 import { LATER_SECTION_DEFAULTS } from "../../src/init/init.ts";
 import { makeHome, pingSocket, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { refusedOsascriptSpawns } from "../helpers/no-notifications.ts";
+import { runOpen } from "../../src/lavish/opener.ts";
 
 /**
  * macOS notifications are on in your own setup unless your config turns them
@@ -128,5 +129,14 @@ describe("notifications are on in your setup, and never real under test", () => 
     const spawns = refusedOsascriptSpawns() as string[];
     expect(spawns.length).toBe(1);
     spawns.splice(0);
+  });
+
+  test("nor does a test open a browser tab: open is refused in-process, and test homes record review pages", async () => {
+    expect(await runOpen("Google Chrome", "http://127.0.0.1:1/session/0123456789abcdef")).toEqual({ ok: false, why: "cannot run open: the test suite never runs open: a real browser tab would open on your Mac" });
+    const spawns = refusedOsascriptSpawns() as string[];
+    expect(spawns.length).toBe(1);
+    spawns.splice(0);
+    const h = home();
+    expect(h.env.FLOWRYN_OPENER).toBe(`record:${join(h.home, "browser-opens.log")}`);
   });
 });

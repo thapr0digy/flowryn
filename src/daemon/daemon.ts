@@ -37,6 +37,7 @@ import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts
 import { UrgentPreempter } from "../lifecycle/urgent.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
 import { Launcher } from "../lifecycle/launcher.ts";
+import { ReviewOpener } from "../lavish/opener.ts";
 import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
@@ -44,7 +45,7 @@ import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
-import { leaderTiming, notificationsOff, notifyConfig, recordingNotifierPath } from "../config/leader.ts";
+import { leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
 import { expireAway } from "../attention/away.ts";
 import type { AttentionServices } from "../attention/services.ts";
 import { lsofPath } from "../policy/locks.ts";
@@ -564,7 +565,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       const found = resolveTool(config, "lavish_axi");
       return found && existsSync(found) ? found : null;
     };
-    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now, pidDir: join(config.state_dir, "lavish-polls") });
+    // Review pages open in your browser once the gate's poll listens (docs/notes/2026-10-10-review-pages-open-4b.md).
+    const opener = openerMode(env);
+    const reviewOpener = new ReviewOpener({ db: database, review: () => reviewConfig(config), mode: () => opener, log, now: Date.now });
+    if (opener.kind === "off") log(`browser: review pages are not opened (${opener.why})`);
+    else if (opener.kind === "record") log(`browser: review pages are recorded to ${opener.path} (FLOWRYN_OPENER), never opened`);
+    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now, pidDir: join(config.state_dir, "lavish-polls"), opener: reviewOpener });
 
     const services: DaemonServices = {
       db: database,
@@ -713,6 +719,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     reconciler.stop();
     scheduler.stop();
     lavishPoller.stop();
+    reviewOpener.stop();
     deliveryWatcher.stop();
     herdrWatcher.stop();
     bus.close();
