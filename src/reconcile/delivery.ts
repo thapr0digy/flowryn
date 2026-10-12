@@ -311,7 +311,7 @@ export function yieldToCiWait(db: Db, run: Pick<RunRow, "id" | "task_id" | "bran
   return true;
 }
 
-/** no-mistakes cannot be read/** no-mistakes cannot be read (its daemon is down): one P1 until it answers again; flowrynd never restarts it. Call inside a transaction. */
+/** no-mistakes cannot be read (its daemon is down): one P1 until it answers again; flowrynd never restarts it. Call inside a transaction. */
 export function noteNmOutage(db: Db, down: boolean, detail: string, now: number): void {
   if (!down) {
     resolveItems(db, "nomistakes_down", null, "no-mistakes answered", now);
