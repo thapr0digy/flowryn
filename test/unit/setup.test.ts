@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, defaultConfig, parseConfig, CONFIG_SECTIONS } from "../../src/config/config.ts";
 import { notifyConfig } from "../../src/config/leader.ts";
-import { configOverrides, configSectionProblems, differingSections, effectiveConfig, redactConfig, REDACTED, SNAPSHOT_KEYS } from "../../src/config/effective.ts";
+import { configOverrides, configSectionProblems, differingSections, effectiveConfig, redactConfig, REDACTED, resolveEnv, SNAPSHOT_KEYS } from "../../src/config/effective.ts";
 import { checkSection, configReport, type DaemonState, type FileState } from "../../src/cli/config-view.ts";
 import { upkeepConfig } from "../../src/config/upkeep.ts";
 import { capacityConfig } from "../../src/config/workflows.ts";
@@ -405,9 +405,9 @@ describe("effective configuration", () => {
       return { path: `${H}/config.toml`, exists: true, text, config: null, error: (error as Error).message };
     }
   };
-  const daemonOf = (text: string, reload: Extract<DaemonState, { state: "answered" }>["reload"] = null): DaemonState => {
-    const snapshot = effectiveConfig(cfg(text), ENV);
-    return { state: "answered", loaded_at: "2026-10-12T10:00:00.000Z", reload, problems: snapshot.problems, sections: redactConfig(snapshot.sections) };
+  const daemonOf = (text: string, reload: Extract<DaemonState, { state: "answered" }>["reload"] = null, env: NodeJS.ProcessEnv = ENV): DaemonState => {
+    const snapshot = effectiveConfig(cfg(text), env);
+    return { state: "answered", loaded_at: "2026-10-12T10:00:00.000Z", reload, problems: snapshot.problems, sections: redactConfig(snapshot.sections), resolve_env: resolveEnv(env) };
   };
 
   test("the snapshot has one entry per registered section, plus core, and the defaults raise no problem", () => {
@@ -496,6 +496,14 @@ token_env = ["GH_TOKEN", "GITHUB_TOKEN"]
       const data = configReport(fileOf(text), daemonOf(text), ENV);
       expect(data).toMatchObject({ daemon: "running; its accepted configuration matches the file", daemon_loaded: "2026-10-12T10:00:00.000Z", overrides: ["upkeep.sync_primary"] });
       expect(data.daemon_values).toBeUndefined();
+    });
+
+    test("a daemon with another CLAUDE_CONFIG_DIR than the caller matches the same file, resolved with the daemon's environment", () => {
+      const caller = { ...ENV, CLAUDE_CONFIG_DIR: "/tmp/fw-eff-claude-work" };
+      const data = configReport(fileOf(""), daemonOf("", null, ENV), caller);
+      expect(data.daemon).toBe("running; its accepted configuration matches the file");
+      expect((data.effective as { grants: { claude_projects_dir: string } }).grants.claude_projects_dir).toBe("/tmp/fw-eff-user/.claude/projects");
+      expect(configReport(fileOf(""), { state: "not_running" }, caller).effective).toMatchObject({ grants: { claude_projects_dir: "/tmp/fw-eff-claude-work/projects" } });
     });
 
     test("a daemon on an older file: the differing sections are named and the daemon's values of only those are shown", () => {

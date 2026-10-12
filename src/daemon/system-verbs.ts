@@ -2,7 +2,7 @@ import { appendEvent } from "../db/events.ts";
 import { pendingIntents } from "../journal/journal.ts";
 import { boolArg, intArg, type VerbSpec } from "../api/verbs.ts";
 import { FlowrynError } from "../api/errors.ts";
-import { effectiveConfig, redactConfig } from "../config/effective.ts";
+import { effectiveConfig, resolveEnv, redactConfig } from "../config/effective.ts";
 import { DEFAULT_WAIT_MIN, MAX_WAIT_MIN, handoffPending, lastDropped, readPending, type Preflight } from "./restart.ts";
 
 /**
@@ -77,6 +77,7 @@ export function systemVerbs(): VerbSpec[] {
             reload: status?.reload ? { at: new Date(status.reload.at).toISOString(), outcome: status.reload.outcome, error: status.reload.error } : null,
             problems: snapshot.problems,
             sections: redactConfig(snapshot.sections),
+            resolve_env: resolveEnv(process.env),
           },
         };
       },

@@ -94,6 +94,18 @@ export function effectiveConfig(config: FlowrynConfig, env: NodeJS.ProcessEnv = 
   return { sections, problems };
 }
 
+/** The environment variables a resolver reads: [grants] claude_projects_dir defaults from them. */
+export const RESOLVE_ENV_KEYS = ["HOME", "CLAUDE_CONFIG_DIR"] as const;
+
+export function resolveEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of RESOLVE_ENV_KEYS) {
+    const value = env[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
 /** Every section parser's refusal: what the daemon checks at startup and on SIGHUP, and init and doctor report. */
 export function configSectionProblems(config: FlowrynConfig, env: NodeJS.ProcessEnv = process.env): string[] {
   return effectiveConfig(config, env).problems;

@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { closestName, TOP_LEVEL_SETTINGS, type FlowrynConfig } from "../config/config.ts";
-import { configOverrides, differingSections, effectiveConfig, redactConfig, SNAPSHOT_KEYS } from "../config/effective.ts";
+import { configOverrides, differingSections, effectiveConfig, redactConfig, RESOLVE_ENV_KEYS, SNAPSHOT_KEYS } from "../config/effective.ts";
 
 /**
  * What `flowryn config` prints (docs/notes/2026-10-12-next-steps-md-it.md):
@@ -28,6 +28,8 @@ export type DaemonState =
       reload: { at: string; outcome: "accepted" | "rejected"; error: string | null } | null;
       problems: string[];
       sections: Record<string, unknown>;
+      /** The daemon's values of the environment variables the resolvers read. */
+      resolve_env: Record<string, string>;
     };
 
 function sectionLabel(key: string): string {
@@ -66,7 +68,8 @@ function reloadLine(daemon: DaemonState): string | null {
 
 /** The reply data of `flowryn config`, optionally narrowed to one section. */
 export function configReport(file: FileState, daemon: DaemonState, env: NodeJS.ProcessEnv, section: string | null = null): Record<string, unknown> {
-  const fromFile = file.config ? effectiveConfig(file.config, env) : null;
+  const resolveWith = daemon.state === "answered" ? { ...env, ...Object.fromEntries(RESOLVE_ENV_KEYS.map((key) => [key, daemon.resolve_env[key]])) } : env;
+  const fromFile = file.config ? effectiveConfig(file.config, resolveWith) : null;
   const fileSections = fromFile ? redactConfig(fromFile.sections) : null;
   const fileProblems = file.error ? [file.error] : (fromFile?.problems ?? []);
   const daemonSections = daemon.state === "answered" ? daemon.sections : null;
