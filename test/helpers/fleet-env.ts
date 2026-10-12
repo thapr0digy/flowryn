@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tx, type Db } from "../../src/db/db.ts";
 import type { Timing } from "../../src/config/workers.ts";
@@ -58,11 +58,17 @@ export function makeRepo(dir: string): string {
   return dir;
 }
 
-/** A stand-in harness binary that only answers --version. */
+/**
+ * A stand-in harness binary that only answers --version. Written beside the
+ * path and renamed over it, as an installer replaces a binary: macOS now and
+ * then SIGKILLs the exec of an executed file rewritten in place.
+ */
 function versionScript(dir: string, name: string, version = FAKE_VERSION): string {
   const path = join(dir, name);
-  writeFileSync(path, `#!/bin/sh\necho "${version} (fake ${name})"\n`);
-  chmodSync(path, 0o755);
+  const staged = `${path}.new`;
+  writeFileSync(staged, `#!/bin/sh\necho "${version} (fake ${name})"\n`);
+  chmodSync(staged, 0o755);
+  renameSync(staged, path);
   return path;
 }
 

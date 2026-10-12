@@ -5,6 +5,7 @@
  * with the doctor command, once per version; a passing contract run settles it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
@@ -56,6 +57,16 @@ async function recordContract(env: FleetEnv, harness: string, version: string): 
 }
 
 describe("the harness version gate", () => {
+  // An executed binary rewritten in place is SIGKILLed on exec by macOS now and then, so the daemon read no version (docs/notes/2026-10-12-fix-the-flaky-8d.md).
+  test("a harness update replaces the stand-in binary rather than rewriting it in place", async () => {
+    const env = await fleet({ contracts: false });
+    const binary = join(env.h.home, "bin", "claude");
+    const before = statSync(binary).ino;
+    setHarnessVersion(env.h, "claude", "9.9.10");
+    expect(statSync(binary).ino).not.toBe(before);
+    expect(new TextDecoder().decode(Bun.spawnSync([binary, "--version"]).stdout)).toContain("9.9.10");
+  });
+
   test(
     "at startup an untested version in use opens one P1 with the doctor command; a restart does not repeat it; a passing run settles it",
     async () => {
