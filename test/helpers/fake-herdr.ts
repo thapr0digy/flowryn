@@ -60,6 +60,12 @@ export class FakeHerdr {
   readonly statusOverride = new Map<string, string>();
   /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
   readonly screens = new Map<string, string>();
+  /**
+   * How events.subscribe is answered: `answer` (Herdr's acknowledgement, the
+   * default), `silent` (the connection stays open and nothing comes back), or
+   * a function giving the raw first line (a malformed peer).
+   */
+  subscribeReply: "answer" | "silent" | ((id: unknown) => string) = "answer";
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
@@ -179,6 +185,12 @@ export class FakeHerdr {
         const params = request.params ?? {};
         this.calls.push({ method, params });
         if (method === "events.subscribe") {
+          const reply = this.subscribeReply;
+          if (reply === "silent") continue;
+          if (reply !== "answer") {
+            conn.write(reply(request.id));
+            continue;
+          }
           this.subscribers.add(conn);
           conn.write(JSON.stringify({ id: request.id, result: { type: "subscription_started" } }) + "\n");
           continue;

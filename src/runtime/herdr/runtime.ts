@@ -81,20 +81,28 @@ function parsePane(raw: Record<string, unknown>): PaneInfo {
   };
 }
 
-function parseProcesses(raw: Record<string, unknown>): PaneProcesses {
-  const list = Array.isArray(raw.foreground_processes) ? (raw.foreground_processes as Record<string, unknown>[]) : [];
-  return {
-    paneId: str(raw.pane_id),
-    shellPid: Number(raw.shell_pid ?? 0),
-    foregroundGroup: Number(raw.foreground_process_group_id ?? 0),
-    processes: list.map((p) => ({
-      pid: Number(p.pid ?? 0),
-      name: str(p.name),
-      argv0: str(p.argv0),
-      argv: Array.isArray(p.argv) ? (p.argv as unknown[]).map(String) : [],
-      cwd: str(p.cwd),
-    })),
-  };
+const isPid = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value > 0;
+const malformedProcessInfo = (what: string) => new HerdrError("protocol", `pane.process_info: ${what}`);
+
+/**
+ * pane.process_info's answer (M0 h02). Its essential fields are checked, not
+ * defaulted: a reply without a shell pid, a foreground group or a process
+ * list says nothing about the pane, so it is `protocol` (liveness unknown to
+ * the reconciler), never an empty pane whose harness looks gone.
+ */
+function parseProcesses(raw: unknown): PaneProcesses {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw malformedProcessInfo("no process_info object");
+  const info = raw as Record<string, unknown>;
+  if (!isPid(info.shell_pid)) throw malformedProcessInfo("shell_pid is not a pid");
+  const group = info.foreground_process_group_id;
+  if (typeof group !== "number" || !Number.isInteger(group) || group < 0) throw malformedProcessInfo("foreground_process_group_id is not a process group");
+  if (!Array.isArray(info.foreground_processes)) throw malformedProcessInfo("foreground_processes is not a list");
+  const processes = (info.foreground_processes as unknown[]).map((entry) => {
+    if (!entry || typeof entry !== "object" || !isPid((entry as Record<string, unknown>).pid)) throw malformedProcessInfo("a foreground process has no pid");
+    const p = entry as Record<string, unknown>;
+    return { pid: p.pid as number, name: str(p.name), argv0: str(p.argv0), argv: Array.isArray(p.argv) ? (p.argv as unknown[]).map(String) : [], cwd: str(p.cwd) };
+  });
+  return { paneId: str(info.pane_id), shellPid: info.shell_pid, foregroundGroup: group, processes };
 }
 
 export class HerdrRuntime {
@@ -148,11 +156,11 @@ export class HerdrRuntime {
     }
   }
 
-  /** The pane's foreground processes, or null when the pane no longer exists. */
+  /** The pane's foreground processes, or null when the pane no longer exists; a malformed answer throws `protocol`. */
   async processes(paneId: string): Promise<PaneProcesses | null> {
     try {
       const result = await this.transport.call("pane.process_info", { pane_id: paneId });
-      return parseProcesses((result.process_info as Record<string, unknown>) ?? {});
+      return parseProcesses(result.process_info);
     } catch (error) {
       if (error instanceof HerdrError && error.code === "pane_not_found") return null;
       throw error;

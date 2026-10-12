@@ -97,6 +97,52 @@ describe("Herdr unreachable: one P1 per episode", () => {
   );
 });
 
+function subscribeCalls(env: FleetEnv): number {
+  return env.herdr.calls.filter((c) => c.method === "events.subscribe").length;
+}
+
+function unreachableDetails(env: FleetEnv): string[] {
+  const db = env.h.db();
+  try {
+    return (db.query("SELECT payload FROM events WHERE kind = 'herdr.unreachable' ORDER BY seq").all() as { payload: string }[]).map((r) => String((JSON.parse(r.payload) as { detail: unknown }).detail));
+  } finally {
+    db.close();
+  }
+}
+
+describe("Herdr connected but not acknowledging the subscription", () => {
+  test(
+    "assumption: a silent peer fails within [herdr] handshake_ms and goes through the outage path; the daemon does not wedge, and recovers once Herdr answers",
+    async () => {
+      const env = await fleet({ herdrHandshakeMs: 300, herdrSubscribe: "silent" });
+      await waitUntil(() => unreachableDetails(env).length === 1, 10_000, "the outage noticed");
+      expect(unreachableDetails(env)[0]).toContain("did not acknowledge events.subscribe within 300 ms");
+      // Retried with backoff, not held on one hung attempt.
+      await waitUntil(() => subscribeCalls(env) >= 2, 10_000, "a second subscribe attempt");
+      expect(env.herdr.subscriberCount()).toBe(0);
+
+      env.herdr.subscribeReply = "answer";
+      await waitUntil(() => env.herdr.subscriberCount() > 0, 20_000, "the event subscription up");
+      await waitUntil(() => eventCount(env, "herdr.reachable") === 1, 10_000, "the episode ended");
+      // The startup pass and the scheduler ran: a dispatch launches its worker.
+      const { run } = await env.dispatch("Scout\nFAKE: sleep 120000");
+      await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "assumption: an acknowledgement of another type is protocol, not a started stream",
+    async () => {
+      const env = await fleet({ herdrHandshakeMs: 2_000, herdrSubscribe: (id) => JSON.stringify({ id, result: { type: "pane_info" } }) + "\n" });
+      await waitUntil(() => unreachableDetails(env).length === 1, 10_000, "the outage noticed");
+      expect(unreachableDetails(env)[0]).toContain("not subscription_started");
+      expect(env.herdr.subscriberCount()).toBe(0);
+    },
+    { timeout: 30_000 },
+  );
+});
+
 const PR_STEPS = (api: string) => `FAKE: commit fix.txt fixed\nFAKE: push\nFAKE: pr ${api} acme/web\nFAKE: deliver-pr\n`;
 
 describe("GitHub unavailable or rate-limited: a P1 only if a merge is waiting", () => {

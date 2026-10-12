@@ -126,6 +126,130 @@ describe("Herdr client", () => {
   });
 });
 
+/**
+ * A Herdr socket for events.subscribe: after the request it writes `lines`
+ * (raw, so a test can send what a broken peer would), or nothing at all.
+ * The connection stays open, as a subscription's does.
+ */
+async function subscribeSocket(lines: (id: string) => string[]): Promise<{ path: string; requests: number; send(line: string): void; close(): void }> {
+  const path = join(tempDir(), "s.sock");
+  const conns: net.Socket[] = [];
+  const state = { path, requests: 0, send: (line: string) => conns.forEach((c) => c.write(line)), close: () => {} };
+  const server = net.createServer((conn) => {
+    conns.push(conn);
+    conn.setEncoding("utf8");
+    conn.on("error", () => conn.destroy());
+    let buffer = "";
+    conn.on("data", (chunk: string) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\n");
+      if (newline === -1) return;
+      const request = JSON.parse(buffer.slice(0, newline)) as { id: string };
+      buffer = buffer.slice(newline + 1);
+      state.requests++;
+      for (const line of lines(request.id)) conn.write(line);
+    });
+  });
+  await new Promise<void>((done) => server.listen(path, () => done()));
+  state.close = () => {
+    for (const c of conns) c.destroy();
+    server.close();
+  };
+  return state;
+}
+
+/** How a subscribe attempt settled, or "pending" if it had not by `withinMs`. */
+async function settle(attempt: Promise<unknown>, withinMs: number): Promise<{ code: string } | "started" | "pending"> {
+  return Promise.race([
+    attempt.then(
+      () => "started" as const,
+      (error: unknown) => ({ code: (error as HerdrError).code }),
+    ),
+    Bun.sleep(withinMs).then(() => "pending" as const),
+  ]);
+}
+
+const ack = (id: string) => JSON.stringify({ id, result: { type: "subscription_started" } }) + "\n";
+
+describe("Herdr subscription handshake", () => {
+  test("assumption: a peer that never acknowledges fails within the handshake deadline, as timeout", async () => {
+    const sock = await subscribeSocket(() => []);
+    try {
+      const started = Date.now();
+      const outcome = await settle(new HerdrClient(sock.path, { handshakeMs: 200 }).subscribe([], () => {}, () => {}), 3_000);
+      expect(outcome).toEqual({ code: "timeout" });
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(sock.requests).toBe(1);
+    } finally {
+      sock.close();
+    }
+  });
+
+  test("assumption: only {id, result: {type: subscription_started}} is an acknowledgement; anything else is protocol", async () => {
+    const malformed: ((id: string) => string)[] = [
+      () => "not json\n",
+      () => "{}\n",
+      () => JSON.stringify({ event: "pane.updated", data: { pane_id: "w1:p1" } }) + "\n",
+      () => JSON.stringify({ id: "another", result: { type: "subscription_started" } }) + "\n",
+      (id) => JSON.stringify({ id, result: { type: "pane_info" } }) + "\n",
+      (id) => JSON.stringify({ id, result: "subscription_started" }) + "\n",
+      () => "[1,2]\n",
+    ];
+    for (const first of malformed) {
+      const sock = await subscribeSocket((id) => [first(id), ack(id)]);
+      try {
+        expect({ line: first("ID"), outcome: await settle(new HerdrClient(sock.path, { handshakeMs: 2_000 }).subscribe([], () => {}, () => {}), 3_000) }).toEqual({
+          line: first("ID"),
+          outcome: { code: "protocol" },
+        });
+      } finally {
+        sock.close();
+      }
+    }
+  });
+
+  test("a refusal keeps Herdr's own code; a valid acknowledgement starts the stream", async () => {
+    const refused = await subscribeSocket((id) => [JSON.stringify({ id, error: { code: "invalid_params", message: "bad subscription" } }) + "\n"]);
+    try {
+      expect(await settle(new HerdrClient(refused.path, { handshakeMs: 2_000 }).subscribe([], () => {}, () => {}), 3_000)).toEqual({ code: "invalid_params" });
+    } finally {
+      refused.close();
+    }
+    const good = await subscribeSocket((id) => ["\n", ack(id)]);
+    try {
+      const events: string[] = [];
+      const subscription = await new HerdrClient(good.path, { handshakeMs: 2_000 }).subscribe([], (e) => events.push(e.event), () => {});
+      good.send(JSON.stringify({ event: "pane.updated", data: { pane_id: "w1:p1" } }) + "\n");
+      for (let i = 0; i < 50 && events.length === 0; i++) await Bun.sleep(20);
+      expect(events).toEqual(["pane.updated"]);
+      subscription.close();
+    } finally {
+      good.close();
+    }
+  });
+
+  test("assumption: a malformed line after the acknowledgement closes the subscription with protocol, never dropped in silence", async () => {
+    for (const bad of ["garbage\n", JSON.stringify({ data: { pane_id: "w1:p1" } }) + "\n", JSON.stringify({ event: "pane.updated", data: "w1:p1" }) + "\n"]) {
+      const sock = await subscribeSocket((id) => [ack(id)]);
+      try {
+        const closed = Promise.withResolvers<HerdrError | null>();
+        const events: string[] = [];
+        await new HerdrClient(sock.path, { handshakeMs: 2_000 }).subscribe([], (e) => events.push(e.event), closed.resolve);
+        sock.send(bad);
+        const error = await Promise.race([closed.promise, Bun.sleep(3_000).then(() => "still open" as const)]);
+        expect({ bad, code: error === "still open" ? error : error?.code }).toEqual({ bad, code: "protocol" });
+        expect(events).toEqual([]);
+      } finally {
+        sock.close();
+      }
+    }
+  });
+
+  test("a socket that does not exist is unreachable, at once", async () => {
+    expect(await settle(new HerdrClient(join(tempDir(), "absent.sock"), { handshakeMs: 2_000 }).subscribe([], () => {}, () => {}), 3_000)).toEqual({ code: "unreachable" });
+  });
+});
+
 function scriptedTransport(replies: Record<string, (params: Record<string, unknown>) => Record<string, unknown>>): HerdrTransport & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -183,6 +307,33 @@ describe("Herdr runtime", () => {
       },
     });
     expect(await new HerdrRuntime(transport).processes("w1:p9")).toBeNull();
+  });
+
+  test("assumption: a malformed pane.process_info is unknown evidence (protocol), never an empty pane", async () => {
+    const shell = { pid: 100, name: "zsh", argv0: "-zsh", argv: ["-zsh"], cwd: "/w" };
+    const malformed: Record<string, unknown>[] = [
+      {},
+      { process_info: "w1:p2" },
+      { process_info: { pane_id: "w1:p2", foreground_process_group_id: 100, foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 0, foreground_process_group_id: 100, foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: "100", foreground_process_group_id: 100, foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: -1, foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100 } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: [{ name: "zsh" }] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: ["zsh"] } },
+    ];
+    for (const reply of malformed) {
+      const runtime = new HerdrRuntime(scriptedTransport({ "pane.process_info": () => reply }), { pollMs: 5 });
+      const outcome = await runtime.processes("w1:p2").then(
+        (info) => ({ info }),
+        (error: unknown) => ({ code: (error as HerdrError).code }),
+      );
+      expect({ reply, outcome }).toEqual({ reply, outcome: { code: "protocol" } });
+      await expect(runtime.harnessProcess("w1:p2", () => true, 0)).rejects.toMatchObject({ code: "protocol" });
+    }
+    const valid = new HerdrRuntime(scriptedTransport({ "pane.process_info": () => ({ process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: [shell] } }) }));
+    expect(await valid.processes("w1:p2")).toMatchObject({ shellPid: 100, foregroundGroup: 100, processes: [{ pid: 100, argv0: "-zsh" }] });
   });
 
   test("events name their pane in either shape Herdr 0.7.5 sends", () => {

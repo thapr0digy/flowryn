@@ -110,6 +110,10 @@ export interface FleetOptions {
   yolo?: boolean;
   /** [herdr] unreachable_alert_ms: how long Herdr may be away before its P1. */
   herdrAlertMs?: number;
+  /** [herdr] handshake_ms: how long the event subscription may take to be acknowledged. */
+  herdrHandshakeMs?: number;
+  /** How the first fake Herdr answers events.subscribe (FakeHerdr.subscribeReply). */
+  herdrSubscribe?: FakeHerdr["subscribeReply"];
   /** Supervise the daemon with a script, so `flowryn daemon restart` works (superviseWithScript). */
   supervised?: boolean;
   /** [workers] turn_end_guard (default on). */
@@ -136,6 +140,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
         "[herdr]",
         `socket = ${JSON.stringify(join(home, "herdr.sock"))}`,
         ...(options.herdrAlertMs ? [`unreachable_alert_ms = ${options.herdrAlertMs}`] : []),
+        ...(options.herdrHandshakeMs ? [`handshake_ms = ${options.herdrHandshakeMs}`] : []),
         "[workers]",
         `worktree_root = ${JSON.stringify(join(home, "wt"))}`,
         ...(options.turnEndGuard === false ? ["turn_end_guard = false"] : []),
@@ -155,6 +160,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   mkdirSync(logDir, { recursive: true });
   const herdrOptions = { env: h.env, logDir, harnessScripts: options.harnessScripts };
   let herdr = await FakeHerdr.start(join(home, "herdr.sock"), herdrOptions);
+  if (options.herdrSubscribe) herdr.subscribeReply = options.herdrSubscribe;
   let herdrUp = true;
   const leader = seedLeader(h);
   if (options.contracts !== false) {

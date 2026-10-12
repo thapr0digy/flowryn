@@ -24,9 +24,13 @@ export interface HerdrConfig {
   session: string | null;
   /** Herdr unreachable this long, while something needs it: one P1 for the episode (design section 16). */
   unreachable_alert_ms: number;
+  /** How long events.subscribe may take to be acknowledged before the attempt fails and is retried (docs/notes/2026-10-12-next-steps-md-e7.md). */
+  handshake_ms: number;
 }
 
 export const DEFAULT_HERDR_ALERT_MS = 60_000;
+/** An ordinary Herdr request's deadline (src/runtime/herdr/client.ts). */
+export const DEFAULT_HERDR_HANDSHAKE_MS = 15_000;
 
 export const CLAUDE_PERMISSION_MODES = ["bypassPermissions", "auto", "acceptEdits", "default", "dontAsk", "plan"] as const;
 export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
@@ -130,14 +134,18 @@ function branchPrefix(value: string): string {
 
 export function herdrConfig(config: FlowrynConfig): HerdrConfig {
   const raw = table(config.extra.herdr, "[herdr]");
-  const alert = raw.unreachable_alert_ms;
-  if (alert !== undefined && (typeof alert !== "number" || !Number.isInteger(alert) || alert <= 0)) {
-    throw new FlowrynError("config_invalid", "[herdr] unreachable_alert_ms must be a positive integer");
-  }
+  const positive = (key: string): number | undefined => {
+    const value = raw[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isInteger(value) || value <= 0)) {
+      throw new FlowrynError("config_invalid", `[herdr] ${key} must be a positive integer`);
+    }
+    return value as number | undefined;
+  };
   return {
     socket: absPath(optString(raw.socket, "[herdr] socket"), config.home),
     session: optString(raw.session, "[herdr] session"),
-    unreachable_alert_ms: (alert as number | undefined) ?? DEFAULT_HERDR_ALERT_MS,
+    unreachable_alert_ms: positive("unreachable_alert_ms") ?? DEFAULT_HERDR_ALERT_MS,
+    handshake_ms: positive("handshake_ms") ?? DEFAULT_HERDR_HANDSHAKE_MS,
   };
 }
 

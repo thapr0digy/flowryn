@@ -235,14 +235,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     // M2: the Herdr runtime, launcher and reconciler (design sections 5 and 6).
     const herdrSocket = await resolveHerdrSocket(config);
-    let runtime = herdrSocket.socket ? new HerdrRuntime(new HerdrClient(herdrSocket.socket)) : null;
+    const herdrClient = (socket: string) => new HerdrClient(socket, { handshakeMs: herdrConfig(config).handshake_ms });
+    let runtime = herdrSocket.socket ? new HerdrRuntime(herdrClient(herdrSocket.socket)) : null;
     log(runtime ? `herdr: ${herdrSocket.socket}` : `herdr: not available (${herdrSocket.reason}); workers cannot start until it is`);
     // Herdr may start after the daemon (launchd starts it at login): the watcher looks for its socket again with backoff.
     const resolveRuntime = async (): Promise<boolean> => {
       if (runtime) return true;
       const found = await resolveHerdrSocket(config);
       if (!found.socket) return false;
-      runtime = new HerdrRuntime(new HerdrClient(found.socket));
+      runtime = new HerdrRuntime(herdrClient(found.socket));
       log(`herdr: ${found.socket}`);
       return true;
     };

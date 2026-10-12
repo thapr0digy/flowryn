@@ -7,6 +7,7 @@ import { renderConfig, renderToml } from "../../src/config/toml.ts";
 import { assertSocketPathFits, flowrynHome, socketPath } from "../../src/config/paths.ts";
 import { FlowrynError } from "../../src/api/errors.ts";
 import { LATER_SECTION_DEFAULTS, recordedToolPath } from "../../src/init/init.ts";
+import { DEFAULT_HERDR_HANDSHAKE_MS, herdrConfig } from "../../src/config/workers.ts";
 
 const HOME = "/tmp/fw-home";
 
@@ -96,6 +97,17 @@ describe("config", () => {
   test("renderToml writes inline tables inside arrays", () => {
     const text = renderToml({ workflows: { fix: { stages: [{ id: "build" }, { id: "ship", pools: ["validation"], gate: "merge" }] } } });
     expect(Bun.TOML.parse(text)).toEqual({ workflows: { fix: { stages: [{ id: "build" }, { id: "ship", pools: ["validation"], gate: "merge" }] } } });
+  });
+});
+
+describe("[herdr]", () => {
+  test("handshake_ms defaults to an ordinary request's deadline and must be a positive integer", () => {
+    expect(herdrConfig(parseConfig("", HOME)).handshake_ms).toBe(DEFAULT_HERDR_HANDSHAKE_MS);
+    expect(DEFAULT_HERDR_HANDSHAKE_MS).toBe(15_000);
+    expect(herdrConfig(parseConfig("[herdr]\nhandshake_ms = 500\n", HOME)).handshake_ms).toBe(500);
+    for (const bad of ["0", "-1", "1.5", '"fast"']) {
+      expect(() => herdrConfig(parseConfig(`[herdr]\nhandshake_ms = ${bad}\n`, HOME))).toThrow("[herdr] handshake_ms must be a positive integer");
+    }
   });
 });
 

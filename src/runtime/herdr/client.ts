@@ -56,6 +56,8 @@ export interface HerdrTransport {
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+/** How long events.subscribe may take to be acknowledged: an ordinary request's deadline, unless `[herdr] handshake_ms` says otherwise. */
+export const DEFAULT_HANDSHAKE_MS = DEFAULT_TIMEOUT_MS;
 const MAX_LINE = 8 * 1024 * 1024;
 let nextId = 0;
 
@@ -67,11 +69,13 @@ export const LAB_ONLY_METHODS = ["pane.send_text"] as const;
 
 export class HerdrClient implements HerdrTransport {
   readonly socketPath: string;
+  readonly handshakeMs: number;
   private readonly labMethods: ReadonlySet<string>;
 
-  constructor(socketPath: string, options: { labMethods?: readonly (typeof LAB_ONLY_METHODS)[number][] } = {}) {
+  constructor(socketPath: string, options: { labMethods?: readonly (typeof LAB_ONLY_METHODS)[number][]; handshakeMs?: number } = {}) {
     this.socketPath = socketPath;
     this.labMethods = new Set(options.labMethods ?? []);
+    this.handshakeMs = options.handshakeMs ?? DEFAULT_HANDSHAKE_MS;
   }
 
   private refusal(method: string): HerdrError | null {
@@ -130,22 +134,37 @@ export class HerdrClient implements HerdrTransport {
     });
   }
 
+  /**
+   * Open the event stream. The handshake has the same kind of deadline as a
+   * request (`handshakeMs`, from the start, so a hung connect counts): a peer
+   * that never acknowledges fails as `timeout`. Only `{id, result: {type:
+   * "subscription_started"}}` for this request is an acknowledgement; any
+   * other first line is `protocol`. After it, a line that is not an event
+   * closes the stream with `protocol` rather than being dropped, since an
+   * event only names a pane to re-read and the caller's reconnect re-reads
+   * every one.
+   */
   subscribe(subscriptions: Record<string, unknown>[], onEvent: (event: HerdrEvent) => void, onClose: (error: HerdrError | null) => void): Promise<Subscription> {
+    const id = `sub${++nextId}`;
     return new Promise((resolve, reject) => {
       const socket = new net.Socket();
       let buffer = "";
+      let connected = false;
       let started = false;
       let closed = false;
       const close = (error: HerdrError | null) => {
         if (closed) return;
         closed = true;
+        clearTimeout(handshake);
         socket.destroy();
         if (started) onClose(error);
         else reject(error ?? new HerdrError("protocol", "Herdr closed the subscription before it started"));
       };
+      const handshake = setTimeout(() => close(new HerdrError("timeout", `Herdr did not acknowledge events.subscribe within ${this.handshakeMs} ms`)), this.handshakeMs);
       socket.setEncoding("utf8");
       socket.on("connect", () => {
-        socket.write(JSON.stringify({ id: `sub${++nextId}`, method: "events.subscribe", params: { subscriptions } }) + "\n");
+        connected = true;
+        socket.write(JSON.stringify({ id, method: "events.subscribe", params: { subscriptions } }) + "\n");
       });
       socket.on("data", (chunk: string) => {
         buffer += chunk;
@@ -154,25 +173,26 @@ export class HerdrClient implements HerdrTransport {
           const line = buffer.slice(0, newline);
           buffer = buffer.slice(newline + 1);
           if (line.trim() === "") continue;
-          let message: Record<string, unknown>;
-          try {
-            message = JSON.parse(line);
-          } catch {
-            continue;
-          }
           if (!started) {
-            const error = message.error as { code?: string; message?: string } | undefined;
-            if (error) return close(new HerdrError(error.code ?? "error", error.message ?? "subscription refused"));
+            const refusal = acknowledgementProblem(line, id);
+            if (refusal) return close(refusal);
             started = true;
+            clearTimeout(handshake);
             resolve({ close: () => close(null) });
             continue;
           }
-          if (typeof message.event === "string") onEvent({ event: message.event, data: (message.data as Record<string, unknown>) ?? {} });
+          const event = parseEvent(line);
+          if (!event) return close(new HerdrError("protocol", `Herdr sent a line that is not an event: ${line.slice(0, 120)}`));
+          onEvent(event);
+          // The caller may close the stream from its handler.
+          if (closed) return;
         }
-        if (buffer.length > MAX_LINE) close(new HerdrError("protocol", "Herdr event line is too large"));
+        if (buffer.length > MAX_LINE) close(new HerdrError("protocol", started ? "Herdr event line is too large" : "Herdr's events.subscribe reply is too large"));
       });
-      socket.on("error", (error: NodeJS.ErrnoException) => close(new HerdrError(started ? "protocol" : "unreachable", `Herdr socket ${this.socketPath}: ${error.code ?? error.message}`)));
-      socket.on("close", () => close(started ? new HerdrError("closed", "Herdr closed the event subscription") : null));
+      socket.on("error", (error: NodeJS.ErrnoException) => close(new HerdrError(connected ? "protocol" : "unreachable", `Herdr socket ${this.socketPath}: ${error.code ?? error.message}`)));
+      socket.on("close", () =>
+        close(started ? new HerdrError("closed", "Herdr closed the event subscription") : new HerdrError(connected ? "protocol" : "unreachable", "Herdr closed the subscription before it started")),
+      );
       try {
         socket.connect(this.socketPath);
       } catch (error) {
@@ -180,4 +200,38 @@ export class HerdrClient implements HerdrTransport {
       }
     });
   }
+}
+
+function jsonObject(line: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(line);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Why the first line of a subscription is not its acknowledgement: Herdr's refusal with its own code, or `protocol`; null when it is one. */
+function acknowledgementProblem(line: string, id: string): HerdrError | null {
+  const message = jsonObject(line);
+  if (!message) return new HerdrError("protocol", "Herdr's events.subscribe reply is not a JSON object");
+  const error = message.error as { code?: unknown; message?: unknown } | undefined;
+  if (error && typeof error === "object") {
+    return new HerdrError(typeof error.code === "string" ? error.code : "error", typeof error.message === "string" ? error.message : "subscription refused");
+  }
+  if (message.id !== id) return new HerdrError("protocol", `Herdr's events.subscribe reply answers ${JSON.stringify(message.id ?? null)}, not ${id}`);
+  const result = message.result as { type?: unknown } | undefined;
+  if (!result || typeof result !== "object" || result.type !== "subscription_started") {
+    return new HerdrError("protocol", "Herdr's events.subscribe reply is not subscription_started");
+  }
+  return null;
+}
+
+/** An event line: a JSON object with a string `event` and, when present, an object `data`; null otherwise. */
+function parseEvent(line: string): HerdrEvent | null {
+  const message = jsonObject(line);
+  if (!message || typeof message.event !== "string") return null;
+  const data = message.data ?? {};
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  return { event: message.event, data: data as Record<string, unknown> };
 }
