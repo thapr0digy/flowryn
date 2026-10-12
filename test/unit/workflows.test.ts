@@ -12,7 +12,7 @@ import { changesTarget, flowLine, positionOf, stageInstructions } from "../../sr
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
 import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.ts";
 import { fullPools, grantLeases, liveCounts, OverCapacity, releaseLeases, runLeases } from "../../src/sched/pools.ts";
-import { Scheduler } from "../../src/sched/scheduler.ts";
+import { EXIT_BACKOFF_MAX_MS, Scheduler } from "../../src/sched/scheduler.ts";
 import { claimProbe, clearUsageLimit, noteUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
@@ -324,26 +324,27 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
   type Exit = { ok: boolean; detail?: string } | Error;
 
   /**
-   * r1 and r2 wait for a fresh check stage, each with a live old worker and its
-   * worker slot; `exits` answers each run's exit attempt in turn. The launch
-   * stand-in does what the launcher does: the new worker's identity, and
-   * pending_launch cleared.
+   * The runs named (r1 and r2 by default) wait for a fresh check stage, each
+   * with a live old worker and its worker slot; `wait` puts another there
+   * later. `exits` answers each run's exit attempt in turn. The launch stand-in
+   * does what the launcher does: the new worker's identity, and pending_launch
+   * cleared. The clock ticks once per read; `advance` moves it on.
    */
-  function freshStage(exits: Record<string, Exit[]>) {
+  function freshStage(exits: Record<string, Exit[]>, runs: string[] = ["r1", "r2"]) {
     const db = scratchDb();
     const config = cfg(FRESH_CONFIG);
     const def = JSON.stringify(workflowFor(config, "twopass", "ship"));
     const caps = capacityConfig(config).pools;
-    tx(db, () => {
-      db.query("INSERT INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 0)").run();
-      for (const [run, pid] of [["r1", 4101], ["r2", 4102]] as const) {
+    const wait = (run: string) =>
+      tx(db, () => {
         db.query(
           `UPDATE runs SET workflow = 'twopass', workflow_def = ?2, stage = 'check', stage_state = 'waiting', pending_launch = 'stage', waiting_since = 1,
              liveness = 'idle', proc_pid = ?3, proc_start = 1, proc_exe = 'claude', agent_session = ?4 WHERE id = ?1`,
-        ).run(run, def, pid, `old-${run}`);
+        ).run(run, def, 4100 + Number(run.slice(1)), `old-${run}`);
         grantLeases(db, run, run.replace("r", "t"), "build", ["worker"], caps, 1);
-      }
-    });
+      });
+    tx(db, () => db.query("INSERT INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 0)").run());
+    for (const run of runs) wait(run);
     const launches: string[] = [];
     const exitCalls: string[] = [];
     let clock = 10;
@@ -373,7 +374,11 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     const kinds = (runId: string) => (db.query("SELECT kind FROM events WHERE run_id = ?1 ORDER BY seq").all(runId) as { kind: string }[]).map((e) => e.kind);
     const workerLeases = (runId: string) => runLeases(db, runId).filter((l) => l.pool === "worker").length;
     const openExitItems = (runId: string) => (db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'worker_not_exited' AND run_id = ?1 AND state IN ('open','presented')").get(runId) as { n: number }).n;
-    return { db, scheduler, launches, exitCalls, row, kinds, workerLeases, openExitItems };
+    const advance = (ms: number) => {
+      clock += ms;
+    };
+    const attempts = (runId: string) => exitCalls.filter((r) => r === runId).length;
+    return { db, scheduler, launches, exitCalls, attempts, wait, advance, row, kinds, workerLeases, openExitItems };
   }
 
   test("a false exit result resets no identity and launches nothing; the run keeps its slot and its pending replacement, and other work still goes", async () => {
@@ -404,6 +409,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     const f = freshStage({ r1: [{ ok: false }] });
     await f.scheduler.passNow();
     expect(f.launches).toEqual(["r2:stage"]);
+    f.advance(schedTiming(cfg(FRESH_CONFIG)).pass_ms);
     await f.scheduler.passNow();
     expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
     expect(f.row("r1")).toMatchObject({ proc_pid: 5000, pending_launch: null, stage_state: "active" });
@@ -418,19 +424,50 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
 
   test("a refusal that persists opens one P1 for the run; the verified exit resolves it", async () => {
     const f = freshStage({ r1: [{ ok: false }, { ok: false }, { ok: false }, { ok: false }] });
+    const retry = async () => {
+      f.advance(EXIT_BACKOFF_MAX_MS);
+      await f.scheduler.passNow();
+    };
     await f.scheduler.passNow();
-    await f.scheduler.passNow();
+    await retry();
     expect(f.openExitItems("r1")).toBe(0);
-    await f.scheduler.passNow();
+    await retry();
     expect(f.openExitItems("r1")).toBe(1);
-    await f.scheduler.passNow();
+    await retry();
     expect(f.openExitItems("r1")).toBe(1);
+    expect(f.attempts("r1")).toBe(4);
     // One refusal event per episode; each attempt is still an exit attempt.
     expect(f.kinds("r1").filter((k) => k === "run.fresh_worker_refused")).toHaveLength(1);
     expect(f.launches).toEqual(["r2:stage"]);
-    await f.scheduler.passNow();
+    await retry();
     expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
     expect(f.openExitItems("r1")).toBe(0);
+    f.db.close();
+  });
+  test("a refused replacement backs off: its run is skipped until its next attempt, one pass doubling to the cap, while other work is granted at once", async () => {
+    const pass = schedTiming(cfg(FRESH_CONFIG)).pass_ms;
+    const f = freshStage({ r1: [{ ok: false }, { ok: false }, { ok: false }, { ok: false }, { ok: false }] }, ["r1"]);
+    await f.scheduler.passNow();
+    expect(f.attempts("r1")).toBe(1);
+    // Another run becomes eligible: the next pass grants it and makes no exit attempt for r1 inside its backoff.
+    f.wait("r3");
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r3:stage"]);
+    expect(f.exitCalls).toEqual(["r1", "r3"]);
+    // Each wait is a pass doubled per refusal, up to EXIT_BACKOFF_MAX_MS; the attempt runs only once it is over.
+    for (const [attempt, backoff] of [[2, pass], [3, 2 * pass], [4, 4 * pass], [5, 8 * pass], [6, EXIT_BACKOFF_MAX_MS]] as const) {
+      expect(backoff).toBeLessThanOrEqual(EXIT_BACKOFF_MAX_MS);
+      f.advance(backoff - 100);
+      await f.scheduler.passNow();
+      expect(f.attempts("r1")).toBe(attempt - 1);
+      f.advance(100);
+      await f.scheduler.passNow();
+      expect(f.attempts("r1")).toBe(attempt);
+    }
+    // The sixth attempt was verified: one replacement, the P1 opened at the third refusal resolved.
+    expect(f.launches).toEqual(["r3:stage", "r1:stage"]);
+    expect(f.openExitItems("r1")).toBe(0);
+    expect(f.kinds("r1")).toContain("run.worker_not_exited");
     f.db.close();
   });
 });

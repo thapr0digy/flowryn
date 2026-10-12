@@ -75,6 +75,8 @@ const HOST_KEY = "sched_host";
 
 /** Consecutive refused exits of a fresh stage's old worker before one P1 asks you to look. */
 export const EXIT_REFUSALS_FOR_ITEM = 3;
+/** The longest a refused fresh-stage replacement waits before its next exit attempt. */
+export const EXIT_BACKOFF_MAX_MS = 5 * 60_000;
 
 export function hostState(db: Db): HostState | null {
   const raw = getMeta(db, HOST_KEY);
@@ -93,8 +95,12 @@ export class Scheduler {
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
   private quotaCache: { at: number; reading: QuotaReading } | null = null;
   private readonly relaunching = new Set<string>();
-  /** Refused fresh-stage exits per run since its last verified exit (in memory: a restart starts the count again). */
-  private readonly exitRefusals = new Map<string, number>();
+  /**
+   * Refused fresh-stage exits per run since its last verified exit, and when the
+   * next attempt may run: one pass after the first refusal, doubling up to
+   * EXIT_BACKOFF_MAX_MS. In memory: a restart starts the count again.
+   */
+  private readonly exitRefusals = new Map<string, { attempts: number; nextAt: number }>();
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
@@ -241,8 +247,10 @@ export class Scheduler {
       )
       .all() as (RunWithPolicy & { priority: number })[];
     const t = now();
+    // A run that no longer waits for its replacement (cancelled, failed) drops its refusal count.
+    for (const runId of this.exitRefusals.keys()) if (!rows.some((run) => run.id === runId)) this.exitRefusals.delete(runId);
     return rows
-      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id))
+      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id) && !this.backingOff(run.id, t))
       .map((run) => {
         const pos = positionOf(db, run, run.kind);
         return { run, pos, needs: neededPools(db, run, pos), remaining: pos.def.stages.length - 1 - pos.index, priority: run.priority, since: run.waiting_since ?? t };
@@ -364,6 +372,12 @@ export class Scheduler {
     }
   }
 
+  /** A refused fresh-stage replacement waits out its backoff: no exit attempt holds the pass meanwhile. */
+  private backingOff(runId: string, t: number): boolean {
+    const refusals = this.exitRefusals.get(runId);
+    return refusals !== undefined && t < refusals.nextAt;
+  }
+
   /** The worker's exit result; an attempt that throws is an unverified exit, so one run's failure never ends the pass. */
   private async verifiedExit(runId: string): Promise<{ ok: boolean; detail?: string }> {
     try {
@@ -376,8 +390,9 @@ export class Scheduler {
   /** One refused fresh-stage replacement: an event when the episode starts, one P1 once it has lasted EXIT_REFUSALS_FOR_ITEM attempts. */
   private freshWorkerRefused(runId: string, detail: string): void {
     const { db, now } = this.deps;
-    const attempts = (this.exitRefusals.get(runId) ?? 0) + 1;
-    this.exitRefusals.set(runId, attempts);
+    const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
+    const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
+    this.exitRefusals.set(runId, { attempts, nextAt: now() + backoff });
     this.deps.log(`sched: fresh worker for ${runId} waits: the old worker did not exit (${detail}; attempt ${attempts})`);
     if (attempts !== 1 && attempts < EXIT_REFUSALS_FOR_ITEM) return;
     tx(db, () => {
