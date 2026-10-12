@@ -67,6 +67,15 @@ function stallDecisions(db: Db, runId: string, nmRunId: string): DecisionRow[] {
 }
 
 /**
+ * The question asked about this pipeline run's CI wait that still stands:
+ * the latest one open or answered (one closed unanswered covers nothing);
+ * null when there is none.
+ */
+export function askedCiWait(db: Db, runId: string, nmRunId: string): DecisionRow | null {
+  return stallDecisions(db, runId, nmRunId).find((d) => d.state === "open" || d.state === "answered") ?? null;
+}
+
+/**
  * Whether this wait should be asked about now. One decision per run per
  * stall: an open one waits for its answer; merge-main or accept-without-ci
  * settles this pipeline run for good (the next run, after the merge, is a new

@@ -4,7 +4,8 @@ import { appendEvent } from "../db/events.ts";
 import type { ChecksSummary, PullRequest } from "../forge/types.ts";
 import { prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
-import { recordEvidence, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { askedCiWait } from "../lifecycle/ci-wait.ts";
+import { recordEvidence, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
@@ -249,18 +250,17 @@ function judgeProgress(db: Db, run: RunWithPolicy, active: NmRun | null, nm: NmR
  * P1 per run per episode. An episode opens with run.validation_stuck and
  * ends with run.validation_moving (a read that says the run moves), counted
  * from the slot's grant, so a dismissed item does not come back until the run
- * moved and stalled again. Releasing the slot resolves the item
+ * moved and stalled again. A CI wait its CI-wait question covers is left to
+ * that question (yieldToCiWait). Releasing the slot resolves the item
  * (releaseLeases, src/sched/pools.ts). Call inside a transaction.
  */
 export function noteValidationProgress(db: Db, run: RunWithPolicy, active: NmRun | null, nm: NmRun | null, stuckAfterMs: number, now: number): void {
-  const lease = db.query("SELECT granted_at FROM pool_leases WHERE run_id = ?1 AND pool = 'validation' AND released_at IS NULL").get(run.id) as { granted_at: number } | null;
+  const lease = validationLease(db, run.id);
   if (!lease) return;
+  if (yieldToCiWait(db, run, active, now)) return;
   const progress = judgeProgress(db, run, active, nm, lease.granted_at, stuckAfterMs, now);
   if (progress === null) return;
-  const last = db
-    .query("SELECT kind FROM events WHERE run_id = ?1 AND kind IN ('run.validation_stuck','run.validation_moving') AND ts >= ?2 ORDER BY seq DESC LIMIT 1")
-    .get(run.id, lease.granted_at) as { kind: string } | null;
-  const inEpisode = last?.kind === "run.validation_stuck";
+  const inEpisode = inStuckEpisode(db, run.id, lease.granted_at);
   if (progress.stuck && !inEpisode) {
     const event = appendEvent(db, { source: "nomistakes", kind: "run.validation_stuck", runId: run.id, taskId: run.task_id, payload: { nm_run: nm?.id ?? null, step: progress.step, quiet_ms: progress.quietMs }, ts: now });
     openItem(db, {
@@ -277,7 +277,41 @@ export function noteValidationProgress(db: Db, run: RunWithPolicy, active: NmRun
   }
 }
 
-/** no-mistakes cannot be read (its daemon is down): one P1 until it answers again; flowrynd never restarts it. Call inside a transaction. */
+function validationLease(db: Db, runId: string): { granted_at: number } | null {
+  return db.query("SELECT granted_at FROM pool_leases WHERE run_id = ?1 AND pool = 'validation' AND released_at IS NULL").get(runId) as { granted_at: number } | null;
+}
+
+/** Whether the run's latest validation episode since the slot's grant is a stall (run.validation_moving or run.validation_covered end one). */
+function inStuckEpisode(db: Db, runId: string, grantedAt: number): boolean {
+  const last = db
+    .query("SELECT kind FROM events WHERE run_id = ?1 AND kind IN ('run.validation_stuck','run.validation_moving','run.validation_covered') AND ts >= ?2 ORDER BY seq DESC LIMIT 1")
+    .get(runId, grantedAt) as { kind: string } | null;
+  return last?.kind === "run.validation_stuck";
+}
+
+/**
+ * One alert per cause: a pipeline waiting only on CI, on the run's branch,
+ * whose CI-wait question (src/lifecycle/ci-wait.ts) is open or answered for
+ * this pipeline run, is that question's to report, not validation_stuck's.
+ * Returns whether the stall is covered. A stall episode already open ends
+ * with run.validation_covered and its item resolves naming the question; a
+ * covered stall opens none. Every other no-progress case is left to
+ * noteValidationProgress. Called on each status read and in the
+ * transaction that opens the question. Call inside a transaction.
+ */
+export function yieldToCiWait(db: Db, run: Pick<RunRow, "id" | "task_id" | "branch">, nm: NmRun | null, now: number): boolean {
+  if (!nm || nm.branch !== run.branch || !waitsOnlyOnCi(nm)) return false;
+  const question = askedCiWait(db, run.id, nm.id);
+  if (!question) return false;
+  const lease = validationLease(db, run.id);
+  if (lease && inStuckEpisode(db, run.id, lease.granted_at)) {
+    appendEvent(db, { source: "nomistakes", kind: "run.validation_covered", runId: run.id, taskId: run.task_id, payload: { nm_run: nm.id, decision: question.id }, ts: now });
+    resolveRunItems(db, run.id, ["validation_stuck"], `covered by the CI-wait question ${question.id}`, now);
+  }
+  return true;
+}
+
+/** no-mistakes cannot be read/** no-mistakes cannot be read (its daemon is down): one P1 until it answers again; flowrynd never restarts it. Call inside a transaction. */
 export function noteNmOutage(db: Db, down: boolean, detail: string, now: number): void {
   if (!down) {
     resolveItems(db, "nomistakes_down", null, "no-mistakes answered", now);
