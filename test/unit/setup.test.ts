@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, defaultConfig } from "../../src/config/config.ts";
 import { notifyConfig } from "../../src/config/leader.ts";
-import { workerConfigProblems } from "../../src/config/workers.ts";
+import { configSectionProblems } from "../../src/config/effective.ts";
 import { migrate, openDb, schemaVersion, LATEST_SCHEMA_VERSION } from "../../src/db/db.ts";
 import { backupIfDue } from "../../src/db/backup.ts";
 import { notifyMacosCheck, restoreBackup } from "../../src/doctor/doctor.ts";
@@ -172,7 +172,7 @@ describe("init", () => {
     expect(await runInit(initDeps(home, io))).toBe(0);
     const config = loadConfig(home).config;
     expect(config.extra.workers).toMatchObject({ claude: { model: "sonnet", permission_mode: "bypassPermissions" } });
-    expect(workerConfigProblems(config)).toEqual([]);
+    expect(configSectionProblems(config)).toEqual([]);
   });
 
   test("refuses to write a config whose sections fail validation", async () => {

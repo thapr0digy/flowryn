@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../config/config.ts";
-import { flowrynHome } from "../../config/paths.ts";
+import { configPath, flowrynHome } from "../../config/paths.ts";
 import { errorReply, okReply, type Reply } from "../../api/envelope.ts";
 import { toErrorBody } from "../../api/errors.ts";
 import { boolArg, stringArg, type CliIo, type VerbSpec } from "../../api/verbs.ts";
@@ -18,6 +18,8 @@ import { agentIdentity, notHumanReason } from "../human.ts";
 import { LineReader } from "../line-reader.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 import { ping } from "./daemon.ts";
+import { checkSection, configReport, type DaemonState, type FileState } from "../config-view.ts";
+import { CONFIG_VERB } from "../../daemon/system-verbs.ts";
 import { runContract } from "../../contracts/runner.ts";
 import { HARNESS_IDS, type HarnessId } from "../../harness/types.ts";
 import { resolveTool } from "../../config/config.ts";
@@ -345,30 +347,44 @@ const doctor: VerbSpec = {
   },
 };
 
+/** The running daemon's accepted configuration, or why there is none to show. */
+async function daemonState(io: CliIo): Promise<DaemonState> {
+  if (!(await ping(io.env))) return { state: "not_running" };
+  const answer = await callServerVerb(serverVerb(CONFIG_VERB)!, {}, io);
+  if (answer.error?.code === "unknown_verb") return { state: "error", message: `it runs an older build without ${CONFIG_VERB} (flowryn daemon restart)` };
+  if (!answer.ok) return { state: "error", message: answer.error?.message ?? "no reply" };
+  return { state: "answered", ...(answer.data as Omit<Extract<DaemonState, { state: "answered" }>, "state">) };
+}
+
+function fileState(home: string): FileState {
+  const path = configPath(home);
+  const exists = existsSync(path);
+  let text: string | null = null;
+  try {
+    if (exists) text = readFileSync(path, "utf8");
+    return { path, exists, text, config: loadConfig(home).config, error: null };
+  } catch (error) {
+    return { path, exists, text, config: null, error: (error as Error).message };
+  }
+}
+
 const config: VerbSpec = {
   name: "config",
-  summary: "Show the effective configuration and where it comes from",
+  summary: "Show the effective configuration: the file's, the running daemon's, and which values the file sets",
   positionals: [],
-  flags: {},
+  flags: {
+    section: { type: "string", help: "show one section only: core (the top-level settings) or a section name such as notify, capacity or workflows", placeholder: "name" },
+  },
   kind: "local",
   roles: ["leader", "reader", "worker", "human", "anonymous"],
-  async local(_args, io) {
+  async local(args, io) {
     try {
-      const loaded = loadConfig(flowrynHome(io.env));
-      const { config: c } = loaded;
-      return print(
-        io,
-        okReply({
-          path: loaded.path,
-          exists: loaded.exists ? "yes" : "no (defaults)",
-          data_dir: c.data_dir,
-          state_dir: c.state_dir,
-          morning_hour: c.morning_hour,
-          backlog: c.tasks.backlog,
-          todos: c.tasks.todos,
-          tools: Object.keys(c.tools).length > 0 ? c.tools : "none recorded (flowryn init)",
-        }),
-      );
+      const requested = stringArg(args, "section");
+      const section = requested === undefined ? null : checkSection(requested);
+      const file = fileState(flowrynHome(io.env));
+      const data = configReport(file, await daemonState(io), io.env, section);
+      const hints = file.error ? ["fix config.toml", "flowryn doctor"] : [];
+      return print(io, okReply(data, hints));
     } catch (error) {
       return print(io, errorReply(toErrorBody(error)));
     }

@@ -3,7 +3,7 @@ import { join, sep } from "node:path";
 import { configProblems, defaultConfig, loadConfig, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { configPath, flowrynHome, runDir, toAbsolute } from "../config/paths.ts";
 import { renderConfig } from "../config/toml.ts";
-import { workerConfigProblems } from "../config/workers.ts";
+import { configSectionProblems } from "../config/effective.ts";
 import { DEFAULT_POLICY_MODE, POLICY_MODE_LINES, POLICY_MODES, type PolicyMode } from "../config/policy.ts";
 import { canCreateOrWrite, ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI } from "../version.ts";
@@ -263,7 +263,7 @@ export async function runInit(deps: InitDeps): Promise<number> {
     extra,
   };
   for (const problem of configProblems(config)) io.print(`${problem.level}: ${problem.message}`);
-  const sectionProblems = workerConfigProblems(config);
+  const sectionProblems = configSectionProblems(config, deps.env);
   for (const problem of sectionProblems) io.print(`error: ${problem}`);
   if (configProblems(config).some((p) => p.level === "error") || sectionProblems.length > 0) {
     io.print("nothing was written");
