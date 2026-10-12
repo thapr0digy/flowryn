@@ -30,6 +30,8 @@ interface FakePane {
   starts: number;
   /** Text pane.send_text typed into the composer, not yet submitted with Enter. */
   typed: string;
+  /** pane.process_info reads still to answer with the handoff reply (see `handoffReads`). */
+  handoff: number;
 }
 
 interface FakeWorkspace {
@@ -66,6 +68,12 @@ export class FakeHerdr {
    * a function giving the raw first line (a malformed peer).
    */
   subscribeReply: "answer" | "silent" | ((id: unknown) => string) = "answer";
+  /**
+   * How many pane.process_info reads after each agent.start answer Herdr
+   * 0.7.5's shell-to-job handoff reply, `{pane_id, shell_pid}` with no
+   * foreground group or process list (M0 h02), before the pane is read as usual.
+   */
+  handoffReads = 0;
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
@@ -253,7 +261,7 @@ export class FakeHerdr {
   }
 
   private addPane(ws: FakeWorkspace, cwd: string, env: Record<string, string>): FakePane {
-    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "" };
+    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "", handoff: 0 };
     this.panes.set(pane.paneId, pane);
     ws.panes.push(pane.paneId);
     return pane;
@@ -308,12 +316,17 @@ export class FakeHerdr {
         const args = (params.args as string[]) ?? [];
         // oxlint-disable-next-line no-control-regex -- Herdr refuses control characters in agent arguments
         if (args.some((a) => /[\u0000-\u001f]/.test(a))) throw Object.assign(new Error("agent arguments cannot be encoded safely"), { code: "invalid_agent_argument" });
+        pane.handoff = this.handoffReads;
         if (this.holdStarts) this.heldStarts.push({ pane, kind: String(params.kind), args });
         else this.startHarness(pane, String(params.kind), args);
         return { type: "agent_started", agent: { pane_id: pane.paneId, launch_pending: true } };
       }
       case "pane.process_info": {
         const pane = this.need(params.pane_id);
+        if (pane.handoff > 0) {
+          pane.handoff--;
+          return { type: "pane_process_info", process_info: { pane_id: pane.paneId, shell_pid: process.pid } };
+        }
         const pid = this.harnessPid(pane.paneId);
         const shell = { pid: process.pid, name: "zsh", argv0: "-zsh", argv: ["-zsh"], cmdline: "-zsh", cwd: pane.cwd };
         const harness = pid === null ? null : { pid, name: pane.kind, argv0: pane.kind, argv: [pane.kind, ...pane.args], cmdline: pane.kind, cwd: pane.cwd };

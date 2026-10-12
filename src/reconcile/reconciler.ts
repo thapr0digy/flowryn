@@ -260,6 +260,12 @@ export class Reconciler {
       return outcome;
     }
 
+    if (alive && panes && !inPane && panes.foregroundGroup === null) {
+      // Herdr's shell-to-job handoff reply (M0 h02) names no job: not evidence the process left the pane. Read again next pass.
+      this.setLive(run, "unknown", { reason: "Herdr: the pane has no foreground group yet" });
+      return "unknown";
+    }
+
     if (alive) {
       // The recorded process lives but not where the run says: never adopt it (design section 6).
       const summary = `run ${run.id}'s process ${identity!.pid} is alive but ${!panes ? `its pane ${run.pane_id ?? "(none)"} is gone` : !inPane ? `not in pane ${run.pane_id}` : `not in worktree ${run.worktree_path}`}`;
