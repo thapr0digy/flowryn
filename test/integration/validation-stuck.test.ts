@@ -135,4 +135,43 @@ describe("a validation slot held with no progress", () => {
     },
     T,
   );
+
+  test(
+    "a quiet CI wait: the stall's P1 closes once the CI-wait question asks about it, stays closed, and a later non-CI stall opens a new one",
+    async () => {
+      ship = await makeShipEnv({ mode: "no-mistakes" });
+      const e = ship;
+      const f = e.fleet;
+      e.github.repo("acme/web").defaultChecks = [];
+      const steps = ["Waits on CI quietly", "FAKE: commit b.txt b", "FAKE: verb stage begin ship", "FAKE: push", `FAKE: pr ${e.github.apiUrl} acme/web`, "FAKE: wait-file go", "FAKE: deliver-pr", "FAKE: sleep 600000"].join("\n");
+      const { run } = await f.dispatch(steps, { kind: "ship" });
+      await waitUntil(() => e.github.repo("acme/web").prs.length === 1, 30_000, "the PR");
+      const branch = f.run(run).branch;
+      const pr = `pr: "${e.github.prUrl("acme/web", 1)}"`;
+      const ciWait = (activeFor: string, quiet: string): string => nmStatus(branch, [`ci,running,${activeFor},"${quiet} ago: log: waiting for checks to register","",starting`]).replace('pr: ""', pr);
+
+      // Quiet past validation_stuck_ms (30 min) but under ci_wait_alert (60 min): only the stall's P1.
+      writeFileSync(join(f.h.home, "nm-status"), ciWait("40m", "35m"));
+      await waitUntil(() => stuckItems(f, run).length === 1, 15_000, "the validation_stuck item");
+      expect(rows(f, "SELECT id FROM decisions WHERE origin = 'ci-wait' AND run_id = ?1", run)).toEqual([]);
+
+      // Past the alert: the CI-wait question opens and the stall's P1 closes in its name.
+      writeFileSync(join(f.h.home, "nm-status"), ciWait("1h30m", "1h25m"));
+      await waitUntil(() => rows(f, "SELECT id FROM decisions WHERE origin = 'ci-wait' AND run_id = ?1", run).length === 1, 30_000, "the CI-wait question");
+      const [q] = rows<{ id: string }>(f, "SELECT id FROM decisions WHERE origin = 'ci-wait' AND run_id = ?1", run);
+      const [closed] = stuckItems(f, run);
+      expect(closed).toMatchObject({ state: "resolved", resolved_by: `covered by the CI-wait question ${q!.id}` });
+
+      // Later reads of the same wait open nothing.
+      await waitUntil(() => rows(f, "SELECT 1 FROM run_evidence WHERE run_id = ?1 AND source = 'nomistakes' AND observed_at > (SELECT created_at FROM decisions WHERE id = ?2)", run, q!.id).length === 1, 15_000, "another status read");
+      expect(stuckItems(f, run)).toHaveLength(1);
+
+      // The pipeline moves past CI and stalls elsewhere: a new P1.
+      writeFileSync(join(f.h.home, "nm-status"), nmStatus(branch, ['review,running,50m,"45m ago: agent: thinking",81234,1']).replace('pr: ""', pr));
+      await waitUntil(() => stuckItems(f, run).length === 2, 15_000, "a second validation_stuck item");
+      expect(stuckItems(f, run).map((i) => i.state)).toEqual(["resolved", "open"]);
+      expect(f.events(run).filter((k) => k.startsWith("run.validation_"))).toEqual(["run.validation_stuck", "run.validation_covered", "run.validation_stuck"]);
+    },
+    T,
+  );
 });

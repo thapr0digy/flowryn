@@ -11,7 +11,7 @@ import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
-import { applyNmObservation, applyPrObservation, noteNmOutage } from "../reconcile/delivery.ts";
+import { applyNmObservation, applyPrObservation, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
 /**
@@ -292,7 +292,9 @@ export class DeliveryWatcher {
       const current = getRunWithPolicy(db, run.id);
       if (!current || (current.state !== "validating" && current.state !== "running")) return null;
       if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return null;
-      return openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: project.default_branch }, facts, alert, now());
+      const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: project.default_branch }, facts, alert, now());
+      yieldToCiWait(db, current, nm, now());
+      return id;
     });
     if (opened) this.deps.log(`delivery watcher: ${run.task_id} waited ${minutes} min on CI with no checks; asked the user (${opened})`);
   }
