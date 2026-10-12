@@ -49,11 +49,12 @@ function real(path: string): string {
 
 export type GitRun = (args: string[], cwd: string) => { code: number; out: string };
 
-/** Remove exactly these worktrees and branches from `checkout`, and nothing else. */
-export function removeOwnWorktrees(checkout: string, created: CreatedWorktree[], prefix: string, worktreeRoot: string, git: GitRun, log: (line: string) => void): void {
+/** Remove exactly these worktrees and branches from `checkout`, and nothing else; returns what could not be removed. */
+export function removeOwnWorktrees(checkout: string, created: CreatedWorktree[], prefix: string, worktreeRoot: string, git: GitRun, log: (line: string) => void): string[] {
   if (!/^flowryn\/contract-[0-9a-f]{8}-$/.test(prefix)) throw new Error(`refusing to clean up with branch prefix ${prefix}`);
   const root = real(worktreeRoot);
   const registered = git(["worktree", "list", "--porcelain"], checkout).out;
+  const failed: string[] = [];
   for (const { branch, worktree } of created) {
     if (!branch.startsWith(prefix) || branch.length === prefix.length) {
       log(`left ${branch} alone: not a branch this run owns`);
@@ -70,10 +71,13 @@ export function removeOwnWorktrees(checkout: string, created: CreatedWorktree[],
     if (onBranch) {
       const removed = git(["worktree", "remove", "--force", path], checkout);
       log(removed.code === 0 ? `removed worktree ${path}` : `could not remove worktree ${path}`);
+      if (removed.code !== 0) failed.push(`worktree ${path} not removed`);
     }
     if (git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], checkout).code === 0) {
       const deleted = git(["branch", "-D", branch], checkout);
       log(deleted.code === 0 ? `deleted branch ${branch}` : `could not delete branch ${branch}`);
+      if (deleted.code !== 0) failed.push(`branch ${branch} not deleted`);
     }
   }
+  return failed;
 }

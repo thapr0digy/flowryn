@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,8 @@ import {
 import { quotaHolds } from "../sched/quota.ts";
 import { usageGate } from "../sched/usage.ts";
 import { autoRecordLine, reportProblem } from "./grant.ts";
+import { MANIFEST_ENV, readManifest, recoverOwned, type CleanupOutcome } from "./owned.ts";
+import { CONTRACT_CLEANUP_BUDGET_MS, git, removeScratchHome } from "./runner.ts";
 import { recordPass } from "./verbs.ts";
 
 /**
@@ -51,14 +54,30 @@ import { recordPass } from "./verbs.ts";
  *   may already be newer. It runs `doctor --contracts --for-daemon`, writes a
  *   recording report and records nothing; the daemon checks the report
  *   (passing, recording, its own build) and records it here.
+ * - One owner, one budget (docs/notes/2026-10-12-next-steps-md-e7.md): the
+ *   checker owns the child, which runs in its own process group and keeps an
+ *   ownership manifest of what it creates. Past its deadline the child gets
+ *   SIGTERM and the runner's whole cleanup budget before its group is killed;
+ *   a child that ended without cleaning up (killed, or its cleanup failed)
+ *   has its manifest's resources released by the checker. Whether the suite
+ *   passed and whether everything was released are recorded apart.
  */
 
-/** A check that has not finished after this long is killed and counts as failed; each step has its own, shorter timeout. */
+/** A check that has not finished after this long is stopped and counts as failed; each step has its own, shorter timeout. */
 export const AUTO_MAX_RUN_MS = 2 * 60 * 60_000;
 /** How often the checker looks again. */
 export const AUTO_POLL_MS = 5_000;
-/** How long a stopping daemon waits for the child to clean up after SIGTERM. */
-const STOP_GRACE_MS = 10_000;
+/** After SIGTERM at the deadline: the runner's whole cleanup budget, and a margin, before its group is killed. */
+export const AUTO_STOP_GRACE_MS = CONTRACT_CLEANUP_BUDGET_MS + 10_000;
+/** After SIGKILL: how long the checker waits for the child to be reaped before it releases the manifest's resources anyway. */
+const KILL_WAIT_MS = 5_000;
+/**
+ * How long a stopping daemon waits for the child after SIGTERM: inside
+ * launchd's 20 s exit timeout. A child still cleaning up is left to finish
+ * (its own group outlives the daemon, and its cleanup bounds itself); the
+ * next start releases whatever it left.
+ */
+const DAEMON_STOP_WAIT_MS = 10_000;
 
 export interface AutoJob {
   harness: HarnessId;
@@ -67,8 +86,9 @@ export interface AutoJob {
   binary: string;
   /** Where the child's stderr goes. */
   logPath: string;
+  /** Where the child keeps its ownership manifest (src/contracts/owned.ts). */
+  manifest: string;
   env: NodeJS.ProcessEnv;
-  timeoutMs: number;
 }
 
 export interface AutoOutcome {
@@ -79,32 +99,54 @@ export interface AutoOutcome {
 
 export interface AutoProcess {
   done: Promise<AutoOutcome>;
-  /** SIGTERM, so the runner cleans up its scratch home and Herdr workspace. */
+  /** SIGTERM to the runner, so it cleans up its scratch home, daemon and Herdr workspace. */
   terminate(): void;
+  /** SIGKILL to the runner's whole process group (its scratch daemon too), never the Flowryn daemon's. */
   kill(): void;
 }
 
 export type AutoRunner = (job: AutoJob) => AutoProcess;
 
-/** The default runner: the pinned binary's `doctor --contracts --for-daemon`, stderr to the log. */
+/** Signal a pid (or, negative, a process group) that may be gone already. */
+function signal(target: number | undefined, sig: NodeJS.Signals): void {
+  if (target === undefined) return;
+  try {
+    process.kill(target, sig);
+  } catch {
+    // gone already
+  }
+}
+
+/**
+ * The default runner: the pinned binary's `doctor --contracts --for-daemon`
+ * in a process group of its own (detached), stdout piped, stderr to the log,
+ * with the manifest path in its environment.
+ */
 export function spawnAutoCheck(job: AutoJob): AutoProcess {
   const fd = openSync(job.logPath, "a", 0o600);
-  let proc;
+  let child;
   try {
-    proc = Bun.spawn([job.binary, "doctor", "--contracts", "--for-daemon", "--harness", job.harness, "--json"], { env: job.env, stdin: "ignore", stdout: "pipe", stderr: fd });
+    child = spawn(job.binary, ["doctor", "--contracts", "--for-daemon", "--harness", job.harness, "--json"], {
+      env: { ...job.env, [MANIFEST_ENV]: job.manifest },
+      stdio: ["ignore", "pipe", fd],
+      detached: true,
+    });
   } finally {
     closeSync(fd);
   }
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill("SIGKILL");
-  }, job.timeoutMs);
-  const done = Promise.all([new Response(proc.stdout).text(), proc.exited]).then(([stdout, exitCode]) => {
-    clearTimeout(timer);
-    return { exitCode, stdout, timedOut };
+  const chunks: Buffer[] = [];
+  child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const done = new Promise<AutoOutcome>((resolve) => {
+    let exited = false;
+    const settle = (exitCode: number | null) => {
+      if (exited) return;
+      exited = true;
+      resolve({ exitCode, stdout: Buffer.concat(chunks).toString("utf8"), timedOut: false });
+    };
+    child.once("error", () => settle(null));
+    child.once("close", (code) => settle(code));
   });
-  return { done, terminate: () => proc.kill("SIGTERM"), kill: () => proc.kill("SIGKILL") };
+  return { done, terminate: () => signal(child.pid, "SIGTERM"), kill: () => signal(child.pid === undefined ? undefined : -child.pid, "SIGKILL") };
 }
 
 export interface AutoCheckDeps {
@@ -122,8 +164,14 @@ export interface AutoCheckDeps {
   /** After a record: launches and resumes that waited for this version can go. */
   afterPass(): void;
   run?: AutoRunner;
+  /** Release what a run's manifest names (recoverOwned by default). */
+  recover?: (manifest: string) => Promise<CleanupOutcome>;
   pollMs?: number;
   maxRunMs?: number;
+  /** After SIGTERM at the deadline, before SIGKILL (AUTO_STOP_GRACE_MS). */
+  stopGraceMs?: number;
+  /** After SIGTERM on a daemon stop, before the child is left to finish its own cleanup. */
+  daemonStopWaitMs?: number;
 }
 
 interface Current {
@@ -174,6 +222,20 @@ export function homeShort(path: string, home: string): string {
   return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
 }
 
+/**
+ * The P1 for a check that left something behind: what, and the manifest that
+ * names it. The full list stays in the contract.auto_cleanup_failed event.
+ */
+export function autoLeftoverLine(harness: HarnessId, version: string, problems: string[], manifest: string, home: string): string {
+  return `${harness} ${version}'s automatic contract check left resources behind (${problems.join("; ")}); manifest ${homeShort(manifest, home)}`;
+}
+
+/** An attempt's cleanup fields, apart from its result. */
+function cleanupFields(cleanup: CleanupOutcome | null): Pick<AutoAttempt, "cleanup" | "cleanup_detail"> {
+  if (!cleanup) return { cleanup: "none" };
+  return cleanup.ok ? { cleanup: "ok" } : { cleanup: "failed", cleanup_detail: cleanup.problems.join("; ") };
+}
+
 /** Is this attempt final for the version: passed or failed, or a pass strict left unrecorded while strict lasts? */
 function settled(attempt: AutoAttempt | null, version: string, relaxedNow: boolean): boolean {
   if (attempt?.version !== version) return false;
@@ -186,6 +248,8 @@ export class AutoContractChecker {
   private ticking = false;
   private current: Current | null = null;
   private stopping = false;
+  /** Checks a stopped daemon cut off, whose manifests are released before any new check starts. */
+  private interrupted: { harness: HarnessId; version: string; manifest: string }[] = [];
 
   constructor(deps: AutoCheckDeps) {
     this.deps = deps;
@@ -221,8 +285,10 @@ export class AutoContractChecker {
       for (const harness of HARNESS_IDS) {
         const attempt = autoAttempt(db, harness);
         if (attempt?.state !== "running") continue;
-        saveAutoAttempt(db, harness, { version: attempt.version, state: "waiting", wait: "a rerun (the daemon stopped mid-check)" });
-        appendEvent(db, { source: "daemon", kind: "contract.auto_interrupted", payload: { harness, version: attempt.version, started_at: attempt.started_at ?? null }, ts: now });
+        // The manifest stays on the attempt until its resources are settled, so a crash mid-release finds it again.
+        saveAutoAttempt(db, harness, { version: attempt.version, state: "waiting", wait: "a rerun (the daemon stopped mid-check)", ...(attempt.manifest ? { manifest: attempt.manifest } : {}) });
+        appendEvent(db, { source: "daemon", kind: "contract.auto_interrupted", payload: { harness, version: attempt.version, started_at: attempt.started_at ?? null, manifest: attempt.manifest ?? null }, ts: now });
+        if (attempt.manifest) this.interrupted.push({ harness, version: attempt.version, manifest: attempt.manifest });
       }
     });
   }
@@ -237,7 +303,12 @@ export class AutoContractChecker {
     void this.tick().catch((error: unknown) => this.deps.log(`contracts: automatic check pass failed: ${(error as Error).stack ?? String(error)}`));
   }
 
-  /** Stop looking, and end a running check: SIGTERM so it cleans up, SIGKILL after the grace. */
+  /**
+   * Stop looking, and end a running check: SIGTERM so it cleans up. A child
+   * still cleaning after the wait is left to finish (it bounds itself, in a
+   * process group of its own); its attempt stays `running`, so the next start
+   * releases what its manifest says it left.
+   */
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
@@ -245,8 +316,8 @@ export class AutoContractChecker {
     const proc = this.current?.process;
     if (!proc) return;
     proc.terminate();
-    const ended = await Promise.race([proc.done.then(() => true), Bun.sleep(STOP_GRACE_MS).then(() => false)]);
-    if (!ended) proc.kill();
+    const ended = await Promise.race([proc.done.then(() => true), Bun.sleep(this.deps.daemonStopWaitMs ?? DAEMON_STOP_WAIT_MS).then(() => false)]);
+    if (!ended) this.deps.log(`contracts: the automatic check of ${this.current?.harness} ${this.current?.version} is still cleaning up; the next start releases what it leaves`);
   }
 
   /** One pass: start at most one check. Resolves once a started check has finished and been recorded. */
@@ -254,6 +325,8 @@ export class AutoContractChecker {
     if (this.ticking || this.current || this.stopping) return;
     this.ticking = true;
     try {
+      await this.releaseInterrupted();
+      if (this.stopping) return;
       for (const harness of HARNESS_IDS) {
         const flagged = unverifiedVersion(this.deps.db, harness);
         if (!flagged) continue;
@@ -334,32 +407,116 @@ export class AutoContractChecker {
     const build = this.deps.info().build!;
     const dir = join(this.deps.config().data_dir, "contracts");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const logPath = join(dir, `auto-${harness}-${version}-${new Date(startedAt).toISOString().replace(/[:.]/g, "-")}.log`);
+    const stem = join(dir, `auto-${harness}-${version}-${new Date(startedAt).toISOString().replace(/[:.]/g, "-")}`);
+    const logPath = `${stem}.log`;
+    const manifest = `${stem}.owned.json`;
     this.current = { harness, version, startedAt, process: null };
     try {
       tx(db, () => {
-        saveAutoAttempt(db, harness, { version, state: "running", started_at: startedAt, build, log: logPath });
-        appendEvent(db, { source: "daemon", kind: "contract.auto_started", payload: { harness, version, build, log: logPath }, ts: startedAt });
+        saveAutoAttempt(db, harness, { version, state: "running", started_at: startedAt, build, log: logPath, manifest });
+        appendEvent(db, { source: "daemon", kind: "contract.auto_started", payload: { harness, version, build, log: logPath, manifest }, ts: startedAt });
       });
       log(`contracts: automatic check of ${harness} ${version} from build ${build}; log ${logPath}`);
-      const job: AutoJob = { harness, version, binary, logPath, env: smokeEnv(this.deps.env), timeoutMs: this.deps.maxRunMs ?? AUTO_MAX_RUN_MS };
+      const job: AutoJob = { harness, version, binary, logPath, manifest, env: smokeEnv(this.deps.env) };
       let outcome: AutoOutcome;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
       try {
-        this.current.process = (this.deps.run ?? spawnAutoCheck)(job);
-        outcome = await this.current.process.done;
+        const proc = (this.deps.run ?? spawnAutoCheck)(job);
+        this.current.process = proc;
+        // Past the deadline the check counts as failed however it then ends; a child that will not be reaped does not hold the checker.
+        let deadlinePassed = false;
+        const stopped = new Promise<AutoOutcome>((resolve) => {
+          deadline = setTimeout(() => {
+            deadlinePassed = true;
+            log(`contracts: the automatic check of ${harness} ${version} passed its deadline; stopping it`);
+            void this.escalate(proc).then(() => resolve({ exitCode: null, stdout: "", timedOut: true }));
+          }, this.deps.maxRunMs ?? AUTO_MAX_RUN_MS);
+        });
+        outcome = await Promise.race([proc.done, stopped]);
+        outcome = { ...outcome, timedOut: outcome.timedOut || deadlinePassed };
       } catch (error) {
         outcome = { exitCode: null, stdout: "", timedOut: false };
         log(`contracts: the automatic check of ${harness} ${version} could not run: ${(error as Error).message}`);
+      } finally {
+        clearTimeout(deadline);
       }
-      // A stopping daemon cut it off: the next start runs it again (init), so nothing is final here.
+      // A stopping daemon cut it off: the next start runs it again and releases what it left (init), so nothing is final here.
       if (this.stopping) return;
-      this.finish(harness, version, build, logPath, startedAt, outcome);
+      const cleanup = await this.settleCleanup(manifest);
+      this.finish(harness, version, build, logPath, startedAt, outcome, { manifest, ...cleanupFields(cleanup) });
+      this.recordCleanup(harness, version, manifest, cleanup);
     } finally {
       this.current = null;
     }
   }
 
-  private finish(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, outcome: AutoOutcome): void {
+  /** Past the deadline: SIGTERM, the runner's whole cleanup budget, then SIGKILL to its group and a short wait for it to be reaped. */
+  private async escalate(proc: AutoProcess): Promise<void> {
+    const ended = (ms: number) => Promise.race([proc.done.then(() => true), Bun.sleep(ms).then(() => false)]);
+    proc.terminate();
+    if (await ended(this.deps.stopGraceMs ?? AUTO_STOP_GRACE_MS)) return;
+    this.deps.log("contracts: the automatic check did not stop after SIGTERM and its cleanup budget; killing its process group");
+    proc.kill();
+    await ended(KILL_WAIT_MS);
+  }
+
+  /**
+   * Whether the run released what it created: the runner's own word when it
+   * recorded a clean cleanup; otherwise the checker releases the manifest's
+   * resources itself. Null when the run kept no manifest (it recorded
+   * nothing it owned).
+   */
+  private async settleCleanup(manifest: string): Promise<CleanupOutcome | null> {
+    const read = readManifest(manifest);
+    if (!read.owned && !read.problem) return null;
+    if (read.owned?.cleanup?.ok) return read.owned.cleanup;
+    const recover =
+      this.deps.recover ??
+      ((path: string) => recoverOwned(path, { git, log: this.deps.log, removeHome: (home) => removeScratchHome(home, this.deps.log), now: this.deps.now }));
+    try {
+      return await recover(manifest);
+    } catch (error) {
+      return { ok: false, problems: [`releasing ${manifest} failed: ${(error as Error).message}`], by: "daemon", at: this.deps.now() };
+    }
+  }
+
+  /** The cleanup's own record, apart from the check's result: an event, and one P1 when something was left. */
+  private recordCleanup(harness: HarnessId, version: string, manifest: string, cleanup: CleanupOutcome | null): void {
+    const { db, log } = this.deps;
+    const now = this.deps.now();
+    tx(db, () => {
+      if (!cleanup || cleanup.ok) {
+        appendEvent(db, {
+          source: "daemon",
+          kind: "contract.auto_cleanup",
+          payload: { harness, version, ok: cleanup ? true : null, by: cleanup?.by ?? null, manifest, detail: cleanup ? null : "no manifest: the run recorded nothing it owned" },
+          ts: now,
+        });
+        return;
+      }
+      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_cleanup_failed", payload: { harness, version, by: cleanup.by, problems: cleanup.problems, manifest }, ts: now });
+      openItem(db, { kind: "contract_leftover", eventSeq: event.seq, line: autoLeftoverLine(harness, version, cleanup.problems, manifest, homedir()), now });
+    });
+    if (cleanup && !cleanup.ok) log(`contracts: the automatic check of ${harness} ${version} left resources behind: ${cleanup.problems.join("; ")}; manifest ${manifest}`);
+  }
+
+  /** At the first pass after a start: release what checks a stopped daemon cut off left, before any new check starts. */
+  private async releaseInterrupted(): Promise<void> {
+    for (const cut of this.interrupted.splice(0)) {
+      const cleanup = await this.settleCleanup(cut.manifest);
+      const { db } = this.deps;
+      tx(db, () => {
+        const attempt = autoAttempt(db, cut.harness);
+        if (attempt?.version === cut.version && attempt.manifest === cut.manifest) {
+          const { manifest: _settled, ...rest } = attempt;
+          saveAutoAttempt(db, cut.harness, { ...rest, ...cleanupFields(cleanup) });
+        }
+      });
+      this.recordCleanup(cut.harness, cut.version, cut.manifest, cleanup);
+    }
+  }
+
+  private finish(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, outcome: AutoOutcome, extra: Partial<AutoAttempt>): void {
     const { db, log } = this.deps;
     const now = this.deps.now();
     const handed = parseHandoff(outcome.stdout);
@@ -371,14 +528,14 @@ export class AutoContractChecker {
         : reportProblem(this.deps.config().data_dir, handed.report, { harness, version: tested, build });
     const strict = !relaxed(this.deps.config());
     if (!problem && strict) {
-      this.leaveUnrecorded(harness, tested, build, logPath, startedAt, handed.report!);
+      this.leaveUnrecorded(harness, tested, build, logPath, startedAt, handed.report!, extra);
       return;
     }
     if (!problem) {
       tx(db, () => {
         const seq = recordPass(db, { harness, version: tested, report: handed.report, by: "daemon", build, session: null, source: "daemon" }, now);
         openItem(db, { kind: "contract_recorded", eventSeq: seq, line: `${autoRecordLine(harness, tested, build)}; report ${handed.report}`, now });
-        saveAutoAttempt(db, harness, { version: tested, state: "passed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath });
+        saveAutoAttempt(db, harness, { version: tested, state: "passed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, ...extra });
       });
       log(`contracts: ${harness} ${tested} passed its automatic check and is recorded; report ${handed.report}`);
       this.deps.afterPass();
@@ -389,7 +546,7 @@ export class AutoContractChecker {
     const where = handed.report ? `report ${handed.report}` : `log ${logPath}`;
     tx(db, () => {
       const event = appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, build, report: handed.report, log: logPath, detail: why }, ts: now });
-      saveAutoAttempt(db, harness, { version: tested, state: "failed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why });
+      saveAutoAttempt(db, harness, { version: tested, state: "failed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why, ...extra });
       resolveItems(db, "harness_unverified", harnessItemKey(harness), `automatic contract check of ${tested} failed`, now);
       openUnverifiedItem(db, harness, tested, event.seq, now, autoFailureLine(harness, tested, handed.report ?? logPath, homedir()));
     });
@@ -397,13 +554,13 @@ export class AutoContractChecker {
   }
 
   /** A pass that ended after a reload to strict: never recorded while strict; a P1 says so, and a reload to relaxed runs the check again. */
-  private leaveUnrecorded(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, report: string): void {
+  private leaveUnrecorded(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, report: string, extra: Partial<AutoAttempt>): void {
     const { db, log } = this.deps;
     const now = this.deps.now();
     const detail = "[policy] mode is strict now, so the daemon did not record its pass";
     tx(db, () => {
       const event = appendEvent(db, { source: "daemon", kind: "contract.auto_unrecorded", payload: { harness, version, build, report, log: logPath, detail }, ts: now });
-      saveAutoAttempt(db, harness, { version, state: "unrecorded", started_at: startedAt, ended_at: now, build, report, log: logPath, detail });
+      saveAutoAttempt(db, harness, { version, state: "unrecorded", started_at: startedAt, ended_at: now, build, report, log: logPath, detail, ...extra });
       resolveItems(db, "harness_unverified", harnessItemKey(harness), `automatic contract check of ${version} passed unrecorded`, now);
       openUnverifiedItem(db, harness, version, event.seq, now, autoUnrecordedLine(harness, version, report, homedir()));
     });

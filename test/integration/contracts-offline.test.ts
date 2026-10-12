@@ -102,10 +102,12 @@ describe("the harness contract suite against fakes", () => {
     test(`${harness}: every step passes and the version is recorded`, async () => {
       const before = new Set(scratchHomes());
       const { code, checks, screen } = await doctorContracts(harness, extra);
-      const steps = checks.filter((c) => c.check.startsWith(`contract ${harness} `));
+      const steps = checks.filter((c) => c.check.startsWith(`contract ${harness} `) && c.check !== `contract ${harness} cleanup`);
       const failed = checks.filter((c) => c.status !== "ok");
       expect(failed, `failed checks:\n${JSON.stringify(failed, null, 2)}\n${screen}`).toEqual([]);
       expect(steps.map((c) => c.check)).toEqual(contractSteps(harness).map((s) => `contract ${harness} ${s.name}`));
+      // Whether the run released what it created is its own check, beside the steps.
+      expect(checks.find((c) => c.check === `contract ${harness} cleanup`)).toMatchObject({ status: "ok", detail: "everything the run created is gone" });
       expect(checks.at(-1)).toMatchObject({ check: `contract ${harness}`, status: "ok" });
       expect(code).toBe(0);
       expect(recorded(harness).map((r) => r.version)).toEqual([FAKE_VERSION]);

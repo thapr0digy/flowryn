@@ -8,11 +8,13 @@
  * pinned build and records the pass itself, under strict it only opens the P1.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FAKE_VERSION, makeFleetEnv, setHarnessVersion, type FleetEnv } from "../helpers/fleet-env.ts";
 import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
+import { readManifest, type OwnedResources } from "../../src/contracts/owned.ts";
+import { isAlive } from "../../src/runtime/proc.ts";
 
 const NEW_VERSION = "9.9.10";
 let buildDir: string;
@@ -88,6 +90,50 @@ describe("the automatic contract check", () => {
     },
     180_000,
   );
+
+  for (const [signal, releasedBy] of [
+    ["SIGKILL", "daemon"],
+    ["SIGTERM", "runner"],
+  ] as const) {
+    test(
+      `assumption: a check stopped mid-suite by ${signal} leaves nothing: the ${releasedBy} releases exactly what the manifest names; the failure and the cleanup are recorded apart`,
+      async () => {
+        const env = await fleet("relaxed");
+        // A workspace that is not the contract run's: it must stay.
+        const unrelated = env.herdr.addPaneWithStatus(env.repo, "working");
+        setHarnessVersion(env.h, "claude", NEW_VERSION);
+        expect((await dispatchClaude(env)).error.code).toBe("contract_unverified");
+
+        // The suite's worker is up in the fake Herdr, and the manifest names the scratch daemon.
+        const contracts = join(env.h.dataDir, "contracts");
+        let owned: OwnedResources | null = null;
+        await waitUntil(
+          () => {
+            const file = existsSync(contracts) ? readdirSync(contracts).find((name) => name.endsWith(".owned.json")) : undefined;
+            owned = file ? readManifest(join(contracts, file)).owned : null;
+            return Boolean(owned?.runner && owned.daemon) && env.herdr.livePanes().length > 0;
+          },
+          90_000,
+          "the contract worker running",
+        );
+        const { runner, daemon, home } = owned!;
+        // SIGTERM: the runner cleans up itself. SIGKILL, as the deadline's escalation sends it: its whole group, the scratch daemon with it.
+        process.kill(signal === "SIGKILL" ? -runner!.pid : runner!.pid, signal);
+
+        await waitUntil(() => events(env, "contract.auto_cleanup").length + events(env, "contract.auto_cleanup_failed").length > 0, 60_000, "the cleanup recorded");
+        expect(events(env, "contract.auto_cleanup_failed")).toEqual([]);
+        expect(events(env, "contract.auto_cleanup")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, ok: true, by: releasedBy })]);
+        expect(events(env, "contract.auto_failed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION })]);
+        expect(versions(env)).toEqual([FAKE_VERSION]);
+        expect(items(env, "contract_leftover")).toEqual([]);
+        expect(env.herdr.livePanes()).toEqual([]);
+        expect(await isAlive(daemon!)).toBe(false);
+        expect(existsSync(home)).toBe(false);
+        expect(env.herdr.panes.has(unrelated)).toBe(true);
+      },
+      180_000,
+    );
+  }
 
   test(
     "strict: the same bump only opens the P1; nothing runs",

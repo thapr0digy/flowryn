@@ -19,6 +19,7 @@ import { LineReader } from "../line-reader.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 import { ping } from "./daemon.ts";
 import { runContract } from "../../contracts/runner.ts";
+import { MANIFEST_ENV, type CleanupOutcome } from "../../contracts/owned.ts";
 import { HARNESS_IDS, type HarnessId } from "../../harness/types.ts";
 import { resolveTool } from "../../config/config.ts";
 import { resolveHerdrSocket } from "../../runtime/herdr/socket.ts";
@@ -116,6 +117,8 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
         model: harness === "pi" ? null : model,
         piProfile: "scripted",
         keep: boolArg(args, "keep"),
+        // The daemon's automatic check names where the run keeps what it owns, so it can release what a killed run left.
+        manifest: mode === "for-daemon" ? (io.env[MANIFEST_ENV] ?? null) : null,
         log: (line) => io.stderr(`contract ${harness}: ${line}\n`),
       });
       const report = dataDirReport(config, result, stamp);
@@ -123,6 +126,7 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
       run.version = result.version;
       gatePassed = result.passed;
       for (const step of result.steps) checks.push({ check: `contract ${harness} ${step.step}`, status: step.ok ? "ok" : "fail", detail: `${step.detail} (${step.seconds}s)` });
+      checks.push(cleanupCheck(`contract ${harness} cleanup`, result.cleanup));
       if (!result.passed) {
         checks.push({ check: `contract ${harness}`, status: "fail", detail: `${result.version} did not pass; report ${report}${boolArg(args, "keep") ? `; scratch ${result.scratch}` : ""}` });
         continue;
@@ -148,6 +152,15 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
     if (real) checks.push(...(await realModelPass({ args, io, config, socket, model: real, gatePassed, stamp })));
   }
   return run;
+}
+
+/**
+ * Whether a contract run released what it created, as its own check: a
+ * warning when it did not, so it never changes whether the suite passed
+ * (docs/notes/2026-10-12-next-steps-md-e7.md).
+ */
+export function cleanupCheck(name: string, cleanup: CleanupOutcome): Check {
+  return cleanup.ok ? { check: name, status: "ok", detail: "everything the run created is gone" } : { check: name, status: "warn", detail: `left behind: ${cleanup.problems.join("; ")}` };
 }
 
 /**
@@ -194,6 +207,7 @@ async function realModelPass(input: {
     });
     const report = dataDirReport(config, result, { ...input.stamp, mode: "verify-only" }, { model });
     const checks: Check[] = result.steps.map((step) => ({ check: `${name} ${step.step}`, status: step.ok ? "info" : "warn", detail: `${step.detail} (${step.seconds}s)` }));
+    checks.push(cleanupCheck(`${name} cleanup`, result.cleanup));
     const stopped = result.steps.find((step) => !step.ok);
     const outcome = result.passed ? `passed ${result.steps.length}/${contractSteps("pi").length}` : `stopped at ${stopped?.step ?? "setup"}: ${stopped?.detail ?? "no step ran"}`;
     checks.push({ check: name, status: "info", detail: `${informational}: ${outcome}; report ${report}` });

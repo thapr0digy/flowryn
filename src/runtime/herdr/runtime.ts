@@ -259,9 +259,9 @@ export class HerdrRuntime {
     }
   }
 
-  async closeWorkspace(workspaceId: string): Promise<void> {
+  async closeWorkspace(workspaceId: string, timeoutMs?: number): Promise<void> {
     try {
-      await this.transport.call("workspace.close", { workspace_id: workspaceId });
+      await this.transport.call("workspace.close", { workspace_id: workspaceId }, timeoutMs);
     } catch (error) {
       if (!(error instanceof HerdrError && error.code === "workspace_not_found")) throw error;
     }

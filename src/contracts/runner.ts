@@ -16,10 +16,9 @@ import type { HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
-import { descendantCommands, isAlive, readProcessTable, terminate, type ProcIdentity } from "../runtime/proc.ts";
-import { HerdrClient } from "../runtime/herdr/client.ts";
-import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
-import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "./cleanup.ts";
+import { descendantCommands, isAlive, readIdentity, readProcessTable, terminate } from "../runtime/proc.ts";
+import { contractPrefix } from "./cleanup.ts";
+import { RELEASE_LIMITS, createdWorkspaces, harnessProcesses, releaseOwned, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
 import { piAgentDir, piAgentSource, realPiTable, scriptedPiTable, seedAgentDir, writeScriptedProvider, type PiProfile } from "./pi-profile.ts";
 import { pinDrift, pinHarness, type HarnessPin } from "./pin.ts";
 import { selfCommand } from "../service/launchd.ts";
@@ -44,6 +43,12 @@ export interface ContractOptions {
    */
   piProfile?: PiProfile;
   keep: boolean;
+  /**
+   * Where to keep the ownership manifest (src/contracts/owned.ts): the
+   * daemon's automatic check names one, so it can release what a killed run
+   * left. Null for a run in your terminal.
+   */
+  manifest?: string | null;
   log(line: string): void;
 }
 
@@ -60,6 +65,8 @@ export interface ContractResult {
   passed: boolean;
   steps: StepResult[];
   scratch: string;
+  /** Whether the run released everything it created: separate from `passed`, the suite's own result. */
+  cleanup: CleanupOutcome;
 }
 
 /**
@@ -75,6 +82,31 @@ const WAIT_POLL_MS = 100;
 /** How long the runner keeps removing its scratch home while something recreates part of it, and the quiet spell that proves it gone. */
 const REMOVE_DEADLINE_MS = 10_000;
 const REMOVE_QUIET_MS = 250;
+
+/** Cleanup's first steps: the cancel request (connect, reply), then the scratch daemon's SIGTERM grace and its SIGKILL wait. */
+const CANCEL_CONNECT_MS = 1_000;
+const CANCEL_REPLY_MS = 15_000;
+const DAEMON_TERM_MS = 15_000;
+const DAEMON_KILL_MS = 5_000;
+
+/**
+ * The most a contract run's cleanup takes: the sum of its bounded steps for
+ * the one run a suite dispatches (cancel, the scratch daemon, a workspace, a
+ * harness, the caller's worktrees, the scratch home). The runner holds itself
+ * to it after a signal, and the daemon's automatic check waits this long
+ * after SIGTERM before it kills the runner (src/contracts/auto.ts).
+ */
+export const CONTRACT_CLEANUP_BUDGET_MS =
+  CANCEL_CONNECT_MS +
+  CANCEL_REPLY_MS +
+  DAEMON_TERM_MS +
+  DAEMON_KILL_MS +
+  RELEASE_LIMITS.workspaceCloseMs +
+  RELEASE_LIMITS.processGraceMs +
+  RELEASE_LIMITS.processKillMs +
+  RELEASE_LIMITS.worktreesMs +
+  REMOVE_DEADLINE_MS +
+  2 * REMOVE_QUIET_MS;
 
 /**
  * FLOWRYN_CONTRACT_MAX_WAIT_MS caps every step's wait. The offline contract
@@ -96,7 +128,8 @@ function maxWaitMs(env: NodeJS.ProcessEnv): number {
 // You asked for this run: the quota floor does not hold it (the daemon's own auto check waits on it instead).
 const CONTRACT_CAPACITY = { worker: 1, host: { min_free_mem_gb: 1, max_load_per_core: 8 }, quota: { floor: 0 } };
 
-function git(args: string[], cwd: string): { code: number; out: string } {
+/** git as a contract run uses it on the caller's checkout (and the daemon, releasing what a killed run left there). */
+export function git(args: string[], cwd: string): { code: number; out: string } {
   const result = Bun.spawnSync(["git", ...args], {
     cwd,
     stdin: "ignore",
@@ -160,20 +193,29 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   const drift = () => pinDrift(pin, harnessVersion);
   const home = realpathSync(mkdtempSync(join(tmpdir(), "fwc-")));
   const { prefix } = contractPrefix();
-  writeFileSync(join(home, "config.toml"), scratchConfig(options, pin, home, prefix));
-  const scripted = options.harness === "pi" && options.piProfile !== "real";
-  const stateDir = join(home, "state");
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
+  // What this run owns, kept where its owner can read it if this process is killed (src/contracts/owned.ts).
+  let owned: OwnedResources = {
+    runner: null,
+    home,
+    herdr_socket: options.herdrSocket,
+    branch_prefix: prefix,
+    project: null,
+    daemon: null,
+    workspaces: [],
+    harnesses: [],
+    cleanup: null,
+  };
+  const note = (change: Partial<OwnedResources>) => {
+    owned = { ...owned, ...change };
+    if (!options.manifest) return;
+    try {
+      writeManifest(options.manifest, owned);
+    } catch (error) {
+      options.log(`could not write the ownership manifest ${options.manifest}: ${(error as Error).message}`);
+    }
+  };
+  note({});
   const leader = mintToken("leader");
-  const seed = openDb(stateFiles(stateDir).db);
-  migrate(seed);
-  tx(seed, () => {
-    seed.query("INSERT INTO leader_lease (id, session_id, harness, epoch, token_hash, claimed_at, heartbeat_at) VALUES (1, 'contract', ?1, 1, ?2, ?3, ?3)").run(options.harness, hashToken(leader), Date.now());
-    seed.query("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, 'scratch')").run(options.harness, version, Date.now());
-  });
-  seed.close();
-
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("FLOWRYN_")) env[k] = v;
   env.FLOWRYN_HOME = home;
@@ -181,46 +223,71 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   env.FLOWRYN_NOTIFY = "off";
   requireNotificationsOff(env, "the contract runner");
   const sock = socketPath(home, env);
-  const logFd = openSync(join(home, "daemon.log"), "a");
-  const daemon = Bun.spawn([...selfCommand(), "daemon", "run"], { env, stdin: "ignore", stdout: logFd, stderr: logFd });
-  closeSync(logFd);
 
-  const call = async (verb: string, args: Record<string, unknown>) => {
-    const reply = (await request(sock, { proto: PROTO, ulid: ulid(), verb, token: leader, args }, { connectMs: 1_000, replyMs: 60_000 })) as Reply;
+  const call = async (verb: string, args: Record<string, unknown>, replyMs = 60_000) => {
+    const reply = (await request(sock, { proto: PROTO, ulid: ulid(), verb, token: leader, args }, { connectMs: CANCEL_CONNECT_MS, replyMs })) as Reply;
     return { ok: reply.ok, data: (reply.data ?? {}) as Record<string, unknown>, error: reply.error as { code: string; message: string } | undefined };
   };
+  let daemon: ReturnType<typeof Bun.spawn> | null = null;
   let db: Db | null = null;
-  const steps: StepResult[] = [];
-  let project: string | null = null;
   let state: ContractState | null = null;
-  let cleaning: Promise<void> | null = null;
-  // Runs once, from the finally block or from a signal: nothing this run created outlives it.
+  let cleaning: Promise<CleanupOutcome> | null = null;
+  // Runs once, from the finally block or from a signal: nothing this run created outlives it, or it says what did.
   const cleanup = () =>
-    (cleaning ??= (async () => {
+    (cleaning ??= (async (): Promise<CleanupOutcome> => {
       db?.close();
       db = null;
-      const workspaces = createdWorkspaces(stateDir);
-      const harnesses = harnessProcesses(stateDir);
-      await teardown(call, state, daemon);
-      // A run that failed is not cancellable, so its workspace may still be open; close it by id.
-      const runtime = new HerdrRuntime(new HerdrClient(options.herdrSocket));
-      for (const ws of workspaces) await runtime.closeWorkspace(ws).catch(() => undefined);
-      // Nothing that writes into the scratch home may outlive it: a worker still exiting would spool its hooks there.
-      for (const proc of harnesses) {
-        const ended = await terminate(proc, { group: true });
-        if (!ended.ok) options.log(`harness pid ${proc.pid} did not exit (${ended.signal}, ${ended.evidence})`);
-      }
-      // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
-      if (options.project && project) removeOwnWorktrees(project, createdWorktrees(stateFiles(stateDir).db), prefix, join(home, "wt"), git, options.log);
-      if (!options.keep) await removeScratchHome(home, options.log);
+      note({ workspaces: createdWorkspaces(home), harnesses: harnessProcesses(home) });
+      const problems = await teardown(call, state, daemon);
+      // A run that failed is not cancellable, so its workspace may still be open; release everything by id.
+      problems.push(...(await releaseOwned(owned, { git, log: options.log, removeHome: (path) => (options.keep ? Promise.resolve(true) : removeScratchHome(path, options.log)) })));
+      const outcome: CleanupOutcome = { ok: problems.length === 0, problems, by: "runner", at: Date.now() };
+      for (const problem of problems) options.log(`cleanup: ${problem}`);
+      note({ cleanup: outcome });
+      return outcome;
     })());
+  // A signal (the daemon's automatic check stopping this run, or ^C) cleans up within the budget, then exits.
+  // A second signal while cleaning is ignored: dying half way would leave what the cleanup was releasing.
+  let signalled = false;
   const onSignal = (signal: NodeJS.Signals) => {
+    if (signalled) {
+      options.log(`${signal}: already cleaning up`);
+      return;
+    }
+    signalled = true;
     options.log(`${signal}: cleaning up before exit`);
-    void cleanup().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+    const overdue = Bun.sleep(CONTRACT_CLEANUP_BUDGET_MS).then(() => {
+      const outcome: CleanupOutcome = { ok: false, problems: [`cleanup did not finish within ${CONTRACT_CLEANUP_BUDGET_MS / 1000} s`], by: "runner", at: Date.now() };
+      note({ cleanup: outcome });
+      return outcome;
+    });
+    void Promise.race([cleanup(), overdue]).finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
   };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  const steps: StepResult[] = [];
+  let cleanupOutcome: CleanupOutcome;
   try {
+    note({ runner: await readIdentity(process.pid).catch(() => null) });
+    writeFileSync(join(home, "config.toml"), scratchConfig(options, pin, home, prefix));
+    const scripted = options.harness === "pi" && options.piProfile !== "real";
+    const stateDir = join(home, "state");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
+    const seed = openDb(stateFiles(stateDir).db);
+    migrate(seed);
+    tx(seed, () => {
+      seed.query("INSERT INTO leader_lease (id, session_id, harness, epoch, token_hash, claimed_at, heartbeat_at) VALUES (1, 'contract', ?1, 1, ?2, ?3, ?3)").run(options.harness, hashToken(leader), Date.now());
+      seed.query("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, 'scratch')").run(options.harness, version, Date.now());
+    });
+    seed.close();
+
+    const logFd = openSync(join(home, "daemon.log"), "a");
+    const scratchDaemon = Bun.spawn([...selfCommand(), "daemon", "run"], { env, stdin: "ignore", stdout: logFd, stderr: logFd });
+    daemon = scratchDaemon;
+    closeSync(logFd);
+    note({ daemon: await readIdentity(scratchDaemon.pid).catch(() => null) });
+
     if (scripted) options.log(`pi plays the offline scripted model (provider ${await writeScriptedProvider(home)})`);
     else if (options.harness === "pi") {
       const source = piAgentSource(options.config, process.env);
@@ -232,11 +299,12 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         await request(sock, { proto: PROTO, ulid: ulid(), verb: PING_VERB, args: {} }, { connectMs: 300, replyMs: 2_000 });
         break;
       } catch {
-        if (Date.now() > deadline || daemon.exitCode !== null) throw new Error(`the scratch daemon did not start; see ${join(home, "daemon.log")}`);
+        if (Date.now() > deadline || scratchDaemon.exitCode !== null) throw new Error(`the scratch daemon did not start; see ${join(home, "daemon.log")}`);
         await Bun.sleep(100);
       }
     }
-    project = options.project ? realpathSync(options.project) : scratchRepo(join(home, "repo"));
+    const project = options.project ? realpathSync(options.project) : scratchRepo(join(home, "repo"));
+    if (options.project) note({ project });
     const branch = git(["branch", "--show-current"], project).out;
     if (!branch) throw new Error(`${project} is on a detached HEAD; the contract run needs a branch to base its worktree on`);
     const added = await call("project add", { path: project, id: "contract", mode: "local-only", "default-branch": branch, harness: options.harness });
@@ -281,12 +349,12 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     };
     steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log, drift)));
   } finally {
-    await cleanup();
+    cleanupOutcome = await cleanup();
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
-  return { harness: options.harness, version, passed, steps, scratch: home };
+  return { harness: options.harness, version, passed, steps, scratch: home, cleanup: cleanupOutcome };
 }
 
 /**
@@ -347,34 +415,6 @@ export async function runContractSteps(
   return results;
 }
 
-function createdWorkspaces(stateDir: string): string[] {
-  const path = stateFiles(stateDir).db;
-  if (!existsSync(path)) return [];
-  const db = openDb(path, { readonly: true });
-  try {
-    return (db.query("SELECT workspace_id FROM runs WHERE workspace_id IS NOT NULL").all() as { workspace_id: string }[]).map((r) => r.workspace_id);
-  } finally {
-    db.close();
-  }
-}
-
-/** The harness processes the scratch daemon recorded, to make sure each is gone before the scratch home goes. */
-function harnessProcesses(stateDir: string): ProcIdentity[] {
-  const path = stateFiles(stateDir).db;
-  if (!existsSync(path)) return [];
-  const db = openDb(path, { readonly: true });
-  try {
-    const rows = db.query("SELECT proc_pid, proc_start, proc_exe FROM runs WHERE proc_pid IS NOT NULL AND proc_start IS NOT NULL AND proc_exe IS NOT NULL").all() as {
-      proc_pid: number;
-      proc_start: number;
-      proc_exe: string;
-    }[];
-    return rows.map((r) => ({ pid: r.proc_pid, start: r.proc_start, exe: r.proc_exe }));
-  } finally {
-    db.close();
-  }
-}
-
 /**
  * Remove the scratch home and see that it stays gone: a straggler that writes
  * into it as it goes (rmSync then fails ENOTEMPTY) or just after (a directory
@@ -404,19 +444,26 @@ export async function removeScratchHome(home: string, log: (line: string) => voi
   }
 }
 
-/** Stop the worker (cancel exits it and closes its workspace), then stop the scratch daemon and wait for it to exit. */
+/**
+ * Stop the worker (cancel exits it and closes its workspace), then stop the
+ * scratch daemon and wait for it to exit, each within its own bound. Returns
+ * what did not happen; the release that follows closes and ends by id anyway.
+ */
 async function teardown(
-  call: (verb: string, args: Record<string, unknown>) => Promise<{ ok: boolean }>,
+  call: (verb: string, args: Record<string, unknown>, replyMs?: number) => Promise<{ ok: boolean }>,
   state: ContractState | null,
-  daemon: { exitCode: number | null; kill(signal?: number | NodeJS.Signals): void; exited: Promise<number> },
-): Promise<void> {
-  if (state) await call("cancel", { target: state.task, reason: "contract run finished" }).catch(() => ({ ok: false }));
-  if (daemon.exitCode === null) {
+  daemon: { exitCode: number | null; kill(signal?: number | NodeJS.Signals): void; exited: Promise<number> } | null,
+): Promise<string[]> {
+  const problems: string[] = [];
+  if (state && daemon?.exitCode === null) await call("cancel", { target: state.task, reason: "contract run finished" }, CANCEL_REPLY_MS).catch(() => ({ ok: false }));
+  if (daemon && daemon.exitCode === null) {
     daemon.kill("SIGTERM");
-    await Promise.race([daemon.exited, Bun.sleep(15_000)]);
+    await Promise.race([daemon.exited, Bun.sleep(DAEMON_TERM_MS)]);
     if (daemon.exitCode === null) {
       daemon.kill("SIGKILL");
-      await Promise.race([daemon.exited, Bun.sleep(5_000)]);
+      await Promise.race([daemon.exited, Bun.sleep(DAEMON_KILL_MS)]);
+      if (daemon.exitCode === null) problems.push("the scratch daemon did not exit after SIGKILL");
     }
   }
+  return problems;
 }
