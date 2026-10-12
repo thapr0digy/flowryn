@@ -397,7 +397,14 @@ export async function recoverVerifications(deps: VerifyDeps): Promise<number> {
     try {
       if (await recoverOne(deps, end, id, leases)) recorded++;
     } catch (error) {
-      deps.log(`verify ${id}: recovery failed: ${(error as Error).message}`);
+      const message = (error as Error).message;
+      deps.log(`verify ${id}: recovery failed: ${message}`);
+      try {
+        const v = getVerification(deps.db, id);
+        if (v && v.state === "running" && tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail: `the daemon stopped mid-run; recovering it failed (${message})`, binary: null }, deps.now()))) recorded++;
+      } catch (recordError) {
+        deps.log(`verify ${id}: recording the failed recovery failed: ${(recordError as Error).message}`);
+      }
     }
   }
   return recorded;

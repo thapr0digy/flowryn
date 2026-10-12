@@ -387,7 +387,7 @@ describe("a verification job", () => {
     expect(liveCounts(f.db)).toEqual({});
   }, 20_000);
 
-  test("a job whose recovery throws is logged and the next job is still recovered", async () => {
+  test("a job whose recovery throws is logged and recorded as an error, keeps its slot for the next startup, and the next job is still recovered", async () => {
     const f = fixture();
     const broken = leftRunning(f, { pid: 999_998, start: 1_000, exe: "/bin/sh" });
     const fine = leftRunning(f, null);
@@ -396,12 +396,21 @@ describe("a verification job", () => {
     f.deps.terminate = async () => {
       throw new Error("ps failed");
     };
-    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(await recoverVerifications(f.deps)).toBe(2);
     expect(logs).toContain(`verify ${broken.id}: recovery failed: ps failed`);
-    expect(getVerification(f.db, broken.id)!.state).toBe("running");
+    expect(getVerification(f.db, broken.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run; recovering it failed (ps failed)" });
+    expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now())).toEqual([]);
+    expect(existsSync(broken.worktree_path)).toBe(true);
     expect(getVerification(f.db, fine.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
     expect(existsSync(fine.worktree_path)).toBe(false);
-    expect(liveCounts(f.db)).toEqual({ validation: 1 });
+    expect(liveJobLeases(f.db).map((l) => l.job_id)).toEqual([broken.id]);
+    f.deps.terminate = async () => ({ ok: true, evidence: "absent", signal: "none" });
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(liveCounts(f.db)).toEqual({});
+    expect(existsSync(broken.worktree_path)).toBe(false);
+    expect(events(f.db, "pool.released").filter((e) => e.job === broken.id)).toHaveLength(1);
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(events(f.db, "pool.released")).toHaveLength(2);
   });
 
   test("a step that will not exit keeps its slot and its worktree; the next startup ends it and frees the slot", async () => {
