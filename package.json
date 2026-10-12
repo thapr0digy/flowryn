@@ -1,6 +1,6 @@
 {
   "name": "flowryn",
-  "version": "0.22.1",
+  "version": "0.23.0",
   "private": true,
   "type": "module",
   "description": "Flowryn: one leader agent, a supervised crew, and nothing lost",

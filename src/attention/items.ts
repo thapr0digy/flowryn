@@ -48,6 +48,8 @@ export type ItemClass = "actionable" | "info";
  * a delivered ship sent back to merge main's policy change (informational);
  * policy_behind, a ship delivered again still behind a policy change it was
  * already told to merge (informational).
+ * review_channel: a review page's Lavish poll has failed for a while, so answers
+ * sent on the page are not reaching Flowryn (src/lavish/channel.ts).
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -56,6 +58,7 @@ export const LANE_TABLE = {
   pr_ready: { lane: "P1", class: "actionable" },
   gate_ready: { lane: "P1", class: "actionable" },
   pass_requested: { lane: "P1", class: "actionable" },
+  review_channel: { lane: "P1", class: "actionable" },
   report_ready: { lane: "P1", class: "actionable" },
   worker_question: { lane: "P1", class: "actionable" },
   review_feedback: { lane: "P1", class: "actionable" },

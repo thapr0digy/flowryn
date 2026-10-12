@@ -1,7 +1,7 @@
 # Review-channel health
 
-- Status: partial
-- Open: design only; the build follows
+- Status: done
+- Open: not run against a real failing Lavish (the fake lavish-axi and scripted ones only); the reasons and exits are lavish-axi 0.1.65's, read from its `dist/cli.mjs`
 - Config: `[review] channel_alert_ms`
 
 `docs/next_steps.md` package 3, the bounded second slice: say when a review page stops delivering answers. On 2026-10-11 Lavish answered 500 to every request; the daemon's polls failed and backed off in silence, and a worker waited on a review nobody could answer until the leader noticed.
@@ -57,3 +57,31 @@ Tests: `test/unit/db.test.ts` (migration 20 on a database in use), `test/unit/ga
 ### Out of scope
 
 The rest of package 3 (decision explanations, a timeline, a diagnostic export). A page file that disappeared. Presence probing of a running poll (the opener's WebSocket) as a second health signal: the poll's own exit is the evidence. Notifying the worker: its gate waits either way, and the leader holds the item.
+
+## What was built
+
+As designed. Choices the design left open:
+
+- **`STEADY_MS` is 15 s and not a setting.** It only has to be longer than a failing poll takes to exit (lavish-axi's connection retries take about 1.5 s); `PollerDeps.steadyMs` shortens it in tests.
+- **The item does not wake an away leader** (`AWAY_WAKE_KINDS` is unchanged): while you are away the leader asks in chat anyway, and the gate_ready item that does wake it is still open.
+- **The leader skill** (`src/bridges/skill.ts`) gains one sentence: a review_channel item means answers sent on the page are not arriving; tell the user, relay the fix, take answers in chat meanwhile; it resolves by itself and never passes the gate.
+- **A failed last poll** (the short one that only carries a reply for a gate no longer polled) is logged and its reply dropped, as before, and counts for nothing.
+- `test/unit/leader-repin.test.ts` pinned `LATEST_SCHEMA_VERSION` to 19; it now checks at least 19.
+
+## Configuration
+
+```toml
+[review]
+channel_alert_ms = 120000  # a review page's polls fail this long (and at least twice) before a review_channel item opens; 0 = at the second failure
+```
+
+A whole number of milliseconds, 0 or more; anything else is `config_invalid`.
+
+## Tests
+
+- `test/unit/gate-questions.test.ts` "review-channel health": the repro (a lavish-axi failing like Lavish's 500, driven pass by pass on an advancing clock: persisted on the gate, no item at two failures in a minute, one item at the third past two minutes), one item per episode, recovery by a delivered poll and by a poll that keeps running (written once; a restarted poller writes nothing more), the failure count and backoff across a restart, the item resolved when lavish-axi is gone, the run fails or the gate passes, nothing without lavish-axi, the reasons and hints, and the `show` segment.
+- `test/unit/db.test.ts`: migration 20 on a database in use. `test/unit/review-opener.test.ts`: the `[review]` key.
+- `test/integration/review-open.test.ts`: through the daemon, two queued `*.fail.out` polls open the item, `show` says `DOWN … ; item iN`, a delivered poll resolves it and `show` says `listening`; the browser state stays `opened` and the gate stays open with no approval.
+- `test/integration/gate-questions.test.ts`: the questions wait while the channel is down; the answer Lavish then delivers is recorded as any page answer is, and nothing passes.
+
+0.23.0. `PROTO` stays 6: no verb or envelope changed (`show`'s gate lines are strings and gain a segment).

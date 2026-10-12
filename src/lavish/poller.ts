@@ -5,6 +5,8 @@ import { tx } from "../db/db.ts";
 import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
 import { gatesToPoll, gatesWithWidget, openGateFeedback, readsAsPass, recordGateComment, recordGateNotes, recordLavishEnded, requestGatePass, widgetState, type PassRequest } from "../lifecycle/gate-questions.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
+import { DEFAULT_CHANNEL_ALERT_MS } from "../config/leader.ts";
+import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
 import { parsePollOutput, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
 
@@ -22,8 +24,11 @@ import { requirePageDir, writeWidget } from "./widget.ts";
  * the leader with the worker questions, and the poll starts again. A poll
  * Flowryn kills loses nothing: Lavish
  * keeps queued feedback until a poll delivers it. A poll that fails backs off
- * (2 s doubling to a minute); one that reports the user ended the session
- * stops for good. Once a gate's poll has started, the gate is offered to the
+ * (2 s doubling to a minute, counted from the failures kept on the gate); one
+ * that reports the user ended the session stops for good. Each failure, and a
+ * channel that turns healthy again, is kept on the gate, and a channel failing
+ * for `[review] channel_alert_ms` opens one review_channel item
+ * (src/lavish/channel.ts). Once a gate's poll has started, the gate is offered to the
  * opener (src/lavish/opener.ts), which opens the page in your browser.
  * Nothing here decides anything: patterns and the database.
  */
@@ -42,6 +47,10 @@ export interface PollerDeps {
   pidDir?: string;
   /** Opens a gate's page in your browser once its poll runs (src/lavish/opener.ts). */
   opener?: { offer(gate: string): void };
+  /** `[review] channel_alert_ms`: how long a gate's polls fail before its review_channel item opens. */
+  channelAlertMs?(): number;
+  /** How long a poll must keep running to count as listening (default STEADY_MS; tests shorten it). */
+  steadyMs?: number;
 }
 
 interface Running {
@@ -50,6 +59,8 @@ interface Running {
   stopped: boolean;
   /** A last, short poll that only carries the reply for a gate no longer polled. */
   final: boolean;
+  /** Marks the channel listening once the poll has kept running STEADY_MS. */
+  steady: ReturnType<typeof setTimeout> | null;
 }
 
 /** How long the last poll that carries a reply waits for anything else the user sends. */
@@ -73,10 +84,15 @@ function appendNotes(page: string, path: string, text: string): void {
 
 const BACKOFF_MIN_MS = 2_000;
 const BACKOFF_MAX_MS = 60_000;
+/**
+ * A poll still running this long after it started is listening: lavish-axi 0.1.65's poll exits
+ * within seconds on a server error, no server (3 retries 500 ms apart) or no session, and holds
+ * its request open while it waits for the user.
+ */
+export const STEADY_MS = 15_000;
 
 export class LavishPoller {
   private readonly running = new Map<string, Running>();
-  private readonly failures = new Map<string, number>();
   private readonly waitUntil = new Map<string, number>();
   private readonly widgets = new Set<string>();
   private readonly warned = new Set<string>();
@@ -149,6 +165,11 @@ export class LavishPoller {
     const wanted = new Map(gatesToPoll(this.deps.db).map((g) => [g.id, g.page_path]));
     for (const [gate, entry] of this.running) if (!wanted.has(gate) && !entry.final) this.halt(gate);
     const now = this.deps.now();
+    // A channel nobody polls any more is not degraded: its item resolves.
+    const polled = lavish ? new Set(wanted.keys()) : new Set<string>();
+    for (const gate of clearUnpolledChannels(this.deps.db, polled, (id) => (lavish ? notPolledWhy(this.deps.db, id) : "lavish-axi is not installed"), now)) {
+      this.deps.log(`lavish: gate ${gate}'s review_channel item resolved: its page is no longer polled`);
+    }
     let nextRetry: number | null = null;
     for (const [gate, page] of wanted) {
       if (this.running.has(gate)) continue;
@@ -203,20 +224,23 @@ export class LavishPoller {
     try {
       proc = Bun.spawn(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
     } catch (error) {
-      this.finished(gate, page, -1, "", `cannot run ${lavish}: ${(error as Error).message}`);
+      this.finished(gate, page, -1, "", `cannot run ${lavish}: ${(error as Error).message}`, final);
       return;
     }
-    const entry: Running = { page, proc, stopped: false, final };
+    const entry: Running = { page, proc, stopped: false, final, steady: null };
     this.running.set(gate, entry);
     this.keepPid(gate, proc.pid, page);
+    if (!final) entry.steady = setTimeout(() => this.listening(gate, entry), this.deps.steadyMs ?? STEADY_MS);
     void (async () => {
       try {
         const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
+        if (entry.steady) clearTimeout(entry.steady);
         this.dropPid(gate, proc.pid);
         if (this.running.get(gate) === entry) this.running.delete(gate);
         if (entry.stopped || this.closed) return;
-        this.finished(gate, page, code, stdout, stderr);
+        this.finished(gate, page, code, stdout, stderr, final);
       } catch (error) {
+        if (entry.steady) clearTimeout(entry.steady);
         if (this.running.get(gate) === entry) this.running.delete(gate);
         this.deps.log(`lavish: the poll of gate ${gate} could not be recorded: ${(error as Error).stack ?? String(error)}`);
       }
@@ -224,26 +248,45 @@ export class LavishPoller {
     })();
   }
 
+  /** The poll has kept running STEADY_MS: the channel listens (written only when that is news). */
+  private listening(gate: string, entry: Running): void {
+    entry.steady = null;
+    if (entry.stopped || this.closed || this.running.get(gate) !== entry) return;
+    try {
+      if (recordChannelOk(this.deps.db, gate, "listening", this.deps.now())) this.deps.log(`lavish: gate ${gate}'s poll is listening`);
+    } catch (error) {
+      this.deps.log(`lavish: cannot record gate ${gate}'s channel listening: ${(error as Error).message}`);
+    }
+  }
+
   private halt(gate: string): void {
     const entry = this.running.get(gate);
     if (!entry) return;
+    if (entry.steady) clearTimeout(entry.steady);
     entry.stopped = true;
     this.running.delete(gate);
     entry.proc.kill("SIGTERM");
   }
 
-  private finished(gate: string, page: string, code: number, stdout: string, stderr: string): void {
+  private finished(gate: string, page: string, code: number, stdout: string, stderr: string, final = false): void {
+    const now = this.deps.now();
     if (code !== 0) {
-      const failures = (this.failures.get(gate) ?? 0) + 1;
-      this.failures.set(gate, failures);
+      const why = pollFailureReason(code, stdout, stderr);
+      // The last short poll for a gate no longer polled says nothing about a channel nobody listens on.
+      if (final) {
+        this.deps.log(`lavish: the last poll of gate ${gate} failed (${why}); its reply is dropped`);
+        return;
+      }
+      const failures = channelFailures(this.deps.db, gate) + 1;
       const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** (failures - 1));
-      this.waitUntil.set(gate, this.deps.now() + delay);
-      const why = /NOT_FOUND/.test(stdout + stderr) ? "no Lavish session for the page (the worker opens it with lavish-axi)" : code < 0 ? stderr : `exit ${code}`;
+      this.waitUntil.set(gate, now + delay);
       this.deps.log(`lavish: the poll of gate ${gate} failed (${why}); again in ${delay / 1000} s`);
+      const item = recordChannelFailure(this.deps.db, gate, { reason: why, retryAt: now + delay, alertMs: this.deps.channelAlertMs?.() ?? DEFAULT_CHANNEL_ALERT_MS, now });
+      if (item) this.deps.log(`lavish: gate ${gate}'s review page is not delivering answers; item ${item} opened`);
       return;
     }
-    this.failures.delete(gate);
     this.waitUntil.delete(gate);
+    if (!final && recordChannelOk(this.deps.db, gate, "delivered", now)) this.deps.log(`lavish: gate ${gate}'s poll delivered`);
     const out = parsePollOutput(stdout);
     this.record(gate, page, out, stdout);
   }
@@ -351,4 +394,19 @@ export class LavishPoller {
       rmSync(file, { force: true });
     }
   }
+}
+
+/** Why a gate with a channel item is no longer polled, for its gate.channel_cleared event. */
+function notPolledWhy(db: Db, gateId: string): string {
+  const gate = db.query("SELECT g.state, g.lavish_ended, g.page_path, r.state AS run_state FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gateId) as {
+    state: string;
+    lavish_ended: number;
+    page_path: string | null;
+    run_state: string;
+  } | null;
+  if (!gate) return "the gate is gone";
+  if (gate.state !== "open") return `the gate closed (${gate.state})`;
+  if (["cleaned", "failed", "cancelled"].includes(gate.run_state)) return `the run ${gate.run_state}`;
+  if (gate.lavish_ended === 1) return "the user ended the Lavish session";
+  return "the gate is no longer polled";
 }

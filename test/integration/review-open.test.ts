@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
@@ -91,6 +91,40 @@ describe("review pages open in your browser", () => {
     expect(line).toContain("(open exited 1: Unable to find application named 'Google Chrome')");
     expect(line).toEndWith(`; open by hand: ${gate.review_url}`);
   });
+
+  test("a page whose polls fail opens one review_channel item and show says DOWN; a delivered poll resolves it; the browser state and the gate are untouched", async () => {
+    ship = await makeShipEnv({ mode: "local-only", extraConfig: "[review]\nchannel_alert_ms = 0\n" });
+    const e = ship;
+    const f = e.fleet;
+    // The test home's lavish-axi fails a poll per queued *.fail.out, printing it, the way Lavish's 500 did on 2026-10-11.
+    const queue = join(f.h.home, "lavish-queue");
+    mkdirSync(queue, { recursive: true });
+    for (const n of ["001", "002"]) writeFileSync(join(queue, `${n}.fail.out`), "error: Lavish Editor request failed: 500\ncode: SERVER_ERROR\n");
+    const { task, run, gate } = await handIn(e);
+
+    await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_channel' AND run_id = ?1 AND state = 'open'", run) !== null, 15_000, "the review_channel item");
+    const item = one<{ id: string; lane: string; line: string; full_line: string | null }>(f, "SELECT id, lane, line, full_line FROM items WHERE kind = 'review_channel' AND run_id = ?1", run)!;
+    expect(item.lane).toBe("P1");
+    expect(item.full_line ?? item.line).toStartWith("Review page not delivering answers: restart Lavish");
+    expect(item.full_line ?? item.line).toContain(`${task} (design gate ${gate.id}) since `);
+    expect(item.full_line ?? item.line).toContain("2 failed polls: error: Lavish Editor request failed: 500 (exit 1)");
+    const down = await gateLine(e, task, gate.id);
+    expect(down).toContain("; channel: DOWN since ");
+    expect(down).toContain(`2 failed polls (error: Lavish Editor request failed: 500 (exit 1)); next try `);
+    expect(down).toEndWith(`; item ${item.id}`);
+
+    // Lavish is healthy again: the next poll delivers, the item resolves and show says listening.
+    writeFileSync(join(queue, "003.out"), "session:\n  status: waiting\n");
+    await waitUntil(() => one<{ state: string }>(f, "SELECT state FROM items WHERE id = ?1", item.id)?.state === "resolved", 15_000, "the item resolved");
+    expect(one<{ resolved_by: string }>(f, "SELECT resolved_by FROM items WHERE id = ?1", item.id)).toEqual({ resolved_by: `gate.channel_ok ${gate.id}` });
+    const healthy = await gateLine(e, task, gate.id);
+    expect(healthy).toContain("; channel: listening since ");
+    expect(healthy).not.toContain("DOWN");
+    // Distinct from opening the browser, and recovery never passes the gate.
+    expect(one<Record<string, unknown>>(f, "SELECT state, approval_id, open_state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open", approval_id: null, open_state: "opened" });
+    expect(healthy).toContain("; browser: opened ");
+    expect(one<{ n: number }>(f, "SELECT COUNT(*) AS n FROM items WHERE kind = 'review_channel'")).toEqual({ n: 1 });
+  }, 60_000);
 
   test("[review] open_browser = false: the gate opens off, and nothing is handed to a browser", async () => {
     ship = await makeShipEnv({ mode: "local-only", extraConfig: "[review]\nopen_browser = false\n" });
