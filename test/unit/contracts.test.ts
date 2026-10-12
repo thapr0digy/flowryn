@@ -136,7 +136,9 @@ describe("contract progress", () => {
 
   test("the up-front plan names the harnesses, counts every step and estimates the time", () => {
     expect(contractEstimateSeconds("claude")).toBeGreaterThan(60);
-    expect(contractEstimateSeconds("pi")).toBeGreaterThan(contractEstimateSeconds("claude"));
+    // Pi's gate plays the scripted model, so only its real sleeps take time: quicker than Claude's live model.
+    expect(contractEstimateSeconds("pi")).toBeGreaterThan(60);
+    expect(contractEstimateSeconds("pi")).toBeLessThan(contractEstimateSeconds("claude"));
     const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
     expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 23 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");

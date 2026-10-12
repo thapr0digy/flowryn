@@ -168,7 +168,8 @@ const SETUP_SECONDS = 30;
 
 /**
  * A rough wall-clock estimate for one harness's suite, from the live runs'
- * step times (docs/m5-notes.md). A slow model or a busy machine runs longer;
+ * step times (docs/m5-notes.md; Pi's from its scripted gate,
+ * docs/notes/2026-10-11-make-the-pi-rv.md). A slow model or a busy machine runs longer;
  * each step's own timeout is the real bound.
  */
 export function contractEstimateSeconds(harness: HarnessId): number {
@@ -316,7 +317,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "deliver while busy",
-      typicalSeconds: harness === "claude" ? 15 : 55,
+      typicalSeconds: harness === "claude" ? 15 : 30,
       async run(env, state) {
         // Sent once the sleep is running, so the expected delivery is the rest of that tool call.
         await waitToolStart(env, "the worker to start its first tool call", env.run().launched_at ?? 0, MID_MS);
@@ -352,7 +353,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "urgent while busy",
-      typicalSeconds: harness === "claude" ? 20 : 15,
+      typicalSeconds: harness === "claude" ? 20 : 5,
       async run(env, state) {
         // A long tool, then an urgent steer a second into it: the tool is cut at the threshold, never run to its end.
         const long = await sendSteer(env, state, "First acknowledge this steer. Then run exactly this command and wait for it: perl -e 'sleep 60'");
@@ -419,7 +420,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
     },
     {
       name: "deliver",
-      typicalSeconds: harness === "claude" ? 15 : 135,
+      typicalSeconds: harness === "claude" ? 15 : 2,
       async run(env, state) {
         let id: string | null = null;
         if (!(harness === "pi" && env.scripted)) {

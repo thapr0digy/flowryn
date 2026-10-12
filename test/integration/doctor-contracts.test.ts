@@ -139,7 +139,8 @@ describe("doctor --contracts from an agent pane", () => {
       expect(result.reply.error!.code).toBe("human_only");
       expect(suiteStarted(result.stderr)).toBe(false);
     }
-    for (const args of [["--for-daemon"], ["--contracts", "--for-daemon", "--verify-only", "--harness", "claude"]]) {
+    // The daemon's check runs the gate only; a real-model Pi pass is yours to ask for.
+    for (const args of [["--for-daemon"], ["--contracts", "--for-daemon", "--verify-only", "--harness", "claude"], ["--contracts", "--for-daemon", "--harness", "pi", "--model", "openrouter/qwen:free"]]) {
       const result = await doctor(e, args, {});
       expect(result.code).toBe(3);
       expect(result.reply.error!.code).toBe("bad_args");

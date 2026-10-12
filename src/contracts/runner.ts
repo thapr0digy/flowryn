@@ -264,19 +264,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         const value = JSON.parse(row.value) as { hook?: string; signal?: string; at?: number };
         return { hook: value.hook ?? null, signal: String(value.signal ?? ""), at: Number(value.at ?? 0) };
       },
-      async waitFor(what, timeoutMs, check, explain) {
-        const limitMs = Math.min(timeoutMs, maxWaitMs(process.env));
-        const until = Date.now() + limitMs;
-        for (;;) {
-          const value = await check();
-          if (value) return value;
-          // A harness updated mid-wait would be refused (contract_unverified) and the wait would only time out.
-          const drifted = await drift();
-          if (drifted) throw new Error(drifted);
-          if (Date.now() > until) throw new Error(`timed out after ${Math.round(limitMs / 1000)}s waiting for ${what}${explain ? ` (${explain()})` : ""}`);
-          await Bun.sleep(WAIT_POLL_MS);
-        }
-      },
+      waitFor: (what, timeoutMs, check, explain) => pollFor(what, Math.min(timeoutMs, maxWaitMs(process.env)), check, explain, drift),
       async exitWorker() {
         const r = contractEnv.run();
         if (r.proc_pid === null || r.proc_start === null || r.proc_exe === null) return { ok: false, detail: "no harness process recorded" };
@@ -299,6 +287,30 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
   return { harness: options.harness, version, passed, steps, scratch: home };
+}
+
+/**
+ * The contract env's `waitFor`: poll `check` every WAIT_POLL_MS until it
+ * returns a truthy value. A `check` that throws, or a harness that drifted
+ * (it would be refused, and the wait would only time out), fails it at once;
+ * after `limitMs` it fails naming `what`, plus what `explain` says.
+ */
+export async function pollFor<T>(
+  what: string,
+  limitMs: number,
+  check: () => T | null | undefined | false | Promise<T | null | undefined | false>,
+  explain: (() => string) | undefined,
+  drift: () => Promise<string | null>,
+): Promise<T> {
+  const until = Date.now() + limitMs;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    const drifted = await drift();
+    if (drifted) throw new Error(drifted);
+    if (Date.now() > until) throw new Error(`timed out after ${Math.round(limitMs / 1000)}s waiting for ${what}${explain ? ` (${explain()})` : ""}`);
+    await Bun.sleep(WAIT_POLL_MS);
+  }
 }
 
 /**
