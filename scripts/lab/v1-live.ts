@@ -31,6 +31,7 @@ import { parseArgs } from "node:util";
 import { hashToken, mintToken } from "../../src/api/auth.ts";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
@@ -239,7 +240,7 @@ async function harness(): Promise<void> {
   const proc = Bun.spawn(["script", "-q", "/dev/null", "bun", MAIN, ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   writeFileSync(join(home, "contract-pi.log"), `${err}\n${out}`);
-  const passed = query<{ version: string }>("SELECT version FROM harness_contracts WHERE harness = 'pi'");
+  const passed = query<{ version: string }>("SELECT version FROM harness_contracts WHERE harness = 'pi' AND revision = ?1", contractRevision("pi"));
   record("harness", "pi contract suite recorded", passed.length > 0, passed.length > 0 ? `pi ${passed[0]!.version} (doctor exit ${code})` : `nothing recorded; see ${home}/contract-pi.log`);
   const pi = items("harness_unverified").find((i) => i.task_id === "harness:pi");
   record("harness", "pi P1 settled by the passing run", pi?.state === "resolved", pi ? `${pi.id} ${pi.state}` : "none");
