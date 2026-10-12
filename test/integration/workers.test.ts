@@ -461,7 +461,7 @@ describe("Herdr focus", () => {
       const { run } = await env.dispatch("Scout\nFAKE: sleep 300\nFAKE: deliver summary.md done");
       const cleaned = await env.waitRun(run, (r) => r.state === "cleaned", "the second scout cleaned up", 30_000);
       await waitUntil(() => !env.herdr.workspaces.has(cleaned.workspace_id!), 5_000, "its workspace closed");
-      expect(env.herdr.focusedWorkspace).toBe(leader);
+      await waitUntil(() => env.herdr.focusedWorkspace === leader, 5_000, "focus restored to the leader");
       expect(env.herdr.calls.filter((c) => c.method === "workspace.focus").map((c) => c.params.workspace_id)).toEqual([leader]);
     },
     { timeout: 60_000 },
