@@ -284,7 +284,11 @@ export class AutoContractChecker {
       }
       for (const harness of HARNESS_IDS) {
         const attempt = autoAttempt(db, harness);
-        if (attempt?.state !== "running") continue;
+        if (!attempt) continue;
+        if (attempt.state !== "running") {
+          if (attempt.state === "waiting" && attempt.manifest) this.interrupted.push({ harness, version: attempt.version, manifest: attempt.manifest });
+          continue;
+        }
         // The manifest stays on the attempt until its resources are settled, so a crash mid-release finds it again.
         saveAutoAttempt(db, harness, { version: attempt.version, state: "waiting", wait: "a rerun (the daemon stopped mid-check)", ...(attempt.manifest ? { manifest: attempt.manifest } : {}) });
         appendEvent(db, { source: "daemon", kind: "contract.auto_interrupted", payload: { harness, version: attempt.version, started_at: attempt.started_at ?? null, manifest: attempt.manifest ?? null }, ts: now });

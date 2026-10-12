@@ -604,6 +604,41 @@ describe("one owner, one budget: the check's deadline and its cleanup", () => {
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
   });
 
+  test("a start that stops again before its release finishes leaves the manifest for the next start", async () => {
+    const auto = checker({ daemonStopWaitMs: 50 });
+    auto.init();
+    script = () => ({ hold: true, ignoreTerm: true, manifest: "unfinished" });
+    await gate("claude");
+    const running = auto.tick();
+    await Bun.sleep(20);
+    await auto.stop();
+    for (const h of held.splice(0)) h.resolve();
+    await running;
+    const manifest = jobs[0]!.manifest;
+
+    const cutOff = checker();
+    cutOff.init();
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", manifest });
+
+    const order: string[] = [];
+    script = () => {
+      order.push("check");
+      return {};
+    };
+    const next = checker({ onRecover: (path) => order.push(`release ${path}`) });
+    next.init();
+    expect(events("contract.auto_interrupted")).toHaveLength(1);
+    await next.tick();
+    expect(order).toEqual([`release ${manifest}`, "check"]);
+    expect(events("contract.auto_cleanup")[0]).toMatchObject({ manifest, ok: true, by: "daemon" });
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+
+    const after = checker({ onRecover: (path) => order.push(`release ${path}`) });
+    after.init();
+    await after.tick();
+    expect(order).toEqual([`release ${manifest}`, "check"]);
+  });
+
   test("an attempt from before manifests reruns with nothing released", async () => {
     tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "running", started_at: 1, build: BUILD, log: "/x.log" }));
     const next = checker();
