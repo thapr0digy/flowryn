@@ -237,8 +237,13 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     (cleaning ??= (async (): Promise<CleanupOutcome> => {
       db?.close();
       db = null;
-      note({ workspaces: createdWorkspaces(home), harnesses: harnessProcesses(home) });
-      const problems = await teardown(call, state, daemon);
+      const problems: string[] = [];
+      try {
+        note({ workspaces: createdWorkspaces(home), harnesses: harnessProcesses(home) });
+      } catch (error) {
+        problems.push(`the scratch database is unreadable, so its workspaces and harnesses are unknown: ${(error as Error).message}`);
+      }
+      problems.push(...(await teardown(call, state, daemon)));
       // A run that failed is not cancellable, so its workspace may still be open; release everything by id.
       problems.push(...(await releaseOwned(owned, { git, log: options.log, removeHome: (path) => (options.keep ? Promise.resolve(true) : removeScratchHome(path, options.log)) })));
       const outcome: CleanupOutcome = { ok: problems.length === 0, problems, by: "runner", at: Date.now() };
