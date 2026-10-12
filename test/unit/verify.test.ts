@@ -369,6 +369,41 @@ describe("a verification job", () => {
     expect(existsSync(marker)).toBe(false);
   }, 20_000);
 
+  test("startup recovery also ends a member of the step's group that ignores SIGTERM after its leader exits", async () => {
+    const f = fixture();
+    const pidFile = join(tempDir(), "member.pid");
+    const child = spawn("/bin/sh", ["-c", `(trap '' TERM; exec sleep 30) & echo $! > ${pidFile}; wait`], { detached: true, stdio: "ignore" });
+    child.unref();
+    let proc: ProcIdentity | null = null;
+    await waitFor(async () => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "" && (proc = await readIdentity(child.pid!)) !== null);
+    const member = await readIdentity(Number(readFileSync(pidFile, "utf8").trim()));
+    expect(member).not.toBeNull();
+    const v = leftRunning(f, proc);
+    f.deps.terminate = (p, options) => terminate(p, { ...options, graceMs: 1_000 });
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(await isAlive(proc!)).toBe(false);
+    await waitFor(async () => !(await isAlive(member!)));
+    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(liveCounts(f.db)).toEqual({});
+  }, 20_000);
+
+  test("a job whose recovery throws is logged and the next job is still recovered", async () => {
+    const f = fixture();
+    const broken = leftRunning(f, { pid: 999_998, start: 1_000, exe: "/bin/sh" });
+    const fine = leftRunning(f, null);
+    const logs: string[] = [];
+    f.deps.log = (message) => logs.push(message);
+    f.deps.terminate = async () => {
+      throw new Error("ps failed");
+    };
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(logs).toContain(`verify ${broken.id}: recovery failed: ps failed`);
+    expect(getVerification(f.db, broken.id)!.state).toBe("running");
+    expect(getVerification(f.db, fine.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
+    expect(existsSync(fine.worktree_path)).toBe(false);
+    expect(liveCounts(f.db)).toEqual({ validation: 1 });
+  });
+
   test("a step that will not exit keeps its slot and its worktree; the next startup ends it and frees the slot", async () => {
     const f = fixture();
     const v = leftRunning(f, { pid: 999_999, start: 1_000, exe: "/bin/sh" });

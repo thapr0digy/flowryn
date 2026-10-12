@@ -345,11 +345,46 @@ export function stopVerifications(): void {
   }
 }
 
+/** SIGKILL what is left of a group whose leader the recovery just ended (a member that ignored SIGTERM). */
+function killLeftovers(pgid: number): void {
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    // the group is gone already
+  }
+}
+
+/** Recover one job; true when a running row was recorded as an error. */
+async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["terminate"]>, id: string, leases: ReturnType<typeof liveJobLeases>): Promise<boolean> {
+  const v = getVerification(deps.db, id);
+  const lease = leases.find((l) => l.job_id === id) ?? null;
+  let stepGone = true;
+  if (lease && lease.proc_pid !== null && lease.proc_start !== null && lease.proc_exe !== null) {
+    const ended = await end({ pid: lease.proc_pid, start: lease.proc_start, exe: lease.proc_exe }, { group: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
+    stepGone = ended.ok;
+    if (ended.ok && ended.evidence === "process") killLeftovers(lease.proc_pid);
+    if (!ended.ok) deps.log(`verify ${id}: the step left by the last daemon (pid ${lease.proc_pid}) did not exit (${ended.evidence}); its slot stays held`);
+  }
+  let recorded = false;
+  if (v && v.state === "running") {
+    const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step (pid ${lease?.proc_pid}) did not exit`;
+    recorded = tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now()));
+  }
+  if (!stepGone) return recorded;
+  if (v) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
+  if (lease) {
+    const job = { kind: "verify" as const, id, taskId: lease.task_id };
+    tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));
+  }
+  return recorded;
+}
+
 /**
  * Daemon startup: a verification still running, or a verify slot still held,
  * belongs to a daemon that is gone. Its recorded step is ended by identity
  * (its whole group; a reused pid is never signalled), a running row is
- * recorded as an error, its worktree removed, and then its slot released. A
+ * recorded as an error, its worktree removed, and then its slot released
+ * (a member of the group that outlived its leader is SIGKILLed first). A
  * step that will not exit keeps its slot (the next startup tries again): the
  * slot is not free while its work still runs. Returns the rows recorded as errors.
  */
@@ -359,23 +394,10 @@ export async function recoverVerifications(deps: VerifyDeps): Promise<number> {
   const ids = [...new Set([...runningVerifications(deps.db).map((v) => v.id), ...leases.map((l) => l.job_id)])].filter((id) => !active.has(id));
   let recorded = 0;
   for (const id of ids) {
-    const v = getVerification(deps.db, id);
-    const lease = leases.find((l) => l.job_id === id) ?? null;
-    let stepGone = true;
-    if (lease && lease.proc_pid !== null && lease.proc_start !== null && lease.proc_exe !== null) {
-      const ended = await end({ pid: lease.proc_pid, start: lease.proc_start, exe: lease.proc_exe }, { group: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
-      stepGone = ended.ok;
-      if (!ended.ok) deps.log(`verify ${id}: the step left by the last daemon (pid ${lease.proc_pid}) did not exit (${ended.evidence}); its slot stays held`);
-    }
-    if (v && v.state === "running") {
-      const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step (pid ${lease?.proc_pid}) did not exit`;
-      if (tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now()))) recorded++;
-    }
-    if (!stepGone) continue;
-    if (v) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
-    if (lease) {
-      const job = { kind: "verify" as const, id, taskId: lease.task_id };
-      tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));
+    try {
+      if (await recoverOne(deps, end, id, leases)) recorded++;
+    } catch (error) {
+      deps.log(`verify ${id}: recovery failed: ${(error as Error).message}`);
     }
   }
   return recorded;
