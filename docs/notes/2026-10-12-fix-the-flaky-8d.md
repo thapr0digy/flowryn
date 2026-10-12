@@ -6,9 +6,11 @@
 
 ### The demonstrated boundary
 
-`test/integration/harness-gate.test.ts` timed out waiting for "the P1 for
-9.9.10" (and, in the third case, "the P1 for 9.9.11"). On this Mac the file
-failed 5 of 6 runs. The kept test home of a failure shows why: the daemon log
+Two tests in `test/integration/harness-gate.test.ts` failed intermittently:
+"at startup an untested version in use opens one P1 ..." timed out waiting for
+"the P1 for 9.9.10", and "a worker that dies on an untested version ..." for
+"the P1 for 9.9.11". Both update the harness with `setHarnessVersion`. On this
+Mac the file failed 5 of 6 runs, each time in one or both of them. The kept test home of a failure shows why: the daemon log
 after the restart says
 
 ```
