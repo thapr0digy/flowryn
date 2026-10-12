@@ -13,7 +13,7 @@ import { DEFAULT_POLICY_MODE, policyMode } from "../../src/config/policy.ts";
 import { configSectionProblems } from "../../src/config/effective.ts";
 import { checkLeaderReport, recordGrant, type GrantInput } from "../../src/contracts/grant.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
-import { contractRevision, LEGACY_REVISION } from "../../src/contracts/revision.ts";
+import { BASELINE_REVISION, contractRevision } from "../../src/contracts/revision.ts";
 import { CONTRACT_VERBS } from "../../src/contracts/verbs.ts";
 import { inertRestart } from "../../src/daemon/restart.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
@@ -191,13 +191,13 @@ function recordedItems(): { line: string; class: string; lane: string }[] {
 }
 
 describe("contracts.record and contracts.may_record", () => {
-  test("your own terminal records as before: no build, no report check, no item; a report that proves no revision records a legacy pass", async () => {
+  test("your own terminal records as before: no build, no report check, no item; a report that names no revision records the baseline", async () => {
     useConfig("");
     const reply = await record(null, { report: "/anywhere.json" }, "tty");
-    expect(reply).toMatchObject({ ok: true, data: { recorded: true, by: "human", revision: LEGACY_REVISION, current: false, required_revision: CLAUDE_REVISION } });
+    expect(reply).toMatchObject({ ok: true, data: { recorded: true, by: "human", revision: BASELINE_REVISION, current: BASELINE_REVISION === CLAUDE_REVISION, required_revision: CLAUDE_REVISION } });
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
     expect(passedEvents()).toEqual([
-      { harness: "claude", version: "2.1.300", revision: LEGACY_REVISION, report: "/anywhere.json", by: "human", build: null, session: null, platform: null, herdr_version: null, launch_profile: null },
+      { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, report: "/anywhere.json", by: "human", build: null, session: null, platform: null, herdr_version: null, launch_profile: null },
     ]);
     expect(recordedItems()).toEqual([]);
     expect((await mayRecord(null, {}, "tty")).ok).toBe(true);
@@ -276,8 +276,7 @@ describe("contracts.record and contracts.may_record", () => {
       [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { passed: false }) }), "not a passing run"],
       [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { version: "2.1.299" }) }), "is for claude 2.1.299"],
       [() => ({ report: writeReport({ mode: "record", build: PR_BUILD }) }), `written by build ${PR_BUILD}`],
-      // The daemon's own build always proves its own revision; a report from before revisions, or claiming another, does not do.
-      [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { revision: undefined }) }), "proves contract revision 0 (before revisions), not this daemon's revision"],
+      // The daemon's own build always proves its own revision; a report claiming another does not do.
       [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { revision: CLAUDE_REVISION + 1 }) }), `proves contract revision ${CLAUDE_REVISION + 1}, not this daemon's revision ${CLAUDE_REVISION}`],
     ];
     for (const [args, why] of cases) {
@@ -311,24 +310,30 @@ describe("contract revision on a record", () => {
     ]);
   });
 
-  test("a report for another harness version proves no revision: your own terminal's record of it is legacy", async () => {
+  test("a report for another harness version names nothing for this one: your own terminal's record is at the baseline, with no context", async () => {
     useConfig("");
-    const report = writeReport({ mode: "record", build: INSTALLED }, { version: "2.1.299" });
-    expect((await record(null, { report }, "tty")).data).toMatchObject({ revision: LEGACY_REVISION, current: false });
-    expect(contractRows()).toEqual([expect.objectContaining({ revision: LEGACY_REVISION, platform: null, herdr_version: null, launch_profile: null })]);
+    const report = writeReport({ mode: "record", build: INSTALLED }, { version: "2.1.299", revision: CLAUDE_REVISION + 1 });
+    expect((await record(null, { report }, "tty")).data).toMatchObject({ revision: BASELINE_REVISION });
+    expect(contractRows()).toEqual([expect.objectContaining({ revision: BASELINE_REVISION, platform: null, herdr_version: null, launch_profile: null })]);
+  });
+
+  test("a report written before revisions is at the baseline: what every pass then proved", async () => {
+    useConfig("");
+    const report = writeReport({ mode: "record", build: INSTALLED }, { revision: undefined, context: undefined });
+    expect((await record(null, { report }, "tty")).data).toMatchObject({ revision: BASELINE_REVISION, current: BASELINE_REVISION === CLAUDE_REVISION });
   });
 
   test("a pass at another revision never overwrites the current one: each (harness, version, revision) is its own record", async () => {
     useConfig("");
     const current = writeReport({ mode: "record", build: INSTALLED });
     await record(null, { report: current }, "tty");
-    // An older flowryn in your terminal (one whose report has no revision) records the same version afterwards.
+    // A PR build with a bumped revision, run in your terminal, records the same version afterwards.
     await Bun.sleep(2);
-    const older = writeReport({ mode: "record", build: PR_BUILD }, { revision: undefined, context: undefined });
-    expect((await record(null, { report: older }, "tty")).data).toMatchObject({ revision: LEGACY_REVISION, current: false });
+    const other = writeReport({ mode: "record", build: PR_BUILD }, { revision: CLAUDE_REVISION + 1 });
+    expect((await record(null, { report: other }, "tty")).data).toMatchObject({ revision: CLAUDE_REVISION + 1, current: false });
     expect(contractRows().map((r) => [r.revision, r.report_path])).toEqual([
-      [LEGACY_REVISION, older],
       [CLAUDE_REVISION, current],
+      [CLAUDE_REVISION + 1, other],
     ]);
   });
 });
@@ -341,10 +346,10 @@ describe("contract revision: what each surface says", () => {
       status: "ok",
       detail: `2.1.300 passed 2026-10-12 at contract revision ${CLAUDE_REVISION}`,
     });
-    expect(contractCheck("claude", "2.1.300", [{ revision: LEGACY_REVISION, passed_at: day }])).toEqual({
+    expect(contractCheck("claude", "2.1.300", [{ revision: CLAUDE_REVISION + 1, passed_at: day }])).toEqual({
       check: "contract claude",
       status: "warn",
-      detail: `claude 2.1.300 passed only at contract revision 0 (before revisions), not revision ${CLAUDE_REVISION}, so dispatch refuses it: flowryn doctor --contracts --harness claude`,
+      detail: `claude 2.1.300 passed only at contract revision ${CLAUDE_REVISION + 1}, not revision ${CLAUDE_REVISION}, so dispatch refuses it: flowryn doctor --contracts --harness claude`,
     });
     expect(contractCheck("claude", "2.1.300", []).detail).toBe("no passing contract run for claude 2.1.300, so dispatch refuses it: flowryn doctor --contracts --harness claude");
   });

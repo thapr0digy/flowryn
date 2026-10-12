@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { contractRevision, LEGACY_REVISION } from "../../src/contracts/revision.ts";
+import { BASELINE_REVISION, contractRevision } from "../../src/contracts/revision.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
@@ -166,19 +166,20 @@ describe("the harness version gate", () => {
   );
 
   test(
-    "a pass from an older contract revision is stale: startup and dispatch name its revision, and a pass at the current revision lets dispatch through",
+    "a pass from another contract revision is stale: startup and dispatch name its revision, and a pass at the current revision lets dispatch through",
     async () => {
       const env = await fleet({ contracts: false });
       const revision = contractRevision("claude");
-      // A pass recorded before revisions (what migration 20 leaves of every old pass), by an older flowryn in your terminal.
-      expect(await recordContract(env, "claude", FAKE_VERSION, null)).toMatchObject({ revision: LEGACY_REVISION, current: false, required_revision: revision });
+      const other = revision + 1;
+      // A pass recorded from a build at another revision (a PR that bumped it, run in your terminal).
+      expect(await recordContract(env, "claude", FAKE_VERSION, other)).toMatchObject({ revision: other, current: false, required_revision: revision });
       await env.daemon.stop();
       await env.restartDaemon();
       await waitUntil(() => harnessItems(env).length === 1, 10_000, "the P1 for the stale pass");
-      const stale = `claude ${FAKE_VERSION} passed only at contract revision 0 (before revisions), not revision ${revision}`;
+      const stale = `claude ${FAKE_VERSION} passed only at contract revision ${other}, not revision ${revision}`;
       expect(harnessItems(env)[0]!.line).toStartWith(`${stale}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude`);
       expect(eventKinds(env, "harness.checked")).toEqual(expect.arrayContaining([expect.objectContaining({ harness: "claude", state: "unverified", version: FAKE_VERSION, revision })]));
-      expect(eventKinds(env, "harness.unverified")).toEqual([expect.objectContaining({ version: FAKE_VERSION, revision, stale: [LEGACY_REVISION] })]);
+      expect(eventKinds(env, "harness.unverified")).toEqual([expect.objectContaining({ version: FAKE_VERSION, revision, stale: [other] })]);
 
       const refused = await env.json(["dispatch", "web", "--kind", "scout", "--body-file", "-"], { stdin: "Scout it" });
       expect(refused.code).toBe(2);
@@ -192,5 +193,18 @@ describe("the harness version gate", () => {
       expect(dispatched.code).toBe(0);
     },
     { timeout: 60_000 },
+  );
+
+  test(
+    "a pass recorded before revisions is at the baseline: the upgrade refuses nothing",
+    async () => {
+      const env = await fleet({ contracts: false });
+      // A report from a flowryn before revisions names none: the baseline, which this build's revision is until a bump.
+      expect(await recordContract(env, "claude", FAKE_VERSION, null)).toMatchObject({ revision: BASELINE_REVISION, current: BASELINE_REVISION === contractRevision("claude") });
+      const dispatched = await env.json(["dispatch", "web", "--kind", "scout", "--body-file", "-"], { stdin: "Scout it" });
+      expect(dispatched.code).toBe(BASELINE_REVISION === contractRevision("claude") ? 0 : 2);
+      expect(harnessItems(env)).toHaveLength(BASELINE_REVISION === contractRevision("claude") ? 0 : 1);
+    },
+    { timeout: 30_000 },
   );
 });

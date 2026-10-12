@@ -65,9 +65,9 @@ import { recordPass } from "./verbs.ts";
  *   has its manifest's resources released by the checker. Whether the suite
  *   passed and whether everything was released are recorded apart.
  * - Per contract revision (docs/notes/2026-10-12-next-steps-md-ez.md): an
- *   attempt names the revision it checks, and one at another revision (or
- *   from before revisions) settles nothing for the daemon's own, so a pass or
- *   failure there never stops the check of a revision bump.
+ *   attempt names the revision it checks (one from before revisions is at the
+ *   baseline), and one at another revision settles nothing for the daemon's
+ *   own, so a pass or failure there never stops the check of a revision bump.
  */
 
 /** A check that has not finished after this long is stopped and counts as failed; each step has its own, shorter timeout. */

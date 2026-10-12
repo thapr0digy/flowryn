@@ -107,7 +107,7 @@ export function makeOriginRepo(dir: string): { origin: string; repo: string } {
 export interface FleetOptions {
   timing?: Partial<Timing>;
   contracts?: boolean;
-  /** The contract revision the seeded passes carry (default this build's; LEGACY_REVISION is a pass from before revisions). */
+  /** The contract revision the seeded passes carry (default this build's; another one is a stale pass). */
   contractsAt?: number;
   /** The project's delivery mode (default local-only). */
   mode?: "local-only" | "direct-PR" | "no-mistakes";

@@ -75,7 +75,7 @@ function isUnder(path: string, dir: string): boolean {
 /**
  * A record must point at the report its run wrote: in `<data_dir>/contracts/`,
  * a passing recording run of this harness, version, build and contract
- * revision (a report from before revisions has none). Not proof
+ * revision (a report from before revisions is at the baseline). Not proof
  * against a forged file (docs/cutover-notes.md), but a confused leader cannot
  * record a failed or verify-only run by mistake, and the daemon's automatic
  * check (src/contracts/auto.ts) records only what its own build proved.

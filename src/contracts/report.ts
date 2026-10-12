@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
 import type { ReportStamp } from "./grant.ts";
-import { LEGACY_REVISION, storedRevision } from "./revision.ts";
+import { BASELINE_REVISION, storedRevision } from "./revision.ts";
 import type { ContractResult } from "./runner.ts";
 
 /**
@@ -29,7 +29,7 @@ export interface ReportFacts {
   launch_profile: string | null;
 }
 
-const NO_FACTS: ReportFacts = { revision: LEGACY_REVISION, platform: null, herdr_version: null, launch_profile: null };
+const NO_FACTS: ReportFacts = { revision: BASELINE_REVISION, platform: null, herdr_version: null, launch_profile: null };
 
 const textOrNull = (value: unknown): string | null => (typeof value === "string" && value.length > 0 ? value : null);
 
@@ -37,8 +37,8 @@ const textOrNull = (value: unknown): string | null => (typeof value === "string"
  * The revision and context a report says its run proved, for this harness and
  * version. Read for the record only, never as authority (reportProblem checks
  * the leader's and the daemon's reports): no report, an unreadable one, one
- * for another harness or version, or one written before revisions gives a
- * legacy revision and no context.
+ * for another harness or version, or one written before revisions gives the
+ * baseline revision and no context.
  */
 export function reportFacts(report: string | null, harness: string, version: string): ReportFacts {
   if (!report) return NO_FACTS;

@@ -15,7 +15,7 @@ import { POLICY_MODE_LINES, policyMode } from "../config/policy.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
 import { contractsCommand, unverifiedReason } from "../lifecycle/harness-gate.ts";
-import { contractRevision, LEGACY_REVISION } from "../contracts/revision.ts";
+import { BASELINE_REVISION, contractRevision } from "../contracts/revision.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
@@ -308,14 +308,14 @@ async function contractChecks(config: FlowrynConfig): Promise<Check[]> {
   return checks;
 }
 
-/** The passes recorded for this harness version, any revision; one from before migration 20 is legacy. */
+/** The passes recorded for this harness version, any revision; one from before migration 20 is at the baseline revision. */
 function recordedPasses(db: Db, harness: string, version: string): { revision: number; passed_at: number }[] {
   const schema = schemaVersion(db);
   if (schema < 2) return [];
   const sql =
     schema >= 20
       ? "SELECT revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2 ORDER BY revision"
-      : `SELECT ${LEGACY_REVISION} AS revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2`;
+      : `SELECT ${BASELINE_REVISION} AS revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2`;
   return db.query(sql).all(harness, version) as { revision: number; passed_at: number }[];
 }
 

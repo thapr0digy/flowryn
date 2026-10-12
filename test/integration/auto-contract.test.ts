@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { FAKE_VERSION, makeFleetEnv, setHarnessVersion, type FleetEnv } from "../helpers/fleet-env.ts";
 import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
 import { readManifest, type OwnedResources } from "../../src/contracts/owned.ts";
-import { contractRevision, LEGACY_REVISION } from "../../src/contracts/revision.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { isAlive } from "../../src/runtime/proc.ts";
 
 const NEW_VERSION = "9.9.10";
@@ -94,19 +94,19 @@ describe("the automatic contract check", () => {
   );
 
   test(
-    "relaxed: a pass from before revisions (as migration 20 leaves it) is re-run by the daemon and recorded at this build's revision, with its context, and no P1",
+    "relaxed: a pass at another revision (as after a bump) is re-run by the daemon and recorded at this build's revision, with its context, and no P1",
     async () => {
-      const env = await fleet("relaxed", LEGACY_REVISION);
       const revision = contractRevision("claude");
+      const env = await fleet("relaxed", revision + 1);
       const refused = await env.json(["dispatch", "web", "--kind", "scout", "--harness", "claude", "--body-file", "-"], { stdin: "look around" });
-      expect(refused.reply.error).toMatchObject({ code: "contract_unverified", message: `claude ${FAKE_VERSION} passed only at contract revision 0 (before revisions), not revision ${revision}` });
+      expect(refused.reply.error).toMatchObject({ code: "contract_unverified", message: `claude ${FAKE_VERSION} passed only at contract revision ${revision + 1}, not revision ${revision}` });
       const revisions = () => query<{ revision: number }>(env, "SELECT revision FROM harness_contracts WHERE harness = 'claude' AND version = ?1 ORDER BY revision", FAKE_VERSION).map((r) => r.revision);
       try {
         await waitUntil(() => revisions().includes(revision), 120_000, `the daemon to record claude ${FAKE_VERSION} at revision ${revision}`);
       } catch (error) {
         throw new Error(`${(error as Error).message}; events: ${JSON.stringify(events(env, "contract.auto_failed"))}`, { cause: error });
       }
-      expect(revisions()).toEqual([LEGACY_REVISION, revision]);
+      expect(revisions()).toEqual([revision, revision + 1]);
       expect(events(env, "contract.auto_started")).toEqual([expect.objectContaining({ harness: "claude", version: FAKE_VERSION, revision })]);
       const [passed] = events(env, "contract.passed");
       expect(passed).toMatchObject({ harness: "claude", version: FAKE_VERSION, revision, by: "daemon", herdr_version: "0.7.5-test" });

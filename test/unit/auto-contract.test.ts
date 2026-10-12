@@ -9,7 +9,7 @@ import { AUTO_STOP_GRACE_MS, AutoContractChecker, autoFailureLine, autoLeftoverL
 import { writeManifest, type CleanupOutcome, type OwnedResources } from "../../src/contracts/owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS } from "../../src/contracts/runner.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
-import { contractRevision, LEGACY_REVISION } from "../../src/contracts/revision.ts";
+import { CONTRACT_REVISIONS, contractRevision, type RevisionMap } from "../../src/contracts/revision.ts";
 import { recordPass } from "../../src/contracts/verbs.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
 import { getMeta, migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
@@ -153,9 +153,9 @@ function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopW
   });
 }
 
-/** What a dispatch does: the gate, against the installed version. */
-function gate(harness: HarnessId): Promise<HarnessCheck> {
-  return gateHarness(db, config, harness, async (h) => versions[h], "cli", "dispatch", Date.now);
+/** What a dispatch does: the gate, against the installed version (at `revisions`: this build's, or a test's bump). */
+function gate(harness: HarnessId, revisionMap?: RevisionMap): Promise<HarnessCheck> {
+  return gateHarness(db, config, harness, async (h) => versions[h], "cli", "dispatch", Date.now, revisionMap);
 }
 
 function items(kind: string): { line: string; state: string; class: string }[] {
@@ -710,6 +710,11 @@ function revisions(harness: HarnessId): number[] {
   return (db.query("SELECT revision FROM harness_contracts WHERE harness = ?1 ORDER BY revision").all(harness) as { revision: number }[]).map((r) => r.revision);
 }
 
+/** This build's revisions with one harness bumped, as the PR that changes its proven behaviour would. */
+function bumped(harness: HarnessId): RevisionMap {
+  return { ...CONTRACT_REVISIONS, [harness]: CONTRACT_REVISIONS[harness] + 1 };
+}
+
 describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => {
   test("a pass at the current revision from another build is reused: a docs-only rebuild runs no check", async () => {
     seedPass("claude", "2.1.300", CLAUDE_REVISION, "0f0f0f0f0f0f");
@@ -721,29 +726,48 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("harness.unverified")).toEqual([]);
   });
 
-  test("a legacy pass is stale: the gate names its revision, and under relaxed the daemon re-records the version at the current one", async () => {
-    seedPass("claude", "2.1.300", LEGACY_REVISION);
+  test("a bump makes the pass at the old revision stale: the gate refuses, naming both revisions, and opens one P1 under strict", async () => {
+    useConfig("strict");
+    seedPass("claude", "2.1.300", CLAUDE_REVISION);
+    const next = CLAUDE_REVISION + 1;
+    const check = await gate("claude", bumped("claude"));
+    expect(check).toEqual({ harness: "claude", state: "unverified", version: "2.1.300", revision: next, stale: [CLAUDE_REVISION] });
+    expect(harnessRefusal(check as Extract<HarnessCheck, { state: "unverified" }>).message).toBe(`claude 2.1.300 passed only at contract revision ${CLAUDE_REVISION}, not revision ${next}`);
+    expect(events("harness.unverified")).toEqual([expect.objectContaining({ version: "2.1.300", revision: next, stale: [CLAUDE_REVISION] })]);
+    expect(items("harness_unverified")).toEqual([
+      expect.objectContaining({
+        state: "open",
+        line: `claude 2.1.300 passed only at contract revision ${CLAUDE_REVISION}, not revision ${next}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude`,
+      }),
+    ]);
+    await gate("claude", bumped("claude"));
+    expect(items("harness_unverified")).toHaveLength(1);
+    // The other harness, and an unbumped build, still reuse their passes.
+    seedPass("pi", "0.90.0", CONTRACT_REVISIONS.pi);
+    expect(await gate("pi", bumped("claude"))).toMatchObject({ state: "verified" });
+    expect(await gate("claude")).toMatchObject({ state: "verified" });
+  });
+
+  test("a pass at another revision is stale: under relaxed the daemon re-records the version at its own", async () => {
+    seedPass("claude", "2.1.300", CLAUDE_REVISION + 1);
     const auto = checker();
     auto.init();
     const check = await gate("claude");
-    expect(check).toEqual({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [LEGACY_REVISION] });
-    expect(events("harness.unverified")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION, stale: [LEGACY_REVISION], auto: true })]);
+    expect(check).toEqual({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [CLAUDE_REVISION + 1] });
+    expect(events("harness.unverified")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION, stale: [CLAUDE_REVISION + 1], auto: true })]);
     expect(unverifiedVersion(db, "claude")).toBe("2.1.300");
-    const refusal = harnessRefusal(check as Extract<HarnessCheck, { state: "unverified" }>);
-    expect(refusal.message).toBe(`claude 2.1.300 passed only at contract revision 0 (before revisions), not revision ${CLAUDE_REVISION}`);
 
     await auto.tick();
     expect(jobs.map((j) => j.version)).toEqual(["2.1.300"]);
-    expect(revisions("claude")).toEqual([LEGACY_REVISION, CLAUDE_REVISION]);
+    expect(revisions("claude")).toEqual([CLAUDE_REVISION, CLAUDE_REVISION + 1]);
     expect(events("contract.passed").at(-1)).toMatchObject({ version: "2.1.300", revision: CLAUDE_REVISION, by: "daemon", platform: CONTEXT.platform, herdr_version: CONTEXT.herdr, launch_profile: CONTEXT.launch_profile });
     expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.300", revision: CLAUDE_REVISION, state: "passed" });
     expect(await gate("claude")).toMatchObject({ state: "verified" });
     expect(items("harness_unverified")).toEqual([]);
   });
 
-  test("a check that failed at an older revision does not settle the current one: it runs once more, then is final", async () => {
-    // An attempt saved before revisions had none: it reads as the legacy revision.
-    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
+  test("a check that failed at another revision does not settle the daemon's: it runs once more, then is final", async () => {
+    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", revision: CLAUDE_REVISION + 1, state: "failed", ended_at: 1, detail: "a failure at another revision" }));
     const auto = checker();
     auto.init();
     script = () => ({ passed: false });
@@ -753,6 +777,15 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(jobs).toHaveLength(1);
     expect(autoAttempt(db, "claude")).toMatchObject({ revision: CLAUDE_REVISION, state: "failed" });
     expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
+  });
+
+  test("a check that failed before revisions is at the baseline: still final for that version, so an upgrade runs nothing again", async () => {
+    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    expect(jobs).toEqual([]);
   });
 
   test("a report that proves another revision is not recorded by the daemon", async () => {
@@ -765,31 +798,32 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")[0]).toMatchObject({ detail: `the report proves contract revision ${CLAUDE_REVISION + 1}, not this daemon's revision ${CLAUDE_REVISION}` });
   });
 
-  test("strict: one P1 per version and revision, naming the stale pass; a P1 settled for the legacy pass does not hide it", async () => {
+  test("strict: a flag and P1 from before revisions are at the baseline: the upgrade opens no second P1 for the same version", async () => {
     useConfig("strict");
-    seedPass("claude", "2.1.300", LEGACY_REVISION);
-    // What the gate left before revisions: a plain-version flag and a P1 whose event names no revision, settled since.
+    // What the gate left before revisions: a plain-version flag and a P1 whose event names no revision, dismissed since.
     tx(db, () => {
       setMeta(db, "harness_flagged:claude", "2.1.300");
       const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "claude", version: "2.1.300", where: "startup" } });
       openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:claude", line: "old", now: 1 });
-      resolveItems(db, "harness_unverified", "harness:claude", "settled before revisions", 2);
+      resolveItems(db, "harness_unverified", "harness:claude", "dismissed before revisions", 2);
     });
     const auto = checker();
     auto.init();
     await gate("claude");
     await auto.tick();
-    await gate("claude");
     expect(jobs).toEqual([]);
-    const open = items("harness_unverified").filter((i) => i.state === "open");
-    expect(open).toEqual([
-      expect.objectContaining({ line: `claude 2.1.300 passed only at contract revision 0 (before revisions), not revision ${CLAUDE_REVISION}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude` }),
-    ]);
-    expect(JSON.parse(getMeta(db, "harness_flagged:claude")!)).toEqual({ version: "2.1.300", revision: CLAUDE_REVISION });
+    expect(events("harness.unverified")).toHaveLength(1);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
+  });
 
-    // Another pass at a stale revision does not settle it; one at the current revision does.
+  test("strict: only a pass at the daemon's revision settles the P1; one at another revision does not", async () => {
+    useConfig("strict");
     seedPass("claude", "2.1.300", CLAUDE_REVISION + 1);
+    await gate("claude");
     expect(items("harness_unverified").filter((i) => i.state === "open")).toHaveLength(1);
+    seedPass("claude", "2.1.300", CLAUDE_REVISION + 2);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toHaveLength(1);
+    expect(JSON.parse(getMeta(db, "harness_flagged:claude")!)).toEqual({ version: "2.1.300", revision: CLAUDE_REVISION });
     seedPass("claude", "2.1.300", CLAUDE_REVISION);
     expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
     expect(await gate("claude")).toMatchObject({ state: "verified" });

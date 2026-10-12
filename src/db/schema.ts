@@ -521,18 +521,19 @@ ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
 /**
  * Contract revision (docs/notes/2026-10-12-next-steps-md-ez.md): a pass is identified by harness,
  * version and the adapter/contract compatibility revision it proved, with the platform, Herdr version
- * and launch profile it ran on. Passes recorded before this are revision 0, legacy: nothing proves
- * which adapter behaviour they ran, so the gate asks for a re-run (the automatic check does it under
- * relaxed policy).
+ * and launch profile it ran on. Passes recorded before this carry over as revision 1, the baseline:
+ * revision 1 is defined as the adapter behaviour when revisions were introduced, which is what they
+ * proved (this migration's change proves no new behaviour), so an upgrade refuses nothing. Only a
+ * later bump of CONTRACT_REVISIONS makes them stale.
  */
 const CONTRACT_REVISION_SQL = /* sql */ `
 CREATE TABLE harness_contracts_v20 (harness TEXT NOT NULL, version TEXT NOT NULL,
-  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
   passed_at INTEGER NOT NULL, report_path TEXT,
   platform TEXT, herdr_version TEXT, launch_profile TEXT,
   PRIMARY KEY (harness, version, revision));
 INSERT INTO harness_contracts_v20 (harness, version, revision, passed_at, report_path)
-  SELECT harness, version, 0, passed_at, report_path FROM harness_contracts;
+  SELECT harness, version, 1, passed_at, report_path FROM harness_contracts;
 DROP TABLE harness_contracts;
 ALTER TABLE harness_contracts_v20 RENAME TO harness_contracts;
 `;

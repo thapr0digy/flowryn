@@ -6,7 +6,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
-import { contractRevision, LEGACY_REVISION, revisionLabel, storedRevision } from "../contracts/revision.ts";
+import { BASELINE_REVISION, CONTRACT_REVISIONS, contractRevision, revisionLabel, storedRevision, type RevisionMap } from "../contracts/revision.ts";
 
 /**
  * The harness version gate (design section 5): contract tests gate every
@@ -44,13 +44,13 @@ export function stalePasses(db: Db, harness: string, version: string, revision: 
   return rows.map((r) => r.revision);
 }
 
-/** The installed harness's version and whether a contract run passed for it at the daemon's revision. */
-export async function checkHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf): Promise<HarnessCheck> {
+/** The installed harness's version and whether a contract run passed for it at the daemon's revision (`revisions`: the constants, or a test's bump). */
+export async function checkHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf, revisions: RevisionMap = CONTRACT_REVISIONS): Promise<HarnessCheck> {
   const binary = resolveTool(config, harness);
   if (!binary) return { harness, state: "missing", detail: `${harness} is not installed or not in [tools]` };
   const version = await versionOf(harness, binary);
   if (!version) return { harness, state: "missing", detail: `cannot read the ${harness} version from ${binary} --version` };
-  const revision = contractRevision(harness);
+  const revision = contractRevision(harness, revisions);
   if (hasPass(db, harness, version, revision)) return { harness, state: "verified", version, revision };
   return { harness, state: "unverified", version, revision, stale: stalePasses(db, harness, version, revision) };
 }
@@ -87,7 +87,7 @@ const attemptKey = (harness: HarnessId) => `contract_auto:${harness}`;
 /** The daemon's automatic check of one harness version (meta.contract_auto:<harness>). */
 export interface AutoAttempt {
   version: string;
-  /** The contract revision it checks; absent on attempts from before revisions (read as legacy, attemptRevision). */
+  /** The contract revision it checks; absent on attempts from before revisions (read as the baseline, attemptRevision). */
   revision?: number;
   /** `unrecorded`: it passed after a reload to strict, so nothing was recorded; a reload to relaxed runs it again. */
   state: "waiting" | "running" | "passed" | "failed" | "unrecorded";
@@ -152,11 +152,11 @@ export interface Flag {
   revision: number;
 }
 
-/** The flag: JSON `{version, revision}`; a plain version (written before revisions) is legacy. */
+/** The flag: JSON `{version, revision}`; a plain version (written before revisions) is at the baseline revision. */
 export function readFlag(db: Db, harness: HarnessId): Flag | null {
   const raw = getMeta(db, flaggedKey(harness));
   if (!raw) return null;
-  if (!raw.startsWith("{")) return { version: raw, revision: LEGACY_REVISION };
+  if (!raw.startsWith("{")) return { version: raw, revision: BASELINE_REVISION };
   try {
     const parsed = JSON.parse(raw) as { version?: unknown; revision?: unknown };
     return typeof parsed.version === "string" ? { version: parsed.version, revision: storedRevision(parsed.revision) } : null;
@@ -202,7 +202,7 @@ export function noteHarnessCheck(db: Db, check: HarnessCheck, source: EventSourc
     ts: now,
   });
   if (auto) return null;
-  return openUnverifiedItem(db, check.harness, check.version, event.seq, now);
+  return openUnverifiedItem(db, check.harness, check.version, event.seq, now, unverifiedLine(check.harness, check.version, check.revision, check.stale));
 }
 
 function unverifiedLine(harness: HarnessId, version: string, revision: number, stale: number[]): string {
@@ -221,14 +221,14 @@ export function openUnverifiedItem(db: Db, harness: HarnessId, version: string, 
   return openItem(db, { kind: "harness_unverified", eventSeq, taskId: harnessItemKey(harness), line: line ?? unverifiedLine(harness, version, revision, stalePasses(db, harness, version, revision)), now });
 }
 
-/** Has a harness_unverified P1 ever opened for this version at this revision (open, resolved or dismissed)? An event from before revisions is legacy. */
+/** Has a harness_unverified P1 ever opened for this version at this revision (open, resolved or dismissed)? An event from before revisions is at the baseline revision. */
 export function unverifiedItemOpened(db: Db, harness: HarnessId, version: string, revision: number): boolean {
   return (
     db
       .query(
         `SELECT 1 FROM items i JOIN events e ON e.seq = i.event_seq
          WHERE i.kind = 'harness_unverified' AND i.task_id = ?1 AND json_extract(e.payload, '$.version') = ?2
-           AND COALESCE(json_extract(e.payload, '$.revision'), ${LEGACY_REVISION}) = ?3 LIMIT 1`,
+           AND COALESCE(json_extract(e.payload, '$.revision'), ${BASELINE_REVISION}) = ?3 LIMIT 1`,
       )
       .get(harnessItemKey(harness), version, revision) !== null
   );
@@ -253,8 +253,17 @@ export function unverifiedVersion(db: Db, harness: string): string | null {
 }
 
 /** Check a harness and record the result in its own transaction; resolves the check. */
-export async function gateHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf, source: EventSource, where: string, now: () => number): Promise<HarnessCheck> {
-  const check = await checkHarness(db, config, harness, versionOf);
+export async function gateHarness(
+  db: Db,
+  config: FlowrynConfig,
+  harness: HarnessId,
+  versionOf: VersionOf,
+  source: EventSource,
+  where: string,
+  now: () => number,
+  revisions: RevisionMap = CONTRACT_REVISIONS,
+): Promise<HarnessCheck> {
+  const check = await checkHarness(db, config, harness, versionOf, revisions);
   tx(db, () => noteHarnessCheck(db, check, source, where, now(), autoChecksOn(db, config)));
   return check;
 }
