@@ -17,6 +17,7 @@ export const ALLOWED_METHODS = new Set([
   "workspace.get",
   "workspace.list",
   "workspace.close",
+  "workspace.focus",
   "pane.get",
   "pane.list",
   "pane.process_info",

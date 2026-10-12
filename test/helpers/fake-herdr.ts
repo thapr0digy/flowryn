@@ -68,6 +68,10 @@ export class FakeHerdr {
   subscribeReply: "answer" | "silent" | ((id: unknown) => string) = "answer";
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
+  /** The focused workspace. Herdr's list order is `workspaces`' insertion order. */
+  focusedWorkspace: string | null = null;
+  /** Runs right after a workspace closes, before the reply: a user's focus change while Flowryn closes one. */
+  afterClose: ((workspaceId: string) => void) | null = null;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
   private readonly subscribers = new Set<net.Socket>();
   private readonly connections = new Set<net.Socket>();
@@ -126,6 +130,12 @@ export class FakeHerdr {
     const paneId = ws.panes[0]!;
     this.statusOverride.set(paneId, status);
     return paneId;
+  }
+
+  /** The user focusing a workspace (Herdr's workspace.focus). */
+  focusWorkspace(workspaceId: string): void {
+    if (!this.workspaces.has(workspaceId)) throw new Error(`no workspace ${workspaceId}`);
+    this.focusedWorkspace = workspaceId;
   }
 
   /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
@@ -259,6 +269,20 @@ export class FakeHerdr {
     return pane;
   }
 
+  /**
+   * Herdr 0.7.5 on any workspace close (M0 h07): focus moves to the workspace
+   * that takes the closed one's slot, the new list's [min(index, length - 1)],
+   * whether or not the closed one had it.
+   */
+  private removeWorkspace(ws: FakeWorkspace): void {
+    const order = [...this.workspaces.keys()];
+    const index = order.indexOf(ws.workspaceId);
+    this.workspaces.delete(ws.workspaceId);
+    const remaining = order.filter((id) => id !== ws.workspaceId);
+    if (this.focusedWorkspace !== null) this.focusedWorkspace = remaining[Math.min(index, remaining.length - 1)] ?? null;
+    this.afterClose?.(ws.workspaceId);
+  }
+
   private closePane(pane: FakePane): void {
     this.killChild(pane, "SIGKILL");
     this.panes.delete(pane.paneId);
@@ -293,13 +317,25 @@ export class FakeHerdr {
         return { type: "pong" };
       case "workspace.create": {
         const ws = this.createWorkspace(String(params.cwd ?? "/"), String(params.label ?? ""), (params.env as Record<string, string>) ?? {});
+        if (params.focus === true) this.focusedWorkspace = ws.workspaceId;
         return { type: "workspace_created", workspace: { workspace_id: ws.workspaceId }, root_pane: this.paneView(this.panes.get(ws.panes[0]!)!) };
       }
       case "workspace.close": {
         const ws = this.workspaces.get(String(params.workspace_id));
         if (!ws) throw Object.assign(new Error("workspace not found"), { code: "workspace_not_found" });
         for (const id of ws.panes) this.closePane(this.panes.get(id)!);
-        this.workspaces.delete(ws.workspaceId);
+        this.removeWorkspace(ws);
+        return { type: "ok" };
+      }
+      case "workspace.list":
+        return {
+          type: "workspace_list",
+          workspaces: [...this.workspaces.values()].map((ws) => ({ workspace_id: ws.workspaceId, label: ws.label, focused: ws.workspaceId === this.focusedWorkspace, pane_count: ws.panes.length })),
+        };
+      case "workspace.focus": {
+        const id = String(params.workspace_id);
+        if (!this.workspaces.has(id)) throw Object.assign(new Error("workspace not found"), { code: "workspace_not_found" });
+        this.focusedWorkspace = id;
         return { type: "ok" };
       }
       case "agent.start": {
@@ -362,9 +398,14 @@ export class FakeHerdr {
         if (typeof params.title === "string") pane.title = params.title;
         return { type: "ok" };
       }
-      case "pane.close":
-        this.closePane(this.need(params.pane_id));
+      case "pane.close": {
+        const pane = this.need(params.pane_id);
+        this.closePane(pane);
+        // Closing a workspace's last pane closes the workspace (M0 h07).
+        const ws = this.workspaces.get(pane.workspaceId);
+        if (ws && ws.panes.length === 0) this.removeWorkspace(ws);
         return { type: "ok" };
+      }
       case "notification.show":
         return { type: "ok" };
       case "session.snapshot":

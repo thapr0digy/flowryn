@@ -110,6 +110,7 @@ export class HerdrRuntime {
   private readonly ps: PsRunner;
   private readonly shellReadyMs: number;
   private readonly pollMs: number;
+  private workspaceOps: Promise<unknown> = Promise.resolve();
 
   constructor(transport: HerdrTransport, options: RuntimeOptions = {}) {
     this.transport = transport;
@@ -128,13 +129,31 @@ export class HerdrRuntime {
    * included (M0 h04, h06), so a worker workspace holds one pane.
    */
   async openWorkspace(cwd: string, label: string, env: Record<string, string> = {}): Promise<{ workspaceId: string; rootPaneId: string }> {
-    const result = await this.transport.call("workspace.create", { cwd, label, env, focus: false });
+    // focus:false keeps the user's focus where it is (M0 h07), so a launch needs no restore.
+    const result = await this.serially(() => this.transport.call("workspace.create", { cwd, label, env, focus: false }));
     const workspace = result.workspace as Record<string, unknown> | undefined;
     const root = (result.root_pane ?? result.pane) as Record<string, unknown> | undefined;
     const workspaceId = str(workspace?.workspace_id);
     const rootPaneId = str(root?.pane_id);
     if (!workspaceId || !rootPaneId) throw new HerdrError("protocol", "workspace.create returned no workspace or root pane");
     return { workspaceId, rootPaneId };
+  }
+
+  /**
+   * Workspace creates and closes run one at a time, so a close's prediction
+   * of where Herdr moves focus is not skewed by another create or close.
+   */
+  private serially<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.workspaceOps.then(op);
+    this.workspaceOps = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Workspace ids in Herdr's list order, and the focused one. */
+  private async workspaceFocus(timeoutMs?: number): Promise<{ order: string[]; focused: string | null }> {
+    const result = await this.transport.call("workspace.list", {}, timeoutMs);
+    const list = Array.isArray(result.workspaces) ? (result.workspaces as Record<string, unknown>[]) : [];
+    return { order: list.map((w) => str(w.workspace_id)), focused: str(list.find((w) => w.focused === true)?.workspace_id) || null };
   }
 
   /**
@@ -259,12 +278,34 @@ export class HerdrRuntime {
     }
   }
 
+  /**
+   * Close a workspace without taking the user's focus with it. Herdr moves
+   * focus on any workspace.close, even of an unfocused workspace, to the one
+   * that takes the closed one's slot (M0 h07). When the focus lands exactly
+   * there, it goes back to the workspace that had it; focus anywhere else
+   * means the user moved it meanwhile, and it stays. Nothing focused, or
+   * closing the focused workspace itself, leaves focus to Herdr.
+   */
   async closeWorkspace(workspaceId: string, timeoutMs?: number): Promise<void> {
-    try {
-      await this.transport.call("workspace.close", { workspace_id: workspaceId }, timeoutMs);
-    } catch (error) {
-      if (!(error instanceof HerdrError && error.code === "workspace_not_found")) throw error;
-    }
+    await this.serially(async () => {
+      // An unreadable list means an unreachable Herdr, which the close reports itself.
+      const before = await this.workspaceFocus(timeoutMs).catch(() => null);
+      try {
+        await this.transport.call("workspace.close", { workspace_id: workspaceId }, timeoutMs);
+      } catch (error) {
+        if (error instanceof HerdrError && error.code === "workspace_not_found") return;
+        throw error;
+      }
+      const index = before?.order.indexOf(workspaceId) ?? -1;
+      const previous = before?.focused ?? null;
+      if (!before || index === -1 || previous === null || previous === workspaceId) return;
+      const remaining = before.order.filter((id) => id !== workspaceId);
+      const landing = remaining[Math.min(index, remaining.length - 1)];
+      const after = await this.workspaceFocus(timeoutMs);
+      if (after.focused === landing && after.focused !== previous && after.order.includes(previous)) {
+        await this.transport.call("workspace.focus", { workspace_id: previous }, timeoutMs);
+      }
+    });
   }
 
   /** Name the pane's run in its metadata, with no TTL (M0 h03), so the reconciler can find candidates. */

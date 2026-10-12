@@ -1,7 +1,7 @@
 # Keep Herdr focus on the leader
 
-- Status: partial
-- Open: the design below; code and tests follow in this PR
+- Status: done
+- Open: a workspace Herdr closes on its own (its last shell exited) still moves focus; see Out of scope
 
 User report (2026-10-12): when Flowryn opens a new agent, Herdr's focus jumps from the leader's pane to a worker's workspace.
 
@@ -48,3 +48,18 @@ None: nothing persisted changes.
 - A workspace Herdr closes on its own (its last shell exited): no Flowryn call to guard. Restoring from the `pane.closed` event would race the user's own focus changes.
 - `pane.close` is not called by Flowryn (`HerdrRuntime.closePane` has no caller), so it gets no guard.
 - Focus routing of any kind (cut from v1, `docs/v1-status.md`): Flowryn never moves focus except to undo Herdr's move caused by its own close.
+
+## Built
+
+As designed. `HerdrRuntime.closeWorkspace` (`src/runtime/herdr/runtime.ts`) is the one guarded close; every caller (landing cleanup, cancel and stop, divergence teardown, the contract runner's lab cleanup, the lab scripts) already goes through it, so none of them changed. A guarded close costs two `workspace.list` calls, plus one `workspace.focus` when Herdr moved focus.
+
+### Tests
+
+- `test/unit/runtime.test.ts` "Herdr focus across workspace closes (M0 h07)", through the real client against FakeHerdr: an open leaves focus alone and sends `focus: false`; closing an unfocused worker restores the leader (and no restore when Herdr's move already lands on it); nothing focused reads the list once and focuses nothing; closing the focused workspace restores nothing; a focus the user chose between the close and the check (FakeHerdr `afterClose`) stays; two closes and an open at once keep the leader; a workspace already gone is not an error.
+- `test/integration/workers.test.ts` "Herdr focus": with a focused leader workspace, a first worker launches, a second scout launches, lands and is cleaned; its workspace closes and the leader stays focused, with exactly one `workspace.focus`.
+- Without the runtime change, four of the unit cases and the integration case fail (the integration case ends focused on the first worker's workspace).
+
+### Live
+
+`spikes/herdr/h07-focus.sh` in a lab session (Herdr 0.7.5), confirmed: `focused before=w2/w2:p2, after create=w2/w2:p2, after agent.start (idle)=w2/w2:p2, after close w1=w4/w4:p1, after workspace.focus leader=w2/w2:p2, after pane.close of w3's only pane=w4/w4:p1` (list `w1, w2(leader), w3, w4, w5`). Run it with `spikes/run-all.sh herdr` or on its own, outside a command sandbox.
+
