@@ -8,6 +8,7 @@ import { HerdrRuntime, eventPaneId } from "../../src/runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../../src/runtime/herdr/socket.ts";
 import { descendantCommands, isAlive, parseLstart, parseProcessTable, parsePsLine, readIdentity, readProcessTable, sameProcess, terminate, type PsRunner } from "../../src/runtime/proc.ts";
 import { defaultConfig } from "../../src/config/config.ts";
+import { FakeHerdr } from "../helpers/fake-herdr.ts";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -419,6 +420,111 @@ describe("Herdr runtime", () => {
     expect(await runtime.readPane("w1:p2", 40)).toBe("line 1\nDo you want to proceed?\n❯ 1. Yes");
     expect(await runtime.readPane("w1:p9", 40)).toBeNull();
     expect(seen[0]).toMatchObject({ source: "recent_unwrapped" });
+  });
+});
+
+/** The workspaces Flowryn asked Herdr to focus. */
+function focusCalls(herdr: FakeHerdr): unknown[] {
+  return herdr.calls.filter((c) => c.method === "workspace.focus").map((c) => c.params.workspace_id);
+}
+
+describe("Herdr focus across workspace closes (M0 h07)", () => {
+  const fakes: FakeHerdr[] = [];
+  afterEach(async () => {
+    for (const f of fakes.splice(0)) await f.stop();
+  });
+
+  /** A fake Herdr with workspaces `a, leader, w1, w2` (the leader focused) and a runtime on it. */
+  async function fleet(): Promise<{ herdr: FakeHerdr; runtime: HerdrRuntime; ids: Record<"a" | "leader" | "w1" | "w2", string> }> {
+    const dir = tempDir();
+    const herdr = await FakeHerdr.start(join(dir, "h.sock"), { env: {}, logDir: dir });
+    fakes.push(herdr);
+    const runtime = new HerdrRuntime(new HerdrClient(herdr.socket));
+    const ids = {} as Record<"a" | "leader" | "w1" | "w2", string>;
+    for (const name of ["a", "leader", "w1", "w2"] as const) ids[name] = (await runtime.openWorkspace(dir, name)).workspaceId;
+    herdr.focusWorkspace(ids.leader);
+    return { herdr, runtime, ids };
+  }
+
+  test("opening a worker workspace leaves the focused one focused", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    await runtime.openWorkspace("/", "w3");
+    expect(herdr.focusedWorkspace).toBe(ids.leader);
+    expect(herdr.calls.find((c) => c.method === "workspace.create")?.params.focus).toBe(false);
+  });
+
+  test("closing an unfocused worker puts focus back where Herdr's close took it from", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.focusedWorkspace).toBe(ids.leader);
+    // Herdr's own move already lands on the leader here (`a, leader*, w2`, then `leader*, w2`), so nothing is restored.
+    await runtime.closeWorkspace(ids.a);
+    await runtime.closeWorkspace(ids.w2);
+    expect(herdr.focusedWorkspace).toBe(ids.leader);
+    expect(focusCalls(herdr)).toEqual([ids.leader]);
+  });
+
+  test("with nothing focused, a close reads the list once and focuses nothing", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    herdr.focusedWorkspace = null;
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.focusedWorkspace).toBeNull();
+    expect(herdr.calls.filter((c) => c.method === "workspace.list")).toHaveLength(1);
+    expect(focusCalls(herdr)).toEqual([]);
+  });
+
+  test("closing the focused workspace leaves focus to Herdr", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    herdr.focusWorkspace(ids.w1);
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.focusedWorkspace).toBe(ids.w2);
+    expect(focusCalls(herdr)).toEqual([]);
+  });
+
+  test("a focus the user chose between the close and the check stays", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    herdr.afterClose = () => herdr.focusWorkspace(ids.a);
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.focusedWorkspace).toBe(ids.a);
+    expect(focusCalls(herdr)).toEqual([]);
+  });
+
+  test("two closes at once both keep the leader focused", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    await runtime.openWorkspace("/", "w3");
+    await Promise.all([runtime.closeWorkspace(ids.w1), runtime.closeWorkspace(ids.w2), runtime.openWorkspace("/", "w4")]);
+    expect(herdr.focusedWorkspace).toBe(ids.leader);
+  });
+
+  test("a close that succeeded resolves even when the restore's list read fails", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    herdr.afterClose = () => herdr.failNext.set("workspace.list", ["internal"]);
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.workspaces.has(ids.w1)).toBe(false);
+    expect(focusCalls(herdr)).toEqual([]);
+  });
+
+  test("a close with a time budget stays within it when Herdr never answers", async () => {
+    const path = join(tempDir(), "silent.sock");
+    const server = net.createServer(() => {});
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    try {
+      const started = Date.now();
+      const error = await new HerdrRuntime(new HerdrClient(path)).closeWorkspace("w1", 300).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(HerdrError);
+      expect((error as HerdrError).code).toBe("timeout");
+      expect(Date.now() - started).toBeLessThan(600);
+    } finally {
+      server.close();
+    }
+  });
+
+  test("a workspace already gone is not an error and moves no focus", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    await runtime.closeWorkspace(ids.w1);
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.focusedWorkspace).toBe(ids.leader);
+    expect(focusCalls(herdr)).toEqual([ids.leader]);
   });
 });
 

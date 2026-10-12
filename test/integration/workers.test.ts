@@ -446,6 +446,28 @@ describe("deliver matches the task kind", () => {
   );
 });
 
+describe("Herdr focus", () => {
+  test(
+    "launching workers and closing a landed run's workspace leave the leader's workspace focused (M0 h07)",
+    async () => {
+      const env = await fleet();
+      const leaderPane = env.herdr.addPaneWithStatus(env.repo, "idle");
+      const leader = env.herdr.panes.get(leaderPane)!.workspaceId;
+      env.herdr.focusWorkspace(leader);
+      const first = await env.dispatch("Scout\nFAKE: sleep 30000");
+      await env.waitRun(first.run, (r) => r.liveness === "busy", "the first worker busy");
+      expect(env.herdr.focusedWorkspace).toBe(leader);
+      // The second worker's workspace comes after the first's, so Herdr's close alone would focus the first worker.
+      const { run } = await env.dispatch("Scout\nFAKE: sleep 300\nFAKE: deliver summary.md done");
+      const cleaned = await env.waitRun(run, (r) => r.state === "cleaned", "the second scout cleaned up", 30_000);
+      await waitUntil(() => !env.herdr.workspaces.has(cleaned.workspace_id!), 5_000, "its workspace closed");
+      await waitUntil(() => env.herdr.focusedWorkspace === leader, 5_000, "focus restored to the leader");
+      expect(env.herdr.calls.filter((c) => c.method === "workspace.focus").map((c) => c.params.workspace_id)).toEqual([leader]);
+    },
+    { timeout: 60_000 },
+  );
+});
+
 describe("questions, cancel and interrupt", () => {
   test(
     "ask opens a P0 and a captain hold; answer resolves it and reaches the worker as a steer",
