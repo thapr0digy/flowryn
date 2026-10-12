@@ -67,15 +67,12 @@ SQLite transactions and the tasks-axi journal already protect a substantial
 part of the system. The next boundary is the gap between committing intent and
 performing an external action.
 
-**First, a small concrete fix:** `Scheduler.freshWorker`
-[ignores the exit result](../src/sched/scheduler.ts#L332-L346), then clears
-identity and starts a new session. In the same file,
-[`relaunchWorker`](../src/sched/scheduler.ts#L299-L310) already checks `ok`.
-The [daemon forwards the actual termination result](../src/daemon/daemon.ts#L452-L454).
-Reuse that verified-exit precondition for fresh stages: retain the old identity
-and pending replacement on failure, surface the refusal, and retry only through
-the scheduler. One failed candidate must not prevent unrelated eligible work
-from progressing. Prove this first without waiting for the larger change below.
+**First, a small concrete fix (done):** `Scheduler.freshWorker` ignored the
+exit result, then cleared identity and started a new session. It now replaces
+a fresh stage's worker only on a verified exit, keeps the old identity and
+pending replacement on failure, surfaces the refusal and retries only through
+the scheduler; see
+[docs/notes/2026-10-12-next-steps-md-we.md](notes/2026-10-12-next-steps-md-we.md).
 
 The [gateway](../src/api/gateway.ts#L84-L113) caches database application but
 re-enters `settle` on replay. Settlement can include
