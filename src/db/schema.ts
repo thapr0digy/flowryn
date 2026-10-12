@@ -518,6 +518,21 @@ const LEADER_REPIN_SQL = /* sql */ `
 ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
 `;
 
+/**
+ * Review-channel health (docs/notes/2026-10-12-next-steps-md-7b.md): whether the daemon's Lavish
+ * poll of a gate's page delivers. When it last turned healthy, since when it fails, how many polls
+ * in a row, why, when it tries again, and the review_channel item the failing episode opened.
+ * Gates from before carry nothing: an upgrade says nothing about a channel it never watched.
+ */
+const GATE_CHANNEL_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN channel_ok_at INTEGER;
+ALTER TABLE gates ADD COLUMN channel_failing_since INTEGER;
+ALTER TABLE gates ADD COLUMN channel_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gates ADD COLUMN channel_reason TEXT;
+ALTER TABLE gates ADD COLUMN channel_retry_at INTEGER;
+ALTER TABLE gates ADD COLUMN channel_item TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -538,6 +553,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
   { version: 18, name: "gate-browser-open", sql: GATE_BROWSER_OPEN_SQL },
   { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
+  { version: 20, name: "gate-channel", sql: GATE_CHANNEL_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

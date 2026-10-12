@@ -155,14 +155,15 @@ updated at ...". Keep the terse pointer by default and expand on request.
 Add a read-only timeline and a redacted, opt-in diagnostic export rather than
 requiring direct database queries or uploading chat transcripts.
 
-**A bounded second slice:** expose review-channel health. The
-[Lavish poller](../src/lavish/poller.ts#L235-L247) keeps retry/failure state in
-memory, while [browser-opening status](../src/lavish/opener.ts#L115-L126) is
-durable. A page that opened successfully can later stop receiving answers.
-Persist last success, failure-since, reason and retry time; show one actionable
-degraded-channel item after a bounded threshold, clearing it on recovery or
-gate closure. Keep this distinct from opening the browser and from intentional
-operation without optional Lavish. Never let channel recovery pass the gate.
+**A bounded second slice (done):** expose review-channel health. The Lavish
+poller kept retry/failure state in memory, while browser-opening status was
+durable, so a page that opened successfully could later stop receiving answers
+unseen. Each open review gate now persists its channel's last success,
+failure-since, reason and retry time, opens one actionable `review_channel` item
+after a bounded threshold and clears it on recovery or gate closure, distinct
+from browser opening and from running without optional Lavish; recovery never
+passes the gate. See
+[docs/notes/2026-10-12-next-steps-md-7b.md](notes/2026-10-12-next-steps-md-7b.md).
 
 **Done means:** a saved blocked-dialog, capacity-wait or resume decision can be
 explained and replayed offline; the operator can identify the next authorized

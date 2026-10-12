@@ -26,6 +26,8 @@ import { divergenceView, getDivergence, resolveCommand } from "../reconcile/dive
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 import { ShowText } from "./show-text.ts";
+import { channelView } from "../lavish/channel.ts";
+import type { Db } from "../db/db.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
   const run = findRun(db, ref);
@@ -291,7 +293,11 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
 function gatesView(ctx: ReadCtx, runId: string): string[] | null {
   const gates = gatesOf(ctx.db, runId);
   if (gates.length === 0) return null;
-  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}${g.state === "open" ? browserView(g) : ""}`);
+  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}${g.state === "open" ? browserView(g) : ""}${g.state === "open" && g.page_path ? channelView(g, (item) => itemIsOpen(ctx.db, item)) : ""}`);
+}
+
+function itemIsOpen(db: Db, itemId: string): boolean {
+  return db.query("SELECT 1 FROM items WHERE id = ?1 AND state IN ('open','presented')").get(itemId) !== null;
 }
 
 /** An open review gate's browser state; unless it opened, the URL to open by hand (docs/notes/2026-10-10-review-pages-open-4b.md). */

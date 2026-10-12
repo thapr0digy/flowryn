@@ -158,7 +158,7 @@ describe("the target", () => {
 describe("the repin", () => {
   test("database: migration 19 adds leader_sessions.pinned_at", () => {
     const w = world();
-    expect(LATEST_SCHEMA_VERSION).toBe(19);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(19);
     expect((w.db.query("PRAGMA table_info(leader_sessions)").all() as { name: string }[]).map((c) => c.name)).toContain("pinned_at");
   });
 

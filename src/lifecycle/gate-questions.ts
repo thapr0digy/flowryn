@@ -295,7 +295,7 @@ export interface PolledGate {
   page_path: string;
 }
 
-const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
+export const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
 
 /**
  * Gates whose page the daemon polls: open on a live run with a known page,

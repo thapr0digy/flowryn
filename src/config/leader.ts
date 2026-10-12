@@ -157,9 +157,14 @@ export interface ReviewConfig {
   open_browser: boolean;
   /** The macOS application `open -a` hands the page to. */
   browser: string;
+  /** How long a review page's Lavish poll fails before a review_channel item opens (src/lavish/channel.ts). */
+  channel_alert_ms: number;
 }
 
-export const DEFAULT_REVIEW: ReviewConfig = { open_browser: true, browser: "Google Chrome" };
+/** The default `[review] channel_alert_ms`: two minutes of failed polls. */
+export const DEFAULT_CHANNEL_ALERT_MS = 120_000;
+
+export const DEFAULT_REVIEW: ReviewConfig = { open_browser: true, browser: "Google Chrome", channel_alert_ms: DEFAULT_CHANNEL_ALERT_MS };
 
 const MAX_BROWSER_NAME = 100;
 
@@ -184,6 +189,11 @@ export function reviewConfig(config: FlowrynConfig): ReviewConfig {
       throw new FlowrynError("config_invalid", `[review] browser must be an application name (at most ${MAX_BROWSER_NAME} characters), like "Google Chrome"`);
     }
     out.browser = name;
+  }
+  if (raw.channel_alert_ms !== undefined) {
+    const ms = raw.channel_alert_ms;
+    if (typeof ms !== "number" || !Number.isInteger(ms) || ms < 0) throw new FlowrynError("config_invalid", "[review] channel_alert_ms must be a whole number of milliseconds, 0 or more");
+    out.channel_alert_ms = ms;
   }
   return out;
 }

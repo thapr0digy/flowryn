@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
@@ -9,6 +9,7 @@ import { readsAsPass } from "../../src/lifecycle/gate-questions.ts";
 import { normalizeAnswer, parseGateQuestions } from "../../src/lavish/questions.ts";
 import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetState } from "../../src/lavish/widget.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
+import { channelHint, channelView, pollFailureReason, recordChannelFailure, recordChannelOk } from "../../src/lavish/channel.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateFeedback, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
@@ -854,5 +855,313 @@ describe("a gate's questions as decisions", () => {
     }
     expect(rejections).toEqual([]);
     expect(getDecision(db, "q1")!.state).toBe("open");
+  });
+});
+
+// --- review-channel health (docs/notes/2026-10-12-next-steps-md-7b.md) -----------------------------
+
+describe("review-channel health", () => {
+  const SERVER_ERROR = "error: Lavish Editor request failed: 500";
+
+  /**
+   * A lavish-axi whose poll fails like Lavish's 500 while `<home>/lavish-fail` exists, prints one
+   * empty delivery while `<home>/lavish-deliver` exists, and otherwise holds its poll open.
+   */
+  function flakyLavish(): string {
+    const fail = JSON.stringify(join(h.home, "lavish-fail"));
+    const deliver = JSON.stringify(join(h.home, "lavish-deliver"));
+    return scriptedLavish(
+      [
+        `if [ -f ${fail} ]; then echo "${SERVER_ERROR}"; echo "code: SERVER_ERROR"; exit 1; fi`,
+        `if [ -f ${deliver} ]; then rm ${deliver}; printf 'session:\\n  status: waiting\\n'; exit 0; fi`,
+        "while :; do sleep 0.05; done",
+      ].join("\n"),
+    );
+  }
+
+  interface Channel {
+    channel_ok_at: number | null;
+    channel_failing_since: number | null;
+    channel_failures: number;
+    channel_reason: string | null;
+    channel_retry_at: number | null;
+    channel_item: string | null;
+  }
+
+  function channel(): Channel {
+    return db.query("SELECT channel_ok_at, channel_failing_since, channel_failures, channel_reason, channel_retry_at, channel_item FROM gates WHERE id = 'g1'").get() as Channel;
+  }
+
+  function channelItems(): { id: string; lane: string; class: string; state: string; line: string; full_line: string | null; resolved_by: string | null }[] {
+    return db.query("SELECT id, lane, class, state, line, full_line, resolved_by FROM items WHERE kind = 'review_channel' ORDER BY id").all() as ReturnType<typeof channelItems>;
+  }
+
+  function eventKinds(): string[] {
+    return (db.query("SELECT kind FROM events WHERE kind LIKE 'gate.channel_%' ORDER BY seq").all() as { kind: string }[]).map((e) => e.kind);
+  }
+
+  let clock = NOW;
+  let logs: string[] = [];
+  let poller: LavishPoller | null = null;
+
+  function makePoller(options: { lavish?: () => string | null; steadyMs?: number; alertMs?: number } = {}): LavishPoller {
+    poller?.stop();
+    const bin = flakyLavish();
+    poller = new LavishPoller({ db, lavish: options.lavish ?? (() => bin), log: (m) => logs.push(m), now: () => clock, steadyMs: options.steadyMs ?? 60_000, channelAlertMs: () => options.alertMs ?? 120_000 });
+    return poller;
+  }
+
+  /** One more failed poll: the clock moves past the backoff, a pass starts the poll, and its failure is recorded. */
+  async function failOnce(p: LavishPoller, advanceMs: number): Promise<void> {
+    const before = channel().channel_failures;
+    clock += advanceMs;
+    p.pass();
+    await waitUntil(() => channel().channel_failures === before + 1, 5_000, `failure ${before + 1} recorded`);
+  }
+
+  beforeEach(() => {
+    clock = NOW;
+    logs = [];
+    db.query("UPDATE gates SET page_path = ?1 WHERE id = 'g1'").run(page);
+  });
+  afterEach(() => {
+    poller?.stop();
+    poller = null;
+  });
+
+  test("repro: a page whose polls all fail (Lavish 500) is persisted on the gate and, past the threshold, opens one actionable item", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller();
+    await failOnce(p, 0);
+    expect(channel()).toEqual({ channel_ok_at: null, channel_failing_since: NOW, channel_failures: 1, channel_reason: `${SERVER_ERROR} (exit 1)`, channel_retry_at: NOW + 2_000, channel_item: null });
+    await failOnce(p, 60_000);
+    expect(channel().channel_retry_at).toBe(NOW + 60_000 + 4_000);
+    // Two failures, but only a minute: not yet.
+    expect(channelItems()).toEqual([]);
+    await failOnce(p, 60_000);
+    const items = channelItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ lane: "P1", class: "actionable", state: "open" });
+    const line = items[0]!.full_line ?? items[0]!.line;
+    expect(line).toStartWith("Review page not delivering answers: restart Lavish (lavish-axi server --verbose; its log is ~/.lavish-axi/server.log).");
+    expect(line).toContain(`${taskId} (design gate g1) since `);
+    expect(line).toContain(`3 failed polls: ${SERVER_ERROR} (exit 1)`);
+    expect(line).toContain("answer through the leader (flowryn decide)");
+    expect(channel()).toMatchObject({ channel_failing_since: NOW, channel_failures: 3, channel_item: items[0]!.id });
+    expect(eventKinds()).toEqual(["gate.channel_failed", "gate.channel_failed", "gate.channel_failed", "gate.channel_degraded"]);
+    expect(logs.some((l) => l.includes(`item ${items[0]!.id} opened`))).toBe(true);
+  });
+
+  test("one item per failing episode: later failures update the gate, not the item", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller({ alertMs: 0 });
+    await failOnce(p, 0);
+    expect(channelItems()).toEqual([]);
+    await failOnce(p, 10_000);
+    await failOnce(p, 10_000);
+    await failOnce(p, 10_000);
+    expect(channelItems()).toHaveLength(1);
+    expect(channel()).toMatchObject({ channel_failures: 4, channel_retry_at: clock + 16_000 });
+    expect(eventKinds().filter((k) => k === "gate.channel_degraded")).toHaveLength(1);
+  });
+
+  test("a dismissed item stays dismissed for the rest of its episode; the next episode after recovery opens a new one", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller({ alertMs: 0 });
+    await failOnce(p, 0);
+    await failOnce(p, 10_000);
+    const [first] = channelItems();
+    db.query("UPDATE items SET state = 'dismissed', resolved_by = 'dismissed by leader', resolved_at = ?2 WHERE id = ?1").run(first!.id, clock);
+    for (let i = 0; i < 3; i++) await failOnce(p, 60_000);
+    expect(channelItems().map((i) => [i.id, i.state])).toEqual([[first!.id, "dismissed"]]);
+    expect(channel()).toMatchObject({ channel_failures: 5, channel_item: first!.id });
+    // Recovery ends the episode; the next one opens its own item.
+    rmSync(join(h.home, "lavish-fail"));
+    writeFileSync(join(h.home, "lavish-deliver"), "");
+    clock += 60_000;
+    p.pass();
+    await waitUntil(() => channel().channel_failures === 0, 5_000, "the channel recovered");
+    expect(channel().channel_item).toBeNull();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    p.stop();
+    const q = makePoller({ alertMs: 0 });
+    await failOnce(q, 60_000);
+    await failOnce(q, 10_000);
+    const items = channelItems();
+    expect(items).toHaveLength(2);
+    expect(items[1]).toMatchObject({ state: "open" });
+    expect(channel().channel_item).toBe(items[1]!.id);
+  });
+
+  test("a delivered poll recovers the channel and resolves the item; recovery never passes the gate or answers a question", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller({ alertMs: 0 });
+    await failOnce(p, 0);
+    await failOnce(p, 10_000);
+    const [item] = channelItems();
+    rmSync(join(h.home, "lavish-fail"));
+    writeFileSync(join(h.home, "lavish-deliver"), "");
+    clock += 10_000;
+    p.pass();
+    await waitUntil(() => channel().channel_failures === 0, 5_000, "the channel recovered");
+    expect(channel()).toEqual({ channel_ok_at: clock, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    expect(channelItems()).toEqual([expect.objectContaining({ id: item!.id, state: "resolved", resolved_by: "gate.channel_ok g1" })]);
+    expect(eventKinds().at(-1)).toBe("gate.channel_ok");
+    expect(JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'gate.channel_ok'").get() as { payload: string }).payload)).toEqual({ gate: "g1", via: "delivered", recovered: true });
+    expect(db.query("SELECT state, approval_id FROM gates WHERE id = 'g1'").get()).toEqual({ state: "open", approval_id: null });
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+    expect((db.query("SELECT state FROM decisions WHERE gate_id = 'g1'").all() as { state: string }[]).map((d) => d.state)).toEqual(["open", "open", "open"]);
+  });
+
+  test("a poll that keeps running is listening: the channel recovers without a delivery, and healthy is written once", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    // A failing poll exits well inside the second; the held one is listening after it.
+    const p = makePoller({ alertMs: 0, steadyMs: 1_000 });
+    await failOnce(p, 0);
+    await failOnce(p, 10_000);
+    expect(channelItems()[0]!.state).toBe("open");
+    rmSync(join(h.home, "lavish-fail"));
+    clock += 10_000;
+    p.pass();
+    await waitUntil(() => channel().channel_failing_since === null, 5_000, "the poll listening");
+    expect(channel()).toMatchObject({ channel_ok_at: clock, channel_failing_since: null, channel_failures: 0 });
+    expect(channelItems()[0]).toMatchObject({ state: "resolved", resolved_by: "gate.channel_ok g1" });
+    const ok = (db.query("SELECT payload FROM events WHERE kind = 'gate.channel_ok'").all() as { payload: string }[]).map((e) => JSON.parse(e.payload));
+    expect(ok).toEqual([{ gate: "g1", via: "listening", recovered: true }]);
+    // A fresh poller (a restarted daemon) sees it listening again: unchanged, so nothing is written.
+    const q = makePoller({ steadyMs: 100 });
+    q.pass();
+    await waitUntil(() => logs.filter((l) => l.includes("poll of gate g1") || l.includes("is listening")).length > 0, 5_000, "the poll ran");
+    await Bun.sleep(300);
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'gate.channel_ok'").get()).toEqual({ n: 1 });
+    expect(db.query("SELECT state FROM gates WHERE id = 'g1'").get()).toEqual({ state: "open" });
+  });
+
+  test("the failure count survives a restart: the backoff goes on from it, and the item can open after it", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    await failOnce(makePoller(), 0);
+    await failOnce(makePoller(), 60_000);
+    expect(logs.at(-1)).toContain("again in 4 s");
+    await failOnce(makePoller(), 60_000);
+    expect(logs.some((l) => l.includes("again in 8 s"))).toBe(true);
+    expect(channelItems()).toHaveLength(1);
+  });
+
+  test("closing the gate, ending its run or uninstalling lavish-axi resolves the item; the gate's own state is left alone", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller({ alertMs: 0 });
+    await failOnce(p, 0);
+    await failOnce(p, 10_000);
+    // lavish-axi gone: running without Lavish is a choice, not a fault.
+    const none = makePoller({ lavish: () => null });
+    none.pass();
+    expect(channelItems()[0]).toMatchObject({ state: "resolved", resolved_by: "gate.channel_cleared g1" });
+    expect(JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared'").get() as { payload: string }).payload).why).toBe("lavish-axi is not installed");
+    // Nothing stale is left for show: the failure columns clear with the item.
+    expect(channel()).toEqual({ channel_ok_at: null, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    // Failing again is a new episode: one failure opens nothing, the second opens a new item.
+    const again = makePoller({ alertMs: 0 });
+    await failOnce(again, 10_000);
+    expect(channelItems().filter((i) => i.state === "open")).toHaveLength(0);
+    await failOnce(again, 10_000);
+    expect(channelItems().filter((i) => i.state === "open")).toHaveLength(1);
+    tx(db, () => failRun(db, getRun(db, runId)!, "test", "daemon", NOW));
+    again.pass();
+    expect(channelItems().filter((i) => i.state === "open")).toHaveLength(0);
+    const why = (db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).why);
+    expect(why).toEqual(["lavish-axi is not installed", "the run failed"]);
+  });
+
+  test("a gate failing below the threshold clears too once it is no longer polled; its last healthy time stays", async () => {
+    open();
+    db.query("UPDATE gates SET channel_ok_at = ?1 WHERE id = 'g1'").run(NOW - 60_000);
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller();
+    await failOnce(p, 0);
+    expect(channelItems()).toEqual([]);
+    p.stop();
+    db.query("UPDATE gates SET lavish_ended = 1 WHERE id = 'g1'").run();
+    makePoller().pass();
+    expect(channel()).toEqual({ channel_ok_at: NOW - 60_000, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    const cleared = JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared'").get() as { payload: string }).payload);
+    expect(cleared).toEqual({ gate: "g1", item: null, why: "the user ended the Lavish session" });
+    expect(channelView(channel(), () => true)).toBe(`; channel: listening since ${new Date(NOW - 60_000).toTimeString().slice(0, 5)}`);
+  });
+
+  test("a poll that ends after its gate closed or its run ended is recorded nowhere: no item opens for it", () => {
+    open();
+    const failure = { reason: `${SERVER_ERROR} (exit 1)`, retryAt: NOW + 2_000, alertMs: 0, now: NOW };
+    db.query("UPDATE gates SET state = 'passed' WHERE id = 'g1'").run();
+    expect(recordChannelFailure(db, "g1", failure)).toBeNull();
+    expect(recordChannelFailure(db, "g1", { ...failure, now: NOW + 10_000 })).toBeNull();
+    expect(recordChannelOk(db, "g1", "delivered", NOW)).toBe(false);
+    db.query("UPDATE gates SET state = 'open' WHERE id = 'g1'").run();
+    tx(db, () => failRun(db, getRun(db, runId)!, "test", "daemon", NOW));
+    expect(recordChannelFailure(db, "g1", failure)).toBeNull();
+    expect(recordChannelFailure(db, "g1", { ...failure, now: NOW + 10_000 })).toBeNull();
+    expect(recordChannelOk(db, "g1", "listening", NOW)).toBe(false);
+    expect(channel()).toEqual({ channel_ok_at: null, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    expect(channelItems()).toEqual([]);
+    expect(eventKinds()).toEqual([]);
+  });
+
+  test("a pass verdict resolves the gate's channel item with its other items", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller({ alertMs: 0 });
+    await failOnce(p, 0);
+    await failOnce(p, 10_000);
+    p.stop();
+    tx(db, () => {
+      lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null });
+      lavishAnswer(ctx(), { gate: "g1", decision: "q2", choice: ["pi"], note: null });
+      lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: ["flowryn keys"], note: null });
+    });
+    db.query("UPDATE runs SET workflow = 'feature', stage = 'design' WHERE id = ?1").run(runId);
+    tx(db, () => {
+      const approval = insertApproval(db, { task: taskId, ref: "gate:g1", head: "abc123", channel: "cli-tty", actor: "captain", action: "gate", now: NOW });
+      passReviewGate(db, getRunWithPolicy(db, runId)!, db.query("SELECT * FROM gates WHERE id = 'g1'").get() as GateRow, approval, NOW);
+    });
+    expect(channelItems()[0]).toMatchObject({ state: "resolved", resolved_by: "gate.passed g1" });
+  });
+
+  test("without lavish-axi nothing fails and no item opens, however long the gate waits", () => {
+    open();
+    const none = makePoller({ lavish: () => null, alertMs: 0 });
+    for (let i = 0; i < 3; i++) {
+      clock += 600_000;
+      none.pass();
+    }
+    expect(channel()).toEqual({ channel_ok_at: null, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    expect(channelItems()).toEqual([]);
+    expect(eventKinds()).toEqual([]);
+  });
+
+  test("why a poll failed, and what to do about it", () => {
+    expect(pollFailureReason(1, `${SERVER_ERROR}\ncode: SERVER_ERROR\n`, "")).toBe(`${SERVER_ERROR} (exit 1)`);
+    expect(pollFailureReason(1, "error: No active Lavish Editor session for this file\ncode: NOT_FOUND\n", "")).toBe("no Lavish session for the page");
+    expect(pollFailureReason(-1, "", "cannot run /x/lavish-axi: ENOENT")).toBe("cannot run /x/lavish-axi: ENOENT");
+    expect(pollFailureReason(2, "", "boom\nmore")).toBe("boom (exit 2)");
+    expect(pollFailureReason(3, "", "")).toBe("exit 3");
+    expect(channelHint("no Lavish session for the page", "/r/design.html")).toBe("the worker hosts the page again with lavish-axi --no-open /r/design.html");
+    expect(channelHint("cannot run /x: ENOENT", null)).toBe("check [tools] lavish_axi");
+    expect(channelHint(`${SERVER_ERROR} (exit 1)`, null)).toContain("restart Lavish");
+  });
+
+  test("show's channel segment: listening, failing, down with its item; nothing for a channel never seen", () => {
+    const at = new Date(2026, 9, 12, 14, 2).getTime();
+    expect(channelView({}, () => true)).toBe("");
+    expect(channelView({ channel_ok_at: at }, () => true)).toBe("; channel: listening since 14:02");
+    const failing = { channel_failing_since: at, channel_failures: 1, channel_reason: "exit 1", channel_retry_at: at + 60_000 };
+    expect(channelView(failing, () => true)).toBe("; channel: failing since 14:02, 1 failed poll (exit 1); next try 14:03");
+    expect(channelView({ ...failing, channel_failures: 3, channel_item: "i9" }, () => true)).toBe("; channel: DOWN since 14:02, 3 failed polls (exit 1); next try 14:03; item i9");
+    expect(channelView({ ...failing, channel_item: "i9" }, () => false)).toBe("; channel: DOWN since 14:02, 1 failed poll (exit 1); next try 14:03; item i9 (dismissed)");
   });
 });
