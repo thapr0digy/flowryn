@@ -6,6 +6,7 @@ import { openItem } from "../../src/attention/items.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
+import { getRun } from "../../src/lifecycle/runs.ts";
 import type { SteerBus } from "../../src/lifecycle/steers.ts";
 import { herdrEpisode, noteHerdrDown } from "../../src/reconcile/herdr-health.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
@@ -67,6 +68,37 @@ describe("reconciler", () => {
     expect(launches).toEqual(["r1:resume"]);
     expect((db.query("SELECT resume_count FROM runs WHERE id = 'r1'").get() as { resume_count: number }).resume_count).toBe(1);
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE run_id = 'r1' AND kind = 'auto_resumed'").get()).toEqual({ n: 1 });
+  });
+
+  test("a live run whose pane reads with no foreground group yet (M0 h02's handoff reply) is unknown for the pass, never orphaned", async () => {
+    const db = deadRunDb();
+    const start = new Date(2026, 9, 12, 10, 0, 0).getTime();
+    db.query("UPDATE runs SET proc_start = ?1, liveness = 'idle' WHERE id = 'r1'").run(start);
+    const launches: string[] = [];
+    const runtime = {
+      processes: (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: null, processes: [] }),
+      snapshotPanes: () => Promise.resolve([]),
+      agentStatus: () => Promise.resolve(null),
+    } as unknown as HerdrRuntime;
+    const reconciler = new Reconciler({
+      db,
+      runtime: () => runtime,
+      launch: (runId, mode) => launches.push(`${runId}:${mode}`),
+      isLaunching: () => false,
+      bus: { notify() {} } as unknown as SteerBus,
+      timing: () => DEFAULT_TIMING,
+      log: () => {},
+      now: Date.now,
+      ps: () => Promise.resolve("999999 Mon Oct 12 10:00:00 2026 claude\n"),
+    });
+
+    const outcome = await reconciler.reconcileRun(getRun(db, "r1")!, "steady");
+    reconciler.stop();
+
+    expect(outcome).toBe("unknown");
+    expect(db.query("SELECT liveness FROM runs WHERE id = 'r1'").get()).toEqual({ liveness: "unknown" });
+    expect(db.query("SELECT COUNT(*) AS n FROM divergences").get()).toEqual({ n: 0 });
+    expect(launches).toEqual([]);
   });
 
   test("a Herdr read that answers ends a Herdr outage episode", async () => {

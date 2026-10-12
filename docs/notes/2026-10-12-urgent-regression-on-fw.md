@@ -6,7 +6,7 @@ Regression from #69 (4702766): `parseProcesses` (`src/runtime/herdr/runtime.ts`)
 
 ## Design
 
-**Repro (live).** `spikes/herdr/h02-process-info.sh` now also opens a lab pane, starts Claude there with `agent.start` (retrying `agent_pane_busy` as the runtime does) and reads `pane.process_info` back to back the whole time. Herdr 0.7.5, 2026-10-12, isolated lab session: of about 2 000 reads per start, the replies are `group = shell` at the prompt, then `group = job (1..10 procs)` while Claude starts; in two of four starts exactly one read, at the shell-to-job handoff, came back as
+**Repro (live).** `spikes/herdr/h02-process-info.sh` now also opens a lab pane, starts Claude there with `agent.start` (retrying `agent_pane_busy` as the runtime does) and reads `pane.process_info` back to back the whole time. Herdr 0.7.5, 2026-10-12, isolated lab session: of up to 2 000 back-to-back reads per start, the replies are `group = shell` at the prompt, then `group = job (1..10 procs)` while Claude starts; in two of five starts exactly one read, at the shell-to-job handoff, came back as
 
 ```json
 {"process_info":{"pane_id":"w1:p1","shell_pid":91760},"type":"pane_process_info"}

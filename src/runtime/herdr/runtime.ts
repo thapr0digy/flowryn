@@ -23,7 +23,8 @@ export interface PaneProcess {
 export interface PaneProcesses {
   paneId: string;
   shellPid: number;
-  foregroundGroup: number;
+  /** Null while the pane has no foreground job Herdr can name (the shell-to-job handoff, M0 h02): not started yet, never gone. */
+  foregroundGroup: number | null;
   processes: PaneProcess[];
 }
 
@@ -86,18 +87,21 @@ const malformedProcessInfo = (what: string) => new HerdrError("protocol", `pane.
 
 /**
  * pane.process_info's answer (M0 h02). Its essential fields are checked, not
- * defaulted: a reply without a shell pid, a foreground group or a process
- * list says nothing about the pane, so it is `protocol` (liveness unknown to
- * the reconciler), never an empty pane whose harness looks gone.
+ * defaulted: a reply without a shell pid, or with a field of the wrong type,
+ * says nothing about the pane, so it is `protocol` (liveness unknown to the
+ * reconciler), never an empty pane whose harness looks gone. An absent or
+ * null foreground group is Herdr's reply at the shell-to-job handoff (it
+ * omits the process list then too): a pane with no job yet, `null`.
  */
 function parseProcesses(raw: unknown): PaneProcesses {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw malformedProcessInfo("no process_info object");
   const info = raw as Record<string, unknown>;
   if (!isPid(info.shell_pid)) throw malformedProcessInfo("shell_pid is not a pid");
-  const group = info.foreground_process_group_id;
-  if (typeof group !== "number" || !Number.isInteger(group) || group < 0) throw malformedProcessInfo("foreground_process_group_id is not a process group");
-  if (!Array.isArray(info.foreground_processes)) throw malformedProcessInfo("foreground_processes is not a list");
-  const processes = (info.foreground_processes as unknown[]).map((entry) => {
+  const group = info.foreground_process_group_id ?? null;
+  if (group !== null && (typeof group !== "number" || !Number.isInteger(group) || group < 0)) throw malformedProcessInfo("foreground_process_group_id is not a process group");
+  const list = info.foreground_processes ?? (group === null ? [] : undefined);
+  if (!Array.isArray(list)) throw malformedProcessInfo("foreground_processes is not a list");
+  const processes = (list as unknown[]).map((entry) => {
     if (!entry || typeof entry !== "object" || !isPid((entry as Record<string, unknown>).pid)) throw malformedProcessInfo("a foreground process has no pid");
     const p = entry as Record<string, unknown>;
     return { pid: p.pid as number, name: str(p.name), argv0: str(p.argv0), argv: Array.isArray(p.argv) ? (p.argv as unknown[]).map(String) : [], cwd: str(p.cwd) };
@@ -170,14 +174,15 @@ export class HerdrRuntime {
   /**
    * The harness running in a pane: the leader of the foreground process group
    * when that is not the shell and `matches` accepts it, with its start time
-   * from ps (Herdr does not report one). Polls up to `waitMs`.
+   * from ps (Herdr does not report one). Polls up to `waitMs`, through reads
+   * with no foreground group yet.
    */
   async harnessProcess(paneId: string, matches: (p: PaneProcess) => boolean, waitMs = 0): Promise<HarnessProcess | null> {
     const deadline = Date.now() + waitMs;
     for (;;) {
       const info = await this.processes(paneId);
       if (!info) return null;
-      if (info.foregroundGroup !== 0 && info.foregroundGroup !== info.shellPid) {
+      if (info.foregroundGroup !== null && info.foregroundGroup !== 0 && info.foregroundGroup !== info.shellPid) {
         const leader = info.processes.find((p) => p.pid === info.foregroundGroup);
         if (leader && matches(leader)) {
           const identity = await readIdentity(leader.pid, this.ps);

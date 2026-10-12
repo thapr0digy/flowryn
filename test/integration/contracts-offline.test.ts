@@ -49,6 +49,8 @@ beforeAll(async () => {
     extraConfig: ["[workers.pi]", 'model = "openrouter/free"', `agent_dir = ${JSON.stringify(piAgent)}`].join("\n"),
     harnessScripts: { claude: `${import.meta.dir}/../helpers/fake-contract-claude.ts`, pi: `${import.meta.dir}/../helpers/fake-contract-pi.ts` },
   });
+  // Every launch's first process_info reads land in Herdr's shell-to-job handoff (no foreground group yet, M0 h02): the launch waits through them.
+  fleet.herdr.handoffReads = 2;
   // claude-in-chrome on, as on this Mac: the toolkit step must then see it hidden, not skip the check.
   writeFileSync(join(fleet.claudeStore, ".claude.json"), JSON.stringify({ claudeInChromeDefaultEnabled: true }));
 });

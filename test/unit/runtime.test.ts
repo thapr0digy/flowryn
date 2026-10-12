@@ -344,9 +344,13 @@ describe("Herdr runtime", () => {
       { process_info: { pane_id: "w1:p2", foreground_process_group_id: 100, foreground_processes: [shell] } },
       { process_info: { pane_id: "w1:p2", shell_pid: 0, foreground_process_group_id: 100, foreground_processes: [shell] } },
       { process_info: { pane_id: "w1:p2", shell_pid: "100", foreground_process_group_id: 100, foreground_processes: [shell] } },
-      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_processes: [shell] } },
       { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: -1, foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: "100", foreground_processes: [shell] } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 1.5, foreground_processes: [shell] } },
       { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100 } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: null } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_processes: "zsh" } },
+      { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: null, foreground_processes: { pid: 100 } } },
       { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: [{ name: "zsh" }] } },
       { process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: ["zsh"] } },
     ];
@@ -361,6 +365,38 @@ describe("Herdr runtime", () => {
     }
     const valid = new HerdrRuntime(scriptedTransport({ "pane.process_info": () => ({ process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: 100, foreground_processes: [shell] } }) }));
     expect(await valid.processes("w1:p2")).toMatchObject({ shellPid: 100, foregroundGroup: 100, processes: [{ pid: 100, argv0: "-zsh" }] });
+  });
+
+  test("assumption: a pane with no foreground group yet (M0 h02's handoff reply) is a pane with no job, not malformed", async () => {
+    const shell = { pid: 100, name: "zsh", argv0: "-zsh", argv: ["-zsh"], cwd: "/w" };
+    const replies: [Record<string, unknown>, unknown][] = [
+      // Herdr 0.7.5's own reply at the shell-to-job handoff, seen live: both fields omitted.
+      [{ pane_id: "w1:p2", shell_pid: 100 }, { foregroundGroup: null, processes: [] }],
+      [{ pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: null, foreground_processes: null }, { foregroundGroup: null, processes: [] }],
+      [{ pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: null, foreground_processes: [shell] }, { foregroundGroup: null, processes: [{ pid: 100 }] }],
+      [{ pane_id: "w1:p2", shell_pid: 100, foreground_processes: [shell] }, { foregroundGroup: null, processes: [{ pid: 100 }] }],
+    ];
+    for (const [info, expected] of replies) {
+      const runtime = new HerdrRuntime(scriptedTransport({ "pane.process_info": () => ({ process_info: info }) }));
+      expect({ info, read: await runtime.processes("w1:p2") }).toMatchObject({ info, read: { paneId: "w1:p2", shellPid: 100, ...(expected as object) } });
+      expect(await runtime.harnessProcess("w1:p2", () => true, 0)).toBeNull();
+    }
+  });
+
+  test("the launch's identity wait keeps polling through reads with no foreground group until the harness appears", async () => {
+    let reads = 0;
+    const transport = scriptedTransport({
+      "pane.process_info": () => {
+        reads++;
+        if (reads <= 2) return { process_info: { pane_id: "w1:p2", shell_pid: 100 } };
+        return {
+          process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: process.pid, foreground_processes: [{ pid: process.pid, name: "2.1.296", argv0: "claude", argv: ["claude"], cwd: "/w" }] },
+        };
+      },
+    });
+    const found = await new HerdrRuntime(transport, { pollMs: 5 }).harnessProcess("w1:p2", (p) => p.argv0 === "claude", 10_000);
+    expect(found?.identity.pid).toBe(process.pid);
+    expect(reads).toBe(3);
   });
 
   test("events name their pane in either shape Herdr 0.7.5 sends", () => {
