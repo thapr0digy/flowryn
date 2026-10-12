@@ -18,7 +18,7 @@ What the design left room for and what this change chose, the live results, the 
 
 - `Status` (required): `done`, `partial` or `not built`. `partial` and `not built` need an `Open` line saying what is left.
 - `Open` (optional): what is not done or not yet run live.
-- `Config` (optional): the configuration keys the feature adds, each in backticks. Explain them in the body; the README's configuration section is not edited for them.
+- `Config` (optional): the configuration keys the feature adds, each in backticks. Explain them in the body; README.md does not list configuration keys.
 
 Later phases and later fixes of the same feature edit its file. They run one after another, so they do not collide.
 
