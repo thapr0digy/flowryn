@@ -293,7 +293,7 @@ describe("workflow stages and review gates", () => {
         await f.waitRun(run, (r) => r.state === "ready", "the delivery");
         expect(f.events(run).filter((k) => k === "run.fresh_worker")).toHaveLength(1);
         expect(f.events(run).filter((k) => k === "run.launched")).toHaveLength(2);
-        expect(one(f, "SELECT state FROM items WHERE kind = 'worker_not_exited' AND run_id = ?1", run)).toEqual({ state: "resolved" });
+        expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'worker_not_exited' AND run_id = ?1", run)).toEqual({ state: "resolved" });
       } finally {
         stubborn.kill("SIGKILL");
         rmSync(probeDir, { recursive: true, force: true });
@@ -303,13 +303,15 @@ describe("workflow stages and review gates", () => {
   );
 });
 
-/** The process's identity as the daemon reads it: its ps runs with TZ=UTC (the test home's env), and lstart is local time. */
+/** ps as the daemon runs it: TZ=UTC (the test home's env), so lstart, in local time, parses to the same start. */
+const utcPs: PsRunner = async (pids) => {
+  const proc = Bun.spawn(["/bin/ps", "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  return out;
+};
+
+/** The process's identity as the daemon reads it. */
 async function waitForIdentity(pid: number): Promise<ProcIdentity> {
-  const utcPs: PsRunner = async (pids) => {
-    const proc = Bun.spawn(["/bin/ps", "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
-    const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    return out;
-  };
   let identity: ProcIdentity | null = null;
   await waitUntil(async () => (identity = await readIdentity(pid, utcPs)) !== null, 5_000, `the identity of pid ${pid}`);
   return identity!;
