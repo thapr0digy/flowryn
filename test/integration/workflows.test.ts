@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
@@ -7,6 +8,7 @@ import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { M4_SHIP_WORKFLOW } from "../../src/db/schema.ts";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
+import { readIdentity, type ProcIdentity, type PsRunner } from "../../src/runtime/proc.ts";
 
 /**
  * Workflows, review gates, capacity grants and the usage-limit pause (design
@@ -233,6 +235,69 @@ describe("workflow stages and review gates", () => {
       expect(f.events(run)).toContain("run.fresh_worker");
       expect(later.worktree_path).toBe(first.worktree_path);
       await f.waitRun(run, (r) => r.state === "ready", "the delivery");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "a fresh stage whose old worker does not exit keeps it and its slots, and replaces it once when it does",
+    async () => {
+      // The host probe holds the check stage's grant (its browser pool needs the host check) while the test swaps the worker.
+      const probeDir = mkdtempSync(join(tmpdir(), "fw-fresh-probe-"));
+      const hostFile = join(probeDir, "host.json");
+      const probe = join(probeDir, "probe");
+      writeFileSync(probe, `#!/bin/sh\ncat ${JSON.stringify(hostFile)}\n`);
+      chmodSync(probe, 0o755);
+      const setHost = (freeGb: number) => writeFileSync(hostFile, JSON.stringify({ free_mem_gb: freeGb, load_per_core: 0.2 }));
+      setHost(64);
+      // Not a group leader: exitRun signals the group the recorded pid leads, finds none, and the process outlives it.
+      const stubborn = Bun.spawn(["sleep", "600"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      try {
+        fleet = await makeFleetEnv({
+          extraConfig: [
+            "[capacity.host]",
+            `probe = ${JSON.stringify(probe)}`,
+            "[sched]",
+            "pass_ms = 250",
+            "host_cache_ms = 50",
+            "[workflows.twopass]",
+            'stages = [ { id = "build" }, { id = "check", fresh = true, pools = ["browser"] }, { id = "ship", gate = "merge" } ]',
+          ].join("\n"),
+        });
+        const f = fleet;
+        const steps = ["Two passes", "FAKE: commit a.txt one", "FAKE: wait-file go", "FAKE: stage-done", "FAKE: deliver-local", "FAKE: sleep 120000"].join("\n");
+        const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--workflow", "twopass", "--body-file", "-"], { stdin: steps });
+        expect(dispatched.code).toBe(0);
+        const { task, run } = dispatched.reply.data as { task: string; run: string };
+        await f.waitRun(run, (r) => r.proc_pid !== null && r.worker_started_at !== null, "the first worker");
+        setHost(2);
+        await Bun.write(join(f.h.dataDir, task, "go"), "");
+        // Waiting for its grant, the run is the scheduler's: the reconciler leaves its recorded worker alone.
+        await f.waitRun(run, (r) => r.stage === "check" && r.stage_state === "waiting" && r.pending_launch === "stage", "the fresh stage waiting for the host");
+        const identity = await waitForIdentity(stubborn.pid);
+        const db = f.h.db();
+        db.query("UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4 WHERE id = ?1").run(run, identity.pid, identity.start, identity.exe);
+        db.close();
+        const session = f.run(run).agent_session;
+        setHost(64);
+
+        await until(f, "the refused exits' P1", () => one(f, "SELECT 1 FROM items WHERE kind = 'worker_not_exited' AND run_id = ?1 AND state = 'open'", run) !== null);
+        expect(f.run(run)).toMatchObject({ stage: "check", stage_state: "active", pending_launch: "stage", proc_pid: identity.pid, agent_session: session });
+        expect(f.events(run)).toContain("run.fresh_worker_refused");
+        expect(f.events(run)).not.toContain("run.fresh_worker");
+        expect(rows<{ pool: string }>(f, "SELECT pool FROM pool_leases WHERE run_id = ?1 AND released_at IS NULL", run).map((l) => l.pool).toSorted()).toEqual(["browser", "worker"]);
+
+        stubborn.kill("SIGKILL");
+        await stubborn.exited;
+        await f.waitRun(run, (r) => r.agent_session !== session && r.worker_started_at !== null && r.pending_launch === null, "the fresh worker", 30_000);
+        await f.waitRun(run, (r) => r.state === "ready", "the delivery");
+        expect(f.events(run).filter((k) => k === "run.fresh_worker")).toHaveLength(1);
+        expect(f.events(run).filter((k) => k === "run.launched")).toHaveLength(2);
+        expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'worker_not_exited' AND run_id = ?1", run)).toEqual({ state: "resolved" });
+      } finally {
+        stubborn.kill("SIGKILL");
+        rmSync(probeDir, { recursive: true, force: true });
+      }
     },
     { timeout: 90_000 },
   );
@@ -549,3 +614,18 @@ describe("the scheduler keeps going", () => {
     { timeout: 60_000 },
   );
 });
+
+
+/** ps as the daemon runs it: TZ=UTC (the test home's env), so lstart, in local time, parses to the same start. */
+const utcPs: PsRunner = async (pids) => {
+  const proc = Bun.spawn(["/bin/ps", "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  return out;
+};
+
+/** The process's identity as the daemon reads it. */
+async function waitForIdentity(pid: number): Promise<ProcIdentity> {
+  let identity: ProcIdentity | null = null;
+  await waitUntil(async () => (identity = await readIdentity(pid, utcPs)) !== null, 5_000, `the identity of pid ${pid}`);
+  return identity!;
+}

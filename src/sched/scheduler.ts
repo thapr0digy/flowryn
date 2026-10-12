@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
-import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
+import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems } from "../attention/items.ts";
 import { existsSync } from "node:fs";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
@@ -73,6 +73,11 @@ export interface HostState {
 
 const HOST_KEY = "sched_host";
 
+/** Consecutive refused exits of a fresh stage's old worker before one P1 asks you to look. */
+export const EXIT_REFUSALS_FOR_ITEM = 3;
+/** The longest a refused fresh-stage replacement waits before its next exit attempt. */
+export const EXIT_BACKOFF_MAX_MS = 5 * 60_000;
+
 export function hostState(db: Db): HostState | null {
   const raw = getMeta(db, HOST_KEY);
   return raw ? (JSON.parse(raw) as HostState) : null;
@@ -90,6 +95,12 @@ export class Scheduler {
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
   private quotaCache: { at: number; reading: QuotaReading } | null = null;
   private readonly relaunching = new Set<string>();
+  /**
+   * Refused fresh-stage exits per run since its last verified exit, and when the
+   * next attempt may run: one pass after the first refusal, doubling up to
+   * EXIT_BACKOFF_MAX_MS. In memory: a restart starts the count again.
+   */
+  private readonly exitRefusals = new Map<string, { attempts: number; nextAt: number }>();
 
   constructor(deps: SchedulerDeps) {
     this.deps = deps;
@@ -236,8 +247,10 @@ export class Scheduler {
       )
       .all() as (RunWithPolicy & { priority: number })[];
     const t = now();
+    // A run that no longer waits for its replacement (cancelled, failed) drops its refusal count.
+    for (const runId of this.exitRefusals.keys()) if (!rows.some((run) => run.id === runId)) this.exitRefusals.delete(runId);
     return rows
-      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id))
+      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id) && !this.backingOff(run.id, t))
       .map((run) => {
         const pos = positionOf(db, run, run.kind);
         return { run, pos, needs: neededPools(db, run, pos), remaining: pos.def.stages.length - 1 - pos.index, priority: run.priority, since: run.waiting_since ?? t };
@@ -328,12 +341,22 @@ export class Scheduler {
     }
   }
 
-  /** A stage with fresh = true: the old worker exits, and a new session starts in the same worktree. */
+  /**
+   * A stage with fresh = true: the old worker exits, and a new session starts in
+   * the same worktree. Only a verified exit clears the old identity: a worker
+   * that did not stop keeps it, its slots and its pending replacement, and the
+   * next pass tries again (docs/notes/2026-10-12-next-steps-md-we.md).
+   */
   private async freshWorker(runId: string): Promise<void> {
     const { db, now } = this.deps;
     this.relaunching.add(runId);
     try {
-      await this.deps.exitWorker(runId);
+      const exited = await this.verifiedExit(runId);
+      if (!exited.ok) {
+        this.freshWorkerRefused(runId, exited.detail ?? "unverified");
+        return;
+      }
+      this.exitRefusals.delete(runId);
       tx(db, () => {
         db.query(
           `UPDATE runs SET agent_session = ?2, proc_pid = NULL, proc_start = NULL, proc_exe = NULL, worker_started_at = NULL,
@@ -341,11 +364,52 @@ export class Scheduler {
         ).run(runId, randomUUID(), now());
         const run = getRunWithPolicy(db, runId);
         appendEvent(db, { source: "daemon", kind: "run.fresh_worker", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null }, ts: now() });
+        resolveRunItems(db, runId, ["worker_not_exited"], "run.fresh_worker", now());
       });
       this.deps.launch(runId, "stage");
     } finally {
       this.relaunching.delete(runId);
     }
+  }
+
+  /** A refused fresh-stage replacement waits out its backoff: no exit attempt holds the pass meanwhile. */
+  private backingOff(runId: string, t: number): boolean {
+    const refusals = this.exitRefusals.get(runId);
+    return refusals !== undefined && t < refusals.nextAt;
+  }
+
+  /** The worker's exit result; an attempt that throws is an unverified exit, so one run's failure never ends the pass. */
+  private async verifiedExit(runId: string): Promise<{ ok: boolean; detail?: string }> {
+    try {
+      return await this.deps.exitWorker(runId);
+    } catch (error) {
+      return { ok: false, detail: (error as Error).message };
+    }
+  }
+
+  /** One refused fresh-stage replacement: an event when the episode starts, one P1 once it has lasted EXIT_REFUSALS_FOR_ITEM attempts. */
+  private freshWorkerRefused(runId: string, detail: string): void {
+    const { db, now } = this.deps;
+    const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
+    const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
+    this.exitRefusals.set(runId, { attempts, nextAt: now() + backoff });
+    this.deps.log(`sched: fresh worker for ${runId} waits: the old worker did not exit (${detail}; attempt ${attempts})`);
+    if (attempts !== 1 && attempts < EXIT_REFUSALS_FOR_ITEM) return;
+    tx(db, () => {
+      const run = getRunWithPolicy(db, runId);
+      if (attempts === 1) appendEvent(db, { source: "daemon", kind: "run.fresh_worker_refused", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null, detail, attempts }, ts: now() });
+      if (attempts < EXIT_REFUSALS_FOR_ITEM || findOpenRunItem(db, "worker_not_exited", runId)) return;
+      const event = appendEvent(db, { source: "daemon", kind: "run.worker_not_exited", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null, detail, attempts }, ts: now() });
+      const title = run ? taskTitle(db, run.task_id) : runId;
+      openItem(db, {
+        kind: "worker_not_exited",
+        eventSeq: event.seq,
+        taskId: run?.task_id ?? null,
+        runId,
+        line: `${title}: stage ${run?.stage ?? "?"} waits for a fresh worker; the old worker (pid ${run?.proc_pid ?? "?"}) did not exit after ${attempts} tries (${detail})`,
+        now: now(),
+      });
+    });
   }
 
   /**

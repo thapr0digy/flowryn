@@ -37,6 +37,8 @@ export type ItemClass = "actionable" | "info";
  * (REPORT_EFFECT in src/lifecycle/worker.ts), such as a finding or a blocker.
  * validation_stuck: a ship holds its validation slot with no progress (its
  * no-mistakes step quiet, or its run gone or ended with nothing delivered).
+ * worker_not_exited: a fresh stage's old worker did not exit after several
+ * scheduler attempts, so its replacement waits (src/sched/scheduler.ts).
  * The upkeep hooks (src/upkeep/, spec 3 phase 3): build_failed, the daemon's
  * build after a Flowryn merge failed; checkout_unsynced, a primary checkout
  * the sync left alone (informational); conflict_nudged, a delivered PR that
@@ -78,6 +80,7 @@ export const LANE_TABLE = {
   quota_low: { lane: "P1", class: "actionable" },
   validation_outside_cap: { lane: "P1", class: "actionable" },
   validation_stuck: { lane: "P1", class: "actionable" },
+  worker_not_exited: { lane: "P1", class: "actionable" },
   harness_unverified: { lane: "P1", class: "actionable" },
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
