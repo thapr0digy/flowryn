@@ -26,6 +26,9 @@ export type ItemClass = "actionable" | "info";
  * contract_recorded: the leader, or the daemon's automatic check, recorded a
  * harness contract pass (relaxed policy, installed build); informational, so
  * you see every one.
+ * contract_leftover: the daemon's automatic contract check could not release
+ * what a run created (a Herdr workspace, a process, a worktree, its scratch
+ * home); the line and its event name each one and the run's manifest.
  * build_refused: the build watcher found an installed build it will not apply
  * (older than the running daemon, or failing its binary check).
  * build_held: an installed build the watcher leaves to you (unstamped, built
@@ -69,6 +72,7 @@ export const LANE_TABLE = {
   nomistakes_down: { lane: "P1", class: "actionable" },
   capacity_wait: { lane: "P1", class: "actionable" },
   docker_leftover: { lane: "P1", class: "actionable" },
+  contract_leftover: { lane: "P1", class: "actionable" },
   phase_blocked: { lane: "P1", class: "actionable" },
   usage_limit: { lane: "P1", class: "actionable" },
   quota_low: { lane: "P1", class: "actionable" },

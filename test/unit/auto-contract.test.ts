@@ -5,12 +5,14 @@ import { join } from "node:path";
 import type { DaemonInfo } from "../../src/api/verbs.ts";
 import { composeBriefing } from "../../src/attention/briefing.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
-import { AutoContractChecker, autoFailureLine, autoUnrecordedLine, parseHandoff, type AutoJob, type AutoOutcome, type AutoProcess } from "../../src/contracts/auto.ts";
+import { AUTO_STOP_GRACE_MS, AutoContractChecker, autoFailureLine, autoLeftoverLine, autoUnrecordedLine, parseHandoff, type AutoJob, type AutoOutcome, type AutoProcess } from "../../src/contracts/auto.ts";
+import { writeManifest, type CleanupOutcome, type OwnedResources } from "../../src/contracts/owned.ts";
+import { CONTRACT_CLEANUP_BUDGET_MS } from "../../src/contracts/runner.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
 import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
-import { autoAttempt, gateHarness, harnessRefusal, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
+import { autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
 import { noteUsageLimit } from "../../src/sched/usage.ts";
 
 /**
@@ -30,8 +32,23 @@ let busy: boolean;
 let herdr: string | null;
 let passes: number;
 let jobs: AutoJob[];
-let script: (job: AutoJob) => { passed?: boolean; build?: string | null; mode?: "record" | "verify-only"; report?: boolean; hold?: boolean };
+let script: (job: AutoJob) => {
+  passed?: boolean;
+  build?: string | null;
+  mode?: "record" | "verify-only";
+  report?: boolean;
+  hold?: boolean;
+  /** A held child that keeps running after SIGTERM (it ends only on SIGKILL). */
+  ignoreTerm?: boolean;
+  /** The ownership manifest the child leaves: none, one whose cleanup it recorded, or one it never finished. */
+  manifest?: "none" | "clean" | "unfinished";
+};
 let held: { resolve: () => void; terminated: boolean }[];
+/** The signals each fake child received, with when. */
+let signals: { signal: "TERM" | "KILL"; at: number }[];
+/** The manifests the checker asked to release, and what that release reports. */
+let recovered: string[];
+let recovery: CleanupOutcome;
 let probe: Promise<void> | null;
 
 function useConfig(mode: "strict" | "relaxed"): void {
@@ -48,14 +65,24 @@ function pin(id: string): void {
   writeFileSync(join(dir, "bin", `flowryn-${id}`), "#!/bin/sh\n");
 }
 
+function ownedBy(job: AutoJob, cleanup: CleanupOutcome | null): OwnedResources {
+  return { runner: null, home: join(dir, "fwc-x"), herdr_socket: "/s", branch_prefix: "flowryn/contract-00000000-", project: null, daemon: null, workspaces: ["w7"], harnesses: [], cleanup };
+}
+
 /** A fake run: writes the report the child would (or none), and prints its handoff. */
 function fakeRun(job: AutoJob): AutoProcess {
   jobs.push(job);
   const plan = script(job);
+  if (plan.manifest === "clean") writeManifest(job.manifest, ownedBy(job, { ok: true, problems: [], by: "runner", at: Date.now() }));
+  if (plan.manifest === "unfinished") writeManifest(job.manifest, ownedBy(job, null));
   const report =
     plan.report === false
       ? null
-      : dataDirReport(config, { harness: job.harness, version: versions[job.harness], passed: plan.passed ?? true, steps: [], scratch: "/tmp/x" }, { mode: plan.mode ?? "record", build: plan.build === undefined ? BUILD : plan.build, by: "daemon" });
+      : dataDirReport(
+          config,
+          { harness: job.harness, version: versions[job.harness], passed: plan.passed ?? true, steps: [], scratch: "/tmp/x", cleanup: { ok: true, problems: [], by: "runner", at: 0 } },
+          { mode: plan.mode ?? "record", build: plan.build === undefined ? BUILD : plan.build, by: "daemon" },
+        );
   const outcome: AutoOutcome = {
     exitCode: plan.passed === false ? 1 : 0,
     stdout: JSON.stringify({ ok: true, data: { checks: [], summary: "", report: report ?? "-", version: versions[job.harness] } }) + "\n",
@@ -70,15 +97,26 @@ function fakeRun(job: AutoJob): AutoProcess {
   return {
     done,
     terminate: () => {
+      signals.push({ signal: "TERM", at: Date.now() });
       latch.terminated = true;
+      if (!plan.ignoreTerm) latch.resolve();
+    },
+    kill: () => {
+      signals.push({ signal: "KILL", at: Date.now() });
       latch.resolve();
     },
-    kill: () => latch.resolve(),
   };
 }
 
-function checker(): AutoContractChecker {
+function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopWaitMs?: number; onRecover?: (manifest: string) => void } = {}): AutoContractChecker {
+  const { onRecover, ...timing } = options;
   return new AutoContractChecker({
+    ...timing,
+    recover: async (manifest) => {
+      onRecover?.(manifest);
+      recovered.push(manifest);
+      return recovery;
+    },
     db,
     config: () => config,
     env: { FLOWRYN_TOKEN: "leader-token", PATH: "/bin" },
@@ -134,6 +172,9 @@ beforeEach(() => {
   held = [];
   script = () => ({});
   probe = null;
+  signals = [];
+  recovered = [];
+  recovery = { ok: true, problems: [], by: "daemon", at: Date.now() };
 });
 
 afterEach(() => {
@@ -450,6 +491,167 @@ describe("strict, and daemons that cannot run the check", () => {
     expect(jobs).toHaveLength(2);
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
     expect(items("harness_unverified")).toEqual([expect.objectContaining({ state: "resolved" })]);
+  });
+});
+
+describe("one owner, one budget: the check's deadline and its cleanup", () => {
+  test("assumption: the stop grace covers the runner's whole cleanup budget", () => {
+    expect(AUTO_STOP_GRACE_MS).toBeGreaterThan(CONTRACT_CLEANUP_BUDGET_MS);
+    // cancel 16 s, scratch daemon 20 s, a workspace 5 s, a harness 12 s, worktrees 5 s, the scratch home 10.5 s.
+    expect(CONTRACT_CLEANUP_BUDGET_MS).toBe(68_500);
+  });
+
+  test("assumption: past its deadline the child gets SIGTERM and the stop grace before SIGKILL; it fails, and the checker releases what it left", async () => {
+    script = () => ({ hold: true, ignoreTerm: true, manifest: "unfinished" });
+    const auto = checker({ maxRunMs: 30, stopGraceMs: 200 });
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    expect(signals.map((s) => s.signal)).toEqual(["TERM", "KILL"]);
+    expect(signals[1]!.at - signals[0]!.at).toBeGreaterThanOrEqual(190);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "failed", detail: expect.stringContaining("did not finish within"), cleanup: "ok", manifest: jobs[0]!.manifest });
+    expect(jobs[0]!.manifest).toStartWith(join(dir, "data", "contracts", "auto-claude-2.1.300-"));
+    expect(jobs[0]!.manifest).toEndWith(".owned.json");
+    expect(recovered).toEqual([jobs[0]!.manifest]);
+    expect(events("contract.auto_cleanup")).toEqual([expect.objectContaining({ harness: "claude", version: "2.1.300", ok: true, by: "daemon" })]);
+    expect(items("contract_leftover")).toEqual([]);
+  });
+
+  test("a child that stops on SIGTERM within the grace is never killed", async () => {
+    script = () => ({ hold: true, manifest: "clean" });
+    const auto = checker({ maxRunMs: 30, stopGraceMs: 5_000 });
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    expect(signals.map((s) => s.signal)).toEqual(["TERM"]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "failed", cleanup: "ok" });
+    expect(recovered).toEqual([]);
+  });
+
+  test("assumption: contract success and cleanup success are recorded apart: a pass that left something is recorded, with one P1 naming it", async () => {
+    script = () => ({ manifest: "unfinished" });
+    recovery = { ok: false, problems: ["Herdr workspace w7 not closed: Herdr did not answer"], by: "daemon", at: Date.now() };
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "passed", cleanup: "failed", cleanup_detail: "Herdr workspace w7 not closed: Herdr did not answer" });
+    expect(events("contract.auto_cleanup_failed")).toEqual([expect.objectContaining({ harness: "claude", version: "2.1.300", by: "daemon", problems: recovery.problems, manifest: jobs[0]!.manifest })]);
+    const [item] = items("contract_leftover");
+    expect(item).toMatchObject({ state: "open", class: "actionable" });
+    expect(item!.line).toContain("w7 not closed");
+    expect(items("harness_unverified")).toEqual([]);
+
+    // And a failed check whose cleanup was clean is still a failure, with no leftover P1.
+    versions.claude = "2.1.301";
+    script = () => ({ passed: false, manifest: "clean" });
+    await gate("claude");
+    await auto.tick();
+    expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.301", state: "failed", cleanup: "ok" });
+    expect(items("contract_leftover")).toHaveLength(1);
+  });
+
+  test("a runner that recorded a clean cleanup is taken at its word; nothing is released again", async () => {
+    script = () => ({ manifest: "clean" });
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    expect(recovered).toEqual([]);
+    expect(events("contract.auto_cleanup")).toEqual([expect.objectContaining({ ok: true, by: "runner" })]);
+  });
+
+  test("assumption: no manifest means the run recorded nothing it owned: cleanup none, no release, no P1", async () => {
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "passed", cleanup: "none" });
+    expect(recovered).toEqual([]);
+    expect(events("contract.auto_cleanup")).toEqual([expect.objectContaining({ ok: null, detail: expect.stringContaining("no manifest") })]);
+    expect(items("contract_leftover")).toEqual([]);
+  });
+
+  test("assumption: a daemon stop never kills the child; the next start releases its manifest before any new check starts", async () => {
+    const auto = checker({ daemonStopWaitMs: 50 });
+    auto.init();
+    script = () => ({ hold: true, ignoreTerm: true, manifest: "unfinished" });
+    await gate("claude");
+    const running = auto.tick();
+    await Bun.sleep(20);
+    await auto.stop();
+    expect(signals.map((s) => s.signal)).toEqual(["TERM"]);
+    // The child finishes on its own later; the stopped checker records nothing of it.
+    for (const h of held.splice(0)) h.resolve();
+    await running;
+    const manifest = jobs[0]!.manifest;
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "running", manifest });
+    expect(events("contract.auto_cleanup")).toEqual([]);
+
+    const order: string[] = [];
+    script = () => {
+      order.push("check");
+      return {};
+    };
+    const next = checker({ onRecover: (path) => order.push(`release ${path}`) });
+    next.init();
+    expect(events("contract.auto_interrupted")).toEqual([expect.objectContaining({ manifest })]);
+    await next.tick();
+    expect(order).toEqual([`release ${manifest}`, "check"]);
+    // The cut-off run's release, then the rerun's own (it kept no manifest).
+    expect(events("contract.auto_cleanup")).toEqual([expect.objectContaining({ manifest, ok: true, by: "daemon" }), expect.objectContaining({ ok: null })]);
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+  });
+
+  test("a start that stops again before its release finishes leaves the manifest for the next start", async () => {
+    const auto = checker({ daemonStopWaitMs: 50 });
+    auto.init();
+    script = () => ({ hold: true, ignoreTerm: true, manifest: "unfinished" });
+    await gate("claude");
+    const running = auto.tick();
+    await Bun.sleep(20);
+    await auto.stop();
+    for (const h of held.splice(0)) h.resolve();
+    await running;
+    const manifest = jobs[0]!.manifest;
+
+    const cutOff = checker();
+    cutOff.init();
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", manifest });
+
+    const order: string[] = [];
+    script = () => {
+      order.push("check");
+      return {};
+    };
+    const next = checker({ onRecover: (path) => order.push(`release ${path}`) });
+    next.init();
+    expect(events("contract.auto_interrupted")).toHaveLength(1);
+    await next.tick();
+    expect(order).toEqual([`release ${manifest}`, "check"]);
+    expect(events("contract.auto_cleanup")[0]).toMatchObject({ manifest, ok: true, by: "daemon" });
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+
+    const after = checker({ onRecover: (path) => order.push(`release ${path}`) });
+    after.init();
+    await after.tick();
+    expect(order).toEqual([`release ${manifest}`, "check"]);
+  });
+
+  test("an attempt from before manifests reruns with nothing released", async () => {
+    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "running", started_at: 1, build: BUILD, log: "/x.log" }));
+    const next = checker();
+    next.init();
+    await gate("claude");
+    await next.tick();
+    expect(recovered).toEqual([]);
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+  });
+
+  test("the leftover line names what was left and the manifest under ~", () => {
+    const line = autoLeftoverLine("claude", "2.1.300", ["Herdr workspace w7 not closed: timeout"], "/Users/me/.flowryn/data/contracts/auto-claude-2.1.300-x.owned.json", "/Users/me");
+    expect(line).toBe("claude 2.1.300's automatic contract check left resources behind (Herdr workspace w7 not closed: timeout); manifest ~/.flowryn/data/contracts/auto-claude-2.1.300-x.owned.json");
   });
 });
 

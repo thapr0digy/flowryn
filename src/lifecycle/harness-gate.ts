@@ -71,6 +71,11 @@ export interface AutoAttempt {
   report?: string | null;
   log?: string | null;
   detail?: string;
+  /** The run's ownership manifest (src/contracts/owned.ts); absent on attempts from before it existed. */
+  manifest?: string;
+  /** Whether the run released what it created, apart from `state`: `none` when it recorded nothing it owned. */
+  cleanup?: "ok" | "failed" | "none";
+  cleanup_detail?: string;
 }
 
 export function autoAttempt(db: Db, harness: HarnessId): AutoAttempt | null {
