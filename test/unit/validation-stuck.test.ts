@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { RELAY_KINDS, type ItemRow } from "../../src/attention/items.ts";
 import { DEFAULT_SCHED } from "../../src/config/workflows.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { openCiWait } from "../../src/lifecycle/ci-wait.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { oldestStep, parseNmStatus, quietSeconds } from "../../src/policy/nomistakes.ts";
-import { applyNmObservation } from "../../src/reconcile/delivery.ts";
+import { applyNmObservation, yieldToCiWait } from "../../src/reconcile/delivery.ts";
 import { releaseLeases } from "../../src/sched/pools.ts";
 
 /**
@@ -69,7 +70,7 @@ function stuckItems(): ItemRow[] {
 }
 
 function episodeEvents(): string[] {
-  return (db.query("SELECT kind FROM events WHERE kind IN ('run.validation_stuck','run.validation_moving') ORDER BY seq").all() as { kind: string }[]).map((e) => e.kind);
+  return (db.query("SELECT kind FROM events WHERE kind IN ('run.validation_stuck','run.validation_moving','run.validation_covered') ORDER BY seq").all() as { kind: string }[]).map((e) => e.kind);
 }
 
 describe("how long a no-mistakes step has been quiet", () => {
@@ -193,5 +194,104 @@ describe("a validation slot held with no progress", () => {
 
   test("a stuck validation is an item the leader's turn end relays", () => {
     expect(RELAY_KINDS).toContain("validation_stuck");
+  });
+});
+
+/** `axi status` of a pipeline waiting only on CI (no agent on the step), as the CI-wait watchdog reads it. */
+function waitingOnCi(activeFor: string, lastActivity: string, id = "01NM"): string {
+  return [
+    "run:",
+    `  id: "${id}"`,
+    "  branch: b",
+    "  status: running",
+    "  head: abc",
+    '  pr: ""',
+    "  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:",
+    `    ci,running,${activeFor},"${lastActivity}","",starting`,
+    "",
+  ].join("\n");
+}
+
+/** The CI-wait question the delivery watcher opens for pipeline run `nmRun`. */
+function askCiWait(nmRun = "01NM", at = now): string {
+  return tx(db, () => openCiWait(db, getRunWithPolicy(db, "r1")!, "p", { nmRun, minutes: 60, pr: "", defaultBranch: "main" }, { lacksNoCi: false, hasMain: false }, 60, at));
+}
+
+function answer(id: string, choice: string, at = now): void {
+  tx(db, () => db.query("UPDATE decisions SET state = 'answered', answer = ?2, answered_at = ?3 WHERE id = ?1").run(id, choice, at));
+}
+
+describe("a CI wait the CI-wait question covers (one alert per cause)", () => {
+  test("assumption: the watchdog's CI wait (only the ci step, no agent) can read quiet past the threshold", () => {
+    observe(waitingOnCi("1h30m", "45m ago: log: waiting for checks to register"));
+    expect(stuckItems()).toHaveLength(1);
+  });
+
+  test("a CI-wait question open for the pipeline run: a quiet CI wait opens no validation_stuck", () => {
+    askCiWait();
+    observe(waitingOnCi("1h30m", "45m ago: log: waiting for checks to register"));
+    observe(waitingOnCi("1h40m", "55m ago: log: waiting for checks to register"), now + 10 * MIN);
+    expect(stuckItems()).toEqual([]);
+    expect(episodeEvents()).toEqual([]);
+  });
+
+  test("a validation_stuck already open for the CI wait closes, naming the question, once the question opens; it does not reopen", () => {
+    observe(waitingOnCi("40m", "35m ago: log: waiting for checks to register"));
+    expect(stuckItems().map((i) => i.state)).toEqual(["open"]);
+    const q = askCiWait("01NM", now + 20 * MIN);
+    observe(waitingOnCi("1h", "55m ago: log: waiting for checks to register"), now + 21 * MIN);
+    expect(stuckItems().map((i) => [i.state, i.resolved_by])).toEqual([["resolved", `covered by the CI-wait question ${q}`]]);
+    observe(waitingOnCi("1h10m", "1h5m ago: log: waiting for checks to register"), now + 31 * MIN);
+    expect(stuckItems()).toHaveLength(1);
+    expect(episodeEvents()).toEqual(["run.validation_stuck", "run.validation_covered"]);
+    const covered = db.query("SELECT payload FROM events WHERE kind = 'run.validation_covered'").get() as { payload: string };
+    expect(JSON.parse(covered.payload)).toEqual({ nm_run: "01NM", decision: q });
+  });
+
+  test("the transaction that opens the question closes the open stall at once", () => {
+    observe(waitingOnCi("40m", "35m ago: log: waiting for checks to register"));
+    const q = askCiWait("01NM", now + MIN);
+    const covered = tx(db, () => yieldToCiWait(db, getRunWithPolicy(db, "r1")!, parseNmStatus(waitingOnCi("1h", "55m ago: x")), now + MIN));
+    expect(covered).toBe(true);
+    expect(stuckItems().map((i) => i.resolved_by)).toEqual([`covered by the CI-wait question ${q}`]);
+  });
+
+  test("a non-CI stall still opens validation_stuck while a CI-wait question is open", () => {
+    askCiWait();
+    observe(running("review", "50m", "45m ago: agent: thinking"));
+    expect(stuckItems().map((i) => i.line)).toEqual(["Validation stuck: t1 (p): no-mistakes step review quiet for 45m; flowryn show t1"]);
+  });
+
+  test("a quiet CI wait no question covers still opens it: none asked (pending checks), another pipeline run's, or one closed unanswered", () => {
+    askCiWait("01OTHER");
+    observe(waitingOnCi("1h30m", "45m ago: log: waiting for checks"));
+    expect(stuckItems()).toHaveLength(1);
+
+    tx(db, () => db.query("UPDATE items SET state = 'resolved', resolved_by = 'x'").run());
+    const q = askCiWait("01NM", now + MIN);
+    tx(db, () => db.query("UPDATE decisions SET state = 'dismissed', answered_at = ?2 WHERE id = ?1").run(q, now + MIN));
+    observe(waitingOnCi("1h31m", "46m ago: log: waiting for checks"), now + 2 * MIN);
+    // Still the same episode: the dismissed question covers nothing, and the stall stays the stuck item's.
+    expect(episodeEvents()).toEqual(["run.validation_stuck"]);
+  });
+
+  test("a CI-wait question answered, then a later non-CI stall, opens validation_stuck", () => {
+    const q = askCiWait();
+    answer(q, "keep-waiting", now + MIN);
+    observe(waitingOnCi("1h30m", "45m ago: log: waiting for checks"), now + 2 * MIN);
+    expect(stuckItems()).toEqual([]);
+    observe(running("review", "40m", "35m ago: agent: thinking"), now + 40 * MIN);
+    expect(stuckItems().map((i) => i.line)).toEqual(["Validation stuck: t1 (p): no-mistakes step review quiet for 35m; flowryn show t1"]);
+  });
+
+  test("an answered question covers its stall even after the stuck episode it closed, and the next stall after it opens anew", () => {
+    observe(waitingOnCi("40m", "35m ago: log: waiting"));
+    const q = askCiWait("01NM", now + MIN);
+    answer(q, "merge-main", now + 2 * MIN);
+    observe(waitingOnCi("45m", "40m ago: log: waiting"), now + 3 * MIN);
+    expect(stuckItems().map((i) => i.state)).toEqual(["resolved"]);
+    observe('run:\n  id: "01NM2"\n  branch: b\n  status: running\n  head: abc\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    test,running,40m,"31m ago: log: go test",81234,1\n', now + 50 * MIN);
+    expect(stuckItems().map((i) => i.state)).toEqual(["resolved", "open"]);
+    expect(episodeEvents()).toEqual(["run.validation_stuck", "run.validation_covered", "run.validation_stuck"]);
   });
 });
