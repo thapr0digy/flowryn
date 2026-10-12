@@ -23,7 +23,7 @@ A fresh stage replaces its worker only on a verified exit, the precondition `rel
 
 Choices the brief left open, and why:
 
-- Episode tracking is in memory (`Map<runId, { attempts }>` on the scheduler), not a new column: a refusal is a transient condition, and after a daemon restart the worst case is one more `run.fresh_worker_refused` event and three more attempts before the item, while `findOpenRunItem` keeps a still-open item from duplicating. No schema change, so no migration.
+- Episode tracking is in memory (a `Map<runId, attempts>` on the scheduler holding an attempt count per run), not a new column: a refusal is a transient condition, and after a daemon restart the worst case is one more `run.fresh_worker_refused` event and three more attempts before the item, while `findOpenRunItem` keeps a still-open item from duplicating. No schema change, so no migration.
 - The item threshold is a count (3 attempts), not a new config key: each attempt already spends the exit grace period plus the SIGKILL wait, so three attempts are minutes of a worker that will not die, which is worth a person's look. A constant keeps the config surface unchanged.
 - `relaunchWorker` is not changed. It already refuses on `ok: false`; making it catch a throw too is a separate change.
 
