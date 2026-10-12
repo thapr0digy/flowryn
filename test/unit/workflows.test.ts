@@ -10,8 +10,9 @@ import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts"
 import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
-import { judgeHost, parseVmStat } from "../../src/sched/host.ts";
+import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.ts";
 import { fullPools, grantLeases, liveCounts, OverCapacity, releaseLeases, runLeases } from "../../src/sched/pools.ts";
+import { Scheduler } from "../../src/sched/scheduler.ts";
 import { claimProbe, clearUsageLimit, noteUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
@@ -314,5 +315,122 @@ describe("the Claude usage-limit pause (design section 16)", () => {
     expect((db.query("SELECT source FROM events WHERE kind = 'sched.usage_resumed' ORDER BY seq DESC LIMIT 1").get() as { source: string }).source).toBe("cli");
     expect(usageItem(db)).toMatchObject({ state: "resolved" });
     db.close();
+  });
+});
+
+describe("a fresh stage replaces its worker only on a verified exit (docs/notes/2026-10-12-next-steps-md-we.md)", () => {
+  const FRESH_CONFIG = `[tools]\nclaude = "/bin/true"\n[workflows.twopass]\nstages = [ { id = "build" }, { id = "check", fresh = true }, { id = "ship", gate = "merge" } ]`;
+
+  type Exit = { ok: boolean; detail?: string } | Error;
+
+  /**
+   * r1 and r2 wait for a fresh check stage, each with a live old worker and its
+   * worker slot; `exits` answers each run's exit attempt in turn. The launch
+   * stand-in does what the launcher does: the new worker's identity, and
+   * pending_launch cleared.
+   */
+  function freshStage(exits: Record<string, Exit[]>) {
+    const db = scratchDb();
+    const config = cfg(FRESH_CONFIG);
+    const def = JSON.stringify(workflowFor(config, "twopass", "ship"));
+    const caps = capacityConfig(config).pools;
+    tx(db, () => {
+      db.query("INSERT INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 0)").run();
+      for (const [run, pid] of [["r1", 4101], ["r2", 4102]] as const) {
+        db.query(
+          `UPDATE runs SET workflow = 'twopass', workflow_def = ?2, stage = 'check', stage_state = 'waiting', pending_launch = 'stage', waiting_since = 1,
+             liveness = 'idle', proc_pid = ?3, proc_start = 1, proc_exe = 'claude', agent_session = ?4 WHERE id = ?1`,
+        ).run(run, def, pid, `old-${run}`);
+        grantLeases(db, run, run.replace("r", "t"), "build", ["worker"], caps, 1);
+      }
+    });
+    const launches: string[] = [];
+    const exitCalls: string[] = [];
+    let clock = 10;
+    const scheduler = new Scheduler({
+      db,
+      config: () => config,
+      now: () => ++clock,
+      log: () => {},
+      launch: (runId, mode) => {
+        launches.push(`${runId}:${mode}`);
+        db.query("UPDATE runs SET pending_launch = NULL, proc_pid = 5000, proc_start = 2, proc_exe = 'claude' WHERE id = ?1").run(runId);
+      },
+      isLaunching: () => false,
+      exitWorker: async (runId) => {
+        exitCalls.push(runId);
+        const next = exits[runId]?.shift() ?? { ok: true };
+        if (next instanceof Error) throw next;
+        return next;
+      },
+      notify: () => {},
+      startDeps: { db, config: () => config, runtime: () => null, harnessVersion: async () => "1", git: async () => null, now: () => clock },
+      kickJournal: () => {},
+      host: async () => ({ ok: true, reason: "test" }) as HostVerdict,
+    });
+    const row = (runId: string) =>
+      db.query("SELECT proc_pid, agent_session, stage_state, pending_launch FROM runs WHERE id = ?1").get(runId) as { proc_pid: number | null; agent_session: string; stage_state: string; pending_launch: string | null };
+    const kinds = (runId: string) => (db.query("SELECT kind FROM events WHERE run_id = ?1 ORDER BY seq").all(runId) as { kind: string }[]).map((e) => e.kind);
+    const workerLeases = (runId: string) => runLeases(db, runId).filter((l) => l.pool === "worker").length;
+    const openExitItems = (runId: string) => (db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'worker_not_exited' AND run_id = ?1 AND state IN ('open','presented')").get(runId) as { n: number }).n;
+    return { db, scheduler, launches, exitCalls, row, kinds, workerLeases, openExitItems };
+  }
+
+  test("a false exit result resets no identity and launches nothing; the run keeps its slot and its pending replacement, and other work still goes", async () => {
+    const f = freshStage({ r1: [{ ok: false, detail: "timeout" }] });
+    await f.scheduler.passNow();
+    expect(f.row("r1")).toEqual({ proc_pid: 4101, agent_session: "old-r1", stage_state: "active", pending_launch: "stage" });
+    expect(f.kinds("r1")).not.toContain("run.fresh_worker");
+    expect(f.kinds("r1")).toContain("run.fresh_worker_refused");
+    expect(f.workerLeases("r1")).toBe(1);
+    // The refused candidate did not hold up r2, granted in the same pass.
+    expect(f.launches).toEqual(["r2:stage"]);
+    expect(f.row("r2")).toMatchObject({ proc_pid: 5000, pending_launch: null });
+    expect(f.row("r2").agent_session).not.toBe("old-r2");
+    f.db.close();
+  });
+
+  test("an exit attempt that throws counts as unverified, and does not stop the pass", async () => {
+    const f = freshStage({ r1: [new Error("ps failed")] });
+    await f.scheduler.passNow();
+    expect(f.row("r1")).toEqual({ proc_pid: 4101, agent_session: "old-r1", stage_state: "active", pending_launch: "stage" });
+    const refused = f.db.query("SELECT payload FROM events WHERE run_id = 'r1' AND kind = 'run.fresh_worker_refused'").get() as { payload: string };
+    expect(JSON.parse(refused.payload)).toMatchObject({ stage: "check", detail: "ps failed", attempts: 1 });
+    expect(f.launches).toEqual(["r2:stage"]);
+    f.db.close();
+  });
+
+  test("a later verified exit, on a scheduler pass, replaces the worker exactly once and keeps one worker slot", async () => {
+    const f = freshStage({ r1: [{ ok: false }] });
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r2:stage"]);
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 5000, pending_launch: null, stage_state: "active" });
+    expect(f.row("r1").agent_session).not.toBe("old-r1");
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
+    expect(f.kinds("r1").filter((k) => k === "run.fresh_worker")).toHaveLength(1);
+    expect(f.workerLeases("r1")).toBe(1);
+    expect(f.exitCalls.filter((r) => r === "r1")).toHaveLength(2);
+    f.db.close();
+  });
+
+  test("a refusal that persists opens one P1 for the run; the verified exit resolves it", async () => {
+    const f = freshStage({ r1: [{ ok: false }, { ok: false }, { ok: false }, { ok: false }] });
+    await f.scheduler.passNow();
+    await f.scheduler.passNow();
+    expect(f.openExitItems("r1")).toBe(0);
+    await f.scheduler.passNow();
+    expect(f.openExitItems("r1")).toBe(1);
+    await f.scheduler.passNow();
+    expect(f.openExitItems("r1")).toBe(1);
+    // One refusal event per episode; each attempt is still an exit attempt.
+    expect(f.kinds("r1").filter((k) => k === "run.fresh_worker_refused")).toHaveLength(1);
+    expect(f.launches).toEqual(["r2:stage"]);
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
+    expect(f.openExitItems("r1")).toBe(0);
+    f.db.close();
   });
 });
