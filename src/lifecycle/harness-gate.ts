@@ -234,9 +234,9 @@ export function unverifiedItemOpened(db: Db, harness: HarnessId, version: string
   );
 }
 
-/** A contract run just passed for this version at this revision: the P1 flagged for exactly that is settled. Call inside a transaction. */
+/** A contract run just passed for this version at this revision: when that verifies the flagged version (whatever revision the flag recorded), its P1 is settled. Call inside a transaction. */
 export function noteContractPassed(db: Db, harness: HarnessId, version: string, revision: number, now: number): void {
-  if (!sameFlag(readFlag(db, harness), version, revision)) return;
+  if (revision !== contractRevision(harness) || readFlag(db, harness)?.version !== version) return;
   setFlag(db, harness, null);
   resolveItems(db, "harness_unverified", harnessItemKey(harness), `contract passed for ${version}`, now);
 }

@@ -794,4 +794,19 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
     expect(await gate("claude")).toMatchObject({ state: "verified" });
   });
+
+  test("strict: a pass at the current revision settles a P1 still flagged in the plain-version format from before revisions", () => {
+    useConfig("strict");
+    tx(db, () => {
+      setMeta(db, "harness_flagged:claude", "2.1.300");
+      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "claude", version: "2.1.300", where: "startup" } });
+      openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:claude", line: "old", now: 1 });
+    });
+    seedPass("claude", "2.1.300", CLAUDE_REVISION + 1);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toHaveLength(1);
+    expect(getMeta(db, "harness_flagged:claude")).toBe("2.1.300");
+    seedPass("claude", "2.1.300", CLAUDE_REVISION);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
+    expect(unverifiedVersion(db, "claude")).toBeNull();
+  });
 });
