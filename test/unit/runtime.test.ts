@@ -460,6 +460,21 @@ describe("Herdr focus across workspace closes (M0 h07)", () => {
     expect(herdr.focusedWorkspace).toBe(ids.leader);
   });
 
+  test("a close with a time budget stays within it when Herdr never answers", async () => {
+    const path = join(tempDir(), "silent.sock");
+    const server = net.createServer(() => {});
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    try {
+      const started = Date.now();
+      const error = await new HerdrRuntime(new HerdrClient(path)).closeWorkspace("w1", 300).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(HerdrError);
+      expect((error as HerdrError).code).toBe("timeout");
+      expect(Date.now() - started).toBeLessThan(600);
+    } finally {
+      server.close();
+    }
+  });
+
   test("a workspace already gone is not an error and moves no focus", async () => {
     const { herdr, runtime, ids } = await fleet();
     await runtime.closeWorkspace(ids.w1);

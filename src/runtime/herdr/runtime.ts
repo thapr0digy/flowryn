@@ -287,23 +287,25 @@ export class HerdrRuntime {
    * closing the focused workspace itself, leaves focus to Herdr.
    */
   async closeWorkspace(workspaceId: string, timeoutMs?: number): Promise<void> {
+    const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+    const left = () => (deadline === undefined ? undefined : Math.max(0, deadline - Date.now()));
     await this.serially(async () => {
       // An unreadable list means an unreachable Herdr, which the close reports itself.
-      const before = await this.workspaceFocus(timeoutMs).catch(() => null);
+      const before = await this.workspaceFocus(left()).catch(() => null);
       try {
-        await this.transport.call("workspace.close", { workspace_id: workspaceId }, timeoutMs);
+        await this.transport.call("workspace.close", { workspace_id: workspaceId }, left());
       } catch (error) {
         if (error instanceof HerdrError && error.code === "workspace_not_found") return;
         throw error;
       }
       const index = before?.order.indexOf(workspaceId) ?? -1;
       const previous = before?.focused ?? null;
-      if (!before || index === -1 || previous === null || previous === workspaceId) return;
+      if (!before || index === -1 || previous === null || previous === workspaceId || left() === 0) return;
       const remaining = before.order.filter((id) => id !== workspaceId);
       const landing = remaining[Math.min(index, remaining.length - 1)];
-      const after = await this.workspaceFocus(timeoutMs);
-      if (after.focused === landing && after.focused !== previous && after.order.includes(previous)) {
-        await this.transport.call("workspace.focus", { workspace_id: previous }, timeoutMs);
+      const after = await this.workspaceFocus(left());
+      if (after.focused === landing && after.focused !== previous && after.order.includes(previous) && left() !== 0) {
+        await this.transport.call("workspace.focus", { workspace_id: previous }, left());
       }
     });
   }

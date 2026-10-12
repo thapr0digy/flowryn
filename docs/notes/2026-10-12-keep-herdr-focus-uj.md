@@ -51,7 +51,7 @@ None: nothing persisted changes.
 
 ## Built
 
-As designed. `HerdrRuntime.closeWorkspace` (`src/runtime/herdr/runtime.ts`) is the one guarded close; every caller (landing cleanup, cancel and stop, divergence teardown, the contract runner's lab cleanup, the lab scripts) already goes through it, so none of them changed. A guarded close costs two `workspace.list` calls, plus one `workspace.focus` when Herdr moved focus.
+As designed. `HerdrRuntime.closeWorkspace` (`src/runtime/herdr/runtime.ts`) is the one guarded close; every caller (landing cleanup, cancel and stop, divergence teardown, the contract runner's lab cleanup, the lab scripts) already goes through it, so none of them changed. A guarded close costs two `workspace.list` calls, plus one `workspace.focus` when Herdr moved focus. The contract cleanup's time budget (`closeWorkspace(id, timeoutMs)`, `src/contracts/owned.ts`) bounds the whole guarded close: each call gets what is left of it, and the restore is skipped once none is.
 
 ### Tests
 
