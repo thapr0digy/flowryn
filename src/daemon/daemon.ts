@@ -32,7 +32,8 @@ import { ulid } from "../util/ulid.ts";
 import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
-import { herdrConfig, timingConfig, workerConfigProblems, workersConfig } from "../config/workers.ts";
+import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
+import { configSectionProblems, type ConfigStatus } from "../config/effective.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
 import { UrgentPreempter } from "../lifecycle/urgent.ts";
 import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/fleet-services.ts";
@@ -173,8 +174,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
   try {
     let config = loadConfig(home).config;
-    const workerProblems = workerConfigProblems(config);
-    if (workerProblems.length > 0) throw new StartupRefused(`config.toml: ${workerProblems.join("; ")}`);
+    const sectionProblems = configSectionProblems(config, env);
+    if (sectionProblems.length > 0) throw new StartupRefused(`config.toml: ${sectionProblems.join("; ")}`);
+    // What `flowryn config` reports as this daemon's accepted configuration (daemon.config).
+    let configStatus: ConfigStatus = { loaded_at: Date.now(), reload: null };
     ensureDir(config.state_dir, 0o700);
     ensureDir(config.data_dir, 0o700);
     ensureDir(runDir(home), 0o700);
@@ -575,6 +578,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const services: DaemonServices = {
       db: database,
       config: () => config,
+      configStatus: () => configStatus,
       journal,
       watcher,
       now: Date.now,
@@ -692,14 +696,18 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const onHup = () => {
       try {
         const next = loadConfig(home).config;
-        const configProblems = workerConfigProblems(next);
+        const configProblems = configSectionProblems(next, env);
         if (configProblems.length > 0) throw new Error(configProblems.join("; "));
         if (next.state_dir !== config.state_dir) log("SIGHUP: state_dir changed; restart the daemon to use it");
         config = { ...next, state_dir: config.state_dir };
+        const at = Date.now();
+        configStatus = { loaded_at: at, reload: { at, outcome: "accepted", error: null } };
         watcher.rewatch();
         void watcher.checkAll("sighup");
         log("SIGHUP: configuration reloaded");
       } catch (error) {
+        // The last valid configuration stays in force; only the outcome is recorded.
+        configStatus = { ...configStatus, reload: { at: Date.now(), outcome: "rejected", error: (error as Error).message } };
         log(`SIGHUP: configuration not reloaded: ${(error as Error).message}`);
       }
     };

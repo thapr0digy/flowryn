@@ -70,7 +70,7 @@ export interface FlowrynConfig {
   morning_hour: number;
   tasks: { backlog: string; todos: string };
   tools: Partial<Record<ToolName, string>>;
-  /** Sections owned by later milestones ([workers.*], [capacity], [notify], ...), kept verbatim. */
+  /** The registered sections after [tasks] and [tools] ([workers.*], [capacity], [notify], ...), kept verbatim for their own parsers. */
   extra: Record<string, unknown>;
 }
 
@@ -80,7 +80,80 @@ export interface LoadedConfig {
   exists: boolean;
 }
 
-const KNOWN_TOP_LEVEL = new Set(["data_dir", "state_dir", "morning_hour", "tasks", "tools"]);
+/** The top-level settings that are not tables. */
+export const TOP_LEVEL_SETTINGS = ["data_dir", "state_dir", "morning_hour"] as const;
+
+/**
+ * Every top-level table Flowryn reads. Anything else at the top level is a
+ * typo and refused (docs/notes/2026-10-12-next-steps-md-it.md); a section's
+ * own parser checks its keys. `[projects.<id>]` and `[workflows.<id>]` are
+ * sub-tables of `projects` and `workflows`, so their ids stay free.
+ */
+export const CONFIG_SECTIONS = [
+  "tasks",
+  "tools",
+  "herdr",
+  "workers",
+  "reconcile",
+  "leader",
+  "notify",
+  "away",
+  "grants",
+  "review",
+  "github",
+  "cleanup",
+  "policy",
+  "daemon",
+  "upkeep",
+  "validation",
+  "capacity",
+  "workflows",
+  "autonomy",
+  "sched",
+  "style",
+  "decisions",
+  "projects",
+] as const;
+export type SectionName = (typeof CONFIG_SECTIONS)[number];
+
+const KNOWN_TOP_LEVEL: ReadonlySet<string> = new Set([...TOP_LEVEL_SETTINGS, "tasks", "tools"]);
+const KNOWN_NAMES: readonly string[] = [...TOP_LEVEL_SETTINGS, ...CONFIG_SECTIONS];
+
+/** Edit distance with adjacent transpositions counted as one edit (notfiy → notify is 1). */
+function editDistance(a: string, b: string): number {
+  const d: number[][] = [];
+  for (let i = 0; i <= a.length; i++) d.push(Array.from({ length: b.length + 1 }, (_unused, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i]![j] = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i]![j] = Math.min(d[i]![j]!, d[i - 2]![j - 2]! + 1);
+    }
+  }
+  return d[a.length]![b.length]!;
+}
+
+/** The known name a typo most likely meant, or null when none is close. */
+export function closestName(name: string, known: readonly string[]): string | null {
+  let best: string | null = null;
+  let bestDistance = Infinity;
+  for (const candidate of known) {
+    const distance = editDistance(name.toLowerCase(), candidate);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best !== null && bestDistance <= Math.max(2, Math.floor(name.length / 3)) ? best : null;
+}
+
+function unknownTopLevel(key: string, value: unknown): FlowrynError {
+  const isSection = typeof value === "object" && value !== null && !Array.isArray(value);
+  const guess = closestName(key, KNOWN_NAMES);
+  const label = isSection ? `[${key}] is not a known section` : `${key} is not a known setting`;
+  if (guess) return new FlowrynError("config_invalid", `${label}; did you mean ${(CONFIG_SECTIONS as readonly string[]).includes(guess) ? `[${guess}]` : guess}?`);
+  return new FlowrynError("config_invalid", `${label}; known sections: ${CONFIG_SECTIONS.join(", ")}; top-level settings: ${TOP_LEVEL_SETTINGS.join(", ")}`);
+}
 
 export function defaultConfig(home: string = flowrynHome()): FlowrynConfig {
   const dataDir = join(home, "data");
@@ -145,7 +218,9 @@ export function parseConfig(text: string, home: string): FlowrynConfig {
 
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (!KNOWN_TOP_LEVEL.has(key)) extra[key] = value;
+    if (KNOWN_TOP_LEVEL.has(key)) continue;
+    if (!(CONFIG_SECTIONS as readonly string[]).includes(key)) throw unknownTopLevel(key, value);
+    extra[key] = value;
   }
 
   const config: FlowrynConfig = {

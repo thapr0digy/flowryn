@@ -10,7 +10,7 @@ import { inertAttention } from "../../src/attention/services.ts";
 import { composeBriefing } from "../../src/attention/briefing.ts";
 import { defaultConfig, parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { DEFAULT_POLICY_MODE, policyMode } from "../../src/config/policy.ts";
-import { workerConfigProblems } from "../../src/config/workers.ts";
+import { configSectionProblems } from "../../src/config/effective.ts";
 import { checkLeaderReport, recordGrant, type GrantInput } from "../../src/contracts/grant.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
 import { CONTRACT_VERBS } from "../../src/contracts/verbs.ts";
@@ -53,8 +53,8 @@ describe("[policy] mode", () => {
   });
 
   test("a bad mode is a config problem: the daemon refuses it at startup and on SIGHUP, and doctor fails it", () => {
-    expect(workerConfigProblems(parseConfig('[policy]\nmode = "lax"\n', "/h"))).toContain('[policy] mode must be "strict" or "relaxed"');
-    expect(workerConfigProblems(parseConfig('[policy]\nmode = "relaxed"\n', "/h"))).toEqual([]);
+    expect(configSectionProblems(parseConfig('[policy]\nmode = "lax"\n', "/h"))).toContain('[policy] mode must be "strict" or "relaxed"');
+    expect(configSectionProblems(parseConfig('[policy]\nmode = "relaxed"\n', "/h"))).toEqual([]);
   });
 
   test("doctor shows the mode in force", () => {
