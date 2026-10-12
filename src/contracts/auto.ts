@@ -13,6 +13,7 @@ import { appendEvent } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import {
   AUTO_BUILD_KEY,
+  attemptRevision,
   autoAttempt,
   contractsCommand,
   gateHarness,
@@ -29,6 +30,8 @@ import { usageGate } from "../sched/usage.ts";
 import { autoRecordLine, reportProblem } from "./grant.ts";
 import { MANIFEST_ENV, readManifest, recoverOwned, type CleanupOutcome } from "./owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS, removeScratchHome } from "./runner.ts";
+import { reportFacts } from "./report.ts";
+import { contractRevision } from "./revision.ts";
 import { recordPass } from "./verbs.ts";
 
 /**
@@ -61,6 +64,10 @@ import { recordPass } from "./verbs.ts";
  *   a child that ended without cleaning up (killed, or its cleanup failed)
  *   has its manifest's resources released by the checker. Whether the suite
  *   passed and whether everything was released are recorded apart.
+ * - Per contract revision (docs/notes/2026-10-12-next-steps-md-ez.md): an
+ *   attempt names the revision it checks, and one at another revision (or
+ *   from before revisions) settles nothing for the daemon's own, so a pass or
+ *   failure there never stops the check of a revision bump.
  */
 
 /** A check that has not finished after this long is stopped and counts as failed; each step has its own, shorter timeout. */
@@ -236,9 +243,9 @@ function cleanupFields(cleanup: CleanupOutcome | null): Pick<AutoAttempt, "clean
   return cleanup.ok ? { cleanup: "ok" } : { cleanup: "failed", cleanup_detail: cleanup.problems.join("; ") };
 }
 
-/** Is this attempt final for the version: passed or failed, or a pass strict left unrecorded while strict lasts? */
-function settled(attempt: AutoAttempt | null, version: string, relaxedNow: boolean): boolean {
-  if (attempt?.version !== version) return false;
+/** Is this attempt final for the version at this revision: passed or failed, or a pass strict left unrecorded while strict lasts? */
+function settled(attempt: AutoAttempt | null, version: string, revision: number, relaxedNow: boolean): boolean {
+  if (attempt?.version !== version || attemptRevision(attempt) !== revision) return false;
   return attempt.state === "passed" || attempt.state === "failed" || (attempt.state === "unrecorded" && !relaxedNow);
 }
 
@@ -290,8 +297,9 @@ export class AutoContractChecker {
           continue;
         }
         // The manifest stays on the attempt until its resources are settled, so a crash mid-release finds it again.
-        saveAutoAttempt(db, harness, { version: attempt.version, state: "waiting", wait: "a rerun (the daemon stopped mid-check)", ...(attempt.manifest ? { manifest: attempt.manifest } : {}) });
-        appendEvent(db, { source: "daemon", kind: "contract.auto_interrupted", payload: { harness, version: attempt.version, started_at: attempt.started_at ?? null, manifest: attempt.manifest ?? null }, ts: now });
+        const revision = attemptRevision(attempt);
+        saveAutoAttempt(db, harness, { version: attempt.version, revision, state: "waiting", wait: "a rerun (the daemon stopped mid-check)", ...(attempt.manifest ? { manifest: attempt.manifest } : {}) });
+        appendEvent(db, { source: "daemon", kind: "contract.auto_interrupted", payload: { harness, version: attempt.version, revision, started_at: attempt.started_at ?? null, manifest: attempt.manifest ?? null }, ts: now });
         if (attempt.manifest) this.interrupted.push({ harness, version: attempt.version, manifest: attempt.manifest });
       }
     });
@@ -334,8 +342,9 @@ export class AutoContractChecker {
       for (const harness of HARNESS_IDS) {
         const flagged = unverifiedVersion(this.deps.db, harness);
         if (!flagged) continue;
+        const revision = contractRevision(harness);
         const relaxedNow = relaxed(this.deps.config());
-        if (settled(autoAttempt(this.deps.db, harness), flagged, relaxedNow)) continue;
+        if (settled(autoAttempt(this.deps.db, harness), flagged, revision, relaxedNow)) continue;
         const binary = this.pinnedBinary();
         if (!relaxedNow || !binary) {
           this.ensureItem(harness, flagged);
@@ -353,7 +362,7 @@ export class AutoContractChecker {
             this.ensureItem(harness, check.version);
             continue;
           }
-          if (settled(autoAttempt(this.deps.db, harness), check.version, true)) continue;
+          if (settled(autoAttempt(this.deps.db, harness), check.version, revision, true)) continue;
           if (this.holdFor(harness, check.version)) continue;
           await this.runCheck(harness, check.version, binary);
           return;
@@ -384,23 +393,25 @@ export class AutoContractChecker {
 
   private noteWaiting(harness: HarnessId, version: string, wait: string): void {
     const { db } = this.deps;
+    const revision = contractRevision(harness);
     const attempt = autoAttempt(db, harness);
-    if (attempt?.version === version && attempt.state === "waiting" && attempt.wait === wait) return;
+    if (attempt?.version === version && attemptRevision(attempt) === revision && attempt.state === "waiting" && attempt.wait === wait) return;
     const now = this.deps.now();
     tx(db, () => {
-      saveAutoAttempt(db, harness, { version, state: "waiting", wait });
-      appendEvent(db, { source: "daemon", kind: "contract.auto_waiting", payload: { harness, version, wait }, ts: now });
+      saveAutoAttempt(db, harness, { version, revision, state: "waiting", wait });
+      appendEvent(db, { source: "daemon", kind: "contract.auto_waiting", payload: { harness, version, revision, wait }, ts: now });
     });
   }
 
-  /** Strict mode, or a daemon that cannot run the check: the P1 as the gate opens it, once per version. */
+  /** Strict mode, or a daemon that cannot run the check: the P1 as the gate opens it, once per version and revision. */
   private ensureItem(harness: HarnessId, version: string): void {
     const { db } = this.deps;
-    if (unverifiedItemOpened(db, harness, version)) return;
+    const revision = contractRevision(harness);
+    if (unverifiedItemOpened(db, harness, version, revision)) return;
     const now = this.deps.now();
     tx(db, () => {
-      if (unverifiedItemOpened(db, harness, version)) return;
-      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness, version, where: "auto-check" }, ts: now });
+      if (unverifiedItemOpened(db, harness, version, revision)) return;
+      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness, version, revision, where: "auto-check" }, ts: now });
       openUnverifiedItem(db, harness, version, event.seq, now);
     });
   }
@@ -409,6 +420,7 @@ export class AutoContractChecker {
     const { db, log } = this.deps;
     const startedAt = this.deps.now();
     const build = this.deps.info().build!;
+    const revision = contractRevision(harness);
     const dir = join(this.deps.config().data_dir, "contracts");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const stem = join(dir, `auto-${harness}-${version}-${new Date(startedAt).toISOString().replace(/[:.]/g, "-")}`);
@@ -417,8 +429,8 @@ export class AutoContractChecker {
     this.current = { harness, version, startedAt, process: null };
     try {
       tx(db, () => {
-        saveAutoAttempt(db, harness, { version, state: "running", started_at: startedAt, build, log: logPath, manifest });
-        appendEvent(db, { source: "daemon", kind: "contract.auto_started", payload: { harness, version, build, log: logPath, manifest }, ts: startedAt });
+        saveAutoAttempt(db, harness, { version, revision, state: "running", started_at: startedAt, build, log: logPath, manifest });
+        appendEvent(db, { source: "daemon", kind: "contract.auto_started", payload: { harness, version, revision, build, log: logPath, manifest }, ts: startedAt });
       });
       log(`contracts: automatic check of ${harness} ${version} from build ${build}; log ${logPath}`);
       const job: AutoJob = { harness, version, binary, logPath, manifest, env: smokeEnv(this.deps.env) };
@@ -525,21 +537,24 @@ export class AutoContractChecker {
     const now = this.deps.now();
     const handed = parseHandoff(outcome.stdout);
     const tested = handed.version ?? version;
+    const revision = contractRevision(harness);
     const problem = outcome.timedOut
       ? `it did not finish within ${Math.round((this.deps.maxRunMs ?? AUTO_MAX_RUN_MS) / 60_000)} min`
       : !handed.report
         ? `it wrote no report (exit ${outcome.exitCode ?? "on a signal"}${handed.detail ? `: ${handed.detail}` : ""})`
-        : reportProblem(this.deps.config().data_dir, handed.report, { harness, version: tested, build });
+        : reportProblem(this.deps.config().data_dir, handed.report, { harness, version: tested, build, revision });
     const strict = !relaxed(this.deps.config());
     if (!problem && strict) {
-      this.leaveUnrecorded(harness, tested, build, logPath, startedAt, handed.report!, extra);
+      this.leaveUnrecorded(harness, tested, revision, build, logPath, startedAt, handed.report!, extra);
       return;
     }
     if (!problem) {
       tx(db, () => {
-        const seq = recordPass(db, { harness, version: tested, report: handed.report, by: "daemon", build, session: null, source: "daemon" }, now);
+        // reportProblem held the report to this daemon's revision, so the facts carry it.
+        const facts = reportFacts(handed.report, harness, tested);
+        const seq = recordPass(db, { harness, version: tested, report: handed.report, by: "daemon", build, session: null, source: "daemon", ...facts }, now);
         openItem(db, { kind: "contract_recorded", eventSeq: seq, line: `${autoRecordLine(harness, tested, build)}; report ${handed.report}`, now });
-        saveAutoAttempt(db, harness, { version: tested, state: "passed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, ...extra });
+        saveAutoAttempt(db, harness, { version: tested, revision, state: "passed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, ...extra });
       });
       log(`contracts: ${harness} ${tested} passed its automatic check and is recorded; report ${handed.report}`);
       this.deps.afterPass();
@@ -549,8 +564,8 @@ export class AutoContractChecker {
     const why = problem!.replace(`${handed.report} `, "the report ");
     const where = handed.report ? `report ${handed.report}` : `log ${logPath}`;
     tx(db, () => {
-      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, build, report: handed.report, log: logPath, detail: why }, ts: now });
-      saveAutoAttempt(db, harness, { version: tested, state: "failed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why, ...extra });
+      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, revision, build, report: handed.report, log: logPath, detail: why }, ts: now });
+      saveAutoAttempt(db, harness, { version: tested, revision, state: "failed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why, ...extra });
       resolveItems(db, "harness_unverified", harnessItemKey(harness), `automatic contract check of ${tested} failed`, now);
       openUnverifiedItem(db, harness, tested, event.seq, now, autoFailureLine(harness, tested, handed.report ?? logPath, homedir()));
     });
@@ -558,13 +573,13 @@ export class AutoContractChecker {
   }
 
   /** A pass that ended after a reload to strict: never recorded while strict; a P1 says so, and a reload to relaxed runs the check again. */
-  private leaveUnrecorded(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, report: string, extra: Partial<AutoAttempt>): void {
+  private leaveUnrecorded(harness: HarnessId, version: string, revision: number, build: string, logPath: string, startedAt: number, report: string, extra: Partial<AutoAttempt>): void {
     const { db, log } = this.deps;
     const now = this.deps.now();
     const detail = "[policy] mode is strict now, so the daemon did not record its pass";
     tx(db, () => {
-      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_unrecorded", payload: { harness, version, build, report, log: logPath, detail }, ts: now });
-      saveAutoAttempt(db, harness, { version, state: "unrecorded", started_at: startedAt, ended_at: now, build, report, log: logPath, detail, ...extra });
+      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_unrecorded", payload: { harness, version, revision, build, report, log: logPath, detail }, ts: now });
+      saveAutoAttempt(db, harness, { version, revision, state: "unrecorded", started_at: startedAt, ended_at: now, build, report, log: logPath, detail, ...extra });
       resolveItems(db, "harness_unverified", harnessItemKey(harness), `automatic contract check of ${version} passed unrecorded`, now);
       openUnverifiedItem(db, harness, version, event.seq, now, autoUnrecordedLine(harness, version, report, homedir()));
     });

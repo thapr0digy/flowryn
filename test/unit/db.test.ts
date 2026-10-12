@@ -229,6 +229,23 @@ describe("migrations", () => {
     expect(migrate(db, MIGRATIONS.slice(0, 19))).toEqual([]);
     db.close();
   });
+
+  test("contract revision: migration 20 keeps every pass as legacy revision 0, and a pass at another revision of the same version is its own row", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 19));
+    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    expect(migrate(db, MIGRATIONS.slice(0, 20))).toEqual([20]);
+    expect(db.query("SELECT harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY harness").all()).toEqual([
+      { harness: "claude", version: "2.1.300", revision: 0, passed_at: 5, report_path: "/r.json", platform: null, herdr_version: null, launch_profile: null },
+      { harness: "pi", version: "0.90.0", revision: 0, passed_at: 6, report_path: null, platform: null, herdr_version: null, launch_profile: null },
+    ]);
+    db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 1, 7)");
+    expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 1, 8)")).toThrow("UNIQUE");
+    expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.301', -1, 8)")).toThrow("CHECK");
+    expect(migrate(db, MIGRATIONS.slice(0, 20))).toEqual([]);
+    expect(integrityProblems(db)).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {

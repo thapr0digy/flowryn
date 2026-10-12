@@ -23,6 +23,7 @@ import { checkInvariant } from "./invariant.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
 import { contractsCommand, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import { contractRevision } from "../contracts/revision.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -279,7 +280,7 @@ export class Reconciler {
   }
 
   private async harnessCheck(harness: HarnessId): Promise<HarnessCheck> {
-    if (!this.deps.harnessGate) return { harness, state: "verified", version: "unchecked" };
+    if (!this.deps.harnessGate) return { harness, state: "verified", version: "unchecked", revision: contractRevision(harness) };
     try {
       return await this.deps.harnessGate(harness);
     } catch (error) {

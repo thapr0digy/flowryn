@@ -5,8 +5,10 @@
  * with the doctor command, once per version; a passing contract run settles it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { statSync } from "node:fs";
+import { statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { contractRevision, LEGACY_REVISION } from "../../src/contracts/revision.ts";
+import type { HarnessId } from "../../src/harness/types.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
@@ -50,10 +52,23 @@ function eventKinds(env: FleetEnv, kind: string): Record<string, unknown>[] {
   }
 }
 
-/** What `flowryn doctor --contracts` in your own terminal does once a suite passes: the daemon records the version. */
-async function recordContract(env: FleetEnv, harness: string, version: string): Promise<void> {
-  const answer = (await request(join(env.h.home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb: "contracts.record", token: null, channel: "tty", args: { harness, version } }, { connectMs: 1_000, replyMs: 10_000 })) as { ok: boolean };
+/** The report a passing run writes, proving `revision` (none: a report from before revisions). */
+function passReport(env: FleetEnv, harness: HarnessId, version: string, revision: number | null): string {
+  const path = join(env.h.home, `report-${harness}-${version}-${revision ?? "none"}.json`);
+  const proved = revision === null ? {} : { revision, context: { platform: "darwin-arm64 25.3.0", herdr: "0.7.5", launch_profile: "scripted" } };
+  writeFileSync(path, JSON.stringify({ harness, version, passed: true, mode: "record", build: null, by: "human", ...proved }));
+  return path;
+}
+
+/** What `flowryn doctor --contracts` in your own terminal does once a suite passes: the daemon records the version at the revision its report proves (this build's by default). */
+async function recordContract(env: FleetEnv, harness: HarnessId, version: string, revision: number | null = contractRevision(harness)): Promise<Record<string, unknown>> {
+  const report = passReport(env, harness, version, revision);
+  const answer = (await request(join(env.h.home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb: "contracts.record", token: null, channel: "tty", args: { harness, version, report } }, { connectMs: 1_000, replyMs: 10_000 })) as {
+    ok: boolean;
+    data: Record<string, unknown>;
+  };
   expect(answer.ok).toBe(true);
+  return answer.data;
 }
 
 describe("the harness version gate", () => {
@@ -146,6 +161,35 @@ describe("the harness version gate", () => {
       const start = env.herdr.calls.filter((c) => c.method === "agent.start").at(-1)!;
       expect(start.params.args as string[]).toContain("--resume");
       expect(harnessItems(env).find((i) => i.line.includes("9.9.11"))?.state).toBe("resolved");
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a pass from an older contract revision is stale: startup and dispatch name its revision, and a pass at the current revision lets dispatch through",
+    async () => {
+      const env = await fleet({ contracts: false });
+      const revision = contractRevision("claude");
+      // A pass recorded before revisions (what migration 20 leaves of every old pass), by an older flowryn in your terminal.
+      expect(await recordContract(env, "claude", FAKE_VERSION, null)).toMatchObject({ revision: LEGACY_REVISION, current: false, required_revision: revision });
+      await env.daemon.stop();
+      await env.restartDaemon();
+      await waitUntil(() => harnessItems(env).length === 1, 10_000, "the P1 for the stale pass");
+      const stale = `claude ${FAKE_VERSION} passed only at contract revision 0 (before revisions), not revision ${revision}`;
+      expect(harnessItems(env)[0]!.line).toStartWith(`${stale}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude`);
+      expect(eventKinds(env, "harness.checked")).toEqual(expect.arrayContaining([expect.objectContaining({ harness: "claude", state: "unverified", version: FAKE_VERSION, revision })]));
+      expect(eventKinds(env, "harness.unverified")).toEqual([expect.objectContaining({ version: FAKE_VERSION, revision, stale: [LEGACY_REVISION] })]);
+
+      const refused = await env.json(["dispatch", "web", "--kind", "scout", "--body-file", "-"], { stdin: "Scout it" });
+      expect(refused.code).toBe(2);
+      expect(refused.reply.error).toMatchObject({ code: "contract_unverified", message: stale });
+      expect(harnessItems(env)).toHaveLength(1);
+
+      // The same version passes again at this build's revision: the P1 settles and dispatch goes through.
+      expect(await recordContract(env, "claude", FAKE_VERSION)).toMatchObject({ revision, current: true });
+      await waitUntil(() => harnessItems(env)[0]!.state === "resolved", 5_000, "the P1 resolved by the current pass");
+      const dispatched = await env.json(["dispatch", "web", "--kind", "scout", "--body-file", "-"], { stdin: "Scout it" });
+      expect(dispatched.code).toBe(0);
     },
     { timeout: 60_000 },
   );

@@ -144,7 +144,7 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
       const recorded = await callServerVerb(serverVerb("contracts.record")!, { harness, version: result.version, report, ...(build ? { build } : {}) }, io);
       checks.push(
         recorded.ok
-          ? { check: `contract ${harness}`, status: "ok", detail: `${result.version} passed and was recorded; report ${report}` }
+          ? recordedCheck(harness, result.version, report, recorded.data)
           : { check: `contract ${harness}`, status: "fail", detail: `${result.version} passed but was not recorded (${recorded.error?.code ?? `exit ${recorded.exitCode}`}: ${recorded.error?.message ?? "is the daemon up?"}); report ${report}` },
       );
     } catch (error) {
@@ -154,6 +154,21 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
     if (real) checks.push(...(await realModelPass({ args, io, config, socket, model: real, gatePassed, stamp })));
   }
   return run;
+}
+
+/**
+ * A recorded pass: ok when it is at the daemon's contract revision; a warning
+ * when this binary proves another one (an older or newer flowryn than the
+ * daemon's), since the record is kept but dispatch still refuses the version.
+ */
+export function recordedCheck(harness: HarnessId, version: string, report: string, data: unknown): Check {
+  const reply = (data ?? {}) as { current?: unknown; revision?: unknown; required_revision?: unknown };
+  if (reply.current !== false) return { check: `contract ${harness}`, status: "ok", detail: `${version} passed and was recorded; report ${report}` };
+  return {
+    check: `contract ${harness}`,
+    status: "warn",
+    detail: `${version} passed and was recorded at contract revision ${String(reply.revision)}, but the daemon checks revision ${String(reply.required_revision)}, so dispatch still refuses it: run the installed flowryn's doctor --contracts; report ${report}`,
+  };
 }
 
 /**

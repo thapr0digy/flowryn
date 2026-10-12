@@ -1,5 +1,5 @@
 /** Flowryn release version; kept equal to package.json by a unit test. */
-export const VERSION = "0.22.1";
+export const VERSION = "0.23.0";
 
 /**
  * Wire protocol version. The CLI sends it on every call and the daemon refuses

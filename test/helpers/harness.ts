@@ -159,6 +159,10 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   const noHarness = join(bin, "harness-absent");
   writeFileSync(noHarness, "#!/bin/sh\necho 'no harness in this test' >&2\nexit 1\n");
   chmodSync(noHarness, 0o755);
+  // Nor the real Herdr binary: a contract run records `herdr --version` with its pass (src/contracts/context.ts).
+  const herdrBin = join(bin, "herdr");
+  writeFileSync(herdrBin, "#!/bin/sh\necho 'herdr 0.7.5-test'\n");
+  chmodSync(herdrBin, 0o755);
   const harnessStandIns = ["claude", "pi"].filter((name) => !new RegExp(`^${name}\\s*=`, "m").test(extraConfig)).map((name) => `${name} = ${JSON.stringify(noHarness)}`);
   const lines = [
     `data_dir = ${JSON.stringify(dataDir)}`,
@@ -175,6 +179,7 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     ...(/^lavish_axi\s*=/m.test(extraConfig) ? [] : [`lavish_axi = ${JSON.stringify(lavish)}`]),
     ...(/^quota_axi\s*=/m.test(extraConfig) ? [] : [`quota_axi = ${JSON.stringify(quota)}`]),
     ...harnessStandIns,
+    ...(/^herdr\s*=/m.test(extraConfig) ? [] : [`herdr = ${JSON.stringify(herdrBin)}`]),
     extraConfig,
   ];
   // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.

@@ -9,8 +9,12 @@ import { AUTO_STOP_GRACE_MS, AutoContractChecker, autoFailureLine, autoLeftoverL
 import { writeManifest, type CleanupOutcome, type OwnedResources } from "../../src/contracts/owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS } from "../../src/contracts/runner.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
+import { contractRevision, LEGACY_REVISION } from "../../src/contracts/revision.ts";
+import { recordPass } from "../../src/contracts/verbs.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
-import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { getMeta, migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
+import { openItem, resolveItems } from "../../src/attention/items.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
 import { autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
 import { noteUsageLimit } from "../../src/sched/usage.ts";
@@ -23,6 +27,8 @@ import { noteUsageLimit } from "../../src/sched/usage.ts";
  */
 
 const BUILD = "ab12cd34ef56";
+const CLAUDE_REVISION = contractRevision("claude");
+const CONTEXT = { platform: "darwin-arm64 25.3.0", herdr: "0.7.5", launch_profile: "model=default effort=default permission_mode=auto pretrust=register" };
 let dir: string;
 let db: Db;
 let config: FlowrynConfig;
@@ -36,6 +42,8 @@ let script: (job: AutoJob) => {
   passed?: boolean;
   build?: string | null;
   mode?: "record" | "verify-only";
+  /** The contract revision the child's report says it proved (default: this build's). */
+  revision?: number;
   report?: boolean;
   hold?: boolean;
   /** A held child that keeps running after SIGTERM (it ends only on SIGKILL). */
@@ -80,7 +88,16 @@ function fakeRun(job: AutoJob): AutoProcess {
       ? null
       : dataDirReport(
           config,
-          { harness: job.harness, version: versions[job.harness], passed: plan.passed ?? true, steps: [], scratch: "/tmp/x", cleanup: { ok: true, problems: [], by: "runner", at: 0 } },
+          {
+            harness: job.harness,
+            version: versions[job.harness],
+            revision: plan.revision ?? contractRevision(job.harness),
+            context: CONTEXT,
+            passed: plan.passed ?? true,
+            steps: [],
+            scratch: "/tmp/x",
+            cleanup: { ok: true, problems: [], by: "runner", at: 0 },
+          },
           { mode: plan.mode ?? "record", build: plan.build === undefined ? BUILD : plan.build, by: "daemon" },
         );
   const outcome: AutoOutcome = {
@@ -282,7 +299,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [], contractChecks: auto.running() }, Date.now());
     expect(guards).toEqual([expect.objectContaining({ kind: "contract_check", detail: expect.stringContaining("automatic contract check claude 2.1.300 running for") })]);
     expect(briefing()).toMatch(/Contract check running: claude 2\.1\.300 since \d\d:\d\d \(automatic\)\./);
-    const refusal = harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config);
+    const refusal = harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [] }, db, config);
     expect(refusal.code).toBe("contract_unverified");
     expect(refusal.help).toContain("an automatic contract check is running");
 
@@ -309,7 +326,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(jobs).toEqual([]);
     expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "a daemon restart" });
     expect(briefing()).toContain("Contract check queued: claude 2.1.300, waiting for a daemon restart (automatic).");
-    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config).help).toContain("queued (a daemon restart)");
+    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [] }, db, config).help).toContain("queued (a daemon restart)");
     await auto.tick();
     expect(events("contract.auto_waiting")).toHaveLength(1);
 
@@ -408,7 +425,7 @@ describe("strict, and daemons that cannot run the check", () => {
     await auto.tick();
     expect(jobs).toEqual([]);
     expect(items("harness_unverified")).toEqual([expect.objectContaining({ state: "open", line: expect.stringContaining("claude 2.1.300 has no passing contract run") })]);
-    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
+    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [] }, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
   });
 
   test("a development daemon (no build) opens the P1 as strict does", async () => {
@@ -459,7 +476,7 @@ describe("strict, and daemons that cannot run the check", () => {
     expect(items("harness_unverified")).toHaveLength(1);
     expect(jobs).toEqual([]);
     // Nothing will run now: the help names the doctor command, and the briefing lists no queued check.
-    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300" }, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
+    expect(harnessRefusal({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [] }, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
     expect(briefing()).not.toContain("Contract check queued");
   });
 
@@ -675,5 +692,106 @@ describe("the --for-daemon handoff", () => {
     expect(parseHandoff('{"ok":true,"data":{"report":"/d/r.json","version":"1.2.3","checks":[]}}\n')).toEqual({ report: "/d/r.json", version: "1.2.3", detail: null });
     expect(parseHandoff('{"ok":true,"data":{"report":"-","version":"-","checks":[{"status":"fail","detail":"no Herdr session"}]}}')).toEqual({ report: null, version: null, detail: "no Herdr session" });
     expect(parseHandoff("not json")).toEqual({ report: null, version: null, detail: null });
+  });
+});
+
+/** A pass as recordPass writes it, at `revision`, from `passBuild`. */
+function seedPass(harness: HarnessId, version: string, revision: number, passBuild: string | null = BUILD): void {
+  tx(db, () =>
+    recordPass(
+      db,
+      { harness, version, revision, report: null, by: "human", build: passBuild, session: null, source: "cli", platform: null, herdr_version: null, launch_profile: null },
+      Date.now(),
+    ),
+  );
+}
+
+function revisions(harness: HarnessId): number[] {
+  return (db.query("SELECT revision FROM harness_contracts WHERE harness = ?1 ORDER BY revision").all(harness) as { revision: number }[]).map((r) => r.revision);
+}
+
+describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => {
+  test("a pass at the current revision from another build is reused: a docs-only rebuild runs no check", async () => {
+    seedPass("claude", "2.1.300", CLAUDE_REVISION, "0f0f0f0f0f0f");
+    const auto = checker();
+    auto.init();
+    expect(await gate("claude")).toEqual({ harness: "claude", state: "verified", version: "2.1.300", revision: CLAUDE_REVISION });
+    await auto.tick();
+    expect(jobs).toEqual([]);
+    expect(events("harness.unverified")).toEqual([]);
+  });
+
+  test("a legacy pass is stale: the gate names its revision, and under relaxed the daemon re-records the version at the current one", async () => {
+    seedPass("claude", "2.1.300", LEGACY_REVISION);
+    const auto = checker();
+    auto.init();
+    const check = await gate("claude");
+    expect(check).toEqual({ harness: "claude", state: "unverified", version: "2.1.300", revision: CLAUDE_REVISION, stale: [LEGACY_REVISION] });
+    expect(events("harness.unverified")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION, stale: [LEGACY_REVISION], auto: true })]);
+    expect(unverifiedVersion(db, "claude")).toBe("2.1.300");
+    const refusal = harnessRefusal(check as Extract<HarnessCheck, { state: "unverified" }>);
+    expect(refusal.message).toBe(`claude 2.1.300 passed only at contract revision 0 (before revisions), not revision ${CLAUDE_REVISION}`);
+
+    await auto.tick();
+    expect(jobs.map((j) => j.version)).toEqual(["2.1.300"]);
+    expect(revisions("claude")).toEqual([LEGACY_REVISION, CLAUDE_REVISION]);
+    expect(events("contract.passed").at(-1)).toMatchObject({ version: "2.1.300", revision: CLAUDE_REVISION, by: "daemon", platform: CONTEXT.platform, herdr_version: CONTEXT.herdr, launch_profile: CONTEXT.launch_profile });
+    expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.300", revision: CLAUDE_REVISION, state: "passed" });
+    expect(await gate("claude")).toMatchObject({ state: "verified" });
+    expect(items("harness_unverified")).toEqual([]);
+  });
+
+  test("a check that failed at an older revision does not settle the current one: it runs once more, then is final", async () => {
+    // An attempt saved before revisions had none: it reads as the legacy revision.
+    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
+    const auto = checker();
+    auto.init();
+    script = () => ({ passed: false });
+    await gate("claude");
+    await auto.tick();
+    await auto.tick();
+    expect(jobs).toHaveLength(1);
+    expect(autoAttempt(db, "claude")).toMatchObject({ revision: CLAUDE_REVISION, state: "failed" });
+    expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
+  });
+
+  test("a report that proves another revision is not recorded by the daemon", async () => {
+    const auto = checker();
+    auto.init();
+    script = () => ({ revision: CLAUDE_REVISION + 1 });
+    await gate("claude");
+    await auto.tick();
+    expect(recorded()).toEqual([]);
+    expect(events("contract.auto_failed")[0]).toMatchObject({ detail: `the report proves contract revision ${CLAUDE_REVISION + 1}, not this daemon's revision ${CLAUDE_REVISION}` });
+  });
+
+  test("strict: one P1 per version and revision, naming the stale pass; a P1 settled for the legacy pass does not hide it", async () => {
+    useConfig("strict");
+    seedPass("claude", "2.1.300", LEGACY_REVISION);
+    // What the gate left before revisions: a plain-version flag and a P1 whose event names no revision, settled since.
+    tx(db, () => {
+      setMeta(db, "harness_flagged:claude", "2.1.300");
+      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "claude", version: "2.1.300", where: "startup" } });
+      openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:claude", line: "old", now: 1 });
+      resolveItems(db, "harness_unverified", "harness:claude", "settled before revisions", 2);
+    });
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    await auto.tick();
+    await gate("claude");
+    expect(jobs).toEqual([]);
+    const open = items("harness_unverified").filter((i) => i.state === "open");
+    expect(open).toEqual([
+      expect.objectContaining({ line: `claude 2.1.300 passed only at contract revision 0 (before revisions), not revision ${CLAUDE_REVISION}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude` }),
+    ]);
+    expect(JSON.parse(getMeta(db, "harness_flagged:claude")!)).toEqual({ version: "2.1.300", revision: CLAUDE_REVISION });
+
+    // Another pass at a stale revision does not settle it; one at the current revision does.
+    seedPass("claude", "2.1.300", CLAUDE_REVISION + 1);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toHaveLength(1);
+    seedPass("claude", "2.1.300", CLAUDE_REVISION);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
+    expect(await gate("claude")).toMatchObject({ state: "verified" });
   });
 });

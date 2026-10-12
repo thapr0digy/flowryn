@@ -518,6 +518,25 @@ const LEADER_REPIN_SQL = /* sql */ `
 ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
 `;
 
+/**
+ * Contract revision (docs/notes/2026-10-12-next-steps-md-ez.md): a pass is identified by harness,
+ * version and the adapter/contract compatibility revision it proved, with the platform, Herdr version
+ * and launch profile it ran on. Passes recorded before this are revision 0, legacy: nothing proves
+ * which adapter behaviour they ran, so the gate asks for a re-run (the automatic check does it under
+ * relaxed policy).
+ */
+const CONTRACT_REVISION_SQL = /* sql */ `
+CREATE TABLE harness_contracts_v20 (harness TEXT NOT NULL, version TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  passed_at INTEGER NOT NULL, report_path TEXT,
+  platform TEXT, herdr_version TEXT, launch_profile TEXT,
+  PRIMARY KEY (harness, version, revision));
+INSERT INTO harness_contracts_v20 (harness, version, revision, passed_at, report_path)
+  SELECT harness, version, 0, passed_at, report_path FROM harness_contracts;
+DROP TABLE harness_contracts;
+ALTER TABLE harness_contracts_v20 RENAME TO harness_contracts;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -538,6 +557,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
   { version: 18, name: "gate-browser-open", sql: GATE_BROWSER_OPEN_SQL },
   { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
+  { version: 20, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

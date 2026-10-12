@@ -6,6 +6,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
+import { contractRevision, LEGACY_REVISION, revisionLabel, storedRevision } from "../contracts/revision.ts";
 
 /**
  * The harness version gate (design section 5): contract tests gate every
@@ -17,22 +18,47 @@ import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
  * Under `[policy] mode = "relaxed"`, on a daemon that can run the check from
  * its own build, the P1 waits: the daemon runs the recording check itself
  * (src/contracts/auto.ts) and opens the P1 only if it cannot pass.
+ *
+ * A pass counts only at the running daemon's contract revision
+ * (src/contracts/revision.ts): one from another revision is stale, and the
+ * refusal, the P1 and its dedup, and the automatic check all carry the
+ * revision (docs/notes/2026-10-12-next-steps-md-ez.md).
  */
 
 export type VersionOf = (harness: HarnessId, binary: string) => Promise<string | null>;
 
 export type HarnessCheck =
-  | { harness: HarnessId; state: "verified" | "unverified"; version: string }
+  | { harness: HarnessId; state: "verified"; version: string; revision: number }
+  /** `stale`: the revisions this version passed at, none of them the required one (empty: it never passed). */
+  | { harness: HarnessId; state: "unverified"; version: string; revision: number; stale: number[] }
   | { harness: HarnessId; state: "missing"; detail: string };
 
-/** The installed harness's version and whether a contract run passed for it. */
+/** Has this version passed at this revision? */
+export function hasPass(db: Db, harness: string, version: string, revision: number): boolean {
+  return db.query("SELECT 1 FROM harness_contracts WHERE harness = ?1 AND version = ?2 AND revision = ?3").get(harness, version, revision) !== null;
+}
+
+/** The revisions this version passed at other than `revision`, oldest first. */
+export function stalePasses(db: Db, harness: string, version: string, revision: number): number[] {
+  const rows = db.query("SELECT revision FROM harness_contracts WHERE harness = ?1 AND version = ?2 AND revision != ?3 ORDER BY revision").all(harness, version, revision) as { revision: number }[];
+  return rows.map((r) => r.revision);
+}
+
+/** The installed harness's version and whether a contract run passed for it at the daemon's revision. */
 export async function checkHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf): Promise<HarnessCheck> {
   const binary = resolveTool(config, harness);
   if (!binary) return { harness, state: "missing", detail: `${harness} is not installed or not in [tools]` };
   const version = await versionOf(harness, binary);
   if (!version) return { harness, state: "missing", detail: `cannot read the ${harness} version from ${binary} --version` };
-  const passed = db.query("SELECT 1 FROM harness_contracts WHERE harness = ?1 AND version = ?2").get(harness, version);
-  return { harness, state: passed ? "verified" : "unverified", version };
+  const revision = contractRevision(harness);
+  if (hasPass(db, harness, version, revision)) return { harness, state: "verified", version, revision };
+  return { harness, state: "unverified", version, revision, stale: stalePasses(db, harness, version, revision) };
+}
+
+/** Why an unverified version has no usable pass: "no passing contract run for claude 2.1.300", or which revision its pass is from. */
+export function unverifiedReason(harness: HarnessId, version: string, revision: number, stale: number[]): string {
+  if (stale.length === 0) return `no passing contract run for ${harness} ${version}`;
+  return `${harness} ${version} passed only at contract ${stale.map(revisionLabel).join(", ")}, not revision ${revision}`;
 }
 
 export function contractsCommand(harness: HarnessId): string {
@@ -44,10 +70,10 @@ export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" 
   if (check.state === "missing") return new FlowrynError("tool_missing", check.detail, "flowryn init");
   const attempt = db && config ? activeAutoAttempt(db, config, check.harness) : null;
   const help =
-    attempt?.version === check.version && (attempt.state === "running" || attempt.state === "waiting")
+    attempt?.version === check.version && attemptRevision(attempt) === check.revision && (attempt.state === "running" || attempt.state === "waiting")
       ? `an automatic contract check is ${attempt.state === "running" ? "running" : `queued (${attempt.wait ?? "waiting"})`}; dispatch and resume work once it passes`
       : `run the contract suite: ${contractsCommand(check.harness)}`;
-  return new FlowrynError("contract_unverified", `no passing contract run for ${check.harness} ${check.version}`, help);
+  return new FlowrynError("contract_unverified", unverifiedReason(check.harness, check.version, check.revision, check.stale), help);
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +87,8 @@ const attemptKey = (harness: HarnessId) => `contract_auto:${harness}`;
 /** The daemon's automatic check of one harness version (meta.contract_auto:<harness>). */
 export interface AutoAttempt {
   version: string;
+  /** The contract revision it checks; absent on attempts from before revisions (read as legacy, attemptRevision). */
+  revision?: number;
   /** `unrecorded`: it passed after a reload to strict, so nothing was recorded; a reload to relaxed runs it again. */
   state: "waiting" | "running" | "passed" | "failed" | "unrecorded";
   /** While waiting: what it waits for. */
@@ -83,6 +111,10 @@ export function autoAttempt(db: Db, harness: HarnessId): AutoAttempt | null {
   return raw ? (JSON.parse(raw) as AutoAttempt) : null;
 }
 
+export function attemptRevision(attempt: AutoAttempt): number {
+  return storedRevision(attempt.revision);
+}
+
 /** Call inside the transaction that appends the event for the change. */
 export function saveAutoAttempt(db: Db, harness: HarnessId, attempt: AutoAttempt): void {
   setMeta(db, attemptKey(harness), JSON.stringify(attempt));
@@ -103,7 +135,7 @@ export function autoChecksOn(db: Db, config: FlowrynConfig): boolean {
 export function activeAutoAttempt(db: Db, config: FlowrynConfig, harness: HarnessId): AutoAttempt | null {
   const attempt = autoAttempt(db, harness);
   if (!attempt || (attempt.state !== "waiting" && attempt.state !== "running")) return null;
-  if (unverifiedVersion(db, harness) !== attempt.version || !autoChecksOn(db, config)) return null;
+  if (unverifiedVersion(db, harness) !== attempt.version || attemptRevision(attempt) !== contractRevision(harness) || !autoChecksOn(db, config)) return null;
   return attempt;
 }
 
@@ -113,6 +145,33 @@ export function harnessItemKey(harness: HarnessId): string {
 }
 
 const flaggedKey = (harness: HarnessId) => `harness_flagged:${harness}`;
+
+/** The version and revision the last check flagged unverified. */
+export interface Flag {
+  version: string;
+  revision: number;
+}
+
+/** The flag: JSON `{version, revision}`; a plain version (written before revisions) is legacy. */
+export function readFlag(db: Db, harness: HarnessId): Flag | null {
+  const raw = getMeta(db, flaggedKey(harness));
+  if (!raw) return null;
+  if (!raw.startsWith("{")) return { version: raw, revision: LEGACY_REVISION };
+  try {
+    const parsed = JSON.parse(raw) as { version?: unknown; revision?: unknown };
+    return typeof parsed.version === "string" ? { version: parsed.version, revision: storedRevision(parsed.revision) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function setFlag(db: Db, harness: HarnessId, flag: Flag | null): void {
+  setMeta(db, flaggedKey(harness), flag ? JSON.stringify(flag) : "");
+}
+
+function sameFlag(flag: Flag | null, version: string, revision: number): boolean {
+  return flag?.version === version && flag.revision === revision;
+}
 
 /**
  * Record what a check found. An unverified version opens its P1 once (a
@@ -125,58 +184,72 @@ const flaggedKey = (harness: HarnessId) => `harness_flagged:${harness}`;
 export function noteHarnessCheck(db: Db, check: HarnessCheck, source: EventSource, where: string, now: number, auto = false): string | null {
   const key = harnessItemKey(check.harness);
   if (check.state === "verified") {
-    if (getMeta(db, flaggedKey(check.harness))) setMeta(db, flaggedKey(check.harness), "");
+    if (getMeta(db, flaggedKey(check.harness))) setFlag(db, check.harness, null);
     if (resolveItems(db, "harness_unverified", key, `contract passed for ${check.version}`, now) > 0) {
-      appendEvent(db, { source, kind: "harness.verified", payload: { harness: check.harness, version: check.version, where }, ts: now });
+      appendEvent(db, { source, kind: "harness.verified", payload: { harness: check.harness, version: check.version, revision: check.revision, where }, ts: now });
     }
     return null;
   }
   // A harness that is not installed is dispatch's tool_missing refusal, not an untested version.
   if (check.state === "missing") return null;
-  if (getMeta(db, flaggedKey(check.harness)) === check.version) return null;
-  resolveItems(db, "harness_unverified", key, `superseded by ${check.version}`, now);
-  setMeta(db, flaggedKey(check.harness), check.version);
-  const event = appendEvent(db, { source, kind: "harness.unverified", payload: { harness: check.harness, version: check.version, where, ...(auto ? { auto: true } : {}) }, ts: now });
+  if (sameFlag(readFlag(db, check.harness), check.version, check.revision)) return null;
+  resolveItems(db, "harness_unverified", key, `superseded by ${check.version} at contract revision ${check.revision}`, now);
+  setFlag(db, check.harness, { version: check.version, revision: check.revision });
+  const event = appendEvent(db, {
+    source,
+    kind: "harness.unverified",
+    payload: { harness: check.harness, version: check.version, revision: check.revision, ...(check.stale.length > 0 ? { stale: check.stale } : {}), where, ...(auto ? { auto: true } : {}) },
+    ts: now,
+  });
   if (auto) return null;
   return openUnverifiedItem(db, check.harness, check.version, event.seq, now);
 }
 
-function unverifiedLine(harness: HarnessId, version: string): string {
-  return `${harness} ${version} has no passing contract run, so dispatch and resume on ${harness} are refused until it passes: ${contractsCommand(harness)}`;
+function unverifiedLine(harness: HarnessId, version: string, revision: number, stale: number[]): string {
+  const why = stale.length === 0 ? `${harness} ${version} has no passing contract run` : unverifiedReason(harness, version, revision, stale);
+  return `${why}, so dispatch and resume on ${harness} are refused until it passes: ${contractsCommand(harness)}`;
 }
 
-/** The harness_unverified P1. `line` replaces the default (an automatic check's failure names its report). Call inside a transaction. */
+/**
+ * The harness_unverified P1 for this version at the daemon's revision. `line`
+ * replaces the default (an automatic check's failure names its report). The
+ * event at `eventSeq` must carry the version and revision (unverifiedItemOpened
+ * dedupes on them). Call inside a transaction.
+ */
 export function openUnverifiedItem(db: Db, harness: HarnessId, version: string, eventSeq: number, now: number, line?: string): string {
-  return openItem(db, { kind: "harness_unverified", eventSeq, taskId: harnessItemKey(harness), line: line ?? unverifiedLine(harness, version), now });
+  const revision = contractRevision(harness);
+  return openItem(db, { kind: "harness_unverified", eventSeq, taskId: harnessItemKey(harness), line: line ?? unverifiedLine(harness, version, revision, stalePasses(db, harness, version, revision)), now });
 }
 
-/** Has a harness_unverified P1 ever opened for this version (open, resolved or dismissed)? */
-export function unverifiedItemOpened(db: Db, harness: HarnessId, version: string): boolean {
+/** Has a harness_unverified P1 ever opened for this version at this revision (open, resolved or dismissed)? An event from before revisions is legacy. */
+export function unverifiedItemOpened(db: Db, harness: HarnessId, version: string, revision: number): boolean {
   return (
     db
       .query(
         `SELECT 1 FROM items i JOIN events e ON e.seq = i.event_seq
-         WHERE i.kind = 'harness_unverified' AND i.task_id = ?1 AND json_extract(e.payload, '$.version') = ?2 LIMIT 1`,
+         WHERE i.kind = 'harness_unverified' AND i.task_id = ?1 AND json_extract(e.payload, '$.version') = ?2
+           AND COALESCE(json_extract(e.payload, '$.revision'), ${LEGACY_REVISION}) = ?3 LIMIT 1`,
       )
-      .get(harnessItemKey(harness), version) !== null
+      .get(harnessItemKey(harness), version, revision) !== null
   );
 }
 
-/** A contract run just passed for this version: the P1 about it is settled. Call inside a transaction. */
-export function noteContractPassed(db: Db, harness: HarnessId, version: string, now: number): void {
-  if (getMeta(db, flaggedKey(harness)) !== version) return;
-  setMeta(db, flaggedKey(harness), "");
+/** A contract run just passed for this version at this revision: the P1 flagged for exactly that is settled. Call inside a transaction. */
+export function noteContractPassed(db: Db, harness: HarnessId, version: string, revision: number, now: number): void {
+  if (!sameFlag(readFlag(db, harness), version, revision)) return;
+  setFlag(db, harness, null);
   resolveItems(db, "harness_unverified", harnessItemKey(harness), `contract passed for ${version}`, now);
 }
 
 /**
  * The untested version the last check found installed, while it still has no
- * passing record; a database read only, for the capacity view and the wait alert.
+ * passing record at the daemon's revision; a database read only, for the
+ * capacity view, the wait alert and the automatic check.
  */
 export function unverifiedVersion(db: Db, harness: string): string | null {
-  const version = getMeta(db, flaggedKey(harness as HarnessId));
-  if (!version) return null;
-  return db.query("SELECT 1 FROM harness_contracts WHERE harness = ?1 AND version = ?2").get(harness, version) ? null : version;
+  const flag = readFlag(db, harness as HarnessId);
+  if (!flag) return null;
+  return hasPass(db, harness, flag.version, contractRevision(harness as HarnessId)) ? null : flag.version;
 }
 
 /** Check a harness and record the result in its own transaction; resolves the check. */
@@ -211,7 +284,7 @@ export async function checkHarnessesAtStartup(db: Db, config: FlowrynConfig, ver
       appendEvent(db, {
         source: "daemon",
         kind: "harness.checked",
-        payload: check.state === "missing" ? { harness, state: check.state, detail: check.detail } : { harness, state: check.state, version: check.version },
+        payload: check.state === "missing" ? { harness, state: check.state, detail: check.detail } : { harness, state: check.state, version: check.version, revision: check.revision },
         ts: now(),
       });
       noteHarnessCheck(db, check, "daemon", "startup", now(), autoChecksOn(db, config));
