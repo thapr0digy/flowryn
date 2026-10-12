@@ -99,6 +99,115 @@ describe("config", () => {
   });
 });
 
+describe("known sections", () => {
+  function refusal(text: string): string {
+    try {
+      parseConfig(text, HOME);
+    } catch (error) {
+      expect(error).toBeInstanceOf(FlowrynError);
+      expect((error as FlowrynError).code).toBe("config_invalid");
+      return (error as Error).message;
+    }
+    throw new Error("parseConfig accepted the text");
+  }
+
+  test("a misspelled section is refused with the section it most likely meant", () => {
+    expect(refusal("[notfiy]\nmacos = false\n")).toBe("[notfiy] is not a known section; did you mean [notify]?");
+  });
+
+  test("a misspelled dynamic parent is refused too: [workflow.fix] suggests [workflows]", () => {
+    expect(refusal('[workflow.fix]\nstages = [{ id = "ship", gate = "merge" }]\n')).toBe("[workflow] is not a known section; did you mean [workflows]?");
+  });
+
+  test("a top-level key far from any known name is refused without a guess, and lists the known sections", () => {
+    const message = refusal("[zzzzzzzz]\nx = 1\n");
+    expect(message).toStartWith("[zzzzzzzz] is not a known section; known sections: ");
+    expect(message).not.toContain("did you mean");
+    expect(message).toContain("notify");
+    expect(message).toContain("projects");
+  });
+
+  test("a misspelled top-level key such as morning_hours suggests morning_hour", () => {
+    expect(refusal("morning_hours = 6\n")).toBe("morning_hours is not a known setting; did you mean morning_hour?");
+  });
+
+  test("a config.toml-shaped file with comments, every registered section and dynamic project and workflow names still parses", () => {
+    const text = `# Flowryn configuration, written by \`flowryn init\`.
+data_dir = "/x/data" # trailing comment
+state_dir = "/x/state"
+morning_hour = 5
+
+[tasks]
+backlog = "/x/data/backlog.md"
+todos = "/x/data/todos.md"
+
+[tools]
+tasks_axi = "/bin/tasks-axi"
+
+[workers.claude]
+model = "opus"
+
+[workers.pi]
+effort = "medium"
+
+[style]
+terse = true
+
+[capacity]
+worker = 20
+validation = 5
+
+[capacity.host]
+min_free_mem_gb = 8
+
+[autonomy]
+default = "plan"
+
+[notify]
+macos = true
+
+# custom workflows keep any id
+[workflows.feature-ui-2]
+stages = [{ id = "build" }, { id = "ship", pools = ["validation"], gate = "merge" }]
+
+[workflows.quick]
+stages = [{ id = "ship", gate = "merge" }]
+
+[projects.web-app]
+verify = ["bun test"]
+
+[projects.another_one]
+verify_timeout_min = 10
+
+[policy]
+mode = "strict"
+
+[herdr]
+[reconcile]
+[leader]
+[away]
+[grants]
+[review]
+[github]
+[cleanup]
+[daemon]
+[upkeep]
+[validation]
+[sched]
+[decisions]
+`;
+    const config = parseConfig(text, HOME);
+    expect(Object.keys((config.extra.workflows as Record<string, unknown>) ?? {})).toEqual(["feature-ui-2", "quick"]);
+    expect(Object.keys((config.extra.projects as Record<string, unknown>) ?? {})).toEqual(["web-app", "another_one"]);
+    expect(config.extra.notify).toEqual({ macos: true });
+  });
+
+  test("every section init writes is registered, so a fresh init config always loads", () => {
+    const text = renderConfig({ ...defaultConfig(HOME), extra: LATER_SECTION_DEFAULTS });
+    expect(() => parseConfig(text, HOME)).not.toThrow();
+  });
+});
+
 describe("paths", () => {
   test("FLOWRYN_HOME and FLOWRYN_SOCK override the fixed locations", () => {
     expect(flowrynHome({ FLOWRYN_HOME: "/tmp/x" })).toBe("/tmp/x");
