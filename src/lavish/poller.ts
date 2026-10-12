@@ -165,10 +165,10 @@ export class LavishPoller {
     const wanted = new Map(gatesToPoll(this.deps.db).map((g) => [g.id, g.page_path]));
     for (const [gate, entry] of this.running) if (!wanted.has(gate) && !entry.final) this.halt(gate);
     const now = this.deps.now();
-    // A channel nobody polls any more is not degraded: its item resolves.
+    // A channel nobody polls any more is not degraded: its failures clear and its item resolves.
     const polled = lavish ? new Set(wanted.keys()) : new Set<string>();
     for (const gate of clearUnpolledChannels(this.deps.db, polled, (id) => (lavish ? notPolledWhy(this.deps.db, id) : "lavish-axi is not installed"), now)) {
-      this.deps.log(`lavish: gate ${gate}'s review_channel item resolved: its page is no longer polled`);
+      this.deps.log(`lavish: gate ${gate}'s channel cleared: its page is no longer polled`);
     }
     let nextRetry: number | null = null;
     for (const [gate, page] of wanted) {
@@ -396,7 +396,7 @@ export class LavishPoller {
   }
 }
 
-/** Why a gate with a channel item is no longer polled, for its gate.channel_cleared event. */
+/** Why a gate with a failing channel is no longer polled, for its gate.channel_cleared event. */
 function notPolledWhy(db: Db, gateId: string): string {
   const gate = db.query("SELECT g.state, g.lavish_ended, g.page_path, r.state AS run_state FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gateId) as {
     state: string;

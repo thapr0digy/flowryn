@@ -9,7 +9,7 @@ import { readsAsPass } from "../../src/lifecycle/gate-questions.ts";
 import { normalizeAnswer, parseGateQuestions } from "../../src/lavish/questions.ts";
 import { pageMountsWidget, renderWidget, WIDGET_FILE, writeWidget, type WidgetState } from "../../src/lavish/widget.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
-import { channelHint, channelView, pollFailureReason } from "../../src/lavish/channel.ts";
+import { channelHint, channelView, pollFailureReason, recordChannelFailure, recordChannelOk } from "../../src/lavish/channel.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateFeedback, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
@@ -1035,8 +1035,12 @@ describe("review-channel health", () => {
     none.pass();
     expect(channelItems()[0]).toMatchObject({ state: "resolved", resolved_by: "gate.channel_cleared g1" });
     expect(JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared'").get() as { payload: string }).payload).why).toBe("lavish-axi is not installed");
-    // Failing again opens a new item (alert 0, two more failures in the same episode count).
+    // Nothing stale is left for show: the failure columns clear with the item.
+    expect(channel()).toEqual({ channel_ok_at: null, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    // Failing again is a new episode: one failure opens nothing, the second opens a new item.
     const again = makePoller({ alertMs: 0 });
+    await failOnce(again, 10_000);
+    expect(channelItems().filter((i) => i.state === "open")).toHaveLength(0);
     await failOnce(again, 10_000);
     expect(channelItems().filter((i) => i.state === "open")).toHaveLength(1);
     tx(db, () => failRun(db, getRun(db, runId)!, "test", "daemon", NOW));
@@ -1044,6 +1048,39 @@ describe("review-channel health", () => {
     expect(channelItems().filter((i) => i.state === "open")).toHaveLength(0);
     const why = (db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).why);
     expect(why).toEqual(["lavish-axi is not installed", "the run failed"]);
+  });
+
+  test("a gate failing below the threshold clears too once it is no longer polled; its last healthy time stays", async () => {
+    open();
+    db.query("UPDATE gates SET channel_ok_at = ?1 WHERE id = 'g1'").run(NOW - 60_000);
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller();
+    await failOnce(p, 0);
+    expect(channelItems()).toEqual([]);
+    p.stop();
+    db.query("UPDATE gates SET lavish_ended = 1 WHERE id = 'g1'").run();
+    makePoller().pass();
+    expect(channel()).toEqual({ channel_ok_at: NOW - 60_000, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    const cleared = JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared'").get() as { payload: string }).payload);
+    expect(cleared).toEqual({ gate: "g1", item: null, why: "the user ended the Lavish session" });
+    expect(channelView(channel(), () => true)).toBe(`; channel: listening since ${new Date(NOW - 60_000).toTimeString().slice(0, 5)}`);
+  });
+
+  test("a poll that ends after its gate closed or its run ended is recorded nowhere: no item opens for it", () => {
+    open();
+    const failure = { reason: `${SERVER_ERROR} (exit 1)`, retryAt: NOW + 2_000, alertMs: 0, now: NOW };
+    db.query("UPDATE gates SET state = 'passed' WHERE id = 'g1'").run();
+    expect(recordChannelFailure(db, "g1", failure)).toBeNull();
+    expect(recordChannelFailure(db, "g1", { ...failure, now: NOW + 10_000 })).toBeNull();
+    expect(recordChannelOk(db, "g1", "delivered", NOW)).toBe(false);
+    db.query("UPDATE gates SET state = 'open' WHERE id = 'g1'").run();
+    tx(db, () => failRun(db, getRun(db, runId)!, "test", "daemon", NOW));
+    expect(recordChannelFailure(db, "g1", failure)).toBeNull();
+    expect(recordChannelFailure(db, "g1", { ...failure, now: NOW + 10_000 })).toBeNull();
+    expect(recordChannelOk(db, "g1", "listening", NOW)).toBe(false);
+    expect(channel()).toEqual({ channel_ok_at: null, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null });
+    expect(channelItems()).toEqual([]);
+    expect(eventKinds()).toEqual([]);
   });
 
   test("a pass verdict resolves the gate's channel item with its other items", async () => {

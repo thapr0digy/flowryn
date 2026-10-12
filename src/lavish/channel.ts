@@ -2,6 +2,7 @@ import { openItem } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
+import { LIVE_RUN } from "../lifecycle/gate-questions.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -34,12 +35,13 @@ interface ChannelGate extends ChannelColumns {
   page_path: string | null;
 }
 
+/** The gate, while it is open and its run live: a poll's verdict for any other gate is recorded nowhere. */
 function channelGate(db: Db, gateId: string): ChannelGate | null {
   return db
     .query(
       `SELECT g.id, g.run_id, g.stage, r.task_id, g.page_path, g.channel_ok_at, g.channel_failing_since, g.channel_failures,
               g.channel_reason, g.channel_retry_at, g.channel_item
-       FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1`,
+       FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1 AND g.state = 'open' AND ${LIVE_RUN}`,
     )
     .get(gateId) as ChannelGate | null;
 }
@@ -128,24 +130,27 @@ export function recordChannelOk(db: Db, gateId: string, via: "listening" | "deli
 }
 
 /**
- * Resolve the channel item of every gate the poller no longer polls (closed, its run ended, the
- * Lavish session ended, or no lavish-axi): a channel nobody listens on is not degraded.
+ * Clear the channel of every gate the poller no longer polls (closed, its run ended, the Lavish
+ * session ended, or no lavish-axi): a channel nobody listens on is not degraded, so its failure
+ * columns are cleared (its last healthy time kept) and its item resolves.
  */
 export function clearUnpolledChannels(db: Db, polled: ReadonlySet<string>, why: (gateId: string) => string, now: number): string[] {
-  const open = db
+  const failing = db
     .query(
       `SELECT g.id, g.run_id, r.task_id, g.channel_item FROM gates g JOIN runs r ON r.id = g.run_id
-       JOIN items i ON i.id = g.channel_item WHERE i.state IN ('open','presented')`,
+       WHERE g.channel_failing_since IS NOT NULL
+          OR EXISTS (SELECT 1 FROM items i WHERE i.id = g.channel_item AND i.state IN ('open','presented'))`,
     )
-    .all() as { id: string; run_id: string; task_id: string; channel_item: string }[];
+    .all() as { id: string; run_id: string; task_id: string; channel_item: string | null }[];
   const cleared: string[] = [];
-  for (const gate of open) {
-    const reason = polled.has(gate.id) ? null : why(gate.id);
-    if (reason === null) continue;
+  for (const gate of failing) {
+    if (polled.has(gate.id)) continue;
+    const reason = why(gate.id);
     tx(db, () => {
-      db.query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1 AND state IN ('open','presented')").run(gate.channel_item, `gate.channel_cleared ${gate.id}`, now);
-      db.query("UPDATE gates SET channel_item = NULL WHERE id = ?1").run(gate.id);
-      appendEvent(db, { source: "daemon", kind: "gate.channel_cleared", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, item: gate.channel_item, why: reason }, ts: now });
+      const item = itemOpen(db, gate.channel_item) ? gate.channel_item : null;
+      if (item) db.query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1").run(item, `gate.channel_cleared ${gate.id}`, now);
+      db.query("UPDATE gates SET channel_failing_since = NULL, channel_failures = 0, channel_reason = NULL, channel_retry_at = NULL, channel_item = NULL WHERE id = ?1").run(gate.id);
+      appendEvent(db, { source: "daemon", kind: "gate.channel_cleared", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, item, why: reason }, ts: now });
     });
     cleared.push(gate.id);
   }
