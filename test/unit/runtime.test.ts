@@ -460,6 +460,14 @@ describe("Herdr focus across workspace closes (M0 h07)", () => {
     expect(herdr.focusedWorkspace).toBe(ids.leader);
   });
 
+  test("a close that succeeded resolves even when the restore's list read fails", async () => {
+    const { herdr, runtime, ids } = await fleet();
+    herdr.afterClose = () => herdr.failNext.set("workspace.list", ["internal"]);
+    await runtime.closeWorkspace(ids.w1);
+    expect(herdr.workspaces.has(ids.w1)).toBe(false);
+    expect(focusCalls(herdr)).toEqual([]);
+  });
+
   test("a close with a time budget stays within it when Herdr never answers", async () => {
     const path = join(tempDir(), "silent.sock");
     const server = net.createServer(() => {});

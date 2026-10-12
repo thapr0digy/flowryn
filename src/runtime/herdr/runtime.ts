@@ -284,7 +284,8 @@ export class HerdrRuntime {
    * that takes the closed one's slot (M0 h07). When the focus lands exactly
    * there, it goes back to the workspace that had it; focus anywhere else
    * means the user moved it meanwhile, and it stays. Nothing focused, or
-   * closing the focused workspace itself, leaves focus to Herdr.
+   * closing the focused workspace itself, leaves focus to Herdr. Once the
+   * close has succeeded, the restore is best effort and never fails it.
    */
   async closeWorkspace(workspaceId: string, timeoutMs?: number): Promise<void> {
     const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
@@ -298,16 +299,21 @@ export class HerdrRuntime {
         if (error instanceof HerdrError && error.code === "workspace_not_found") return;
         throw error;
       }
-      const index = before?.order.indexOf(workspaceId) ?? -1;
-      const previous = before?.focused ?? null;
-      if (!before || index === -1 || previous === null || previous === workspaceId || left() === 0) return;
-      const remaining = before.order.filter((id) => id !== workspaceId);
-      const landing = remaining[Math.min(index, remaining.length - 1)];
-      const after = await this.workspaceFocus(left());
-      if (after.focused === landing && after.focused !== previous && after.order.includes(previous) && left() !== 0) {
-        await this.transport.call("workspace.focus", { workspace_id: previous }, left());
-      }
+      if (before) await this.restoreFocus(before, workspaceId, left).catch(() => undefined);
     });
+  }
+
+  /** Put focus back on the workspace that had it, if Herdr's close moved it exactly to the closed one's slot. */
+  private async restoreFocus(before: { order: string[]; focused: string | null }, closed: string, left: () => number | undefined): Promise<void> {
+    const index = before.order.indexOf(closed);
+    const previous = before.focused;
+    if (index === -1 || previous === null || previous === closed || left() === 0) return;
+    const remaining = before.order.filter((id) => id !== closed);
+    const landing = remaining[Math.min(index, remaining.length - 1)];
+    const after = await this.workspaceFocus(left());
+    if (after.focused === landing && after.focused !== previous && after.order.includes(previous) && left() !== 0) {
+      await this.transport.call("workspace.focus", { workspace_id: previous }, left());
+    }
   }
 
   /** Name the pane's run in its metadata, with no TTL (M0 h03), so the reconciler can find candidates. */

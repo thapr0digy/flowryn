@@ -25,7 +25,7 @@ The user's server log agrees: no `workspace.focus` follows any worker `workspace
   1. Read `workspace.list`. If nothing is focused, the target is the focused workspace, or the target is not listed, just close: no restore (nothing of the user's to keep).
   2. Close, then compute where Herdr's rule puts focus: the list without the target, at `min(index, length - 1)`.
   3. Read `workspace.list` again. Restore with `workspace.focus <previous>` only when focus is now exactly on that landing workspace and the previous one still exists. Focus anywhere else means the user moved it in between, and it is left alone.
-  4. If the first read fails, close unguarded (Herdr being unreachable fails the close anyway). Errors after the close propagate to the caller, as close errors do today; every caller already treats a close failure as best effort.
+  4. If the first read fails, close unguarded (Herdr being unreachable fails the close anyway). Once the close has succeeded, the restore is best effort: its errors are dropped so a slow or failing restore never makes a done close look failed (the contract cleanup counts a failed close).
 - `openWorkspace` and the guarded close run one at a time per `HerdrRuntime` (a promise chain), so two runs landing together, or a launch beside a landing, cannot skew each other's landing prediction. The daemon holds one runtime; the contract runner and lab scripts hold their own against their lab session.
 - `workspace.focus` joins the client's allowed methods; it is the only new Herdr call.
 - Deterministic only: the landing rule is plain list arithmetic from h07. No model.
