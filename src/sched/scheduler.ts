@@ -182,6 +182,11 @@ export class Scheduler {
     }
   }
 
+  /** The host check as the next grant would read it: heavy work outside a run (a verify) is admitted on the same verdict. */
+  async hostCheck(): Promise<HostVerdict> {
+    return this.hostVerdict(capacityConfig(this.deps.config()).host);
+  }
+
   private async hostVerdict(cfg: HostCheckConfig): Promise<HostVerdict> {
     const now = this.deps.now();
     const ttl = schedTiming(this.deps.config()).host_cache_ms;

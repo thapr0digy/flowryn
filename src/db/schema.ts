@@ -533,6 +533,23 @@ ALTER TABLE gates ADD COLUMN channel_retry_at INTEGER;
 ALTER TABLE gates ADD COLUMN channel_item TEXT;
 `;
 
+/**
+ * Job leases (docs/notes/2026-10-12-next-steps-md-64.md): a capacity slot held by
+ * heavy work that is not a run (a `flowryn verify`), counted with pool_leases
+ * against the same caps, so no run is fabricated for it. One live row per pool
+ * and job; proc_* is the identity of the job's running step (its process group
+ * leader), so a daemon that restarts can end it before it frees the slot.
+ * A verification running at upgrade has no lease: startup recovery handles it as before.
+ */
+const JOB_LEASES_SQL = /* sql */ `
+CREATE TABLE job_leases (
+  id INTEGER PRIMARY KEY, pool TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('verify')), job_id TEXT NOT NULL,
+  task_id TEXT, granted_at INTEGER NOT NULL, released_at INTEGER, released_by TEXT,
+  proc_pid INTEGER, proc_start INTEGER, proc_exe TEXT);
+CREATE UNIQUE INDEX job_one_live ON job_leases(pool, kind, job_id) WHERE released_at IS NULL;
+CREATE INDEX job_live ON job_leases(pool) WHERE released_at IS NULL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -554,6 +571,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 18, name: "gate-browser-open", sql: GATE_BROWSER_OPEN_SQL },
   { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
   { version: 20, name: "gate-channel", sql: GATE_CHANNEL_SQL },
+  { version: 21, name: "job-leases", sql: JOB_LEASES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

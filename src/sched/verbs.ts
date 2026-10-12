@@ -5,7 +5,7 @@ import { taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { unverifiedVersion } from "../lifecycle/harness-gate.ts";
 import { neededPools, positionOf } from "../lifecycle/stages.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { fullPools, liveCounts } from "./pools.ts";
+import { fullPools, liveCounts, liveJobLeases } from "./pools.ts";
 import { hostState } from "./scheduler.ts";
 import { overrideQuota, quotaHolds, quotaLine, quotaState } from "./quota.ts";
 import { clearUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "./usage.ts";
@@ -37,8 +37,9 @@ function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Rec
 
 /**
  * `flowryn capacity` (design section 11): each pool's live leases against its
- * cap, the host check, the Claude usage-limit pause, the Claude quota floor,
- * and the runs waiting for a grant in the order the scheduler grants them.
+ * cap (a run's and a job's, such as a verify), the jobs holding slots, the host
+ * check, the Claude usage-limit pause, the Claude quota floor, and the runs
+ * waiting for a grant in the order the scheduler grants them.
  */
 const capacity: VerbSpec = {
   name: "capacity",
@@ -89,6 +90,8 @@ const capacity: VerbSpec = {
             : `not read yet (floor ${cfg.quota.floor}%; read before a new Claude run starts)`,
       waiting: waiting.slice(0, MAX_WAITING_ROWS),
     };
+    const jobs = liveJobLeases(ctx.db);
+    if (jobs.length > 0) data.jobs = jobs.map((j) => ({ job: j.job_id, kind: j.kind, pool: j.pool, task: j.task_id ?? "-", held: age(ctx.now, j.granted_at) }));
     if (waiting.length > MAX_WAITING_ROWS) data.more = `${waiting.length - MAX_WAITING_ROWS} more waiting`;
     const hints = waiting.length > 0 ? ["flowryn show <task>"] : [`every run holds a ${WORKER_POOL} slot while its worker lives`];
     return { data, hints: pause || quotaHolds(ctx.db) ? [RESUME_COMMAND, ...hints] : hints };

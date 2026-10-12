@@ -249,6 +249,23 @@ describe("migrations", () => {
     expect(db.query("SELECT channel_failures, channel_item FROM gates").get()).toEqual({ channel_failures: 2, channel_item: "i1" });
     db.close();
   });
+
+  test("job leases: migration 21 on a database in use; a verification running before it holds no slot; one live lease per pool and job; only a verify job", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 20));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES ('v1', 'web', 'https://github.com/a/w/pull/1', 'h', 'running', '[]', '/d', '/d/wt', '/w', 1)");
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([21]);
+    expect(db.query("SELECT COUNT(*) AS n FROM job_leases").get()).toEqual({ n: 0 });
+    const lease = (job: string, kind = "verify") => db.query("INSERT INTO job_leases (pool, kind, job_id, granted_at) VALUES ('validation', ?1, ?2, 1)").run(kind, job);
+    lease("v2");
+    expect(() => lease("v2")).toThrow("UNIQUE");
+    expect(() => lease("b1", "build")).toThrow("CHECK");
+    db.exec("UPDATE job_leases SET released_at = 2, released_by = 'x' WHERE job_id = 'v2'");
+    lease("v2");
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {
