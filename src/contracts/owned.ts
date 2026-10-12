@@ -138,7 +138,7 @@ export function withScratchIds(owned: OwnedResources): OwnedResources {
 
 /** Each bounded step of releasing what a contract run owns; the runner's cleanup budget is their sum (src/contracts/runner.ts). */
 export const RELEASE_LIMITS = {
-  /** Each workspace close: a request with this deadline. */
+  /** Each workspace close: the guarded close (its focus reads and restore included) shares this deadline. */
   workspaceCloseMs: 5_000,
   /** Each process: SIGTERM, this grace, then SIGKILL and up to 2 s more (terminate in src/runtime/proc.ts). */
   processGraceMs: 10_000,

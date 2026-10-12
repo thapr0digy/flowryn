@@ -55,7 +55,7 @@ As designed. `HerdrRuntime.closeWorkspace` (`src/runtime/herdr/runtime.ts`) is t
 
 ### Tests
 
-- `test/unit/runtime.test.ts` "Herdr focus across workspace closes (M0 h07)", through the real client against FakeHerdr: an open leaves focus alone and sends `focus: false`; closing an unfocused worker restores the leader (and no restore when Herdr's move already lands on it); nothing focused reads the list once and focuses nothing; closing the focused workspace restores nothing; a focus the user chose between the close and the check (FakeHerdr `afterClose`) stays; two closes and an open at once keep the leader; a workspace already gone is not an error.
+- `test/unit/runtime.test.ts` "Herdr focus across workspace closes (M0 h07)", through the real client against FakeHerdr: an open leaves focus alone and sends `focus: false`; closing an unfocused worker restores the leader (and no restore when Herdr's move already lands on it); nothing focused reads the list once and focuses nothing; closing the focused workspace restores nothing; a focus the user chose between the close and the check (FakeHerdr `afterClose`) stays; two closes and an open at once keep the leader; a close that succeeded resolves even when the restore's list read fails; a close with a time budget stays within it when Herdr never answers; a workspace already gone is not an error.
 - `test/integration/workers.test.ts` "Herdr focus": with a focused leader workspace, a first worker launches, a second scout launches, lands and is cleaned; its workspace closes and the leader stays focused, with exactly one `workspace.focus`.
 - Without the runtime change, four of the unit cases and the integration case fail (the integration case ends focused on the first worker's workspace).
 
