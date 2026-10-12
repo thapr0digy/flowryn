@@ -5,6 +5,7 @@
  * started again on its socket; GitHub is the fake forge with its outage knobs.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { DEFAULT_HANDSHAKE_MS } from "../../src/runtime/herdr/client.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
@@ -112,13 +113,13 @@ function unreachableDetails(env: FleetEnv): string[] {
 
 describe("Herdr connected but not acknowledging the subscription", () => {
   test(
-    "assumption: a silent peer fails within [herdr] handshake_ms and goes through the outage path; the daemon does not wedge, and recovers once Herdr answers",
+    "assumption: a silent peer fails within the handshake deadline and goes through the outage path; the daemon does not wedge, and recovers once Herdr answers",
     async () => {
-      const env = await fleet({ herdrHandshakeMs: 300, herdrSubscribe: "silent" });
-      await waitUntil(() => unreachableDetails(env).length === 1, 10_000, "the outage noticed");
-      expect(unreachableDetails(env)[0]).toContain("did not acknowledge events.subscribe within 300 ms");
+      const env = await fleet({ herdrSubscribe: "silent" });
+      await waitUntil(() => unreachableDetails(env).length === 1, DEFAULT_HANDSHAKE_MS + 5_000, "the outage noticed");
+      expect(unreachableDetails(env)[0]).toContain(`did not acknowledge events.subscribe within ${DEFAULT_HANDSHAKE_MS} ms`);
       // Retried with backoff, not held on one hung attempt.
-      await waitUntil(() => subscribeCalls(env) >= 2, 10_000, "a second subscribe attempt");
+      await waitUntil(() => subscribeCalls(env) >= 2, 5_000, "a second subscribe attempt");
       expect(env.herdr.subscriberCount()).toBe(0);
 
       env.herdr.subscribeReply = "answer";
@@ -128,13 +129,13 @@ describe("Herdr connected but not acknowledging the subscription", () => {
       const { run } = await env.dispatch("Scout\nFAKE: sleep 120000");
       await env.waitRun(run, (r) => r.liveness === "busy", "busy");
     },
-    { timeout: 60_000 },
+    { timeout: 90_000 },
   );
 
   test(
     "assumption: an acknowledgement of another type is protocol, not a started stream",
     async () => {
-      const env = await fleet({ herdrHandshakeMs: 2_000, herdrSubscribe: (id) => JSON.stringify({ id, result: { type: "pane_info" } }) + "\n" });
+      const env = await fleet({ herdrSubscribe: (id) => JSON.stringify({ id, result: { type: "pane_info" } }) + "\n" });
       await waitUntil(() => unreachableDetails(env).length === 1, 10_000, "the outage noticed");
       expect(unreachableDetails(env)[0]).toContain("not subscription_started");
       expect(env.herdr.subscriberCount()).toBe(0);

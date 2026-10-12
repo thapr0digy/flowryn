@@ -1,11 +1,11 @@
-import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { stateFiles } from "../config/paths.ts";
 import { openDb } from "../db/db.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate, type ProcIdentity, type TerminateResult } from "../runtime/proc.ts";
-import { createdWorktrees, removeOwnWorktrees, type GitRun } from "./cleanup.ts";
+import { createdWorktrees, removeOwnWorktrees, type CreatedWorktree, type GitRun } from "./cleanup.ts";
 
 /**
  * What a contract run owns, written where its owner can read it after the
@@ -45,6 +45,9 @@ export interface OwnedResources {
   /** The runner's cleanup outcome; null while it runs, or when it never finished. */
   cleanup: CleanupOutcome | null;
 }
+
+/** The first line of a scratch home's config.toml (renderToml's header comment): what marks a directory as one. */
+export const SCRATCH_CONFIG_HEADER = "Scratch home for a Flowryn harness contract run";
 
 /** The environment variable that names the manifest of a `doctor --contracts --for-daemon` run. */
 export const MANIFEST_ENV = "FLOWRYN_CONTRACT_MANIFEST";
@@ -145,7 +148,6 @@ export const RELEASE_LIMITS = {
 };
 
 export interface ReleaseDeps {
-  git: GitRun;
   log(line: string): void;
   /** Remove the scratch home; false when it would not go (src/contracts/runner.ts removeScratchHome). */
   removeHome(home: string): Promise<boolean>;
@@ -153,17 +155,43 @@ export interface ReleaseDeps {
   closeWorkspace?: (socket: string, workspaceId: string, timeoutMs: number) => Promise<void>;
 }
 
+/**
+ * git on the caller's checkout within one deadline for the whole worktree
+ * step: each call gets what is left of it, and a call cut off by it (or one
+ * starting after it) answers code 124, which removeOwnWorktrees reports.
+ */
+export function gitWithin(budgetMs: number, binary = "git"): GitRun {
+  const until = Date.now() + budgetMs;
+  return (args, cwd) => {
+    const left = until - Date.now();
+    if (left <= 0) return { code: 124, out: "" };
+    const result = Bun.spawnSync([binary, ...args], { cwd, stdin: "ignore", timeout: left });
+    if (result.exitedDueToTimeout) return { code: 124, out: "" };
+    return { code: result.exitCode ?? 1, out: result.stdout.toString().trim() };
+  };
+}
+
 async function closeInHerdr(socket: string, workspaceId: string, timeoutMs: number): Promise<void> {
   const runtime = new HerdrRuntime(new HerdrClient(socket));
   await runtime.closeWorkspace(workspaceId, timeoutMs);
 }
 
-/** A scratch home the release may remove: an absolute, real `fwc-*` directory (never a symlink, never anything else). */
+/**
+ * A scratch home the release may remove: an absolute, real `fwc-*` directory
+ * (never a symlink) that holds the scratch config.toml, or nothing at all (a
+ * run stopped before it wrote one). Null when it may go, or is gone already.
+ */
 export function removableHome(home: string): string | null {
   if (!isAbsolute(home) || !basename(home).startsWith("fwc-")) return `${home} is not a contract scratch home`;
   if (!existsSync(home)) return null;
   const stat = lstatSync(home);
-  return stat.isDirectory() && !stat.isSymbolicLink() ? null : `${home} is not a directory`;
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return `${home} is not a directory`;
+  const config = join(home, "config.toml");
+  if (existsSync(config)) {
+    const first = readFileSync(config, "utf8").split("\n", 1)[0];
+    return first === `# ${SCRATCH_CONFIG_HEADER}` ? null : `${config} is not a contract scratch config`;
+  }
+  return readdirSync(home).length === 0 ? null : `${home} has no scratch config.toml`;
 }
 
 /**
@@ -172,10 +200,11 @@ export function removableHome(home: string): string | null {
  * run's own worktrees from the caller's checkout, then the scratch home.
  * Returns what was left, one line each; nothing else is touched.
  */
-export async function releaseOwned(owned: OwnedResources, deps: ReleaseDeps): Promise<string[]> {
+export async function releaseOwned(owned: OwnedResources, deps: ReleaseDeps, options: { keepHome?: string } = {}): Promise<string[]> {
   const problems: string[] = [];
-  const end = deps.terminate ?? ((proc, options) => terminate(proc, options));
+  const end = deps.terminate ?? ((proc, opts) => terminate(proc, opts));
   const close = deps.closeWorkspace ?? closeInHerdr;
+  let keepHome = options.keepHome ?? null;
   for (const ws of owned.workspaces) {
     try {
       await close(owned.herdr_socket, ws, RELEASE_LIMITS.workspaceCloseMs);
@@ -190,12 +219,18 @@ export async function releaseOwned(owned: OwnedResources, deps: ReleaseDeps): Pr
   }
   // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
   if (owned.project) {
+    let created: CreatedWorktree[] | null = null;
     try {
-      const created = createdWorktrees(stateFiles(join(owned.home, "state")).db);
-      problems.push(...removeOwnWorktrees(owned.project, created, owned.branch_prefix, join(owned.home, "wt"), deps.git, deps.log));
+      created = createdWorktrees(stateFiles(join(owned.home, "state")).db);
     } catch (error) {
-      problems.push(`worktrees in ${owned.project} not removed: ${(error as Error).message}`);
+      problems.push(`the scratch database is unreadable, so the worktrees in ${owned.project} are unknown: ${(error as Error).message}`);
+      keepHome ??= "its database names the run's worktrees";
     }
+    if (created) problems.push(...removeOwnWorktrees(owned.project, created, owned.branch_prefix, join(owned.home, "wt"), gitWithin(RELEASE_LIMITS.worktreesMs), deps.log));
+  }
+  if (keepHome) {
+    if (existsSync(owned.home)) problems.push(`scratch home ${owned.home} kept for recovery: ${keepHome}`);
+    return problems;
   }
   const refused = removableHome(owned.home);
   if (refused) problems.push(`scratch home left alone: ${refused}`);
@@ -232,13 +267,16 @@ export async function recoverOwned(manifestPath: string, deps: RecoverDeps): Pro
     if (!ended.ok) problems.push(`${what} (pid ${proc.pid}) did not exit (${ended.signal}, ${ended.evidence})`);
   }
   let owned: OwnedResources;
+  let keepHome: string | undefined;
   try {
     owned = withScratchIds(read.owned);
   } catch (error) {
     problems.push(`the scratch database in ${read.owned.home} is unreadable: ${(error as Error).message}`);
     owned = read.owned;
+    // It is the only record of the run's workspace and harness ids: the home stays until someone reads it.
+    keepHome = "its database is the only record of the run's workspaces and harnesses";
   }
-  problems.push(...(await releaseOwned(owned, deps)));
+  problems.push(...(await releaseOwned(owned, deps, { keepHome })));
   const result = outcome(problems);
   try {
     writeManifest(manifestPath, { ...owned, cleanup: result });

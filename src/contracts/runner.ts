@@ -18,7 +18,7 @@ import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
 import { descendantCommands, isAlive, readIdentity, readProcessTable, terminate } from "../runtime/proc.ts";
 import { contractPrefix } from "./cleanup.ts";
-import { RELEASE_LIMITS, createdWorkspaces, harnessProcesses, releaseOwned, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
+import { RELEASE_LIMITS, SCRATCH_CONFIG_HEADER, createdWorkspaces, harnessProcesses, releaseOwned, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
 import { piAgentDir, piAgentSource, realPiTable, scriptedPiTable, seedAgentDir, writeScriptedProvider, type PiProfile } from "./pi-profile.ts";
 import { pinDrift, pinHarness, type HarnessPin } from "./pin.ts";
 import { selfCommand } from "../service/launchd.ts";
@@ -128,8 +128,7 @@ function maxWaitMs(env: NodeJS.ProcessEnv): number {
 // You asked for this run: the quota floor does not hold it (the daemon's own auto check waits on it instead).
 const CONTRACT_CAPACITY = { worker: 1, host: { min_free_mem_gb: 1, max_load_per_core: 8 }, quota: { floor: 0 } };
 
-/** git as a contract run uses it on the caller's checkout (and the daemon, releasing what a killed run left there). */
-export function git(args: string[], cwd: string): { code: number; out: string } {
+function git(args: string[], cwd: string): { code: number; out: string } {
   const result = Bun.spawnSync(["git", ...args], {
     cwd,
     stdin: "ignore",
@@ -174,7 +173,7 @@ export function scratchConfig(options: ContractOptions, pin: HarnessPin, home: s
     capacity: CONTRACT_CAPACITY,
   };
   if (real.extra.style) data.style = real.extra.style;
-  return renderToml(data, "Scratch home for a Flowryn harness contract run");
+  return renderToml(data, SCRATCH_CONFIG_HEADER);
 }
 
 /**
@@ -238,14 +237,18 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       db?.close();
       db = null;
       const problems: string[] = [];
+      let keepHome: string | undefined;
       try {
         note({ workspaces: createdWorkspaces(home), harnesses: harnessProcesses(home) });
       } catch (error) {
-        problems.push(`the scratch database is unreadable, so its workspaces and harnesses are unknown: ${(error as Error).message}`);
+        problems.push(`the scratch database in ${home} is unreadable, so its workspaces and harnesses are unknown: ${(error as Error).message}`);
+        // It is the only record of those ids: the home stays for whoever recovers it.
+        keepHome = "its database is the only record of the run's workspaces and harnesses";
       }
       problems.push(...(await teardown(call, state, daemon)));
       // A run that failed is not cancellable, so its workspace may still be open; release everything by id.
-      problems.push(...(await releaseOwned(owned, { git, log: options.log, removeHome: (path) => (options.keep ? Promise.resolve(true) : removeScratchHome(path, options.log)) })));
+      const removeHome = (path: string) => (options.keep ? Promise.resolve(true) : removeScratchHome(path, options.log));
+      problems.push(...(await releaseOwned(owned, { log: options.log, removeHome }, { keepHome })));
       const outcome: CleanupOutcome = { ok: problems.length === 0, problems, by: "runner", at: Date.now() };
       for (const problem of problems) options.log(`cleanup: ${problem}`);
       note({ cleanup: outcome });

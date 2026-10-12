@@ -228,20 +228,47 @@ describe("Herdr subscription handshake", () => {
     }
   });
 
-  test("assumption: a malformed line after the acknowledgement closes the subscription with protocol, never dropped in silence", async () => {
-    for (const bad of ["garbage\n", JSON.stringify({ data: { pane_id: "w1:p1" } }) + "\n", JSON.stringify({ event: "pane.updated", data: "w1:p1" }) + "\n"]) {
+  test("assumption: after the acknowledgement, a line that is not JSON ends the stream with protocol, and an {error} line with Herdr's code", async () => {
+    for (const [bad, code] of [
+      ["garbage\n", "protocol"],
+      ["[1,2]\n", "protocol"],
+      [JSON.stringify({ error: { code: "server_shutting_down", message: "bye" } }) + "\n", "server_shutting_down"],
+    ] as const) {
       const sock = await subscribeSocket((id) => [ack(id)]);
       try {
         const closed = Promise.withResolvers<HerdrError | null>();
-        const events: string[] = [];
-        await new HerdrClient(sock.path, { handshakeMs: 2_000 }).subscribe([], (e) => events.push(e.event), closed.resolve);
+        await new HerdrClient(sock.path, { handshakeMs: 2_000 }).subscribe([], () => {}, closed.resolve);
         sock.send(bad);
         const error = await Promise.race([closed.promise, Bun.sleep(3_000).then(() => "still open" as const)]);
-        expect({ bad, code: error === "still open" ? error : error?.code }).toEqual({ bad, code: "protocol" });
-        expect(events).toEqual([]);
+        expect({ bad, code: error === "still open" ? error : error?.code }).toEqual({ bad, code });
       } finally {
         sock.close();
       }
+    }
+  });
+
+  test("assumption: an unknown JSON line after the acknowledgement (a reply, a heartbeat) is dropped, logged once and counted; the stream stays up", async () => {
+    const sock = await subscribeSocket((id) => [ack(id)]);
+    try {
+      const logged: string[] = [];
+      const events: string[] = [];
+      let closes = 0;
+      const subscription = await new HerdrClient(sock.path, { handshakeMs: 2_000, log: (line) => logged.push(line) }).subscribe(
+        [],
+        (e) => events.push(e.event),
+        () => closes++,
+      );
+      for (const unknown of [{ type: "heartbeat" }, { id: "sub1", result: { type: "noted" } }, { event: "pane_updated", data: "w1:p1" }]) sock.send(JSON.stringify(unknown) + "\n");
+      sock.send(JSON.stringify({ event: "pane_closed", data: { pane_id: "w1:p1", type: "pane_closed", workspace_id: "w1" } }) + "\n");
+      for (let i = 0; i < 50 && events.length === 0; i++) await Bun.sleep(20);
+      expect(events).toEqual(["pane_closed"]);
+      expect(subscription.ignored?.()).toBe(3);
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).toContain("heartbeat");
+      expect(closes).toBe(0);
+      subscription.close();
+    } finally {
+      sock.close();
     }
   });
 

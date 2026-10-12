@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stateFiles } from "../../src/config/paths.ts";
-import { git, removeScratchHome } from "../../src/contracts/runner.ts";
-import { readManifest, recoverOwned, removableHome, writeManifest, type OwnedResources, type RecoverDeps } from "../../src/contracts/owned.ts";
+import { removeScratchHome } from "../../src/contracts/runner.ts";
+import { SCRATCH_CONFIG_HEADER, gitWithin, readManifest, recoverOwned, removableHome, writeManifest, type OwnedResources, type RecoverDeps } from "../../src/contracts/owned.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
 import { isAlive, readIdentity, type ProcIdentity } from "../../src/runtime/proc.ts";
@@ -66,7 +66,7 @@ function scratchDb(home: string, workspaceId: string, harness: ProcIdentity): vo
 
 function deps(): RecoverDeps & { lines: string[] } {
   const lines: string[] = [];
-  return { lines, git, log: (line) => lines.push(line), removeHome: (home) => removeScratchHome(home, (line) => lines.push(line), 2_000), now: Date.now };
+  return { lines, log: (line) => lines.push(line), removeHome: (home) => removeScratchHome(home, (line) => lines.push(line), 2_000), now: Date.now };
 }
 
 describe("releasing what a killed contract run owned", () => {
@@ -77,7 +77,7 @@ describe("releasing what a killed contract run owned", () => {
       const herdr = await FakeHerdr.start(join(root, "h.sock"), { env: {}, logDir: root });
       herdrs.push(herdr);
       const home = realpathSync(mkdtempSync(join(root, "fwc-")));
-      writeFileSync(join(home, "config.toml"), "# scratch\n");
+      writeFileSync(join(home, "config.toml"), `# ${SCRATCH_CONFIG_HEADER}\n`);
       const unrelatedDir = join(root, "fwc-not-ours");
       mkdirSync(unrelatedDir);
       const owned = { daemon: await sleeper(), harness: await sleeper(), copied: await sleeper() };
@@ -146,21 +146,66 @@ describe("releasing what a killed contract run owned", () => {
     expect(await recoverOwned(join(root, "thin.owned.json"), deps())).toMatchObject({ ok: false, problems: [expect.stringContaining("lacks")] });
   });
 
-  test("assumption: only a real fwc-* directory is ever removed as a scratch home", async () => {
+  test("assumption: only a real fwc-* directory holding the scratch config.toml (or nothing) is ever removed as a scratch home", async () => {
     const root = tempDir();
     const notScratch = join(root, "projects");
     mkdirSync(notScratch);
     const link = join(root, "fwc-link");
     symlinkSync(notScratch, link);
+    const foreignConfig = join(root, "fwc-foreign");
+    mkdirSync(foreignConfig);
+    writeFileSync(join(foreignConfig, "config.toml"), "data_dir = \"/Users/me/.flowryn/data\"\n");
+    const noConfig = join(root, "fwc-noconfig");
+    mkdirSync(noConfig);
+    writeFileSync(join(noConfig, "notes.txt"), "mine\n");
+    const empty = join(root, "fwc-empty");
+    mkdirSync(empty);
+    const scratch = join(root, "fwc-scratch");
+    mkdirSync(scratch);
+    writeFileSync(join(scratch, "config.toml"), `# ${SCRATCH_CONFIG_HEADER}\ndata_dir = "x"\n`);
     expect(removableHome(notScratch)).toContain("not a contract scratch home");
     expect(removableHome("fwc-relative")).toContain("not a contract scratch home");
     expect(removableHome(link)).toContain("not a directory");
+    expect(removableHome(foreignConfig)).toContain("not a contract scratch config");
+    expect(removableHome(noConfig)).toContain("has no scratch config.toml");
+    expect(removableHome(empty)).toBeNull();
+    expect(removableHome(scratch)).toBeNull();
     expect(removableHome(join(root, "fwc-gone"))).toBeNull();
 
+    for (const home of [notScratch, foreignConfig, noConfig]) {
+      const manifest = join(root, "auto.owned.json");
+      writeManifest(manifest, { runner: null, home, herdr_socket: "/s", branch_prefix: "flowryn/contract-00000000-", project: null, daemon: null, workspaces: [], harnesses: [], cleanup: null });
+      const outcome = await recoverOwned(manifest, deps());
+      expect(outcome).toMatchObject({ ok: false, problems: [expect.stringContaining("scratch home left alone")] });
+      expect(existsSync(home)).toBe(true);
+    }
+  });
+
+  test("assumption: a scratch database that cannot be read keeps the scratch home, the only record of the run's ids, and says so", async () => {
+    const root = tempDir();
+    const home = realpathSync(mkdtempSync(join(root, "fwc-")));
+    writeFileSync(join(home, "config.toml"), `# ${SCRATCH_CONFIG_HEADER}\n`);
+    mkdirSync(join(home, "state"), { recursive: true });
+    writeFileSync(stateFiles(join(home, "state")).db, "this is not a database, it is long enough to be read as a header but is no sqlite file at all\n".repeat(20));
     const manifest = join(root, "auto.owned.json");
-    writeManifest(manifest, { runner: null, home: notScratch, herdr_socket: "/s", branch_prefix: "flowryn/contract-00000000-", project: null, daemon: null, workspaces: [], harnesses: [], cleanup: null });
+    writeManifest(manifest, { runner: null, home, herdr_socket: "/s", branch_prefix: "flowryn/contract-00000000-", project: null, daemon: null, workspaces: [], harnesses: [], cleanup: null });
     const outcome = await recoverOwned(manifest, deps());
-    expect(outcome).toMatchObject({ ok: false, problems: [expect.stringContaining("scratch home left alone")] });
-    expect(existsSync(notScratch)).toBe(true);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.problems).toEqual([expect.stringContaining(`the scratch database in ${home} is unreadable`), `scratch home ${home} kept for recovery: its database is the only record of the run's workspaces and harnesses`]);
+    expect(existsSync(home)).toBe(true);
+  });
+
+  test("assumption: the worktree step's git is bounded: a git that hangs is cut off at the budget and reported, not waited for", () => {
+    const root = tempDir();
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "git"), "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+    const run = gitWithin(300, join(bin, "git"));
+    const started = Date.now();
+    expect(run(["worktree", "list", "--porcelain"], root)).toEqual({ code: 124, out: "" });
+    // The budget is the whole step's: a later call gets nothing left.
+    expect(run(["branch", "-D", "x"], root)).toEqual({ code: 124, out: "" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(gitWithin(5_000)(["--version"], root)).toMatchObject({ code: 0, out: expect.stringContaining("git version") });
   });
 });

@@ -28,7 +28,7 @@ import { quotaHolds } from "../sched/quota.ts";
 import { usageGate } from "../sched/usage.ts";
 import { autoRecordLine, reportProblem } from "./grant.ts";
 import { MANIFEST_ENV, readManifest, recoverOwned, type CleanupOutcome } from "./owned.ts";
-import { CONTRACT_CLEANUP_BUDGET_MS, git, removeScratchHome } from "./runner.ts";
+import { CONTRACT_CLEANUP_BUDGET_MS, removeScratchHome } from "./runner.ts";
 import { recordPass } from "./verbs.ts";
 
 /**
@@ -476,7 +476,7 @@ export class AutoContractChecker {
     if (read.owned?.cleanup?.ok) return read.owned.cleanup;
     const recover =
       this.deps.recover ??
-      ((path: string) => recoverOwned(path, { git, log: this.deps.log, removeHome: (home) => removeScratchHome(home, this.deps.log), now: this.deps.now }));
+      ((path: string) => recoverOwned(path, { log: this.deps.log, removeHome: (home) => removeScratchHome(home, this.deps.log), now: this.deps.now }));
     try {
       return await recover(manifest);
     } catch (error) {

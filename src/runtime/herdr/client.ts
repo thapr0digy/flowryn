@@ -48,6 +48,8 @@ export interface HerdrEvent {
 
 export interface Subscription {
   close(): void;
+  /** How many lines after the acknowledgement were neither an event nor an error, and were dropped. */
+  ignored?(): number;
 }
 
 export interface HerdrTransport {
@@ -56,7 +58,7 @@ export interface HerdrTransport {
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
-/** How long events.subscribe may take to be acknowledged: an ordinary request's deadline, unless `[herdr] handshake_ms` says otherwise. */
+/** How long events.subscribe may take to be acknowledged: an ordinary request's deadline. */
 export const DEFAULT_HANDSHAKE_MS = DEFAULT_TIMEOUT_MS;
 const MAX_LINE = 8 * 1024 * 1024;
 let nextId = 0;
@@ -71,11 +73,13 @@ export class HerdrClient implements HerdrTransport {
   readonly socketPath: string;
   readonly handshakeMs: number;
   private readonly labMethods: ReadonlySet<string>;
+  private readonly log: (line: string) => void;
 
-  constructor(socketPath: string, options: { labMethods?: readonly (typeof LAB_ONLY_METHODS)[number][]; handshakeMs?: number } = {}) {
+  constructor(socketPath: string, options: { labMethods?: readonly (typeof LAB_ONLY_METHODS)[number][]; handshakeMs?: number; log?: (line: string) => void } = {}) {
     this.socketPath = socketPath;
     this.labMethods = new Set(options.labMethods ?? []);
     this.handshakeMs = options.handshakeMs ?? DEFAULT_HANDSHAKE_MS;
+    this.log = options.log ?? (() => {});
   }
 
   private refusal(method: string): HerdrError | null {
@@ -138,11 +142,12 @@ export class HerdrClient implements HerdrTransport {
    * Open the event stream. The handshake has the same kind of deadline as a
    * request (`handshakeMs`, from the start, so a hung connect counts): a peer
    * that never acknowledges fails as `timeout`. Only `{id, result: {type:
-   * "subscription_started"}}` for this request is an acknowledgement; any
-   * other first line is `protocol`. After it, a line that is not an event
-   * closes the stream with `protocol` rather than being dropped, since an
-   * event only names a pane to re-read and the caller's reconnect re-reads
-   * every one.
+   * "subscription_started"}}` for this request is an acknowledgement (what
+   * Herdr 0.7.5 sends, seen in a lab session); any other first line is
+   * `protocol`. After it, a line that is not JSON ends the stream with
+   * `protocol` and an `{error}` line with Herdr's code, so the caller's
+   * reconnect re-reads every pane; any other JSON object (a reply or
+   * heartbeat Flowryn does not know) is dropped, logged once and counted.
    */
   subscribe(subscriptions: Record<string, unknown>[], onEvent: (event: HerdrEvent) => void, onClose: (error: HerdrError | null) => void): Promise<Subscription> {
     const id = `sub${++nextId}`;
@@ -152,6 +157,7 @@ export class HerdrClient implements HerdrTransport {
       let connected = false;
       let started = false;
       let closed = false;
+      let ignored = 0;
       const close = (error: HerdrError | null) => {
         if (closed) return;
         closed = true;
@@ -178,11 +184,18 @@ export class HerdrClient implements HerdrTransport {
             if (refusal) return close(refusal);
             started = true;
             clearTimeout(handshake);
-            resolve({ close: () => close(null) });
+            resolve({ close: () => close(null), ignored: () => ignored });
             continue;
           }
-          const event = parseEvent(line);
-          if (!event) return close(new HerdrError("protocol", `Herdr sent a line that is not an event: ${line.slice(0, 120)}`));
+          const message = jsonObject(line);
+          if (!message) return close(new HerdrError("protocol", `Herdr sent a line that is not a JSON object: ${line.slice(0, 120)}`));
+          const refusal = herdrError(message);
+          if (refusal) return close(refusal);
+          const event = asEvent(message);
+          if (!event) {
+            if (ignored++ === 0) this.log(`herdr: dropped a subscription line that is not an event (more are counted, not logged): ${line.slice(0, 120)}`);
+            continue;
+          }
           onEvent(event);
           // The caller may close the stream from its handler.
           if (closed) return;
@@ -215,10 +228,8 @@ function jsonObject(line: string): Record<string, unknown> | null {
 function acknowledgementProblem(line: string, id: string): HerdrError | null {
   const message = jsonObject(line);
   if (!message) return new HerdrError("protocol", "Herdr's events.subscribe reply is not a JSON object");
-  const error = message.error as { code?: unknown; message?: unknown } | undefined;
-  if (error && typeof error === "object") {
-    return new HerdrError(typeof error.code === "string" ? error.code : "error", typeof error.message === "string" ? error.message : "subscription refused");
-  }
+  const refusal = herdrError(message);
+  if (refusal) return refusal;
   if (message.id !== id) return new HerdrError("protocol", `Herdr's events.subscribe reply answers ${JSON.stringify(message.id ?? null)}, not ${id}`);
   const result = message.result as { type?: unknown } | undefined;
   if (!result || typeof result !== "object" || result.type !== "subscription_started") {
@@ -227,10 +238,16 @@ function acknowledgementProblem(line: string, id: string): HerdrError | null {
   return null;
 }
 
-/** An event line: a JSON object with a string `event` and, when present, an object `data`; null otherwise. */
-function parseEvent(line: string): HerdrEvent | null {
-  const message = jsonObject(line);
-  if (!message || typeof message.event !== "string") return null;
+/** Herdr's `{error}` on a line, with its own code; null when the line carries none. */
+function herdrError(message: Record<string, unknown>): HerdrError | null {
+  const error = message.error as { code?: unknown; message?: unknown } | undefined;
+  if (!error || typeof error !== "object") return null;
+  return new HerdrError(typeof error.code === "string" ? error.code : "error", typeof error.message === "string" ? error.message : "Herdr reported an error on the subscription");
+}
+
+/** An event: a string `event` and, when present, an object `data`; null otherwise. */
+function asEvent(message: Record<string, unknown>): HerdrEvent | null {
+  if (typeof message.event !== "string") return null;
   const data = message.data ?? {};
   if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
   return { event: message.event, data: data as Record<string, unknown> };
