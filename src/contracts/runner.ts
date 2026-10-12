@@ -20,6 +20,7 @@ import { descendantCommands, isAlive, readProcessTable, terminate, type ProcIden
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { contractPrefix, createdWorktrees, removeOwnWorktrees } from "./cleanup.ts";
+import { piAgentDir, piAgentSource, realPiTable, scriptedPiTable, seedAgentDir, writeScriptedProvider, type PiProfile } from "./pi-profile.ts";
 import { pinDrift, pinHarness, type HarnessPin } from "./pin.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
@@ -34,8 +35,14 @@ export interface ContractOptions {
   herdrSocket: string;
   /** A checkout the worker's worktree is created from (its current branch is the base); default a scratch repo. */
   project: string | null;
-  /** Override the worker model for this run. */
+  /** Override the worker model for this run: Claude's, or the model of a Pi `real` pass (the Pi gate is always scripted). */
   model: string | null;
+  /**
+   * Pi only: `scripted` (the default, and the gate) plays the model with the
+   * offline scripted provider; `real` is the opt-in informational pass on
+   * `model` (src/contracts/pi-profile.ts).
+   */
+  piProfile?: PiProfile;
   keep: boolean;
   log(line: string): void;
 }
@@ -115,7 +122,13 @@ export function scratchConfig(options: ContractOptions, pin: HarnessPin, home: s
   workers.branch_prefix = branchPrefix;
   // The contract worker ends its turns without an outcome on purpose; a reminder would keep it busy past the idle step.
   workers.turn_end_guard = false;
-  if (options.model) workers[options.harness] = { ...(workers[options.harness] as Record<string, unknown> | undefined), model: options.model };
+  if (options.harness === "pi") {
+    const own = workers.pi as Record<string, unknown> | undefined;
+    if (options.piProfile === "real") {
+      if (!options.model) throw new Error("a real-model Pi pass needs a model");
+      workers.pi = realPiTable(own, options.model, home);
+    } else workers.pi = scriptedPiTable(home);
+  } else if (options.model) workers[options.harness] = { ...(workers[options.harness] as Record<string, unknown> | undefined), model: options.model };
   const data: Record<string, unknown> = {
     data_dir: join(home, "data"),
     state_dir: join(home, "state"),
@@ -148,6 +161,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   const home = realpathSync(mkdtempSync(join(tmpdir(), "fwc-")));
   const { prefix } = contractPrefix();
   writeFileSync(join(home, "config.toml"), scratchConfig(options, pin, home, prefix));
+  const scripted = options.harness === "pi" && options.piProfile !== "real";
   const stateDir = join(home, "state");
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   mkdirSync(join(home, "data"), { recursive: true, mode: 0o700 });
@@ -207,6 +221,11 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
+    if (scripted) options.log(`pi plays the offline scripted model (provider ${await writeScriptedProvider(home)})`);
+    else if (options.harness === "pi") {
+      const source = piAgentSource(options.config, process.env);
+      options.log(`pi on ${options.model}: copied ${seedAgentDir(source, piAgentDir(home)).join(", ")} from ${source} into a scratch agent dir`);
+    }
     const deadline = Date.now() + 20_000;
     for (;;) {
       try {
@@ -222,8 +241,6 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     if (!branch) throw new Error(`${project} is on a detached HEAD; the contract run needs a branch to base its worktree on`);
     const added = await call("project add", { path: project, id: "contract", mode: "local-only", "default-branch": branch, harness: options.harness });
     if (!added.ok) throw new Error(`project add: ${added.error?.message}`);
-    const piModel = options.model ?? workersConfig(options.config).pi.model ?? "";
-    const scripted = options.harness === "pi" && piModel.startsWith("flowryn-scripted/");
     const dispatched = await call("dispatch", { project: "contract", kind: "scout", harness: options.harness, body: contractBody(options.harness, scripted), title: `contract ${options.harness} ${version}` });
     if (!dispatched.ok) throw new Error(`dispatch: ${dispatched.error?.code} ${dispatched.error?.message}`);
     db = openDb(stateFiles(stateDir).db, { readonly: true });
@@ -247,19 +264,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         const value = JSON.parse(row.value) as { hook?: string; signal?: string; at?: number };
         return { hook: value.hook ?? null, signal: String(value.signal ?? ""), at: Number(value.at ?? 0) };
       },
-      async waitFor(what, timeoutMs, check) {
-        const limitMs = Math.min(timeoutMs, maxWaitMs(process.env));
-        const until = Date.now() + limitMs;
-        for (;;) {
-          const value = await check();
-          if (value) return value;
-          // A harness updated mid-wait would be refused (contract_unverified) and the wait would only time out.
-          const drifted = await drift();
-          if (drifted) throw new Error(drifted);
-          if (Date.now() > until) throw new Error(`timed out after ${Math.round(limitMs / 1000)}s waiting for ${what}`);
-          await Bun.sleep(WAIT_POLL_MS);
-        }
-      },
+      waitFor: (what, timeoutMs, check, explain) => pollFor(what, Math.min(timeoutMs, maxWaitMs(process.env)), check, explain, drift),
       async exitWorker() {
         const r = contractEnv.run();
         if (r.proc_pid === null || r.proc_start === null || r.proc_exe === null) return { ok: false, detail: "no harness process recorded" };
@@ -282,6 +287,30 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
   return { harness: options.harness, version, passed, steps, scratch: home };
+}
+
+/**
+ * The contract env's `waitFor`: poll `check` every WAIT_POLL_MS until it
+ * returns a truthy value. A `check` that throws, or a harness that drifted
+ * (it would be refused, and the wait would only time out), fails it at once;
+ * after `limitMs` it fails naming `what`, plus what `explain` says.
+ */
+export async function pollFor<T>(
+  what: string,
+  limitMs: number,
+  check: () => T | null | undefined | false | Promise<T | null | undefined | false>,
+  explain: (() => string) | undefined,
+  drift: () => Promise<string | null>,
+): Promise<T> {
+  const until = Date.now() + limitMs;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    const drifted = await drift();
+    if (drifted) throw new Error(drifted);
+    if (Date.now() > until) throw new Error(`timed out after ${Math.round(limitMs / 1000)}s waiting for ${what}${explain ? ` (${explain()})` : ""}`);
+    await Bun.sleep(WAIT_POLL_MS);
+  }
 }
 
 /**

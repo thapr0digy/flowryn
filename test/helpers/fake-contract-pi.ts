@@ -15,13 +15,18 @@
  *     followUp with triggerTurn while idle starts a run (p03); an abort drops
  *     queued custom messages (p14).
  *
- * The model is the offline scripted provider's (spikes/pi/lib/scripted-provider.ts):
- * the FLOWRYN-SCRIPT line in the task file holds the steps, one per model
- * request, so tool results, steers and follow-ups advance it as in a real
- * turn; `bash <command>` is one Bash call (a contract `perl -e 'sleep N'`
- * sleeps N tenths of a second, fake-contract-shared.ts), `say <text>` a final
- * reply, and an exhausted script says "ok". The position is kept per session
- * next to the task file, as Pi's session history keeps it across a resume.
+ * The model is the offline scripted provider's (spikes/pi/lib/scripted-provider.ts)
+ * only when launched as the contract gate launches Pi: `--model
+ * flowryn-scripted/scripted`, the provider loaded with a second `-e`, a
+ * scratch PI_CODING_AGENT_DIR and PI_OFFLINE=1. Then the FLOWRYN-SCRIPT line
+ * in the task file holds the steps, one per model request, so tool results,
+ * steers and follow-ups advance it as in a real turn; `bash <command>` is one
+ * Bash call (a contract `perl -e 'sleep N'` sleeps N tenths of a second,
+ * fake-contract-shared.ts), `say <text>` a final reply, and an exhausted
+ * script says "ok". Launched any other way it plays a real model that ignores
+ * steers (the scout's openrouter/free failure): it runs the task's first
+ * command, says ONE and never acknowledges anything. The position is kept per
+ * session next to the task file, as Pi's session history keeps it across a resume.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -58,13 +63,43 @@ function log(message: string): void {
  */
 const FIRST_REQUEST_MS = 300;
 
+/**
+ * Every request of the steer-ignoring "real" model takes this long, as a live
+ * model's inference does: the extension's steer-seen hook (at the request) and
+ * stop hook (at the turn end) are fire-and-forget, and an instant reply could
+ * let the turn end land before the steer was marked seen.
+ */
+const REAL_MODEL_REQUEST_MS = 500;
+
 interface ScriptState {
   steps: string[];
   played: number;
 }
 
+/** Launched as the contract gate launches Pi: the scripted model, its provider extension, a scratch agent dir, offline. */
+function launchedScripted(): boolean {
+  const extensions = args.flatMap((a, i) => (a === "-e" && args[i + 1] ? [args[i + 1]!] : []));
+  const agentDir = env.PI_CODING_AGENT_DIR ?? "";
+  return (
+    flag("--model") === "flowryn-scripted/scripted" &&
+    extensions.some((e) => e.endsWith("/pi/scripted-provider.ts") && existsSync(e)) &&
+    agentDir !== "" &&
+    !agentDir.startsWith(join(env.HOME ?? "/nonexistent", ".pi")) &&
+    env.PI_OFFLINE === "1"
+  );
+}
+
+/** A real model that does the task's first step and ignores every steer. */
+const IGNORING_MODEL = ["bash perl -e 'sleep 25'", "say ONE"];
+
+const scripted = launchedScripted();
+
 function loadScript(): ScriptState {
   if (existsSync(stateFile)) return JSON.parse(readFileSync(stateFile, "utf8")) as ScriptState;
+  if (!scripted) {
+    log(`not launched as the scripted gate (${args.join(" ")}): playing a model that ignores steers`);
+    return { steps: IGNORING_MODEL, played: 0 };
+  }
   const line = (existsSync(taskFile) ? readFileSync(taskFile, "utf8") : "").split("\n").find((l) => l.includes("FLOWRYN-SCRIPT:")) ?? "";
   const script = line.slice(line.indexOf("FLOWRYN-SCRIPT:") + "FLOWRYN-SCRIPT:".length).trim();
   return { steps: script ? script.split(" ;; ").map((s) => s.trim()) : [], played: 0 };
@@ -139,7 +174,8 @@ async function run(messages: { customType?: string; content: unknown }[]): Promi
   await emit("agent_start");
   for (let request = 0; ; request++) {
     await emit("context", { messages: queued.splice(0) });
-    if (request === 0) await Bun.sleep(FIRST_REQUEST_MS);
+    if (!scripted) await Bun.sleep(REAL_MODEL_REQUEST_MS);
+    else if (request === 0) await Bun.sleep(FIRST_REQUEST_MS);
     const step = nextStep();
     if ("say" in step) {
       log(`say ${step.say}`);

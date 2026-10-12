@@ -13,9 +13,16 @@
  * nothing of is its own: a `doctor --contracts` elsewhere on the machine (another
  * worker's suite, the leader's merge check) makes its fwc-* homes in the shared
  * tmpdir and cannot fail this check.
+ *
+ * The Pi gate runs the scripted model whatever `[workers.pi]` says (the test
+ * home sets openrouter/free, as the user's did): the fake Pi plays the script
+ * only when launched that way (docs/notes/2026-10-11-make-the-pi-rv.md).
+ * `--model` on Pi adds an informational real-model pass; the fake then plays a
+ * model that ignores steers, so that pass stops at its first steer with the
+ * named cause, as a warning that leaves doctor's exit code and the record alone.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractSteps } from "../../src/contracts/suite.ts";
@@ -30,10 +37,16 @@ const MAX_WAIT_MS = 15_000;
 let fleet: FleetEnv;
 /** The doctor's TMPDIR: the runner makes its scratch home here and nowhere else. */
 let scratchRoot: string;
+/** The test home's own Pi agent dir, as `[workers.pi] agent_dir`: only ever read. */
+let piAgent: string;
 beforeAll(async () => {
   scratchRoot = mkdtempSync(join(tmpdir(), "fwt-"));
+  piAgent = join(scratchRoot, "pi-agent-own");
+  mkdirSync(piAgent, { recursive: true });
+  writeFileSync(join(piAgent, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key: "test-only" } }));
   fleet = await makeFleetEnv({
     contracts: false,
+    extraConfig: ["[workers.pi]", 'model = "openrouter/free"', `agent_dir = ${JSON.stringify(piAgent)}`].join("\n"),
     harnessScripts: { claude: `${import.meta.dir}/../helpers/fake-contract-claude.ts`, pi: `${import.meta.dir}/../helpers/fake-contract-pi.ts` },
   });
   // claude-in-chrome on, as on this Mac: the toolkit step must then see it hidden, not skip the check.
@@ -84,7 +97,7 @@ function scratchHomes(): string[] {
 describe("the harness contract suite against fakes", () => {
   for (const [harness, extra] of [
     ["claude", []],
-    ["pi", ["--model", "flowryn-scripted/scripted"]],
+    ["pi", []],
   ] as [HarnessId, string[]][]) {
     test(`${harness}: every step passes and the version is recorded`, async () => {
       const before = new Set(scratchHomes());
@@ -100,4 +113,27 @@ describe("the harness contract suite against fakes", () => {
       if (process.env.FLOWRYN_TEST_KEEP !== "1") expect(scratchHomes().filter((name) => !before.has(name))).toEqual([]);
     }, 90_000);
   }
+
+  test("pi: --model adds an informational real-model pass that names the ignored steer and gates nothing", async () => {
+    const before = new Set(scratchHomes());
+    const auth = readFileSync(join(piAgent, "auth.json"), "utf8");
+    const model = "openrouter/test-model:free";
+    const { code, checks, screen } = await doctorContracts("pi", ["--model", model]);
+    const gate = checks.filter((c) => (c.check === "contract pi" || c.check.startsWith("contract pi ")) && !c.check.startsWith("contract pi model "));
+    expect(gate.filter((c) => c.status !== "ok"), screen).toEqual([]);
+    expect(gate.at(-1)).toMatchObject({ check: "contract pi", status: "ok" });
+    const real = checks.filter((c) => c.check.startsWith(`contract pi model ${model}`));
+    const stopped = real.find((c) => c.status === "warn");
+    expect(stopped, screen).toMatchObject({ check: `contract pi model ${model} deliver while busy` });
+    expect(stopped!.detail).toMatch(/^m1 seen \+[\d.]+m?s, turn ended without ack \(model ignored the steer\); m1 carried \+/);
+    expect(real.at(-1)).toMatchObject({ check: `contract pi model ${model}`, status: "info" });
+    expect(real.at(-1)!.detail).toStartWith("informational, not gating: stopped at deliver while busy");
+    expect(checks.some((c) => c.status === "fail")).toBe(false);
+    expect(code).toBe(0);
+    expect(recorded("pi").map((r) => r.version)).toEqual([FAKE_VERSION]);
+    expect(readFileSync(join(piAgent, "auth.json"), "utf8")).toBe(auth);
+    expect(readdirSync(piAgent)).toEqual(["auth.json"]);
+    expect(fleet.herdr.livePanes()).toEqual([]);
+    if (process.env.FLOWRYN_TEST_KEEP !== "1") expect(scratchHomes().filter((name) => !before.has(name))).toEqual([]);
+  }, 150_000);
 });
