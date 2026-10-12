@@ -15,7 +15,7 @@ All three modes of `flowryn doctor --contracts` (recording, `--verify-only` the 
 
 ## A real model is opt-in and informational
 
-`--model X` on Pi, where X is not `flowryn-scripted/…`, adds a second pass after the gate passes. For Claude, `--model` still sets the worker model, as before.
+`--model X` with `--harness pi`, where X is not `flowryn-scripted/…`, adds a second pass after the gate passes. Without `--harness pi` (every installed harness), `--model` sets Claude's worker model only, as before, and Pi runs the scripted gate alone.
 
 - **How it is reported.** Each step is a check `contract pi model X <step>`, with status `info` when it passes and `warn` when it fails. A summary check `contract pi model X` (`info`) reads `informational, not gating: passed 11/11` or `… stopped at <step>: <why>`, and names its report. Only `fail` sets doctor's exit code, so this pass never changes it.
 - **Never recorded.** Its report is always written as verify-only and carries a `model` field, so `contracts.record` and the daemon's report check cannot take it. The gate's report stays the run's report.
@@ -45,7 +45,7 @@ Not built: the scout's third fix (pin one model, a task header without the scout
   - `waitAcked` failing fast on a run that lands mid-wait, on an ignored steer, and on a timeout with timings;
   - the gate profile against a `[workers.pi]` of `openrouter/free` plus an extension of your own;
   - the real profile, and that Claude's `--model` is unchanged;
-  - `realPiModel`;
+  - `realPiModel`, including that it asks for no pass without an explicit `--harness pi`;
   - the embedded provider matches the spike file;
   - the credential copy (present, missing, the source untouched) and where the source is looked up.
 - `test/integration/contracts-offline.test.ts`:

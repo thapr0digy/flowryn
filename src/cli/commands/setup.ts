@@ -144,15 +144,19 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
     } catch (error) {
       checks.push({ check: `contract ${harness}`, status: "fail", detail: (error as Error).message });
     }
-    const real = realPiModel(harness, model);
+    const real = realPiModel(harness, model, wanted === "pi");
     if (real) checks.push(...(await realModelPass({ args, io, config, socket, model: real, gatePassed, stamp })));
   }
   return run;
 }
 
-/** The model of the opt-in real-model Pi pass: `--model` on Pi, unless it names the scripted model the gate already ran. */
-export function realPiModel(harness: HarnessId, model: string | null): string | null {
-  return harness === "pi" && model !== null && !isScriptedModel(model) ? model : null;
+/**
+ * The model of the opt-in real-model Pi pass: `--model` with an explicit
+ * `--harness pi`, unless it names the scripted model the gate already ran.
+ * Without `--harness pi`, `--model` is Claude's worker model only.
+ */
+export function realPiModel(harness: HarnessId, model: string | null, piChosen: boolean): string | null {
+  return harness === "pi" && piChosen && model !== null && !isScriptedModel(model) ? model : null;
 }
 
 /**
@@ -294,7 +298,7 @@ const doctor: VerbSpec = {
     "herdr-socket": { type: "string", help: "with --contracts: the Herdr session socket to run in (default: [herdr])", placeholder: "path" },
     model: {
       type: "string",
-      help: "with --contracts: Claude's worker model; on Pi, also run an informational, non-gating pass on this model after the scripted gate",
+      help: "with --contracts: Claude's worker model; with --harness pi, also run an informational, non-gating Pi pass on this model after the scripted gate",
       placeholder: "model",
     },
     keep: { type: "boolean", help: "with --contracts: keep the scratch home for inspection" },

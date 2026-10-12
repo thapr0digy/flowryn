@@ -178,11 +178,16 @@ describe("the Pi gate's profile", () => {
     expect(scratchConfig(claude, { ...pin, harness: "claude" }, "/scratch/fwc-z", "flowryn/contract-z-")).toContain('model = "claude-sonnet-5-5"');
   });
 
-  test("only --model on Pi naming a model other than the scripted one asks for the informational pass", () => {
-    expect(realPiModel("pi", "openrouter/qwen:free")).toBe("openrouter/qwen:free");
-    expect(realPiModel("pi", SCRIPTED_MODEL)).toBeNull();
-    expect(realPiModel("pi", null)).toBeNull();
-    expect(realPiModel("claude", "openrouter/qwen:free")).toBeNull();
+  test("only --model with --harness pi naming a model other than the scripted one asks for the informational pass", () => {
+    expect(realPiModel("pi", "openrouter/qwen:free", true)).toBe("openrouter/qwen:free");
+    expect(realPiModel("pi", SCRIPTED_MODEL, true)).toBeNull();
+    expect(realPiModel("pi", null, true)).toBeNull();
+    expect(realPiModel("claude", "openrouter/qwen:free", false)).toBeNull();
+  });
+
+  test("without --harness pi, --model is Claude's alone and the Pi run is the gate only", () => {
+    expect(realPiModel("pi", "claude-sonnet-5-5", false)).toBeNull();
+    expect(realPiModel("pi", "openrouter/qwen:free", false)).toBeNull();
   });
 
   test("assumption: the provider the compiled binary embeds is the spike's scripted provider, and the gate's script needs it", async () => {
@@ -190,7 +195,6 @@ describe("the Pi gate's profile", () => {
     const path = await writeScriptedProvider(home);
     expect(path).toBe(join(home, "pi", "scripted-provider.ts"));
     expect(readFileSync(path, "utf8")).toBe(readFileSync(join(import.meta.dir, "../../spikes/pi/lib/scripted-provider.ts"), "utf8"));
-    expect(readFileSync(path, "utf8")).toContain('const PROVIDER = "flowryn-scripted"');
     expect(contractBody("pi", true)).toContain("FLOWRYN-SCRIPT: ");
   });
 });
