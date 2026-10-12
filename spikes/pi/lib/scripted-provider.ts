@@ -130,10 +130,10 @@ function planFor(messages: any[], tools: unknown[]): Plan {
   const replies = messages.slice(scriptAt + 1).filter((m) => m?.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted").length;
   const scriptKey = `${messages[scriptAt].timestamp ?? scriptAt}:${text.length}`;
   let stepIndex = replies;
-  let step = stepIndex < steps.length ? parseStep(steps[stepIndex]) : ({ kind: "say", text: "ok", fill: false } as Step);
+  let step = stepIndex < steps.length ? parseStep(steps[stepIndex]!) : ({ kind: "say", text: "ok", fill: false } as Step);
   if (step.kind === "overflow" && firedOverflows.has(`${scriptKey}:${stepIndex}`)) {
     stepIndex += 1;
-    step = stepIndex < steps.length ? parseStep(steps[stepIndex]) : { kind: "say", text: "ok", fill: false };
+    step = stepIndex < steps.length ? parseStep(steps[stepIndex]!) : { kind: "say", text: "ok", fill: false };
   }
   return { step, stepIndex, scriptKey, summary: false };
 }

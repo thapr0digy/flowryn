@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HarnessId } from "../harness/types.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
-import { steerStatus, type MessageRow } from "../lifecycle/steers.ts";
+import { formatMs, steerStatus, type MessageRow } from "../lifecycle/steers.ts";
 
 /**
  * The harness contract suite (design section 5, "Contract tests gate every
@@ -38,8 +38,12 @@ export interface ContractEnv {
   steers(): MessageRow[];
   /** The latest worker hook as the run's hook evidence records it, or null. */
   lastHook(): { hook: string | null; signal: string; at: number } | null;
-  /** Poll `check` until it returns a truthy value, or fail with `what` after `timeoutMs`. */
-  waitFor<T>(what: string, timeoutMs: number, check: () => T | null | undefined | false | Promise<T | null | undefined | false>): Promise<T>;
+  /**
+   * Poll `check` until it returns a truthy value, or fail with `what` after
+   * `timeoutMs`; `explain`, when given, adds what it says to the timeout's message.
+   * A `check` that throws fails the wait at once with its error.
+   */
+  waitFor<T>(what: string, timeoutMs: number, check: () => T | null | undefined | false | Promise<T | null | undefined | false>, explain?: () => string): Promise<T>;
   /** Is a process under the worker's harness process running this command line (its argv joined by spaces, as ps shows it)? */
   commandRunning(command: string): Promise<boolean>;
   /** The design's exit: SIGTERM by pid, start time and executable, SIGKILL after the grace period. */
@@ -115,8 +119,48 @@ async function sendSteer(env: ContractEnv, state: ContractState, text: string, u
   return String(reply.data.steer);
 }
 
-async function waitAcked(env: ContractEnv, id: string, timeoutMs: number): Promise<MessageRow> {
-  return env.waitFor(`steer ${id} to be acknowledged`, timeoutMs, () => env.steers().find((m) => m.id === id && m.acked_at !== null));
+/**
+ * How long a turn must have stayed ended after a steer was seen, unacknowledged,
+ * before the wait calls it ignored: it absorbs any hook-ordering flap between a
+ * turn end and a continuation. Nothing else acknowledges a seen steer within a
+ * step's window (it re-rings only on the contract's 600 s ring interval).
+ */
+export const IGNORED_GRACE_MS = 5_000;
+
+/**
+ * Why steer `steer` can no longer be acknowledged, or null while it still can
+ * (it is acknowledged, or the wait should go on). Plain rules on the run and the
+ * steer, in order: the run delivered (landed or cleaned) or ended (failed or
+ * cancelled) first; or the steer was seen and the turn then ended (a turn-end
+ * hook set `idle_since` after `seen_at`) without an acknowledgement, and has
+ * stayed ended for IGNORED_GRACE_MS. `idle_since`, not `liveness`, since a
+ * lapsed busy lease mid-tool turns liveness idle with the turn still running.
+ */
+export function ackBlocker(run: RunRow, steer: MessageRow | undefined, now: number): string | null {
+  if (steer?.acked_at != null) return null;
+  const id = steer?.id ?? "the steer";
+  const status = steer ? `; ${id} ${steerStatus(steer, now)}` : "";
+  if (run.state === "landed" || run.state === "cleaned") return `the worker delivered before ${id} (run ${run.state})${status}`;
+  if (run.state === "failed" || run.state === "cancelled") return `the run ${run.state} before ${id} was acknowledged${status}`;
+  if (!steer || steer.seen_at === null) return null;
+  if (run.idle_since === null || run.idle_since <= steer.seen_at || now - run.idle_since < IGNORED_GRACE_MS) return null;
+  return `${id} seen +${formatMs(steer.seen_at - steer.created_at)}, turn ended without ack (model ignored the steer)${status}`;
+}
+
+/** Wait for steer `id`'s acknowledgement; fail at once with the named cause when it can no longer come, and with its timings on a timeout. */
+export async function waitAcked(env: ContractEnv, id: string, timeoutMs: number): Promise<MessageRow> {
+  return env.waitFor(
+    `steer ${id} to be acknowledged`,
+    timeoutMs,
+    () => {
+      const steer = env.steers().find((m) => m.id === id);
+      if (steer?.acked_at != null) return steer;
+      const blocker = ackBlocker(env.run(), steer, Date.now());
+      if (blocker) throw new Error(blocker);
+      return null;
+    },
+    () => timings(env, id),
+  );
 }
 
 /** A scratch daemon's start and teardown around the steps (teardown waits up to 15 s for it to stop). */

@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { loadConfig } from "../../config/config.ts";
 import { flowrynHome } from "../../config/paths.ts";
 import { errorReply, okReply, type Reply } from "../../api/envelope.ts";
@@ -22,7 +24,9 @@ import { resolveTool } from "../../config/config.ts";
 import { resolveHerdrSocket } from "../../runtime/herdr/socket.ts";
 import { dataDirReport } from "../../contracts/report.ts";
 import { contractEstimateSeconds, contractSteps } from "../../contracts/suite.ts";
+import { isScriptedModel, piAgentSource } from "../../contracts/pi-profile.ts";
 import type { Check } from "../../doctor/doctor.ts";
+import type { FlowrynConfig } from "../../config/config.ts";
 import type { ReportStamp } from "../../contracts/grant.ts";
 import { buildIdOf } from "../../daemon/restart.ts";
 import { selfCommand } from "../../service/launchd.ts";
@@ -97,21 +101,27 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
   const stamp: ReportStamp = { mode: verifyOnly ? "verify-only" : "record", build, by };
   io.stderr(`${contractPlan(harnesses)}${verifyOnly ? "; verify-only: nothing is recorded" : mode === "for-daemon" ? "; for the daemon to record" : ""}\n`);
   const checks = run.checks;
+  const model = stringArg(args, "model") ?? null;
   for (const [index, harness] of harnesses.entries()) {
-    io.stderr(`contract ${harness} (${index + 1}/${harnesses.length}): ${contractSteps(harness).length} steps, about ${minutes(contractEstimateSeconds(harness))}\n`);
+    const scriptedNote = harness === "pi" ? ", offline scripted model" : "";
+    io.stderr(`contract ${harness} (${index + 1}/${harnesses.length}): ${contractSteps(harness).length} steps, about ${minutes(contractEstimateSeconds(harness))}${scriptedNote}\n`);
+    let gatePassed = false;
     try {
       const result = await runContract({
         harness,
         config,
         herdrSocket: socket,
         project: stringArg(args, "project") ?? null,
-        model: stringArg(args, "model") ?? null,
+        // The Pi gate always plays the scripted model; a real Pi model is the informational pass below.
+        model: harness === "pi" ? null : model,
+        piProfile: "scripted",
         keep: boolArg(args, "keep"),
         log: (line) => io.stderr(`contract ${harness}: ${line}\n`),
       });
       const report = dataDirReport(config, result, stamp);
       run.report = report;
       run.version = result.version;
+      gatePassed = result.passed;
       for (const step of result.steps) checks.push({ check: `contract ${harness} ${step.step}`, status: step.ok ? "ok" : "fail", detail: `${step.detail} (${step.seconds}s)` });
       if (!result.passed) {
         checks.push({ check: `contract ${harness}`, status: "fail", detail: `${result.version} did not pass; report ${report}${boolArg(args, "keep") ? `; scratch ${result.scratch}` : ""}` });
@@ -134,8 +144,59 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
     } catch (error) {
       checks.push({ check: `contract ${harness}`, status: "fail", detail: (error as Error).message });
     }
+    const real = realPiModel(harness, model);
+    if (real) checks.push(...(await realModelPass({ args, io, config, socket, model: real, gatePassed, stamp })));
   }
   return run;
+}
+
+/** The model of the opt-in real-model Pi pass: `--model` on Pi, unless it names the scripted model the gate already ran. */
+export function realPiModel(harness: HarnessId, model: string | null): string | null {
+  return harness === "pi" && model !== null && !isScriptedModel(model) ? model : null;
+}
+
+/**
+ * The opt-in real-model Pi pass, after the gate: informational, never gating.
+ * Its steps are `info` when they pass and `warn` when they fail (only `fail`
+ * sets doctor's exit code), its report is a verify-only one whatever the mode
+ * (so nothing can record it), and the gate's report stays the run's report.
+ */
+async function realModelPass(input: {
+  args: Parameters<NonNullable<VerbSpec["local"]>>[0];
+  io: CliIo;
+  config: FlowrynConfig;
+  socket: string;
+  model: string;
+  gatePassed: boolean;
+  stamp: ReportStamp;
+}): Promise<Check[]> {
+  const { args, io, config, socket, model } = input;
+  const name = `contract pi model ${model}`;
+  const informational = "informational, not gating";
+  if (!input.gatePassed) return [{ check: name, status: "info", detail: `${informational}: skipped, the gate failed` }];
+  const source = piAgentSource(config, io.env);
+  if (!existsSync(join(source, "auth.json"))) return [{ check: name, status: "info", detail: `${informational}: skipped, no auth.json in ${source}` }];
+  io.stderr(`contract pi on ${model} (${informational}): ${contractSteps("pi").length} steps\n`);
+  try {
+    const result = await runContract({
+      harness: "pi",
+      config,
+      herdrSocket: socket,
+      project: stringArg(args, "project") ?? null,
+      model,
+      piProfile: "real",
+      keep: boolArg(args, "keep"),
+      log: (line) => io.stderr(`contract pi model ${model}: ${line}\n`),
+    });
+    const report = dataDirReport(config, result, { ...input.stamp, mode: "verify-only" }, { model });
+    const checks: Check[] = result.steps.map((step) => ({ check: `${name} ${step.step}`, status: step.ok ? "info" : "warn", detail: `${step.detail} (${step.seconds}s)` }));
+    const stopped = result.steps.find((step) => !step.ok);
+    const outcome = result.passed ? `passed ${result.steps.length}/${contractSteps("pi").length}` : `stopped at ${stopped?.step ?? "setup"}: ${stopped?.detail ?? "no step ran"}`;
+    checks.push({ check: name, status: "info", detail: `${informational}: ${outcome}; report ${report}` });
+    return checks;
+  } catch (error) {
+    return [{ check: name, status: "warn", detail: `${informational}: ${(error as Error).message}` }];
+  }
 }
 
 function print(io: CliIo, reply: Reply): number {
@@ -231,7 +292,11 @@ const doctor: VerbSpec = {
     harness: { type: "string", help: "with --contracts: claude or pi (default: every installed harness)", placeholder: "harness" },
     project: { type: "string", help: "with --contracts: a checkout to base the test worktree on (default: a scratch repo)", placeholder: "path" },
     "herdr-socket": { type: "string", help: "with --contracts: the Herdr session socket to run in (default: [herdr])", placeholder: "path" },
-    model: { type: "string", help: "with --contracts: the worker model for the run", placeholder: "model" },
+    model: {
+      type: "string",
+      help: "with --contracts: Claude's worker model; on Pi, also run an informational, non-gating pass on this model after the scripted gate",
+      placeholder: "model",
+    },
     keep: { type: "boolean", help: "with --contracts: keep the scratch home for inspection" },
     "for-daemon": { type: "boolean", help: "with --contracts: the daemon's automatic check (it starts this itself); writes the report, records nothing" },
     restore: { type: "boolean", help: "replace flowryn.db with a nightly backup (daemon stopped)" },
@@ -246,6 +311,7 @@ const doctor: VerbSpec = {
     if (verifyOnly && !contracts) return print(io, errorReply({ code: "bad_args", message: "--verify-only goes with --contracts" }));
     if (forDaemon && !contracts) return print(io, errorReply({ code: "bad_args", message: "--for-daemon goes with --contracts" }));
     if (forDaemon && verifyOnly) return print(io, errorReply({ code: "bad_args", message: "--for-daemon does not go with --verify-only" }));
+    if (forDaemon && stringArg(args, "model")) return print(io, errorReply({ code: "bad_args", message: "--for-daemon does not go with --model: the daemon's check runs the gate only" }));
     const restore = boolArg(args, "restore");
     const identity = agentIdentity(io.env);
     if (identity && restore) return print(io, errorReply({ code: "human_only", message: `doctor --restore runs only in your own terminal: ${identity} is set` }));
