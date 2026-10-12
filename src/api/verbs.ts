@@ -1,5 +1,6 @@
 import type { Db } from "../db/db.ts";
 import type { FlowrynConfig } from "../config/config.ts";
+import type { ConfigStatus } from "../config/effective.ts";
 import type { Journal } from "../journal/journal.ts";
 import type { BacklogWatcher } from "../journal/watcher.ts";
 import type { FleetServices } from "../lifecycle/fleet-services.ts";
@@ -74,6 +75,8 @@ export interface DaemonInfo {
 export interface DaemonServices {
   db: Db;
   config(): FlowrynConfig;
+  /** When the running config was accepted and the last SIGHUP's outcome; absent in test services that do not reload. */
+  configStatus?(): ConfigStatus;
   journal: Journal;
   watcher: BacklogWatcher;
   now(): number;
@@ -108,6 +111,8 @@ export interface ReadCtx {
   caller: Caller;
   /** Present when the daemon serves the read; absent in the read-only fallback. */
   info?: DaemonInfo;
+  /** The daemon's config status (daemon.config); absent in the read-only fallback. */
+  configStatus?: ConfigStatus;
 }
 
 export type VerbKind = "read" | "mutation" | "local";

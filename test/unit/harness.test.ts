@@ -1,9 +1,10 @@
+import { configSectionProblems } from "../../src/config/effective.ts";
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig } from "../../src/config/config.ts";
-import { DEFAULT_TIMING, timingConfig, workerConfigProblems, workersConfig } from "../../src/config/workers.ts";
+import { DEFAULT_TIMING, timingConfig, workersConfig } from "../../src/config/workers.ts";
 import { claudeAdapter, workerSettings } from "../../src/harness/claude/adapter.ts";
 import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude/trust.ts";
 import { type ContractDelivery, promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
@@ -211,7 +212,7 @@ describe("worker configuration", () => {
 
   test("bad values are config_invalid problems, not launch-time surprises", () => {
     const bad = { ...defaultConfig("/h"), extra: { workers: { claude: { permission_mode: "yolo" } }, reconcile: { pass_ms: -1, bogus: 3 } } };
-    const problems = workerConfigProblems(bad);
+    const problems = configSectionProblems(bad);
     expect(problems.join(" ")).toContain("permission_mode must be one of");
     expect(problems.join(" ")).toContain("pass_ms must be a positive integer");
   });

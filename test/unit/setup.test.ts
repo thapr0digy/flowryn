@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, defaultConfig } from "../../src/config/config.ts";
+import { loadConfig, defaultConfig, parseConfig, CONFIG_SECTIONS } from "../../src/config/config.ts";
 import { notifyConfig } from "../../src/config/leader.ts";
-import { workerConfigProblems } from "../../src/config/workers.ts";
+import { configOverrides, configSectionProblems, differingSections, effectiveConfig, redactConfig, REDACTED, resolveEnv, SNAPSHOT_KEYS } from "../../src/config/effective.ts";
+import { checkSection, configReport, type DaemonState, type FileState } from "../../src/cli/config-view.ts";
+import { upkeepConfig } from "../../src/config/upkeep.ts";
+import { capacityConfig } from "../../src/config/workflows.ts";
 import { migrate, openDb, schemaVersion, LATEST_SCHEMA_VERSION } from "../../src/db/db.ts";
 import { backupIfDue } from "../../src/db/backup.ts";
 import { notifyMacosCheck, restoreBackup } from "../../src/doctor/doctor.ts";
@@ -172,7 +175,7 @@ describe("init", () => {
     expect(await runInit(initDeps(home, io))).toBe(0);
     const config = loadConfig(home).config;
     expect(config.extra.workers).toMatchObject({ claude: { model: "sonnet", permission_mode: "bypassPermissions" } });
-    expect(workerConfigProblems(config)).toEqual([]);
+    expect(configSectionProblems(config)).toEqual([]);
   });
 
   test("refuses to write a config whose sections fail validation", async () => {
@@ -388,5 +391,167 @@ describe("doctor --restore", () => {
     } finally {
       lock.release();
     }
+  });
+});
+
+describe("effective configuration", () => {
+  const H = "/tmp/fw-eff";
+  const ENV = { HOME: "/tmp/fw-eff-user" };
+  const cfg = (text: string) => parseConfig(text, H);
+  const fileOf = (text: string | null): FileState => {
+    try {
+      return { path: `${H}/config.toml`, exists: text !== null, text, config: text === null ? defaultConfig(H) : cfg(text), error: null };
+    } catch (error) {
+      return { path: `${H}/config.toml`, exists: true, text, config: null, error: (error as Error).message };
+    }
+  };
+  const daemonOf = (text: string, reload: Extract<DaemonState, { state: "answered" }>["reload"] = null, env: NodeJS.ProcessEnv = ENV): DaemonState => {
+    const snapshot = effectiveConfig(cfg(text), env);
+    return { state: "answered", loaded_at: "2026-10-12T10:00:00.000Z", reload, problems: snapshot.problems, sections: redactConfig(snapshot.sections), resolve_env: resolveEnv(env) };
+  };
+
+  test("the snapshot has one entry per registered section, plus core, and the defaults raise no problem", () => {
+    const { sections, problems } = effectiveConfig(defaultConfig(H), ENV);
+    expect(Object.keys(sections)).toEqual(["core", ...CONFIG_SECTIONS]);
+    expect(SNAPSHOT_KEYS).toEqual(["core", ...CONFIG_SECTIONS]);
+    expect(problems).toEqual([]);
+    expect(Object.values(sections).every((value) => value !== null)).toBe(true);
+  });
+
+  test("each section's effective values are its own parser's: the snapshot adds no defaults of its own", () => {
+    const config = cfg("[upkeep]\nsync_primary = false\n[capacity]\nworker = 3\n[notify]\nmacos = false\n");
+    const { sections } = effectiveConfig(config, ENV);
+    expect(sections.upkeep).toEqual(upkeepConfig(config));
+    expect(sections.capacity).toEqual(capacityConfig(config));
+    expect(sections.notify).toEqual(notifyConfig(config));
+    expect(sections.policy).toEqual({ mode: "strict" });
+  });
+
+  test("workflows say which are built in and which the file adds or replaces", () => {
+    const { sections } = effectiveConfig(cfg('[workflows.quick]\nstages = [{ id = "ship", gate = "merge" }]\n[workflows.feature]\nstages = [{ id = "ship", gate = "merge" }]\n'), ENV);
+    const workflows = sections.workflows as Record<string, { source: string; stages: { id: string }[] }>;
+    expect(workflows.quick).toMatchObject({ source: "config", stages: [{ id: "ship" }] });
+    expect(workflows.feature!.source).toBe("config (replaces the built-in)");
+    expect(workflows["feature-ui"]!.source).toBe("built-in");
+  });
+
+  test("a refused section is null in the snapshot and its refusal is a problem; the others still resolve", () => {
+    const { sections, problems } = effectiveConfig(cfg('[policy]\nmode = "lax"\n'), ENV);
+    expect(sections.policy).toBeNull();
+    expect(problems).toEqual([expect.stringContaining("[policy] mode")]);
+    expect(sections.notify).not.toBeNull();
+  });
+
+  test("the startup check now covers [grants], [decisions] and [projects.<id>], which it used to miss", () => {
+    expect(configSectionProblems(cfg("[grants]\nclaude_projects_dir = 3\n"), ENV)).toEqual([expect.stringContaining("[grants]")]);
+    expect(configSectionProblems(cfg('[decisions]\nreserved_classes = ["nope"]\n'), ENV)).toEqual([expect.stringContaining("[decisions]")]);
+    expect(configSectionProblems(cfg("[projects.web]\nverfy = []\n"), ENV)).toEqual([expect.stringContaining("[projects.web] verfy")]);
+    expect(configSectionProblems(cfg('[projects.web]\nverify = ["bun test"]\n'), ENV)).toEqual([]);
+  });
+
+  test("overrides are the dotted paths of the leaves the file sets; an array is one leaf and comments are not values", () => {
+    const text = '# a comment\nmorning_hour = 6\n[notify]\nmacos = false # off\n[capacity.host]\nmin_free_mem_gb = 0\n[workflows.quick]\nstages = [{ id = "ship", gate = "merge" }]\n';
+    expect(configOverrides(text)).toEqual(["capacity.host.min_free_mem_gb", "morning_hour", "notify.macos", "workflows.quick.stages"]);
+    expect(configOverrides("not = = toml")).toEqual([]);
+    expect(configOverrides("")).toEqual([]);
+  });
+
+  test("redaction hides harness env values, secret-named keys, secret flags in extra_args and token-shaped strings; github token_env stays", () => {
+    const { sections } = effectiveConfig(
+      cfg(`[workers.pi]
+env = { OPENAI_API_KEY = "sk-live-0123456789", PLAIN = "not-secret-but-env" }
+extra_args = ["--api-key", "k1", "--auth-token=k2", "--model", "m", "ghp_abcdefghijklmnopqrstuvwxyz"]
+[workers.claude]
+extra_args = ["--password", "hunter2", "--verbose"]
+[github]
+token_env = ["GH_TOKEN", "GITHUB_TOKEN"]
+`),
+      ENV,
+    );
+    const redacted = redactConfig(sections) as { workers: { pi: { env: Record<string, string>; extra_args: string[] }; claude: { extra_args: string[] } }; github: { token_env: string[] } };
+    expect(redacted.workers.pi.env).toEqual({ OPENAI_API_KEY: REDACTED, PLAIN: REDACTED });
+    expect(redacted.workers.pi.extra_args).toEqual(["--api-key", REDACTED, `--auth-token=${REDACTED}`, "--model", "m", REDACTED]);
+    expect(redacted.workers.claude.extra_args).toEqual(["--password", REDACTED, "--verbose"]);
+    expect(redacted.github.token_env).toEqual(["GH_TOKEN", "GITHUB_TOKEN"]);
+    const text = JSON.stringify(redacted);
+    for (const secret of ["sk-live-0123456789", "k1", "k2", "hunter2", "ghp_abcdefghijklmnopqrstuvwxyz", "not-secret-but-env"]) expect(text).not.toContain(`"${secret}"`);
+    expect(redactConfig({ x: { client_secret: "s", nested: { password: 1 } } })).toEqual({ x: { client_secret: REDACTED, nested: { password: REDACTED } } });
+  });
+
+  test("differingSections names only the sections whose values differ", () => {
+    expect(differingSections({ core: 1, notify: { a: 1 }, upkeep: { b: 1 } }, { core: 1, notify: { a: 2 }, upkeep: { b: 1 } })).toEqual(["notify"]);
+    expect(differingSections({ notify: { a: 1 } }, { notify: { a: 1 } })).toEqual([]);
+  });
+
+  describe("flowryn config's report", () => {
+    test("no file: defaults, no overrides, and the daemon not running", () => {
+      const data = configReport(fileOf(null), { state: "not_running" }, ENV);
+      expect(data).toMatchObject({ exists: "no (defaults)", file: "valid", daemon: "not running", overrides: "none: every value shown is a default", effective_from: "the file" });
+      expect(Object.keys(data.effective as object)).toEqual([...SNAPSHOT_KEYS]);
+      expect(data.daemon_values).toBeUndefined();
+    });
+
+    test("the daemon's accepted configuration matching the file says so, with its load time", () => {
+      const text = "[upkeep]\nsync_primary = false\n";
+      const data = configReport(fileOf(text), daemonOf(text), ENV);
+      expect(data).toMatchObject({ daemon: "running; its accepted configuration matches the file", daemon_loaded: "2026-10-12T10:00:00.000Z", overrides: ["upkeep.sync_primary"] });
+      expect(data.daemon_values).toBeUndefined();
+    });
+
+    test("a daemon with another CLAUDE_CONFIG_DIR than the caller matches the same file, resolved with the daemon's environment", () => {
+      const caller = { ...ENV, CLAUDE_CONFIG_DIR: "/tmp/fw-eff-claude-work" };
+      const data = configReport(fileOf(""), daemonOf("", null, ENV), caller);
+      expect(data.daemon).toBe("running; its accepted configuration matches the file");
+      expect((data.effective as { grants: { claude_projects_dir: string } }).grants.claude_projects_dir).toBe("/tmp/fw-eff-user/.claude/projects");
+      expect(configReport(fileOf(""), { state: "not_running" }, caller).effective).toMatchObject({ grants: { claude_projects_dir: "/tmp/fw-eff-claude-work/projects" } });
+    });
+
+    test("a daemon on an older file: the differing sections are named and the daemon's values of only those are shown", () => {
+      const data = configReport(fileOf("[upkeep]\nsync_primary = false\n"), daemonOf(""), ENV);
+      expect(data.daemon).toBe("running; its accepted configuration differs from the file in [upkeep] (it reads the file again on SIGHUP or a restart)");
+      expect(data.daemon_values).toEqual({ upkeep: expect.objectContaining({ sync_primary: true }) });
+      expect((data.effective as { upkeep: { sync_primary: boolean } }).upkeep.sync_primary).toBe(false);
+    });
+
+    test("an invalid file with a running daemon: the effective values are the daemon's, and a rejected reload is shown", () => {
+      const file = fileOf("[notfiy]\nmacos = false\n");
+      const data = configReport(file, daemonOf("[upkeep]\nsync_primary = false\n", { at: "2026-10-12T11:00:00.000Z", outcome: "rejected", error: "[notfiy] is not a known section; did you mean [notify]?" }), ENV);
+      expect(data.file).toBe("invalid: [notfiy] is not a known section; did you mean [notify]?");
+      expect(data.daemon).toBe("running; the file does not load, so the effective values below are the daemon's");
+      expect(data.daemon_reload).toBe("rejected at 2026-10-12T11:00:00.000Z: [notfiy] is not a known section; did you mean [notify]?; the daemon keeps its last valid configuration");
+      expect(data.effective_from).toBe("the running daemon");
+      expect((data.effective as { upkeep: { sync_primary: boolean } }).upkeep.sync_primary).toBe(false);
+      expect(data.overrides).toEqual(["notfiy.macos"]);
+    });
+
+    test("an invalid file with no daemon shows no effective values, only why", () => {
+      const data = configReport(fileOf("[notfiy]\n"), { state: "not_running" }, ENV);
+      expect(data.effective).toBeUndefined();
+      expect(data.file).toStartWith("invalid: ");
+    });
+
+    test("--section narrows the effective values, the overrides and the daemon's differing values to one section", () => {
+      const text = "morning_hour = 7\n[upkeep]\nsync_primary = false\n[notify]\nmacos = false\n";
+      const data = configReport(fileOf(text), daemonOf(""), ENV, "notify");
+      expect(Object.keys(data.effective as object)).toEqual(["notify"]);
+      expect(data.overrides).toEqual(["notify.macos"]);
+      expect(Object.keys(data.daemon_values as object)).toEqual(["notify"]);
+      expect(data.daemon).toContain("differs from the file in [notify] ");
+      expect(configReport(fileOf(text), daemonOf(""), ENV, "core").overrides).toEqual(["morning_hour"]);
+    });
+
+    test("a section name that is not one is refused with the closest", () => {
+      expect(checkSection("capacity")).toBe("capacity");
+      expect(() => checkSection("notfy")).toThrow("--section notfy is not a section; did you mean notify?");
+    });
+
+    test("secrets never reach the report, from the file or from the daemon", () => {
+      const text = '[workers.pi]\nenv = { KEY = "very-secret-value" }\n';
+      const data = configReport(fileOf(text), daemonOf(text.replace("very-secret-value", "older-secret-value")), ENV);
+      const out = JSON.stringify(data);
+      expect(out).not.toContain("very-secret-value");
+      expect(out).not.toContain("older-secret-value");
+      expect(data.overrides).toEqual(["workers.pi.env.KEY"]);
+    });
   });
 });

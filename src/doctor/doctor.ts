@@ -10,7 +10,7 @@ import { isLockHeld, tryExclusiveLock } from "../util/flock.ts";
 import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERIFIED_LAVISH_AXI, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
-import { workerConfigProblems } from "../config/workers.ts";
+import { configSectionProblems } from "../config/effective.ts";
 import { POLICY_MODE_LINES, policyMode } from "../config/policy.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
@@ -345,7 +345,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(...(await lavishCheck(config)));
   checks.push(...databaseChecks(config));
   checks.push(...(await daemonChecks(home, config, env)));
-  checks.push(...workerConfigProblems(config).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
+  checks.push(...configSectionProblems(config, env.env).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
   checks.push(await herdrCheck(config));
   checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
