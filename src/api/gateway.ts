@@ -68,7 +68,7 @@ export class Gateway {
     const ctx: HandlerCtx = { ...services, caller, ulid: env.ulid, via };
 
     if (spec.kind === "read") {
-      const result = spec.read!({ db: services.db, config: services.config(), now: services.now(), caller, info: services.info() }, args);
+      const result = spec.read!({ db: services.db, config: services.config(), now: services.now(), caller, info: services.info(), configStatus: services.configStatus?.() }, args);
       return okReply(result.data, result.hints);
     }
 

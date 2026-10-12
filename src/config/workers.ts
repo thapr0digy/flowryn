@@ -1,13 +1,6 @@
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { FlowrynConfig } from "./config.ts";
-import { awayConfig, leaderTiming, notifyConfig, reviewConfig } from "./leader.ts";
-import { cleanupConfig, githubConfig } from "./delivery.ts";
-import { policyMode } from "./policy.ts";
-import { daemonConfig } from "./daemon.ts";
-import { validationConfig } from "./validation.ts";
-import { upkeepConfig } from "./upkeep.ts";
-import { workflowConfigProblems } from "./workflows.ts";
 import { toAbsolute } from "./paths.ts";
 
 /**
@@ -170,19 +163,6 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
       env: stringMap(pi.env, "[workers.pi] env"),
     },
   };
-}
-
-/** Validate every section M2 to M5 own at once; returns the problems (empty when sound). */
-export function workerConfigProblems(config: FlowrynConfig): string[] {
-  const problems: string[] = [];
-  for (const check of [() => herdrConfig(config), () => workersConfig(config), () => timingConfig(config), () => leaderTiming(config), () => notifyConfig(config), () => awayConfig(config), () => reviewConfig(config), () => githubConfig(config), () => cleanupConfig(config), () => policyMode(config), () => daemonConfig(config), () => upkeepConfig(config), () => validationConfig(config)]) {
-    try {
-      check();
-    } catch (error) {
-      problems.push((error as Error).message);
-    }
-  }
-  return [...problems, ...workflowConfigProblems(config)];
 }
 
 /**

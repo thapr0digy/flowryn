@@ -2,6 +2,7 @@ import { appendEvent } from "../db/events.ts";
 import { pendingIntents } from "../journal/journal.ts";
 import { boolArg, intArg, type VerbSpec } from "../api/verbs.ts";
 import { FlowrynError } from "../api/errors.ts";
+import { effectiveConfig, resolveEnv, redactConfig } from "../config/effective.ts";
 import { DEFAULT_WAIT_MIN, MAX_WAIT_MIN, handoffPending, lastDropped, readPending, type Preflight } from "./restart.ts";
 
 /**
@@ -11,6 +12,8 @@ import { DEFAULT_WAIT_MIN, MAX_WAIT_MIN, handoffPending, lastDropped, readPendin
 export const PING_VERB = "daemon.ping";
 export const STOP_VERB = "daemon.stop";
 export const RESTART_VERB = "daemon.restart";
+/** The configuration the running daemon accepted, for `flowryn config`. */
+export const CONFIG_VERB = "daemon.config";
 
 /**
  * Verbs the gateway serves whatever protocol the caller speaks: after a build
@@ -52,6 +55,29 @@ export function systemVerbs(): VerbSpec[] {
             restart_pending: readPending(ctx.db),
             restart_handoff: handoffPending(ctx.db),
             restart_dropped: lastDropped(ctx.db),
+          },
+        };
+      },
+    },
+    {
+      name: CONFIG_VERB,
+      summary: "The configuration the running daemon accepted: every section resolved, secrets redacted",
+      positionals: [],
+      flags: {},
+      kind: "read",
+      roles: ["leader", "reader", "worker", "human"],
+      read(ctx) {
+        // The read-only fallback has only the file on disk, which is not what a running daemon accepted.
+        if (!ctx.info) throw new FlowrynError("daemon_unavailable", "the daemon is not running, so it has no accepted configuration", "flowryn daemon status");
+        const snapshot = effectiveConfig(ctx.config);
+        const status = ctx.configStatus;
+        return {
+          data: {
+            loaded_at: status ? new Date(status.loaded_at).toISOString() : null,
+            reload: status?.reload ? { at: new Date(status.reload.at).toISOString(), outcome: status.reload.outcome, error: status.reload.error } : null,
+            problems: snapshot.problems,
+            sections: redactConfig(snapshot.sections),
+            resolve_env: resolveEnv(process.env),
           },
         };
       },
