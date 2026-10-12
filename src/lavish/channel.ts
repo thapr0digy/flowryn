@@ -97,7 +97,8 @@ export function recordChannelFailure(db: Db, gateId: string, failure: ChannelFai
     db.query("UPDATE gates SET channel_failing_since = ?2, channel_failures = ?3, channel_reason = ?4, channel_retry_at = ?5 WHERE id = ?1").run(gateId, since, failures, failure.reason, failure.retryAt);
     appendEvent(db, { source: "daemon", kind: "gate.channel_failed", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, failures, reason: failure.reason, retry_at: failure.retryAt }, ts: failure.now });
     const degraded = failures >= MIN_FAILURES && failure.now - since >= failure.alertMs;
-    if (!degraded || itemOpen(db, gate.channel_item)) return null;
+    // One item per failing episode: a dismissed one stays dismissed until the channel recovers or stops being polled.
+    if (!degraded || gate.channel_item != null) return null;
     const event = appendEvent(db, { source: "daemon", kind: "gate.channel_degraded", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, since, failures, reason: failure.reason }, ts: failure.now });
     const line =
       `Review page not delivering answers: ${channelHint(failure.reason, gate.page_path)}. ` +
@@ -160,11 +161,11 @@ export function clearUnpolledChannels(db: Db, polled: ReadonlySet<string>, why: 
 /** The channel segment of an open review gate's `show` line; empty when the channel was never seen. */
 export function channelView(gate: ChannelColumns, isItemOpen: (itemId: string) => boolean): string {
   if (gate.channel_failing_since != null) {
-    const down = gate.channel_item != null && isItemOpen(gate.channel_item);
+    const down = gate.channel_item != null;
     const failures = gate.channel_failures ?? 0;
     const reason = gate.channel_reason ? ` (${sanitizeLine(gate.channel_reason, MAX_REASON_CHARS)})` : "";
     const next = gate.channel_retry_at != null ? `; next try ${clock(gate.channel_retry_at)}` : "";
-    return `; channel: ${down ? "DOWN" : "failing"} since ${clock(gate.channel_failing_since)}, ${failures} failed poll${failures === 1 ? "" : "s"}${reason}${next}${down ? `; item ${gate.channel_item}` : ""}`;
+    return `; channel: ${down ? "DOWN" : "failing"} since ${clock(gate.channel_failing_since)}, ${failures} failed poll${failures === 1 ? "" : "s"}${reason}${next}${down ? `; item ${gate.channel_item}${isItemOpen(gate.channel_item!) ? "" : " (dismissed)"}` : ""}`;
   }
   if (gate.channel_ok_at != null) return `; channel: listening since ${clock(gate.channel_ok_at)}`;
   return "";

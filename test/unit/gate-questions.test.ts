@@ -967,6 +967,35 @@ describe("review-channel health", () => {
     expect(eventKinds().filter((k) => k === "gate.channel_degraded")).toHaveLength(1);
   });
 
+  test("a dismissed item stays dismissed for the rest of its episode; the next episode after recovery opens a new one", async () => {
+    open();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    const p = makePoller({ alertMs: 0 });
+    await failOnce(p, 0);
+    await failOnce(p, 10_000);
+    const [first] = channelItems();
+    db.query("UPDATE items SET state = 'dismissed', resolved_by = 'dismissed by leader', resolved_at = ?2 WHERE id = ?1").run(first!.id, clock);
+    for (let i = 0; i < 3; i++) await failOnce(p, 60_000);
+    expect(channelItems().map((i) => [i.id, i.state])).toEqual([[first!.id, "dismissed"]]);
+    expect(channel()).toMatchObject({ channel_failures: 5, channel_item: first!.id });
+    // Recovery ends the episode; the next one opens its own item.
+    rmSync(join(h.home, "lavish-fail"));
+    writeFileSync(join(h.home, "lavish-deliver"), "");
+    clock += 60_000;
+    p.pass();
+    await waitUntil(() => channel().channel_failures === 0, 5_000, "the channel recovered");
+    expect(channel().channel_item).toBeNull();
+    writeFileSync(join(h.home, "lavish-fail"), "");
+    p.stop();
+    const q = makePoller({ alertMs: 0 });
+    await failOnce(q, 60_000);
+    await failOnce(q, 10_000);
+    const items = channelItems();
+    expect(items).toHaveLength(2);
+    expect(items[1]).toMatchObject({ state: "open" });
+    expect(channel().channel_item).toBe(items[1]!.id);
+  });
+
   test("a delivered poll recovers the channel and resolves the item; recovery never passes the gate or answers a question", async () => {
     open();
     writeFileSync(join(h.home, "lavish-fail"), "");
@@ -1133,6 +1162,6 @@ describe("review-channel health", () => {
     const failing = { channel_failing_since: at, channel_failures: 1, channel_reason: "exit 1", channel_retry_at: at + 60_000 };
     expect(channelView(failing, () => true)).toBe("; channel: failing since 14:02, 1 failed poll (exit 1); next try 14:03");
     expect(channelView({ ...failing, channel_failures: 3, channel_item: "i9" }, () => true)).toBe("; channel: DOWN since 14:02, 3 failed polls (exit 1); next try 14:03; item i9");
-    expect(channelView({ ...failing, channel_item: "i9" }, () => false)).toBe("; channel: failing since 14:02, 1 failed poll (exit 1); next try 14:03");
+    expect(channelView({ ...failing, channel_item: "i9" }, () => false)).toBe("; channel: DOWN since 14:02, 1 failed poll (exit 1); next try 14:03; item i9 (dismissed)");
   });
 });
