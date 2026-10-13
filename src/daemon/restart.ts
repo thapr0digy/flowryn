@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { FlowrynError } from "../api/errors.ts";
 import type { Caller, DaemonInfo } from "../api/verbs.ts";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
+import { runBounded } from "../runtime/bounded.ts";
 import type { OpenChallenge } from "../policy/approvals.ts";
 import { oldestStep, waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
@@ -227,20 +229,9 @@ export interface ProcResult {
 export type RunProc = (argv: string[], env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<ProcResult>;
 
 export async function runProc(argv: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<ProcResult> {
-  let proc;
-  try {
-    proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env });
-  } catch (error) {
-    return { exitCode: null, stdout: "", stderr: (error as Error).message, timedOut: false };
-  }
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill("SIGKILL");
-  }, timeoutMs);
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  clearTimeout(timer);
-  return { exitCode, stdout, stderr, timedOut };
+  const result = await runBounded(argv, { label: basename(argv[0] ?? "command"), timeoutMs, env });
+  if (result.spawnError !== null) return { exitCode: null, stdout: "", stderr: result.spawnError, timedOut: false };
+  return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr, timedOut: result.timedOut };
 }
 
 /** The environment the smoke check runs in: no agent identity, so the binary answers as your own shell would. */

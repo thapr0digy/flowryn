@@ -42,6 +42,7 @@ import { ReviewOpener } from "../lavish/opener.ts";
 import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
+import { configureOwnedProcesses, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../runtime/bounded.ts";
 import { Operations } from "../lifecycle/operation-recovery.ts";
 import { adapterFor } from "../harness/registry.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
@@ -61,7 +62,7 @@ import { GitHubForge, tokenSource } from "../forge/github.ts";
 import { cleanupRun, type CleanupReport, type LandingDeps } from "../lifecycle/landing.ts";
 import { getRun } from "../lifecycle/runs.ts";
 import { ChallengeStore } from "../policy/approvals.ts";
-import { gitRunner } from "../policy/git.ts";
+import { gitLabel, gitRunner } from "../policy/git.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { DeliveryWatcher } from "../watch/delivery.ts";
 import { Scheduler } from "../sched/scheduler.ts";
@@ -87,6 +88,8 @@ const DEFAULT_PASS_MS = 60_000;
 const ATTENTION_TICK_MS = 1_000;
 const TOOL_TIMEOUT_MS = 10_000;
 const SHUTDOWN_GRACE_MS = 12_000;
+/** The daemon's own external commands still running at its stop get this long after SIGTERM. */
+const OWNED_STOP_GRACE_MS = 2_000;
 
 class StartupRefused extends Error {}
 
@@ -96,11 +99,33 @@ function say(message: string): void {
 
 async function runTool(path: string | null, args: string[], cwd?: string) {
   if (!path) return { exitCode: 127, stdout: "", stderr: "tool not found" };
-  const proc = Bun.spawn([path, ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-  const timer = setTimeout(() => proc.kill("SIGKILL"), TOOL_TIMEOUT_MS);
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  clearTimeout(timer);
-  return { exitCode, stdout, stderr };
+  const result = await runBounded([path, ...args], { label: gitLabel(args), cwd, timeoutMs: TOOL_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
+}
+
+function ownedName(p: { pid: number; label: string }): string {
+  return `${p.label} (pid ${p.pid})`;
+}
+
+/**
+ * Startup: end the external commands a force-killed daemon left running (by
+ * their recorded identity), and record what was ended, what could not be,
+ * and any ledger entry that cannot be read (kept for the next start).
+ */
+async function recoverOwned(db: Db, dir: string, log: Log): Promise<void> {
+  try {
+    const found = await recoverOwnedProcesses(dir);
+    if (found.ended.length + found.failed.length + found.unreadable.length + found.discarded.length === 0) return;
+    if (found.ended.length > 0) log(`owned: ended ${found.ended.map(ownedName).join(", ")}, left running by the last daemon`);
+    if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${ownedName(f)}: ${f.detail}`).join("; ")}; kept, and checked again at the next start`);
+    if (found.unreadable.length > 0) log(`owned: cannot read ${found.unreadable.join(", ")}; kept`);
+    if (found.discarded.length > 0) log(`owned: removed torn writes ${found.discarded.join(", ")}`);
+    tx(db, () =>
+      appendEvent(db, { source: "daemon", kind: "daemon.owned_recovery", payload: { ended: found.ended, failed: found.failed, unreadable: found.unreadable, discarded: found.discarded } }),
+    );
+  } catch (error) {
+    log(`owned: startup recovery failed: ${(error as Error).message}`);
+  }
 }
 
 /** Is some daemon already answering on this socket? A 300 ms probe, like a hook's. */
@@ -172,6 +197,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   let listener: Listener | null = null;
   let boundSocket = false;
   let removeSignals: (() => void) | null = null;
+  let ownsProcesses = false;
   const sock = socketPath(home, env);
 
   try {
@@ -211,6 +237,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       // A restart the old daemon asked for: record who asked, with the build before and after.
       return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
+    // This daemon owns its external commands from here (process groups and the ledger); first, end what the last one left.
+    // Before the reconciler's first pass, where launch/resume/cancel operations recover: a relaunch's
+    // `git worktree add` then never races a git the last daemon left holding the worktree's locks.
+    const ownedDir = join(config.state_dir, "owned");
+    await recoverOwned(database, ownedDir, log);
+    configureOwnedProcesses({ dir: ownedDir, log });
+    ownsProcesses = true;
 
     const journalFiles = (): Record<JournalFile, string> => ({ backlog: config.tasks.backlog, todos: config.tasks.todos });
     const runner = (): TasksAxiRunner | null => {
@@ -768,6 +801,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const closing = listener.close();
     listener = null;
     await Promise.race([Promise.all([closing, journal.stop()]), Bun.sleep(SHUTDOWN_GRACE_MS)]);
+    // After the journal settles or the shutdown grace runs out: what still runs goes. A tasks-axi
+    // mutation cut here is one the grace did not cover; its intent replays on the next start.
+    const owned = await stopOwnedProcesses(OWNED_STOP_GRACE_MS);
+    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start, which ends a group whose leader is still alive and drops the entry of one whose leader is gone`);
     tx(database, () => appendEvent(database, { source: "daemon", kind: "daemon.stopped", payload: { reason } }));
     return 0;
   } catch (error) {
@@ -779,6 +816,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     return 1;
   } finally {
     removeSignals?.();
+    if (ownsProcesses) configureOwnedProcesses(null);
     if (listener) await Promise.race([listener.close(), Bun.sleep(1_000)]);
     if (db) db.close();
     if (boundSocket) {

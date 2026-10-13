@@ -5,6 +5,8 @@
  * started again on its socket; GitHub is the fake forge with its outage knobs.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_HANDSHAKE_MS } from "../../src/runtime/herdr/client.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
@@ -200,5 +202,58 @@ describe("GitHub unavailable or rate-limited: a P1 only if a merge is waiting", 
       expect(itemsOf(e.fleet, "forge_unavailable")).toHaveLength(0);
     },
     { timeout: 45_000 },
+  );
+});
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("external commands a force-killed daemon left running (docs/notes/2026-10-13-next-steps-md-xm.md)", () => {
+  test(
+    "a silent docker ps outlives a SIGKILLed daemon through its ledger entry; the next start ends exactly its group and records it",
+    async () => {
+      const env = await fleet();
+      const unrelated = Bun.spawn(["/bin/sleep", "120"], { detached: true, stdout: "ignore", stderr: "ignore" });
+      try {
+        const ledger = join(env.h.stateDir, "owned");
+        const pidFile = join(env.h.home, "docker-silent.pid");
+        writeFileSync(join(env.h.home, "docker-silent"), "");
+        // The steady reconcile pass lists Docker; the fake now never answers.
+        await waitUntil(() => existsSync(pidFile) && Number(readFileSync(pidFile, "utf8")) > 0, 20_000, "a silent docker ps");
+        const sleeper = Number(readFileSync(pidFile, "utf8"));
+        await waitUntil(() => existsSync(ledger) && readdirSync(ledger).some((n) => n.endsWith(".json")), 5_000, "its ledger entry");
+        const entries = readdirSync(ledger).filter((n) => n.endsWith(".json"));
+        const recorded = entries.map((n) => JSON.parse(readFileSync(join(ledger, n), "utf8")) as { pid: number; label: string });
+        expect(recorded.map((r) => r.label)).toContain("docker ps");
+
+        await env.daemon.kill9();
+        // In its own group, it survives the daemon's death: only the ledger names it now.
+        expect(alive(sleeper)).toBe(true);
+        rmSync(join(env.h.home, "docker-silent"));
+        await env.restartDaemon();
+
+        await waitUntil(() => eventCount(env, "daemon.owned_recovery") === 1, 15_000, "the recovery event");
+        await waitUntil(() => !alive(sleeper), 5_000, "the silent docker's sleeper ended");
+        const db = env.h.db();
+        try {
+          const payload = JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'daemon.owned_recovery'").get() as { payload: string }).payload) as { ended: { pid: number; label: string }[]; failed: unknown[] };
+          expect(payload.ended.map((e) => e.label)).toContain("docker ps");
+          expect(payload.failed).toEqual([]);
+        } finally {
+          db.close();
+        }
+        for (const docker of recorded.filter((r) => r.label === "docker ps")) expect(existsSync(join(ledger, `${docker.pid}.json`))).toBe(false);
+        expect(alive(unrelated.pid)).toBe(true);
+      } finally {
+        unrelated.kill("SIGKILL");
+      }
+    },
+    { timeout: 60_000 },
   );
 });
