@@ -59,7 +59,7 @@ race is visible in `flowryn show`/the event log.
   only after a claim committed; the existing `resume_count` compare stays as
   a second check. The idle carry (typing a steer into the pane) runs only when
   that pass's live checks applied.
-- `UrgentQueue.releasedPrompt` (the cancel path's dialog-gone release) is the
+- `UrgentPreempter.releasedPrompt` (the cancel path's dialog-gone release) is the
   one other await-then-write of liveness; it goes through the guard too
   (`dialog_gone`).
 
