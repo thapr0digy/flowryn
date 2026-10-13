@@ -59,12 +59,39 @@ export function observedTransition<T>(db: Db, seen: RunRow, transition: string, 
     const current = getRun(db, seen.id);
     const changed = staleFields(seen, current);
     if (Object.keys(changed).length > 0) {
-      appendEvent(db, { source, kind: "run.observation_stale", runId: seen.id, taskId: seen.task_id, payload: { transition, changed }, ts: now });
+      const watermarkOnly = onlyHookWatermark(changed);
+      if (!watermarkOnly || !recentWatermarkEvent(db, seen.id, now)) {
+        appendEvent(db, { source, kind: "run.observation_stale", runId: seen.id, taskId: seen.task_id, payload: { transition, changed, ...(watermarkOnly ? { watermark_only: true } : {}) }, ts: now });
+      }
       return { applied: false, changed };
     }
     Object.assign(seen, current);
     return { applied: true, value: apply(seen) };
   });
+}
+
+/** The fields every hook writes: a newer hook during a pass changes only these. */
+const HOOK_WATERMARK: readonly ObservedField[] = ["last_hook_at", "busy_until", "idle_since"];
+
+/**
+ * A busy worker's hooks overtake almost every reconciler pass. A stale
+ * observation whose only change is that watermark on a live run is still
+ * dropped, but records at most one event per run per this window; a change
+ * of state, generation or liveness always records one.
+ */
+export const WATERMARK_EVENT_WINDOW_MS = 10 * 60_000;
+
+function onlyHookWatermark(changed: StaleFields): boolean {
+  const fields = Object.keys(changed);
+  return fields.length > 0 && fields.every((f) => (HOOK_WATERMARK as readonly string[]).includes(f));
+}
+
+function recentWatermarkEvent(db: Db, runId: string, now: number): boolean {
+  return (
+    db
+      .query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'run.observation_stale' AND ts > ?2 AND json_extract(payload, '$.watermark_only') = 1 LIMIT 1")
+      .get(runId, now - WATERMARK_EVENT_WINDOW_MS) !== null
+  );
 }
 
 /** A liveness value read from an observation, written only if the run is still the one observed. */

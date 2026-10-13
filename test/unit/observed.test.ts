@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
-import { observedTransition, staleFields } from "../../src/lifecycle/observed.ts";
+import { observedTransition, staleFields, WATERMARK_EVENT_WINDOW_MS } from "../../src/lifecycle/observed.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { cancelRun, getRun, setLiveness, type RunRow } from "../../src/lifecycle/runs.ts";
 import type { SteerBus } from "../../src/lifecycle/steers.ts";
@@ -176,6 +176,33 @@ describe("the observation guard", () => {
     const fresh = getRun(db, "r1")!;
     const result = observedTransition(db, fresh, "probe", "reconciler", Date.now(), (run) => run.liveness);
     expect(result).toEqual({ applied: true, value: "busy" });
+  });
+
+  test("assumption: a busy worker's hook only advancing its watermark records one stale event per run per window, a real change always one", () => {
+    const db = runDb();
+    let at = Date.now();
+    /** One pass overtaken by a hook that only moves last_hook_at and busy_until (liveness already busy). */
+    const overtakenByHook = (): boolean => {
+      const seen = getRun(db, "r1")!;
+      at += 1_000;
+      tx(db, () => db.query("UPDATE runs SET busy_until = ?2, last_hook_at = ?2 WHERE id = ?1").run("r1", at));
+      return observedTransition(db, seen, "live_checks", "reconciler", at, () => true).applied;
+    };
+    db.query("UPDATE runs SET liveness = 'busy', idle_since = NULL WHERE id = 'r1'").run();
+    expect([overtakenByHook(), overtakenByHook(), overtakenByHook()]).toEqual([false, false, false]);
+    expect(staleEvents(db)).toHaveLength(1);
+    expect(db.query("SELECT json_extract(payload, '$.watermark_only') AS w FROM events WHERE kind = 'run.observation_stale'").get()).toEqual({ w: 1 });
+
+    // A real conflict is never coalesced: the hook also changed liveness.
+    const seen = getRun(db, "r1")!;
+    tx(db, () => setLiveness(db, getRun(db, "r1")!, "idle", "hook", { signal: "stop" }, at));
+    expect(observedTransition(db, seen, "live_checks", "reconciler", at, () => true).applied).toBe(false);
+    expect(staleEvents(db)).toHaveLength(2);
+
+    // Past the window the next watermark-only rejection records again.
+    at += WATERMARK_EVENT_WINDOW_MS;
+    expect(overtakenByHook()).toBe(false);
+    expect(staleEvents(db)).toHaveLength(3);
   });
 });
 

@@ -43,6 +43,17 @@ the next pass (or the reconcile the hook, cancel or launch already schedules)
 reads the newer state. A rejection never opens an item; it is an event so the
 race is visible in `flowryn show`/the event log.
 
+**A hook-only overtake is coalesced.** In production a busy worker's hooks
+overtook almost every pass (221 `live_checks` rejections in about six hours,
+each only because `last_hook_at`/`busy_until` advanced). A rejection whose
+only changed fields are the hook watermark (`last_hook_at`, `busy_until`,
+`idle_since`) on a live run is still dropped, but records its event (payload
+`watermark_only: true`) at most once per run per
+`WATERMARK_EVENT_WINDOW_MS` (10 minutes). Any other change (state, worker
+generation, liveness, a terminal run) records its event every time. Added by
+docs/notes/2026-10-13-next-steps-md-av.md's ship; the test is in
+`test/unit/observed.test.ts`.
+
 **Where it applies (this slice).**
 
 - Reconciler liveness writes: Herdr unreachable or no foreground group
