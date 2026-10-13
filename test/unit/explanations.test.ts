@@ -123,19 +123,20 @@ function waitForGpu(holder: string | null, at: number, runId = "r2"): void {
   });
 }
 
-describe("recording an explanation (dedupe)", () => {
-  const base = (over: Partial<NewExplanation> = {}): NewExplanation => ({
-    run: { id: "r1", task_id: "t1", stage: "build" },
-    kind: "capacity",
-    rule: "capacity.pools_full",
-    reason: "no free slot in gpu",
-    facts: [{ name: "pool gpu", value: "1/1 held by t3", at: 100 }],
-    unblock: [{ by: "flowryn", action: "grants when a slot frees" }],
-    source: "daemon",
-    now: 100,
-    ...over,
-  });
+/** One capacity explanation for r1, with what a test changes. */
+const base = (over: Partial<NewExplanation> = {}): NewExplanation => ({
+  run: { id: "r1", task_id: "t1", stage: "build" },
+  kind: "capacity",
+  rule: "capacity.pools_full",
+  reason: "no free slot in gpu",
+  facts: [{ name: "pool gpu", value: "1/1 held by t3", at: 100 }],
+  unblock: [{ by: "flowryn", action: "grants when a slot frees" }],
+  source: "daemon",
+  now: 100,
+  ...over,
+});
 
+describe("recording an explanation (dedupe)", () => {
   test("an unchanged observation read again writes nothing, even observed later; a changed fact supersedes the open row", () => {
     expect(tx(db, () => explain(db, base()))).toBe(1);
     expect(tx(db, () => explain(db, base({ now: 200, facts: [{ name: "pool gpu", value: "1/1 held by t3", at: 200 }] })))).toBeNull();
