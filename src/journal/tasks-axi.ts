@@ -1,5 +1,6 @@
 import { dirname } from "node:path";
 import { decode } from "@toon-format/toon";
+import { runBounded } from "../runtime/bounded.ts";
 
 /** One task as Flowryn reads it back from tasks-axi (list TOON or mutation JSON). */
 export interface BacklogTask {
@@ -37,29 +38,9 @@ export function processRunner(tasksAxiPath: string, nodePath: string | null): Ta
   return {
     async run(args, timeoutMs = TASKS_AXI_TIMEOUT_MS) {
       const pathParts = [nodePath ? dirname(nodePath) : null, dirname(tasksAxiPath), process.env.PATH ?? "/usr/bin:/bin"];
-      let proc: ReturnType<typeof Bun.spawn>;
-      try {
-        proc = Bun.spawn([tasksAxiPath, ...args], {
-          stdin: "ignore",
-          stdout: "pipe",
-          stderr: "pipe",
-          env: { ...process.env, PATH: pathParts.filter(Boolean).join(":"), NO_COLOR: "1" },
-        });
-      } catch (error) {
-        return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnError: (error as Error).message };
-      }
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        proc.kill("SIGKILL");
-      }, timeoutMs);
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout as ReadableStream).text(),
-        new Response(proc.stderr as ReadableStream).text(),
-        proc.exited,
-      ]);
-      clearTimeout(timer);
-      return { exitCode, stdout, stderr, timedOut };
+      const result = await runBounded([tasksAxiPath, ...args], { label: "tasks-axi", timeoutMs, env: { ...process.env, PATH: pathParts.filter(Boolean).join(":"), NO_COLOR: "1" } });
+      if (result.spawnError !== null) return { exitCode: null, stdout: "", stderr: "", timedOut: false, spawnError: result.spawnError };
+      return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr, timedOut: result.timedOut };
     },
   };
 }

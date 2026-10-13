@@ -1,3 +1,4 @@
+import { runBounded } from "../runtime/bounded.ts";
 import { summarize, ForgeError, type Annotation, type Check, type ChecksSummary, type Forge, type MergeResult, type PrRef, type PullRequest, type RepoRef } from "./types.ts";
 
 /**
@@ -28,6 +29,7 @@ interface Cached {
 const MAX_CACHE = 500;
 const MAX_PAGES = 5;
 const PER_PAGE = 100;
+const GH_TOKEN_TIMEOUT_MS = 5_000;
 
 /** https://github.com/o/r(.git), git@github.com:o/r(.git) or ssh://git@github.com/o/r(.git) -> {owner, repo}. */
 export function repoOf(url: string, webUrl = "https://github.com"): RepoRef | null {
@@ -115,11 +117,17 @@ export class GitHubForge implements Forge {
     } catch (error) {
       throw new ForgeError("unreachable", `${method} ${path}: ${(error as Error).message}`);
     }
+    // The deadline covers the body too: a stalled body is a failed request, never a raw AbortError.
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new ForgeError("unreachable", `${method} ${path}: reading the answer: ${(error as Error).message}`, response.status);
+    }
     if (response.status === 304 && cached) {
       this.stats.notModified++;
       return { status: 200, body: cached.body, headers: response.headers };
     }
-    const text = await response.text();
     let parsed: unknown = null;
     if (text.length > 0) {
       try {
@@ -268,15 +276,8 @@ export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string 
     if (cached !== undefined) return cached;
     cached = null;
     if (!gh) return null;
-    try {
-      const proc = Bun.spawn([gh, "auth", "token", "--hostname", webHost], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-      const timer = setTimeout(() => proc.kill("SIGKILL"), 5_000);
-      const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-      clearTimeout(timer);
-      if (code === 0 && out.trim().length > 0) cached = out.trim();
-    } catch {
-      cached = null;
-    }
+    const result = await runBounded([gh, "auth", "token", "--hostname", webHost], { label: "gh auth token", timeoutMs: GH_TOKEN_TIMEOUT_MS });
+    if (result.code === 0 && result.stdout.trim().length > 0) cached = result.stdout.trim();
     return cached;
   };
 }

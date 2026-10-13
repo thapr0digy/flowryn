@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
+import { runBounded } from "../runtime/bounded.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
@@ -89,15 +90,11 @@ export async function probeQuota(tool: string | null, node: string | null): Prom
   if (!tool) return { state: "unknown", detail: "quota-axi is not installed" };
   const path = [node ? dirname(node) : null, dirname(tool), process.env.PATH ?? "/usr/bin:/bin"].filter(Boolean).join(":");
   try {
-    const proc = Bun.spawn([tool, ...QUOTA_ARGS], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, PATH: path } });
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGKILL");
-    }, PROBE_TIMEOUT_MS);
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-    clearTimeout(timer);
-    if (timedOut) return { state: "unknown", detail: `quota-axi took over ${PROBE_TIMEOUT_MS / 1000} s` };
+    const result = await runBounded([tool, ...QUOTA_ARGS], { label: "quota-axi", timeoutMs: PROBE_TIMEOUT_MS, env: { ...process.env, PATH: path }, maxOutputBytes: MAX_OUTPUT + 1 });
+    if (result.spawnError !== null) throw new Error(result.spawnError);
+    const { stdout: out, stderr: err, code } = result;
+    if (result.timedOut) return { state: "unknown", detail: `quota-axi took over ${PROBE_TIMEOUT_MS / 1000} s` };
+    if (result.incomplete) return { state: "unknown", detail: out.length > MAX_OUTPUT ? "quota-axi printed over 1 MB" : `quota-axi ${result.incomplete}` };
     if (code !== 0) return { state: "unknown", detail: `quota-axi exited ${code}${err.trim() ? `: ${sanitizeLine(err.trim().split("\n")[0]!, 120)}` : ""}` };
     if (out.length > MAX_OUTPUT) return { state: "unknown", detail: "quota-axi printed over 1 MB" };
     return parseQuota(out);

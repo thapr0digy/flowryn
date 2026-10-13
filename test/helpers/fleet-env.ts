@@ -82,11 +82,15 @@ export function setHarnessVersion(h: TestHome, harness: "claude" | "pi", version
 /**
  * A stand-in docker: `docker ps` prints the containers the fake workers
  * started (`FAKE: docker-up`), one line each in the format the reconciler
- * asks for. Nothing reaches a real Docker.
+ * asks for. With `docker-silent` in the home it never answers: it starts a
+ * sleeper holding its stdout (its pid in docker-silent.pid) and waits on it.
+ * Nothing reaches a real Docker.
  */
-function dockerScript(dir: string, home: string): string {
+export function dockerScript(dir: string, home: string): string {
   const path = join(dir, "docker");
-  writeFileSync(path, `#!/bin/sh\ncase "$1" in\n  ps) [ -f ${JSON.stringify(join(home, "docker-ps.txt"))} ] && cat ${JSON.stringify(join(home, "docker-ps.txt"))}; exit 0 ;;\nesac\nexit 1\n`);
+  const silent = JSON.stringify(join(home, "docker-silent"));
+  const silentGuard = `if [ -f ${silent} ]; then\n  sleep 600 &\n  echo $! > ${JSON.stringify(join(home, "docker-silent.pid"))}\n  wait\nfi\n`;
+  writeFileSync(path, `#!/bin/sh\n${silentGuard}case "$1" in\n  ps) [ -f ${JSON.stringify(join(home, "docker-ps.txt"))} ] && cat ${JSON.stringify(join(home, "docker-ps.txt"))}; exit 0 ;;\nesac\nexit 1\n`);
   chmodSync(path, 0o755);
   return path;
 }

@@ -9,7 +9,7 @@ import { PolicyFollower } from "../upkeep/policy-follow.ts";
 import { listProjects } from "../lifecycle/projects.ts";
 import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { loadConfig, resolveTool, type FlowrynConfig } from "../config/config.ts";
@@ -42,6 +42,7 @@ import { ReviewOpener } from "../lavish/opener.ts";
 import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
+import { configureOwnedProcesses, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../runtime/bounded.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
@@ -94,11 +95,27 @@ function say(message: string): void {
 
 async function runTool(path: string | null, args: string[], cwd?: string) {
   if (!path) return { exitCode: 127, stdout: "", stderr: "tool not found" };
-  const proc = Bun.spawn([path, ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-  const timer = setTimeout(() => proc.kill("SIGKILL"), TOOL_TIMEOUT_MS);
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  clearTimeout(timer);
-  return { exitCode, stdout, stderr };
+  const result = await runBounded([path, ...args], { label: `${basename(path)} ${args.find((a) => !a.startsWith("-")) ?? ""}`.trim(), cwd, timeoutMs: TOOL_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
+}
+
+/**
+ * Startup: end the external commands a force-killed daemon left running (by
+ * their recorded identity), and record what was ended, what could not be,
+ * and any ledger entry that cannot be read (kept for the next start).
+ */
+async function recoverOwned(db: Db, dir: string, log: Log): Promise<void> {
+  try {
+    const found = await recoverOwnedProcesses(dir);
+    if (found.ended.length + found.failed.length + found.unreadable.length === 0) return;
+    const name = (p: { pid: number; label: string }) => `${p.label} (pid ${p.pid})`;
+    if (found.ended.length > 0) log(`owned: ended ${found.ended.map(name).join(", ")}, left running by the last daemon`);
+    if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${name(f)}: ${f.detail}`).join("; ")}; kept for the next start`);
+    if (found.unreadable.length > 0) log(`owned: cannot read ${found.unreadable.join(", ")}; kept`);
+    tx(db, () => appendEvent(db, { source: "daemon", kind: "daemon.owned_recovery", payload: { ended: found.ended, failed: found.failed, unreadable: found.unreadable } }));
+  } catch (error) {
+    log(`owned: startup recovery failed: ${(error as Error).message}`);
+  }
 }
 
 /** Is some daemon already answering on this socket? A 300 ms probe, like a hook's. */
@@ -170,6 +187,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   let listener: Listener | null = null;
   let boundSocket = false;
   let removeSignals: (() => void) | null = null;
+  let ownsProcesses = false;
   const sock = socketPath(home, env);
 
   try {
@@ -209,6 +227,11 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       // A restart the old daemon asked for: record who asked, with the build before and after.
       return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
+    // This daemon owns its external commands from here (process groups and the ledger); first, end what the last one left.
+    const ownedDir = join(config.state_dir, "owned");
+    await recoverOwned(database, ownedDir, log);
+    configureOwnedProcesses({ dir: ownedDir, log });
+    ownsProcesses = true;
 
     const journalFiles = (): Record<JournalFile, string> => ({ backlog: config.tasks.backlog, todos: config.tasks.todos });
     const runner = (): TasksAxiRunner | null => {
@@ -735,6 +758,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     reviewOpener.stop();
     deliveryWatcher.stop();
     herdrWatcher.stop();
+    const owned = await stopOwnedProcesses();
+    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start`);
     bus.close();
     urgent.close();
     attention.bus.close();
@@ -755,6 +780,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     return 1;
   } finally {
     removeSignals?.();
+    if (ownsProcesses) configureOwnedProcesses(null);
     if (listener) await Promise.race([listener.close(), Bun.sleep(1_000)]);
     if (db) db.close();
     if (boundSocket) {

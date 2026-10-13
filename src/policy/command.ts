@@ -1,4 +1,6 @@
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
+import { runBounded } from "../runtime/bounded.ts";
 
 export interface CommandResult {
   code: number;
@@ -6,17 +8,12 @@ export interface CommandResult {
   stderr: string;
 }
 
-/** Run one command with a timeout; a missing binary or directory is a failed result, never a throw. */
+/**
+ * Run one command with a timeout (`runBounded`: its process group is stopped at the deadline, and a cut-off or
+ * incomplete read is a non-zero code); a missing binary or directory is a failed result, never a throw.
+ */
 export async function runCommand(argv: string[], options: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {}): Promise<CommandResult> {
   if (options.cwd && !existsSync(options.cwd)) return { code: 128, stdout: "", stderr: `no such directory: ${options.cwd}` };
-  let proc;
-  try {
-    proc = Bun.spawn(argv, { cwd: options.cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...options.env } });
-  } catch (error) {
-    return { code: 127, stdout: "", stderr: (error as Error).message };
-  }
-  const timer = setTimeout(() => proc.kill("SIGKILL"), options.timeoutMs ?? 10_000);
-  const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  clearTimeout(timer);
-  return { code, stdout, stderr };
+  const result = await runBounded(argv, { label: basename(argv[0] ?? "command"), cwd: options.cwd, timeoutMs: options.timeoutMs ?? 10_000, env: { ...process.env, ...options.env } });
+  return { code: result.code, stdout: result.stdout, stderr: result.stderr };
 }
