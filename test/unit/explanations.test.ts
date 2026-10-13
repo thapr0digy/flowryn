@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Args } from "../../src/api/verbs.ts";
-import { explain, openExplanations, sweepExplanations, taskExplanations, type ExplanationRow, type NewExplanation } from "../../src/attention/explanations.ts";
+import { closeDismissedPromptExplanations, explain, openExplanations, sweepExplanations, taskExplanations, type ExplanationRow, type NewExplanation } from "../../src/attention/explanations.ts";
 import { resolveRunItems } from "../../src/attention/items.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
@@ -76,11 +76,11 @@ const sweep = (now: number) => tx(db, () => sweepExplanations(db, now));
 
 const rows = (runId: string) => db.query("SELECT * FROM explanations WHERE run_id = ?1 ORDER BY id").all(runId) as ExplanationRow[];
 
-function reconciler(opts: { now: () => number; launches?: string[]; harnessGate?: (h: "claude" | "pi") => Promise<HarnessCheck>; foreground?: number }) {
+function reconciler(opts: { now: () => number; launches?: string[]; harnessGate?: (h: "claude" | "pi") => Promise<HarnessCheck>; foreground?: number; agentStatus?: () => string | null }) {
   const runtime = {
     processes: (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: opts.foreground ?? 1, processes: [] }),
     snapshotPanes: () => Promise.resolve([]),
-    agentStatus: () => Promise.resolve(null),
+    agentStatus: () => Promise.resolve(opts.agentStatus?.() ?? null),
   } as unknown as HerdrRuntime;
   return new Reconciler({
     db,
@@ -218,16 +218,34 @@ describe("dialog: a blocked-dialog hold", () => {
     expect(rows("r1")[0]).toMatchObject({ closed_by: "run.worker_started" });
   });
 
-  test("a dismissed prompt item keeps its row while the dialog holds; the sweep closes it once the run is off blocked_dialog", () => {
+  test("a dismissed prompt item keeps its row while the dialog is up, though liveness leaves blocked_dialog; Herdr reading it gone closes it", async () => {
+    let clock = Date.now();
+    let herdr: string | null = "blocked";
+    db.query("UPDATE runs SET worker_started_at = started_at, last_hook_at = ?1, busy_until = ?2 WHERE id = 'r1'").run(clock, clock + 3_600_000);
+    tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: clock }, clock));
+    dismiss(rows("r1")[0]!.item_id!);
+    const rec = reconciler({ now: () => clock, foreground: 999999, agentStatus: () => herdr });
+    clock += 1_000;
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    expect(getRun(db, "r1")!.liveness).toBe("busy");
+    expect(sweep(clock)).toBe(0);
+    expect(show("t1").waiting).toMatch(/^a confirmation dialog is up in pane w:1/);
+    herdr = "working";
+    clock += 1_000;
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    rec.stop();
+    expect(rows("r1")[0]).toMatchObject({ closed_by: "item dismissed; dialog gone", closed_at: clock });
+    expect(show("t1").waiting).toBeUndefined();
+  });
+
+  test("a dismissed prompt item's row closes on the worker's next hook", () => {
     const t = Date.now();
     tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: t }, t));
     dismiss(rows("r1")[0]!.item_id!);
-    expect(sweep(t + 1_000)).toBe(0);
-    expect(show("t1").waiting).toMatch(/^a confirmation dialog is up in pane w:1/);
     db.query("UPDATE runs SET liveness = 'busy' WHERE id = 'r1'").run();
-    expect(sweep(t + 2_000)).toBe(1);
-    expect(rows("r1")[0]).toMatchObject({ closed_by: "item dismissed; no longer waiting", closed_at: t + 2_000 });
-    expect(show("t1").waiting).toBeUndefined();
+    expect(sweep(t + 1_000)).toBe(0);
+    tx(db, () => closeDismissedPromptExplanations(db, "r1", "hook post-tool", "hook", t + 2_000));
+    expect(rows("r1")[0]).toMatchObject({ closed_by: "item dismissed; hook post-tool", closed_at: t + 2_000 });
   });
 });
 

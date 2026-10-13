@@ -132,10 +132,30 @@ export function closeItemExplanations(db: Db, itemIds: readonly string[], by: st
 }
 
 /**
+ * Close a run's open dialog rows whose blocked_prompt item was dismissed: the
+ * dismissal ended the liveness hold but not the dialog, so the signal that
+ * would have resolved the item (a worker hook, or Herdr reading the dialog
+ * gone) ends the row instead. Call inside that signal's transaction.
+ */
+export function closeDismissedPromptExplanations(db: Db, runId: string, by: string, source: EventSource, now: number): number {
+  const rows = db
+    .query(
+      `SELECT x.id FROM explanations x JOIN items i ON i.id = x.item_id
+       WHERE x.run_id = ?1 AND x.closed_at IS NULL AND x.kind = 'dialog' AND i.kind = 'blocked_prompt' AND i.state = 'dismissed'`,
+    )
+    .all(runId) as { id: number }[];
+  const closedBy = `item dismissed; ${by}`;
+  for (const row of rows) db.query("UPDATE explanations SET closed_at = ?2, closed_by = ?3 WHERE id = ?1").run(row.id, now, closedBy);
+  if (rows.length > 0) appendEvent(db, { source, kind: "run.explanations_closed", runId, payload: { explanations: rows.map((r) => r.id) }, ts: now });
+  return rows.length;
+}
+
+/**
  * Close what no longer waits: every open explanation of a run that ended, one
  * whose item resolved by any path, one whose item was dismissed and whose
- * condition is gone (a dialog row off `blocked_dialog`, a resume row off
- * `dead`), and one with no item whose run the scheduler no longer considers
+ * condition is gone (a trust dialog row off `blocked_dialog`, a resume row off
+ * `dead`; a dismissed prompt's row waits for its dialog-gone signal,
+ * `closeDismissedPromptExplanations`), and one with no item whose run the scheduler no longer considers
  * for a grant (its `candidates()` filter). One event when anything closed. Runs in its own
  * transaction (the scheduler, each pass).
  */
@@ -151,7 +171,7 @@ export function sweepExplanations(db: Db, now: number): number {
        WHERE x.closed_at IS NULL AND (
          r.id IS NULL OR r.state IN ('cleaned','failed','cancelled')
          OR i.state = 'resolved'
-         OR (i.state = 'dismissed' AND ((x.kind = 'dialog' AND r.liveness != 'blocked_dialog') OR (x.kind = 'resume' AND r.liveness != 'dead')))
+         OR (i.state = 'dismissed' AND ((x.kind = 'dialog' AND i.kind = 'trust_dialog' AND r.liveness != 'blocked_dialog') OR (x.kind = 'resume' AND r.liveness != 'dead')))
          OR (x.item_id IS NULL AND x.kind IN ('capacity','resume')
              AND NOT ((r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead'))))`,
     )

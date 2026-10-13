@@ -23,7 +23,7 @@ import { checkInvariant } from "./invariant.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
 import { contractsCommand, harnessFacts, harnessUnblock, type HarnessCheck } from "../lifecycle/harness-gate.ts";
-import { explain, type Fact } from "../attention/explanations.ts";
+import { closeDismissedPromptExplanations, explain, type Fact } from "../attention/explanations.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -324,6 +324,7 @@ export class Reconciler {
       const busy = run.busy_until !== null && run.busy_until > t;
       const lastHook = run.last_hook_at ?? launchedAt;
       const prompted = findOpenRunItem(db, "blocked_prompt", run.id) !== null;
+      const dialogGone = herdrStatus === "working" || (isSettledHerdrStatus(herdrStatus) && isSettledHerdrStatus(previousHerdrStatus));
       if (prompted) {
         /**
          * Spike c12: Herdr reads "blocked" for exactly the duration of a
@@ -341,12 +342,11 @@ export class Reconciler {
          * still actually up.
          */
         if (run.harness === "claude") {
-          const dialogGone = herdrStatus === "working" || (isSettledHerdrStatus(herdrStatus) && isSettledHerdrStatus(previousHerdrStatus));
           if (dialogGone) {
             clearPrompt(db, run, herdrStatus, "reconciler", t);
           } else return;
         } else return;
-      }
+      } else if (run.harness === "claude" && dialogGone) closeDismissedPromptExplanations(db, run.id, "dialog gone", "reconciler", t);
       const leaseLapsedWithoutStop = !busy && run.idle_since === null;
       /**
        * The backstop (spike c12, Task 11): Herdr's agent_status reads
