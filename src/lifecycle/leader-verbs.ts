@@ -27,7 +27,7 @@ import { divergenceView, getDivergence, resolveCommand } from "../reconcile/dive
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 import { ShowText } from "./show-text.ts";
-import { getOperation, latestOperation, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
+import { getOperation, heldByEscalation, latestOperation, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
 import { channelView } from "../lavish/channel.ts";
 import type { Db } from "../db/db.ts";
 
@@ -522,7 +522,7 @@ function waitingView(ctx: ReadCtx, runId: string, why: boolean): { waiting?: unk
 function operationView(ctx: ReadCtx, runId: string): { operation?: string } {
   const op = openOperation(ctx.db, runId) ?? latestOperation(ctx.db, runId);
   if (!op || (op.phase !== "requested" && op.phase !== "effect_issued" && op.phase !== "escalated")) return {};
-  if (op.phase === "escalated" && !(op.item_id && ctx.db.query("SELECT 1 FROM items WHERE id = ?1 AND state IN ('open','presented')").get(op.item_id))) return {};
+  if (op.phase === "escalated" && !heldByEscalation(ctx.db, runId)) return {};
   return { operation: operationLine(op) };
 }
 
