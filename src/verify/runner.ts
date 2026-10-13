@@ -262,11 +262,31 @@ function releaseSlot(deps: VerifyDeps, v: Verification, reason: string): void {
   }
 }
 
+const EXEC_SETTLE_MS = 2_000;
+const EXEC_POLL_MS = 20;
+
+/** macOS ps names a process it cannot read the arguments of, such as one still being exec'd, in parentheses: "(sh)". */
+function midExec(identity: ProcIdentity): boolean {
+  return identity.exe.startsWith("(") && identity.exe.endsWith(")");
+}
+
+/** The step leader's identity once its exec has settled; null when it is gone or never settles. */
+async function settledIdentity(pid: number, ps: PsRunner | undefined): Promise<ProcIdentity | null> {
+  const deadline = Date.now() + EXEC_SETTLE_MS;
+  for (;;) {
+    const identity = await readIdentity(pid, ps);
+    if (!identity || !midExec(identity)) return identity;
+    if (Date.now() > deadline) throw new Error(`its executable never settled (ps reads ${identity.exe})`);
+    await Bun.sleep(EXEC_POLL_MS);
+  }
+}
+
 /** Record a step's process group leader on the job's lease, so a later daemon can end it by identity. */
 async function noteStepProcess(deps: VerifyDeps, v: Verification, pid: number): Promise<void> {
   try {
     // Gone already (a quick step): nothing outlives it, since its group is killed when it exits.
-    const identity = await readIdentity(pid, deps.ps);
+    // A mid-exec name would never match the running step again, so recovery would read it as absent.
+    const identity = await settledIdentity(pid, deps.ps);
     if (identity) tx(deps.db, () => recordJobProcess(deps.db, jobOf(v), identity, deps.now()));
   } catch (error) {
     deps.log(`verify ${v.id}: could not record step pid ${pid}: ${(error as Error).message}`);

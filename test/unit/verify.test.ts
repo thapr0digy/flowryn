@@ -17,7 +17,7 @@ import { getVerification, insertVerification, type Verification } from "../../sr
 import { countsLine, parseBunSummary } from "../../src/verify/summary.ts";
 import { verificationView } from "../../src/verify/verbs.ts";
 import { grantJobLease, liveCounts, liveJobLeases, recordJobProcess } from "../../src/sched/pools.ts";
-import { isAlive, readIdentity, terminate, type ProcIdentity } from "../../src/runtime/proc.ts";
+import { isAlive, psRunner, readIdentity, terminate, type ProcIdentity } from "../../src/runtime/proc.ts";
 import { spawn } from "node:child_process";
 import { NOT_STARTED_MESSAGE } from "../helpers/fake-github.ts";
 
@@ -300,6 +300,22 @@ describe("a verification job", () => {
     pruneDirs(f.deps, "web", 0);
     expect(existsSync(f.repo)).toBe(true);
   });
+
+  test("a step read mid-exec (ps names it \"(sh)\") is re-read, so the lease holds the identity recovery can match", async () => {
+    const f = fixture();
+    let reads = 0;
+    // The first read sees the leader still being exec'd, as macOS ps reports it.
+    f.deps.ps = async (pids) => {
+      const out = await psRunner(pids);
+      return reads++ === 0 ? out.replace(/\S+\s*$/, "(sh)\n") : out;
+    };
+    const v = await f.start(["sleep 1"]);
+    expect(v.state).toBe("passed");
+    expect(reads).toBeGreaterThanOrEqual(2);
+    const lease = f.db.query("SELECT proc_exe FROM job_leases WHERE job_id = ?1").get(v.id) as { proc_exe: string | null };
+    expect(lease.proc_exe).not.toBeNull();
+    expect(lease.proc_exe).not.toBe("(sh)");
+  }, 20_000);
 
   test("a verification a dead daemon left running is recorded as an error at startup, its worktree removed", async () => {
     const f = fixture();
