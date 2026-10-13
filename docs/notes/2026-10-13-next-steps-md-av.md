@@ -26,7 +26,7 @@ overwrite" is what a newer change landing during that await (a new delivery,
 | 4 | `DeliveryWatcher.readNmRuns` → `applyNmObservation` (src/watch/delivery.ts, src/reconcile/delivery.ts) | `no-mistakes status` in the worktree (up to `nm_timeout_ms`) | run `running` ⇄ `validating`, `validation_outside_cap` P1, the `validation_stuck` episode (P1, `run.validation_moving`), no-mistakes evidence and the CI-wait clock | A delivery (stage done, slot released), `decline`, a new validation slot granted (a new episode) or a stage advance during the read: the old status opens or closes a stuck episode against the new slot, or flips state from the old pipeline | **guarded** (`nm_observation`) |
 | 5 | `DeliveryWatcher.watchCiWait` (src/watch/delivery.ts) | `forge.pull`/`checks` (check count), `readBranchFacts` (`git fetch`, `git show`) | opens the CI-wait decision (a question for the user) and covers the stuck episode | Already re-checks run state and `ciWaitDue` in the transaction; a delivery, `decline` or a new slot that keeps the state `running`/`validating` was not seen | **guarded** (`ci_wait`) |
 | 6 | `DeliveryWatcher.watchLocalMerges` (src/watch/delivery.ts) | `proveLocal` (git) for a `merging` local-only run | `recordMergeResult`: merged (lands), unproven (P1) | `recordMergeResult` re-reads the merge row (a settled merge is left alone) and `landRun` refuses a terminal run, but a cancel *request* (an open cancel operation) or a newer merge request was not seen | **guarded** (`local_merge_proof`) |
-| 7 | `merge` verb `settle` (src/policy/verbs.ts) | `executeMerge` (GitHub merge + proof) | `recordMergeResult` | It is the effect's own result, written by merge id; `recordMergeResult` refuses a settled merge, `landRun` a terminal run. The merge is in `inFlight`, so the watcher leaves it alone | already guarded by the merge row's state (left as is) |
+| 7 | `merge` verb `settle` (src/policy/verbs.ts) | `executeMerge` (GitHub merge + proof) | `recordMergeResult` | It is the effect's own result, written by merge id; `recordMergeResult` refuses a settled merge, and keeps a merge proven for a terminal run with `noteMergedAfterEnd` rather than landing it. The merge is in `inFlight`, so the watcher leaves it alone | already guarded by the merge row's state (left as is) |
 | 8 | Gate channel: `LavishPoller.record` → `lavishAnswer`, `recordGateComment`, `requestGatePass` (src/lavish/poller.ts) | `lavish-axi poll` | captain answers, gate comments, pass requests | Each re-reads the decision and the gate in the transaction and answers `late` (closed) or `stale` (another page or gate), with an event | already guarded (left as is) |
 | 9 | `applyDocker` (src/reconcile/docker.ts) | `docker ps` | docker evidence, an over-lease divergence, a `docker_leftover` P1 | Reads the run and leases after the await (no await in between), so only the container list is old. It changes no run state, stage or delivery; a divergence or P1 from a list a second old is accurate about that second | **left open** |
 | 10 | `verifyPrDelivery`'s `diverge` (src/lifecycle/delivery.ts) | the PR read in `deliver`'s prepare | a draft or head-not-on-remote divergence, in its own transaction, before the refusal | A record of what the worker named against what GitHub said at that moment; no state change, and the refusal follows. A run cancelled during the read still gets the divergence | **left open** |
@@ -88,9 +88,14 @@ new delivery, and a merged PR still reads merged then). The reversible effects
   `noteMergedAfterEnd` records the fact instead: an open merge request is
   marked `merged`, a `run.merged_after_end` event is appended, and a
   divergence (P1, GitHub or git over the run) says the work landed under an
-  ended run, so you decide what the task is now. Only the PR watcher and the
-  local proof see this; the merge verb's caller gets `observation_stale` and
-  its retry is refused because the run is no longer ready.
+  ended run, so you decide what the task is now. The PR watcher, the local
+  proof and the merge verb all keep it. The merge verb does so on both of its
+  proven reads: a PR the gate already reads merged (the cancel committed
+  during the gate's read, the delivery unchanged) and its own merge's proof
+  (the cancel committed while GitHub merged; `recordMergeResult` calls
+  `noteMergedAfterEnd` instead of `landRun` for a run already ended). Either
+  way its caller is told the PR merged after the run ended and a divergence
+  asks; nothing lands and no cleanup starts.
 
 **Taking the basis.** The watchers read it for each run right before that
 run's own awaits (not when the pass lists its runs), so a slow read of one run
@@ -142,7 +147,8 @@ already a row the transitions write.
 - `MERGED_PARTS` (src/watch/delivery.ts) and `["delivered"]` for an
   already-merged PR in the merge verb; `landRun` settles an open cancel
   (src/lifecycle/landing.ts); `noteMergedAfterEnd` (src/reconcile/delivery.ts)
-  for a merge read after the run ended; the cancel verb's `settle` maps the
+  for a merge read after the run ended, called by the watchers, the merge
+  verb's `apply` and `recordMergeResult`; the cancel verb's `settle` maps the
   landed outcome (src/lifecycle/leader-verbs.ts).
 - A dropped *unproven* local proof leaves the merge `requested`: if the cancel
   it raced completes, the run ends cancelled; if not, the next pass reads the
@@ -165,6 +171,8 @@ still applies. A proven merge is the exception: its tests assert it wins.
 | `pr_observation` | `forge.pull` of a merged PR | cancel requested | (the merge wins: the run lands, the cancel ends `failed` as a no-op, no stale event) |
 | `pr_observation` | `forge.pull` of a merged PR | the cancel completes (run cancelled) | (not revived: `run.merged_after_end` and a divergence) |
 | `merge` | the gate's `forge.pull` | redelivery at a new head | a merge is requested for the replaced head |
+| `merge` | the gate's `forge.pull` of a merged PR | the cancel completes (run cancelled) | (not revived: `run.merged_after_end` and a divergence, no cleanup) |
+| `merge` `settle` | `forge.merge` | the cancel completes (run cancelled) | (the merge is proven, the run not revived: `run.merged_after_end` and a divergence, no cleanup) |
 | `deliver` | `forge.checks` of the older delivery | a newer delivery commits | the older head overwrites the newer |
 | `deliver` | `forge.checks` of a redelivery | send-back (decline) | the run is ready again, the decline undone |
 | `nm_observation` | the status read of a stalled pipeline | a new validation slot | a stuck P1 for the new slot, run `validating` |

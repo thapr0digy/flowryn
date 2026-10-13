@@ -88,6 +88,7 @@ const github = {
   checks: GREEN as ChecksSummary,
   pullGate: null as Barrier | null,
   checksGate: null as Barrier | null,
+  mergeGate: null as Barrier | null,
 };
 const forge = {
   pull: async (): Promise<PullRequest> => {
@@ -101,6 +102,15 @@ const forge = {
     const gate = github.checksGate;
     github.checksGate = null;
     return gate ? gate.hold(() => said) : said;
+  },
+  merge: async (): Promise<{ merged: boolean; message: string }> => {
+    const merged = () => {
+      github.pr = { ...github.pr, state: "merged", mergeSha: MERGED, mergeable: null };
+      return { merged: true, message: "merged" };
+    };
+    const gate = github.mergeGate;
+    github.mergeGate = null;
+    return gate ? gate.hold(merged) : merged();
   },
 } as unknown as Forge;
 
@@ -130,7 +140,7 @@ beforeEach(() => {
   cleaned = [];
   github.pr = pr(HEAD_A);
   github.checks = GREEN;
-  github.pullGate = github.checksGate = null;
+  github.pullGate = github.checksGate = github.mergeGate = null;
   Object.assign(repo, { head: HEAD_A, remote: HEAD_A, onDefault: true, gate: null });
   Object.assign(nm, { text: "run: null\n", gate: null });
   runToken = mintToken("run");
@@ -158,7 +168,11 @@ beforeEach(() => {
     runTool: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
     fleet: inertFleet(),
     attention: inertAttention(),
-    delivery: inertDelivery({ forge: () => forge, git }),
+    delivery: inertDelivery({ forge: () => forge, git, cleanup: (runId) => {
+        cleaned.push(runId);
+        return Promise.reject(new Error("no cleanup runner in this test"));
+      },
+    }),
     sched: inertSched(),
     restart: inertRestart(db, info),
     lavish: inertLavish(),
@@ -429,6 +443,46 @@ describe("merge: the merge verb's gate reads", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM approvals WHERE consumed_at IS NOT NULL").get()).toEqual({ n: 0 });
     expect(state()).toBe("ready");
     expect(staleEvents().map((e) => [e.transition, Object.keys(e.changed)])).toEqual([["merge", ["delivered"]]]);
+  });
+});
+
+describe("merge: a proven merge after the run ended", () => {
+  test("a PR GitHub already reads merged, the run cancelled during the gate's read: not revived, the merge is kept as a divergence", async () => {
+    readyAtA();
+    github.pr = pr(HEAD_A, { state: "merged", mergeSha: MERGED, mergeable: null });
+    github.pullGate = barrier();
+    const gate = github.pullGate;
+    const replying = call("merge", { task: "t1" }, "human");
+    await gate.reached;
+    tx(db, () => cancelRun(db, getRunWithPolicy(db, "r1")!, "you cancelled it", "cli", now));
+    gate.open();
+    const reply = await replying;
+    expect(reply.ok).toBe(true);
+    expect(reply.data).toMatchObject({ merged: "after_end", state: "cancelled", sha: MERGED });
+    expect(state()).toBe("cancelled");
+    expect(cleaned).toEqual([]);
+    expect(staleEvents()).toEqual([]);
+    expect(count("run.merged_after_end")).toBe(1);
+    expect(db.query("SELECT higher, lower FROM divergences WHERE run_id = 'r1' AND resolved_at IS NULL").all()).toEqual([{ higher: "github", lower: "run" }]);
+  });
+
+  test("the run cancelled while GitHub merges: the merge is proven, the run not revived, a divergence asks", async () => {
+    readyAtA();
+    github.mergeGate = barrier();
+    const gate = github.mergeGate;
+    const replying = call("merge", { task: "t1" }, "human");
+    await gate.reached;
+    tx(db, () => cancelRun(db, getRunWithPolicy(db, "r1")!, "you cancelled it", "cli", now));
+    gate.open();
+    const reply = await replying;
+    expect(reply.ok).toBe(true);
+    expect(reply.data).toMatchObject({ merged: "after_end", state: "merged", sha: MERGED });
+    expect(db.query("SELECT state, merge_sha FROM merges WHERE task_id = 't1'").all()).toEqual([{ state: "merged", merge_sha: MERGED }]);
+    expect(state()).toBe("cancelled");
+    expect(cleaned).toEqual([]);
+    expect(count("run.landed")).toBe(0);
+    expect(count("run.merged_after_end")).toBe(1);
+    expect(db.query("SELECT higher, lower FROM divergences WHERE run_id = 'r1' AND resolved_at IS NULL").all()).toEqual([{ higher: "github", lower: "run" }]);
   });
 });
 
