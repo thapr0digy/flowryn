@@ -111,7 +111,7 @@ All rules stay where they decide today (`src/lifecycle/prompt-wedge.ts`, `src/re
 - Relinking an open row to a new item (the dedupe branch, after a dismissal) appends a `run.explanation_relinked` event (`{explanation, from, item}`).
 - `show --timeline` on a target that is no run, no task with a policy and no queued task refuses with `not_found` (exit 4), not an empty timeline.
 - `resolveRunItems` returns the resolved ids (`RETURNING id`) to close the explanations they carried; its count is unchanged.
-- The pools rule records each full pool's holders by task id; the order is by task id, so the same holders in another order are not a change.
+- The pools rule records each full pool's holders by task id, and its job leases as `<kind> <job id>` (`verify v3`); the order is by holder, so the same holders in another order are not a change.
 
 ### Out of scope
 
