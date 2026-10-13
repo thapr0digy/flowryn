@@ -72,16 +72,24 @@ function signatureOf(x: NewExplanation, reason: string, facts: Fact[], unblock: 
 /**
  * Record a decision about a run. Call inside the deciding transaction. When
  * the run already has an open explanation of this kind with the same rule,
- * reason, facts and unblock, nothing is written (null); a different one is
- * closed as superseded. Returns the new row's id.
+ * reason, facts and unblock, no row is written (null), though a new item for
+ * the same wait (one opened after a dismissal) takes over its link; a
+ * different one is closed as superseded. Returns the new row's id.
  */
 export function explain(db: Db, x: NewExplanation): number | null {
   const reason = sanitizeLine(x.reason, MAX_REASON_CHARS);
   const facts = x.facts.map((f) => ({ name: f.name, value: sanitizeLine(f.value, MAX_VALUE_CHARS), at: f.at }));
   const unblock = x.unblock.map((u) => ({ by: u.by, action: sanitizeLine(u.action, MAX_VALUE_CHARS) }));
   const signature = signatureOf(x, reason, facts, unblock);
-  const open = db.query("SELECT id, signature FROM explanations WHERE run_id = ?1 AND kind = ?2 AND closed_at IS NULL ORDER BY id").all(x.run.id, x.kind) as { id: number; signature: string }[];
-  if (!x.settled && open.length === 1 && open[0]!.signature === signature) return null;
+  const open = db.query("SELECT id, signature, item_id FROM explanations WHERE run_id = ?1 AND kind = ?2 AND closed_at IS NULL ORDER BY id").all(x.run.id, x.kind) as {
+    id: number;
+    signature: string;
+    item_id: string | null;
+  }[];
+  if (!x.settled && open.length === 1 && open[0]!.signature === signature) {
+    if (x.itemId && open[0]!.item_id !== x.itemId) db.query("UPDATE explanations SET item_id = ?2 WHERE id = ?1").run(open[0]!.id, x.itemId);
+    return null;
+  }
   const event = appendEvent(db, { source: x.source, kind: "run.explained", runId: x.run.id, taskId: x.run.task_id, payload: { kind: x.kind, rule: x.rule }, ts: x.now });
   const result = db
     .query(
@@ -125,8 +133,10 @@ export function closeItemExplanations(db: Db, itemIds: readonly string[], by: st
 
 /**
  * Close what no longer waits: every open explanation of a run that ended, one
- * whose item resolved by any path, and one with no item whose run no longer
- * waits for a grant. One event when anything closed. Runs in its own
+ * whose item resolved by any path, one whose item was dismissed and whose
+ * condition is gone (a dialog row off `blocked_dialog`, a resume row off
+ * `dead`), and one with no item whose run the scheduler no longer considers
+ * for a grant (its `candidates()` filter). One event when anything closed. Runs in its own
  * transaction (the scheduler, each pass).
  */
 export function sweepExplanations(db: Db, now: number): number {
@@ -135,12 +145,15 @@ export function sweepExplanations(db: Db, now: number): number {
       `SELECT x.id, CASE
            WHEN r.id IS NULL OR r.state IN ('cleaned','failed','cancelled') THEN 'run ended'
            WHEN i.state = 'resolved' THEN COALESCE(i.resolved_by, 'item resolved')
+           WHEN i.state = 'dismissed' THEN 'item dismissed; no longer waiting'
            ELSE 'no longer waiting' END AS why
        FROM explanations x LEFT JOIN runs r ON r.id = x.run_id LEFT JOIN items i ON i.id = x.item_id
        WHERE x.closed_at IS NULL AND (
          r.id IS NULL OR r.state IN ('cleaned','failed','cancelled')
          OR i.state = 'resolved'
-         OR (x.item_id IS NULL AND x.kind IN ('capacity','resume') AND NOT (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL)))`,
+         OR (i.state = 'dismissed' AND ((x.kind = 'dialog' AND r.liveness != 'blocked_dialog') OR (x.kind = 'resume' AND r.liveness != 'dead')))
+         OR (x.item_id IS NULL AND x.kind IN ('capacity','resume')
+             AND NOT ((r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead'))))`,
     )
     .all() as { id: number; why: string }[];
   for (const row of rows) db.query("UPDATE explanations SET closed_at = ?2, closed_by = ?3 WHERE id = ?1").run(row.id, now, row.why);

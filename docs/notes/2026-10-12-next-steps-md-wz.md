@@ -58,7 +58,7 @@ The trust rule runs on every pass while the worker has not started; dedupe keeps
 | `capacity.quota_floor` | quota percent, floor, window resets at (observed when the verdict last changed) | flowryn: starts it once a reading is at or over the floor; captain: `flowryn capacity resume --harness claude` |
 | `capacity.harness_unverified` | harness and version, or why it is missing | flowryn: an automatic contract check is running/queued (when one is); captain: `flowryn doctor --contracts --harness H` (or `flowryn init` for a missing harness) |
 | `capacity.host_check` | the host verdict's reason, free memory and load (as recorded when it flipped) | flowryn: grants once the host check passes (its thresholds) |
-| `capacity.pools_full` | each full pool: used/cap and the tasks holding it | flowryn: grants when a slot in the pool frees (a holder's stage or run ends); captain: raise `[capacity.pools] <pool>` |
+| `capacity.pools_full` | each full pool: used/cap and the tasks holding it | flowryn: grants when a slot in the pool frees (a holder's stage or run ends); captain: raise `[capacity] <pool>` in config.toml |
 
 A pool's holders are facts, so a new holder is a new row: that is a changed input, written once per change.
 
@@ -74,10 +74,10 @@ A pool's holders are facts, so a new holder is a new row: that is a changed inpu
 
 ### Closing
 
-- **Item-linked rows** (`dialog`, `resume.refused`): `resolveRunItems` closes the rows whose `item_id` it just resolved, with the item's own `resolved_by` (`hook post-tool`, `dialog gone`, `run.died`, `run.resume_requested`, `run.cancelled`, …). A leader dismissing the item does not close the row: the dialog may still be up.
+- **Item-linked rows** (`dialog`, `resume.refused`): `resolveRunItems` closes the rows whose `item_id` it just resolved, with the item's own `resolved_by` (`hook post-tool`, `dialog gone`, `run.died`, `run.resume_requested`, `run.cancelled`, …). A leader dismissing the item does not close the row: the dialog may still be up. When the same wait opens a new item (the trust rule after a dismissal), `explain`'s dedupe moves the open row's `item_id` to it, so the new item's resolution closes the row.
 - **Grant**: the scheduler's activation transaction closes the run's open `capacity` and `resume` rows.
 - **Run end**: `failRun` and `cancelRun` close every open row of the run.
-- **Sweep** (each scheduler pass, before the grants): an open row with no item whose run is terminal, or no longer waiting for a grant, closes (`closed_by = no longer waiting`), with one `run.explanations_closed` event for the pass. So `show` never says "waiting" for a run that is not.
+- **Sweep** (each scheduler pass, before the grants): an open row whose run is terminal closes (`run ended`); one whose item resolved by any path closes with the item's `resolved_by`; one whose item was dismissed closes once its condition is gone, a `dialog` row when the run's liveness is no longer `blocked_dialog` and a `resume` row when it is no longer `dead` (`item dismissed; no longer waiting`); and an open `capacity` or `resume` row with no item closes when the scheduler's `candidates()` filter no longer selects its run (not `stage_state = waiting` or a `pending_launch`, or dead with no `pending_launch`: a dead run waiting between stages is not granted until `flowryn resume`) (`no longer waiting`). One `run.explanations_closed` event for the pass. So `show` never says "waiting" for a run that is not.
 
 ### `flowryn show`
 

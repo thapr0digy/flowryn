@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Args } from "../../src/api/verbs.ts";
-import { explain, openExplanations, taskExplanations, type ExplanationRow, type NewExplanation } from "../../src/attention/explanations.ts";
+import { explain, openExplanations, sweepExplanations, taskExplanations, type ExplanationRow, type NewExplanation } from "../../src/attention/explanations.ts";
 import { resolveRunItems } from "../../src/attention/items.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
@@ -70,6 +70,9 @@ function show(target: string, flags: { why?: boolean; timeline?: boolean; full?:
   const ctx = { db, config: parseConfig("", HOME), now, caller: { role: "human" as const, runId: null, taskId: null } };
   return (spec.read!(ctx, args) as { data: Record<string, unknown> }).data;
 }
+
+const dismiss = (itemId: string) => db.query("UPDATE items SET state = 'dismissed', resolved_by = 'dismissed by leader', resolved_at = 0 WHERE id = ?1").run(itemId);
+const sweep = (now: number) => tx(db, () => sweepExplanations(db, now));
 
 const rows = (runId: string) => db.query("SELECT * FROM explanations WHERE run_id = ?1 ORDER BY id").all(runId) as ExplanationRow[];
 
@@ -195,6 +198,37 @@ describe("dialog: a blocked-dialog hold", () => {
     tx(db, () => resolveRunItems(db, "r1", ["trust_dialog"], "run.worker_started", clock));
     expect(rows("r1")[0]).toMatchObject({ closed_by: "run.worker_started" });
   });
+  test("a dismissed trust item does not close the row; the next item for the same wait takes over its link and closes it", async () => {
+    let clock = Date.now();
+    db.query("UPDATE runs SET launched_at = ?1, liveness = 'starting' WHERE id = 'r1'").run(clock);
+    clock += DEFAULT_TIMING.trust_wedge_ms + 1_000;
+    const rec = reconciler({ now: () => clock, foreground: 999999 });
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    const first = rows("r1")[0]!.item_id!;
+    dismiss(first);
+    expect(sweep(clock)).toBe(0);
+    clock += 10_000;
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    rec.stop();
+    const [row] = rows("r1");
+    expect(rows("r1")).toHaveLength(1);
+    expect(row!.item_id).not.toBe(first);
+    expect(row!.closed_at).toBeNull();
+    tx(db, () => resolveRunItems(db, "r1", ["trust_dialog"], "run.worker_started", clock));
+    expect(rows("r1")[0]).toMatchObject({ closed_by: "run.worker_started" });
+  });
+
+  test("a dismissed prompt item keeps its row while the dialog holds; the sweep closes it once the run is off blocked_dialog", () => {
+    const t = Date.now();
+    tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: t }, t));
+    dismiss(rows("r1")[0]!.item_id!);
+    expect(sweep(t + 1_000)).toBe(0);
+    expect(show("t1").waiting).toMatch(/^a confirmation dialog is up in pane w:1/);
+    db.query("UPDATE runs SET liveness = 'busy' WHERE id = 'r1'").run();
+    expect(sweep(t + 2_000)).toBe(1);
+    expect(rows("r1")[0]).toMatchObject({ closed_by: "item dismissed; no longer waiting", closed_at: t + 2_000 });
+    expect(show("t1").waiting).toBeUndefined();
+  });
 });
 
 describe("capacity: a scheduler wait", () => {
@@ -262,6 +296,18 @@ describe("capacity: a scheduler wait", () => {
     const open = openExplanations(db, "r2");
     expect(open.map((r) => [r.rule, r.reason])).toEqual([["capacity.host_check", "the host check fails: free memory 1 GB under 8 GB"]]);
     expect(JSON.parse(open[0]!.unblock)).toEqual([{ by: "flowryn", action: "grants once the host check passes (8 GB free, load per core under 1.5)" }]);
+  });
+
+  test("a waiting run whose worker dies with no launch pending is no scheduler candidate, so its capacity row is swept", async () => {
+    const clock = 3_500_000;
+    waitForGpu("r3", clock);
+    const s = scheduler({ now: () => clock });
+    await s.passNow();
+    s.stop();
+    expect(openExplanations(db, "r2")).toHaveLength(1);
+    db.query("UPDATE runs SET liveness = 'dead', pending_launch = NULL WHERE id = 'r2'").run();
+    expect(sweep(clock + 1_000)).toBe(1);
+    expect(rows("r2")[0]).toMatchObject({ rule: "capacity.pools_full", closed_by: "no longer waiting" });
   });
 
   test("a run that stops waiting without a grant is swept on the next pass; a cancel closes its rows at once", async () => {
@@ -335,5 +381,17 @@ describe("resume: an automatic resume, deferred or refused", () => {
     expect(why!.unblock).toEqual(["leader: flowryn resume t1", "leader: flowryn cancel t1"]);
     tx(db, () => resolveRunItems(db, "r1", ["failure_needs_you"], "run.resume_requested", Date.now()));
     expect(taskExplanations(db, "t1").map((r) => [r.rule, r.closed_by])).toEqual([["resume.refused", "run.resume_requested"]]);
+  });
+
+  test("a dismissed refusal keeps its row while the run is dead; the sweep closes it once the run is live again", async () => {
+    db.query("UPDATE runs SET resume_count = 1 WHERE id = 'r1'").run();
+    const rec = reconciler({ now: Date.now });
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    rec.stop();
+    dismiss(rows("r1")[0]!.item_id!);
+    expect(sweep(Date.now())).toBe(0);
+    db.query("UPDATE runs SET liveness = 'busy' WHERE id = 'r1'").run();
+    expect(sweep(Date.now())).toBe(1);
+    expect(rows("r1")[0]).toMatchObject({ rule: "resume.refused", closed_by: "item dismissed; no longer waiting" });
   });
 });
