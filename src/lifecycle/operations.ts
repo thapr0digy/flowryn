@@ -66,7 +66,7 @@ export function latestOperation(db: Db, runId: string): OperationRow | null {
   return db.query("SELECT * FROM operations WHERE run_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1").get(runId) as OperationRow | null;
 }
 
-/** The run's newest operation escalated and its P1 is still open: nothing happens to the run by itself until you act. */
+/** The run's newest operation escalated and its P1 is still open or presented: nothing happens to the run by itself until you act. */
 export function heldByEscalation(db: Db, runId: string): boolean {
   const op = latestOperation(db, runId);
   if (op?.phase !== "escalated" || !op.item_id) return false;
