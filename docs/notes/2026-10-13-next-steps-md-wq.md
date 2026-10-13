@@ -42,7 +42,7 @@ The file is JSON, `format: "flowryn-diag/1"`, written with mode 0600 and refused
 | `exported_at`, `flowryn` | when, and the daemon's version and build (or `read-only fallback`) |
 | `text` | `redacted` or `included` |
 | `run` | the run row, without `token_hash`; `stage_note` is free text and redacted |
-| `stages` | the frozen workflow (`id`, `gate`, `skill`, `pools` per stage), the current stage and its state, and the run's pool leases (granted/released per stage) |
+| `stages` | the frozen workflow (`id`, `gate`, `skill`, `pools`, `fresh` per stage), the current stage and its state, and the run's pool leases (granted/released per stage) |
 | `gates` | the run's gates; `feedback`, `comment` and `decided` redacted |
 | `decisions` | the run's decisions; `question`, `options`, `answer`, `context`, `recommendation`, `rationale`, `note` and `blocks` redacted |
 | `explanations` | the run's rows, open and closed, facts and unblock parsed |
