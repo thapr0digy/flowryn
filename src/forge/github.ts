@@ -262,7 +262,7 @@ function enc(part: string): string {
  * tests and the lab) gets none, so a credential never reaches it. No token is
  * fine too: a public repository answers without one.
  */
-export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string | null, apiUrl: string, webUrl: string): TokenSource {
+export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string | null, apiUrl: string, webUrl: string, ghTimeoutMs = GH_TOKEN_TIMEOUT_MS): TokenSource {
   const apiHost = hostOf(apiUrl);
   const webHost = hostOf(webUrl);
   const trusted = apiHost === "api.github.com" || apiHost === webHost;
@@ -276,7 +276,7 @@ export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string 
     if (cached !== undefined) return cached;
     cached = null;
     if (!gh) return null;
-    const result = await runBounded([gh, "auth", "token", "--hostname", webHost], { label: "gh auth token", timeoutMs: GH_TOKEN_TIMEOUT_MS });
+    const result = await runBounded([gh, "auth", "token", "--hostname", webHost], { label: "gh auth token", timeoutMs: ghTimeoutMs });
     if (result.code === 0 && result.stdout.trim().length > 0) cached = result.stdout.trim();
     return cached;
   };

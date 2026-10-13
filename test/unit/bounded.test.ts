@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
+import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, parseEtime, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
 
 /**
  * The daemon's bounded external commands (src/runtime/bounded.ts) against real
@@ -175,13 +175,13 @@ describe("runBounded outside the daemon (the CLI's group)", () => {
   });
 });
 
-describe("recoverOwnedProcesses (the next daemon's start)", () => {
-  function entry(dir: string, pid: number, spawnedAt: number, label = "left"): string {
-    const path = join(dir, `${pid}.json`);
-    writeFileSync(path, JSON.stringify({ pid, spawned_at: spawnedAt, argv0: "sh", label }));
-    return path;
-  }
+function writeEntry(dir: string, pid: number, spawnedAt: number, label = "left"): string {
+  const path = join(dir, `${pid}.json`);
+  writeFileSync(path, JSON.stringify({ pid, spawned_at: spawnedAt, argv0: "sh", label }));
+  return path;
+}
 
+describe("recoverOwnedProcesses (the next daemon's start)", () => {
   test("a recorded live group is ended, the entry removed, and an unrelated process left alone", async () => {
     const ledger = tempDir();
     const dir = tempDir();
@@ -190,7 +190,7 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
     const leader = Bun.spawn(["/bin/sh", "-c", `sleep 60 & echo $! > ${dir}/child; wait`], { detached: true, stdout: "ignore", stderr: "ignore" });
     strays.push(leader.pid);
     const child = await pidFrom(join(dir, "child"));
-    const path = entry(ledger, leader.pid, spawnedAt, "docker ps");
+    const path = writeEntry(ledger, leader.pid, spawnedAt, "docker ps");
     const found = await recoverOwnedProcesses(ledger, { graceMs: 500 });
     expect(found.ended).toEqual([{ pid: leader.pid, label: "docker ps" }]);
     expect(found.failed).toEqual([]);
@@ -204,7 +204,7 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
     const ledger = tempDir();
     const proc = Bun.spawn(["/usr/bin/true"]);
     await proc.exited;
-    const path = entry(ledger, proc.pid, Date.now());
+    const path = writeEntry(ledger, proc.pid, Date.now());
     const found = await recoverOwnedProcesses(ledger);
     expect(found.gone).toEqual([{ pid: proc.pid, label: "left" }]);
     expect(existsSync(path)).toBe(false);
@@ -213,7 +213,7 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
   test("a live group leader that started outside the entry's window is another process: dropped, left running", async () => {
     const ledger = tempDir();
     const other = unrelated();
-    entry(ledger, other, Date.now() - 3_600_000);
+    writeEntry(ledger, other, Date.now() - 3_600_000);
     const found = await recoverOwnedProcesses(ledger);
     expect(found.gone.map((g) => g.pid)).toEqual([other]);
     expect(found.ended).toEqual([]);
@@ -226,7 +226,7 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
     const spawnedAt = Date.now();
     const notLeader = Bun.spawn(["/bin/sleep", "60"], { stdout: "ignore", stderr: "ignore" });
     strays.push(notLeader.pid);
-    entry(ledger, notLeader.pid, spawnedAt);
+    writeEntry(ledger, notLeader.pid, spawnedAt);
     const found = await recoverOwnedProcesses(ledger);
     expect(found.gone.map((g) => g.pid)).toEqual([notLeader.pid]);
     expect(alive(notLeader.pid)).toBe(true);
@@ -245,4 +245,14 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
     const found = await recoverOwnedProcesses(join(tempDir(), "absent"));
     expect(found).toEqual({ ended: [], gone: [], failed: [], unreadable: [] });
   });
+});
+
+test("ps etime reads as elapsed ms in every form ps prints, and garbage as null", () => {
+  expect(parseEtime("00:05")).toBe(5_000);
+  expect(parseEtime("12:34")).toBe((12 * 60 + 34) * 1_000);
+  expect(parseEtime("01:02:03")).toBe((3_600 + 120 + 3) * 1_000);
+  expect(parseEtime("2-01:00:00")).toBe((2 * 24 + 1) * 3_600_000);
+  expect(parseEtime("  00:01 ")).toBe(1_000);
+  expect(parseEtime("")).toBeNull();
+  expect(parseEtime("soon")).toBeNull();
 });

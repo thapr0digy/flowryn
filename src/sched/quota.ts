@@ -86,14 +86,14 @@ export function parseQuota(text: string): QuotaReading {
  * Run quota-axi once (no shell, a timeout). quota-axi is a node script, so
  * node's directory leads PATH, as for lavish-axi in doctor.
  */
-export async function probeQuota(tool: string | null, node: string | null): Promise<QuotaReading> {
+export async function probeQuota(tool: string | null, node: string | null, timeoutMs = PROBE_TIMEOUT_MS): Promise<QuotaReading> {
   if (!tool) return { state: "unknown", detail: "quota-axi is not installed" };
   const path = [node ? dirname(node) : null, dirname(tool), process.env.PATH ?? "/usr/bin:/bin"].filter(Boolean).join(":");
   try {
-    const result = await runBounded([tool, ...QUOTA_ARGS], { label: "quota-axi", timeoutMs: PROBE_TIMEOUT_MS, env: { ...process.env, PATH: path }, maxOutputBytes: MAX_OUTPUT + 1 });
+    const result = await runBounded([tool, ...QUOTA_ARGS], { label: "quota-axi", timeoutMs, env: { ...process.env, PATH: path }, maxOutputBytes: MAX_OUTPUT + 1 });
     if (result.spawnError !== null) throw new Error(result.spawnError);
     const { stdout: out, stderr: err, code } = result;
-    if (result.timedOut) return { state: "unknown", detail: `quota-axi took over ${PROBE_TIMEOUT_MS / 1000} s` };
+    if (result.timedOut) return { state: "unknown", detail: `quota-axi took over ${timeoutMs / 1000} s` };
     if (result.incomplete) return { state: "unknown", detail: out.length > MAX_OUTPUT ? "quota-axi printed over 1 MB" : `quota-axi ${result.incomplete}` };
     if (code !== 0) return { state: "unknown", detail: `quota-axi exited ${code}${err.trim() ? `: ${sanitizeLine(err.trim().split("\n")[0]!, 120)}` : ""}` };
     if (out.length > MAX_OUTPUT) return { state: "unknown", detail: "quota-axi printed over 1 MB" };

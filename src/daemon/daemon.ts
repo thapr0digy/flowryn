@@ -99,6 +99,10 @@ async function runTool(path: string | null, args: string[], cwd?: string) {
   return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
 }
 
+function ownedName(p: { pid: number; label: string }): string {
+  return `${p.label} (pid ${p.pid})`;
+}
+
 /**
  * Startup: end the external commands a force-killed daemon left running (by
  * their recorded identity), and record what was ended, what could not be,
@@ -108,9 +112,8 @@ async function recoverOwned(db: Db, dir: string, log: Log): Promise<void> {
   try {
     const found = await recoverOwnedProcesses(dir);
     if (found.ended.length + found.failed.length + found.unreadable.length === 0) return;
-    const name = (p: { pid: number; label: string }) => `${p.label} (pid ${p.pid})`;
-    if (found.ended.length > 0) log(`owned: ended ${found.ended.map(name).join(", ")}, left running by the last daemon`);
-    if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${name(f)}: ${f.detail}`).join("; ")}; kept for the next start`);
+    if (found.ended.length > 0) log(`owned: ended ${found.ended.map(ownedName).join(", ")}, left running by the last daemon`);
+    if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${ownedName(f)}: ${f.detail}`).join("; ")}; kept for the next start`);
     if (found.unreadable.length > 0) log(`owned: cannot read ${found.unreadable.join(", ")}; kept`);
     tx(db, () => appendEvent(db, { source: "daemon", kind: "daemon.owned_recovery", payload: { ended: found.ended, failed: found.failed, unreadable: found.unreadable } }));
   } catch (error) {
