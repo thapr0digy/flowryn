@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
-import { effectiveConfig, redactConfig, REDACTED, TOKEN_LIKE } from "../config/effective.ts";
+import { effectiveConfig, redactConfig, REDACTED, redactUrlSecrets, TOKEN_LIKE } from "../config/effective.ts";
 import { findRun } from "./runs.ts";
 import { runWorkflow } from "./stages.ts";
 
@@ -51,9 +51,14 @@ function hidden(value: unknown): string {
   return `<redacted: ${text.length} chars>`;
 }
 
-/** Every string: token-looking runs replaced. Applied to the whole export, whatever --include-text says. */
+/**
+ * Every string: URL credentials and token-looking runs replaced. Applied to
+ * the whole export, whatever --include-text says, so tool and stderr text
+ * kept as-is (a failure reason, a channel error, a cleanup detail) still
+ * never carries a credential.
+ */
 function scrubTokens(value: unknown): unknown {
-  if (typeof value === "string") return value.replace(TOKEN_ANYWHERE, REDACTED);
+  if (typeof value === "string") return redactUrlSecrets(value).replace(TOKEN_ANYWHERE, REDACTED);
   if (Array.isArray(value)) return value.map(scrubTokens);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubTokens(v)]));
   return value;
@@ -84,6 +89,22 @@ function hideExplanation(x: Record<string, unknown>, quoted: readonly string[]):
     ? x.facts.map((f: Record<string, unknown>) => (SCREEN_FACTS.has(String(f?.name)) ? { ...f, value: hidden(f.value) } : f))
     : x.facts;
   return hidePayload({ ...x, facts, signature: hidden(x.signature) }, quoted) as Record<string, unknown>;
+}
+
+/**
+ * The cancel reasons Flowryn itself writes (`flowryn cancel` without
+ * --reason, src/lifecycle/leader-verbs.ts; an accepted backlog edit,
+ * src/lifecycle/divergences.ts). Any other reason is the caller's own words.
+ */
+const GENERATED_CANCEL_REASON = /^(by [a-z]+|your backlog edit won \(divergence [\w-]+\))$/;
+
+/** An event's payload, redacted: free-text keys, quoted decision and gate texts, and a cancel reason someone typed. */
+function hideEvent(kind: string, payload: unknown, quoted: readonly string[]): unknown {
+  const hiddenPayload = hidePayload(payload, quoted);
+  if (kind !== "run.cancelled" || !payload || typeof payload !== "object") return hiddenPayload;
+  const reason = (payload as Record<string, unknown>).reason;
+  if (typeof reason !== "string" || GENERATED_CANCEL_REASON.test(reason)) return hiddenPayload;
+  return { ...(hiddenPayload as Record<string, unknown>), reason: hidden(reason) };
 }
 
 function parsed(text: string): unknown {
@@ -124,7 +145,7 @@ export function diagExport(ctx: ReadCtx, target: string, includeText: boolean): 
     : [...decisions.flatMap((d) => DECISION_TEXT.map((c) => d[c])), ...gates.flatMap((g) => GATE_TEXT.map((c) => g[c]))].filter(
         (t): t is string => typeof t === "string" && t.length >= MIN_QUOTED_CHARS,
       );
-  const events = rawEvents.map((e) => ({ ...e, payload: includeText ? parsed(e.payload) : hidePayload(parsed(e.payload), quoted) }));
+  const events = rawEvents.map((e) => ({ ...e, payload: includeText ? parsed(e.payload) : hideEvent(e.kind, parsed(e.payload), quoted) }));
   const info = ctx.info;
   const out = {
     format: DIAG_FORMAT,

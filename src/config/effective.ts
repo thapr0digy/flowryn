@@ -148,6 +148,15 @@ const NOT_SECRET_PATHS = new Set(["github.token_env"]);
 export const TOKEN_LIKE = /\b(gh[opusr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{8,}/;
 const SECRET_FLAG = /^--?[\w-]*(token|secret|passw(or)?d|api[-_]?key|credential|private[-_]?key)[\w-]*$/i;
 const SECRET_FLAG_VALUE = /^(--?[\w-]*(?:token|secret|passw(?:or)?d|api[-_]?key|credential|private[-_]?key)[\w-]*)=.*/i;
+/** A URL's userinfo (`user:pass@`, `user@`): a credential wherever a URL carries one. */
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi;
+/** A URL query parameter whose name looks secret (`?access_token=…`, `&sig=…`). */
+const SECRET_QUERY_PARAM = /([?&][^=&#\s]*(?:token|secret|passw(?:or)?d|api[-_]?key|access[-_]?key|credential|signature|sig|auth)[^=&#\s]*=)[^&#\s]*/gi;
+
+/** A URL's credentials (userinfo and secret-looking query values) replaced by `<redacted>`, in a URL or inside a longer string. */
+export function redactUrlSecrets(text: string): string {
+  return text.replace(URL_USERINFO, `$1${REDACTED}@`).replace(SECRET_QUERY_PARAM, `$1${REDACTED}`);
+}
 
 function redactArgs(args: unknown[]): unknown[] {
   const out: unknown[] = [];
@@ -167,7 +176,7 @@ function redactArgs(args: unknown[]): unknown[] {
     if (withValue) out.push(`${withValue[1]}=${REDACTED}`);
     else if (TOKEN_LIKE.test(arg)) out.push(REDACTED);
     else {
-      out.push(arg);
+      out.push(redactUrlSecrets(arg));
       hideNext = SECRET_FLAG.test(arg);
     }
   }
@@ -182,11 +191,11 @@ function redactValue(value: unknown, path: string[]): unknown {
   if (path.length >= 2 && path[path.length - 2] === "env") return REDACTED;
   if (Array.isArray(value)) return key === "extra_args" ? redactArgs(value) : value.map((item) => redactValue(item, []));
   if (isTable(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactValue(v, [...path, k])]));
-  if (typeof value === "string" && TOKEN_LIKE.test(value)) return REDACTED;
+  if (typeof value === "string") return TOKEN_LIKE.test(value) ? REDACTED : redactUrlSecrets(value);
   return value;
 }
 
-/** The snapshot with every secret-looking value replaced by `<redacted>`; nothing else changes. */
+/** The snapshot with every secret-looking value, and every URL's credentials, replaced by `<redacted>`; nothing else changes. */
 export function redactConfig(sections: Record<string, unknown>): Record<string, unknown> {
   return redactValue(sections, []) as Record<string, unknown>;
 }

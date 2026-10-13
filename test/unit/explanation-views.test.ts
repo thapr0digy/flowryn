@@ -171,6 +171,16 @@ describe("retention", () => {
   });
 });
 
+function addEvent(kind: string, payload: unknown): void {
+  db.query("INSERT INTO events (ulid, ts, source, run_id, task_id, kind, payload) VALUES (?1, ?2, 'cli', 'r1', 't1', ?3, ?4)").run(`u-${kind}-${Math.random()}`, NOW, kind, JSON.stringify(payload));
+}
+
+function cancelReasons(includeText: boolean): string[] {
+  return (read(DIAG_VERBS, "diag.export", { target: "t1", "include-text": includeText }).events as { kind: string; payload: { reason: string } }[])
+    .filter((e) => e.kind === "run.cancelled")
+    .map((e) => e.payload.reason);
+}
+
 describe("diagnostic export (diag.export)", () => {
   const QUESTION = "Should the cache key include the tenant id?";
   const ANSWER = "yes-include-tenant";
@@ -220,6 +230,35 @@ describe("diagnostic export (diag.export)", () => {
     const text = JSON.stringify(exportOf(true));
     for (const kept of [QUESTION, ANSWER, RATIONALE, "please split the page", "private plan", "found the bug"]) expect(text).toContain(kept);
     for (const secret of [TOKEN, "very-secret-value", "another-secret", "ghp_zyxwvutsrqponmlkjihgfedc", "secret-hash"]) expect(text).not.toContain(secret);
+  });
+
+  test("URL credentials never appear, in the config, an event payload or tool and stderr text, with or without --include-text", () => {
+    const config = '[github]\napi_url = "https://user:pass@ghe.example.com/api/v3"\n[workers.claude]\nextra_args = ["--mcp", "https://bot@mcp.example.com/?access_token=qwerty12345"]\n';
+    tx(db, () => {
+      db.query("UPDATE runs SET cleanup_detail = 'git push https://deploy:hunter2@git.example.com/repo.git failed' WHERE id = 'r1'").run();
+      db.query("INSERT INTO gates (id, run_id, stage, kind, state, opened_at, open_detail, channel_reason) VALUES ('g1', 'r1', 'design', 'review', 'open', ?1, 'GET https://x:y-secret@lavish.example.com?sig=abc123 refused', 'fetch https://lavish.example.com/?token=tok-998877 timed out')").run(NOW);
+    });
+    addEvent("run.failed", { reason: "clone of https://ci:pa55word@git.example.com/x.git exited 128", from: "running" });
+    addEvent("gate.channel_failed", { gate: "g1", reason: "POST https://lavish.example.com/pages?api_key=k-5544 refused" });
+    addEvent("run.launch_deferred", { mode: "fresh", reason: "pull https://user:pass@registry.example.com failed" });
+    for (const includeText of [false, true]) {
+      const data = read(DIAG_VERBS, "diag.export", { target: "t1", "include-text": includeText }, config);
+      const text = JSON.stringify(data);
+      for (const secret of ["user:pass", "bot@", "qwerty12345", "hunter2", "y-secret", "abc123", "tok-998877", "pa55word", "k-5544"]) expect(text).not.toContain(secret);
+      expect(((data.config as Record<string, Record<string, unknown>>).github as Record<string, unknown>).api_url).toBe("https://<redacted>@ghe.example.com/api/v3");
+      expect((data.run as Record<string, unknown>).cleanup_detail).toBe("git push https://<redacted>@git.example.com/repo.git failed");
+      expect(text).toContain("clone of https://<redacted>@git.example.com/x.git exited 128");
+      expect(text).toContain("https://lavish.example.com/pages?api_key=<redacted> refused");
+    }
+  });
+
+  test("a cancel reason someone typed is redacted without --include-text; one Flowryn wrote stays", () => {
+    const TYPED = "client asked us to stop the migration work";
+    addEvent("run.cancelled", { reason: TYPED, from: "running" });
+    addEvent("run.cancelled", { reason: "by leader", from: "running" });
+    addEvent("run.cancelled", { reason: "your backlog edit won (divergence d7)", from: "running" });
+    expect(cancelReasons(false)).toEqual([`<redacted: ${TYPED.length} chars>`, "by leader", "your backlog edit won (divergence d7)"]);
+    expect(cancelReasons(true)).toEqual([TYPED, "by leader", "your backlog edit won (divergence d7)"]);
   });
 
   test("an unknown target is not_found", () => {

@@ -12,7 +12,7 @@
 
 One helper, `waitingRuns(db)` (`src/attention/explanations.ts`): every run that is not terminal and has an open explanation, longest waiting first, with its newest open row and how many more it has. Both views read only it; nothing is recomputed from live state.
 
-- **`flowryn fleet`** gets a top-level `waiting` table, one row per waiting run: `task`, `waiting` (the reason, at most 80 characters, plus ` (+N)` when the run has N more open rows) and `next` (the first unblock action, at most 60 characters, with its actor: `flowryn capacity resume --harness claude (captain)`, or `-` when the row names none). The fleet rows themselves are unchanged, so the table stays uniform. No waiting run, no field. Detail stays in `flowryn show <task> --why`.
+- **`flowryn fleet`** gets a top-level `waiting` table, one row per waiting run: `task`, `waiting` (the reason, at most 80 characters, plus ` (+N)` when the run has N more open rows) and `next` (the first unblock action, at most 60 characters, with its actor: `flowryn capacity resume --harness claude (captain)`, or `-` when the row names none). The fleet rows themselves are unchanged, so the table stays uniform. The table is uncapped: it lists every waiting run, so it is the full list the briefing's overflow points at. No waiting run, no field. Detail stays in `flowryn show <task> --why`.
 - **The briefing** gets a section after "Needs you": `Waiting (N):` then one line per run, `- [<task>] waiting: <reason> · next: <action> (<actor>)`, at most 8 lines and `+N more: flowryn fleet`. No waiting run, no section (no "nothing" line: the briefing stays short). The return brief is unchanged.
 
 ### Retention
@@ -54,8 +54,11 @@ Redaction, unless `--include-text`:
 1. A redacted text field becomes `<redacted: N chars>`, so its presence and size stay diagnosable.
 2. Event payloads: values under free-text keys (`body`, `summary`, `text`, `question`, `answer`, `choice`, `options`, `context`, `recommend`, `recommendation`, `rationale`, `note`, `blocks`, `feedback`, `comment`, `line`, `full_line`, `words`, `prompt`, `title`, `screen`) are redacted, and so is any other string that contains one of the run's decision or gate texts (an item line quoting a question).
 3. Explanations: a dialog's `prompt` fact (a line of the worker's screen) and every row's `signature` (which repeats the fact values) are redacted, and so is any string quoting a decision or gate text.
+4. `run.cancelled`'s `reason` is the canceller's own words (`flowryn cancel --reason`) and is redacted, except the reasons Flowryn writes itself (`by <role>`, `your backlog edit won (divergence <id>)`).
 
-Always, with or without the flag: every string anywhere in the export that looks like a token (the `TOKEN_LIKE` pattern `flowryn config` uses: `ghp_…`, `github_pat_…`, `sk-…`, `xox?-…`) becomes `<redacted>`, and the config snapshot is always redacted.
+Always, with or without the flag, on every string anywhere in the export: a URL's userinfo (`https://user:pass@host`, `https://user@host`) becomes `https://<redacted>@host`, a secret-looking query value (`?access_token=`, `api_key`, `sig`, `auth`…) becomes `<redacted>`, and a token-looking run (the `TOKEN_LIKE` pattern `flowryn config` uses: `ghp_…`, `github_pat_…`, `sk-…`, `xox?-…`) becomes `<redacted>`. The config snapshot is always redacted, and `redactConfig` now strips URL credentials too, so `flowryn config` shows `[github] api_url = "https://<redacted>@host"`.
+
+Exported as tool and stderr text, kept without `--include-text` but always through that URL and token scrub: `run.failed`'s `reason`, `gate.channel_failed`'s `reason`, `decision.lavish_ignored`'s `detail`, `run.launch_deferred`'s `reason` or `message`, the gates' `open_detail` and `channel_reason`, and the run's `cleanup_detail`. They are what a diagnosis needs most (which command failed, and how), so they are not hidden whole.
 
 Never included: chat or harness transcripts (only `transcript_path`, a path), steer bodies (the `messages` table is not read), the token, anything outside this run. Nothing is uploaded; the verb prints the path, the counts and whether text was included.
 
@@ -76,7 +79,7 @@ Never included: chat or harness transcripts (only `transcript_path`, a path), st
 
 ## Implementation notes
 
-- The redaction marker is `<redacted: N chars>` for hidden text and `<redacted>` (the `flowryn config` marker) for a token; `TOKEN_LIKE` is now exported from `src/config/effective.ts` and applied to every string in the export, inside longer strings too (only the token is replaced there).
+- The redaction marker is `<redacted: N chars>` for hidden text and `<redacted>` (the `flowryn config` marker) for a token or a URL credential; `TOKEN_LIKE` and `redactUrlSecrets` are exported from `src/config/effective.ts` and applied to every string in the export, inside longer strings too (only the token or credential is replaced there).
 - A decision or gate text is matched inside other event strings only from 8 characters up, so a short option such as `yes` never hides an unrelated string.
 - The run row leaves out `token_hash` and `workflow_def` (the frozen workflow is the `stages` section).
 - The upkeep pass logs a prune only when it deleted something; a prune that throws is logged and the pass goes on.
@@ -99,4 +102,4 @@ explanations_keep_per_run = 200  # 0 sets no per-run cap
 
 ## Tests
 
-`test/unit/explanation-views.test.ts` (fleet and briefing lines, including none when nothing waits and none for an ended run; capacity's `unresolved`; retention by age and by count, `0`, the event, the upkeep pass pruning while it waits; the export's redaction with and without `--include-text`, not found), `test/unit/upkeep-sync.test.ts` (the two keys), `test/integration/diag-export.test.ts` (the real CLI with a daemon and with the read-only fallback: mode 0600, no overwrite, a worker refused, not found, `--out` required).
+`test/unit/explanation-views.test.ts` (fleet and briefing lines, including none when nothing waits and none for an ended run; capacity's `unresolved`; retention by age and by count, `0`, the event, the upkeep pass pruning while it waits; the export's redaction with and without `--include-text`, URL credentials in the config, event payloads and tool text, a typed cancel reason, not found), `test/unit/upkeep-sync.test.ts` (the two keys), `test/integration/diag-export.test.ts` (the real CLI with a daemon and with the read-only fallback: mode 0600, no overwrite, a worker refused, not found, `--out` required).
