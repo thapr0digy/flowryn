@@ -1,7 +1,7 @@
 import type { Fact, Unblock } from "../attention/explanations.ts";
 import type { HostCheckConfig } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
-import { harnessFacts, harnessUnblock, type AutoAttempt, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import { harnessFacts, harnessUnblock, harnessWaitReason, type AutoAttempt, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import { liveCounts } from "./pools.ts";
 import { quotaState } from "./quota.ts";
 import type { HostState } from "./scheduler.ts";
@@ -64,7 +64,7 @@ export function harnessRefusalOf(check: Exclude<HarnessCheck, { state: "verified
   const auto = attempt && check.state === "unverified" ? `an automatic contract check of ${check.harness} ${check.version} is ${attempt.state === "running" ? "running" : `queued (${attempt.wait ?? "waiting"})`}; it launches once that passes` : null;
   return {
     rule: "capacity.harness_unverified",
-    reason: check.state === "missing" ? `the harness cannot launch: ${check.detail}` : `${check.harness} ${check.version} has no passing contract run`,
+    reason: check.state === "missing" ? `the harness cannot launch: ${check.detail}` : harnessWaitReason(check),
     facts: harnessFacts(check, now),
     unblock: harnessUnblock(check, "launches it", auto),
   };

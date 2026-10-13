@@ -9,6 +9,7 @@ import { parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { workflowFor } from "../../src/config/workflows.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import type { HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
 import { LEADER_RUN_VERBS } from "../../src/lifecycle/leader-verbs.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
@@ -474,7 +475,7 @@ describe("resume: an automatic resume, deferred or refused", () => {
 
   test("a resume deferred on an untested harness waits with the contract command; the scheduler's launch closes it", async () => {
     let clock = 4_000_000;
-    const rec = reconciler({ now: () => clock, harnessGate: async (harness) => ({ harness, state: "unverified", version: "1" }) });
+    const rec = reconciler({ now: () => clock, harnessGate: async (harness) => ({ harness, state: "unverified", version: "1", revision: contractRevision(harness), stale: [] }) });
     await rec.reconcileRun(getRun(db, "r1")!, "steady");
     rec.stop();
     reopen();
@@ -492,6 +493,16 @@ describe("resume: an automatic resume, deferred or refused", () => {
     s.stop();
     expect(launches).toEqual(["r1:resume"]);
     expect(rows("r1").map((r) => [r.rule, r.closed_by])).toEqual([["resume.deferred", "granted"]]);
+  });
+
+  test("a resume deferred on a pass at an older contract revision names the stale revision", async () => {
+    const rec = reconciler({ now: () => 4_000_000, harnessGate: async (harness) => ({ harness, state: "unverified", version: "1", revision: 2, stale: [1] }) });
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    rec.stop();
+    reopen();
+    expect(show("t1", {}, 4_000_000).waiting).toMatch(/^the worker died; its one automatic resume waits: claude 1 passed only at contract revision 1, not revision 2 /);
+    const [why] = show("t1", { why: true }, 4_000_000).waiting as Record<string, unknown>[];
+    expect((why!.facts as string[])[0]).toStartWith("claude version: 1: passed only at contract revision 1, not revision 2 (observed ");
   });
 
   test("a second death refuses another resume: the leader's commands are the way on, and flowryn resume closes it with the item", async () => {

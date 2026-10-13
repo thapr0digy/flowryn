@@ -3,7 +3,7 @@ import { appendEvent } from "../db/events.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { explain, type Fact } from "../attention/explanations.ts";
 import { releaseLeases } from "../sched/pools.ts";
-import { contractsCommand, harnessFacts, harnessUnblock, type HarnessCheck } from "./harness-gate.ts";
+import { contractsCommand, harnessFacts, harnessUnblock, harnessWaitReason, type HarnessCheck } from "./harness-gate.ts";
 import { observedTransition } from "./observed.ts";
 import { setLiveness, taskTitle, type RunRow } from "./runs.ts";
 
@@ -38,7 +38,7 @@ export function claimAutoResume(db: Db, seen: RunRow, husk: boolean, now: number
  * when the claim did not apply.
  */
 export function deferAutoResume(db: Db, seen: RunRow, gate: Exclude<HarnessCheck, { state: "verified" }>, husk: boolean, now: number): string | null {
-  const why = gate.state === "missing" ? gate.detail : `${gate.harness} ${gate.version} has no passing contract run`;
+  const why = harnessWaitReason(gate);
   const result = observedTransition(db, seen, "auto_resume_deferred", "reconciler", now, (run) => {
     const updated = db.query("UPDATE runs SET resume_count = resume_count + 1, pending_launch = 'resume', waiting_since = ?2, updated_at = ?2 WHERE id = ?1 AND resume_count = ?3").run(run.id, now, run.resume_count);
     if (updated.changes === 0) return false;

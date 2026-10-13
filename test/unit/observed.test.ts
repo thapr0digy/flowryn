@@ -9,6 +9,7 @@ import { observedTransition, staleFields } from "../../src/lifecycle/observed.ts
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { cancelRun, getRun, setLiveness, type RunRow } from "../../src/lifecycle/runs.ts";
 import type { SteerBus } from "../../src/lifecycle/steers.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
 import { HerdrError } from "../../src/runtime/herdr/client.ts";
 import type { HerdrRuntime, PaneProcesses } from "../../src/runtime/herdr/runtime.ts";
@@ -256,7 +257,7 @@ describe("the automatic resume racing newer truth", () => {
     const db = runDb();
     const gate = barrier();
     const launches: string[] = [];
-    const reconciler = reconcilerFor(db, { processes: husk, ps: () => Promise.resolve(""), harnessGate: () => gate.hold<HarnessCheck>({ harness: "claude", state: "verified", version: "1" }) }, launches);
+    const reconciler = reconcilerFor(db, { processes: husk, ps: () => Promise.resolve(""), harnessGate: () => gate.hold<HarnessCheck>({ harness: "claude", state: "verified", version: "1", revision: contractRevision("claude") }) }, launches);
     const pass = reconciler.reconcileRun(getRun(db, "r1")!, "steady");
     await gate.reached;
     cancel(db);
@@ -291,7 +292,7 @@ describe("the automatic resume racing newer truth", () => {
   test("a cancellation during an untested harness check defers no resume", async () => {
     const db = runDb();
     const gate = barrier();
-    const reconciler = reconcilerFor(db, { processes: husk, ps: () => Promise.resolve(""), harnessGate: () => gate.hold<HarnessCheck>({ harness: "claude", state: "unverified", version: "9" }) });
+    const reconciler = reconcilerFor(db, { processes: husk, ps: () => Promise.resolve(""), harnessGate: () => gate.hold<HarnessCheck>({ harness: "claude", state: "unverified", version: "9", revision: contractRevision("claude"), stale: [] }) });
     const pass = reconciler.reconcileRun(getRun(db, "r1")!, "steady");
     await gate.reached;
     cancel(db);

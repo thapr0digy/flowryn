@@ -8,8 +8,11 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { noteContractPassed } from "../lifecycle/harness-gate.ts";
 import { checkLeaderReport, leaderRecordLine, recordGrant } from "./grant.ts";
+import { reportFacts, type ReportFacts } from "./report.ts";
+import { contractRevision } from "./revision.ts";
 
-export interface PassRecord {
+/** A pass: the harness version, the contract revision it proved and the context it ran on (ReportFacts), and who recorded it. */
+export interface PassRecord extends ReportFacts {
   harness: HarnessId;
   version: string;
   report: string | null;
@@ -21,23 +24,35 @@ export interface PassRecord {
 }
 
 /**
- * Write a passing harness version: the record, its `contract.passed` event,
- * and the settled P1 about it. The verb and the daemon's automatic check
+ * Write a passing harness version at its contract revision: the record, its
+ * `contract.passed` event, and the settled P1 about it. The verb and the daemon's automatic check
  * (src/contracts/auto.ts) both record through here. Call inside a
  * transaction; returns the event's seq.
  */
 export function recordPass(db: Db, pass: PassRecord, now: number): number {
   db.query(
-    `INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, ?4)
-     ON CONFLICT(harness, version) DO UPDATE SET passed_at = excluded.passed_at, report_path = excluded.report_path`,
-  ).run(pass.harness, pass.version, now, pass.report);
+    `INSERT INTO harness_contracts (harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+     ON CONFLICT(harness, version, revision) DO UPDATE SET passed_at = excluded.passed_at, report_path = excluded.report_path,
+       platform = excluded.platform, herdr_version = excluded.herdr_version, launch_profile = excluded.launch_profile`,
+  ).run(pass.harness, pass.version, pass.revision, now, pass.report, pass.platform, pass.herdr_version, pass.launch_profile);
   const event = appendEvent(db, {
     source: pass.source,
     kind: "contract.passed",
-    payload: { harness: pass.harness, version: pass.version, report: pass.report, by: pass.by, build: pass.build, session: pass.session },
+    payload: {
+      harness: pass.harness,
+      version: pass.version,
+      revision: pass.revision,
+      report: pass.report,
+      by: pass.by,
+      build: pass.build,
+      session: pass.session,
+      platform: pass.platform,
+      herdr_version: pass.herdr_version,
+      launch_profile: pass.launch_profile,
+    },
     ts: now,
   });
-  noteContractPassed(db, pass.harness, pass.version, now);
+  noteContractPassed(db, pass.harness, pass.version, pass.revision, now);
   return event.seq;
 }
 
@@ -54,7 +69,10 @@ function grantFor(caller: Caller, config: FlowrynConfig, info: DaemonInfo | unde
  * so it is never parsed from argv; doctor calls it after a passing run. Your
  * own terminal records as it always has; the leader only as recordGrant and
  * its report check allow, and each of its records opens a contract_recorded
- * item so you see it.
+ * item so you see it. The revision recorded is the one the run's report
+ * proved (a leader's must be the daemon's own); your own terminal's record at
+ * another revision is kept but does not verify, and the reply says so
+ * (`current: false`).
  */
 export const recordContract: VerbSpec = {
   name: "contracts.record",
@@ -78,11 +96,13 @@ export const recordContract: VerbSpec = {
     const report = stringArg(args, "report") ?? null;
     const build = stringArg(args, "build") ?? null;
     const byLeader = ctx.caller.role === "leader";
-    if (byLeader) checkLeaderReport(ctx.config().data_dir, report, { harness, version, build: info.build! });
+    const required = contractRevision(harness as HarnessId);
+    if (byLeader) checkLeaderReport(ctx.config().data_dir, report, { harness, version, build: info.build!, revision: required });
+    const facts = reportFacts(report, harness, version);
     const now = ctx.now();
-    const seq = recordPass(ctx.db, { harness: harness as HarnessId, version, report, by: ctx.caller.role, build, session: ctx.caller.session ?? null, source: "cli" }, now);
+    const seq = recordPass(ctx.db, { harness: harness as HarnessId, version, report, by: ctx.caller.role, build, session: ctx.caller.session ?? null, source: "cli", ...facts }, now);
     if (byLeader) openItem(ctx.db, { kind: "contract_recorded", eventSeq: seq, line: leaderRecordLine(harness, version, build), now });
-    return { data: { harness, version, recorded: true, by: ctx.caller.role } };
+    return { data: { harness, version, revision: facts.revision, current: facts.revision === required, required_revision: required, recorded: true, by: ctx.caller.role } };
   },
   async settle(ctx, result) {
     // Launches and resumes that waited for this version can go now.

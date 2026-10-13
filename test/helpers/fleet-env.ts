@@ -1,6 +1,8 @@
 import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tx, type Db } from "../../src/db/db.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
+import { HARNESS_IDS } from "../../src/harness/types.ts";
 import type { Timing } from "../../src/config/workers.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { FakeHerdr, type FakeHerdrOptions } from "./fake-herdr.ts";
@@ -105,6 +107,8 @@ export function makeOriginRepo(dir: string): { origin: string; repo: string } {
 export interface FleetOptions {
   timing?: Partial<Timing>;
   contracts?: boolean;
+  /** The contract revision the seeded passes carry (default this build's; another one is a stale pass). */
+  contractsAt?: number;
   /** The project's delivery mode (default local-only). */
   mode?: "local-only" | "direct-PR" | "no-mistakes";
   /** Give the project a bare origin (a clone of it is the primary checkout) and a GitHub repo URL, acme/web. */
@@ -169,7 +173,9 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   if (options.contracts !== false) {
     const db = h.db();
     tx(db, () => {
-      for (const harness of ["claude", "pi"]) db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, passed_at) VALUES (?1, ?2, ?3)").run(harness, FAKE_VERSION, Date.now());
+      for (const harness of HARNESS_IDS) {
+        db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, revision, passed_at) VALUES (?1, ?2, ?3, ?4)").run(harness, FAKE_VERSION, options.contractsAt ?? contractRevision(harness), Date.now());
+      }
     });
     db.close();
   }

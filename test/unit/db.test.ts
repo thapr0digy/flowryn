@@ -8,6 +8,9 @@ import { backupIfDue, listBackups, BACKUPS_KEPT } from "../../src/db/backup.ts";
 import { MIGRATIONS, type Migration } from "../../src/db/schema.ts";
 import { openItem, resolveItems, findOpenItem, openItems } from "../../src/attention/items.ts";
 import { positionOf, runWorkflow } from "../../src/lifecycle/stages.ts";
+import { parseConfig } from "../../src/config/config.ts";
+import { BASELINE_REVISION } from "../../src/contracts/revision.ts";
+import { checkHarness } from "../../src/lifecycle/harness-gate.ts";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -46,6 +49,11 @@ const DESIGN_TABLES = [
   "notifications",
   "harness_contracts",
 ];
+
+/** The installed versions the migration 23 case checks against. */
+async function installedVersion(harness: string): Promise<string> {
+  return harness === "claude" ? "2.1.300" : "0.90.0";
+}
 
 describe("migrations", () => {
   test("a fresh database gets every section 13 table, in WAL mode with foreign keys", () => {
@@ -289,6 +297,29 @@ describe("migrations", () => {
       VALUES ('r1', 'web-a1', 'build', 'gate', 'x', 'x', '[]', '[]', 's', 1, 2)`)).toThrow();
     expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([]);
     expect(db.query("SELECT operation, closed_at FROM explanations").get()).toEqual({ operation: null, closed_at: null });
+    db.close();
+  });
+
+  test("contract revision: migration 23 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 22));
+    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([23]);
+    expect(db.query("SELECT harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY harness").all()).toEqual([
+      { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, passed_at: 5, report_path: "/r.json", platform: null, herdr_version: null, launch_profile: null },
+      { harness: "pi", version: "0.90.0", revision: BASELINE_REVISION, passed_at: 6, report_path: null, platform: null, herdr_version: null, launch_profile: null },
+    ]);
+    // The upgrade refuses nothing: the gate at revision 1 verifies the carried-over passes; only a bump to 2 makes them stale.
+    const config = parseConfig('[tools]\nclaude = "/x/claude"\npi = "/x/pi"\n', "/h");
+    const baseline = { claude: BASELINE_REVISION, pi: BASELINE_REVISION };
+    expect(await checkHarness(db, config, "claude", installedVersion, baseline)).toMatchObject({ state: "verified", revision: BASELINE_REVISION });
+    expect(await checkHarness(db, config, "pi", installedVersion, baseline)).toMatchObject({ state: "verified" });
+    expect(await checkHarness(db, config, "claude", installedVersion, { ...baseline, claude: 2 })).toMatchObject({ state: "unverified", revision: 2, stale: [BASELINE_REVISION] });
+    db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 7)");
+    expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 8)")).toThrow("UNIQUE");
+    expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.301', 0, 8)")).toThrow("CHECK");
+    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([]);
+    expect(integrityProblems(db)).toEqual([]);
     db.close();
   });
 });

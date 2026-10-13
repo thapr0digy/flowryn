@@ -18,9 +18,11 @@ import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
 import { descendantCommands, isAlive, readIdentity, readProcessTable, terminate } from "../runtime/proc.ts";
 import { contractPrefix } from "./cleanup.ts";
+import { contractContext, type ContractContext } from "./context.ts";
 import { RELEASE_LIMITS, SCRATCH_CONFIG_HEADER, createdWorkspaces, harnessProcesses, releaseOwned, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
 import { piAgentDir, piAgentSource, realPiTable, scriptedPiTable, seedAgentDir, writeScriptedProvider, type PiProfile } from "./pi-profile.ts";
 import { pinDrift, pinHarness, type HarnessPin } from "./pin.ts";
+import { contractRevision } from "./revision.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { request } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
@@ -62,6 +64,10 @@ export interface StepResult {
 export interface ContractResult {
   harness: HarnessId;
   version: string;
+  /** The contract revision this binary proves (src/contracts/revision.ts). */
+  revision: number;
+  /** What the run ran on: platform, Herdr version, launch profile. */
+  context: ContractContext;
   passed: boolean;
   steps: StepResult[];
   scratch: string;
@@ -189,6 +195,9 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   const pin = await pinHarness(options.harness, configured, harnessVersion);
   const { version } = pin;
   options.log(`${options.harness} ${version} pinned at ${pin.binary}`);
+  const revision = contractRevision(options.harness);
+  const context = await contractContext(options.config, options.harness, options.model, options.piProfile);
+  options.log(`contract revision ${revision}; ${context.platform}, herdr ${context.herdr ?? "version unknown"}, launch ${context.launch_profile}`);
   const drift = () => pinDrift(pin, harnessVersion);
   const home = realpathSync(mkdtempSync(join(tmpdir(), "fwc-")));
   const { prefix } = contractPrefix();
@@ -286,7 +295,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     migrate(seed);
     tx(seed, () => {
       seed.query("INSERT INTO leader_lease (id, session_id, harness, epoch, token_hash, claimed_at, heartbeat_at) VALUES (1, 'contract', ?1, 1, ?2, ?3, ?3)").run(options.harness, hashToken(leader), Date.now());
-      seed.query("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, 'scratch')").run(options.harness, version, Date.now());
+      seed.query("INSERT INTO harness_contracts (harness, version, revision, passed_at, report_path) VALUES (?1, ?2, ?3, ?4, 'scratch')").run(options.harness, version, revision, Date.now());
     });
     seed.close();
 
@@ -362,7 +371,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     process.off("SIGTERM", onSignal);
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
-  return { harness: options.harness, version, passed, steps, scratch: home, cleanup: cleanupOutcome };
+  return { harness: options.harness, version, revision, context, passed, steps, scratch: home, cleanup: cleanupOutcome };
 }
 
 /**

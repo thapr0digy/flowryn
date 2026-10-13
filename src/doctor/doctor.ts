@@ -2,7 +2,7 @@ import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync }
 import { basename, dirname } from "node:path";
 import { configProblems, loadConfig, resolveTool, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
-import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion } from "../db/db.ts";
+import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
 import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.ts";
 import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
@@ -14,6 +14,8 @@ import { configSectionProblems } from "../config/effective.ts";
 import { POLICY_MODE_LINES, policyMode } from "../config/policy.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
+import { contractsCommand, unverifiedReason } from "../lifecycle/harness-gate.ts";
+import { BASELINE_REVISION, contractRevision } from "../contracts/revision.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { loadExtensionSource } from "../harness/pi/adapter.ts";
@@ -298,17 +300,32 @@ async function contractChecks(config: FlowrynConfig): Promise<Check[]> {
         checks.push({ check: `contract ${harness}`, status: "warn", detail: `cannot read the version from ${binary} --version` });
         continue;
       }
-      const row = db && schemaVersion(db) >= 2 ? (db.query("SELECT passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2").get(harness, version) as { passed_at: number } | null) : null;
-      checks.push(
-        row
-          ? { check: `contract ${harness}`, status: "ok", detail: `${version} passed ${new Date(row.passed_at).toISOString().slice(0, 10)}` }
-          : { check: `contract ${harness}`, status: "warn", detail: `${version} has no passing contract run, so dispatch refuses it: flowryn doctor --contracts --harness ${harness}` },
-      );
+      checks.push(contractCheck(harness as HarnessId, version, db ? recordedPasses(db, harness, version) : []));
     }
   } finally {
     db?.close();
   }
   return checks;
+}
+
+/** The passes recorded for this harness version, any revision; one from before migration 23 is at the baseline revision. */
+function recordedPasses(db: Db, harness: string, version: string): { revision: number; passed_at: number }[] {
+  const schema = schemaVersion(db);
+  if (schema < 2) return [];
+  const sql =
+    schema >= 23
+      ? "SELECT revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2 ORDER BY revision"
+      : `SELECT ${BASELINE_REVISION} AS revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2`;
+  return db.query(sql).all(harness, version) as { revision: number; passed_at: number }[];
+}
+
+/** The contract check of an installed harness version: a pass at this build's contract revision, or why there is none. */
+export function contractCheck(harness: HarnessId, version: string, passes: { revision: number; passed_at: number }[]): Check {
+  const revision = contractRevision(harness);
+  const current = passes.find((p) => p.revision === revision);
+  if (current) return { check: `contract ${harness}`, status: "ok", detail: `${version} passed ${new Date(current.passed_at).toISOString().slice(0, 10)} at contract revision ${revision}` };
+  const why = unverifiedReason(harness, version, revision, passes.map((p) => p.revision));
+  return { check: `contract ${harness}`, status: "warn", detail: `${why}, so dispatch refuses it: ${contractsCommand(harness)}` };
 }
 
 /** A config that does not say whether macOS notifications are on gets them by default: say so, so it is a choice. */

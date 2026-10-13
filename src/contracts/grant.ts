@@ -3,6 +3,7 @@ import { join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { Role } from "../api/verbs.ts";
 import type { PolicyMode } from "../config/policy.ts";
+import { revisionLabel, storedRevision } from "./revision.ts";
 
 /**
  * Who may record a harness contract pass (design section 5; the leader's part
@@ -73,13 +74,22 @@ function isUnder(path: string, dir: string): boolean {
 
 /**
  * A record must point at the report its run wrote: in `<data_dir>/contracts/`,
- * a passing recording run of this harness, version and build. Not proof
+ * a passing recording run of this harness, version, build and contract
+ * revision (a report from before revisions is at the baseline). Not proof
  * against a forged file (docs/cutover-notes.md), but a confused leader cannot
  * record a failed or verify-only run by mistake, and the daemon's automatic
  * check (src/contracts/auto.ts) records only what its own build proved.
  * Returns why the report does not do, or null when it does.
  */
-export function reportProblem(dataDir: string, report: string | null, expected: { harness: string; version: string; build: string }): string | null {
+export interface ExpectedReport {
+  harness: string;
+  version: string;
+  build: string;
+  /** The daemon's contract revision for the harness (src/contracts/revision.ts). */
+  revision: number;
+}
+
+export function reportProblem(dataDir: string, report: string | null, expected: ExpectedReport): string | null {
   if (!report) return "no --report";
   const dir = join(dataDir, "contracts");
   if (!existsSync(report)) return `${report} does not exist`;
@@ -95,11 +105,13 @@ export function reportProblem(dataDir: string, report: string | null, expected: 
   if (parsed.mode !== "record") return `${report} is a ${String(parsed.mode ?? "unmarked")} run, not a recording one`;
   if (parsed.harness !== expected.harness || parsed.version !== expected.version) return `${report} is for ${String(parsed.harness)} ${String(parsed.version)}`;
   if (parsed.build !== expected.build) return `${report} was written by build ${String(parsed.build)}`;
+  const revision = storedRevision(parsed.revision);
+  if (revision !== expected.revision) return `${report} proves contract ${revisionLabel(revision)}, not this daemon's revision ${expected.revision}`;
   return null;
 }
 
 /** The leader's record: its report must do (reportProblem), or the record is refused. */
-export function checkLeaderReport(dataDir: string, report: string | null, expected: { harness: string; version: string; build: string }): void {
+export function checkLeaderReport(dataDir: string, report: string | null, expected: ExpectedReport): void {
   const problem = reportProblem(dataDir, report, expected);
   if (problem) throw new FlowrynError("not_installed_build", `the leader's record needs its run's report: ${problem}`, "run flowryn doctor --contracts again with the installed build");
 }
