@@ -577,11 +577,12 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     await f.scheduler.passNow();
     expect(f.exitCalls).toEqual([]);
     expect(f.launches).toEqual([]);
-    // What `flowryn resume` opens: a newer operation, which the grant then launches.
-    tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "human", source: "cli", now: Date.now() }));
+    // A newer operation releases it: a stage launch requested again is granted, under that operation.
+    const again = tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "scheduler", source: "daemon", now: Date.now() }));
     await f.scheduler.passNow();
     expect(f.exitCalls).toEqual(["r1"]);
     expect(f.launches).toEqual(["r1:stage"]);
+    expect(f.launchOps).toEqual([again.id]);
     f.db.close();
   });
 });

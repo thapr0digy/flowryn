@@ -184,6 +184,7 @@ const resume: VerbSpec = {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     const now = ctx.now();
     const open = openOperation(ctx.db, run.id);
+    const escalated = heldByEscalation(ctx.db, run.id) !== null;
     // A resume already asked for (the automatic one waiting for its harness) is the same operation: no second one.
     const op = open ?? requestOperation(ctx.db, { id: ctx.ulid, run, kind: "resume", mode: "resume", requestedBy: ctx.caller.role, source: "cli", now });
     ctx.db
@@ -192,6 +193,7 @@ const resume: VerbSpec = {
     // A dead worker holds no slot (design section 11): the scheduler grants its worker slot, and its stage's pools, first.
     const viaScheduler = !holdsLease(ctx.db, run.id, WORKER_POOL);
     if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
+    else if (escalated) ctx.db.query("UPDATE runs SET pending_launch = NULL WHERE id = ?1").run(run.id);
     if (run.state === "failed") {
       // failRun parked the task; take it back to In flight.
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });

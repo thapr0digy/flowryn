@@ -484,6 +484,23 @@ describe("an issued launch with no launcher is judged against its recorded candi
     expect(db.query("SELECT state FROM items WHERE kind = 'operation_escalated'").get()).toEqual({ state: "resolved" });
   });
 
+  test("`flowryn resume` on an escalated stage replacement that holds its worker slot takes its place: one resume, and the grant starts no stage worker over it", async () => {
+    const op = tx(db, () => {
+      const at = Date.now();
+      db.query("UPDATE runs SET liveness = 'starting', proc_pid = NULL, proc_start = NULL, proc_exe = NULL, pending_launch = 'stage', stage_state = 'active' WHERE id = 'r1'").run();
+      db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('worker', 'r1', 'investigate', ?1)").run(at);
+      const requested = requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "scheduler", source: "daemon", now: START + 60_000 });
+      return claimOperation(db, requested.id, { paneId: "w:1", agentName: "flowryn-x" }, "daemon", START + 60_000)!;
+    });
+    const d = daemon({ processes: harness(PID), verifiedHarness: true });
+    await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
+    expect(getOperation(db, op.id)!.phase).toBe("escalated");
+    const resume = envelope("resume", { target: "t1" });
+    expect(await d.gateway.handle(resume)).toMatchObject({ ok: true, data: { operation: resume.ulid } });
+    expect(d.launches).toEqual([`r1:resume:${resume.ulid}`]);
+    expect(getRun(db, "r1")!.pending_launch).toBeNull();
+  });
+
   test("another foreground process in the recorded pane: escalated", async () => {
     const op = issuedLaunch(Date.now() - 60_000);
     const d = daemon({ processes: (paneId) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: 77, processes: [{ pid: 77, cwd: "", name: "vim", argv0: "vim" }] } as PaneProcesses) });
