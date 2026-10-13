@@ -14,6 +14,7 @@ import { activeAutoAttempt } from "../lifecycle/harness-gate.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { HARNESS_IDS } from "../harness/types.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
+import { waitingPointer, waitingRuns } from "./explanations.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -28,6 +29,7 @@ const MAX_NEEDS_LINES = 20;
 const MAX_DUE_NAMES = 5;
 export const COMMANDS_LINE = "Commands: flowryn fleet · flowryn show <id> · flowryn decide <id> <choice> --rationale <why> · flowryn decision list";
 const MAX_DECISION_LINES = 8;
+const MAX_WAITING_LINES = 8;
 
 export interface BriefingInput {
   /** The session the briefing is for; null for your own terminal (`flowryn brief`). */
@@ -134,6 +136,19 @@ function needsLines(db: Db, now: number, ageMs: number, heading: string): { line
   return { lines, listed };
 }
 
+/** Why each waiting run waits, from its recorded explanation; no section when nothing waits (docs/notes/2026-10-13-next-steps-md-wq.md). */
+function waitingLines(db: Db): string[] {
+  const held = waitingRuns(db);
+  if (held.length === 0) return [];
+  const lines = [`Waiting (${held.length}):`];
+  for (const w of held.slice(0, MAX_WAITING_LINES)) {
+    const p = waitingPointer(w);
+    lines.push(`- [${w.task_id}] waiting: ${p.waiting} · next: ${p.next}`);
+  }
+  if (held.length > MAX_WAITING_LINES) lines.push(`+${held.length - MAX_WAITING_LINES} more: flowryn fleet`);
+  return lines;
+}
+
 /** Reserved decisions waiting on you, and what the leader decided since the last briefing (cutover C1). */
 function decisionLines(db: Db, now: number, mark: boolean): string[] {
   const lines = reservedLines(db, now);
@@ -214,6 +229,7 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   const needs = needsLines(db, input.now, input.ageMs, "Needs you");
   const listed = needs.listed;
   lines.push(...needs.lines);
+  lines.push(...waitingLines(db));
   // Before decisionLines, which moves last_briefing_at on.
   lines.push(...restartLines(db));
   lines.push(...recordLines(db));

@@ -18,10 +18,17 @@ const MAIN = join(REPO_ROOT, "src/main.ts");
  * The test homes' no-mistakes: `axi status` prints $FLOWRYN_HOME/nm-status (a
  * test writes the run it wants the watcher to see), `axi abort` is logged to
  * $FLOWRYN_HOME/nm-abort.log, and every call to $FLOWRYN_HOME/nm-calls.log.
- * Nothing reaches the shared no-mistakes daemon.
+ * With $FLOWRYN_HOME/nm-silent present it never answers: it starts a sleeper
+ * that holds its stdout (its pid in nm-silent.pid) and waits on it, as a hung
+ * CLI with a forked helper would. Nothing reaches the shared no-mistakes daemon.
  */
-const FAKE_NO_MISTAKES = `#!/bin/sh
+export const FAKE_NO_MISTAKES = `#!/bin/sh
 echo "$*" >> "$FLOWRYN_HOME/nm-calls.log"
+if [ -f "$FLOWRYN_HOME/nm-silent" ]; then
+  sleep 600 &
+  echo $! > "$FLOWRYN_HOME/nm-silent.pid"
+  wait
+fi
 case "$1 $2" in
   "axi status") [ -f "$FLOWRYN_HOME/nm-status" ] && cat "$FLOWRYN_HOME/nm-status"; exit 0 ;;
   "axi abort") echo "$*" >> "$FLOWRYN_HOME/nm-abort.log"; exit 0 ;;

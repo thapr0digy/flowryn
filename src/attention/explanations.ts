@@ -1,4 +1,4 @@
-import type { Db } from "../db/db.ts";
+import { tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
@@ -212,7 +212,11 @@ function clock(t: number, seconds = false): string {
 }
 
 function age(now: number, since: number): string {
-  const s = Math.max(0, Math.round((now - since) / 1000));
+  return duration(now - since);
+}
+
+function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
   if (s < 90) return `${s}s`;
   if (s < 5400) return `${Math.round(s / 60)}m`;
   return `${Math.round(s / 3600)}h`;
@@ -262,4 +266,102 @@ export function timelineEntry(row: ExplanationRow, now: number, full: boolean): 
   const line = `x${row.id} ${clock(row.opened_at)} ${row.rule} [${row.stage}]: ${row.reason} → ${end}`;
   if (!full) return line;
   return { line, facts: factsOf(row).map((f) => factLine(f, now)), unblock: unblockOf(row).map((u) => `${u.by}: ${u.action}`) };
+}
+
+// --- fleet, briefing and capacity (docs/notes/2026-10-13-next-steps-md-wq.md) ---------------
+
+export interface WaitingRun {
+  task_id: string;
+  run_id: string;
+  /** The run's newest open explanation. */
+  row: ExplanationRow;
+  /** How many more open explanations the run has. */
+  more: number;
+}
+
+/** Every run not ended with an open explanation, longest waiting first, with its newest open row. */
+export function waitingRuns(db: Db): WaitingRun[] {
+  const rows = db
+    .query(
+      `SELECT x.* FROM explanations x JOIN runs r ON r.id = x.run_id
+       WHERE x.closed_at IS NULL AND r.state NOT IN ('cleaned','failed','cancelled')
+       ORDER BY x.id DESC`,
+    )
+    .all() as ExplanationRow[];
+  const byRun = new Map<string, { row: ExplanationRow; count: number; since: number }>();
+  for (const row of rows) {
+    const seen = byRun.get(row.run_id);
+    if (seen) {
+      seen.count += 1;
+      seen.since = Math.min(seen.since, row.opened_at);
+    } else byRun.set(row.run_id, { row, count: 1, since: row.opened_at });
+  }
+  return [...byRun.values()]
+    .toSorted((a, b) => a.since - b.since || a.row.id - b.row.id)
+    .map((w) => ({ task_id: w.row.task_id, run_id: w.row.run_id, row: w.row, more: w.count - 1 }));
+}
+
+/** The terse pointer's two halves: the reason (with `(+N)` for more open rows) and the first unblock with its actor. */
+export function waitingPointer(w: WaitingRun): { waiting: string; next: string } {
+  const next = unblockOf(w.row)[0];
+  return {
+    waiting: `${sanitizeLine(w.row.reason, 80)}${w.more > 0 ? ` (+${w.more})` : ""}`,
+    next: next ? `${sanitizeLine(next.action, 60)} (${next.by})` : "-",
+  };
+}
+
+/** `flowryn capacity`'s `unresolved`: per kind, the open explanations, the longest and the total time they have waited. */
+export function unresolvedLine(db: Db, now: number): string {
+  const rows = db
+    .query(
+      `SELECT x.kind AS kind, COUNT(*) AS n, MIN(x.opened_at) AS oldest, SUM(?1 - x.opened_at) AS total
+       FROM explanations x JOIN runs r ON r.id = x.run_id
+       WHERE x.closed_at IS NULL AND r.state NOT IN ('cleaned','failed','cancelled')
+       GROUP BY x.kind ORDER BY x.kind`,
+    )
+    .all(now) as { kind: string; n: number; oldest: number; total: number }[];
+  if (rows.length === 0) return "-";
+  return rows.map((r) => `${r.kind} ${r.n} (longest ${age(now, r.oldest)}, total ${duration(r.total)})`).join(" · ");
+}
+
+export interface PruneBounds {
+  /** Closed rows older than this many days go; 0 keeps them whatever their age. */
+  keepDays: number;
+  /** Beyond a run's newest this many closed rows, the older ones go; 0 sets no cap. */
+  keepPerRun: number;
+}
+
+export interface PruneReport {
+  deleted: number;
+  byAge: number;
+  byCount: number;
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Retention: delete closed explanations past either bound, never an open
+ * one, with one `explanations.pruned` event when anything went. Runs in its
+ * own transaction (the upkeep pass). The `run.explained` events stay.
+ */
+export function pruneExplanations(db: Db, bounds: PruneBounds, now: number): PruneReport {
+  return tx(db, () => {
+    const byAge = bounds.keepDays > 0 ? db.query("DELETE FROM explanations WHERE closed_at IS NOT NULL AND closed_at < ?1").run(now - bounds.keepDays * DAY_MS).changes : 0;
+    const byCount =
+      bounds.keepPerRun > 0
+        ? db
+            .query(
+              `DELETE FROM explanations WHERE id IN (
+                 SELECT id FROM (
+                   SELECT id, ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY id DESC) AS n FROM explanations WHERE closed_at IS NOT NULL)
+                 WHERE n > ?1)`,
+            )
+            .run(bounds.keepPerRun).changes
+        : 0;
+    const deleted = byAge + byCount;
+    if (deleted > 0) {
+      appendEvent(db, { source: "daemon", kind: "explanations.pruned", payload: { deleted, by_age: byAge, by_count: byCount, keep_days: bounds.keepDays, keep_per_run: bounds.keepPerRun }, ts: now });
+    }
+    return { deleted, byAge, byCount };
+  });
 }

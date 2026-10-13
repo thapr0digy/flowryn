@@ -3,7 +3,7 @@ import { latestVerification, verificationLine } from "../verify/store.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
-import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField } from "../attention/explanations.ts";
+import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField, waitingPointer, waitingRuns } from "../attention/explanations.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
@@ -413,6 +413,9 @@ const fleet: VerbSpec = {
     const away = getAway(ctx.db, ctx.now);
     if (away) data.away = awayLine(away, ctx.now);
     const queued = queuedWork(ctx.db);
+    // Why each waiting run waits, from its recorded explanation (docs/notes/2026-10-13-next-steps-md-wq.md); detail is show --why.
+    const held = waitingRuns(ctx.db);
+    if (held.length > 0) data.waiting = held.map((w) => ({ task: w.task_id, ...waitingPointer(w) }));
     if (queued.length > 0) {
       data.queued = queued.slice(0, MAX_QUEUED_ROWS).map((q) => queuedRow(ctx, q));
       if (queued.length > MAX_QUEUED_ROWS) data.queued_more = `${queued.length - MAX_QUEUED_ROWS} more queued: backlog.md`;

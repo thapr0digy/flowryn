@@ -3,6 +3,7 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { getRun, isTerminal, recordEvidence, taskTitle } from "../lifecycle/runs.ts";
+import { runBounded } from "../runtime/bounded.ts";
 import { openDivergence } from "./divergence.ts";
 
 /**
@@ -37,20 +38,14 @@ export function parseDockerPs(text: string): LabelledContainer[] {
 }
 
 /** The labelled containers, or null when Docker cannot be asked (not installed, daemon not running). */
-export async function listLabelled(docker: string): Promise<LabelledContainer[] | null> {
-  try {
-    const proc = Bun.spawn([docker, "ps", "--filter", `label=${RUN_LABEL}`, "--format", `{{.ID}}\t{{.Names}}\t{{.Label "${RUN_LABEL}"}}\t{{.Label "${COMPOSE_LABEL}"}}`], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const timer = setTimeout(() => proc.kill("SIGKILL"), DOCKER_TIMEOUT_MS);
-    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    clearTimeout(timer);
-    return code === 0 ? parseDockerPs(out) : null;
-  } catch {
-    return null;
-  }
+export async function listLabelled(docker: string, timeoutMs = DOCKER_TIMEOUT_MS): Promise<LabelledContainer[] | null> {
+  // A cut-off or over-cap listing is a non-zero code: Docker unknown, never "no containers". Stderr is never read.
+  const result = await runBounded([docker, "ps", "--filter", `label=${RUN_LABEL}`, "--format", `{{.ID}}\t{{.Names}}\t{{.Label "${RUN_LABEL}"}}\t{{.Label "${COMPOSE_LABEL}"}}`], {
+    label: "docker ps",
+    timeoutMs,
+    stderr: "ignore",
+  });
+  return result.code === 0 ? parseDockerPs(result.stdout) : null;
 }
 
 /** Environments: distinct compose projects, and each container outside compose on its own. */

@@ -92,6 +92,10 @@ export class FakeGitHub {
   rateLimited = false;
   /** Check-run annotation reads answer 500. */
   annotationsDown = false;
+  /** A silent forge: "headers" never answers; "body" answers 200 and a start of a body that never ends. */
+  stall: "none" | "headers" | "body" = "none";
+  /** Releases the requests held by `stall`, on stop. */
+  private readonly stalled: (() => void)[] = [];
   readonly webUrl: string;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private nextNumber = 1;
@@ -114,6 +118,7 @@ export class FakeGitHub {
   }
 
   async stop(): Promise<void> {
+    for (const release of this.stalled.splice(0)) release();
     await this.server?.stop(true);
     this.server = null;
   }
@@ -251,6 +256,22 @@ export class FakeGitHub {
   private async handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = `${url.pathname}${url.search}`;
+    if (this.stall !== "none") {
+      this.requests.push({ method: req.method, path, status: 0 });
+      const held = new Promise<void>((resolve) => this.stalled.push(resolve));
+      if (this.stall === "headers") {
+        await held;
+        return new Response("", { status: 503 });
+      }
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"number":'));
+          await held;
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     if (this.unreachable) {
       this.requests.push({ method: req.method, path, status: 503 });
       return new Response(JSON.stringify({ message: "Service Unavailable (fake)" }), { status: 503 });

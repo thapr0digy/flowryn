@@ -1,0 +1,105 @@
+# Why is this waiting: fleet, briefing, retention and export
+
+- Status: partial
+- Open: decisions, gates and merges as explanation kinds
+- Config: `[upkeep] explanations_keep_days`, `[upkeep] explanations_keep_per_run`
+
+`docs/next_steps.md` package 3, its third slice, on top of the explanations table of the first (`2026-10-12-next-steps-md-wz.md`): the terse "waiting: … · next: …" pointer in `flowryn fleet` and the leader briefing, a bounded retention for closed rows, an opt-in redacted diagnostic export, and a count of unresolved waiting time per kind in `flowryn capacity`. No model: every line is read from the table.
+
+## Design
+
+### Fleet and briefing pointer
+
+One helper, `waitingRuns(db)` (`src/attention/explanations.ts`): every run that is not terminal and has an open explanation, longest waiting first, with its newest open row and how many more it has. Both views read only it; nothing is recomputed from live state.
+
+- **`flowryn fleet`** gets a top-level `waiting` table, one row per waiting run: `task`, `waiting` (the reason, at most 80 characters, plus ` (+N)` when the run has N more open rows) and `next` (the first unblock action, at most 60 characters, with its actor: `flowryn capacity resume --harness claude (captain)`, or `-` when the row names none). The fleet rows themselves are unchanged, so the table stays uniform. The table is uncapped: it lists every waiting run, so it is the full list the briefing's overflow points at. No waiting run, no field. Detail stays in `flowryn show <task> --why`.
+- **The briefing** gets a section after "Needs you": `Waiting (N):` then one line per run, `- [<task>] waiting: <reason> · next: <action> (<actor>)`, at most 8 lines and `+N more: flowryn fleet`. No waiting run, no section (no "nothing" line: the briefing stays short). The return brief is unchanged.
+
+### Retention
+
+Closed rows are pruned by the upkeep pass (`src/upkeep/upkeep.ts`), first in each pass and also while the pass otherwise waits (it is one SQLite transaction, touching no checkout), by two bounds:
+
+- **Age:** a row closed more than `[upkeep] explanations_keep_days` (default 30) ago is deleted.
+- **Count per run:** beyond the newest `[upkeep] explanations_keep_per_run` (default 200) closed rows of a run, older closed rows are deleted, so one run that flaps cannot grow the table between age sweeps.
+
+`0` turns either bound off. Open rows are never deleted, whatever their age. Each pass that deletes appends one `explanations.pruned` event (`{deleted, by_age, by_count, keep_days, keep_per_run}`) in the same transaction (the one-event-per-mutation rule). The `run.explained` events stay (events are append-only), so a pruned row's decision is still in the log; `show --timeline` lists only the rows kept.
+
+Why both: age alone lets a pathological run add thousands of rows within the window; count alone keeps rows of long-finished runs forever.
+
+### Diagnostic export: `flowryn diag export <task|run> --out <file> [--include-text]`
+
+A new local verb, chosen over `show --export`:
+
+- **The file is written by the caller's own process**, not the daemon. `show` is a read the daemon serves; giving it a write path would have the daemon (which runs outside every sandbox) write wherever a caller names. The local verb asks the internal read verb `diag.export` for the data over the socket and writes the file itself, so a leader inside its Claude sandbox can only write where its sandbox allows. The read verb is a plain read, so with the daemon down the read-only fallback serves it and the export still works.
+- `show` stays a view; an export has its own flags (`--out`, `--include-text`) and its own refusals.
+
+Roles: `leader` and `human` (not workers or read-only readers). The target resolves like `show` (a task's latest run, or a run id); not found exits 4.
+
+The file is JSON, `format: "flowryn-diag/1"`, written with mode 0600 and refused when it already exists (`O_EXCL`; nothing is overwritten). It holds:
+
+| section | what |
+|---|---|
+| `exported_at`, `flowryn` | when, and the daemon's version and build (or `read-only fallback`) |
+| `text` | `redacted` or `included` |
+| `run` | the run row, without `token_hash`; `stage_note` is free text and redacted |
+| `stages` | the frozen workflow (`id`, `gate`, `skill`, `pools`, `fresh` per stage), the current stage and its state, and the run's pool leases (granted/released per stage) |
+| `gates` | the run's gates; `feedback`, `comment` and `decided` redacted |
+| `decisions` | the run's decisions; `question`, `options`, `answer`, `context`, `recommendation`, `rationale`, `note` and `blocks` redacted |
+| `explanations` | the run's rows, open and closed, facts and unblock parsed |
+| `events` | the run's events, newest 2,000 in order (`events_truncated` says how many were left out), payloads redacted as below |
+| `config` | the effective configuration, `redactConfig(effectiveConfig(...))` (the `flowryn config` redaction) |
+
+Redaction, unless `--include-text`:
+
+1. A redacted text field becomes `<redacted: N chars>`, so its presence and size stay diagnosable.
+2. Event payloads: values under free-text keys (`body`, `summary`, `text`, `question`, `answer`, `choice`, `options`, `context`, `recommend`, `recommendation`, `rationale`, `note`, `blocks`, `feedback`, `comment`, `line`, `full_line`, `words`, `prompt`, `title`, `screen`) are redacted, and so is any other string that contains one of the run's decision or gate texts (an item line quoting a question).
+3. Explanations: a dialog's `prompt` fact (a line of the worker's screen) and every row's `signature` (which repeats the fact values) are redacted, and so is any string quoting a decision or gate text.
+4. `run.cancelled`'s `reason` is the canceller's own words (`flowryn cancel --reason`) and is redacted, except the reasons Flowryn writes itself (`by <role>`, `cancelled`, `your backlog edit won (divergence <id>)`).
+
+Always, with or without the flag, on every string anywhere in the export: a URL's userinfo (`https://user:pass@host`, `https://user@host`) becomes `https://<redacted>@host`, a secret-looking query value (`?access_token=`, `api_key`, `sig`, `auth`…) becomes `<redacted>`, and a token-looking run (the `TOKEN_LIKE` pattern `flowryn config` uses: `ghp_…`, `github_pat_…`, `sk-…`, `xox?-…`) becomes `<redacted>`. The config snapshot is always redacted, and `redactConfig` now strips URL credentials too, so `flowryn config` shows `[github] api_url = "https://<redacted>@host"`.
+
+Exported as tool and stderr text, kept without `--include-text` but always through that URL and token scrub: `run.failed`'s `reason`, `gate.channel_failed`'s `reason`, `decision.lavish_ignored`'s `detail`, `run.launch_deferred`'s `reason` or `message`, the gates' `open_detail` and `channel_reason`, and the run's `cleanup_detail`. They are what a diagnosis needs most (which command failed, and how), so they are not hidden whole.
+
+Never included: chat or harness transcripts (only `transcript_path`, a path), steer bodies (the `messages` table is not read), the token, anything outside this run. Nothing is uploaded; the verb prints the path, the counts and whether text was included.
+
+### Measure: unresolved waiting time
+
+`flowryn capacity` gets one `unresolved` field from the open rows: per kind, `<kind> <count> (longest <age>, total <age>)`, joined with ` · `, or `-`. One grouped query over the open-row index; cheap. Unnecessary interventions are not measured here (open).
+
+### Files
+
+`src/attention/explanations.ts` (`waitingRuns`, `pruneExplanations`, `unresolvedLine`), `src/lifecycle/leader-verbs.ts` (fleet), `src/attention/briefing.ts`, `src/config/upkeep.ts`, `src/upkeep/upkeep.ts`, `src/sched/verbs.ts` (capacity), `src/lifecycle/diag.ts` (new: the `diag.export` read and the redaction), `src/cli/commands/diag.ts` (new: the local verb), the two registries.
+
+### Tests
+
+- Fleet and briefing: a waiting run gets its line (reason, next action and actor; `(+N)` for more rows); a run with no open row, or only closed rows, gets none, and with nothing waiting the field and the section are absent; a terminal run's stray open row is not listed.
+- Retention: by age (an old closed row goes, an old open row stays), by count per run (the newest N closed rows stay), `0` turns each off, one `explanations.pruned` event, none when nothing is deleted; the upkeep pass prunes even when it waits; config validation of the two keys.
+- Export: through the real CLI against a daemon and against the read-only fallback; a token-looking config value (`[workers.pi] env`, an `extra_args` token, a token-like string in a decision) and a decision's question and answer text never appear in the file without `--include-text`, and do appear (except tokens and config secrets) with it; an existing file is not overwritten; the file is mode 0600; a worker token is refused; unknown target exits 4.
+- Capacity: `unresolved` per kind with an open dialog and capacity row, `-` with none.
+
+## Implementation notes
+
+- The redaction marker is `<redacted: N chars>` for hidden text and `<redacted>` (the `flowryn config` marker) for a token or a URL credential; `TOKEN_LIKE` and `redactUrlSecrets` are exported from `src/config/effective.ts` and applied to every string in the export, inside longer strings too (only the token or credential is replaced there).
+- A decision or gate text is matched inside other event strings only from 8 characters up, so a short option such as `yes` never hides an unrelated string.
+- The run row leaves out `token_hash` and `workflow_def` (the frozen workflow is the `stages` section).
+- The upkeep pass logs a prune only when it deleted something; a prune that throws is logged and the pass goes on.
+- `flowryn capacity`'s `unresolved` counts only runs not ended, like the fleet and briefing pointer.
+
+## Usage
+
+```sh
+flowryn fleet                                   # waiting[]: task, waiting, next
+flowryn capacity                                # unresolved: capacity 2 (longest 10m, total 15m) · dialog 1 (…)
+flowryn diag export web-fix-a1 --out diag.json  # redacted
+flowryn diag export web-fix-a1 --out diag-full.json --include-text
+```
+
+```toml
+[upkeep]
+explanations_keep_days = 30      # 0 keeps closed rows whatever their age
+explanations_keep_per_run = 200  # 0 sets no per-run cap
+```
+
+## Tests
+
+`test/unit/explanation-views.test.ts` (fleet and briefing lines, including none when nothing waits and none for an ended run; capacity's `unresolved`; retention by age and by count, `0`, the event, the upkeep pass pruning while it waits; the export's redaction with and without `--include-text`, URL credentials in the config, event payloads and tool text, a typed cancel reason, not found), `test/unit/upkeep-sync.test.ts` (the two keys), `test/integration/diag-export.test.ts` (the real CLI with a daemon and with the read-only fallback: mode 0600, no overwrite, a worker refused, not found, `--out` required).
