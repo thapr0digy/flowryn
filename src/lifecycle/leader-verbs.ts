@@ -27,6 +27,7 @@ import { divergenceView, getDivergence, resolveCommand } from "../reconcile/dive
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 import { ShowText } from "./show-text.ts";
+import { LANDED_BEFORE_CANCEL } from "./landing.ts";
 import { getOperation, heldByEscalation, latestOperation, launchKind, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
 import { channelView } from "../lavish/channel.ts";
 import type { Db } from "../db/db.ts";
@@ -136,6 +137,9 @@ const cancel: VerbSpec = {
     // A reply stored before operations existed: its apply already cancelled the run.
     if (typeof result.data.operation !== "string") return result;
     const outcome = await ctx.fleet.driveCancel(result.data.operation);
+    if (!outcome.ok && outcome.detail?.startsWith(LANDED_BEFORE_CANCEL)) {
+      throw new FlowrynError("run_not_active", `${String(result.data.task)}: ${outcome.detail}; nothing was cancelled`, `flowryn show ${String(result.data.task)}`);
+    }
     if (!outcome.ok) throw new FlowrynError("internal", `the worker for ${String(result.data.task)} did not exit (${outcome.detail ?? outcome.evidence}); nothing was cancelled`);
     return { data: { ...result.data, state: "cancelled", exited: outcome.evidence } };
   },

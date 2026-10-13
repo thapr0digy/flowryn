@@ -68,6 +68,29 @@ Each transition names its parts:
 | `nm_observation` | state, stage, stage_state, operation, validation | the PR and merge do not bear on the pipeline's status |
 | `ci_wait` | state, stage, stage_state, delivered, operation, validation | |
 | `local_merge_proof` | state, merge, operation | a merging run's stage is done |
+| a proven merge (`pr_observation` reading merged, `local_merge_proof` proving merged, `merge` finding the PR already merged) | delivered | see below |
+
+**A proven merge is never dropped.** A merge of the delivered work cannot be
+undone, so it wins over anything newer: a cancel requested, any other
+operation change, a change of the merge row, a stage or state change. It is
+checked only against the delivery (a redelivery means the next read is of the
+new delivery, and a merged PR still reads merged then). The reversible effects
+(the conflict nudge, P1s, divergences, `unproven`) keep the full parts.
+
+- **The racing cancel ends as a no-op.** `landRun` ends a cancel still open
+  `failed` with `the run landed before the cancel took effect; the merge
+  stands (merge <sha>)` (`LANDED_BEFORE_CANCEL`). A cancel whose worker stop
+  is in flight then finds its operation settled and stops there, and
+  `flowryn cancel` answers `run_not_active` with that line instead of a stop
+  failure. The worker of a landed run is stopped by its cleanup as usual.
+- **A merge proven after the run already ended** (the cancel committed before
+  the read came back) does not revive the run: terminal work stays terminal.
+  `noteMergedAfterEnd` records the fact instead: an open merge request is
+  marked `merged`, a `run.merged_after_end` event is appended, and a
+  divergence (P1, GitHub or git over the run) says the work landed under an
+  ended run, so you decide what the task is now. Only the PR watcher and the
+  local proof see this; the merge verb's caller gets `observation_stale` and
+  its retry is refused because the run is no longer ready.
 
 **Taking the basis.** The watchers read it for each run right before that
 run's own awaits (not when the pass lists its runs), so a slow read of one run
@@ -116,10 +139,14 @@ already a row the transitions write.
 - `src/lifecycle/worker.ts` (`DELIVER_PARTS`) and `src/policy/verbs.ts`
   (`MERGE_PARTS`): the basis is read in `prepare` and required in `apply`. A
   scout's report delivery reads nothing remote and is not guarded.
-- A dropped local merge proof leaves the merge `requested`: if the cancel it
-  raced completes, the run ends cancelled and the watcher no longer looks; if
-  the cancel fails, the next pass reads the proof again against the settled
-  operation.
+- `MERGED_PARTS` (src/watch/delivery.ts) and `["delivered"]` for an
+  already-merged PR in the merge verb; `landRun` settles an open cancel
+  (src/lifecycle/landing.ts); `noteMergedAfterEnd` (src/reconcile/delivery.ts)
+  for a merge read after the run ended; the cancel verb's `settle` maps the
+  landed outcome (src/lifecycle/leader-verbs.ts).
+- A dropped *unproven* local proof leaves the merge `requested`: if the cancel
+  it raced completes, the run ends cancelled; if not, the next pass reads the
+  proof again against the settled operation.
 
 ## Tests
 
@@ -130,20 +157,24 @@ explicit promise barrier. For each guarded path one test pauses the
 observation, applies a newer change, releases it, and asserts nothing changed
 but one `run.observation_stale` event naming the transition and the changed
 part; beside each, a control with nothing newer shows the same observation
-still applies:
+still applies. A proven merge is the exception: its tests assert it wins.
 
 | Transition | Paused read | Newer change | Without the guard |
 |---|---|---|---|
 | `pr_observation` | `forge.pull` of a conflicting PR | redelivery at a new head | the new delivery is sent back (conflict nudge) |
-| `pr_observation` | `forge.pull` of a merged PR | cancel requested | the run lands and is cleaned up |
+| `pr_observation` | `forge.pull` of a merged PR | cancel requested | (the merge wins: the run lands, the cancel ends `failed` as a no-op, no stale event) |
+| `pr_observation` | `forge.pull` of a merged PR | the cancel completes (run cancelled) | (not revived: `run.merged_after_end` and a divergence) |
 | `merge` | the gate's `forge.pull` | redelivery at a new head | a merge is requested for the replaced head |
 | `deliver` | `forge.checks` of the older delivery | a newer delivery commits | the older head overwrites the newer |
 | `deliver` | `forge.checks` of a redelivery | send-back (decline) | the run is ready again, the decline undone |
 | `nm_observation` | the status read of a stalled pipeline | a new validation slot | a stuck P1 for the new slot, run `validating` |
 | `ci_wait` | the check-count `forge.pull` | the stage restarted with a new slot | a CI-wait question for the old pipeline |
-| `local_merge_proof` | `git merge-base` (the proof) | cancel requested | the merge is recorded and the run lands |
+| `local_merge_proof` | `git merge-base` proving merged | cancel requested | (the merge wins: recorded merged, the run lands) |
+| `local_merge_proof` | `git merge-base` not proving it | cancel requested | the merge is recorded `unproven` with a P1 |
 
-With the guard disabled every race test fails and every control passes. The
+With the guard disabled every race test of a reversible effect fails and every
+control passes. "a cancel a landing overtook" checks `flowryn cancel`'s answer
+when the run lands while its worker is being stopped. The
 basis has its own cases: a part the transition does not name never makes it
 stale, a terminal run always does, and a hook's liveness or lease write on a
 delivered run is not part of it.

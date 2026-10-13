@@ -3,16 +3,16 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
-import { deliveredOf } from "../lifecycle/delivery.ts";
+import { deliveredOf, type Delivered } from "../lifecycle/delivery.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { deliveryBasis, deliveryTransition, type BasisPart } from "../lifecycle/observed.ts";
-import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
-import { applyNmObservation, applyPrObservation, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
+import { applyNmObservation, applyPrObservation, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
 /**
@@ -68,6 +68,12 @@ const PR_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delive
 const NM_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "operation", "validation"];
 const CI_WAIT_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "operation", "validation"];
 const LOCAL_MERGE_PARTS: readonly BasisPart[] = ["state", "merge", "operation"];
+/**
+ * A proven merge of the delivered work cannot be undone, so it wins over a
+ * newer cancel, operation or merge-row change: it depends on the delivery
+ * alone. A run that ended meanwhile is not revived (noteMergedAfterEnd).
+ */
+const MERGED_PARTS: readonly BasisPart[] = ["delivered"];
 
 export class DeliveryWatcher {
   private readonly deps: DeliveryWatcherDeps;
@@ -167,9 +173,11 @@ export class DeliveryWatcher {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
         tx(db, () => noteForgeUp(db, "github", now()));
-        const observed = deliveryTransition(db, seen, PR_PARTS, "pr_observation", "github", now(), (current) =>
+        const mergeSha = pr.state === "merged" ? pr.mergeSha : null;
+        const observed = deliveryTransition(db, seen, mergeSha ? MERGED_PARTS : PR_PARTS, "pr_observation", "github", now(), (current) =>
           applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts() }),
         );
+        if (!observed.applied && mergeSha && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, mergeSha, "github");
         const applied = observed.applied ? observed.value : { landed: false, nudged: false };
         this.backoffMs = 0;
         if (applied.landed) this.deps.cleanup(run.id);
@@ -183,6 +191,16 @@ export class DeliveryWatcher {
         return;
       }
     }
+  }
+
+  /** A merge proven after its run ended: kept as a fact, the run not revived (noteMergedAfterEnd). */
+  private keepLateMerge(runId: string, delivered: Delivered, mergeSha: string, source: "github" | "daemon"): void {
+    const { db, now } = this.deps;
+    const kept = tx(db, () => {
+      const run = getRun(db, runId);
+      return run ? noteMergedAfterEnd(db, run, delivered, { mergeSha, source }, now()) : false;
+    });
+    if (kept) this.deps.log(`delivery watcher: ${delivered.ref} merged at ${mergeSha.slice(0, 8)} after its run ended; a divergence asks you`);
   }
 
   /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
@@ -208,10 +226,13 @@ export class DeliveryWatcher {
       if (!merge || !project || (merge.state !== "requested" && merge.state !== "unproven") || this.deps.inFlight.has(merge.id)) continue;
       const seen = deliveryBasis(db, run.id);
       const proof = await proveLocal(this.deps.git, project, merge.head_sha);
-      const observed = deliveryTransition(db, seen, LOCAL_MERGE_PARTS, "local_merge_proof", "daemon", now(), (current) => {
+      const parts = proof.state === "merged" ? MERGED_PARTS : LOCAL_MERGE_PARTS;
+      const observed = deliveryTransition(db, seen, parts, "local_merge_proof", "daemon", now(), (current) => {
         recordMergeResult(db, current, merge.id, proof.state === "merged" ? proof : { state: "unproven", detail: `${proof.detail}; the daemon stopped before the merge's result was known` }, now());
         return proof.state === "merged";
       });
+      const delivered = deliveredOf(db, run.task_id);
+      if (!observed.applied && proof.state === "merged" && delivered && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, proof.sha, "daemon");
       if (observed.applied && observed.value) this.deps.cleanup(run.id);
     }
   }

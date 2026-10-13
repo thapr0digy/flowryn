@@ -18,9 +18,13 @@ import { deliveredOf, recordDelivery } from "../../src/lifecycle/delivery.ts";
 import { inertFleet } from "../../src/lifecycle/fleet-services.ts";
 import { deliveryBasis, deliveryTransition, staleBasis } from "../../src/lifecycle/observed.ts";
 import { requestCancel } from "../../src/lifecycle/operations.ts";
-import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import { cancelRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import { LANDED_BEFORE_CANCEL } from "../../src/lifecycle/landing.ts";
 import { sendBack } from "../../src/lifecycle/send-back.ts";
 import { WORKER_VERBS } from "../../src/lifecycle/worker.ts";
+import { LEADER_RUN_VERBS } from "../../src/lifecycle/leader-verbs.ts";
+import { landRun } from "../../src/lifecycle/landing.ts";
+import { getOperation } from "../../src/lifecycle/operations.ts";
 import type { GitRunner } from "../../src/policy/landed.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
 import { POLICY_VERBS } from "../../src/policy/verbs.ts";
@@ -52,6 +56,7 @@ let now: number;
 let runToken: string;
 let gateway: Gateway;
 let cleaned: string[];
+let services: DaemonServices;
 
 /** A barrier an observation parks on: `reached` once it is held, `open()` lets it through. */
 function barrier() {
@@ -141,7 +146,7 @@ beforeEach(() => {
   const files = () => ({ backlog: join(dir, "b.md"), todos: join(dir, "t.md") });
   const journal = new Journal({ db, files, runner: () => null });
   const info = () => ({ pid: 1, version: "t", proto: PROTO, instance: "i", startedAt: 0, execPath: "/bin/flowryn", socket: "/s", stateDir: dir });
-  const services: DaemonServices = {
+  services = {
     db,
     config: () => config,
     journal,
@@ -158,7 +163,7 @@ beforeEach(() => {
     restart: inertRestart(db, info),
     lavish: inertLavish(),
   };
-  const verbs = new Map([...WORKER_VERBS, ...POLICY_VERBS].map((v) => [v.name, v]));
+  const verbs = new Map([...WORKER_VERBS, ...POLICY_VERBS, ...LEADER_RUN_VERBS].map((v) => [v.name, v]));
   gateway = new Gateway({ services, lookup: (v) => verbs.get(v) });
 });
 
@@ -207,6 +212,10 @@ function deliverAt(head: string): void {
 /** A run delivered at HEAD_A: ready, its last stage done. */
 function readyAtA(): void {
   deliverAt(HEAD_A);
+}
+
+function cancelOperation(): { phase: string; detail: string | null } | null {
+  return db.query("SELECT phase, detail FROM operations WHERE run_id = 'r1' AND kind = 'cancel'").get() as { phase: string; detail: string | null } | null;
 }
 
 function cancelRequested(): void {
@@ -346,7 +355,7 @@ describe("pr_observation: the PR watcher", () => {
     expect(cleaned).toContain("r1");
   });
 
-  test("a cancel requested during a merged read: the run is not landed and not cleaned up", async () => {
+  test("assumption: a proven merge wins over a cancel requested during the read: the run lands, the cancel ends as a no-op", async () => {
     readyAtA();
     github.pr = pr(HEAD_A, { state: "merged", mergeSha: MERGED, mergeable: null });
     github.pullGate = barrier();
@@ -356,10 +365,44 @@ describe("pr_observation: the PR watcher", () => {
     cancelRequested();
     gate.open();
     await pass;
-    expect(state()).toBe("ready");
-    expect(count("run.landed")).toBe(0);
+    expect(state()).toBe("landed");
+    expect(cleaned).toContain("r1");
+    expect(cancelOperation()).toEqual({ phase: "failed", detail: `${LANDED_BEFORE_CANCEL} (merge ${MERGED.slice(0, 8)})` });
+    expect(staleEvents()).toEqual([]);
+  });
+
+  test("a merged read whose run was cancelled meanwhile: the run is not revived, the merge is kept as a divergence", async () => {
+    readyAtA();
+    github.pr = pr(HEAD_A, { state: "merged", mergeSha: MERGED, mergeable: null });
+    github.pullGate = barrier();
+    const gate = github.pullGate;
+    const pass = watcher().pass();
+    await gate.reached;
+    tx(db, () => cancelRun(db, getRunWithPolicy(db, "r1")!, "you cancelled it", "cli", now));
+    gate.open();
+    await pass;
+    expect(state()).toBe("cancelled");
     expect(cleaned).toEqual([]);
-    expect(staleEvents().map((e) => [e.transition, Object.keys(e.changed)])).toEqual([["pr_observation", ["operation"]]]);
+    expect(count("run.merged_after_end")).toBe(1);
+    expect(db.query("SELECT higher, lower FROM divergences WHERE run_id = 'r1' AND resolved_at IS NULL").all()).toEqual([{ higher: "github", lower: "run" }]);
+  });
+});
+
+describe("a cancel a landing overtook", () => {
+  test("flowryn cancel says the run landed and nothing was cancelled", async () => {
+    readyAtA();
+    // The worker's stop takes a moment; the merge is proven and the run lands meanwhile (as the watcher or merge verb would).
+    services.fleet = {
+      ...services.fleet,
+      driveCancel: async (id) => {
+        tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: MERGED, how: "merged_elsewhere" }, now));
+        const op = getOperation(db, id)!;
+        return { ok: false, phase: op.phase, evidence: "process", detail: op.detail ?? op.phase };
+      },
+    };
+    const reply = await call("cancel", { target: "t1" }, "human");
+    expect(reply.error).toMatchObject({ code: "run_not_active", message: `t1: ${LANDED_BEFORE_CANCEL} (merge ${MERGED.slice(0, 8)}); nothing was cancelled` });
+    expect(state()).toBe("landed");
   });
 });
 
@@ -495,7 +538,7 @@ describe("local_merge_proof: a local-only merge's proof", () => {
     expect(cleaned).toContain("r1");
   });
 
-  test("a cancel requested while the proof is read: no result is written", async () => {
+  test("assumption: a proven local merge wins over a cancel requested while the proof is read", async () => {
     merging();
     repo.gate = barrier();
     const gate = repo.gate;
@@ -504,9 +547,25 @@ describe("local_merge_proof: a local-only merge's proof", () => {
     cancelRequested();
     gate.open();
     await pass;
+    expect(mergeState()).toBe("merged");
+    expect(state()).toBe("landed");
+    expect(cleaned).toContain("r1");
+    expect(cancelOperation()!.phase).toBe("failed");
+    expect(staleEvents()).toEqual([]);
+  });
+
+  test("an unproven local merge read while a cancel is requested is still dropped", async () => {
+    merging();
+    repo.onDefault = false;
+    repo.gate = barrier();
+    const gate = repo.gate;
+    const pass = watcher().pass();
+    await gate.reached;
+    cancelRequested();
+    gate.open();
+    await pass;
     expect(mergeState()).toBe("requested");
-    expect(state()).toBe("merging");
-    expect(cleaned).toEqual([]);
+    expect(openItemKinds()).not.toContain("unproven_merge");
     expect(staleEvents().map((e) => [e.transition, Object.keys(e.changed)])).toEqual([["local_merge_proof", ["operation"]]]);
   });
 });

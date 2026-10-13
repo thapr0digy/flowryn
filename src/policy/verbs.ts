@@ -148,7 +148,8 @@ const merge: VerbSpec = {
   apply(ctx, _args, prepared) {
     const { facts, gate, chosen, seen } = prepared as MergePrepared;
     const now = ctx.now();
-    requireDeliveryBasis(ctx.db, seen, MERGE_PARTS, "merge", "cli", now, `flowryn merge ${facts.run.task_id} again`);
+    // A PR GitHub already reads merged lands the run whatever else changed, as long as it is still the delivery.
+    requireDeliveryBasis(ctx.db, seen, gate.alreadyMerged ? ["delivered"] : MERGE_PARTS, "merge", "cli", now, `flowryn merge ${facts.run.task_id} again`);
     const run = getRunWithPolicy(ctx.db, facts.run.id)!;
     rememberFacts(ctx.db, facts, now);
     if (gate.alreadyMerged) {

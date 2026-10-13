@@ -126,6 +126,7 @@ export interface DeliveryBasis {
 export const BASIS_PARTS = ["state", "stage", "stage_state", "delivered", "merge", "operation", "validation"] as const;
 export type BasisPart = (typeof BASIS_PARTS)[number];
 export type StaleParts = Partial<Record<BasisPart | "run", { seen: unknown; current: unknown }>>;
+export type DeliveryObserved<T> = { applied: true; value: T } | { applied: false; changed: StaleParts };
 
 /** Read a run's delivery basis now. */
 export function deliveryBasis(db: Db, runId: string): DeliveryBasis {
@@ -176,7 +177,7 @@ export function deliveryTransition<T>(
   source: EventSource,
   now: number,
   apply: (run: RunWithPolicy) => T,
-): Observed<T> {
+): DeliveryObserved<T> {
   return tx(db, () => {
     const changed = staleBasis(seen, deliveryBasis(db, seen.run), parts);
     const run = getRunWithPolicy(db, seen.run);

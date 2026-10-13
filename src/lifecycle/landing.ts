@@ -13,6 +13,7 @@ import { psRunner, type PsRunner } from "../runtime/proc.ts";
 import { deliveredOf, projectRepo } from "./delivery.ts";
 import { reportLink } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
+import { failOperation, openOperation } from "./operations.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { closeMergeGate } from "./stages.ts";
@@ -27,13 +28,22 @@ import { dismissRunQuestions } from "./gate-questions.ts";
  * decides. When the worktree is gone the task is done in the backlog.
  */
 
+/** How a cancel that a landing overtook ends: the run is landed, nothing was cancelled. */
+export const LANDED_BEFORE_CANCEL = "the run landed before the cancel took effect; the merge stands";
+
 /** The items a landing settles. */
 const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind"] as const;
 
-/** The run landed: the merge is proven. Call inside a transaction. */
+/**
+ * The run landed: the merge is proven. A merge cannot be undone, so it wins
+ * over a cancel still in flight: that cancel ends `failed` here, as a no-op
+ * (docs/notes/2026-10-13-next-steps-md-av.md). Call inside a transaction.
+ */
 export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; how: "merge" | "merged_elsewhere"; mergeId?: string }, now: number): void {
   if (run.state === "landed" || isTerminal(run.state)) return;
   db.query("UPDATE runs SET state = 'landed', updated_at = ?2 WHERE id = ?1").run(run.id, now);
+  const cancel = openOperation(db, run.id);
+  if (cancel?.kind === "cancel") failOperation(db, cancel.id, `${LANDED_BEFORE_CANCEL} (merge ${proof.mergeSha.slice(0, 8)})`, proof.how === "merge" ? "daemon" : "github", now);
   resolveRunItems(db, run.id, [...SETTLED_BY_LANDING], `run.landed ${proof.mergeSha.slice(0, 8)}`, now);
   const merge = proof.mergeId ? (db.query("SELECT approval_id FROM merges WHERE id = ?1").get(proof.mergeId) as { approval_id: string } | null) : null;
   closeMergeGate(db, run, { passed: true, approvalId: merge?.approval_id ?? null }, now);
