@@ -5,7 +5,9 @@ import { basename, dirname, join, sep } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { finishVerification, recordSteps, runningVerifications, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
+import { readIdentity, terminate, type ProcIdentity, type PsRunner, type TerminateOptions, type TerminateResult } from "../runtime/proc.ts";
+import { liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
+import { finishVerification, getVerification, recordSteps, runningVerifications, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
 /**
@@ -14,7 +16,9 @@ import { parseBunSummary, type TestCounts } from "./summary.ts";
  * at it, run the configured steps in order through /bin/sh with a scrubbed
  * environment, parse bun's test summary from each step's output, copy the
  * built binary out, record the outcome, and remove the worktree. One job per
- * daemon at a time (the verb refuses a second).
+ * daemon at a time (the verb refuses a second). The job holds a validation
+ * slot (a job lease the verb took with the row), released only once its steps'
+ * process groups are gone and its worktree removed.
  */
 
 export interface VerifyDeps {
@@ -24,6 +28,12 @@ export interface VerifyDeps {
   log(message: string): void;
   /** Where verification directories live: <state_dir>/verify. */
   root: string;
+  /** The job's slot was released: the scheduler may grant it. */
+  released?(): void;
+  /** The process table (tests); by default /bin/ps. */
+  ps?: PsRunner;
+  /** End a step left by the last daemon (tests); by default `terminate` by identity, its whole group. */
+  terminate?(proc: ProcIdentity, options: TerminateOptions): Promise<TerminateResult>;
 }
 
 export interface VerifyPlan {
@@ -40,6 +50,8 @@ export const KEEP_PER_PROJECT = 3;
 /** How much of a step's output the summary parser and the failure tail read. */
 const TAIL_BYTES = 256 * 1024;
 const KILL_GRACE_MS = 5_000;
+/** How long startup recovery waits for a step left by the last daemon to exit on SIGTERM before SIGKILL. */
+const RECOVER_GRACE_MS = 5_000;
 
 interface Job {
   aborted: boolean;
@@ -141,8 +153,11 @@ interface StepResult {
   timedOut: boolean;
 }
 
-/** Run one step in its own process group, its output to its log; the whole group is killed at the deadline. */
-function runStep(job: Job, command: string, cwd: string, logPath: string, deadline: number, env: Record<string, string>): Promise<StepResult> {
+/**
+ * Run one step in its own process group, its output to its log; the whole group is killed at the deadline.
+ * `spawned` hears of the group leader's pid; the step resolves only after its promise settles too.
+ */
+function runStep(job: Job, command: string, cwd: string, logPath: string, deadline: number, env: Record<string, string>, spawned: (pid: number) => Promise<void>): Promise<StepResult> {
   return new Promise((resolve) => {
     const fd = openSync(logPath, "w", 0o600);
     let child: ChildProcess;
@@ -154,6 +169,7 @@ function runStep(job: Job, command: string, cwd: string, logPath: string, deadli
       return;
     }
     job.child = child;
+    const noted = child.pid === undefined ? Promise.resolve() : spawned(child.pid);
     let timedOut = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
@@ -168,7 +184,7 @@ function runStep(job: Job, command: string, cwd: string, logPath: string, deadli
       killGroup(child, "SIGKILL");
       closeSync(fd);
       job.child = null;
-      resolve({ exit, timedOut });
+      void noted.then(() => resolve({ exit, timedOut }));
     };
     child.once("error", () => done(127));
     child.once("exit", (code, signal) => done(code ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0)));
@@ -232,6 +248,51 @@ function lastTests(steps: VerifyStep[]): TestCounts | null {
   return steps.findLast((s) => s.tests !== null)?.tests ?? null;
 }
 
+function jobOf(v: Pick<Verification, "id" | "task_id">): JobRef {
+  return { kind: "verify", id: v.id, taskId: v.task_id };
+}
+
+/** Release the job's slot (once; a second call records nothing) and tell the scheduler. A failure is logged: startup recovery releases it then. */
+function releaseSlot(deps: VerifyDeps, v: Verification, reason: string): void {
+  try {
+    const pools = tx(deps.db, () => releaseJobLeases(deps.db, jobOf(v), reason, deps.now()));
+    if (pools.length > 0) deps.released?.();
+  } catch (error) {
+    deps.log(`verify ${v.id}: could not release its slot: ${(error as Error).message}`);
+  }
+}
+
+const EXEC_SETTLE_MS = 2_000;
+const EXEC_POLL_MS = 20;
+
+/** macOS ps names a process it cannot read the arguments of, such as one still being exec'd, in parentheses: "(sh)". */
+function midExec(identity: ProcIdentity): boolean {
+  return identity.exe.startsWith("(") && identity.exe.endsWith(")");
+}
+
+/** The step leader's identity once its exec has settled; null when it is gone or never settles. */
+async function settledIdentity(pid: number, ps: PsRunner | undefined): Promise<ProcIdentity | null> {
+  const deadline = Date.now() + EXEC_SETTLE_MS;
+  for (;;) {
+    const identity = await readIdentity(pid, ps);
+    if (!identity || !midExec(identity)) return identity;
+    if (Date.now() > deadline) throw new Error(`its executable never settled (ps reads ${identity.exe})`);
+    await Bun.sleep(EXEC_POLL_MS);
+  }
+}
+
+/** Record a step's process group leader on the job's lease, so a later daemon can end it by identity. */
+async function noteStepProcess(deps: VerifyDeps, v: Verification, pid: number): Promise<void> {
+  try {
+    // Gone already (a quick step): nothing outlives it, since its group is killed when it exits.
+    // A mid-exec name would never match the running step again, so recovery would read it as absent.
+    const identity = await settledIdentity(pid, deps.ps);
+    if (identity) tx(deps.db, () => recordJobProcess(deps.db, jobOf(v), identity, deps.now()));
+  } catch (error) {
+    deps.log(`verify ${v.id}: could not record step pid ${pid}: ${(error as Error).message}`);
+  }
+}
+
 /** Run a verification to its end. Never throws: whatever happens is recorded on its row. */
 export async function runVerification(deps: VerifyDeps, v: Verification, plan: VerifyPlan, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (active.has(v.id)) return;
@@ -260,7 +321,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       step.state = "running";
       tx(deps.db, () => recordSteps(deps.db, v, steps, null, deps.now()));
       const began = Date.now();
-      const result = await runStep(job, step.name, v.worktree_path, join(v.dir, step.log), deadline, childEnv);
+      const result = await runStep(job, step.name, v.worktree_path, join(v.dir, step.log), deadline, childEnv, (pid) => noteStepProcess(deps, v, pid));
       step.ms = Date.now() - began;
       step.exit = result.exit;
       step.tests = parseBunSummary(readTail(join(v.dir, step.log)));
@@ -289,6 +350,9 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     } catch (error) {
       deps.log(`verify ${v.id}: cleanup failed: ${(error as Error).message}`);
     }
+    // After the steps' groups are killed (runStep) and the worktree is gone: a failed removal is logged above,
+    // and the slot still freed, since nothing of the job runs any more.
+    releaseSlot(deps, v, `verification ${v.id} ended`);
     active.delete(v.id);
   }
 }
@@ -301,15 +365,67 @@ export function stopVerifications(): void {
   }
 }
 
+/** SIGKILL what is left of a group whose leader the recovery just ended (a member that ignored SIGTERM). */
+function killLeftovers(pgid: number): void {
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    // the group is gone already
+  }
+}
+
+/** Recover one job; true when a running row was recorded as an error. */
+async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["terminate"]>, id: string, leases: ReturnType<typeof liveJobLeases>): Promise<boolean> {
+  const v = getVerification(deps.db, id);
+  const lease = leases.find((l) => l.job_id === id) ?? null;
+  let stepGone = true;
+  if (lease && lease.proc_pid !== null && lease.proc_start !== null && lease.proc_exe !== null) {
+    const ended = await end({ pid: lease.proc_pid, start: lease.proc_start, exe: lease.proc_exe }, { group: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
+    stepGone = ended.ok;
+    if (ended.ok && ended.evidence === "process") killLeftovers(lease.proc_pid);
+    if (!ended.ok) deps.log(`verify ${id}: the step left by the last daemon (pid ${lease.proc_pid}) did not exit (${ended.evidence}); its slot stays held`);
+  }
+  let recorded = false;
+  if (v && v.state === "running") {
+    const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step (pid ${lease?.proc_pid}) did not exit`;
+    recorded = tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now()));
+  }
+  if (!stepGone) return recorded;
+  if (v) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
+  if (lease) {
+    const job = { kind: "verify" as const, id, taskId: lease.task_id };
+    tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));
+  }
+  return recorded;
+}
+
 /**
- * Daemon startup: a verification still running belongs to a daemon that is
- * gone. It is recorded as an error and its worktree removed.
+ * Daemon startup: a verification still running, or a verify slot still held,
+ * belongs to a daemon that is gone. Its recorded step is ended by identity
+ * (its whole group; a reused pid is never signalled), a running row is
+ * recorded as an error, its worktree removed, and then its slot released
+ * (a member of the group that outlived its leader is SIGKILLed first). A
+ * step that will not exit keeps its slot (the next startup tries again): the
+ * slot is not free while its work still runs. Returns the rows recorded as errors.
  */
 export async function recoverVerifications(deps: VerifyDeps): Promise<number> {
-  const stale = runningVerifications(deps.db).filter((v) => !active.has(v.id));
-  for (const v of stale) {
-    tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail: "the daemon stopped mid-run", binary: null }, deps.now()));
-    await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${v.id}: cleanup failed: ${(error as Error).message}`));
+  const end = deps.terminate ?? ((proc, options) => terminate(proc, options));
+  const leases = liveJobLeases(deps.db, "verify").filter((l) => !active.has(l.job_id));
+  const ids = [...new Set([...runningVerifications(deps.db).map((v) => v.id), ...leases.map((l) => l.job_id)])].filter((id) => !active.has(id));
+  let recorded = 0;
+  for (const id of ids) {
+    try {
+      if (await recoverOne(deps, end, id, leases)) recorded++;
+    } catch (error) {
+      const message = (error as Error).message;
+      deps.log(`verify ${id}: recovery failed: ${message}`);
+      try {
+        const v = getVerification(deps.db, id);
+        if (v && v.state === "running" && tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail: `the daemon stopped mid-run; recovering it failed (${message})`, binary: null }, deps.now()))) recorded++;
+      } catch (recordError) {
+        deps.log(`verify ${id}: recording the failed recovery failed: ${(recordError as Error).message}`);
+      }
+    }
   }
-  return stale.length;
+  return recorded;
 }

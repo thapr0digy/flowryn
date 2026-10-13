@@ -9,6 +9,9 @@ import { deliveredOf } from "../lifecycle/delivery.ts";
 import { getProject, listProjects, type ProjectRow } from "../lifecycle/projects.ts";
 import { runAndProject } from "../policy/verbs.ts";
 import { isForgeOutage, noteForgeDown } from "../reconcile/forge-health.ts";
+import { capacityConfig } from "../config/workflows.ts";
+import type { HostVerdict } from "../sched/host.ts";
+import { fullPools, grantJobLease, liveCounts, poolHolders } from "../sched/pools.ts";
 import { tx } from "../db/db.ts";
 import { verifyConfig, verifySnippet, type VerifyConfig } from "./config.ts";
 import { initialSteps, isVerifying, readTail, runVerification, type VerifyDeps } from "./runner.ts";
@@ -26,8 +29,11 @@ export function verifyRoot(ctx: Pick<HandlerCtx, "config">): string {
   return join(ctx.config().state_dir, "verify");
 }
 
+/** The pool a verify takes a slot of: the ship stage's no-mistakes pipeline's. */
+export const VERIFY_POOL = "validation";
+
 function verifyDeps(ctx: HandlerCtx): VerifyDeps {
-  return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx) };
+  return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx), released: () => ctx.sched.kick() };
 }
 
 interface Target {
@@ -88,6 +94,19 @@ interface StartPrepared {
   target: Target;
   pr: PullRequest;
   config: VerifyConfig;
+  host: HostVerdict;
+}
+
+/**
+ * Admission for a new verify (docs/notes/2026-10-12-next-steps-md-64.md): the
+ * scheduler's host verdict and a free slot of the validation pool, or a
+ * no_capacity refusal saying why. There is no queue: the caller runs it again.
+ */
+function admissionRefusal(db: Db, caps: Record<string, number>, host: HostVerdict): FlowrynError | null {
+  if (!host.ok) return new FlowrynError("no_capacity", `the host check fails (${host.reason}); a verify starts only when a new ${VERIFY_POOL} slot could be granted`, "flowryn capacity; run flowryn verify again later");
+  if (fullPools(db, caps, [VERIFY_POOL]).length === 0) return null;
+  const used = liveCounts(db)[VERIFY_POOL] ?? 0;
+  return new FlowrynError("no_capacity", `the ${VERIFY_POOL} pool is full (${used}/${caps[VERIFY_POOL] ?? 0}: ${poolHolders(db, VERIFY_POOL) || "nothing listed"}); a verify takes one slot`, "flowryn capacity; run flowryn verify again when a slot is free");
 }
 
 /** What the CLI and `verify show` print: the steps so far, and the tail of a failed step's output. */
@@ -140,10 +159,12 @@ const verifyStart: VerbSpec = {
     if (!sameRepo(repoOf(`${github.web_url}/${pr.headRepo}`, github.web_url) ?? { owner: "", repo: "" }, target.ref)) {
       throw new FlowrynError("fork_pr", `${target.url} comes from the fork ${pr.headRepo}; verify runs the PR's code with no sandbox, so it only verifies branches of ${target.ref.owner}/${target.ref.repo}`);
     }
-    return { target, pr, config };
+    // Read before the transaction (it may sample the host); apply enforces it only for a new job, never an attach.
+    const host = await ctx.sched.host();
+    return { target, pr, config, host };
   },
   apply(ctx, args, prepared) {
-    const { target, pr, config } = prepared as StartPrepared;
+    const { target, pr, config, host } = prepared as StartPrepared;
     const running = runningVerifications(ctx.db);
     const same = running.find((v) => v.pr_url === target.url && v.head_sha === pr.headSha);
     if (same) return { data: { ...verificationView(same, ctx.now()), attached: true } };
@@ -151,6 +172,9 @@ const verifyStart: VerbSpec = {
       const busy = running[0]!;
       throw new FlowrynError("verify_busy", `verification ${busy.id} of ${busy.pr_url} at ${busy.head_sha.slice(0, 8)} is running; one runs at a time`, `flowryn verify show ${busy.id}`);
     }
+    const caps = capacityConfig(ctx.config()).pools;
+    const refused = admissionRefusal(ctx.db, caps, host);
+    if (refused) throw refused;
     const root = verifyRoot(ctx);
     const v = insertVerification(ctx.db, {
       project_id: target.project.id,
@@ -164,6 +188,8 @@ const verifyStart: VerbSpec = {
       source: "cli",
       now: ctx.now(),
     });
+    // Same transaction as the row: the slot is re-counted here, so a scheduler grant cannot take it meanwhile.
+    grantJobLease(ctx.db, { kind: "verify", id: v.id, taskId: v.task_id }, VERIFY_POOL, caps, ctx.now());
     return { data: { ...verificationView(v, ctx.now()), attached: false, pr_number: target.ref.number, head_ref: pr.headRef, binary_config: config.binary ?? "", timeout_ms: config.timeout_ms, env_path: stringArg(args, "path") ?? "" } };
   },
   async settle(ctx, result) {

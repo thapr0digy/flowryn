@@ -16,6 +16,9 @@ import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVeri
 import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
 import { countsLine, parseBunSummary } from "../../src/verify/summary.ts";
 import { verificationView } from "../../src/verify/verbs.ts";
+import { grantJobLease, liveCounts, liveJobLeases, recordJobProcess } from "../../src/sched/pools.ts";
+import { isAlive, psRunner, readIdentity, terminate, type ProcIdentity } from "../../src/runtime/proc.ts";
+import { spawn } from "node:child_process";
 import { NOT_STARTED_MESSAGE } from "../helpers/fake-github.ts";
 
 /**
@@ -138,8 +141,8 @@ function fixture(): Fixture {
     head,
     root,
     async start(steps, over = {}, at = head, startedAt = Date.now()) {
-      const v = tx(db, () =>
-        insertVerification(db, {
+      const v = tx(db, () => {
+        const row = insertVerification(db, {
           project_id: "web",
           pr_url: "https://github.com/acme/web/pull/1",
           task_id: null,
@@ -150,16 +153,40 @@ function fixture(): Fixture {
           project_path: repo,
           source: "cli",
           now: startedAt,
-        }),
-      );
+        });
+        // As verify.start does: the row and its validation slot in one transaction.
+        grantJobLease(db, { kind: "verify", id: row.id, taskId: null }, "validation", { validation: 5 }, startedAt);
+        return row;
+      });
       await runVerification(deps, v, { prNumber: 1, headRef: "flowryn/t", binary: null, timeoutMs: 60_000, path: null, ...over }, { PATH: process.env.PATH, HOME: process.env.HOME, FLOWRYN_HOME: "/must/not/leak" });
       return getVerification(db, v.id)!;
     },
   };
 }
 
+async function waitFor(check: () => Promise<boolean>, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await Bun.sleep(20);
+  }
+}
+
 function events(db: Db, kind: string): Record<string, unknown>[] {
   return (db.query("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq").all(kind) as { payload: string }[]).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+}
+
+/** A running row and its slot as the last daemon left them, with a worktree, and the step's identity when one is given. */
+function leftRunning(f: Fixture, proc: ProcIdentity | null): Verification {
+  const v = tx(f.db, () => {
+    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() });
+    grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", { validation: 5 }, Date.now());
+    if (proc) recordJobProcess(f.db, { kind: "verify", id: row.id, taskId: null }, proc, Date.now());
+    return row;
+  });
+  mkdirSync(v.dir, { recursive: true });
+  git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
+  return v;
 }
 
 describe("a verification job", () => {
@@ -274,6 +301,22 @@ describe("a verification job", () => {
     expect(existsSync(f.repo)).toBe(true);
   });
 
+  test("a step read mid-exec (ps names it \"(sh)\") is re-read, so the lease holds the identity recovery can match", async () => {
+    const f = fixture();
+    let reads = 0;
+    // The first read sees the leader still being exec'd, as macOS ps reports it.
+    f.deps.ps = async (pids) => {
+      const out = await psRunner(pids);
+      return reads++ === 0 ? out.replace(/\S+\s*$/, "(sh)\n") : out;
+    };
+    const v = await f.start(["sleep 1"]);
+    expect(v.state).toBe("passed");
+    expect(reads).toBeGreaterThanOrEqual(2);
+    const lease = f.db.query("SELECT proc_exe FROM job_leases WHERE job_id = ?1").get(v.id) as { proc_exe: string | null };
+    expect(lease.proc_exe).not.toBeNull();
+    expect(lease.proc_exe).not.toBe("(sh)");
+  }, 20_000);
+
   test("a verification a dead daemon left running is recorded as an error at startup, its worktree removed", async () => {
     const f = fixture();
     const v = tx(f.db, () =>
@@ -288,6 +331,129 @@ describe("a verification job", () => {
     expect(after.detail).toContain("daemon stopped");
     expect(existsSync(v.worktree_path)).toBe(false);
     expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now())).toEqual([]);
+  });
+
+  test("assumption: a job's slot is released once, only after its steps' process groups are gone and its worktree is removed (pass and fail)", async () => {
+    const f = fixture();
+    const seen: { worktree: boolean; live: number }[] = [];
+    let wt = "";
+    f.deps.released = () => seen.push({ worktree: existsSync(wt), live: liveJobLeases(f.db).length });
+    const marker = join(tempDir(), "left-behind");
+    // Each step leaves a background child in its group; the slot is freed only once the group is killed.
+    const steps = [`(sleep 2; touch ${marker}) & sleep 0.3`];
+    for (const tail of ["true", "exit 4"]) {
+      wt = join(f.root, `v${seen.length + 1}`, "wt");
+      const v = await f.start([...steps, tail]);
+      expect(v.state).toBe(tail === "true" ? "passed" : "failed");
+      expect(seen.at(-1)).toEqual({ worktree: false, live: 0 });
+      expect(git(f.repo, ["worktree", "list", "--porcelain"])).not.toContain(v.worktree_path);
+      const released = events(f.db, "pool.released").filter((e) => e.job === v.id);
+      expect(released).toEqual([{ job: v.id, kind: "verify", pools: ["validation"], reason: `verification ${v.id} ended` }]);
+      // The step that ran long enough for ps to read it was recorded on the lease.
+      expect(events(f.db, "pool.job_process").filter((e) => e.job === v.id).length).toBeGreaterThanOrEqual(1);
+    }
+    expect(seen).toHaveLength(2);
+    expect(liveCounts(f.db)).toEqual({});
+    await Bun.sleep(2_200);
+    expect(existsSync(marker)).toBe(false);
+  }, 20_000);
+
+  test("startup recovery ends a step the last daemon left running (its whole group), records the row, removes the worktree, then frees the slot once", async () => {
+    const f = fixture();
+    const marker = join(tempDir(), "grandchild-alive");
+    const child = spawn("/bin/sh", ["-c", `(sleep 3; touch ${marker}) & sleep 30`], { detached: true, stdio: "ignore" });
+    child.unref();
+    let proc: ProcIdentity | null = null;
+    await waitFor(async () => (proc = await readIdentity(child.pid!)) !== null);
+    const v = leftRunning(f, proc);
+    const order: string[] = [];
+    f.deps.terminate = async (p, options) => {
+      order.push(`terminate worktree=${existsSync(v.worktree_path)} live=${liveJobLeases(f.db).length}`);
+      return terminate(p, { ...options, graceMs: 1_000 });
+    };
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(order).toEqual(["terminate worktree=true live=1"]);
+    expect(await isAlive(proc!)).toBe(false);
+    expect(getVerification(f.db, v.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
+    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(liveCounts(f.db)).toEqual({});
+    expect(f.db.query("SELECT released_by FROM job_leases").all()).toEqual([{ released_by: "recovered at startup" }]);
+    // A second startup finds nothing to do and records nothing.
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(events(f.db, "pool.released")).toHaveLength(1);
+    await Bun.sleep(3_200);
+    expect(existsSync(marker)).toBe(false);
+  }, 20_000);
+
+  test("startup recovery also ends a member of the step's group that ignores SIGTERM after its leader exits", async () => {
+    const f = fixture();
+    const pidFile = join(tempDir(), "member.pid");
+    const child = spawn("/bin/sh", ["-c", `(trap '' TERM; exec sleep 30) & echo $! > ${pidFile}; wait`], { detached: true, stdio: "ignore" });
+    child.unref();
+    let proc: ProcIdentity | null = null;
+    await waitFor(async () => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "" && (proc = await readIdentity(child.pid!)) !== null);
+    const member = await readIdentity(Number(readFileSync(pidFile, "utf8").trim()));
+    expect(member).not.toBeNull();
+    const v = leftRunning(f, proc);
+    f.deps.terminate = (p, options) => terminate(p, { ...options, graceMs: 1_000 });
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(await isAlive(proc!)).toBe(false);
+    await waitFor(async () => !(await isAlive(member!)));
+    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(liveCounts(f.db)).toEqual({});
+  }, 20_000);
+
+  test("a job whose recovery throws is logged and recorded as an error, keeps its slot for the next startup, and the next job is still recovered", async () => {
+    const f = fixture();
+    const broken = leftRunning(f, { pid: 999_998, start: 1_000, exe: "/bin/sh" });
+    const fine = leftRunning(f, null);
+    const logs: string[] = [];
+    f.deps.log = (message) => logs.push(message);
+    f.deps.terminate = async () => {
+      throw new Error("ps failed");
+    };
+    expect(await recoverVerifications(f.deps)).toBe(2);
+    expect(logs).toContain(`verify ${broken.id}: recovery failed: ps failed`);
+    expect(getVerification(f.db, broken.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run; recovering it failed (ps failed)" });
+    expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now())).toEqual([]);
+    expect(existsSync(broken.worktree_path)).toBe(true);
+    expect(getVerification(f.db, fine.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
+    expect(existsSync(fine.worktree_path)).toBe(false);
+    expect(liveJobLeases(f.db).map((l) => l.job_id)).toEqual([broken.id]);
+    f.deps.terminate = async () => ({ ok: true, evidence: "absent", signal: "none" });
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(liveCounts(f.db)).toEqual({});
+    expect(existsSync(broken.worktree_path)).toBe(false);
+    expect(events(f.db, "pool.released").filter((e) => e.job === broken.id)).toHaveLength(1);
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(events(f.db, "pool.released")).toHaveLength(2);
+  });
+
+  test("a step that will not exit keeps its slot and its worktree; the next startup ends it and frees the slot", async () => {
+    const f = fixture();
+    const v = leftRunning(f, { pid: 999_999, start: 1_000, exe: "/bin/sh" });
+    f.deps.terminate = async () => ({ ok: false, evidence: "timeout", signal: "SIGKILL" });
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(getVerification(f.db, v.id)!.state).toBe("error");
+    expect(getVerification(f.db, v.id)!.detail).toContain("did not exit");
+    expect(liveCounts(f.db)).toEqual({ validation: 1 });
+    expect(existsSync(v.worktree_path)).toBe(true);
+    f.deps.terminate = async () => ({ ok: true, evidence: "process", signal: "SIGTERM" });
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(liveCounts(f.db)).toEqual({});
+    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(events(f.db, "pool.released")).toHaveLength(1);
+    expect(events(f.db, "pr.verified")).toHaveLength(1);
+  });
+
+  test("a slot whose verification already finished (the daemon died before releasing it) is freed at startup", async () => {
+    const f = fixture();
+    const v = leftRunning(f, null);
+    tx(f.db, () => f.db.query("UPDATE verifications SET state = 'passed', finished_at = 1 WHERE id = ?1").run(v.id));
+    expect(await recoverVerifications(f.deps)).toBe(0);
+    expect(getVerification(f.db, v.id)!.state).toBe("passed");
+    expect(liveCounts(f.db)).toEqual({});
+    expect(existsSync(v.worktree_path)).toBe(false);
   });
 
   test.skipIf(process.platform !== "darwin")(
