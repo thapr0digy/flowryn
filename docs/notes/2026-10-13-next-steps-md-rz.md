@@ -1,7 +1,6 @@
 # Durable lifecycle operations: launch, resume, cancel
 
-- Status: partial
-- Open: implementation in progress (design first)
+- Status: done
 
 `docs/next_steps.md` package 1, its second slice (the first, verified fresh-stage replacement, is docs/notes/2026-10-12-next-steps-md-we.md). Launch, resume and cancel each cross a boundary between a committed intent and an external effect (Herdr's `agent.start`, a signal to the worker), and Flowryn recovered them from the last observed worker state, not from what it had asked for. This slice records each as an operation, and recovery works from the operation.
 
@@ -136,11 +135,26 @@ The scheduler's admission (a launch still needs its grant; recovery re-drives on
 - `src/lifecycle/launcher.ts`: the entry check, the claim, the confirmation, the racing-cancel stop.
 - `src/lifecycle/auto-resume.ts`, `src/lifecycle/runs.ts` (`failRun`, `cancelRun` close operations), `src/sched/scheduler.ts` (grant opens the operation, candidates), `src/reconcile/reconciler.ts` (recovery first, the re-drive through the operation), `src/attention/items.ts` (`operation_escalated`), `src/attention/explanations.ts` (the `operation` value), `src/daemon/daemon.ts` (wiring).
 
+### Implementation notes
+
+Where the build settled what the design left open:
+
+- `flowryn resume` refuses before its harness check (in `resumable`) when a cancel or an issued launch is open, so the refusal is `run_not_active` rather than whatever the harness check says.
+- `flowryn resume` on a dead run whose automatic resume is already requested (deferred on an unverified harness) takes that operation rather than opening a second: the reply names it, and the grant launches it once.
+- A cancel that `cancelRun` ends some other way (a divergence's accept-edit) is confirmed (`run cancelled`); a launch or resume open when the run fails or is cancelled is failed (`run failed`, `run cancelled`).
+- A live cancel whose stop fails stores the exit's own detail (`SIGKILL`) on the operation, so a replay's error reads exactly as the live one did.
+- A stored reply from before this change carries no `operation`: its settle does nothing more (its apply already cancelled, or its resume was launched then).
+- After the harness check, the reconciler reads the operation again before launching it, as well as the launcher's claim: a cancel landing during the check wins without the launcher being called.
+- Recovery after a confirmed cancel also forgets the run's waiters, kicks the scheduler and closes its Herdr workspace, as the verb did; that also ends a candidate a superseded launch may have left in the pane.
+- The gateway coalesces in-flight calls by ULID for every mutation, ephemeral ones included; a spooled copy of a call still in flight is marked ingested once the first reply is in.
+- The fake worker gained `FAKE: ignore-term` (SIGTERM ignored), so a cancel's stop can be caught inside its grace period.
+
 ### Tests
 
 Deterministic: explicit promise barriers in the fakes, an abandoned barrier standing in for a daemon that died at that point (a new set of instances over the same database file is the restart), and the fake Herdr's `holdStarts` for an agent that was started and has not appeared. No sleeps.
 
-- `test/unit/operations.test.ts` (new): crash right after `agent.start` (the candidate appears: adopted, one `agent.start`; it never appears: re-issued once under the same operation; another process in the pane: escalated); crash right after the worker's termination and before the cancel's commit; crash between the cancel's commit and the stop; a reconciler pass over a run with an open cancel does not resume it; same-ULID `cancel` and `resume` concurrently through the real gateway (one operation, one exit, one launch); a replayed `resume` after a restart issues no second launch; a replayed `cancel` after a restart finishes it; a cancel superseding a requested resume; a launch confirmation racing a cancel stops its process; the unique index refuses a second open operation.
-- `test/unit/db.test.ts`: the migration on a database in use (runs survive, the table starts empty), and the upgrade case of a run left `launching` mid-launch.
-- `test/unit/gateway.test.ts`: same-ULID calls in flight together apply once and both get the reply; the in-transaction re-check.
-- `test/integration/crash.test.ts` (or a new file): kill -9 of the daemon while the fake Herdr holds an `agent.start`, then the restart adopts the candidate with no second `agent.start`; kill -9 during a cancel's stop of a worker that ignores SIGTERM, then the restart ends it cancelled, never resumed.
+- `test/unit/operations.test.ts` (new): a crash between the cancel's commit and its stop, and right after the worker's termination (both: cancelled on restart, never resumed); a replayed cancel after a restart finishes it, a replay of a finished one stops nothing; the same cancel twice at once (one ULID) and two cancels at once (two ULIDs): one operation, one stop; a live stop that fails (error as before, replay the same, no second stop); a stop that fails in recovery escalates and holds the run; a cancel superseding a waiting resume, and a resume refused while it is open; the unique index; the launcher's guard; an issued launch judged against its candidate (adopted, started before the issue, another process, within and past the timeout, at the issue limit, Herdr away, an issued resume not read as a second death, a check whose operation changed during the Herdr read, a launch interrupted before operations existed); an automatic resume claimed before a crash is launched under its operation; a cancel landing during the harness check wins; `show`'s `operation` field.
+- `test/unit/gateway.test.ts`: the same ULID twice in flight (and a spooled copy): one prepare, apply and settle; a reply stored during prepare is returned, not applied again.
+- `test/unit/workflows.test.ts`: the grant's replacement is one operation named to the launcher and reused by the retry after a refused exit; a run with an open cancel or an issued launch is never granted.
+- `test/unit/db.test.ts`: migration 23 on a database in use, a run left mid-launch untouched, one open operation per run, the CHECKs.
+- `test/integration/operations.test.ts` (new), on the fake Herdr with kill -9 of the daemon: killed right after `agent.start`, the restart adopts the candidate (one `agent.start`); a start that never came up is issued again under the same operation (two `agent.start`, one operation); a cancel landing while the launcher waits makes the launcher stop its own worker; killed while a cancel's stop waits out the grace of a worker that ignores SIGTERM, the restart finishes the cancel and never resumes; the same `resume` envelope twice at once and again after a restart starts exactly one worker.

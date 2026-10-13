@@ -110,6 +110,11 @@ interface Daemon {
   cancelled: string[];
 }
 
+/** The fake ps: the worker's line while it is alive, and any other pid asked about as alive. */
+function ps(pids: number[]): Promise<string> {
+  return Promise.resolve(pids.includes(PID) && workerAlive ? PS_LINE(PID) : pids.filter((p) => p !== PID).map((p) => PS_LINE(p)).join(""));
+}
+
 /** One daemon life over the shared database. */
 function daemon(options: DaemonOptions = {}): Daemon {
   const exits: string[] = [];
@@ -127,7 +132,6 @@ function daemon(options: DaemonOptions = {}): Daemon {
     snapshotPanes: () => Promise.resolve([]),
     agentStatus: () => Promise.resolve(null),
   } as unknown as HerdrRuntime;
-  const ps = (pids: number[]) => Promise.resolve(pids.includes(PID) && workerAlive ? PS_LINE(PID) : pids.filter((p) => p !== PID).map((p) => PS_LINE(p)).join(""));
   const ops = new Operations({
     db,
     runtime: () => runtime,
@@ -188,7 +192,7 @@ function envelope(verb: string, args: Record<string, unknown>): Envelope {
   return { proto: PROTO, ulid: ulid(), verb, token: leaderToken, args };
 }
 
-function ops(): OperationRow[] {
+function operationRows(): OperationRow[] {
   return db.query("SELECT * FROM operations WHERE run_id = 'r1' ORDER BY created_at, rowid").all() as OperationRow[];
 }
 
@@ -210,7 +214,7 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
     void first.gateway.handle(cancel);
     await parked.reached;
     // The first daemon dies here: the intent is committed, the stop never went out...
-    expect(ops().map((o) => [o.kind, o.phase])).toEqual([["cancel", "requested"]]);
+    expect(operationRows().map((o) => [o.kind, o.phase])).toEqual([["cancel", "requested"]]);
     expect(first.exits).toEqual([]);
     expect(getRun(db, "r1")!.state).toBe("running");
     // ...and the worker dies on its own meanwhile: without the operation, the next pass would resume it.
@@ -222,7 +226,7 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
     expect(getRun(db, "r1")!.state).toBe("cancelled");
     expect(second.launches).toEqual([]);
     expect(eventKinds()).not.toContain("run.auto_resumed");
-    expect(ops().map((o) => [o.id, o.kind, o.phase])).toEqual([[cancel.ulid, "cancel", "confirmed"]]);
+    expect(operationRows().map((o) => [o.id, o.kind, o.phase])).toEqual([[cancel.ulid, "cancel", "confirmed"]]);
     expect(second.cancelled).toEqual(["r1"]);
   });
 
@@ -267,7 +271,7 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
     const third = daemon();
     expect(await third.gateway.handle(cancel)).toMatchObject({ ok: true, data: { state: "cancelled" } });
     expect(third.exits).toEqual([]);
-    expect(ops()).toHaveLength(1);
+    expect(operationRows()).toHaveLength(1);
   });
 
   test("the same cancel twice at once (one ULID): one operation, one stop, the same reply", async () => {
@@ -288,7 +292,7 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
     expect(ra).toMatchObject({ ok: true, data: { state: "cancelled" } });
     expect(rb).toEqual(ra);
     expect(d.exits).toEqual(["r1"]);
-    expect(ops().map((o) => o.kind)).toEqual(["cancel"]);
+    expect(operationRows().map((o) => o.kind)).toEqual(["cancel"]);
   });
 
   test("two cancels at once (two ULIDs) coalesce on one operation: one stop", async () => {
@@ -309,7 +313,7 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
     expect(ra).toMatchObject({ ok: true, data: { operation: first.ulid, state: "cancelled" } });
     expect(rb).toMatchObject({ ok: true, data: { operation: first.ulid, state: "cancelled" } });
     expect(d.exits).toEqual(["r1"]);
-    expect(ops()).toHaveLength(1);
+    expect(operationRows()).toHaveLength(1);
   });
 
   test("a stop that fails on a live request: the error as before, nothing cancelled, and its replay stops nothing", async () => {
@@ -328,7 +332,7 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
   test("a stop that fails during recovery escalates: one P1, and the run is left alone while it is open", async () => {
     tx(db, () => requestOperation(db, { id: ulid(), run: { id: "r1", task_id: "t1" }, kind: "cancel", requestedBy: "leader", reason: "x", source: "cli", now: Date.now() }));
     const d = daemon({ exitRun: async () => ({ ok: false, evidence: "timeout", detail: "SIGKILL" }) });
-    const op = ops()[0]!;
+    const op = operationRows()[0]!;
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     expect(await d.ops.driveCancel(op.id)).toMatchObject({ ok: false, phase: "escalated" });
     expect(db.query("SELECT kind, state FROM items WHERE run_id = 'r1'").all()).toEqual([{ kind: "operation_escalated", state: "open" }]);
@@ -352,41 +356,49 @@ describe("one open operation per run", () => {
     expect(getOperation(db, resumeOp)!.detail).toContain("superseded by cancel");
     const again = await d.gateway.handle(envelope("resume", { target: "t1" }));
     expect(again).toMatchObject({ ok: false, error: { code: "run_not_active" } });
-    expect(ops().filter((o) => o.phase === "requested" || o.phase === "effect_issued").map((o) => o.kind)).toEqual(["cancel"]);
+    expect(operationRows().filter((o) => o.phase === "requested" || o.phase === "effect_issued").map((o) => o.kind)).toEqual(["cancel"]);
   });
 
   test("the database refuses a second open operation for a run", () => {
     tx(db, () => requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "leader", source: "cli", now: Date.now() }));
     expect(() => tx(db, () => requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "cancel", requestedBy: "leader", source: "cli", now: Date.now() }))).toThrow();
-    expect(ops()).toHaveLength(1);
+    expect(operationRows()).toHaveLength(1);
   });
 
   test("the launcher's guard: only a requested launch or resume (the named one, when named) is started", () => {
-    const row = (over: Partial<OperationRow>) => ({ id: "o1", kind: "launch", phase: "requested", ...over }) as OperationRow;
-    expect(launchable(row({}), undefined)).toBe(true);
-    expect(launchable(row({}), "o1")).toBe(true);
-    expect(launchable(row({}), "o2")).toBe(false);
-    expect(launchable(row({ phase: "effect_issued" }), "o1")).toBe(false);
-    expect(launchable(row({ kind: "cancel" }), undefined)).toBe(false);
+    expect(launchable(opRow({}), undefined)).toBe(true);
+    expect(launchable(opRow({}), "o1")).toBe(true);
+    expect(launchable(opRow({}), "o2")).toBe(false);
+    expect(launchable(opRow({ phase: "effect_issued" }), "o1")).toBe(false);
+    expect(launchable(opRow({ kind: "cancel" }), undefined)).toBe(false);
     // A replay names an operation that is no longer open: nothing starts, and no new one is opened.
     expect(launchable(null, "o1")).toBe(false);
     expect(launchable(null, undefined)).toBe(true);
   });
 });
 
+/** A launch interrupted after agent.start: the run is launching with no identity, its operation issued at `issuedAt`. */
+function issuedLaunch(issuedAt: number, mode: "fresh" | "resume" = "fresh"): OperationRow {
+  return tx(db, () => {
+    db.query("UPDATE runs SET state = 'launching', liveness = 'starting', proc_pid = NULL, proc_start = NULL, proc_exe = NULL, worker_started_at = NULL WHERE id = 'r1'").run();
+    const op = requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: mode === "resume" ? "resume" : "launch", mode, requestedBy: "scheduler", source: "daemon", now: issuedAt });
+    return claimOperation(db, op.id, { paneId: "w:1", agentName: "flowryn-x" }, "daemon", issuedAt)!;
+  });
+}
+
+function harness(pid: number): (paneId: string) => Promise<PaneProcesses> {
+  return (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: pid, processes: [{ pid, cwd: "", name: "claude", argv0: "claude" }] } as PaneProcesses);
+}
+
+function shellOnly(paneId: string): Promise<PaneProcesses> {
+  return Promise.resolve({ paneId, shellPid: 1, foregroundGroup: 1, processes: [] } as PaneProcesses);
+}
+
+function opRow(over: Partial<OperationRow>): OperationRow {
+  return { id: "o1", kind: "launch", phase: "requested", ...over } as OperationRow;
+}
+
 describe("an issued launch with no launcher is judged against its recorded candidate", () => {
-  /** A launch interrupted after agent.start: the run is launching with no identity, its operation issued at `issuedAt`. */
-  function issuedLaunch(issuedAt: number, mode: "fresh" | "resume" = "fresh"): OperationRow {
-    return tx(db, () => {
-      db.query("UPDATE runs SET state = 'launching', liveness = 'starting', proc_pid = NULL, proc_start = NULL, proc_exe = NULL, worker_started_at = NULL WHERE id = 'r1'").run();
-      const op = requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: mode === "resume" ? "resume" : "launch", mode, requestedBy: "scheduler", source: "daemon", now: issuedAt });
-      return claimOperation(db, op.id, { paneId: "w:1", agentName: "flowryn-x" }, "daemon", issuedAt)!;
-    });
-  }
-
-  const harness = (pid: number) => (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: pid, processes: [{ pid, cwd: "", name: "claude", argv0: "claude" }] } as PaneProcesses);
-  const shellOnly = (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: 1, processes: [] } as PaneProcesses);
-
   test("the harness in the recorded pane, started after the launch was issued, is adopted: no second start", async () => {
     const op = issuedLaunch(START - 500);
     const d = daemon({ processes: harness(PID) });
@@ -407,7 +419,7 @@ describe("an issued launch with no launcher is judged against its recorded candi
     // The escalation holds the run: the next pass neither launches it nor opens anything new.
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
     expect(d.launches).toEqual([]);
-    expect(ops()).toHaveLength(1);
+    expect(operationRows()).toHaveLength(1);
   });
 
   test("another foreground process in the recorded pane: escalated", async () => {
@@ -429,7 +441,7 @@ describe("an issued launch with no launcher is judged against its recorded candi
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
     expect(getOperation(db, op.id)).toMatchObject({ phase: "requested", attempts: 1 });
     expect(d.launches).toEqual([`r1:fresh:${op.id}`]);
-    expect(ops()).toHaveLength(1);
+    expect(operationRows()).toHaveLength(1);
   });
 
   test("issued again at most three times, then escalated", async () => {
@@ -481,7 +493,7 @@ describe("an issued launch with no launcher is judged against its recorded candi
     const d = daemon({ processes: harness(PID) });
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     expect(getRun(db, "r1")!.proc_pid).toBe(PID);
-    expect(ops().map((o) => [o.kind, o.phase, o.requested_by])).toEqual([["launch", "confirmed", "reconciler"]]);
+    expect(operationRows().map((o) => [o.kind, o.phase, o.requested_by])).toEqual([["launch", "confirmed", "reconciler"]]);
     expect(d.launches).toEqual([]);
   });
 });
@@ -492,14 +504,14 @@ describe("a requested launch or resume no launcher claimed", () => {
     const first = daemon();
     // The claim commits and its launch is recorded; that daemon dies before its launcher claimed the operation.
     await first.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
-    const [resume] = ops();
+    const [resume] = operationRows();
     expect(resume).toMatchObject({ kind: "resume", phase: "requested" });
     expect(first.launches).toEqual([`r1:resume:${resume!.id}`]);
 
     const second = daemon();
     await second.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     expect(second.launches).toEqual([`r1:resume:${resume!.id}`]);
-    expect(ops()).toHaveLength(1);
+    expect(operationRows()).toHaveLength(1);
     expect(db.query("SELECT kind FROM items WHERE run_id = 'r1' AND kind = 'failure_needs_you'").all()).toEqual([]);
     expect(db.query("SELECT operation FROM explanations WHERE run_id = 'r1' AND rule = 'resume.auto'").all()).toEqual([{ operation: resume!.id }]);
   });
@@ -527,7 +539,7 @@ describe("show", () => {
     deadRun();
     const d = daemon();
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
-    const resume = ops()[0]!;
+    const resume = operationRows()[0]!;
     const shown: Reply = await d.gateway.handle({ ...envelope("show", { target: "t1" }) });
     expect((shown.data as { operation: string }).operation).toContain(`${resume.id} resume requested`);
   });
