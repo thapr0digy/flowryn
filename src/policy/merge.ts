@@ -28,7 +28,8 @@ import type { GitRunner } from "./landed.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-health.ts";
 import { shellWord } from "../util/shell-word.ts";
 import { grantActor, takeGrant, voidItemGrants } from "./grants.ts";
-import { finishedAtHead, lastPassed, type Verification } from "../verify/store.ts";
+import { shortPolicy } from "../verify/policy.ts";
+import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification } from "../verify/store.ts";
 
 /**
  * The merge gate (design section 7, policy/merge), in order: the canonical PR
@@ -54,6 +55,8 @@ export interface MergeContext {
   git: GitRunner;
   github: GitHubConfig;
   now(): number;
+  /** The project's verify policy identity under today's config, or null when it has no verify steps (src/verify/policy.ts). */
+  verifyPolicy(projectId: string): string | null;
 }
 
 export interface MergeFacts {
@@ -79,8 +82,12 @@ export interface MergeFacts {
 export interface LocalEvidence {
   /** The check run ids GitHub never started. */
   notStarted: number[];
-  /** The newest finished verification of this PR at exactly this head. */
+  /** Today's verify policy identity of the project, or null when it has no verify steps. */
+  policy: string | null;
+  /** The newest finished verification of this PR at exactly this head under today's policy. */
   atHead: Verification | null;
+  /** The newest finished verification at this head under another policy or none recorded: it covers nothing, it only names re-verification. */
+  otherPolicyAtHead: Verification | null;
   /** The newest passing verification of this PR at any head. */
   lastPassed: Verification | null;
 }
@@ -150,7 +157,11 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
         annotationsUnread = true;
       }
       const url = canonicalPrUrl(ref, mc.github.web_url);
-      if (notStarted.length > 0) local = { notStarted, atHead: finishedAtHead(mc.db, url, pr.headSha), lastPassed: lastPassed(mc.db, url) };
+      if (notStarted.length > 0) {
+        const policy = mc.verifyPolicy(project.id);
+        const atHead = policy === null ? null : finishedAtHead(mc.db, url, pr.headSha, policy);
+        local = { notStarted, policy, atHead, otherPolicyAtHead: atHead ? null : finishedAtHeadUnderOther(mc.db, url, pr.headSha, policy), lastPassed: lastPassed(mc.db, url) };
+      }
     }
     if (!annotationsUnread) tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
@@ -264,8 +275,10 @@ function waiveHint(task: string, check: string): string {
 
 /**
  * Local green: every red check is one GitHub never started, and a verify of
- * exactly this head passed. Returns its id, or throws why not: it failed at
- * this head, it passed at an older head (head_moved), or there is none.
+ * exactly this head passed under today's verify policy. Returns its id, or
+ * throws why not: it failed at this head, it ran here under another policy
+ * or none recorded (verify_stale), it passed at an older head (head_moved),
+ * or there is none.
  */
 function localGreenOf(facts: MergeFacts, red: string[]): string {
   const task = facts.run.task_id;
@@ -275,6 +288,21 @@ function localGreenOf(facts: MergeFacts, red: string[]): string {
   const at = local.atHead;
   if (at?.state === "passed") return at.id;
   if (at) throw new FlowrynError("red_checks", `${ci}, and the local verify ${at.id} at this head ${at.state}: ${at.detail ?? "no detail"}`, `flowryn verify show ${at.id}; once fixed: flowryn verify ${task}`);
+  const other = local.otherPolicyAtHead;
+  if (other) {
+    const project = facts.project.id;
+    const why =
+      local.policy === null
+        ? `and project ${project} has no verify steps now`
+        : other.policy_id === null
+          ? "before Flowryn recorded its verify policy"
+          : `under another verify policy (${shortPolicy(other.policy_id)}, today's is ${shortPolicy(local.policy)}: the [projects.${project}] verify steps or verify_binary changed since)`;
+    throw new FlowrynError(
+      "verify_stale",
+      `${ci}; the local verify ${other.id} (${other.state}) at this head ran ${why}, so it does not cover today's verify policy`,
+      local.policy === null ? `add [projects.${project}] verify steps to config.toml, then re-verify this head: flowryn verify ${task}` : `re-verify this head under today's steps: flowryn verify ${task}`,
+    );
+  }
   if (local.lastPassed) {
     throw new FlowrynError("head_moved", `${ci}; the local verify ${local.lastPassed.id} passed at ${local.lastPassed.head_sha.slice(0, 8)}, but the PR head is now ${head}`, `verify this head: flowryn verify ${task}`);
   }

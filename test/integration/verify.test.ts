@@ -70,6 +70,22 @@ function query<T>(e: ShipEnv, sql: string, ...params: string[]): T[] {
   }
 }
 
+/** Rewrite the project's verify table in config.toml and have the daemon read it (SIGHUP), as you would after editing it. */
+async function reloadVerify(e: ShipEnv, from: string, to: string): Promise<void> {
+  const file = join(e.fleet.h.home, "config.toml");
+  const text = readFileSync(file, "utf8");
+  if (!text.includes(from)) throw new Error("the verify table to replace is not in config.toml");
+  const before = ((await e.fleet.json(["config"])).reply.data as { daemon_reload?: string }).daemon_reload;
+  writeFileSync(file, text.replace(from, to));
+  process.kill(e.fleet.daemon.pid, "SIGHUP");
+  await waitUntil(async () => {
+    const reload = ((await e.fleet.json(["config"])).reply.data as { daemon_reload?: string }).daemon_reload;
+    return reload !== undefined && reload !== before;
+  }, 10_000, "the daemon to read the edited config");
+  const reload = ((await e.fleet.json(["config"])).reply.data as { daemon_reload?: string }).daemon_reload!;
+  if (!reload.startsWith("accepted")) throw new Error(`the edited config was not accepted: ${reload}`);
+}
+
 describe("flowryn verify", () => {
   test(
     "a PR whose CI never started: merge refuses and says verify; verify passes at the head; the merge then lands on local green",
@@ -237,6 +253,100 @@ describe("flowryn verify", () => {
       expect(query(e, "SELECT released_by FROM job_leases")).toEqual([{ released_by: "verification v1 ended" }]);
       const released = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'pool.released'").map((r) => JSON.parse(r.payload) as Record<string, unknown>).filter((p) => p.job === "v1");
       expect(released).toHaveLength(1);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a pass binds to its verify policy: reformatting the steps keeps it; strengthening them at the same head asks for re-verification; a legacy pass does too; the unchanged policy still merges on it",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: VERIFY_CONFIG });
+      const e = env;
+      const { task } = await unstartedShip(e, "policy-bound");
+      const head = e.github.pr("acme/web", 1).headSha;
+      expect((await e.approve(task)).ok).toBe(true);
+
+      const verified = await e.fleet.json(["verify", task]);
+      expect(verified.code).toBe(0);
+      const [row] = query<{ policy_id: string | null }>(e, "SELECT policy_id FROM verifications WHERE id = 'v1'");
+      expect(row!.policy_id).toMatch(/^vp1:[0-9a-f]{64}$/);
+      expect(verified.reply.data).toMatchObject({ verification: "v1", state: "passed", policy: row!.policy_id });
+      const started = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'pr.verify_started'").map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+      expect(started[0]).toMatchObject({ verification: "v1", policy: row!.policy_id });
+
+      // A legacy pass (recorded before Flowryn kept the policy) covers nothing: the merge asks for re-verification.
+      const db = e.fleet.h.db();
+      try {
+        db.query("UPDATE verifications SET policy_id = NULL WHERE id = 'v1'").run();
+      } finally {
+        db.close();
+      }
+      const legacy = await e.call("merge", { task });
+      expect(legacy.ok).toBe(false);
+      expect(legacy.error).toMatchObject({ code: "verify_stale" });
+      expect(legacy.error!.message).toContain(`CI never started at ${head.slice(0, 8)}`);
+      expect(legacy.error!.message).toContain("the local verify v1 (passed) at this head ran before Flowryn recorded its verify policy");
+      expect(legacy.error!.help).toBe(`re-verify this head under today's steps: flowryn verify ${task}`);
+      const restore = e.fleet.h.db();
+      try {
+        restore.query("UPDATE verifications SET policy_id = ?1 WHERE id = 'v1'").run(row!.policy_id);
+      } finally {
+        restore.close();
+      }
+
+      // Strengthen the steps: the same head, another policy. The old pass no longer counts.
+      const strengthened = `[projects.web]\nverify = ${JSON.stringify([...STEPS, "true"])}\nverify_binary = "dist/flowryn"\n`;
+      await reloadVerify(e, VERIFY_CONFIG, strengthened);
+      const stale = await e.call("merge", { task });
+      expect(stale.ok).toBe(false);
+      expect(stale.error).toMatchObject({ code: "verify_stale" });
+      expect(stale.error!.message).toContain("the local verify v1 (passed) at this head ran under another verify policy");
+      expect(stale.error!.help).toBe(`re-verify this head under today's steps: flowryn verify ${task}`);
+      expect(query(e, "SELECT task_id FROM merges")).toEqual([]);
+
+      // Back to the same steps, only reformatted: the same policy, so the pass at this head is reused.
+      const reformatted = `[projects.web]\nverify = ${JSON.stringify(STEPS.map((step) => `  ${step} `))}\nverify_binary = "./dist/flowryn"\nverify_timeout_min = 7\n`;
+      await reloadVerify(e, strengthened, reformatted);
+      const merged = await e.call("merge", { task });
+      expect(merged.ok).toBe(true);
+      expect(merged.data).toMatchObject({ state: "merged", local_green: "v1" });
+      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a running job attaches only under the same policy: after the steps change, a second verify of the same head is refused verify_busy and takes nothing; with them restored it attaches",
+    async () => {
+      const go = join(scratch(), "go");
+      const gate = `while [ ! -f ${go} ]; do sleep 0.05; done`;
+      const gated = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: gated });
+      const e = env;
+      await unstartedShip(e, "attach-policy");
+
+      const first = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(first.code).toBe(0);
+      expect(first.reply.data).toMatchObject({ verification: "v1", attached: false });
+
+      const strengthened = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS, "true"])}\nverify_binary = "dist/flowryn"\n`;
+      await reloadVerify(e, gated, strengthened);
+      const refused = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(refused.code).toBe(2);
+      expect(refused.reply.error).toMatchObject({ code: "verify_busy" });
+      expect(JSON.stringify(refused.reply.error)).toContain("is running under another verify policy");
+      expect(JSON.stringify(refused.reply.error)).toContain("flowryn verify show v1");
+      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+      expect(query(e, "SELECT job_id FROM job_leases")).toEqual([{ job_id: "v1" }]);
+
+      await reloadVerify(e, strengthened, gated);
+      const again = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(again.code).toBe(0);
+      expect(again.reply.data).toMatchObject({ verification: "v1", attached: true });
+
+      writeFileSync(go, "");
+      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE id = 'v1'")[0]?.state === "passed", 30_000, "v1 passed");
+      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
     },
     { timeout: 120_000 },
   );

@@ -323,16 +323,31 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("operations: migration 24 adds an empty operations table to a database in use; a run left mid-launch keeps its row for recovery; one open operation per run", () => {
+  test("verify policy: its migration keeps every verification, those from before it with no policy (legacy), and a new one records its own", () => {
+    const at = MIGRATIONS.findIndex((m) => m.name === "verify-policy");
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 23));
+    migrate(db, MIGRATIONS.slice(0, at));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at, finished_at) VALUES ('v1', 'web', 'https://github.com/a/w/pull/1', 'h', 'passed', '[]', '/d', '/d/wt', '/w', 1, 2)");
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([MIGRATIONS[at]!.version]);
+    expect(db.query("SELECT id, state, policy_id FROM verifications").all()).toEqual([{ id: "v1", state: "passed", policy_id: null }]);
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at, policy_id) VALUES ('v2', 'web', 'https://github.com/a/w/pull/1', 'h', 'running', '[]', '/d', '/d/wt', '/w', 3, 'vp1:x')");
+    expect(db.query("SELECT policy_id FROM verifications WHERE id = 'v2'").get()).toEqual({ policy_id: "vp1:x" });
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([]);
+    db.close();
+  });
+
+  test("operations: its migration adds an empty operations table to a database in use; a run left mid-launch keeps its row for recovery; one open operation per run", () => {
+    const at = MIGRATIONS.findIndex((m) => m.name === "operations");
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, at));
     db.exec(`
       INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes');
       INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('web-a1', 'web', 'ship', 'no-mistakes', 0, 'fix', 1);
       INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, pane_id, worktree_path, branch, base_sha, token_hash, started_at, updated_at, launched_at)
         VALUES ('r1', 'web-a1', 'claude', '2.1.281', 'launching', 'starting', 'fix', 'build', 'w1:p1', '/tmp/wt', 'fm/x', 'abc123', 'h', 1, 1, 5);
     `);
-    expect(migrate(db, MIGRATIONS.slice(0, 24))).toEqual([24]);
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([MIGRATIONS[at]!.version]);
     // Nothing is invented: the reconciler reads the interrupted launch from launched_at and the pane.
     expect(db.query("SELECT COUNT(*) AS n FROM operations").get()).toEqual({ n: 0 });
     expect(db.query("SELECT state, pane_id, launched_at, proc_pid FROM runs").get()).toEqual({ state: "launching", pane_id: "w1:p1", launched_at: 5, proc_pid: null });
@@ -343,7 +358,7 @@ describe("migrations", () => {
     add("o3", "failed");
     expect(() => add("o4", "running")).toThrow("CHECK");
     expect(() => add("o5", "failed", "deliver")).toThrow("CHECK");
-    expect(migrate(db, MIGRATIONS.slice(0, 24))).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([]);
     db.close();
   });
 });
