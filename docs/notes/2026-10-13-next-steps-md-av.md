@@ -121,8 +121,9 @@ state. A dropped PR read writes no evidence either: evidence of a PR or head
 that is no longer the delivery would be wrong, and the next read records it.
 
 **What stays as it is.** `applyPrObservation`, `applyNmObservation`,
-`openCiWait`, `recordMergeResult`, `recordDelivery` and the state machines
-they drive are unchanged; they are now called through the guard. Their own
+`openCiWait`, `recordDelivery` and the state machines they drive are
+unchanged; they are now called through the guard. `recordMergeResult` changes
+only for a run already ended (above). Their own
 in-transaction checks (merge in flight, `ciWaitDue`, `landRun` on a terminal
 run) remain the second check. No new column or migration: every part is
 already a row the transitions write.
