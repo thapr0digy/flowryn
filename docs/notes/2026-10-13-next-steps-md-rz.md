@@ -1,0 +1,146 @@
+# Durable lifecycle operations: launch, resume, cancel
+
+- Status: partial
+- Open: implementation in progress (design first)
+
+`docs/next_steps.md` package 1, its second slice (the first, verified fresh-stage replacement, is docs/notes/2026-10-12-next-steps-md-we.md). Launch, resume and cancel each cross a boundary between a committed intent and an external effect (Herdr's `agent.start`, a signal to the worker), and Flowryn recovered them from the last observed worker state, not from what it had asked for. This slice records each as an operation, and recovery works from the operation.
+
+## Design
+
+### The boundaries on main (392eeee)
+
+| Path | Order today | Interruption |
+|---|---|---|
+| `flowryn cancel` (`src/lifecycle/leader-verbs.ts`) | `prepare` stops the worker (`exitRun`), then `apply` commits `cancelRun` | A crash after the stop and before the commit leaves a running, uncancelled run with a dead worker: the reconciler's next pass reads a death and resumes it once. The cancel is undone. |
+| Launcher (`src/lifecycle/launcher.ts`) | writes `launched_at`, calls `agent.start`, polls for the harness, then commits its identity | A crash between `agent.start` and the identity write leaves a `launching` run with no identity. The reconciler re-drives a fresh launch (`Reconciler.reconcileRun`, left open by #76), `ensurePane` finds the pane busy with the first agent and opens a new workspace: a second worker in the same worktree. A resume interrupted the same way keeps the old dead identity, so the next pass reads a second death and fails the run while the new worker runs. |
+| Automatic resume | `claimAutoResume` commits, then `launch(resume)` | A crash between them leaves `resume_count = 1`, `starting`, the old identity: the next pass calls it a second death. |
+| Gateway replay (`src/api/gateway.ts`) | a stored reply re-enters `settle` | `resume`'s settle calls `launch(run, "resume")`; the launcher has no guard for a resume (the dead identity is still recorded), so a replayed `resume` after the first one launched starts a second worker in the same session. |
+| Same-ULID calls in flight together | both miss the stored reply, both `prepare` | two exits, two launches; the second `INSERT INTO idempotency` then fails on the key. |
+
+### The record
+
+One new table, `operations` (the next free migration number at merge time; 23 on main today):
+
+| column | what |
+|---|---|
+| `id` | ULID. A CLI request's own idempotency key (`env.ulid`) when a verb made it, so the request and its operation share one identity; minted otherwise |
+| `run_id`, `task_id` | the run |
+| `kind` | `launch`, `resume` or `cancel` |
+| `mode` | for `launch`/`resume`: the launcher mode (`fresh`, `stage`, `relaunch`, `resume`); null for `cancel` |
+| `generation` | the execution generation: for `launch`/`resume`, the worker it starts (one more than the run's highest so far); for `cancel`, the newest confirmed one it stops (0 when none started) |
+| `desired` | the outcome asked for: `worker_running` or `run_cancelled` |
+| `phase` | `requested` → `effect_issued` → `confirmed`, `failed` or `escalated` (below) |
+| `requested_by` | `leader`, `human`, `reconciler`, `scheduler`, `daemon` |
+| `reason` | `cancel`'s reason line; null otherwise |
+| `pane_id`, `agent_name`, `issued_at` | the recorded candidate: the pane `agent.start` was sent to, the agent name it was given, when (committed before the call) |
+| `attempts` | how many times the effect was issued |
+| `proc_pid`, `proc_start` | the confirmed worker identity (launch/resume) |
+| `detail` | one sanitized line: why it failed or was escalated, or how it was confirmed |
+| `item_id` | the P1 of an escalation |
+| `created_at`, `updated_at`, `settled_at` | |
+
+A unique index on `(run_id) WHERE phase IN ('requested','effect_issued')`: a run has at most one open operation, of any kind. That index is the database's own refusal of a second requested operation; the code checks first and coalesces or refuses, so the index is the backstop, never the normal path.
+
+Existing databases get an empty table. Two upgrade cases are recovered from the run row, because it already holds what an operation would (below): a run `launching` with no identity and `launched_at` set (the old launcher wrote it right before `agent.start`) is an issued launch whose candidate is `pane_id` at `launched_at`; one with `launched_at` null never issued anything. A resume interrupted before the upgrade cannot be told from a second death and is handled as today.
+
+### Phases
+
+- **requested**: the desired outcome is committed; no effect has been issued. Safe to issue.
+- **effect_issued**: the candidate is committed and the effect may have happened. Never issued again until recovery has looked.
+- **confirmed**: launch/resume: the worker's identity was recorded in the same transaction. Cancel: `cancelRun` committed in the same transaction.
+- **failed**: refused or failed, and either a caller was told (a cancel whose worker did not exit; the launch's `failRun`) or a later decision ended it (`superseded by cancel <id>`, `run ended`).
+- **escalated**: recovery cannot decide from the evidence. One P1 item `operation_escalated` names the run and what was seen; nothing more happens automatically for that run until the item is resolved (`flowryn cancel` resolves it) or dismissed.
+
+`confirmed`, `failed` and `escalated` are final.
+
+### Who opens an operation
+
+| Request | Where (same transaction as the decision) | kind / mode |
+|---|---|---|
+| A scheduler grant that launches (`activateStage` returns `launch`) | the activation transaction | the run's open requested operation if it has one (a resume waiting for capacity), else a new `launch` with the grant's mode, or `resume` for `pending_launch = resume` |
+| `flowryn resume` | the verb's `apply` (its id is the call's ULID) | `resume` / `resume` |
+| The automatic resume, now or deferred | `claimAutoResume` / `deferAutoResume` | `resume` / `resume` |
+| `flowryn cancel` | the verb's `apply` (its id is the call's ULID) | `cancel` |
+| Anything else that calls the launcher | the launcher's claim transaction (below) opens one if the run has none, so no launch is ever unrecorded | `launch` |
+
+Each refuses when the run already has an open operation, except as coalescing says.
+
+### Coalescing and idempotency
+
+- **Same ULID, concurrent**: the gateway keeps the in-flight mutations by ULID; a second call with a ULID already in flight awaits the first one's reply instead of running `prepare` and `apply` again (a spooled copy is marked ingested as before).
+- **Same ULID, after a restart or a lost reply**: the stored reply, as today. Its `settle` drives the operation named in the reply by its phase (below), so a replay finishes an interrupted request and never issues an effect the operation already issued.
+- **Inside the committing transaction** the gateway reads `idempotency` again for the ULID: a reply stored meanwhile is returned instead of applying a second time.
+- **Different ULIDs, same intent**: a `cancel` on a run with an open `cancel` returns that operation's id and awaits its outcome (one stop, one cancellation); a `resume` on a run with an open `resume` is refused as today (`the worker is starting, not dead`); a `resume` while a `cancel` is open is refused (`run_not_active`).
+- **Cancel supersedes a launch**: a `cancel` on a run whose `launch`/`resume` is still open closes it `failed` (`superseded by cancel <id>`) in the cancel's transaction, so the cancel never waits on a launch that may never confirm.
+
+### Replay-safe settlement versus issuing an effect
+
+The rule: **an effect is issued only by the transition `requested → effect_issued`**, a compare-and-set on the operation's phase in the transaction that also commits the candidate. Every caller (a live request's `settle`, a replay's `settle`, the reconciler, the scheduler) may ask for an operation to be driven; only the one whose compare-and-set commits issues the effect. Settlement on replay is therefore kept (it reports and finishes the operation) and is safe:
+
+- `resume`'s `settle` passes its operation id to the launcher. The launcher's claim commits `effect_issued` only from `requested`; a replay finds `effect_issued` or `confirmed` and the launcher does nothing. The reply still says `resuming` (or `waiting for capacity` while `pending_launch` holds it).
+- `cancel`'s `settle` calls `driveCancel(id)` (below). A replay of a confirmed cancel returns its result; of a failed one, the same error; of an open one, it drives it to its end.
+
+### Cancel: intent first
+
+1. `apply` (one transaction with the stored reply): open the `cancel` operation (`requested`, reason, generation), close a superseded launch. The run row is unchanged: still the same run, same worker.
+2. `settle` → `driveCancel`: a compare-and-set to `effect_issued` (attempts + 1), then `exitRun` (SIGTERM by the recorded identity, SIGKILL after the grace, verified gone: unchanged).
+3. Verified exit: one transaction, `cancelRun` (park, release, items, explanations, as today) and the operation `confirmed`. A run that ended meanwhile (failed, cancelled elsewhere) confirms with `detail = run already <state>`.
+4. Unverified exit on a live request: the operation `failed` and the reply is the error it is today (`the worker did not exit (...); nothing was cancelled`). The run carries on.
+
+While a cancel is open, nothing starts or resumes the run: the launcher's claim refuses, the scheduler's candidates leave it out, the automatic resume does not claim, and the reconciler does not treat the run's worker as dead or orphaned: it drives the cancel instead (below). `driveCancel` is coalesced in memory by operation id, so the request, its replay and the reconciler share one attempt.
+
+Recovery (the reconciler, after a restart or for any open cancel not in flight in this process): `requested` or `effect_issued` → `driveCancel` again. Stopping by identity is idempotent (a gone process is a verified exit; a reused pid fails the start-time check), so a cancel interrupted before the stop, during it, or after it and before the commit all end cancelled, never resumed. An unverified exit found by recovery has no caller to tell: the operation is `escalated` with its P1 rather than silently dropped.
+
+A launch racing a cancel: the launcher's identity transaction confirms only its own operation still `effect_issued`. A cancel committed first has closed it, so the launcher records the identity (so the process can be found) and stops the process it just started, as it already does for a run that ended meanwhile.
+
+### Launch and resume: the candidate before the effect
+
+The launcher (`Launcher.run`):
+
+1. On entry, before any side effect (`ensurePane` can open a workspace): the run's open operation must be the one being launched, in `requested`; an open `cancel`, an `effect_issued` launch or a launch whose id does not match refuses (`skipped`).
+2. The claim transaction (the one that writes `launched_at` and `run.launching` today) re-checks that and moves the operation to `effect_issued` with `pane_id`, `agent_name` and `issued_at`. Only then `agent.start`.
+3. The identity transaction confirms the operation (`proc_pid`, `proc_start`) beside the run's identity, `pending_launch`, `stage_note` updates it makes today.
+4. `failRun` (a launch that failed) and `cancelRun` close the run's open operation `failed` (`run ended`). A deferral before the claim (Herdr down before `agent.start`) leaves the operation `requested`; a Herdr error from `agent.start` itself leaves it `effect_issued`, because the call may have reached Herdr.
+
+Recovery of a launch or resume not in flight in this process (the reconciler, before any liveness judgement, so a run with an open operation is never read as dead, orphaned or due a resume):
+
+- **requested**, no `pending_launch` (the grant was taken, or the automatic resume claimed, and the daemon stopped before the launcher claimed it): the harness gate, then `launch(run, mode, id)`. This replaces the unguarded fresh-launch re-drive: it covers resume too, and the launcher's claim re-checks the operation, so a cancel landing during the harness check wins.
+- **requested** with `pending_launch`: the scheduler's (as today).
+- **effect_issued**: reconciled against the recorded candidate, never a pane label:
+  - Herdr unreachable or the read fails: nothing (unknown is not absence); the next pass looks again.
+  - In the recorded pane, the foreground group's leader is the run's harness (the adapter's process match on the configured binary) and its start time is no earlier than `issued_at` (less one second for `ps`'s whole-second start times): that process is the candidate. It is adopted in one transaction (the launcher's identity write, the operation `confirmed`, `detail = recovered candidate`), guarded: the operation must still be `effect_issued` with the same attempt count.
+  - The recorded pane is gone, or shows only its shell, and `issued_at` is older than `[reconcile] launch_timeout_ms` (the launcher's own wait for a harness to appear): the effect did not take. The operation returns to `requested` (`operation.reissued` event) and is launched again under the same id: one operation, `attempts` counts the issues. After 3 issues it escalates instead. Within the timeout it waits for the next pass.
+  - Anything else (the pane runs some other foreground process, or a harness that started before `issued_at`): escalated.
+
+The scheduler leaves out of its candidates a run whose operation is `effect_issued` or whose open operation is a `cancel`: recovery owns them, so a fresh-stage replacement is never started over an ambiguous launch. A grant re-checks in its activation transaction.
+
+### Generation
+
+The partial unique index already keeps one open operation per run; `generation` makes the history readable and is what the launcher confirms against: a confirmation or an adoption applies only to the operation it claimed (same id, same attempts), so a stale launcher or recovery pass from an older generation commits nothing (`run.operation_stale` event, like #76's `run.observation_stale`). #76's guarded transitions are unchanged and still apply to the reconciler's liveness writes and the automatic resume claim, which now also opens its operation inside the same guarded transaction.
+
+### The `operation` column of #77's explanations
+
+Filled where the explanation belongs to an operation: `resume.auto` and `resume.deferred` carry the resume operation's id, and a `capacity` row carries the id of the open operation the grant would launch (a deferred or requested resume). `flowryn show --why` prints `operation: <id> <kind> <phase>` (or `-`). `flowryn show` adds an `operation` field while the run has an open or escalated operation.
+
+### What does not change
+
+The scheduler's admission (a launch still needs its grant; recovery re-drives only a granted or claimed launch, and `pending_launch` stays the scheduler's), process-identity checks (start time and executable), #76's guards, the single writer and one event per mutation (every operation transition appends `operation.<phase>` in its transaction), tasks-axi intents through `recordIntent` (only `cancelRun`/`failRun`, unchanged), and offline hook enforcement. No retry framework: the only repeated effect is the launch re-issue above, bounded at 3, and the cancel's idempotent stop.
+
+### Files
+
+- `src/db/schema.ts`: the migration.
+- `src/lifecycle/operations.ts` (new): the table's reads and transitions (open, claim, confirm, fail, escalate, reissue), all called inside the caller's transaction.
+- `src/lifecycle/operation-recovery.ts` (new): `driveCancel` (coalesced), the candidate check, recovery of one run's operation.
+- `src/api/gateway.ts`: in-flight coalescing by ULID, the in-transaction idempotency re-check.
+- `src/lifecycle/leader-verbs.ts`: `cancel` and `resume` through operations; `show`'s `operation` field and `--why` line.
+- `src/lifecycle/launcher.ts`: the entry check, the claim, the confirmation, the racing-cancel stop.
+- `src/lifecycle/auto-resume.ts`, `src/lifecycle/runs.ts` (`failRun`, `cancelRun` close operations), `src/sched/scheduler.ts` (grant opens the operation, candidates), `src/reconcile/reconciler.ts` (recovery first, the re-drive through the operation), `src/attention/items.ts` (`operation_escalated`), `src/attention/explanations.ts` (the `operation` value), `src/daemon/daemon.ts` (wiring).
+
+### Tests
+
+Deterministic: explicit promise barriers in the fakes, an abandoned barrier standing in for a daemon that died at that point (a new set of instances over the same database file is the restart), and the fake Herdr's `holdStarts` for an agent that was started and has not appeared. No sleeps.
+
+- `test/unit/operations.test.ts` (new): crash right after `agent.start` (the candidate appears: adopted, one `agent.start`; it never appears: re-issued once under the same operation; another process in the pane: escalated); crash right after the worker's termination and before the cancel's commit; crash between the cancel's commit and the stop; a reconciler pass over a run with an open cancel does not resume it; same-ULID `cancel` and `resume` concurrently through the real gateway (one operation, one exit, one launch); a replayed `resume` after a restart issues no second launch; a replayed `cancel` after a restart finishes it; a cancel superseding a requested resume; a launch confirmation racing a cancel stops its process; the unique index refuses a second open operation.
+- `test/unit/db.test.ts`: the migration on a database in use (runs survive, the table starts empty), and the upgrade case of a run left `launching` mid-launch.
+- `test/unit/gateway.test.ts`: same-ULID calls in flight together apply once and both get the reply; the in-transaction re-check.
+- `test/integration/crash.test.ts` (or a new file): kill -9 of the daemon while the fake Herdr holds an `agent.start`, then the restart adopts the candidate with no second `agent.start`; kill -9 during a cancel's stop of a worker that ignores SIGTERM, then the restart ends it cancelled, never resumed.
