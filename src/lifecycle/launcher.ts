@@ -118,7 +118,7 @@ function textOrNull(value: unknown): string | null {
 }
 
 /** Whether the launcher may start this run now: its open operation is a requested launch or resume (the named one, when named). */
-function launchable(open: OperationRow | null, operation: string | undefined): boolean {
+export function launchable(open: OperationRow | null, operation: string | undefined): boolean {
   if (!open) return operation === undefined;
   return open.kind !== "cancel" && open.phase === "requested" && (operation === undefined || open.id === operation);
 }

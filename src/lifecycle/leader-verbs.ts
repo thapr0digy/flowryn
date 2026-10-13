@@ -149,6 +149,9 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
   if (run.cleanup === "done") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is cleaned up: its worktree is gone`, `dispatch ${run.task_id} again`);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
   if (!run.agent_session) throw new FlowrynError("bad_args", "the run has no stored session to resume");
+  const open = openOperation(db, run.id);
+  if (open?.kind === "cancel") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is being cancelled (${open.id})`, `flowryn show ${run.task_id}`);
+  if (open && open.phase !== "requested") throw new FlowrynError("bad_args", `a ${open.kind} of ${run.task_id} is already under way (${open.id})`, `flowryn show ${run.task_id}`);
   return run;
 }
 
@@ -176,8 +179,6 @@ const resume: VerbSpec = {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     const now = ctx.now();
     const open = openOperation(ctx.db, run.id);
-    if (open?.kind === "cancel") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is being cancelled (${open.id})`, `flowryn show ${run.task_id}`);
-    if (open && open.phase !== "requested") throw new FlowrynError("bad_args", `a ${open.kind} of ${run.task_id} is already under way (${open.id})`, `flowryn show ${run.task_id}`);
     // A resume already asked for (the automatic one waiting for its harness) is the same operation: no second one.
     const op = open ?? requestOperation(ctx.db, { id: ctx.ulid, run, kind: "resume", mode: "resume", requestedBy: ctx.caller.role, source: "cli", now });
     ctx.db

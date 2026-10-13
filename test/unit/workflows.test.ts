@@ -400,6 +400,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     tx(db, () => db.query("INSERT INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 0)").run());
     for (const run of runs) wait(run);
     const launches: string[] = [];
+    const launchOps: string[] = [];
     const exitCalls: string[] = [];
     let clock = 10;
     const scheduler = new Scheduler({
@@ -407,8 +408,9 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
       config: () => config,
       now: () => ++clock,
       log: () => {},
-      launch: (runId, mode) => {
+      launch: (runId, mode, operation) => {
         launches.push(`${runId}:${mode}`);
+        launchOps.push(operation ?? "-");
         db.query("UPDATE runs SET pending_launch = NULL, proc_pid = 5000, proc_start = 2, proc_exe = 'claude' WHERE id = ?1").run(runId);
       },
       isLaunching: () => false,
@@ -432,7 +434,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
       clock += ms;
     };
     const attempts = (runId: string) => exitCalls.filter((r) => r === runId).length;
-    return { db, scheduler, launches, exitCalls, attempts, wait, advance, row, kinds, workerLeases, openExitItems };
+    return { db, scheduler, launches, launchOps, exitCalls, attempts, wait, advance, row, kinds, workerLeases, openExitItems };
   }
 
   test("a false exit result resets no identity and launches nothing; the run keeps its slot and its pending replacement, and other work still goes", async () => {
@@ -522,6 +524,37 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     expect(f.launches).toEqual(["r3:stage", "r1:stage"]);
     expect(f.openExitItems("r1")).toBe(0);
     expect(f.kinds("r1")).toContain("run.worker_not_exited");
+    f.db.close();
+  });
+
+  test("the grant's replacement is one launch operation, named to the launcher; a refused exit keeps the same one for the retry", async () => {
+    const f = freshStage({ r1: [{ ok: false }] });
+    const operationsOf = (runId: string) => f.db.query("SELECT id, kind, mode, phase FROM operations WHERE run_id = ?1").all(runId) as { id: string; kind: string; mode: string; phase: string }[];
+    await f.scheduler.passNow();
+    const [r2] = operationsOf("r2");
+    expect(r2).toMatchObject({ kind: "launch", mode: "stage", phase: "requested" });
+    expect(f.launchOps).toEqual([r2!.id]);
+    const [r1] = operationsOf("r1");
+    expect(r1).toMatchObject({ kind: "launch", mode: "stage", phase: "requested" });
+    f.advance(schedTiming(cfg(FRESH_CONFIG)).pass_ms);
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
+    expect(f.launchOps).toEqual([r2!.id, r1!.id]);
+    expect(operationsOf("r1")).toHaveLength(1);
+    f.db.close();
+  });
+
+  test("a run whose cancel is open, or whose launch was issued, is never granted: no exit attempt, no launch", async () => {
+    const f = freshStage({});
+    tx(f.db, () => {
+      const at = Date.now();
+      f.db.query("INSERT INTO operations (id, run_id, task_id, kind, generation, desired, phase, requested_by, created_at, updated_at) VALUES ('oc', 'r1', 't1', 'cancel', 1, 'run_cancelled', 'requested', 'leader', ?1, ?1)").run(at);
+      f.db.query("INSERT INTO operations (id, run_id, task_id, kind, mode, generation, desired, phase, requested_by, pane_id, issued_at, attempts, created_at, updated_at) VALUES ('ol', 'r2', 't2', 'launch', 'stage', 2, 'worker_running', 'effect_issued', 'scheduler', 'w:2', ?1, 1, ?1, ?1)").run(at);
+    });
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
     f.db.close();
   });
 });
