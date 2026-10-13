@@ -64,6 +64,8 @@ export const ERROR_CODES = {
   // flowryn verify
   verify_failed: EXIT.policy,
   verify_busy: EXIT.policy,
+  // a local verify at this head ran under another verify policy than today's (or none recorded)
+  verify_stale: EXIT.policy,
   fork_pr: EXIT.policy,
   // validation
   bad_args: EXIT.validation,

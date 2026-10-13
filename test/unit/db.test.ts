@@ -322,6 +322,20 @@ describe("migrations", () => {
     expect(integrityProblems(db)).toEqual([]);
     db.close();
   });
+
+  test("verify policy: its migration keeps every verification, those from before it with no policy (legacy), and a new one records its own", () => {
+    const at = MIGRATIONS.findIndex((m) => m.name === "verify-policy");
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, at));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at, finished_at) VALUES ('v1', 'web', 'https://github.com/a/w/pull/1', 'h', 'passed', '[]', '/d', '/d/wt', '/w', 1, 2)");
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([MIGRATIONS[at]!.version]);
+    expect(db.query("SELECT id, state, policy_id FROM verifications").all()).toEqual([{ id: "v1", state: "passed", policy_id: null }]);
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at, policy_id) VALUES ('v2', 'web', 'https://github.com/a/w/pull/1', 'h', 'running', '[]', '/d', '/d/wt', '/w', 3, 'vp1:x')");
+    expect(db.query("SELECT policy_id FROM verifications WHERE id = 'v2'").get()).toEqual({ policy_id: "vp1:x" });
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {
