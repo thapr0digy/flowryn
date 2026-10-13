@@ -269,6 +269,37 @@ describe("a review gate's questions", () => {
   );
 });
 
+describe("review-channel health", () => {
+  test(
+    "while the page's polls fail the questions wait with one review_channel item; once Lavish delivers again the answer is recorded as usual and the gate stays open",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only", extraConfig: "[review]\nchannel_alert_ms = 0\n" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const queue = join(f.h.home, "lavish-queue");
+      mkdirSync(queue, { recursive: true });
+      for (const n of ["000", "001"]) writeFileSync(join(queue, `${n}.fail.out`), "error: Lavish Editor server connection failed\ncode: SERVER_ERROR\n");
+      const { run } = await f.dispatch(steps("c", ["FAKE: sleep 120000"]), { kind: "ship" });
+      await f.waitRun(run, (r) => r.stage_state === "review", "the design review");
+      const gate = one<{ id: string }>(f, "SELECT id FROM gates WHERE run_id = ?1 AND state = 'open'", run)!.id;
+      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_channel' AND run_id = ?1 AND state = 'open'", run) !== null, 15_000, "the review_channel item");
+      expect(one<Record<string, unknown>>(f, "SELECT channel_failures, channel_reason FROM gates WHERE id = ?1", gate)).toEqual({ channel_failures: 2, channel_reason: "error: Lavish Editor server connection failed (exit 1)" });
+      expect(rows<{ state: string }>(f, "SELECT state FROM decisions WHERE gate_id = ?1", gate).map((d) => d.state)).toEqual(["open", "open", "open"]);
+
+      // Lavish delivers what the user sent meanwhile: recorded as any answer is; the channel recovers; nothing passes.
+      queuePoll(f, 2, gate, [{ d: "q1", c: ["db"] }]);
+      await waitUntil(() => one<{ state: string }>(f, "SELECT state FROM decisions WHERE id = 'q1'")?.state === "answered", 15_000, "q1 answered from the page");
+      expect(one<Record<string, unknown>>(f, "SELECT answered_by, answered_via FROM decisions WHERE id = 'q1'")).toEqual({ answered_by: "captain", answered_via: "lavish" });
+      expect(one<Record<string, unknown>>(f, "SELECT state, resolved_by FROM items WHERE kind = 'review_channel' AND run_id = ?1", run)).toEqual({ state: "resolved", resolved_by: `gate.channel_ok ${gate}` });
+      expect(one<Record<string, unknown>>(f, "SELECT state, approval_id, channel_failures, channel_failing_since FROM gates WHERE id = ?1", gate)).toEqual({ state: "open", approval_id: null, channel_failures: 0, channel_failing_since: null });
+      expect(rows<{ state: string }>(f, "SELECT state FROM decisions WHERE gate_id = ?1 ORDER BY id", gate).map((d) => d.state)).toEqual(["answered", "open", "open"]);
+      expect(rows(f, "SELECT 1 FROM approvals")).toEqual([]);
+    },
+    { timeout: 90_000 },
+  );
+});
+
 describe("the daemon listens on every review page", () => {
   test(
     "a page with no questions is polled from the hand-in; feedback reading as a pass wakes the leader as the user's word, and the gate stays open",

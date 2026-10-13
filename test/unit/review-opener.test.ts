@@ -328,9 +328,15 @@ describe("[review] config", () => {
     return parseConfig(toml, "/tmp/fl-home");
   }
 
-  test("defaults: open in Google Chrome", () => {
-    expect(reviewConfig(config(""))).toEqual({ open_browser: true, browser: "Google Chrome" });
-    expect(reviewConfig(config('[review]\nopen_browser = false\nbrowser = "Safari"\n'))).toEqual({ open_browser: false, browser: "Safari" });
+  test("defaults: open in Google Chrome; a review page's channel alerts after two minutes", () => {
+    expect(reviewConfig(config(""))).toEqual({ open_browser: true, browser: "Google Chrome", channel_alert_ms: 120_000 });
+    expect(reviewConfig(config('[review]\nopen_browser = false\nbrowser = "Safari"\nchannel_alert_ms = 0\n'))).toEqual({ open_browser: false, browser: "Safari", channel_alert_ms: 0 });
+  });
+
+  test("channel_alert_ms is a whole number of milliseconds, 0 or more", () => {
+    for (const bad of ["-1", "1.5", '"2m"', "true"]) {
+      expect(() => reviewConfig(config(`[review]\nchannel_alert_ms = ${bad}\n`))).toThrow(/channel_alert_ms must be a whole number/);
+    }
   });
 
   test("refuses an unknown key, a non-boolean switch and a browser name that is not one", () => {

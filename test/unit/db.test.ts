@@ -50,7 +50,7 @@ const DESIGN_TABLES = [
   "harness_contracts",
 ];
 
-/** The installed versions the migration 20 case checks against. */
+/** The installed versions the migration 21 case checks against. */
 async function installedVersion(harness: string): Promise<string> {
   return harness === "claude" ? "2.1.300" : "0.90.0";
 }
@@ -238,11 +238,31 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("contract revision: migration 20 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+  test("review-channel health: migration 20 adds the channel columns to gates in use; a gate from before has no channel state", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 19));
-    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    db.exec(`
+      INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes');
+      INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('web-a1', 'web', 'ship', 'no-mistakes', 0, 'feature', 1);
+      INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+        VALUES ('r1', 'web-a1', 'claude', '2.1.281', 'running', 'busy', 'feature', 'design', '/tmp/wt', 'fm/x', 'abc123', 'h', 1, 1);
+      INSERT INTO gates (id, run_id, stage, kind, review_url, page_path, state, opened_at) VALUES ('g1', 'r1', 'design', 'review', 'http://127.0.0.1:4387/session/x', '/tmp/d.html', 'open', 1);
+    `);
     expect(migrate(db, MIGRATIONS.slice(0, 20))).toEqual([20]);
+    expect(db.query("SELECT id, state, open_state, channel_ok_at, channel_failing_since, channel_failures, channel_reason, channel_retry_at, channel_item FROM gates").all()).toEqual([
+      { id: "g1", state: "open", open_state: null, channel_ok_at: null, channel_failing_since: null, channel_failures: 0, channel_reason: null, channel_retry_at: null, channel_item: null },
+    ]);
+    db.exec("UPDATE gates SET channel_failing_since = 5, channel_failures = 2, channel_reason = 'exit 1', channel_retry_at = 9, channel_item = 'i1' WHERE id = 'g1'");
+    expect(migrate(db, MIGRATIONS.slice(0, 20))).toEqual([]);
+    expect(db.query("SELECT channel_failures, channel_item FROM gates").get()).toEqual({ channel_failures: 2, channel_item: "i1" });
+    db.close();
+  });
+
+  test("contract revision: migration 21 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 20));
+    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([21]);
     expect(db.query("SELECT harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY harness").all()).toEqual([
       { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, passed_at: 5, report_path: "/r.json", platform: null, herdr_version: null, launch_profile: null },
       { harness: "pi", version: "0.90.0", revision: BASELINE_REVISION, passed_at: 6, report_path: null, platform: null, herdr_version: null, launch_profile: null },
@@ -256,7 +276,7 @@ describe("migrations", () => {
     db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 7)");
     expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 8)")).toThrow("UNIQUE");
     expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.301', 0, 8)")).toThrow("CHECK");
-    expect(migrate(db, MIGRATIONS.slice(0, 20))).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([]);
     expect(integrityProblems(db)).toEqual([]);
     db.close();
   });

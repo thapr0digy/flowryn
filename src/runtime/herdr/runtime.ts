@@ -23,7 +23,8 @@ export interface PaneProcess {
 export interface PaneProcesses {
   paneId: string;
   shellPid: number;
-  foregroundGroup: number;
+  /** Null while the pane has no foreground job Herdr can name (the shell-to-job handoff, M0 h02): not started yet, never gone. */
+  foregroundGroup: number | null;
   processes: PaneProcess[];
 }
 
@@ -86,18 +87,21 @@ const malformedProcessInfo = (what: string) => new HerdrError("protocol", `pane.
 
 /**
  * pane.process_info's answer (M0 h02). Its essential fields are checked, not
- * defaulted: a reply without a shell pid, a foreground group or a process
- * list says nothing about the pane, so it is `protocol` (liveness unknown to
- * the reconciler), never an empty pane whose harness looks gone.
+ * defaulted: a reply without a shell pid, or with a field of the wrong type,
+ * says nothing about the pane, so it is `protocol` (liveness unknown to the
+ * reconciler), never an empty pane whose harness looks gone. An absent or
+ * null foreground group is Herdr's reply at the shell-to-job handoff (it
+ * omits the process list then too): a pane with no job yet, `null`.
  */
 function parseProcesses(raw: unknown): PaneProcesses {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw malformedProcessInfo("no process_info object");
   const info = raw as Record<string, unknown>;
   if (!isPid(info.shell_pid)) throw malformedProcessInfo("shell_pid is not a pid");
-  const group = info.foreground_process_group_id;
-  if (typeof group !== "number" || !Number.isInteger(group) || group < 0) throw malformedProcessInfo("foreground_process_group_id is not a process group");
-  if (!Array.isArray(info.foreground_processes)) throw malformedProcessInfo("foreground_processes is not a list");
-  const processes = (info.foreground_processes as unknown[]).map((entry) => {
+  const group = info.foreground_process_group_id ?? null;
+  if (group !== null && (typeof group !== "number" || !Number.isInteger(group) || group < 0)) throw malformedProcessInfo("foreground_process_group_id is not a process group");
+  const list = info.foreground_processes ?? (group === null ? [] : undefined);
+  if (!Array.isArray(list)) throw malformedProcessInfo("foreground_processes is not a list");
+  const processes = (list as unknown[]).map((entry) => {
     if (!entry || typeof entry !== "object" || !isPid((entry as Record<string, unknown>).pid)) throw malformedProcessInfo("a foreground process has no pid");
     const p = entry as Record<string, unknown>;
     return { pid: p.pid as number, name: str(p.name), argv0: str(p.argv0), argv: Array.isArray(p.argv) ? (p.argv as unknown[]).map(String) : [], cwd: str(p.cwd) };
@@ -110,6 +114,7 @@ export class HerdrRuntime {
   private readonly ps: PsRunner;
   private readonly shellReadyMs: number;
   private readonly pollMs: number;
+  private workspaceOps: Promise<unknown> = Promise.resolve();
 
   constructor(transport: HerdrTransport, options: RuntimeOptions = {}) {
     this.transport = transport;
@@ -128,13 +133,31 @@ export class HerdrRuntime {
    * included (M0 h04, h06), so a worker workspace holds one pane.
    */
   async openWorkspace(cwd: string, label: string, env: Record<string, string> = {}): Promise<{ workspaceId: string; rootPaneId: string }> {
-    const result = await this.transport.call("workspace.create", { cwd, label, env, focus: false });
+    // focus:false keeps the user's focus where it is (M0 h07), so a launch needs no restore.
+    const result = await this.serially(() => this.transport.call("workspace.create", { cwd, label, env, focus: false }));
     const workspace = result.workspace as Record<string, unknown> | undefined;
     const root = (result.root_pane ?? result.pane) as Record<string, unknown> | undefined;
     const workspaceId = str(workspace?.workspace_id);
     const rootPaneId = str(root?.pane_id);
     if (!workspaceId || !rootPaneId) throw new HerdrError("protocol", "workspace.create returned no workspace or root pane");
     return { workspaceId, rootPaneId };
+  }
+
+  /**
+   * Workspace creates and closes run one at a time, so a close's prediction
+   * of where Herdr moves focus is not skewed by another create or close.
+   */
+  private serially<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.workspaceOps.then(op);
+    this.workspaceOps = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Workspace ids in Herdr's list order, and the focused one. */
+  private async workspaceFocus(timeoutMs?: number): Promise<{ order: string[]; focused: string | null }> {
+    const result = await this.transport.call("workspace.list", {}, timeoutMs);
+    const list = Array.isArray(result.workspaces) ? (result.workspaces as Record<string, unknown>[]) : [];
+    return { order: list.map((w) => str(w.workspace_id)), focused: str(list.find((w) => w.focused === true)?.workspace_id) || null };
   }
 
   /**
@@ -170,14 +193,15 @@ export class HerdrRuntime {
   /**
    * The harness running in a pane: the leader of the foreground process group
    * when that is not the shell and `matches` accepts it, with its start time
-   * from ps (Herdr does not report one). Polls up to `waitMs`.
+   * from ps (Herdr does not report one). Polls up to `waitMs`, through reads
+   * with no foreground group yet.
    */
   async harnessProcess(paneId: string, matches: (p: PaneProcess) => boolean, waitMs = 0): Promise<HarnessProcess | null> {
     const deadline = Date.now() + waitMs;
     for (;;) {
       const info = await this.processes(paneId);
       if (!info) return null;
-      if (info.foregroundGroup !== 0 && info.foregroundGroup !== info.shellPid) {
+      if (info.foregroundGroup !== null && info.foregroundGroup !== 0 && info.foregroundGroup !== info.shellPid) {
         const leader = info.processes.find((p) => p.pid === info.foregroundGroup);
         if (leader && matches(leader)) {
           const identity = await readIdentity(leader.pid, this.ps);
@@ -259,11 +283,41 @@ export class HerdrRuntime {
     }
   }
 
+  /**
+   * Close a workspace without taking the user's focus with it. Herdr moves
+   * focus on any workspace.close, even of an unfocused workspace, to the one
+   * that takes the closed one's slot (M0 h07). When the focus lands exactly
+   * there, it goes back to the workspace that had it; focus anywhere else
+   * means the user moved it meanwhile, and it stays. Nothing focused, or
+   * closing the focused workspace itself, leaves focus to Herdr. Once the
+   * close has succeeded, the restore is best effort and never fails it.
+   */
   async closeWorkspace(workspaceId: string, timeoutMs?: number): Promise<void> {
-    try {
-      await this.transport.call("workspace.close", { workspace_id: workspaceId }, timeoutMs);
-    } catch (error) {
-      if (!(error instanceof HerdrError && error.code === "workspace_not_found")) throw error;
+    const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+    const left = () => (deadline === undefined ? undefined : Math.max(0, deadline - Date.now()));
+    await this.serially(async () => {
+      // An unreadable list means an unreachable Herdr, which the close reports itself.
+      const before = await this.workspaceFocus(left()).catch(() => null);
+      try {
+        await this.transport.call("workspace.close", { workspace_id: workspaceId }, left());
+      } catch (error) {
+        if (error instanceof HerdrError && error.code === "workspace_not_found") return;
+        throw error;
+      }
+      if (before) await this.restoreFocus(before, workspaceId, left).catch(() => undefined);
+    });
+  }
+
+  /** Put focus back on the workspace that had it, if Herdr's close moved it exactly to the closed one's slot. */
+  private async restoreFocus(before: { order: string[]; focused: string | null }, closed: string, left: () => number | undefined): Promise<void> {
+    const index = before.order.indexOf(closed);
+    const previous = before.focused;
+    if (index === -1 || previous === null || previous === closed || left() === 0) return;
+    const remaining = before.order.filter((id) => id !== closed);
+    const landing = remaining[Math.min(index, remaining.length - 1)];
+    const after = await this.workspaceFocus(left());
+    if (after.focused === landing && after.focused !== previous && after.order.includes(previous) && left() !== 0) {
+      await this.transport.call("workspace.focus", { workspace_id: previous }, left());
     }
   }
 

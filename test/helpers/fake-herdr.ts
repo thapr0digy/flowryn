@@ -30,6 +30,8 @@ interface FakePane {
   starts: number;
   /** Text pane.send_text typed into the composer, not yet submitted with Enter. */
   typed: string;
+  /** pane.process_info reads still to answer with the handoff reply (see `handoffReads`). */
+  handoff: number;
 }
 
 interface FakeWorkspace {
@@ -66,8 +68,18 @@ export class FakeHerdr {
    * a function giving the raw first line (a malformed peer).
    */
   subscribeReply: "answer" | "silent" | ((id: unknown) => string) = "answer";
+  /**
+   * How many pane.process_info reads after each agent.start answer Herdr
+   * 0.7.5's shell-to-job handoff reply, `{pane_id, shell_pid}` with no
+   * foreground group or process list (M0 h02), before the pane is read as usual.
+   */
+  handoffReads = 0;
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
+  /** The focused workspace. Herdr's list order is `workspaces`' insertion order. */
+  focusedWorkspace: string | null = null;
+  /** Runs right after a workspace closes, before the reply: a user's focus change while Flowryn closes one. */
+  afterClose: ((workspaceId: string) => void) | null = null;
   private readonly heldStarts: { pane: FakePane; kind: string; args: string[] }[] = [];
   private readonly subscribers = new Set<net.Socket>();
   private readonly connections = new Set<net.Socket>();
@@ -126,6 +138,12 @@ export class FakeHerdr {
     const paneId = ws.panes[0]!;
     this.statusOverride.set(paneId, status);
     return paneId;
+  }
+
+  /** The user focusing a workspace (Herdr's workspace.focus). */
+  focusWorkspace(workspaceId: string): void {
+    if (!this.workspaces.has(workspaceId)) throw new Error(`no workspace ${workspaceId}`);
+    this.focusedWorkspace = workspaceId;
   }
 
   /** What pane.read returns for a pane (a worker's screen with a dialog on it). */
@@ -253,10 +271,24 @@ export class FakeHerdr {
   }
 
   private addPane(ws: FakeWorkspace, cwd: string, env: Record<string, string>): FakePane {
-    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "" };
+    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "", handoff: 0 };
     this.panes.set(pane.paneId, pane);
     ws.panes.push(pane.paneId);
     return pane;
+  }
+
+  /**
+   * Herdr 0.7.5 on any workspace close (M0 h07): focus moves to the workspace
+   * that takes the closed one's slot, the new list's [min(index, length - 1)],
+   * whether or not the closed one had it.
+   */
+  private removeWorkspace(ws: FakeWorkspace): void {
+    const order = [...this.workspaces.keys()];
+    const index = order.indexOf(ws.workspaceId);
+    this.workspaces.delete(ws.workspaceId);
+    const remaining = order.filter((id) => id !== ws.workspaceId);
+    if (this.focusedWorkspace !== null) this.focusedWorkspace = remaining[Math.min(index, remaining.length - 1)] ?? null;
+    this.afterClose?.(ws.workspaceId);
   }
 
   private closePane(pane: FakePane): void {
@@ -293,13 +325,25 @@ export class FakeHerdr {
         return { type: "pong" };
       case "workspace.create": {
         const ws = this.createWorkspace(String(params.cwd ?? "/"), String(params.label ?? ""), (params.env as Record<string, string>) ?? {});
+        if (params.focus === true) this.focusedWorkspace = ws.workspaceId;
         return { type: "workspace_created", workspace: { workspace_id: ws.workspaceId }, root_pane: this.paneView(this.panes.get(ws.panes[0]!)!) };
       }
       case "workspace.close": {
         const ws = this.workspaces.get(String(params.workspace_id));
         if (!ws) throw Object.assign(new Error("workspace not found"), { code: "workspace_not_found" });
         for (const id of ws.panes) this.closePane(this.panes.get(id)!);
-        this.workspaces.delete(ws.workspaceId);
+        this.removeWorkspace(ws);
+        return { type: "ok" };
+      }
+      case "workspace.list":
+        return {
+          type: "workspace_list",
+          workspaces: [...this.workspaces.values()].map((ws) => ({ workspace_id: ws.workspaceId, label: ws.label, focused: ws.workspaceId === this.focusedWorkspace, pane_count: ws.panes.length })),
+        };
+      case "workspace.focus": {
+        const id = String(params.workspace_id);
+        if (!this.workspaces.has(id)) throw Object.assign(new Error("workspace not found"), { code: "workspace_not_found" });
+        this.focusedWorkspace = id;
         return { type: "ok" };
       }
       case "agent.start": {
@@ -308,12 +352,17 @@ export class FakeHerdr {
         const args = (params.args as string[]) ?? [];
         // oxlint-disable-next-line no-control-regex -- Herdr refuses control characters in agent arguments
         if (args.some((a) => /[\u0000-\u001f]/.test(a))) throw Object.assign(new Error("agent arguments cannot be encoded safely"), { code: "invalid_agent_argument" });
+        pane.handoff = this.handoffReads;
         if (this.holdStarts) this.heldStarts.push({ pane, kind: String(params.kind), args });
         else this.startHarness(pane, String(params.kind), args);
         return { type: "agent_started", agent: { pane_id: pane.paneId, launch_pending: true } };
       }
       case "pane.process_info": {
         const pane = this.need(params.pane_id);
+        if (pane.handoff > 0) {
+          pane.handoff--;
+          return { type: "pane_process_info", process_info: { pane_id: pane.paneId, shell_pid: process.pid } };
+        }
         const pid = this.harnessPid(pane.paneId);
         const shell = { pid: process.pid, name: "zsh", argv0: "-zsh", argv: ["-zsh"], cmdline: "-zsh", cwd: pane.cwd };
         const harness = pid === null ? null : { pid, name: pane.kind, argv0: pane.kind, argv: [pane.kind, ...pane.args], cmdline: pane.kind, cwd: pane.cwd };
@@ -362,9 +411,14 @@ export class FakeHerdr {
         if (typeof params.title === "string") pane.title = params.title;
         return { type: "ok" };
       }
-      case "pane.close":
-        this.closePane(this.need(params.pane_id));
+      case "pane.close": {
+        const pane = this.need(params.pane_id);
+        this.closePane(pane);
+        // Closing a workspace's last pane closes the workspace (M0 h07).
+        const ws = this.workspaces.get(pane.workspaceId);
+        if (ws && ws.panes.length === 0) this.removeWorkspace(ws);
         return { type: "ok" };
+      }
       case "notification.show":
         return { type: "ok" };
       case "session.snapshot":

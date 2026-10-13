@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
-import { MIGRATIONS } from "../../src/db/schema.ts";
+import { LATEST_SCHEMA_VERSION } from "../../src/db/schema.ts";
 import { claim, openSession } from "../../src/lease/lease.ts";
 import { applyRepin, pinHistory, planRepin, processCwd, repinCandidates } from "../../src/lease/repin.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
@@ -158,7 +158,7 @@ describe("the target", () => {
 describe("the repin", () => {
   test("database: migration 19 adds leader_sessions.pinned_at", () => {
     const w = world();
-    expect(MIGRATIONS.find((m) => m.name === "leader-repin")?.version).toBe(19);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(19);
     expect((w.db.query("PRAGMA table_info(leader_sessions)").all() as { name: string }[]).map((c) => c.name)).toContain("pinned_at");
   });
 

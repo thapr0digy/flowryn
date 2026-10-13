@@ -308,12 +308,12 @@ async function contractChecks(config: FlowrynConfig): Promise<Check[]> {
   return checks;
 }
 
-/** The passes recorded for this harness version, any revision; one from before migration 20 is at the baseline revision. */
+/** The passes recorded for this harness version, any revision; one from before migration 21 is at the baseline revision. */
 function recordedPasses(db: Db, harness: string, version: string): { revision: number; passed_at: number }[] {
   const schema = schemaVersion(db);
   if (schema < 2) return [];
   const sql =
-    schema >= 20
+    schema >= 21
       ? "SELECT revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2 ORDER BY revision"
       : `SELECT ${BASELINE_REVISION} AS revision, passed_at FROM harness_contracts WHERE harness = ?1 AND version = ?2`;
   return db.query(sql).all(harness, version) as { revision: number; passed_at: number }[];

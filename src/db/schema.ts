@@ -519,6 +519,21 @@ ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
 `;
 
 /**
+ * Review-channel health (docs/notes/2026-10-12-next-steps-md-7b.md): whether the daemon's Lavish
+ * poll of a gate's page delivers. When it last turned healthy, since when it fails, how many polls
+ * in a row, why, when it tries again, and the review_channel item the failing episode opened.
+ * Gates from before carry nothing: an upgrade says nothing about a channel it never watched.
+ */
+const GATE_CHANNEL_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN channel_ok_at INTEGER;
+ALTER TABLE gates ADD COLUMN channel_failing_since INTEGER;
+ALTER TABLE gates ADD COLUMN channel_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gates ADD COLUMN channel_reason TEXT;
+ALTER TABLE gates ADD COLUMN channel_retry_at INTEGER;
+ALTER TABLE gates ADD COLUMN channel_item TEXT;
+`;
+
+/**
  * Contract revision (docs/notes/2026-10-12-next-steps-md-ez.md): a pass is identified by harness,
  * version and the adapter/contract compatibility revision it proved, with the platform, Herdr version
  * and launch profile it ran on. Passes recorded before this carry over as revision 1, the baseline:
@@ -527,15 +542,15 @@ ALTER TABLE leader_sessions ADD COLUMN pinned_at INTEGER;
  * later bump of CONTRACT_REVISIONS makes them stale.
  */
 const CONTRACT_REVISION_SQL = /* sql */ `
-CREATE TABLE harness_contracts_v20 (harness TEXT NOT NULL, version TEXT NOT NULL,
+CREATE TABLE harness_contracts_v21 (harness TEXT NOT NULL, version TEXT NOT NULL,
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
   passed_at INTEGER NOT NULL, report_path TEXT,
   platform TEXT, herdr_version TEXT, launch_profile TEXT,
   PRIMARY KEY (harness, version, revision));
-INSERT INTO harness_contracts_v20 (harness, version, revision, passed_at, report_path)
+INSERT INTO harness_contracts_v21 (harness, version, revision, passed_at, report_path)
   SELECT harness, version, 1, passed_at, report_path FROM harness_contracts;
 DROP TABLE harness_contracts;
-ALTER TABLE harness_contracts_v20 RENAME TO harness_contracts;
+ALTER TABLE harness_contracts_v21 RENAME TO harness_contracts;
 `;
 
 export const MIGRATIONS: readonly Migration[] = [
@@ -558,7 +573,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 17, name: "chat-grants", sql: CHAT_GRANTS_SQL, rebuildsReferencedTable: true },
   { version: 18, name: "gate-browser-open", sql: GATE_BROWSER_OPEN_SQL },
   { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
-  { version: 20, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
+  { version: 20, name: "gate-channel", sql: GATE_CHANNEL_SQL },
+  { version: 21, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
