@@ -250,9 +250,26 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("wait explanations: migration 21 adds an empty explanations table to a database in use; its runs and items are untouched", () => {
+  test("job leases: migration 21 on a database in use; a verification running before it holds no slot; one live lease per pool and job; only a verify job", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 20));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES ('v1', 'web', 'https://github.com/a/w/pull/1', 'h', 'running', '[]', '/d', '/d/wt', '/w', 1)");
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([21]);
+    expect(db.query("SELECT COUNT(*) AS n FROM job_leases").get()).toEqual({ n: 0 });
+    const lease = (job: string, kind = "verify") => db.query("INSERT INTO job_leases (pool, kind, job_id, granted_at) VALUES ('validation', ?1, ?2, 1)").run(kind, job);
+    lease("v2");
+    expect(() => lease("v2")).toThrow("UNIQUE");
+    expect(() => lease("b1", "build")).toThrow("CHECK");
+    db.exec("UPDATE job_leases SET released_at = 2, released_by = 'x' WHERE job_id = 'v2'");
+    lease("v2");
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([]);
+    db.close();
+  });
+
+  test("wait explanations: migration 22 adds an empty explanations table to a database in use; its runs and items are untouched", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 21));
     db.exec(`
       INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes');
       INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('web-a1', 'web', 'ship', 'no-mistakes', 0, 'fix', 1);
@@ -261,7 +278,7 @@ describe("migrations", () => {
       INSERT INTO events (ulid, ts, source, run_id, task_id, kind, payload) VALUES ('01J', 1, 'hook', 'r1', 'web-a1', 'run.blocked_prompt', '{}');
       INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, opened_at) VALUES ('i1', 1, 'actionable', 'P1', 'blocked_prompt', 'web-a1', 'r1', 'waiting on a confirmation', 1);
     `);
-    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([21]);
+    expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([22]);
     // Nothing is invented for a wait that began before the upgrade.
     expect(db.query("SELECT COUNT(*) AS n FROM explanations").get()).toEqual({ n: 0 });
     expect(db.query("SELECT liveness, stage_state FROM runs").get()).toEqual({ liveness: "blocked_dialog", stage_state: "waiting" });
@@ -270,7 +287,7 @@ describe("migrations", () => {
       VALUES ('r1', 'web-a1', 'build', 'dialog', 'dialog.confirmed', 'a dialog', '[]', '[]', 's', 'i1', 1, 2)`);
     expect(() => db.exec(`INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, event_seq, opened_at)
       VALUES ('r1', 'web-a1', 'build', 'gate', 'x', 'x', '[]', '[]', 's', 1, 2)`)).toThrow();
-    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([]);
     expect(db.query("SELECT operation, closed_at FROM explanations").get()).toEqual({ operation: null, closed_at: null });
     db.close();
   });

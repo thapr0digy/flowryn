@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
@@ -13,11 +14,31 @@ import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
  */
 
 let env: ShipEnv | null = null;
+const dirs: string[] = [];
 
 afterEach(async () => {
   await env?.cleanup();
   env = null;
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 }, 30_000);
+
+function scratch(): string {
+  const dir = mkdtempSync(join(tmpdir(), "fw-verify-"));
+  dirs.push(dir);
+  return dir;
+}
+
+/** A host probe the scheduler's host check runs: the test writes what the host "has". */
+function hostProbe(): { probe: string; set(freeGb: number): void } {
+  const dir = scratch();
+  const file = join(dir, "host.json");
+  const probe = join(dir, "probe");
+  writeFileSync(probe, `#!/bin/sh\ncat ${JSON.stringify(file)}\n`);
+  chmodSync(probe, 0o755);
+  const set = (freeGb: number) => writeFileSync(file, JSON.stringify({ free_mem_gb: freeGb, load_per_core: 0.2 }));
+  set(64);
+  return { probe, set };
+}
 
 const CI = "typecheck, lint, test, build, fixtures";
 
@@ -168,6 +189,54 @@ describe("flowryn verify", () => {
 
       await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE id = 'v1'")[0]?.state === "passed", 30_000, "v1 passed");
       expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a verify takes a validation slot: host pressure refuses it and writes nothing; an attach takes nothing more; the slot is freed once when it ends",
+    async () => {
+      const go = join(scratch(), "go");
+      const host = hostProbe();
+      const gated = `[projects.web]\nverify = ${JSON.stringify([`while [ ! -f ${go} ]; do sleep 0.05; done`, ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
+      env = await makeShipEnv({
+        mode: "direct-PR",
+        extraConfig: `${gated}[capacity]\nvalidation = 1\n[capacity.host]\nmin_free_mem_gb = 8\nmax_load_per_core = 1.5\nprobe = ${JSON.stringify(host.probe)}\n[sched]\nhost_cache_ms = 1\n`,
+      });
+      const e = env;
+      const { task } = await unstartedShip(e, "admitted");
+
+      // The host check fails: a new verify is refused, says why, and records nothing.
+      host.set(2);
+      const refused = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(refused.code).toBe(2);
+      expect(refused.reply.error).toMatchObject({ code: "no_capacity" });
+      expect(JSON.stringify(refused.reply.error)).toContain("host check fails (2.0 GB available, under 8 GB)");
+      expect(query(e, "SELECT id FROM verifications")).toEqual([]);
+      expect(query(e, "SELECT id FROM job_leases")).toEqual([]);
+
+      // The host recovers: the verify starts and holds the one validation slot.
+      host.set(64);
+      const first = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(first.code).toBe(0);
+      expect(first.reply.data).toMatchObject({ verification: "v1", attached: false });
+      const capacity = await e.fleet.json(["capacity"]);
+      expect(capacity.reply.data).toMatchObject({ pools: expect.arrayContaining([{ pool: "validation", used: 1, cap: 1 }]), jobs: [{ job: "v1", kind: "verify", pool: "validation", task }] });
+
+      // The same PR and head attaches, even with the pool full and the host check failing: it takes nothing new.
+      host.set(2);
+      const again = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(again.code).toBe(0);
+      expect(again.reply.data).toMatchObject({ verification: "v1", attached: true });
+      expect(query(e, "SELECT job_id FROM job_leases")).toEqual([{ job_id: "v1" }]);
+
+      writeFileSync(go, "");
+      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE id = 'v1'")[0]?.state === "passed", 30_000, "v1 passed");
+      await waitUntil(() => query(e, "SELECT 1 FROM job_leases WHERE released_at IS NULL").length === 0, 10_000, "v1's slot freed");
+      expect(existsSync(join(e.fleet.h.home, "state", "verify", "v1", "wt"))).toBe(false);
+      expect(query(e, "SELECT released_by FROM job_leases")).toEqual([{ released_by: "verification v1 ended" }]);
+      const released = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'pool.released'").map((r) => JSON.parse(r.payload) as Record<string, unknown>).filter((p) => p.job === "v1");
+      expect(released).toHaveLength(1);
     },
     { timeout: 120_000 },
   );

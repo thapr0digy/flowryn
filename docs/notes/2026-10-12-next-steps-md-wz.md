@@ -9,7 +9,7 @@
 
 ### The record
 
-One new table, `explanations` (migration 21, `explanations`). A row is one decision Flowryn made about one run, with the inputs it decided on:
+One new table, `explanations` (migration 22, `explanations`). A row is one decision Flowryn made about one run, with the inputs it decided on:
 
 | column | what |
 |---|---|
@@ -94,11 +94,11 @@ All rules stay where they decide today (`src/lifecycle/prompt-wedge.ts`, `src/re
 
 ### Files
 
-`src/db/schema.ts` (migration 21), `src/attention/explanations.ts` (new), `src/attention/items.ts` (`resolveRunItems` closes item-linked rows), `src/lifecycle/prompt-wedge.ts`, `src/reconcile/reconciler.ts`, `src/sched/scheduler.ts`, `src/lifecycle/runs.ts` (`failRun`, `cancelRun`), `src/lifecycle/leader-verbs.ts` (`show --why`, `--timeline`).
+`src/db/schema.ts` (migration 22), `src/attention/explanations.ts` (new), `src/attention/items.ts` (`resolveRunItems` closes item-linked rows), `src/lifecycle/prompt-wedge.ts`, `src/reconcile/reconciler.ts`, `src/sched/scheduler.ts`, `src/lifecycle/runs.ts` (`failRun`, `cancelRun`), `src/lifecycle/leader-verbs.ts` (`show --why`, `--timeline`).
 
 ### Tests
 
-- `test/unit/db.test.ts`: migration 21 on a database in use (a run and an open item survive; the table starts empty).
+- `test/unit/db.test.ts`: migration 22 on a database in use (a run and an open item survive; the table starts empty).
 - `test/unit/explanations.test.ts` (new): the quota floor, the harness gate and a throwing harness check, each one row over several passes; `--timeline` not found; dedupe (the same observation twice writes one row; a changed fact supersedes; a changed `at` alone does not; kinds are independent; a settled decision is recorded closed), item-linked closing, the sweep and a cancel, and the `show` lines (default, `--why`, `--timeline`, `--timeline --full`).
 - Per decision kind, through the real code path, then replayed offline: the database file is closed, reopened, and `show --why` / `--timeline` explain it from the table alone:
   - dialog: `openBlockedPrompt` (confirmed), the reconciler's trust wedge over several passes (one row), and hook activity closing it;
