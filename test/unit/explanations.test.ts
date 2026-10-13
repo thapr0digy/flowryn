@@ -350,12 +350,12 @@ describe("capacity: a scheduler wait", () => {
   });
 });
 
-describe("capacity: the quota floor and the harness gate, across passes", () => {
-  /** r2: a new Claude run waiting for its first launch. */
-  function freshLaunch(at: number): void {
-    db.query("UPDATE runs SET state = 'launching', pending_launch = 'fresh', waiting_since = ?1, proc_pid = NULL, proc_start = NULL, proc_exe = NULL WHERE id = 'r2'").run(at);
-  }
+/** r2: a new Claude run waiting for its first launch. */
+function freshLaunch(at: number): void {
+  db.query("UPDATE runs SET state = 'launching', pending_launch = 'fresh', waiting_since = ?1, proc_pid = NULL, proc_start = NULL, proc_exe = NULL WHERE id = 'r2'").run(at);
+}
 
+describe("capacity: the quota floor and the harness gate, across passes", () => {
   test("a new Claude run under the quota floor is one explanation over several passes, naming the reading and the captain's override", async () => {
     let clock = 5_000_000;
     freshLaunch(clock);
