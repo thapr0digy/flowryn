@@ -189,7 +189,15 @@ export class Launcher {
       log(`launch ${runId}: failed: ${(error as Error).stack ?? String(error)}`);
       tx(db, () => {
         const run = getRunWithPolicy(db, runId);
-        if (run) failRun(db, run, `${mode === "resume" ? "resume" : "launch"} failed: ${(error as Error).message}`, "daemon", now());
+        if (!run) return;
+        // A cancel superseded this launch: the run ends as the cancel says (cancelled), not failed. Its driver,
+        // or the reconciler once this launcher lets go, stops whatever is recorded and commits it.
+        const open = openOperation(db, run.id);
+        if (open?.kind === "cancel") {
+          appendEvent(db, { source: "daemon", kind: "run.launch_failed_cancelling", runId, taskId: run.task_id, payload: { mode, reason: (error as Error).message, cancel: open.id }, ts: now() });
+          return;
+        }
+        failRun(db, run, `${mode === "resume" ? "resume" : "launch"} failed: ${(error as Error).message}`, "daemon", now());
       });
       return "failed";
     } finally {

@@ -227,7 +227,10 @@ export class Reconciler {
     // worker: a run being cancelled is never read as dead and resumed, an issued launch never as a death.
     const open = openOperation(db, run.id);
     if (open) return this.recoverOperation(run, open);
-    if (heldByEscalation(this.deps.db, run.id)) return "operation";
+    // An escalated launch or resume waits for you: its candidate may be alive in the pane, so nothing here judges
+    // or relaunches the run. An escalated cancel's worker is the recorded one: it is still watched, never resumed.
+    const held = heldByEscalation(db, run.id);
+    if (held && held.kind !== "cancel") return "operation";
     // A launch the scheduler owns: waiting for its grant, or a fresh stage worker being started.
     if (run.pending_launch) return "launching";
     const runtime = this.deps.runtime();
@@ -309,7 +312,7 @@ export class Reconciler {
       return orphaned.applied ? "orphaned" : "stale";
     }
 
-    return this.handleDeath(run, panes);
+    return this.handleDeath(run, panes, held ? "died after a cancel that could not stop it" : null);
   }
 
   /**
@@ -488,10 +491,10 @@ export class Reconciler {
    * Every write here is a guarded transition: the death was observed before
    * awaits, and a newer hook, cancel or worker voids it (src/lifecycle/observed.ts).
    */
-  private async handleDeath(run: RunRow, panes: PaneProcesses | null): Promise<"dead" | "resumed" | "stale"> {
+  private async handleDeath(run: RunRow, panes: PaneProcesses | null, noResume: string | null = null): Promise<"dead" | "resumed" | "stale"> {
     const { db, now } = this.deps;
     const husk = panes !== null && panes.foregroundGroup === panes.shellPid;
-    const resumeDue = !WORK_DONE.includes(run.state) && run.resume_count === 0 && run.agent_session !== null;
+    const resumeDue = noResume === null && !WORK_DONE.includes(run.state) && run.resume_count === 0 && run.agent_session !== null;
     const gate = resumeDue ? await this.harnessCheck(run.harness) : null;
     if (gate && gate.state !== "verified") return this.deferResume(run, gate, husk);
     const t = now();
@@ -514,7 +517,7 @@ export class Reconciler {
       return "resumed";
     }
     const died = observedTransition(db, run, "died", "reconciler", t, () => {
-      const changed = setLiveness(db, run, "dead", "reconciler", { reason: run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume", husk }, t);
+      const changed = setLiveness(db, run, "dead", "reconciler", { reason: noResume ?? (run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume"), husk }, t);
       resolveRunItems(db, run.id, ["blocked_prompt"], "run.died", t);
       // Nothing holds a slot for a dead worker (design section 11); `flowryn resume` asks for them again.
       const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
@@ -526,14 +529,14 @@ export class Reconciler {
           "failure_needs_you",
           run,
           event.seq,
-          `Worker for ${taskTitle(db, run.task_id)} died${run.resume_count > 0 ? " again after its automatic resume" : ""}; flowryn resume ${run.task_id} or flowryn cancel ${run.task_id}`,
+          `Worker for ${taskTitle(db, run.task_id)} ${noResume ?? `died${run.resume_count > 0 ? " again after its automatic resume" : ""}`}; flowryn resume ${run.task_id} or flowryn cancel ${run.task_id}`,
           t,
         );
         explain(db, {
           run,
           kind: "resume",
           rule: "resume.refused",
-          reason: run.resume_count > 0 ? "the worker died again after its one automatic resume; no second one" : "the worker died with no session to resume",
+          reason: noResume ? `the worker ${noResume}` : run.resume_count > 0 ? "the worker died again after its one automatic resume; no second one" : "the worker died with no session to resume",
           facts: deathFacts(run, husk, t),
           unblock: [
             { by: "leader", action: `flowryn resume ${run.task_id}` },

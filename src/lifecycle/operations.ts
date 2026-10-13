@@ -66,11 +66,15 @@ export function latestOperation(db: Db, runId: string): OperationRow | null {
   return db.query("SELECT * FROM operations WHERE run_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1").get(runId) as OperationRow | null;
 }
 
-/** The run's newest operation escalated and its P1 is still open or presented: nothing happens to the run by itself until you act. */
-export function heldByEscalation(db: Db, runId: string): boolean {
+/**
+ * The run's newest operation, when it escalated: it holds the run until a newer
+ * operation takes over, which only `flowryn cancel` or an explicit
+ * `flowryn resume` opens. Dismissing its P1 does not release it, because the
+ * ambiguous process may still be in the pane.
+ */
+export function heldByEscalation(db: Db, runId: string): OperationRow | null {
   const op = latestOperation(db, runId);
-  if (op?.phase !== "escalated" || !op.item_id) return false;
-  return db.query("SELECT 1 FROM items WHERE id = ?1 AND state IN ('open','presented')").get(op.item_id) !== null;
+  return op?.phase === "escalated" ? op : null;
 }
 
 export function launchKind(mode: OperationMode): "launch" | "resume" {
@@ -220,7 +224,7 @@ export function escalateOperation(db: Db, op: Pick<OperationRow, "id" | "attempt
     eventSeq: seq,
     taskId: row.task_id,
     runId: row.run_id,
-    line: `${row.task_id}: the ${row.kind} ${row.id} needs you: ${detail}; flowryn show ${row.task_id}, then flowryn cancel ${row.task_id} or dismiss`,
+    line: `${row.task_id}: the ${row.kind} ${row.id} needs you: ${detail}; flowryn show ${row.task_id}, then flowryn cancel ${row.task_id}${row.kind === "cancel" ? " again" : ` or flowryn resume ${row.task_id}`}`,
     now,
   });
   db.query("UPDATE operations SET item_id = ?2 WHERE id = ?1").run(row.id, item);

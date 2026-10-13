@@ -115,6 +115,29 @@ describe("a cancel that lands while the launcher waits for its agent", () => {
   }, 90_000);
 });
 
+describe("a cancel that supersedes a launch which then fails", () => {
+  test("the run ends cancelled, not failed: the launcher leaves it to the cancel", async () => {
+    const f = await fleet();
+    f.herdr.holdStarts = true;
+    const { run } = await f.dispatch("FAKE: stall\n");
+    await waitUntil(() => operations(f, run)[0]?.phase === "effect_issued" && agentStarts(f) === 1, 15_000, "the launch to issue agent.start");
+    const db = f.h.db();
+    try {
+      tx(db, () => requestCancel(db, { id: run, task_id: f.run(run).task_id }, { id: ulid(), by: "leader", reason: "test", source: "cli", now: Date.now() }));
+    } finally {
+      db.close();
+    }
+    // The start is never released: the launcher's wait for its harness times out and throws.
+    await f.waitRun(run, (r) => r.state === "cancelled", "the cancel to finish once the launch failed", 30_000);
+    expect(f.events(run)).toContain("run.launch_failed_cancelling");
+    expect(f.events(run)).not.toContain("run.failed");
+    expect(operations(f, run).map((o) => [o.kind, o.phase])).toEqual([
+      ["launch", "failed"],
+      ["cancel", "confirmed"],
+    ]);
+  }, 90_000);
+});
+
 describe("a daemon killed while a cancel stops the worker", () => {
   test("the restart finishes the cancel: the worker is stopped, the run cancelled and never resumed", async () => {
     const f = await fleet({ exit_grace_ms: 4_000 });

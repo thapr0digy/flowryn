@@ -7,7 +7,7 @@ import type { Envelope, Reply } from "../../src/api/envelope.ts";
 import { Gateway } from "../../src/api/gateway.ts";
 import type { DaemonServices } from "../../src/api/verbs.ts";
 import { inertAttention } from "../../src/attention/services.ts";
-import { defaultConfig } from "../../src/config/config.ts";
+import { defaultConfig, parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { inertRestart } from "../../src/daemon/restart.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
@@ -97,6 +97,8 @@ interface DaemonOptions {
   processes?(paneId: string): Promise<PaneProcesses | null>;
   harnessGate?(): Promise<{ harness: "claude"; state: "verified"; version: string; revision: number }>;
   launching?: Set<string>;
+  /** `flowryn resume`'s harness check passes: claude 1 is installed and has a passing contract. */
+  verifiedHarness?: boolean;
   /** In place of the cancel's driver: a daemon that dies before its settle drives the operation. */
   driveCancel?(id: string): Promise<never>;
 }
@@ -158,7 +160,8 @@ function daemon(options: DaemonOptions = {}): Daemon {
     ...(options.harnessGate ? { harnessGate: options.harnessGate } : {}),
   });
   reconcilers.push(reconciler);
-  const config = defaultConfig(dir);
+  const config = options.verifiedHarness ? parseConfig('[tools]\nclaude = "/x/claude"\n', dir) : defaultConfig(dir);
+  if (options.verifiedHarness) tx(db, () => db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 1)").run());
   const files = () => ({ backlog: join(dir, "b.md"), todos: join(dir, "t.md") });
   const journal = new Journal({ db, files, runner: () => null });
   const info = () => ({ pid: 1, version: "t", proto: PROTO, instance: "i", startedAt: 0, execPath: "/bin/flowryn", socket: "/s", stateDir: dir });
@@ -175,6 +178,7 @@ function daemon(options: DaemonOptions = {}): Daemon {
     fleet: inertFleet({
       driveCancel: (id) => (options.driveCancel ? options.driveCancel(id) : ops.driveCancel(id)),
       exitRun: stop,
+      ...(options.verifiedHarness ? { harnessVersion: async () => "1" } : {}),
       launch: (runId, mode, operation) => launches.push(`${runId}:${mode}:${operation ?? "-"}`),
     }),
     attention: inertAttention(),
@@ -329,18 +333,44 @@ describe("cancel: the intent is committed before the worker is stopped", () => {
     expect(d.exits).toEqual(["r1"]);
   });
 
-  test("a stop that fails during recovery escalates: one P1, and the run is left alone while it is open", async () => {
+  test("a stop that fails during recovery escalates: one P1; the worker is still watched, and its death is noticed but never resumed", async () => {
     tx(db, () => requestOperation(db, { id: ulid(), run: { id: "r1", task_id: "t1" }, kind: "cancel", requestedBy: "leader", reason: "x", source: "cli", now: Date.now() }));
     const d = daemon({ exitRun: async () => ({ ok: false, evidence: "timeout", detail: "SIGKILL" }) });
     const op = operationRows()[0]!;
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     expect(await d.ops.driveCancel(op.id)).toMatchObject({ ok: false, phase: "escalated" });
     expect(db.query("SELECT kind, state FROM items WHERE run_id = 'r1'").all()).toEqual([{ kind: "operation_escalated", state: "open" }]);
-    // The worker then dies: with the escalation open, nothing resumes it.
-    deadRun();
-    expect(await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady")).toBe("operation");
+    // The worker then dies: the death is noticed (liveness, a P0 to resume or cancel), and nothing resumes it.
+    workerAlive = false;
+    expect(await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady")).toBe("dead");
+    const run = getRun(db, "r1")!;
+    expect([run.liveness, run.resume_count, run.state]).toEqual(["dead", 0, "running"]);
     expect(d.launches).toEqual([]);
-    expect(getRun(db, "r1")!.resume_count).toBe(0);
+    expect(eventKinds()).not.toContain("run.auto_resumed");
+    expect(db.query("SELECT kind FROM items WHERE run_id = 'r1' AND state = 'open' ORDER BY kind").all()).toEqual([{ kind: "failure_needs_you" }, { kind: "operation_escalated" }]);
+    // A cancel now finds the worker gone and finishes.
+    const again = await daemon().gateway.handle(envelope("cancel", { target: "t1" }));
+    expect(again).toMatchObject({ ok: true, data: { state: "cancelled" } });
+  });
+
+  test("a replay that joins the reconciler's attempt is a waiting caller: a stop that fails fails the cancel, no P1", async () => {
+    const parked = barrier();
+    const first = daemon({ driveCancel: () => parked.hold(() => undefined as never) });
+    const cancel = envelope("cancel", { target: "t1" });
+    void first.gateway.handle(cancel);
+    await parked.reached;
+    // After the restart the reconciler starts the stop; the CLI's retry of the same call joins it.
+    const stop = barrier();
+    const second = daemon({ exitRun: () => stop.hold(() => ({ ok: false, evidence: "timeout", detail: "SIGKILL" }) as Verified) });
+    await second.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
+    await stop.reached;
+    const replay = second.gateway.handle(cancel);
+    await Promise.resolve();
+    stop.open();
+    expect(await replay).toMatchObject({ ok: false, error: { code: "internal" } });
+    expect(getOperation(db, cancel.ulid)!.phase).toBe("failed");
+    expect(db.query("SELECT kind FROM items WHERE run_id = 'r1'").all()).toEqual([]);
+    expect(second.exits).toEqual(["r1"]);
   });
 });
 
@@ -357,6 +387,15 @@ describe("one open operation per run", () => {
     const again = await d.gateway.handle(envelope("resume", { target: "t1" }));
     expect(again).toMatchObject({ ok: false, error: { code: "run_not_active" } });
     expect(operationRows().filter((o) => o.phase === "requested" || o.phase === "effect_issued").map((o) => o.kind)).toEqual(["cancel"]);
+  });
+
+  test("a resume is refused while a launch of another mode is requested: no second operation", async () => {
+    deadRun();
+    tx(db, () => requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "scheduler", source: "daemon", now: Date.now() }));
+    const reply = await daemon().gateway.handle(envelope("resume", { target: "t1" }));
+    expect(reply).toMatchObject({ ok: false, error: { code: "bad_args" } });
+    expect(reply.error!.message).toContain("stage launch");
+    expect(operationRows().map((o) => [o.kind, o.mode, o.phase])).toEqual([["launch", "stage", "requested"]]);
   });
 
   test("the database refuses a second open operation for a run", () => {
@@ -420,6 +459,29 @@ describe("an issued launch with no launcher is judged against its recorded candi
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
     expect(d.launches).toEqual([]);
     expect(operationRows()).toHaveLength(1);
+    // Dismissing its P1 does not release it: the process may still be in the pane.
+    tx(db, () => db.query("UPDATE items SET state = 'dismissed' WHERE run_id = 'r1' AND kind = 'operation_escalated'").run());
+    await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
+    expect(d.launches).toEqual([]);
+    expect(operationRows()).toHaveLength(1);
+    expect(db.query("SELECT line FROM items WHERE kind = 'operation_escalated'").get()).toMatchObject({ line: expect.not.stringContaining("dismiss") });
+  });
+
+  test("`flowryn resume` is the explicit way out of an escalated launch: one new operation, for the scheduler to grant", async () => {
+    const op = issuedLaunch(START + 60_000);
+    const d = daemon({ processes: harness(PID), verifiedHarness: true });
+    await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
+    expect(getOperation(db, op.id)!.phase).toBe("escalated");
+    const resume = envelope("resume", { target: "t1" });
+    const reply = await d.gateway.handle(resume);
+    // The run holds no worker slot here, so the resume waits for its grant like any other.
+    expect(reply).toMatchObject({ ok: true, data: { operation: resume.ulid } });
+    expect(getRun(db, "r1")!.pending_launch).toBe("resume");
+    expect(operationRows().map((o) => [o.kind, o.phase])).toEqual([
+      ["launch", "escalated"],
+      ["resume", "requested"],
+    ]);
+    expect(db.query("SELECT state FROM items WHERE kind = 'operation_escalated'").get()).toEqual({ state: "resolved" });
   });
 
   test("another foreground process in the recorded pane: escalated", async () => {

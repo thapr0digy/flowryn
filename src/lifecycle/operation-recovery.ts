@@ -56,7 +56,8 @@ export type CandidateVerdict = "unknown" | "waiting" | "adopted" | "reissued" | 
 
 export class Operations {
   private readonly deps: OperationDeps;
-  private readonly cancels = new Map<string, Promise<CancelOutcome>>();
+  /** Cancels being driven, and whether a caller (the request, or a replay of it) waits on each. */
+  private readonly cancels = new Map<string, { attempt: Promise<CancelOutcome>; caller: { waiting: boolean } }>();
   private readonly checking = new Set<string>();
 
   constructor(deps: OperationDeps) {
@@ -71,19 +72,26 @@ export class Operations {
   /**
    * Drive a cancel to its end. One attempt per operation at a time: a second
    * caller (the same request again, a replay, the reconciler) shares it. A
-   * recovering caller has no one to tell of a worker that will not exit, so
-   * that escalates instead of failing.
+   * worker that will not exit fails the cancel when a caller waits on it (it
+   * gets the error, as the request always did), even one that joined an
+   * attempt the reconciler began; with no caller at all there is no one to
+   * tell, so it escalates instead.
    */
   driveCancel(id: string, opts: { recovering?: boolean } = {}): Promise<CancelOutcome> {
     const running = this.cancels.get(id);
-    if (running) return running;
-    const attempt = this.cancelOnce(id, opts.recovering === true).finally(() => this.cancels.delete(id));
-    this.cancels.set(id, attempt);
+    if (running) {
+      if (opts.recovering !== true) running.caller.waiting = true;
+      return running.attempt;
+    }
+    const caller = { waiting: opts.recovering !== true };
+    const attempt = this.cancelOnce(id, caller).finally(() => this.cancels.delete(id));
+    this.cancels.set(id, { attempt, caller });
     return attempt;
   }
 
-  private async cancelOnce(id: string, recovering: boolean): Promise<CancelOutcome> {
+  private async cancelOnce(id: string, caller: { waiting: boolean }): Promise<CancelOutcome> {
     const { db, now } = this.deps;
+    const recovering = !caller.waiting;
     const source: EventSource = recovering ? "reconciler" : "cli";
     const issued = tx(db, (): { done: CancelOutcome } | { op: OperationRow } => {
       const op = getOperation(db, id);
@@ -114,7 +122,7 @@ export class Operations {
         return { ok: true, phase: "confirmed", evidence: exited.evidence };
       }
       const why = `the worker did not exit (${exited.detail ?? exited.evidence})`;
-      if (recovering) {
+      if (!caller.waiting) {
         escalateOperation(db, current, `cancel could not stop the worker: ${why}`, source, now());
         return { ok: false, phase: "escalated", evidence: exited.evidence, detail: why };
       }

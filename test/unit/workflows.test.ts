@@ -9,7 +9,7 @@ import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleB
 import { contractRevision } from "../../src/contracts/revision.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
-import { escalateOperation } from "../../src/lifecycle/operations.ts";
+import { escalateOperation, requestOperation } from "../../src/lifecycle/operations.ts";
 import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
@@ -561,7 +561,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     f.db.close();
   });
 
-  test("an escalated stage replacement is held while its P1 is open: no exit attempt, no launch; granted again once the item is resolved", async () => {
+  test("an escalated stage replacement is held, even once its P1 is resolved or dismissed: no exit attempt, no launch; a newer operation you open releases it", async () => {
     const f = freshStage({}, ["r1"]);
     tx(f.db, () => {
       const at = Date.now();
@@ -574,6 +574,11 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     expect(f.launches).toEqual([]);
     expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
     tx(f.db, () => resolveRunItems(f.db, "r1", ["operation_escalated"], "human", Date.now()));
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    // What `flowryn resume` opens: a newer operation, which the grant then launches.
+    tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "human", source: "cli", now: Date.now() }));
     await f.scheduler.passNow();
     expect(f.exitCalls).toEqual(["r1"]);
     expect(f.launches).toEqual(["r1:stage"]);

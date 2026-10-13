@@ -147,11 +147,16 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
   if (!run) throw new FlowrynError("not_found", `no run or task ${target}`);
   if (run.state === "cancelled" || run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
   if (run.cleanup === "done") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is cleaned up: its worktree is gone`, `dispatch ${run.task_id} again`);
-  if (run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
+  // An escalated launch or resume is yours to settle: after looking at its pane, `flowryn resume` is one way out (cancel the other).
+  const held = heldByEscalation(db, run.id);
+  const escalatedStart = held !== null && held.kind !== "cancel";
+  if (!escalatedStart && run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
   if (!run.agent_session) throw new FlowrynError("bad_args", "the run has no stored session to resume");
   const open = openOperation(db, run.id);
   if (open?.kind === "cancel") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is being cancelled (${open.id})`, `flowryn show ${run.task_id}`);
   if (open && open.phase !== "requested") throw new FlowrynError("bad_args", `a ${open.kind} of ${run.task_id} is already under way (${open.id})`, `flowryn show ${run.task_id}`);
+  // A requested launch of another mode (a fresh stage worker waiting for its grant) starts the run when granted: no resume beside it.
+  if (open && open.kind !== "resume") throw new FlowrynError("bad_args", `a ${open.mode ?? open.kind} launch of ${run.task_id} is already requested (${open.id}); it starts when granted`, "flowryn capacity");
   return run;
 }
 
@@ -192,7 +197,7 @@ const resume: VerbSpec = {
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
-    resolveRunItems(ctx.db, run.id, ["failure_needs_you"], "run.resume_requested", now);
+    resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated"], "run.resume_requested", now);
     appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler } });
     return { data: { run: run.id, task: run.task_id, state: "resuming", operation: op.id }, hints: [`flowryn show ${run.task_id}`] };
   },
