@@ -117,7 +117,7 @@ async function recoverOwned(db: Db, dir: string, log: Log): Promise<void> {
     const found = await recoverOwnedProcesses(dir);
     if (found.ended.length + found.failed.length + found.unreadable.length + found.discarded.length === 0) return;
     if (found.ended.length > 0) log(`owned: ended ${found.ended.map(ownedName).join(", ")}, left running by the last daemon`);
-    if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${ownedName(f)}: ${f.detail}`).join("; ")}; kept for the next start`);
+    if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${ownedName(f)}: ${f.detail}`).join("; ")}; kept, and checked again at the next start`);
     if (found.unreadable.length > 0) log(`owned: cannot read ${found.unreadable.join(", ")}; kept`);
     if (found.discarded.length > 0) log(`owned: removed torn writes ${found.discarded.join(", ")}`);
     tx(db, () =>
@@ -804,7 +804,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     // After the journal settles or the shutdown grace runs out: what still runs goes. A tasks-axi
     // mutation cut here is one the grace did not cover; its intent replays on the next start.
     const owned = await stopOwnedProcesses(OWNED_STOP_GRACE_MS);
-    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start`);
+    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded; their leaders are gone, so the next start drops the entries and does not end the members`);
     tx(database, () => appendEvent(database, { source: "daemon", kind: "daemon.stopped", payload: { reason } }));
     return 0;
   } catch (error) {

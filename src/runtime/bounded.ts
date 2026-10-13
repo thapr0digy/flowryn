@@ -58,7 +58,7 @@ export interface BoundedResult {
   /** The leader exited on its own while a process it started still held its output: left running, read so far. */
   lingering: boolean;
   spawnError: string | null;
-  /** The group outlived its SIGKILL: its ledger entry is kept for the next daemon to end. */
+  /** The group outlived its SIGKILL: its ledger entry is kept as a record; the next start drops it, as its leader is gone. */
   leftover: boolean;
 }
 
@@ -72,7 +72,7 @@ interface LiveChild {
   pid: number;
   group: boolean;
   entry: string | null;
-  /** The daemon's stop could not end its group: the entry stays for the next start. */
+  /** The daemon's stop could not end its group: the entry stays as a record, which the next start drops once its leader is gone. */
   keep: boolean;
 }
 
@@ -245,7 +245,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
   }
 
   live.delete(pid);
-  if (leftover && config) config.log(`${opts.label} (pid ${pid}): its process group outlived SIGKILL; recorded in ${child.entry ?? "nothing (no ledger entry)"} for the next start`);
+  if (leftover && config) config.log(`${opts.label} (pid ${pid}): its process group outlived SIGKILL; recorded in ${child.entry ?? "nothing (no ledger entry)"}, which the next start drops since its leader is gone (members that outlive it are not recovered)`);
   else if (!child.keep) forget(child.entry);
   if (lingering) config?.log(`${opts.label} (pid ${pid}) exited ${proc.exitCode ?? "on a signal"}; a process it started still holds its output and is left running`);
 
@@ -295,7 +295,7 @@ export interface OwnedRecovery {
   ended: { pid: number; label: string }[];
   /** Entries whose leader was gone, or whose pid is another process now: removed, nothing signalled. */
   gone: { pid: number; label: string }[];
-  /** Recorded groups that would not die, or whose entries ps could not check: their entries stay for the next start. */
+  /** Recorded groups that would not die, or whose entries ps could not check: their entries stay, and the next start checks them again (dropping one whose leader is gone). */
   failed: { pid: number; label: string; detail: string }[];
   /** Entries that cannot be read: kept, since they may name a process still running. */
   unreadable: string[];
