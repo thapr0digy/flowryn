@@ -589,6 +589,11 @@ DROP TABLE harness_contracts;
 ALTER TABLE harness_contracts_v23 RENAME TO harness_contracts;
 `;
 
+/** Each verification's verify policy identity (docs/notes/2026-10-13-next-steps-md-y4.md); NULL on a row from before it. */
+const VERIFY_POLICY_SQL = /* sql */ `
+ALTER TABLE verifications ADD COLUMN policy_id TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -613,6 +618,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 21, name: "job-leases", sql: JOB_LEASES_SQL },
   { version: 22, name: "explanations", sql: EXPLANATIONS_SQL },
   { version: 23, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
+  { version: 24, name: "verify-policy", sql: VERIFY_POLICY_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

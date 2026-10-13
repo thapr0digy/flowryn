@@ -14,6 +14,7 @@ import type { HostVerdict } from "../sched/host.ts";
 import { fullPools, grantJobLease, liveCounts, poolHolders } from "../sched/pools.ts";
 import { tx } from "../db/db.ts";
 import { verifyConfig, verifySnippet, type VerifyConfig } from "./config.ts";
+import { shortPolicy, verifyPolicyId } from "./policy.ts";
 import { initialSteps, isVerifying, readTail, runVerification, type VerifyDeps } from "./runner.ts";
 import { getVerification, insertVerification, runningVerifications, type Verification } from "./store.ts";
 import { countsLine } from "./summary.ts";
@@ -94,6 +95,8 @@ interface StartPrepared {
   target: Target;
   pr: PullRequest;
   config: VerifyConfig;
+  /** The identity of `config`, recorded with a new job and required of a running one to attach. */
+  policy: string;
   host: HostVerdict;
 }
 
@@ -118,6 +121,7 @@ export function verificationView(v: Verification, now: number): Record<string, u
     pr: v.pr_url,
     task: v.task_id ?? "-",
     head: v.head_sha,
+    policy: v.policy_id ?? "-",
     state: v.state,
     steps: v.steps.map((s) => ({ step: s.name, state: s.state, exit: s.exit ?? "-", ms: s.ms ?? "-", tests: s.tests ? countsLine(s.tests) : "-", detail: s.detail ?? "-" })),
     tests: v.tests ? countsLine(v.tests) : "-",
@@ -161,13 +165,21 @@ const verifyStart: VerbSpec = {
     }
     // Read before the transaction (it may sample the host); apply enforces it only for a new job, never an attach.
     const host = await ctx.sched.host();
-    return { target, pr, config, host };
+    return { target, pr, config, policy: verifyPolicyId(config), host };
   },
   apply(ctx, args, prepared) {
-    const { target, pr, config, host } = prepared as StartPrepared;
+    const { target, pr, config, policy, host } = prepared as StartPrepared;
     const running = runningVerifications(ctx.db);
     const same = running.find((v) => v.pr_url === target.url && v.head_sha === pr.headSha);
-    if (same) return { data: { ...verificationView(same, ctx.now()), attached: true } };
+    if (same?.policy_id === policy) return { data: { ...verificationView(same, ctx.now()), attached: true } };
+    if (same) {
+      // One job at a time: a second cannot start beside it, and attaching would report a run of other steps as today's.
+      throw new FlowrynError(
+        "verify_busy",
+        `verification ${same.id} of ${same.pr_url} at ${same.head_sha.slice(0, 8)} is running under another verify policy (${shortPolicy(same.policy_id)}, today's is ${shortPolicy(policy)}: the [projects.${target.project.id}] verify steps or verify_binary changed since it started), so it would not cover today's steps; one runs at a time`,
+        `wait for it: flowryn verify show ${same.id}; then run flowryn verify again`,
+      );
+    }
     if (running.length > 0) {
       const busy = running[0]!;
       throw new FlowrynError("verify_busy", `verification ${busy.id} of ${busy.pr_url} at ${busy.head_sha.slice(0, 8)} is running; one runs at a time`, `flowryn verify show ${busy.id}`);
@@ -182,6 +194,7 @@ const verifyStart: VerbSpec = {
       task_id: target.task,
       head_sha: pr.headSha,
       steps: initialSteps(config.steps),
+      policy_id: policy,
       dir: (id) => join(root, id),
       worktree: (id) => join(root, id, "wt"),
       project_path: target.project.path,

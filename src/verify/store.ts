@@ -40,6 +40,8 @@ export interface VerificationRow {
   project_path: string;
   started_at: number;
   finished_at: number | null;
+  /** The verify policy it ran under (src/verify/policy.ts); null on a row from before migration 24. */
+  policy_id: string | null;
 }
 
 export interface Verification extends Omit<VerificationRow, "steps" | "tests"> {
@@ -60,9 +62,19 @@ export function runningVerifications(db: Db): Verification[] {
   return (db.query("SELECT * FROM verifications WHERE state = 'running' ORDER BY started_at").all() as VerificationRow[]).map(parseVerification);
 }
 
-/** The newest finished verification of this PR at exactly this head. */
-export function finishedAtHead(db: Db, prUrl: string, head: string): Verification | null {
-  const row = db.query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND state <> 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(prUrl, head) as VerificationRow | null;
+/** The newest finished verification of this PR at exactly this head under exactly this verify policy; a legacy row (no policy) never matches. */
+export function finishedAtHead(db: Db, prUrl: string, head: string, policy: string): Verification | null {
+  const row = db
+    .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state <> 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1")
+    .get(prUrl, head, policy) as VerificationRow | null;
+  return row ? parseVerification(row) : null;
+}
+
+/** The newest finished verification of this PR at this head under any other verify policy, or none recorded (`policy` null: any). */
+export function finishedAtHeadUnderOther(db: Db, prUrl: string, head: string, policy: string | null): Verification | null {
+  const row = db
+    .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND (?3 IS NULL OR policy_id IS NULL OR policy_id <> ?3) AND state <> 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1")
+    .get(prUrl, head, policy) as VerificationRow | null;
   return row ? parseVerification(row) : null;
 }
 
@@ -84,6 +96,8 @@ export interface NewVerification {
   task_id: string | null;
   head_sha: string;
   steps: VerifyStep[];
+  /** The verify policy identity of the config the steps came from. */
+  policy_id: string;
   dir: (id: string) => string;
   worktree: (id: string) => string;
   project_path: string;
@@ -97,14 +111,14 @@ export function insertVerification(db: Db, v: NewVerification): Verification {
   setMeta(db, "next_verify_no", String(next + 1));
   const id = `v${next}`;
   db.query(
-    `INSERT INTO verifications (id, project_id, pr_url, task_id, head_sha, state, steps, dir, worktree_path, project_path, started_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10)`,
-  ).run(id, v.project_id, v.pr_url, v.task_id, v.head_sha, JSON.stringify(v.steps), v.dir(id), v.worktree(id), v.project_path, v.now);
+    `INSERT INTO verifications (id, project_id, pr_url, task_id, head_sha, state, steps, dir, worktree_path, project_path, started_at, policy_id)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11)`,
+  ).run(id, v.project_id, v.pr_url, v.task_id, v.head_sha, JSON.stringify(v.steps), v.dir(id), v.worktree(id), v.project_path, v.now, v.policy_id);
   appendEvent(db, {
     source: v.source,
     kind: "pr.verify_started",
     taskId: v.task_id,
-    payload: { verification: id, project: v.project_id, pr: v.pr_url, head: v.head_sha, steps: v.steps.map((s) => s.name) },
+    payload: { verification: id, project: v.project_id, pr: v.pr_url, head: v.head_sha, policy: v.policy_id, steps: v.steps.map((s) => s.name) },
     ts: v.now,
   });
   return getVerification(db, id)!;
@@ -145,6 +159,7 @@ export function finishVerification(db: Db, v: Verification, outcome: Verificatio
       project: v.project_id,
       pr: v.pr_url,
       head: v.head_sha,
+      policy: v.policy_id,
       state: outcome.state,
       ok: outcome.state === "passed",
       steps: outcome.steps.map((s) => ({ name: s.name, state: s.state, exit: s.exit, ms: s.ms })),

@@ -12,8 +12,9 @@ import type { RunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { checkGate, NOT_STARTED_ANNOTATION, notStartedChecks, type ChoiceResult, type MergeFacts } from "../../src/policy/merge.ts";
 import { verifyConfig } from "../../src/verify/config.ts";
+import { normalizeStep, verifyPolicyId } from "../../src/verify/policy.ts";
 import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVerifications, runVerification, stepEnv, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
-import { getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
+import { finishedAtHead, finishedAtHeadUnderOther, finishVerification, getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
 import { countsLine, parseBunSummary } from "../../src/verify/summary.ts";
 import { verificationView } from "../../src/verify/verbs.ts";
 import { grantJobLease, liveCounts, liveJobLeases, recordJobProcess } from "../../src/sched/pools.ts";
@@ -90,6 +91,48 @@ describe("[projects.<id>] verify", () => {
   });
 });
 
+const policyOf = (steps: string[], binary: string | null = null) => verifyPolicyId({ steps, binary });
+
+describe("the verify policy identity", () => {
+
+  test("assumption: formatting noise in a step (outer whitespace, runs of spaces and tabs) does not change the identity", () => {
+    expect(normalizeStep("  bun   install\t--frozen-lockfile  ")).toBe("bun install --frozen-lockfile");
+    expect(policyOf(["  bun   install\t--frozen-lockfile ", "bun test"])).toBe(policyOf(["bun install --frozen-lockfile", "bun test"]));
+  });
+
+  test("assumption: whitespace inside quotes or after a backslash is part of an argument, and a newline separates commands", () => {
+    expect(normalizeStep(`echo "a  b"   'c\t d'`)).toBe(`echo "a  b" 'c\t d'`);
+    expect(policyOf([`echo "a  b"`])).not.toBe(policyOf([`echo "a b"`]));
+    expect(normalizeStep(String.raw`echo "a \"  b"   c`)).toBe(String.raw`echo "a \"  b" c`);
+    expect(normalizeStep(String.raw`echo a\    b`)).toBe(String.raw`echo a\  b`);
+    expect(policyOf([String.raw`echo a\  b`])).not.toBe(policyOf([String.raw`echo a\ b`]));
+    expect(policyOf(["true\nfalse"])).not.toBe(policyOf(["true false"]));
+  });
+
+  test("assumption: a changed, added, removed or reordered step, or a changed or added artifact, is another policy", () => {
+    const base = policyOf(["bun install", "bun test"]);
+    expect(policyOf(["bun install", "bun test --bail"])).not.toBe(base);
+    expect(policyOf(["bun install", "npx oxlint", "bun test"])).not.toBe(base);
+    expect(policyOf(["bun install"])).not.toBe(base);
+    expect(policyOf(["bun test", "bun install"])).not.toBe(base);
+    expect(policyOf(["bun install", "bun test"], "dist/flowryn")).not.toBe(base);
+    expect(policyOf(["bun install", "bun test"], "dist/flowryn")).not.toBe(policyOf(["bun install", "bun test"], "dist/other"));
+    // Joining two steps into one is another run (a step's exit code is checked on its own).
+    expect(policyOf(["bun install bun test"])).not.toBe(base);
+  });
+
+  test("the time limit is not part of it, and the artifact is compared as verifyConfig normalizes it", () => {
+    const a = verifyConfig(config('[projects.web]\nverify = ["bun test"]\nverify_binary = "./dist/flowryn"\nverify_timeout_min = 5\n'), "web")!;
+    const b = verifyConfig(config('[projects.web]\nverify = ["bun  test"]\nverify_binary = "dist/flowryn"\n'), "web")!;
+    expect(verifyPolicyId(a)).toBe(verifyPolicyId(b));
+  });
+
+  test("assumption: the encoding is stable, so an upgrade does not quietly invalidate (or revalidate) stored results", () => {
+    // sha256 of ["flowryn-verify-policy",1,["bun install --frozen-lockfile","bun test"],"dist/flowryn"]
+    expect(policyOf(["bun install --frozen-lockfile", "bun test"], "dist/flowryn")).toBe("vp1:1e030c6a4a029f17bd56c322243558966e23287d43b2937919e2f52f951c836f");
+  });
+});
+
 describe("the step environment", () => {
   test("assumption: steps never see this Flowryn, a Claude session or a GitHub token", () => {
     const env = stepEnv({ PATH: "/usr/bin", HOME: "/h", FLOWRYN_HOME: "/f", FLOWRYN_TOKEN: "t", CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", GH_TOKEN: "g", GITHUB_TOKEN: "g", KEEP: "yes" });
@@ -148,6 +191,7 @@ function fixture(): Fixture {
           task_id: null,
           head_sha: at,
           steps: initialSteps(steps),
+          policy_id: verifyPolicyId({ steps, binary: null }),
           dir: (id) => join(root, id),
           worktree: (id) => join(root, id, "wt"),
           project_path: repo,
@@ -179,7 +223,7 @@ function events(db: Db, kind: string): Record<string, unknown>[] {
 /** A running row and its slot as the last daemon left them, with a worktree, and the step's identity when one is given. */
 function leftRunning(f: Fixture, proc: ProcIdentity | null): Verification {
   const v = tx(f.db, () => {
-    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() });
+    const row = insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["sleep 30"]), policy_id: verifyPolicyId({ steps: ["sleep 30"], binary: null }), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() });
     grantJobLease(f.db, { kind: "verify", id: row.id, taskId: null }, "validation", { validation: 5 }, Date.now());
     if (proc) recordJobProcess(f.db, { kind: "verify", id: row.id, taskId: null }, proc, Date.now());
     return row;
@@ -320,7 +364,7 @@ describe("a verification job", () => {
   test("a verification a dead daemon left running is recorded as an error at startup, its worktree removed", async () => {
     const f = fixture();
     const v = tx(f.db, () =>
-      insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["true"]), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() }),
+      insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["true"]), policy_id: verifyPolicyId({ steps: ["true"], binary: null }), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() }),
     );
     mkdirSync(v.dir, { recursive: true });
     git(f.repo, ["worktree", "add", "--detach", v.worktree_path, f.head]);
@@ -485,10 +529,13 @@ function pr(over: Partial<PullRequest> = {}): PullRequest {
   return { number: 1, url: "https://github.com/acme/web/pull/1", title: "t", state: "open", draft: false, headSha: "h2", headRef: "flowryn/t", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: true, ...over };
 }
 
+/** The project's verify policy identity under today's config, in the gate's facts. */
+const TODAY = verifyPolicyId({ steps: ["bun install", "bun test"], binary: null });
+
 const NOT_STARTED: Check = { name: "typecheck, lint, test, build, fixtures", state: "red", detail: "failure", id: 7, app: "github-actions", annotations: 2 };
 
 function verification(id: string, head: string, state: Verification["state"]): Verification {
-  return { id, project_id: "web", pr_url: pr().url, task_id: "t", head_sha: head, state, steps: [], tests: { pass: 9, fail: 0, skip: 0, todo: 0, tests: 9, files: 1 }, detail: state === "passed" ? null : "bun test exited 1", binary_path: null, dir: "/d", worktree_path: "/d/wt", project_path: "/p", started_at: 1, finished_at: 2 };
+  return { id, project_id: "web", pr_url: pr().url, task_id: "t", head_sha: head, state, steps: [], tests: { pass: 9, fail: 0, skip: 0, todo: 0, tests: 9, files: 1 }, detail: state === "passed" ? null : "bun test exited 1", binary_path: null, dir: "/d", worktree_path: "/d/wt", project_path: "/p", started_at: 1, finished_at: 2, policy_id: TODAY };
 }
 
 function facts(over: Partial<MergeFacts> = {}): MergeFacts {
@@ -505,7 +552,7 @@ function facts(over: Partial<MergeFacts> = {}): MergeFacts {
     primaryBranch: null,
     primaryDirty: false,
     fastForward: false,
-    local: { notStarted: [NOT_STARTED.id!], atHead: null, lastPassed: null },
+    local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: null, lastPassed: null },
     ...over,
   };
 }
@@ -541,11 +588,11 @@ describe("local green at the merge gate", () => {
 
   test("checks GitHub never started, and a passing verify at exactly this head: the merge goes ahead and names it", () => {
     const passed = verification("v4", "h2", "passed");
-    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved)).toEqual({ waived: null, alreadyMerged: false, localGreen: "v4" });
+    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), approved)).toEqual({ waived: null, alreadyMerged: false, localGreen: "v4" });
   });
 
   test("a verify that passed at an older head is head_moved", () => {
-    const r = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: null, lastPassed: verification("v3", "h1", "passed") } }), approved));
+    const r = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: null, lastPassed: verification("v3", "h1", "passed") } }), approved));
     expect(r.code).toBe("head_moved");
     expect(r.message).toContain("v3 passed at h1");
     expect(r.help).toBe("verify this head: flowryn verify t");
@@ -556,7 +603,7 @@ describe("local green at the merge gate", () => {
     expect(none.code).toBe("red_checks");
     expect(none.message).toContain("CI never started at h2");
     expect(none.help).toContain("flowryn verify t");
-    const failed = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: verification("v5", "h2", "failed"), lastPassed: verification("v3", "h1", "passed") } }), approved));
+    const failed = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: verification("v5", "h2", "failed"), lastPassed: verification("v3", "h1", "passed") } }), approved));
     expect(failed.code).toBe("red_checks");
     expect(failed.message).toContain("v5 at this head failed");
   });
@@ -564,25 +611,25 @@ describe("local green at the merge gate", () => {
   test("a check that ran and failed is never covered, nor is a pending one, nor a missing approval", () => {
     const passed = verification("v4", "h2", "passed");
     const ran: Check = { name: "lint", state: "red", detail: "failure", id: 8, app: "github-actions", annotations: 1 };
-    const mixed = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, ran]), local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved));
+    const mixed = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, ran]), local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), approved));
     expect(mixed.code).toBe("red_checks");
     expect(mixed.message).toContain("2 red checks");
     const pending: Check = { name: "deploy", state: "pending", detail: "in_progress" };
-    expect(refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, pending]), local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved)).code).toBe("checks_pending");
-    expect(refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), { choice: null, why: "none" })).code).toBe("approval_required");
+    expect(refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, pending]), local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), approved)).code).toBe("checks_pending");
+    expect(refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), { choice: null, why: "none" })).code).toBe("approval_required");
   });
 
   test("a red run that ran and failed is not covered by a not-started run of the same name", () => {
     const passed = verification("v4", "h2", "passed");
     const rerun: Check = { ...NOT_STARTED, id: 9, annotations: 1 };
-    const r = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, rerun]), local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), approved));
+    const r = refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, rerun]), local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), approved));
     expect(r.code).toBe("red_checks");
     expect(r.message).toContain("2 red checks");
   });
 
   test("assumption: local green is evidence, not a waiver, so yolo may merge on it", () => {
     const passed = verification("v4", "h2", "passed");
-    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], atHead: passed, lastPassed: passed } }), { choice: { kind: "yolo" }, why: "" }).localGreen).toBe("v4");
+    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), { choice: { kind: "yolo" }, why: "" }).localGreen).toBe("v4");
   });
 });
 
@@ -602,6 +649,80 @@ function forge(annotations: Record<number, Annotation[]>): Forge & { asked: numb
 }
 
 const failure = (message: string): Annotation => ({ level: "failure", message });
+
+/** A result at this head under the given policy (null: legacy). */
+const under = (v: Verification, policy: string | null): Verification => ({ ...v, policy_id: policy });
+/** Gate facts with no same-policy result at this head, only `other`. */
+const stale = (other: Verification, over: Partial<MergeFacts["local"] & object> = {}) => facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, atHead: null, otherPolicyAtHead: other, lastPassed: other, ...over } });
+
+describe("local green needs today's verify policy", () => {
+  const OLD = verifyPolicyId({ steps: ["bun test"], binary: null });
+
+  test("an unchanged policy reuses the pass at this head", () => {
+    const passed = verification("v4", "h2", "passed");
+    expect(passed.policy_id).toBe(TODAY);
+    expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, atHead: passed, otherPolicyAtHead: null, lastPassed: passed } }), approved).localGreen).toBe("v4");
+  });
+
+  test("strengthened steps: a pass at the same head under the old policy is verify_stale, and the way forward is to re-verify", () => {
+    const r = refusal(() => checkGate(stale(under(verification("v4", "h2", "passed"), OLD)), approved));
+    expect(r.code).toBe("verify_stale");
+    expect(r.message).toContain("CI never started at h2");
+    expect(r.message).toContain("the local verify v4 (passed) at this head ran under another verify policy");
+    expect(r.message).toContain(`today's is ${TODAY.slice(0, 16)}`);
+    expect(r.message).toContain("[projects.web] verify steps or verify_binary changed since");
+    expect(r.help).toBe("re-verify this head under today's steps: flowryn verify t");
+  });
+
+  test("a legacy result (no policy recorded) requests re-verification, not coverage", () => {
+    const r = refusal(() => checkGate(stale(under(verification("v2", "h2", "passed"), null)), approved));
+    expect(r.code).toBe("verify_stale");
+    expect(r.message).toContain("ran before Flowryn recorded its verify policy");
+    expect(r.help).toBe("re-verify this head under today's steps: flowryn verify t");
+  });
+
+  test("a project with no verify steps today has no policy: an old pass covers nothing, and the hint says to configure them", () => {
+    const r = refusal(() => checkGate(stale(verification("v4", "h2", "passed"), { policy: null }), approved));
+    expect(r.code).toBe("verify_stale");
+    expect(r.message).toContain("project web has no verify steps now");
+    expect(r.help).toContain("add [projects.web] verify steps to config.toml");
+  });
+
+  test("a stale pass never lifts a check that ran and failed, a pending check or a missing approval", () => {
+    const old = under(verification("v4", "h2", "passed"), OLD);
+    const ran: Check = { name: "lint", state: "red", detail: "failure", id: 8, app: "github-actions", annotations: 1 };
+    const local = { notStarted: [NOT_STARTED.id!], policy: TODAY, atHead: null, otherPolicyAtHead: old, lastPassed: old };
+    expect(refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, ran]), local }), approved)).code).toBe("red_checks");
+    const pending: Check = { name: "deploy", state: "pending", detail: "in_progress" };
+    expect(refusal(() => checkGate(facts({ checks: summarize([NOT_STARTED, pending]), local }), approved)).code).toBe("verify_stale");
+    expect(refusal(() => checkGate(facts({ local }), { choice: null, why: "none" })).code).toBe("verify_stale");
+    expect(refusal(() => checkGate(facts({ local }), { choice: { kind: "yolo" }, why: "" })).code).toBe("verify_stale");
+  });
+
+  test("finishedAtHead matches the policy exactly: a legacy or other-policy row never counts, and the other read names the newest of them", () => {
+    const f = fixture();
+    const url = "https://github.com/acme/web/pull/1";
+    const add = (policy: string | null, state: "passed" | "failed", at: number) =>
+      tx(f.db, () => {
+        const v = insertVerification(f.db, { project_id: "web", pr_url: url, task_id: null, head_sha: "h2", steps: [], policy_id: policy ?? "x", dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: at });
+        if (policy === null) f.db.query("UPDATE verifications SET policy_id = NULL WHERE id = ?1").run(v.id);
+        finishVerification(f.db, v, { state, steps: [], tests: null, detail: null, binary: null }, at + 1);
+        return v.id;
+      });
+    const legacy = add(null, "passed", 10);
+    expect(finishedAtHead(f.db, url, "h2", TODAY)).toBeNull();
+    expect(finishedAtHeadUnderOther(f.db, url, "h2", TODAY)?.id).toBe(legacy);
+    expect(finishedAtHeadUnderOther(f.db, url, "h2", null)?.id).toBe(legacy);
+    const old = add(OLD, "passed", 20);
+    expect(finishedAtHead(f.db, url, "h2", TODAY)).toBeNull();
+    expect(finishedAtHead(f.db, url, "h2", OLD)?.id).toBe(old);
+    expect(finishedAtHeadUnderOther(f.db, url, "h2", TODAY)?.id).toBe(old);
+    const today = add(TODAY, "passed", 30);
+    expect(finishedAtHead(f.db, url, "h2", TODAY)?.id).toBe(today);
+    expect(finishedAtHeadUnderOther(f.db, url, "h2", TODAY)?.id).toBe(old);
+    expect(finishedAtHead(f.db, url, "h1", TODAY)).toBeNull();
+  });
+});
 
 describe("which red checks GitHub never started", () => {
   const ref = { owner: "acme", repo: "web", number: 1 };

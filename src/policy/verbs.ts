@@ -11,6 +11,8 @@ import { discardRef, findAttempt, findHumanApproval, insertApproval } from "./ap
 import { prepareCaptainGrant } from "./grants.ts";
 import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
+import { verifyConfig } from "../verify/config.ts";
+import { verifyPolicyId } from "../verify/policy.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import {
@@ -40,7 +42,17 @@ import {
  */
 
 export function mergeContext(ctx: HandlerCtx): MergeContext {
-  return { db: ctx.db, forge: ctx.delivery.forge(), git: ctx.delivery.git, github: ctx.delivery.github(), now: ctx.now };
+  return {
+    db: ctx.db,
+    forge: ctx.delivery.forge(),
+    git: ctx.delivery.git,
+    github: ctx.delivery.github(),
+    now: ctx.now,
+    verifyPolicy: (projectId) => {
+      const config = verifyConfig(ctx.config(), projectId);
+      return config ? verifyPolicyId(config) : null;
+    },
+  };
 }
 
 /** The run a task (or run id) names, with its project; any state. */
