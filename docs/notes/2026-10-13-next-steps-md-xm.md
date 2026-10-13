@@ -1,0 +1,69 @@
+# Bounded external commands and their termination owner
+
+- Status: partial
+- Open: the operations listed under "Left open" below; nothing here was run live against a real no-mistakes, Docker or GitHub (fakes only)
+
+`docs/next_steps.md` package 6, second slice. The first slice (`2026-10-12-next-steps-md-e7.md`) bounded the Herdr subscription handshake and the automatic contract check. This one covers the rest of the daemon's long-lived external operations: verification steps, no-mistakes, Docker, git network calls, the forge, and the axi tools.
+
+## Design
+
+### The defect every helper shares
+
+The daemon has eight copies of one spawn pattern: `runCommand` (`src/policy/command.ts`: no-mistakes, lsof), `gitRunner` (`src/policy/git.ts`: every git call, network ones included), `runTool` (`src/daemon/daemon.ts`: the launcher's `worktree add`, the build watcher's fetch, local git), `runProc` (`src/daemon/restart.ts`: smoke check, launchctl, plutil), `processRunner` (`src/journal/tasks-axi.ts`), `probeQuota` (`src/sched/quota.ts`), `listLabelled` (`src/reconcile/docker.ts`) and `githubToken`'s `gh auth token` (`src/forge/github.ts`). Each of them:
+
+1. sends SIGKILL to the child's pid only, at its timer;
+2. then awaits `Promise.all([stdout.text(), stderr.text(), exited])`.
+
+A descendant that inherited the pipes keeps step 2 waiting after the leader is dead: `git fetch` → `git-remote-https` or `ssh`, a node CLI that forks, a shell wrapper. The timeout does not bound the call, the descendant is orphaned, and nothing records it. Killing with SIGKILL also gives git no chance to run its own signal cleanup (`worktree add` removes its half-made worktree and admin directory on SIGTERM, not on SIGKILL), which is how a `locked: initializing` worktree that `git worktree prune` skips gets left behind. The upkeep build's `runStep` (`src/upkeep/build.ts`) has the same pid-only kill for `bash scripts/build.sh` and `bun install`, whose compilers outlive it.
+
+### Inventory
+
+Deadline, termination owner, what a kill leaves, and how it is recovered, after this change. "Bounded" means `runBounded` (below): its deadline, SIGTERM to the group, grace, SIGKILL to the group, a bounded pipe drain, and the ownership ledger.
+
+| Operation | Deadline | Owner | Left if killed | Recovery |
+|---|---|---|---|---|
+| Verification steps (`src/verify/runner.ts`) | the job's `timeout_ms`, unchanged | the verify job; leader identity on its job lease (#74) | the step's group, the `v<n>/wt` worktree | unchanged: `recoverVerifications` ends the group by identity, removes the worktree, then releases the slot |
+| Verification's `git fetch`, `worktree add/remove/prune` | `[delivery]` git timeout (120 s) per call, now bounded | `gitRunner` → ledger | fetch locks; a half-made worktree (git's SIGTERM cleanup removes it) | ledger at startup; `removeWorktree` on the job's end and in recovery |
+| no-mistakes `axi status`, `axi abort` | `nomistakes_timeout_ms` (10 s), now bounded | `runCommand` → ledger | nothing of ours; an abort may be half done | the abort is re-read (`concludeParkedRun`); a failed or incomplete status read is a failed read, never "no run" for the watcher |
+| `docker ps --filter label=flowryn.run` | 10 s, now bounded | `listLabelled` → ledger | nothing (read-only) | none needed; a failed or incomplete read is `null` (Docker unknown), never "no containers" |
+| git network calls: cleanup guard fetches, `ls-remote`, upkeep sync, policy-follow, CI-wait fetch, merge build fetch | their runner's timeout (60–300 s), now bounded | `gitRunner` → ledger | `index.lock`/ref locks if SIGKILLed (git removes them on SIGTERM) | ledger at startup |
+| Launcher `git worktree add`, build watcher fetch, local git (`runTool`) | 10 s, now bounded | `runTool` → ledger | a half-made worktree (removed by git on SIGTERM) | ledger at startup |
+| Upkeep build: `bun install`, `bash scripts/build.sh` | 15 min per step, now bounded (group, with its log fd) | the step runner → ledger | the step's compilers; `.flowryn-build/` staging | ledger at startup; staging removed in the build's `finally` and again at the next build's start |
+| tasks-axi | 10 s, now bounded | `processRunner` → ledger | the backlog lock if killed mid-write | unchanged: a timed-out mutation is `timedOut` (transient), its intent stays for replay |
+| quota-axi | 10 s, now bounded | `probeQuota` → ledger | nothing | reading is `unknown` |
+| `gh auth token` | 5 s, now bounded | `githubToken` → ledger | nothing | no token: the forge asks unauthenticated |
+| Smoke check, `launchctl print`, `plutil` (`runProc`) | 10 s, now bounded | `runProc` → ledger | nothing | `timedOut` as before |
+| Forge HTTP (`src/forge/github.ts`) | `[github] timeout_ms` (15 s) for headers **and body** | the request's `AbortSignal` | nothing; a merge PUT's outcome is unknown | the body read moves inside the error mapping: a stalled body is `ForgeError("unreachable")`, never a raw `AbortError` |
+
+### Rule: `runBounded` (`src/runtime/bounded.ts`)
+
+One helper replaces the eight copies; each keeps its own signature and result shape, so no caller changes.
+
+- *Deadline and escalation.* At `timeoutMs` the child's group gets SIGTERM, then after `graceMs` (default 2 s) SIGKILL. The leader is reaped by Bun; once it exits, the pipes get `drainMs` (default 1 s) to close, after which the readers are cancelled. The end-to-end budget of a call is `timeoutMs + graceMs + drainMs` plus up to 1 s confirming the group is gone.
+- *Process group.* In the daemon (once `configureOwnedProcesses` has run) every child is its own group leader (`detached: true`), so the kill reaches its descendants. Being detached, it also escapes launchd's job-group kill, which is why the daemon owns its stop (below). Outside the daemon (the CLI, hooks) children stay in the caller's group, so Ctrl-C still reaches them, and the timeout kills the leader with the same SIGTERM → SIGKILL sequence.
+- *A normal exit is left alone.* A leader that exits on its own is not followed by a group kill: a tool may leave a process on purpose (`git gc --auto --detach` does, after `setsid`; a CLI may start its own daemon). Only the deadline path, the daemon's stop and recovery signal the group.
+- *Unknown, never nothing.* A timed-out call returns exit code 124 (as `gitWithin` already does), with `timedOut`. Output still open past the drain, or over `maxOutputBytes` (16 MiB per stream, the rest discarded but drained so the child never blocks), returns code 125 and says so in `stderr`, even when the leader exited 0: a partial `axi status` or `docker ps` must not parse into "no run" or "no containers". Callers already treat non-zero as a failed read.
+- *Ownership ledger.* While a daemon child runs, `<state_dir>/owned/<pid>.json` holds `{pid, spawned_at, argv0, label}` (written atomically after spawn, removed once the call settles). It is the exact record of what the daemon owns, kept out of `flowryn.db` because it changes on every call and records no workflow state.
+- *Daemon stop.* `stopOwnedProcesses` (called from the daemon's shutdown, inside `SHUTDOWN_GRACE_MS`) sends SIGTERM to every live group, waits up to 3 s, SIGKILLs what remains and removes the entries of groups confirmed gone.
+- *Startup recovery.* `recoverOwnedProcesses`, before the first reconcile pass, reads every entry. A live process at that pid that leads its own group and started within 2 s of `spawned_at` is the recorded one: its group gets SIGTERM, a grace, SIGKILL (through `terminate`, which re-checks the identity before each signal), and the entry is removed. A pid that is gone or is another process removes the entry and signals nothing. An entry that cannot be read is kept and reported, as is a group that will not die: both are retried at the next start, appended as one `daemon.owned_recovery` event with the lists (`ended`, `gone`, `failed`, `unreadable`) and written to the daemon log. The executable is not part of the match: exec chains (a shebang script reads as `/bin/sh`, the `/usr/bin/git` shim execs the real git) make it unpredictable from `argv`, so start time, pid and group leadership are the identity; a pid reused within the 2 s window by another group leader is the residual risk.
+- *Unrelated processes.* Nothing is signalled except a group whose leader the daemon spawned (in memory) or whose leader matches a ledger entry's identity (at startup). No process is found by name or label.
+
+**Files.** New `src/runtime/bounded.ts`; `src/policy/command.ts`, `src/policy/git.ts`, `src/daemon/daemon.ts` (`runTool`, configure, stop, recover), `src/daemon/restart.ts` (`runProc`), `src/journal/tasks-axi.ts`, `src/sched/quota.ts`, `src/reconcile/docker.ts`, `src/forge/github.ts` (token, body read), `src/upkeep/build.ts` (`runStep`).
+
+**Tests.** Named after the assumption each checks.
+
+- `test/unit/bounded.test.ts` against real processes: a silent child holding the pipes through a grandchild is stopped within `timeoutMs + grace + drain` with code 124 and both processes gone; a child that ignores SIGTERM is SIGKILLed after the grace; a leader that exits 0 while a descendant holds stdout returns 125 within the drain, and the descendant is left running; output over the cap is 125; an unrelated process in another group survives; the ledger holds the entry while running and not after; `stopOwnedProcesses` ends a running group; `recoverOwnedProcesses` ends a recorded live group, drops an entry whose pid is gone or belongs to a process started outside the window, keeps an unreadable entry and reports it, and leaves an unrelated process alone.
+- Per fixed operation, with the existing fakes extended: the fake no-mistakes (`test/helpers/harness.ts`) gets a silent mode (`$FLOWRYN_HOME/nm-silent`: it forks a sleeper that holds stdout and never answers), the fake docker (`test/helpers/fleet-env.ts`) the same (`docker-silent`), the fake forge (`test/helpers/fake-github.ts`) a stall mode (no headers, or headers then no body). `readNmStatus`/`concludeParkedRun`, `listLabelled`, `gitRunner` fetching over a silent `core.sshCommand`, `runTool`-style launcher `worktree add` (a silent `git` stand-in), `processRunner`, `probeQuota`, `runProc`, the build `runStep` (a `build.sh` that forks a child and hangs), and both forge stalls each fail within their budget with their descendants gone and an unrelated worktree and process untouched.
+- `test/integration/outages.test.ts`: the compiled daemon with a silent no-mistakes keeps polling (the watcher's pass ends) and counts the outage; a daemon SIGKILLed while a silent fake runs leaves a ledger entry, and the next start ends that group and records `daemon.owned_recovery`.
+
+**Migration.** None: the ledger is files in the state directory, the event is a new kind.
+
+### Left open
+
+- `lavish-axi poll` (`src/lavish/poller.ts`): long-lived by design, with an owner (the poller), a pid file per gate and a startup sweep; its halt sends SIGTERM only, with no SIGKILL escalation.
+- `ps` (`psRunnerAt`, `src/runtime/proc.ts`) has no deadline, and a failing ps reads as "process gone". It is local and does not fork; making its failure unknown changes every liveness reader (the reconciler, `terminate`, the lease), which is its own change.
+- `spawnSync` calls with no timeout: the Claude trust check's `git rev-parse` (`src/harness/claude/trust.ts`) and the poller's sweep `ps`; both local and blocking, both to get a `timeout` option.
+- Leaf tools with a pid-only timer: `osascript`, `/usr/bin/open`, `<harness> --version`, `herdr session list`, the `[sched] probe`. None forks in practice; they move to `runBounded` when touched.
+- The detached `launchctl kickstart -k` of a restart: meant to outlive the daemon; its owner is launchd.
+- A descendant that outlives its leader across a daemon force-kill is not recovered: once the leader is gone no identity proves the group is ours.
+- Verification's git calls are not counted against the job's `timeout_ms`; each is bounded on its own.
