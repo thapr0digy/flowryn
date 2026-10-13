@@ -1,3 +1,5 @@
+import type { NewEvent } from "../db/events.ts";
+
 /**
  * Exit codes from design section 12. Every error code maps to exactly one of
  * them, so scripts and agents can branch on the exit status alone.
@@ -67,6 +69,8 @@ export const ERROR_CODES = {
   // a local verify at this head ran under another verify policy than today's (or none recorded)
   verify_stale: EXIT.policy,
   fork_pr: EXIT.policy,
+  // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
+  observation_stale: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,
@@ -122,12 +126,15 @@ export interface ErrorBody {
 export class FlowrynError extends Error {
   readonly code: ErrorCode;
   readonly help: string | undefined;
+  /** An event the gateway appends after the refused apply rolled back, so the refusal itself stays on record. */
+  readonly refusalEvent: NewEvent | undefined;
 
-  constructor(code: ErrorCode, message: string, help?: string) {
+  constructor(code: ErrorCode, message: string, help?: string, refusalEvent?: NewEvent) {
     super(message);
     this.name = "FlowrynError";
     this.code = code;
     this.help = help;
+    this.refusalEvent = refusalEvent;
   }
 
   toBody(): ErrorBody {

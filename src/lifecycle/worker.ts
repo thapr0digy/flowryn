@@ -12,6 +12,7 @@ import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, nextRunDecisio
 import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
+import { deliveryBasis, requireDeliveryBasis, type BasisPart, type DeliveryBasis } from "./observed.ts";
 import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
@@ -341,6 +342,14 @@ function deliveryAsked(ctx: HandlerCtx, run: RunWithPolicy, args: Record<string,
 }
 
 /**
+ * What a ship's delivery depends on: verified at one head, it is recorded only
+ * if no newer delivery, send-back, stage change or operation (a cancel asked
+ * for, a new worker) landed while GitHub and git were read
+ * (docs/notes/2026-10-13-next-steps-md-av.md).
+ */
+const DELIVER_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "operation"];
+
+/**
  * `flowryn deliver`: the worker's outcome, verified before the run is ready.
  * The task kind decides it: a scout delivers `--report <path>`; a ship
  * delivers `--pr <url>` (no-mistakes, direct-PR), checked by the named-head
@@ -374,13 +383,15 @@ const deliver: VerbSpec = {
     if (asked.kind === "report") return { report: collectReport(ctx, run, asked.path) };
     const project = getProject(ctx.db, run.project_id)!;
     const deps = { db: ctx.db, git: ctx.delivery.git, forge: ctx.delivery.forge(), webUrl: ctx.delivery.github().web_url, now: ctx.now };
-    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project) };
-    return { ship: await verifyPrDelivery(deps, run, project, asked.url) };
+    const seen = deliveryBasis(ctx.db, run.id);
+    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen };
+    return { ship: await verifyPrDelivery(deps, run, project, asked.url), seen };
   },
   apply(ctx, _args, prepared) {
     const run = activeRun(ctx);
     const now = ctx.now();
-    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal };
+    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis };
+    if (outcome.seen) requireDeliveryBasis(ctx.db, outcome.seen, DELIVER_PARTS, "deliver", "cli", now, "read your steers, then deliver again");
     if (run.state !== "ready" && pipelineNeedsLastStage(ctx.db, run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {

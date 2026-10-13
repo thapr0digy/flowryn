@@ -3,6 +3,7 @@ import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec 
 import { tx, type Db } from "../db/db.ts";
 import { checksLine } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
+import { deliveryBasis, requireDeliveryBasis, type BasisPart, type DeliveryBasis } from "../lifecycle/observed.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
@@ -92,7 +93,12 @@ interface MergePrepared {
   facts: MergeFacts;
   gate: GateResult;
   chosen: ChoiceResult;
+  /** The run as the gate's reads started (docs/notes/2026-10-13-next-steps-md-av.md). */
+  seen: DeliveryBasis;
 }
+
+/** A merge is requested only for the delivery, merge and run state the gate read: a redelivery, cancel or merge in between refuses it. */
+const MERGE_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "merge", "operation"];
 
 async function mergeable(ctx: HandlerCtx, target: string): Promise<{ run: RunWithPolicy; project: ProjectRow }> {
   const { run, project } = runAndProject(ctx.db, target);
@@ -126,6 +132,7 @@ const merge: VerbSpec = {
     const allowRed = stringArg(args, "allow-red");
     if (allowRed !== undefined && allowRed.length === 0) throw new FlowrynError("bad_args", "--allow-red needs the name of the one failing check to waive");
     const { run, project } = await mergeable(ctx, task);
+    const seen = deliveryBasis(ctx.db, run.id);
     const facts = await gatherFacts(mergeContext(ctx), run, project);
     // A chat answer never waives a red check: with --allow-red only the prompt, Pi's confirm or your shell count.
     const grant = allowRed === undefined ? prepareCaptainGrant(ctx, args, { item: `merge:${run.task_id}`, choice: "merge", head: facts.head }, { action: "merge", task }) : null;
@@ -136,11 +143,12 @@ const merge: VerbSpec = {
       if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) chosen.choice = { kind: "attempt", attempt, session: ctx.caller.session };
     }
     const gate = checkGate(facts, chosen);
-    return { facts, gate, chosen };
+    return { facts, gate, chosen, seen };
   },
   apply(ctx, _args, prepared) {
-    const { facts, gate, chosen } = prepared as MergePrepared;
+    const { facts, gate, chosen, seen } = prepared as MergePrepared;
     const now = ctx.now();
+    requireDeliveryBasis(ctx.db, seen, MERGE_PARTS, "merge", "cli", now, `flowryn merge ${facts.run.task_id} again`);
     const run = getRunWithPolicy(ctx.db, facts.run.id)!;
     rememberFacts(ctx.db, facts, now);
     if (gate.alreadyMerged) {
