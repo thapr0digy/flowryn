@@ -10,6 +10,7 @@ import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
 import { isActive, isConflictGate, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
+import type { HeadHistory } from "../policy/head-history.ts";
 import { openDivergence } from "./divergence.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 
@@ -39,6 +40,41 @@ export interface Applied {
 export interface ObservationOptions {
   /** `[upkeep] nudge_conflicts`: a delivered PR that conflicts with its base sends its ship back. */
   nudgeConflicts: boolean;
+  /** How the PR head moved from the delivered head (headHistory), when the watcher asked git; absent reads as unknown. */
+  history?: HeadHistory;
+}
+
+/** The start every summary of one head move shares, whatever its history tag. */
+function headMoveSummary(delivered: string, head: string): string {
+  return `the PR head moved from ${delivered.slice(0, 8)} (delivered) to ${head.slice(0, 8)}`;
+}
+
+/**
+ * A divergence for this exact head move is open, or you kept the run as it
+ * is for it (keep-run): another would repeat it, so none opens, and the
+ * watcher does not ask git again.
+ */
+export function headMoveRecorded(db: Db, runId: string, delivered: string, head: string): boolean {
+  const prefix = headMoveSummary(delivered, head);
+  return (
+    db
+      .query("SELECT 1 FROM divergences WHERE run_id = ?1 AND substr(summary, 1, ?3) = ?2 AND (resolved_at IS NULL OR resolution = 'keep-run') LIMIT 1")
+      .get(runId, prefix, prefix.length) !== null
+  );
+}
+
+/** The divergence for a moved head, tagged when its history was rewritten or git could not say. */
+function headMoved(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, history: HeadHistory, now: number): void {
+  if (headMoveRecorded(db, run.id, delivered.head, pr.headSha)) return;
+  const from = delivered.head.slice(0, 8);
+  const to = pr.headSha.slice(0, 8);
+  const tag = history === "rewritten" ? `, history rewritten: ${to} does not descend from ${from}` : history === "unknown" ? ", ancestry unknown" : "";
+  openDivergence(
+    db,
+    "github",
+    { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary: `${headMoveSummary(delivered.head, pr.headSha)}${tag}; merges wait for a new delivery`, detail: { history } },
+    now,
+  );
 }
 
 /** Nudges per run before a conflict stops sending the ship back and asks you instead. */
@@ -132,9 +168,7 @@ export function applyPrObservation(
     }
     return { landed: false };
   }
-  if (pr.headSha !== delivered.head) {
-    openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary: `the PR head moved from ${delivered.head.slice(0, 8)} (delivered) to ${pr.headSha.slice(0, 8)}; merges wait for a new delivery` }, now);
-  }
+  if (pr.headSha !== delivered.head) headMoved(db, run, delivered, pr, opts.history ?? "unknown", now);
   if (pr.draft) {
     openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary: `the delivered PR ${pr.url} was turned into a draft` }, now);
   }

@@ -11,7 +11,8 @@ import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
-import { applyNmObservation, applyPrObservation, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
+import { headHistory, type HeadHistory } from "../policy/head-history.ts";
+import { applyNmObservation, applyPrObservation, headMoveRecorded, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
 /**
@@ -151,10 +152,11 @@ export class DeliveryWatcher {
       try {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
+        const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
         const applied = tx(db, () => {
           noteForgeUp(db, "github", now());
           const current = getRunWithPolicy(db, run.id);
-          return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts() }) : { landed: false };
+          return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history }) : { landed: false };
         });
         this.backoffMs = 0;
         if (applied.landed) this.deps.cleanup(run.id);
@@ -168,6 +170,19 @@ export class DeliveryWatcher {
         return;
       }
     }
+  }
+
+  /**
+   * How a delivered run's open PR head moved, asked of git once per head move
+   * (a divergence already recorded for it skips the call): in the run's
+   * worktree, or the project checkout once it is gone. Undefined when the
+   * head did not move or nothing is asked.
+   */
+  private async headHistoryOf(run: RunWithPolicy, delivered: string, head: string, open: boolean, prNumber: number): Promise<HeadHistory | undefined> {
+    if (!open || run.state !== "ready" || head === delivered || headMoveRecorded(this.deps.db, run.id, delivered, head)) return undefined;
+    const cwd = existsSync(run.worktree_path) ? run.worktree_path : getProject(this.deps.db, run.project_id)?.path;
+    if (!cwd) return "unknown";
+    return headHistory(this.deps.git, cwd, delivered, head, prNumber).catch(() => "unknown" as const);
   }
 
   /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
