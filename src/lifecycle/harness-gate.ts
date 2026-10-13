@@ -6,6 +6,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
+import type { Fact, Unblock } from "../attention/explanations.ts";
 
 /**
  * The harness version gate (design section 5): contract tests gate every
@@ -37,6 +38,20 @@ export async function checkHarness(db: Db, config: FlowrynConfig, harness: Harne
 
 export function contractsCommand(harness: HarnessId): string {
   return `flowryn doctor --contracts --harness ${harness}`;
+}
+
+/** The harness gate's verdict as facts. */
+export function harnessFacts(gate: Exclude<HarnessCheck, { state: "verified" }>, t: number): Fact[] {
+  return gate.state === "missing" ? [{ name: `${gate.harness}`, value: gate.detail, at: t }] : [{ name: `${gate.harness} version`, value: `${gate.version}: no passing contract run`, at: t }];
+}
+
+/** Who can end a wait on the harness gate. */
+export function harnessUnblock(gate: Exclude<HarnessCheck, { state: "verified" }>, what: string, auto?: string | null): Unblock[] {
+  if (gate.state === "missing") return [{ by: "captain", action: `fix it (${gate.detail}): flowryn init` }];
+  return [
+    { by: "flowryn", action: auto ?? `${what} once ${gate.harness} ${gate.version} passes its contract suite` },
+    { by: "captain", action: contractsCommand(gate.harness) },
+  ];
 }
 
 /** What a dispatch, a resume or a launch gets when the harness is not verified. With the database and config, the help names an automatic check that is queued or running. */

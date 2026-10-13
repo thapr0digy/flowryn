@@ -68,7 +68,7 @@ A pool's holders are facts, so a new holder is a new row: that is a changed inpu
 |---|---|---|---|
 | `resume.auto` | no: the decision itself, recorded closed (`closed_by = resumed`) | session, husk, pane, resumes so far (0) | none |
 | `resume.deferred` | until the scheduler launches it (`closed_by = granted`) | the harness check, session, husk | flowryn: launches it once H V passes its contract suite (or the automatic check is running); captain: `flowryn doctor --contracts --harness H` |
-| `resume.refused` | until `failure_needs_you` resolves (`flowryn resume`, a cancel) | resumes so far, session (or none), husk | leader or captain: `flowryn resume <task>`; leader or captain: `flowryn cancel <task>` |
+| `resume.refused` | until `failure_needs_you` resolves (`flowryn resume`, a cancel) | resumes so far, session (or none), husk | leader: `flowryn resume <task>`; leader: `flowryn cancel <task>` (both verbs take the leader or you; the row names the leader, the least-privileged caller allowed) |
 
 `resume.refused`'s reason says which: died again after its one automatic resume, or no session to resume.
 
@@ -98,12 +98,17 @@ All rules stay where they decide today (`src/lifecycle/prompt-wedge.ts`, `src/re
 ### Tests
 
 - `test/unit/db.test.ts`: migration 21 on a database in use (a run and an open item survive; the table starts empty).
-- `test/unit/explanations.test.ts` (new): dedupe (the same observation twice writes one row; a changed fact supersedes; a changed `at` alone does not), item-linked closing, the sweep, the `show` lines.
+- `test/unit/explanations.test.ts` (new): dedupe (the same observation twice writes one row; a changed fact supersedes; a changed `at` alone does not; kinds are independent; a settled decision is recorded closed), item-linked closing, the sweep and a cancel, and the `show` lines (default, `--why`, `--timeline`, `--timeline --full`).
 - Per decision kind, through the real code path, then replayed offline: the database file is closed, reopened, and `show --why` / `--timeline` explain it from the table alone:
   - dialog: `openBlockedPrompt` (confirmed), the reconciler's trust wedge over several passes (one row), and hook activity closing it;
   - capacity: a `Scheduler` with a full pool over several passes (one row), a new holder (a second row, the first superseded), the grant closing it, and the usage pause and host rules;
   - resume: the reconciler's automatic resume (closed `resume.auto`), a deferred resume on an unverified harness (open, closed by the grant), and a second death (`resume.refused`, closed by `flowryn resume`).
-- `test/unit/show-full.test.ts`: the default `waiting` line and no field without open rows.
+
+### Implementation notes
+
+- The harness gate's facts and unblock (`harnessFacts`, `harnessUnblock`) live in `src/lifecycle/harness-gate.ts`, shared by the reconciler's deferred resume and the scheduler's launch gate; the scheduler's other refusal builders are `src/sched/wait-reasons.ts`. A harness check that throws is now an explicit `missing` verdict (it was `false` before), so its reason is recorded.
+- `resolveRunItems` returns the resolved ids (`RETURNING id`) to close the explanations they carried; its count is unchanged.
+- The pools rule records each full pool's holders by task id; the order is by task id, so the same holders in another order are not a change.
 
 ### Out of scope
 

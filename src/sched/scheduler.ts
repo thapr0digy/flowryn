@@ -10,7 +10,7 @@ import { appendEvent } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, type StartDeps } from "../lifecycle/dispatch.ts";
-import { gateHarness, unverifiedVersion } from "../lifecycle/harness-gate.ts";
+import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
@@ -20,6 +20,8 @@ import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity } from "./pools.ts";
 import { probeQuota, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
+import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
+import { harnessRefusalOf, hostRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
 
 /**
  * The scheduler (design sections 4 and 11): it grants stage starts against the
@@ -260,6 +262,7 @@ export class Scheduler {
 
   private async grant(): Promise<void> {
     const config = this.deps.config();
+    tx(this.deps.db, () => sweepExplanations(this.deps.db, this.deps.now()));
     const host = { verdict: null as HostVerdict | null };
     if (quotaState(this.deps.db)?.state === "low") await this.quotaHeld();
     for (const c of this.candidates()) {
@@ -273,15 +276,19 @@ export class Scheduler {
     const { db, now } = this.deps;
     const capacity = capacityConfig(config);
     const usage = c.run.harness === "claude" ? usageGate(db, now(), c.run.id) : "open";
-    if (usage === "paused") return false;
+    if (usage === "paused") return this.refuse(c, usageRefusal(db, now()));
     // Under the quota floor a new Claude run waits; a live run's next stage, a resume or a relaunch drains.
-    if (c.run.harness === "claude" && c.run.pending_launch === "fresh" && (await this.quotaHeld())) return false;
+    if (c.run.harness === "claude" && c.run.pending_launch === "fresh" && (await this.quotaHeld())) return this.refuse(c, quotaRefusal(db));
     // A grant that launches a worker checks the installed harness version first (design section 5).
-    if (c.run.pending_launch && !(await this.harnessVerified(c.run.harness, config))) return false;
+    if (c.run.pending_launch) {
+      const check = await this.harnessCheck(c.run.harness, config);
+      if (check.state !== "verified") return this.refuse(c, harnessRefusalOf(check, activeAutoAttempt(db, config, c.run.harness), now()));
+    }
     if (c.needs.length > 0) {
       host.verdict ??= await this.hostVerdict(capacity.host);
-      if (!host.verdict.ok) return false;
-      if (fullPools(db, capacity.pools, c.needs).length > 0) return false;
+      if (!host.verdict.ok) return this.refuse(c, hostRefusal(hostState(db), capacity.host, host.verdict.reason, now()));
+      const full = fullPools(db, capacity.pools, c.needs);
+      if (full.length > 0) return this.refuse(c, poolsRefusal(db, capacity.pools, full, now()));
     }
     let activated;
     try {
@@ -290,10 +297,11 @@ export class Scheduler {
         if (!fresh || isTerminal(fresh.state) || (fresh.stage_state !== "waiting" && !fresh.pending_launch)) return null;
         const started = activateStage(db, config, fresh, now(), { steer });
         if (started && usage === "probe") claimProbe(db, c.run.id, now());
+        if (started) closeExplanations(db, c.run.id, ["capacity", "resume"], "granted", now());
         return started;
       });
     } catch (error) {
-      if (error instanceof OverCapacity) return false;
+      if (error instanceof OverCapacity) return this.refuse(c, poolsRefusal(db, capacity.pools, fullPools(db, capacity.pools, c.needs), now()));
       throw error;
     }
     if (!activated) return false;
@@ -330,15 +338,29 @@ export class Scheduler {
     }
   }
 
-  /** The harness gate before a launch: an untested version waits, with its P1; a check that fails counts as unverified. */
-  private async harnessVerified(harness: HarnessId, config: FlowrynConfig): Promise<boolean> {
+  /** The harness gate before a launch: an untested version waits, with its P1; a check that fails counts as missing. */
+  private async harnessCheck(harness: HarnessId, config: FlowrynConfig): Promise<HarnessCheck> {
     try {
-      const check = await gateHarness(this.deps.db, config, harness, this.deps.startDeps.harnessVersion, "daemon", "launch", this.deps.now);
-      return check.state === "verified";
+      return await gateHarness(this.deps.db, config, harness, this.deps.startDeps.harnessVersion, "daemon", "launch", this.deps.now);
     } catch (error) {
-      this.deps.log(`sched: checking ${harness} failed: ${(error as Error).message}`);
-      return false;
+      const detail = (error as Error).message;
+      this.deps.log(`sched: checking ${harness} failed: ${detail}`);
+      return { harness, state: "missing", detail: `checking ${harness} failed: ${detail}` };
     }
+  }
+
+  /**
+   * A refused grant: record why, unless the run already waits for the same
+   * reason (docs/notes/2026-10-12-next-steps-md-wz.md). Returns false, the grant's result.
+   */
+  private refuse(c: Candidate, why: Refusal): false {
+    const { db, now } = this.deps;
+    tx(db, () => {
+      const run = getRunWithPolicy(db, c.run.id);
+      if (!run || isTerminal(run.state)) return;
+      explain(db, { run: { id: run.id, task_id: run.task_id, stage: c.pos.stage.id }, kind: "capacity", ...why, source: "daemon", now: now() });
+    });
+    return false;
   }
 
   /**

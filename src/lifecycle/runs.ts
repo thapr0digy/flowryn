@@ -1,6 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { findOpenRunItem, openItem, resolveRunItems, type ItemKind } from "../attention/items.ts";
+import { closeExplanations } from "../attention/explanations.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { normalizedTitle } from "../journal/diff.ts";
@@ -164,6 +165,7 @@ export function failRun(db: Db, run: RunRow, reason: string, source: EventSource
   releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "run.failed", now);
   const event = appendEvent(db, { source, kind: "run.failed", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "steer_unacked", "blocked_prompt", "worker_report"], "run.failed", now);
+  closeExplanations(db, run.id, null, "run.failed", now);
   openRunItemOnce(db, "failure_needs_you", run, event.seq, `Run failed for ${taskTitle(db, run.task_id)}: ${reason}`, now);
   run.state = "failed";
   run.liveness = "dead";
@@ -182,6 +184,7 @@ export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSour
   dismissRunQuestions(db, run, now, "run cancelled", source);
   appendEvent(db, { source, kind: "run.cancelled", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, null, "run.cancelled", now);
+  closeExplanations(db, run.id, null, "run.cancelled", now);
   run.state = "cancelled";
   run.liveness = "dead";
 }

@@ -3,6 +3,7 @@ import type { Db } from "../db/db.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { redactSecrets } from "../util/redact.ts";
 import { findOpenRunItem, resolveRunItems } from "../attention/items.ts";
+import { explain, type Fact, type Unblock } from "../attention/explanations.ts";
 import { openRunItemOnce, setLiveness, taskTitle, type RunRow } from "./runs.ts";
 
 /**
@@ -64,7 +65,12 @@ export function clearPrompt(db: Db, run: RunRow, herdrStatus: string | null, sou
  * second notification for the same stuck prompt touches nothing). Call
  * inside a transaction.
  */
-export function openBlockedPrompt(db: Db, run: RunRow, how: { suspected: boolean; screen: string | null; harness: "claude" | "pi"; lastHook: number }, now: number): string | null {
+export function openBlockedPrompt(
+  db: Db,
+  run: RunRow,
+  how: { suspected: boolean; screen: string | null; harness: "claude" | "pi"; lastHook: number; herdrStatus?: string | null },
+  now: number,
+): string | null {
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return null;
   const screen = how.screen ? redactSecrets(how.screen).split("\n").slice(-SCREEN_LINES).join("\n") : null;
   setLiveness(db, run, "blocked_dialog", how.suspected ? "reconciler" : "hook", { prompt: true }, now);
@@ -77,5 +83,33 @@ export function openBlockedPrompt(db: Db, run: RunRow, how: { suspected: boolean
       : how.suspected
         ? `${title} may be waiting on a confirmation${prompt ? `: ${prompt}` : ""}; look at pane ${run.pane_id}`
         : `${title} is waiting on a confirmation: ${prompt || "see pane " + run.pane_id}`;
-  return openRunItemOnce(db, "blocked_prompt", run, event.seq, line, now);
+  const item = openRunItemOnce(db, "blocked_prompt", run, event.seq, line, now);
+  explainDialog(db, run, how, prompt, item, now);
+  return item;
+}
+
+/** Why the run is held: which rule saw the dialog, on what, and what ends it (docs/notes/2026-10-12-next-steps-md-wz.md). */
+function explainDialog(db: Db, run: RunRow, how: { suspected: boolean; harness: "claude" | "pi"; lastHook: number; herdrStatus?: string | null }, prompt: string, item: string | null, now: number): void {
+  const pane = run.pane_id ?? "(none)";
+  const rule = !how.suspected ? "dialog.confirmed" : how.harness === "pi" ? "dialog.stall" : "dialog.suspected";
+  const reason =
+    rule === "dialog.confirmed"
+      ? `a confirmation dialog is up in pane ${pane}`
+      : rule === "dialog.suspected"
+        ? `Herdr reads the agent blocked, likely on a dialog in pane ${pane}`
+        : `the Pi worker in pane ${pane} sent no hook for a while and is not working`;
+  const facts: Fact[] = [
+    ...(prompt ? [{ name: "prompt", value: prompt, at: now }] : []),
+    ...(how.herdrStatus !== undefined ? [{ name: "herdr agent_status", value: how.herdrStatus ?? "unreadable", at: now }] : []),
+    { name: "last hook", value: new Date(how.lastHook).toISOString(), at: how.lastHook },
+  ];
+  const cleared =
+    how.harness === "claude"
+      ? "clears it on the worker's next hook, or when Herdr reads the agent working (or settled on two passes)"
+      : "clears it on the worker's next hook";
+  const unblock: Unblock[] = [
+    { by: "captain", action: rule === "dialog.confirmed" ? `answer the dialog in pane ${pane} (Flowryn never answers it)` : `look at pane ${pane} and answer what it asks` },
+    { by: "flowryn", action: cleared },
+  ];
+  explain(db, { run, kind: "dialog", rule, reason, facts, unblock, itemId: item ?? findOpenRunItem(db, "blocked_prompt", run.id)?.id ?? null, source: how.suspected ? "reconciler" : "hook", now });
 }
