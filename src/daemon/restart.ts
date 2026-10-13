@@ -115,7 +115,8 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
     .all(VALIDATION_POOL) as ValidationRow[];
   for (const v of validating) {
     const read = freshStatus(v, now);
-    if ("status" in read && waitsOnlyOnCi(read.status)) continue;
+    // A CI-only wait, or a run parked at a merge conflict the conflict nudge covers, is no local work to protect.
+    if ("status" in read && (waitsOnlyOnCi(read.status) || read.status.conflictGate)) continue;
     guards.push({ kind: "validation", task: v.task_id, detail: validationDetail(v, read, now) });
   }
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
@@ -140,18 +141,18 @@ interface ValidationRow {
   observed_at: number | null;
 }
 
-type NmStatusRead = { status: { outcome: string; activeSteps: NmActiveStep[] | null } } | { unusable: string };
+type NmStatusRead = { status: { outcome: string; activeSteps: NmActiveStep[] | null; conflictGate: boolean } } | { unusable: string };
 
 /** The run's own no-mistakes status (src/reconcile/delivery.ts records it) when read recently enough to decide on, or why there is none. */
 function freshStatus(v: ValidationRow, now: number): NmStatusRead {
   if (v.status === null || v.observed_at === null || now - v.observed_at > VALIDATION_STATUS_FRESH_MS) {
     return { unusable: `no no-mistakes status read in the last ${VALIDATION_STATUS_FRESH_MS / 60_000} min` };
   }
-  const read = JSON.parse(v.status) as { branch?: unknown; outcome?: unknown; active_steps?: unknown };
+  const read = JSON.parse(v.status) as { branch?: unknown; outcome?: unknown; active_steps?: unknown; conflict_gate?: unknown };
   if (read.branch === undefined) return { unusable: "the latest no-mistakes status names no run" };
   if (read.branch !== v.branch) return { unusable: `the latest no-mistakes status is a run on branch ${String(read.branch)}, not ${v.branch}` };
   if (typeof read.outcome !== "string") return { unusable: "the latest no-mistakes status has no readable outcome" };
-  return { status: { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null } };
+  return { status: { outcome: read.outcome, activeSteps: Array.isArray(read.active_steps) ? (read.active_steps as NmActiveStep[]) : null, conflictGate: typeof read.conflict_gate === "string" } };
 }
 
 /** Why a validation blocks: its longest-running step and that step's local agent, or why no status says. */

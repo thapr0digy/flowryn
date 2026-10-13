@@ -9,7 +9,7 @@ import { recordEvidence, taskTitle, type RunRow, type RunWithPolicy } from "../l
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
-import { isActive, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
+import { isActive, isConflictGate, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
 import { openDivergence } from "./divergence.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 
@@ -192,12 +192,43 @@ function ciSinceOf(db: Db, runId: string, nm: NmRun | null, now: number): number
   return before && before.id === nm.id && typeof before.ci_since === "number" ? before.ci_since : now;
 }
 
+/** What covers a parked conflict gate: the nudge that sent the ship back, or the pr_conflict item once the nudges are spent. */
+export type ConflictCover = "conflict_nudged" | "pr_conflict";
+
+/**
+ * The run's no-mistakes run is parked at its `ci` gate on a merge conflict
+ * alone (isConflictGate), on the run's branch, and the conflict nudge has
+ * already acted on that head: a `run.conflict_nudged` (the ship was sent back
+ * to merge its base) or a `pr.conflict` (the nudges were spent, pr_conflict
+ * is open) for it. The parked run is then no work in progress: the worker's
+ * next push supersedes it. Null when nothing covers it (with
+ * `nudge_conflicts` off no such event exists, and today's handling stands).
+ */
+export function conflictCovered(db: Db, run: Pick<RunRow, "id" | "branch">, nm: NmRun | null): ConflictCover | null {
+  if (!nm || nm.branch !== run.branch || !isConflictGate(nm)) return null;
+  const head = nm.headSha || nm.head;
+  if (!head) return null;
+  const events = db.query("SELECT kind, payload FROM events WHERE run_id = ?1 AND kind IN ('run.conflict_nudged', 'pr.conflict') ORDER BY seq DESC").all(run.id) as { kind: string; payload: string }[];
+  for (const e of events) {
+    const at = (JSON.parse(e.payload) as { head?: unknown }).head;
+    if (typeof at === "string" && at !== "" && (at.startsWith(head) || head.startsWith(at))) return e.kind === "pr.conflict" ? "pr_conflict" : "conflict_nudged";
+  }
+  return null;
+}
+
 /** Apply one no-mistakes status read for a run's worktree (read-only: flowrynd never drives the pipeline). Call inside a transaction. Returns the CI wait's start as flowrynd saw it. */
 export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null, stuckAfterMs: number, now: number): { ciSince: number | null } {
-  // The active steps let the restart guard tell a CI wait from local work (src/daemon/restart.ts).
+  // The active steps let the restart guard tell a CI wait from local work (src/daemon/restart.ts); a covered conflict gate, from a validation.
   const ciSince = ciSinceOf(db, run.id, nm, now);
-  const evidence = nm ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps, ci_since: ciSince } : { run: null };
+  const covered = conflictCovered(db, run, nm);
+  const evidence = nm
+    ? { id: nm.id, branch: nm.branch, status: nm.status, outcome: nm.outcome, head: nm.head, pr: nm.pr, active_steps: nm.activeSteps, ci_since: ciSince, conflict_gate: covered }
+    : { run: null };
   recordEvidence(db, run.id, "nomistakes", 1, evidence, now);
+  if (covered) {
+    leaveCoveredGate(db, run, nm!, covered, now);
+    return { ciSince };
+  }
   const active = nm !== null && nm.branch === run.branch && isActive(nm);
   if (active && run.state === "running") {
     db.query("UPDATE runs SET state = 'validating', updated_at = ?2 WHERE id = ?1").run(run.id, now);
@@ -209,6 +240,18 @@ export function applyNmObservation(db: Db, run: RunWithPolicy, nm: NmRun | null,
   }
   noteValidationProgress(db, run, active ? nm : null, nm, stuckAfterMs, now);
   return { ciSince };
+}
+
+/**
+ * A parked conflict gate the nudge covers is not a validation: a run it made
+ * `validating` goes back to `running` (an event says what covered it), it
+ * opens no validation_outside_cap or validation_stuck, and no other item.
+ * Call inside a transaction.
+ */
+function leaveCoveredGate(db: Db, run: RunWithPolicy, nm: NmRun, covered: ConflictCover, now: number): void {
+  if (run.state !== "validating") return;
+  db.query("UPDATE runs SET state = 'running', updated_at = ?2 WHERE id = ?1").run(run.id, now);
+  appendEvent(db, { source: "nomistakes", kind: "run.validated", runId: run.id, taskId: run.task_id, payload: { nm_run: nm.id, outcome: null, pr: nm.pr || null, conflict_gate: covered }, ts: now });
 }
 
 /** What one status read says about a held validation slot: stuck (with the line's detail and evidence), moving, or nothing this read can tell. */
