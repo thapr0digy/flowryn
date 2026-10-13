@@ -480,7 +480,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         contractChecks: autoCheck?.running() ?? [],
         builds: builder?.building() ?? [],
       }),
-      supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
+      supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home, env), env)),
       readValidations: () => deliveryWatcher?.readValidations() ?? Promise.resolve(),
     });
     // The build watcher: a new installed build applies by itself, through the restart's guards.
@@ -491,12 +491,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
       config: () => daemonConfig(config),
       info: () => info,
-      supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env)),
+      supervisor: () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home, env), env)),
       restart,
       git: (args, cwd) => git(args, cwd),
     });
     // Spec 3, phase 3: the build after a Flowryn merge, and the upkeep hooks (src/upkeep/).
-    const supervisor = () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home), env));
+    const supervisor = () => (supervisorFile ? scriptSupervisor(supervisorFile, env) : launchdSupervisor(plistSpecFor(config, home, env), env));
     builder = new MergeBuilder({
       db: database,
       env,
