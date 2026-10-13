@@ -27,7 +27,7 @@ import { divergenceView, getDivergence, resolveCommand } from "../reconcile/dive
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 import { ShowText } from "./show-text.ts";
-import { getOperation, heldByEscalation, latestOperation, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
+import { getOperation, heldByEscalation, latestOperation, launchKind, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
 import { channelView } from "../lavish/channel.ts";
 import type { Db } from "../db/db.ts";
 
@@ -184,16 +184,18 @@ const resume: VerbSpec = {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     const now = ctx.now();
     const open = openOperation(ctx.db, run.id);
-    const escalated = heldByEscalation(ctx.db, run.id) !== null;
+    const held = heldByEscalation(ctx.db, run.id);
+    const replacement = held && held.kind !== "cancel" && run.pending_launch && run.pending_launch !== "resume" ? run.pending_launch : null;
+    const mode = replacement ?? "resume";
     // A resume already asked for (the automatic one waiting for its harness) is the same operation: no second one.
-    const op = open ?? requestOperation(ctx.db, { id: ctx.ulid, run, kind: "resume", mode: "resume", requestedBy: ctx.caller.role, source: "cli", now });
+    const op = open ?? requestOperation(ctx.db, { id: ctx.ulid, run, kind: launchKind(mode), mode, requestedBy: ctx.caller.role, source: "cli", now });
     ctx.db
       .query("UPDATE runs SET state = CASE WHEN state = 'failed' THEN 'running' ELSE state END, liveness = 'starting', resume_count = resume_count + 1, ended_at = NULL, updated_at = ?2 WHERE id = ?1")
       .run(run.id, now);
     // A dead worker holds no slot (design section 11): the scheduler grants its worker slot, and its stage's pools, first.
-    const viaScheduler = !holdsLease(ctx.db, run.id, WORKER_POOL);
-    if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
-    else if (escalated) ctx.db.query("UPDATE runs SET pending_launch = NULL WHERE id = ?1").run(run.id);
+    const viaScheduler = replacement !== null || !holdsLease(ctx.db, run.id, WORKER_POOL);
+    if (replacement) ctx.db.query("UPDATE runs SET waiting_since = ?2 WHERE id = ?1").run(run.id, now);
+    else if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
     if (run.state === "failed") {
       // failRun parked the task; take it back to In flight.
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
@@ -205,10 +207,16 @@ const resume: VerbSpec = {
   },
   async settle(ctx, result) {
     const row = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
+    const op = typeof result.data.operation === "string" ? getOperation(ctx.db, result.data.operation) : null;
     if (row?.pending_launch === "resume") {
       await ctx.sched.passNow();
       const after = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
       return after?.pending_launch === "resume" ? { data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity"] } : result;
+    }
+    if (op?.mode && op.mode !== "resume") {
+      await ctx.sched.passNow();
+      const after = ctx.db.query("SELECT waiting_since FROM runs WHERE id = ?1").get(String(result.data.run)) as { waiting_since: number | null } | null;
+      return after?.waiting_since != null ? { data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity"] } : result;
     }
     // The launcher issues the resume only from `requested`: a replayed settlement finds it issued and starts nothing.
     // A reply stored before operations existed names none: its resume was launched then.

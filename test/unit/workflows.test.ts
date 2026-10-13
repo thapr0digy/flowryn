@@ -577,12 +577,25 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     await f.scheduler.passNow();
     expect(f.exitCalls).toEqual([]);
     expect(f.launches).toEqual([]);
-    // A newer operation releases it: a stage launch requested again is granted, under that operation.
-    const again = tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "scheduler", source: "daemon", now: Date.now() }));
+    // What `flowryn resume` opens on it: a newer operation in the replacement's own mode, which the grant launches once.
+    const again = tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "human", source: "cli", now: Date.now() }));
+    await f.scheduler.passNow();
     await f.scheduler.passNow();
     expect(f.exitCalls).toEqual(["r1"]);
     expect(f.launches).toEqual(["r1:stage"]);
     expect(f.launchOps).toEqual([again.id]);
+    f.db.close();
+  });
+
+  test("an open requested operation of another mode is never launched under: the grant is refused with why, no exit, no launch", async () => {
+    const f = freshStage({}, ["r1"]);
+    const op = tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "human", source: "cli", now: Date.now() }));
+    await f.scheduler.passNow();
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
+    expect(f.db.query("SELECT rule, operation FROM explanations WHERE run_id = 'r1' AND closed_at IS NULL").all()).toEqual([{ rule: "capacity.operation_mode", operation: op.id }]);
     f.db.close();
   });
 });

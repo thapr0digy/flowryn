@@ -118,9 +118,9 @@ function textOrNull(value: unknown): string | null {
 }
 
 /** Whether the launcher may start this run now: its open operation is a requested launch or resume (the named one, when named). */
-export function launchable(open: OperationRow | null, operation: string | undefined): boolean {
+export function launchable(open: OperationRow | null, operation: string | undefined, mode: LaunchMode): boolean {
   if (!open) return operation === undefined;
-  return open.kind !== "cancel" && open.phase === "requested" && (operation === undefined || open.id === operation);
+  return open.kind !== "cancel" && open.phase === "requested" && open.mode === mode && (operation === undefined || open.id === operation);
 }
 
 export function dispatchedTask(db: Db, runId: string): DispatchedTask | null {
@@ -211,7 +211,7 @@ export class Launcher {
     const run = getRunWithPolicy(db, runId);
     if (!run || isTerminal(run.state)) return false;
     // Before any side effect (ensurePane may open a workspace): only a requested launch or resume is started here.
-    if (!launchable(openOperation(db, run.id), operation)) return false;
+    if (!launchable(openOperation(db, run.id), operation, mode)) return false;
     // A fresh launch happens once; a replayed dispatch or a second kick must not start another worker.
     if (mode === "fresh" && (run.state !== "launching" || run.proc_pid !== null || run.pending_launch === "fresh")) return false;
     // A fresh stage worker, or a relaunched one, starts only once the scheduler stopped the old one.
@@ -310,7 +310,7 @@ export class Launcher {
       if (!current || isTerminal(current.state)) return null;
       let open = openOperation(db, run.id);
       if (!open && operation === undefined) open = requestOperation(db, { run, kind: launchKind(mode), mode, requestedBy: "daemon", source: "daemon", now: now() });
-      if (!launchable(open, operation)) return null;
+      if (!launchable(open, operation, mode)) return null;
       const op = claimOperation(db, open!.id, { paneId, agentName }, "daemon", now());
       if (!op) return null;
       db.query("UPDATE runs SET launched_at = ?2, liveness = 'starting', busy_until = NULL, idle_since = NULL, updated_at = ?2 WHERE id = ?1").run(run.id, now());

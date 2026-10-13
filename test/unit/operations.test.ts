@@ -405,14 +405,16 @@ describe("one open operation per run", () => {
   });
 
   test("the launcher's guard: only a requested launch or resume (the named one, when named) is started", () => {
-    expect(launchable(opRow({}), undefined)).toBe(true);
-    expect(launchable(opRow({}), "o1")).toBe(true);
-    expect(launchable(opRow({}), "o2")).toBe(false);
-    expect(launchable(opRow({ phase: "effect_issued" }), "o1")).toBe(false);
-    expect(launchable(opRow({ kind: "cancel" }), undefined)).toBe(false);
+    expect(launchable(opRow({}), undefined, "fresh")).toBe(true);
+    expect(launchable(opRow({}), "o1", "fresh")).toBe(true);
+    expect(launchable(opRow({}), "o2", "fresh")).toBe(false);
+    expect(launchable(opRow({ phase: "effect_issued" }), "o1", "fresh")).toBe(false);
+    expect(launchable(opRow({ kind: "cancel" }), undefined, "fresh")).toBe(false);
+    // One mode per operation: a launch never runs under an operation opened for another mode.
+    expect(launchable(opRow({ mode: "stage" }), "o1", "resume")).toBe(false);
     // A replay names an operation that is no longer open: nothing starts, and no new one is opened.
-    expect(launchable(null, "o1")).toBe(false);
-    expect(launchable(null, undefined)).toBe(true);
+    expect(launchable(null, "o1", "fresh")).toBe(false);
+    expect(launchable(null, undefined, "fresh")).toBe(true);
   });
 });
 
@@ -434,7 +436,7 @@ function shellOnly(paneId: string): Promise<PaneProcesses> {
 }
 
 function opRow(over: Partial<OperationRow>): OperationRow {
-  return { id: "o1", kind: "launch", phase: "requested", ...over } as OperationRow;
+  return { id: "o1", kind: "launch", mode: "fresh", phase: "requested", ...over } as OperationRow;
 }
 
 describe("an issued launch with no launcher is judged against its recorded candidate", () => {
@@ -484,10 +486,10 @@ describe("an issued launch with no launcher is judged against its recorded candi
     expect(db.query("SELECT state FROM items WHERE kind = 'operation_escalated'").get()).toEqual({ state: "resolved" });
   });
 
-  test("`flowryn resume` on an escalated stage replacement that holds its worker slot takes its place: one resume, and the grant starts no stage worker over it", async () => {
+  test("`flowryn resume` on an escalated stage replacement starts it again in its own mode: one stage operation for the grant, nothing launched beside it", async () => {
     const op = tx(db, () => {
       const at = Date.now();
-      db.query("UPDATE runs SET liveness = 'starting', proc_pid = NULL, proc_start = NULL, proc_exe = NULL, pending_launch = 'stage', stage_state = 'active' WHERE id = 'r1'").run();
+      db.query("UPDATE runs SET liveness = 'starting', proc_pid = NULL, proc_start = NULL, proc_exe = NULL, pending_launch = 'stage', stage_state = 'active', stage_note = 'checked' WHERE id = 'r1'").run();
       db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('worker', 'r1', 'investigate', ?1)").run(at);
       const requested = requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "scheduler", source: "daemon", now: START + 60_000 });
       return claimOperation(db, requested.id, { paneId: "w:1", agentName: "flowryn-x" }, "daemon", START + 60_000)!;
@@ -497,8 +499,16 @@ describe("an issued launch with no launcher is judged against its recorded candi
     expect(getOperation(db, op.id)!.phase).toBe("escalated");
     const resume = envelope("resume", { target: "t1" });
     expect(await d.gateway.handle(resume)).toMatchObject({ ok: true, data: { operation: resume.ulid } });
-    expect(d.launches).toEqual([`r1:resume:${resume.ulid}`]);
-    expect(getRun(db, "r1")!.pending_launch).toBeNull();
+    expect(getOperation(db, resume.ulid)).toMatchObject({ kind: "launch", mode: "stage", phase: "requested" });
+    expect(getRun(db, "r1")).toMatchObject({ pending_launch: "stage", stage_note: "checked" });
+    expect(d.launches).toEqual([]);
+    // A replay of the same call opens nothing more.
+    await d.gateway.handle(resume);
+    expect(operationRows().map((o) => [o.kind, o.mode, o.phase])).toEqual([
+      ["launch", "stage", "escalated"],
+      ["launch", "stage", "requested"],
+    ]);
+    expect(d.launches).toEqual([]);
   });
 
   test("another foreground process in the recorded pane: escalated", async () => {

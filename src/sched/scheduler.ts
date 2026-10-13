@@ -22,7 +22,7 @@ import { probeQuota, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaR
 import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
 import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
 import { ensureLaunchOperation, getOperation, heldByEscalation, openOperation } from "../lifecycle/operations.ts";
-import { harnessRefusalOf, hostRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
+import { harnessRefusalOf, hostRefusal, operationModeRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
 
 /**
  * The scheduler (design sections 4 and 11): it grants stage starts against the
@@ -306,6 +306,7 @@ export class Scheduler {
         const open = openOperation(db, fresh.id);
         if (open && (open.kind === "cancel" || open.phase !== "requested")) return null;
         if (heldByEscalation(db, fresh.id)) return null;
+        if (open && fresh.pending_launch && open.mode !== fresh.pending_launch) return { refusal: operationModeRefusal(open, fresh.pending_launch) };
         const started = activateStage(db, config, fresh, now(), { steer });
         if (started && usage === "probe") claimProbe(db, c.run.id, now());
         if (started) closeExplanations(db, c.run.id, ["capacity", "resume"], "granted", now());
@@ -318,6 +319,7 @@ export class Scheduler {
       throw error;
     }
     if (!activated) return false;
+    if (activated.refusal) return this.refuse(c, activated.refusal);
     if (activated.steer) this.deps.notify(c.run.id);
     const operation = activated.operation ?? undefined;
     if (activated.launch === "stage") await this.freshWorker(c.run.id, operation);
