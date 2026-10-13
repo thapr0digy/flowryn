@@ -458,7 +458,8 @@ describe("merge: a proven merge after the run ended", () => {
     gate.open();
     const reply = await replying;
     expect(reply.ok).toBe(true);
-    expect(reply.data).toMatchObject({ merged: "after_end", state: "cancelled", sha: MERGED });
+    expect(reply.data).toMatchObject({ merged: "after_end", run_state: "cancelled", sha: MERGED });
+    expect(reply.data).not.toHaveProperty("state");
     expect(state()).toBe("cancelled");
     expect(cleaned).toEqual([]);
     expect(staleEvents()).toEqual([]);
@@ -476,7 +477,7 @@ describe("merge: a proven merge after the run ended", () => {
     gate.open();
     const reply = await replying;
     expect(reply.ok).toBe(true);
-    expect(reply.data).toMatchObject({ merged: "after_end", state: "merged", sha: MERGED });
+    expect(reply.data).toMatchObject({ merged: "after_end", run_state: "cancelled", state: "merged", sha: MERGED });
     expect(db.query("SELECT state, merge_sha FROM merges WHERE task_id = 't1'").all()).toEqual([{ state: "merged", merge_sha: MERGED }]);
     expect(state()).toBe("cancelled");
     expect(cleaned).toEqual([]);

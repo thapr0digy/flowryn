@@ -156,8 +156,9 @@ const merge: VerbSpec = {
         const sha = facts.pr!.mergeSha ?? facts.head;
         rememberFacts(ctx.db, facts, now);
         noteMergedAfterEnd(ctx.db, ended, delivered, { mergeSha: sha, source: "github" }, now);
+        const lateMerge = latestMerge(ctx.db, ended.task_id);
         return {
-          data: { task: ended.task_id, run: ended.id, state: ended.state, merged: "after_end", sha, detail: `the PR was merged after the run was ${ended.state}; the run is not revived and a divergence asks you` },
+          data: { task: ended.task_id, run: ended.id, run_state: ended.state, ...(lateMerge ? { state: lateMerge.state } : {}), merged: "after_end", sha, detail: `the PR was merged after the run was ${ended.state}; the run is not revived and a divergence asks you` },
           hints: [`flowryn show ${ended.task_id}`],
         };
       }
@@ -213,7 +214,7 @@ const merge: VerbSpec = {
       throw new FlowrynError("not_landed", `merge ${mergeId} was requested but is not proven (${row.detail ?? "no answer yet"}); the task is not landed and flowrynd keeps checking`, `flowryn show ${result.data.task}`);
     }
     if (endedBefore) {
-      return { data: { ...data, merged: "after_end", detail: `the PR was merged after the run was ${endedBefore.state}; the run is not revived and a divergence asks you` }, hints: [`flowryn show ${result.data.task}`] };
+      return { data: { ...data, run_state: endedBefore.state, merged: "after_end", detail: `the PR was merged after the run was ${endedBefore.state}; the run is not revived and a divergence asks you` }, hints: [`flowryn show ${result.data.task}`] };
     }
     return { data: { ...data, cleanup: "running" }, hints: [`flowryn show ${result.data.task}`] };
   },
