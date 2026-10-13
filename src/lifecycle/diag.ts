@@ -14,7 +14,6 @@ import { runWorkflow } from "./stages.ts";
 
 export const DIAG_FORMAT = "flowryn-diag/1";
 const MAX_EVENTS = 2_000;
-const MAX_STRING_CHARS = 4_000;
 /** Shortest decision or gate text matched inside other strings: shorter ones would hide ordinary words. */
 const MIN_QUOTED_CHARS = 8;
 
@@ -40,6 +39,7 @@ const TEXT_KEYS = new Set([
   "words",
   "prompt",
   "title",
+  "screen",
 ]);
 const DECISION_TEXT = ["question", "options", "answer", "context", "recommendation", "rationale", "note", "blocks"] as const;
 const GATE_TEXT = ["feedback", "comment", "decided"] as const;
@@ -51,12 +51,9 @@ function hidden(value: unknown): string {
   return `<redacted: ${text.length} chars>`;
 }
 
-/** Every string: token-looking runs replaced, then cut to MAX_STRING_CHARS. Applied to the whole export, whatever --include-text says. */
+/** Every string: token-looking runs replaced. Applied to the whole export, whatever --include-text says. */
 function scrubTokens(value: unknown): unknown {
-  if (typeof value === "string") {
-    const clean = value.replace(TOKEN_ANYWHERE, REDACTED);
-    return clean.length > MAX_STRING_CHARS ? `${clean.slice(0, MAX_STRING_CHARS)}… (${clean.length} chars)` : clean;
-  }
+  if (typeof value === "string") return value.replace(TOKEN_ANYWHERE, REDACTED);
   if (Array.isArray(value)) return value.map(scrubTokens);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubTokens(v)]));
   return value;
@@ -76,6 +73,17 @@ function hidePayload(value: unknown, quoted: readonly string[], key = ""): unkno
   if (Array.isArray(value)) return value.map((v) => hidePayload(v, quoted));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, hidePayload(v, quoted, k)]));
   return value;
+}
+
+/** Fact names whose value quotes the worker's screen (the dialog's prompt line). */
+const SCREEN_FACTS = new Set(["prompt"]);
+
+/** An explanation with its screen-quoting facts hidden, its signature (which repeats every fact value) hidden, and any string quoting a decision or gate text. */
+function hideExplanation(x: Record<string, unknown>, quoted: readonly string[]): Record<string, unknown> {
+  const facts = Array.isArray(x.facts)
+    ? x.facts.map((f: Record<string, unknown>) => (SCREEN_FACTS.has(String(f?.name)) ? { ...f, value: hidden(f.value) } : f))
+    : x.facts;
+  return hidePayload({ ...x, facts, signature: hidden(x.signature) }, quoted) as Record<string, unknown>;
 }
 
 function parsed(text: string): unknown {
@@ -134,7 +142,7 @@ export function diagExport(ctx: ReadCtx, target: string, includeText: boolean): 
     },
     gates: includeText ? gates : gates.map((g) => hideColumns(g, GATE_TEXT)),
     decisions: includeText ? decisions : decisions.map((d) => hideColumns(d, DECISION_TEXT)),
-    explanations,
+    explanations: includeText ? explanations : explanations.map((x) => hideExplanation(x, quoted)),
     events,
     ...(total > rawEvents.length ? { events_truncated: `${total - rawEvents.length} older events left out` } : {}),
     config: redactConfig(effectiveConfig(ctx.config).sections),

@@ -327,7 +327,6 @@ function planLine(ctx: ReadCtx, taskId: string, text: ShowText): string {
 const MAX_FLEET_ROWS = 20;
 const MAX_NEEDS_ROWS = 10;
 const MAX_QUEUED_ROWS = 10;
-const MAX_FLEET_WAITING_ROWS = 10;
 
 function queuedRow(ctx: ReadCtx, q: QueuedTask): Record<string, unknown> {
   return {
@@ -382,10 +381,7 @@ const fleet: VerbSpec = {
     const queued = queuedWork(ctx.db);
     // Why each waiting run waits, from its recorded explanation (docs/notes/2026-10-13-next-steps-md-wq.md); detail is show --why.
     const held = waitingRuns(ctx.db);
-    if (held.length > 0) {
-      data.waiting = held.slice(0, MAX_FLEET_WAITING_ROWS).map((w) => ({ task: w.task_id, ...waitingPointer(w) }));
-      if (held.length > MAX_FLEET_WAITING_ROWS) data.waiting_more = `${held.length - MAX_FLEET_WAITING_ROWS} more waiting: flowryn capacity`;
-    }
+    if (held.length > 0) data.waiting = held.map((w) => ({ task: w.task_id, ...waitingPointer(w) }));
     if (queued.length > 0) {
       data.queued = queued.slice(0, MAX_QUEUED_ROWS).map((q) => queuedRow(ctx, q));
       if (queued.length > MAX_QUEUED_ROWS) data.queued_more = `${queued.length - MAX_QUEUED_ROWS} more queued: backlog.md`;

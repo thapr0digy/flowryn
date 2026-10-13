@@ -52,9 +52,10 @@ The file is JSON, `format: "flowryn-diag/1"`, written with mode 0600 and refused
 Redaction, unless `--include-text`:
 
 1. A redacted text field becomes `<redacted: N chars>`, so its presence and size stay diagnosable.
-2. Event payloads: values under free-text keys (`body`, `summary`, `text`, `question`, `answer`, `choice`, `options`, `context`, `recommend`, `recommendation`, `rationale`, `note`, `blocks`, `feedback`, `comment`, `line`, `full_line`, `words`, `prompt`, `title`) are redacted, and so is any other string that contains one of the run's decision or gate texts (an item line quoting a question).
+2. Event payloads: values under free-text keys (`body`, `summary`, `text`, `question`, `answer`, `choice`, `options`, `context`, `recommend`, `recommendation`, `rationale`, `note`, `blocks`, `feedback`, `comment`, `line`, `full_line`, `words`, `prompt`, `title`, `screen`) are redacted, and so is any other string that contains one of the run's decision or gate texts (an item line quoting a question).
+3. Explanations: a dialog's `prompt` fact (a line of the worker's screen) and every row's `signature` (which repeats the fact values) are redacted, and so is any string quoting a decision or gate text.
 
-Always, with or without the flag: every string anywhere in the export that looks like a token (the `TOKEN_LIKE` pattern `flowryn config` uses: `ghp_…`, `github_pat_…`, `sk-…`, `xox?-…`) becomes `<redacted>`, and the config snapshot is always redacted. Strings are cut at 4,000 characters, so the reply stays under the socket's 4 MB.
+Always, with or without the flag: every string anywhere in the export that looks like a token (the `TOKEN_LIKE` pattern `flowryn config` uses: `ghp_…`, `github_pat_…`, `sk-…`, `xox?-…`) becomes `<redacted>`, and the config snapshot is always redacted.
 
 Never included: chat or harness transcripts (only `transcript_path`, a path), steer bodies (the `messages` table is not read), the token, anything outside this run. Nothing is uploaded; the verb prints the path, the counts and whether text was included.
 

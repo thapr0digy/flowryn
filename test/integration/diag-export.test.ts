@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
+import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
+import { findRun } from "../../src/lifecycle/runs.ts";
 import { cli, cliJson, makeHome, seedLeader, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 
 /**
@@ -75,6 +77,23 @@ describe("flowryn diag export", () => {
     expect(JSON.parse(text)).toMatchObject({ flowryn: "read-only fallback (daemon down)", text: "included" });
     expect(text).toContain(QUESTION);
     for (const secret of [CONFIG_SECRET, "very-secret-value"]) expect(text).not.toContain(secret);
+  });
+
+  test("a confirmation dialog's screen text is left out unless --include-text", async () => {
+    const { h, leader, taskId } = setup();
+    const screen = "Bash command\n  rm -rf build/secret-dialog-target\nDo you want to proceed?\n❯ 1. Yes";
+    const db = h.db();
+    tx(db, () => openBlockedPrompt(db, findRun(db, taskId)!, { suspected: false, screen, harness: "claude", lastHook: Date.now() }, Date.now()));
+    db.close();
+    const redacted = join(h.home, "redacted.json");
+    expect((await cli(h, ["diag", "export", taskId, "--out", redacted], { env: { FLOWRYN_TOKEN: leader } })).code).toBe(0);
+    const text = readFileSync(redacted, "utf8");
+    expect(JSON.parse(text).explanations.map((x: { kind: string }) => x.kind)).toEqual(["dialog"]);
+    for (const shown of ["secret-dialog-target", "Do you want to proceed?"]) expect(text).not.toContain(shown);
+
+    const full = join(h.home, "full.json");
+    expect((await cli(h, ["diag", "export", taskId, "--out", full, "--include-text"], { env: { FLOWRYN_TOKEN: leader } })).code).toBe(0);
+    expect(readFileSync(full, "utf8")).toContain("secret-dialog-target");
   });
 
   test("--out is required", async () => {
