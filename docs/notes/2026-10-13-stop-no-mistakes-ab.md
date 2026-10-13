@@ -1,7 +1,7 @@
 # no-mistakes never rewrites a PR on a merge conflict
 
-- Status: partial
-- Open: design only; built in the following commits
+- Status: done
+- Open: not seen live yet (no PR has conflicted since); a worker whose own pipeline parks at a conflict gate before it delivers is not covered (see "Not in scope")
 
 The scout report on the no-mistakes v1.84.0 CI monitor (`scout-no-code-qn`) found that a PR that starts to conflict with `main` after delivery is repaired by the monitor itself: the repair counts against `auto_fix.ci` (here 3, from the global config), always rebases, revalidates from Review and force-pushes. `auto_fix.rebase` does not cover it. Flowryn's own `[upkeep] nudge_conflicts` races it, and the result was five human decisions on 2026-10-12/13 (q58, q60, q62, q63, q66). This change stops the rewrite at the source and makes Flowryn treat what is left as the conflict nudge's business. Plain code throughout (a config file, a parser, a classifier, a git ancestry check, a doctor check); no model.
 
@@ -35,5 +35,15 @@ Verified against the installed binary (v1.84.0), not memory: its embedded config
 - Effective `auto_fix.ci` per project: the repo's `.no-mistakes.yaml` on the default branch (`origin/<default>`, else the local `<default>`, read with `git show`) overrides `$NM_HOME/config.yaml` (default `~/.no-mistakes/config.yaml`), which overrides no-mistakes' default of 3. YAML through `Bun.YAML`.
 - Above 0: a warn naming where the value came from and the line to add: `auto_fix: { ci: 0 }` in the repo's `.no-mistakes.yaml` on its default branch. 0: ok. A file that does not parse: a warn saying so.
 - Test homes set `NM_HOME` to a missing directory, so no test reads this machine's no-mistakes config. Tests: fixtures for global-only, a repo override either way, an unparsable file, nudge off.
+
+## Built
+
+As designed, with these specifics:
+
+- `parseFindings` decodes only the `findings[N]{...}:` block: decoding the whole status fails on the free-text `help[N]:` list a parked gate prints (`Expected 1 list-form items`), which is why `parseActiveSteps`' whole-document decode is not reused.
+- A covered gate that had already made the run `validating` returns it to `running` with a `run.validated` event carrying `conflict_gate`.
+- The ancestry check lives in `src/policy/head-history.ts`; the watcher asks it only for a `ready` run with an open PR whose head moved and has no recorded divergence yet, and a throwing runner reads as `unknown`.
+- Doctor's check is `src/doctor/nomistakes.ts` (`no-mistakes auto_fix.ci (<project>)`). Run read-only against this machine before the merge: `warn`, `3 (from ~/.no-mistakes/config.yaml)`, since `main` does not have this PR's `.no-mistakes.yaml` yet.
+- Tests: `test/unit/conflict-gate.test.ts` (parser, classifier, and the delivery watcher with a stand-in no-mistakes), `test/unit/restart.test.ts` (the restart guard), `test/unit/head-history.test.ts` (scratch repos), `test/integration/delivery.test.ts` (a commit on top is not tagged), `test/unit/doctor-nomistakes.test.ts` (fixtures).
 
 **Not in scope.** A worker still in its ship stage whose pipeline parks at a conflict gate before delivery is not covered by the nudge (the nudge only acts on delivered runs); the worker contract does not yet say what to do with that gate. Reported to the leader as a follow-up.
