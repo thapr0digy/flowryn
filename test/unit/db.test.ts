@@ -50,7 +50,7 @@ const DESIGN_TABLES = [
   "harness_contracts",
 ];
 
-/** The installed versions the migration 22 case checks against. */
+/** The installed versions the migration 23 case checks against. */
 async function installedVersion(harness: string): Promise<string> {
   return harness === "claude" ? "2.1.300" : "0.90.0";
 }
@@ -275,11 +275,36 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("contract revision: migration 22 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+  test("wait explanations: migration 22 adds an empty explanations table to a database in use; its runs and items are untouched", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 21));
-    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    db.exec(`
+      INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes');
+      INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('web-a1', 'web', 'ship', 'no-mistakes', 0, 'fix', 1);
+      INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, stage_state, pending_launch, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+        VALUES ('r1', 'web-a1', 'claude', '2.1.281', 'running', 'blocked_dialog', 'fix', 'build', 'waiting', NULL, '/tmp/wt', 'fm/x', 'abc123', 'h', 1, 1);
+      INSERT INTO events (ulid, ts, source, run_id, task_id, kind, payload) VALUES ('01J', 1, 'hook', 'r1', 'web-a1', 'run.blocked_prompt', '{}');
+      INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, opened_at) VALUES ('i1', 1, 'actionable', 'P1', 'blocked_prompt', 'web-a1', 'r1', 'waiting on a confirmation', 1);
+    `);
     expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([22]);
+    // Nothing is invented for a wait that began before the upgrade.
+    expect(db.query("SELECT COUNT(*) AS n FROM explanations").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT liveness, stage_state FROM runs").get()).toEqual({ liveness: "blocked_dialog", stage_state: "waiting" });
+    expect(db.query("SELECT id, state FROM items").get()).toEqual({ id: "i1", state: "open" });
+    db.exec(`INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, event_seq, opened_at)
+      VALUES ('r1', 'web-a1', 'build', 'dialog', 'dialog.confirmed', 'a dialog', '[]', '[]', 's', 'i1', 1, 2)`);
+    expect(() => db.exec(`INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, event_seq, opened_at)
+      VALUES ('r1', 'web-a1', 'build', 'gate', 'x', 'x', '[]', '[]', 's', 1, 2)`)).toThrow();
+    expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([]);
+    expect(db.query("SELECT operation, closed_at FROM explanations").get()).toEqual({ operation: null, closed_at: null });
+    db.close();
+  });
+
+  test("contract revision: migration 23 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 22));
+    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([23]);
     expect(db.query("SELECT harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY harness").all()).toEqual([
       { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, passed_at: 5, report_path: "/r.json", platform: null, herdr_version: null, launch_profile: null },
       { harness: "pi", version: "0.90.0", revision: BASELINE_REVISION, passed_at: 6, report_path: null, platform: null, herdr_version: null, launch_profile: null },
@@ -293,7 +318,7 @@ describe("migrations", () => {
     db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 7)");
     expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 8)")).toThrow("UNIQUE");
     expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.301', 0, 8)")).toThrow("CHECK");
-    expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([]);
     expect(integrityProblems(db)).toEqual([]);
     db.close();
   });

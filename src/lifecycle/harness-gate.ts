@@ -7,6 +7,7 @@ import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { BASELINE_REVISION, CONTRACT_REVISIONS, contractRevision, revisionLabel, storedRevision, type RevisionMap } from "../contracts/revision.ts";
+import type { Fact, Unblock } from "../attention/explanations.ts";
 
 /**
  * The harness version gate (design section 5): contract tests gate every
@@ -31,7 +32,7 @@ export type HarnessCheck =
   | { harness: HarnessId; state: "verified"; version: string; revision: number }
   /** `stale`: the revisions this version passed at, none of them the required one (empty: it never passed). */
   | { harness: HarnessId; state: "unverified"; version: string; revision: number; stale: number[] }
-  | { harness: HarnessId; state: "missing"; detail: string };
+  | { harness: HarnessId; state: "missing"; detail: string; /** A check that threw: its raw message (detail then names only the error's kind). */ error?: string };
 
 /** Has this version passed at this revision? */
 export function hasPass(db: Db, harness: string, version: string, revision: number): boolean {
@@ -58,11 +59,31 @@ export async function checkHarness(db: Db, config: FlowrynConfig, harness: Harne
 /** Why an unverified version has no usable pass: "no passing contract run for claude 2.1.300", or which revision its pass is from. */
 export function unverifiedReason(harness: HarnessId, version: string, revision: number, stale: number[]): string {
   if (stale.length === 0) return `no passing contract run for ${harness} ${version}`;
-  return `${harness} ${version} passed only at contract ${stale.map(revisionLabel).join(", ")}, not revision ${revision}`;
+  return `${harness} ${version} ${staleNote(revision, stale)}`;
 }
 
 export function contractsCommand(harness: HarnessId): string {
   return `flowryn doctor --contracts --harness ${harness}`;
+}
+
+/** The harness gate's verdict as facts. */
+export function harnessFacts(gate: Exclude<HarnessCheck, { state: "verified" }>, t: number): Fact[] {
+  if (gate.state !== "missing") return [{ name: `${gate.harness} version`, value: `${gate.version}: ${staleNote(gate.revision, gate.stale)}`, at: t }];
+  return [{ name: `${gate.harness}`, value: gate.detail, at: t }, ...(gate.error ? [{ name: "check error", value: gate.error, at: t, same: "a thrown check" }] : [])];
+}
+
+function staleNote(revision: number, stale: number[]): string {
+  if (stale.length === 0) return "no passing contract run";
+  return `passed only at contract ${stale.map(revisionLabel).join(", ")}, not revision ${revision}`;
+}
+
+/** Who can end a wait on the harness gate. */
+export function harnessUnblock(gate: Exclude<HarnessCheck, { state: "verified" }>, what: string, auto?: string | null): Unblock[] {
+  if (gate.state === "missing") return [{ by: "captain", action: `fix it (${gate.detail}): flowryn init` }];
+  return [
+    { by: "flowryn", action: auto ?? `${what} once ${gate.harness} ${gate.version} passes its contract suite` },
+    { by: "captain", action: contractsCommand(gate.harness) },
+  ];
 }
 
 /** What a dispatch, a resume or a launch gets when the harness is not verified. With the database and config, the help names an automatic check that is queued or running. */

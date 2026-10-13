@@ -22,7 +22,8 @@ import { applyDocker, listLabelled } from "./docker.ts";
 import { checkInvariant } from "./invariant.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
-import { contractsCommand, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import { contractsCommand, harnessFacts, harnessUnblock, unverifiedReason, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import { closeDismissedPromptExplanations, explain, type Fact } from "../attention/explanations.ts";
 import { contractRevision } from "../contracts/revision.ts";
 
 /**
@@ -317,12 +318,14 @@ export class Reconciler {
           setLiveness(db, run, "blocked_dialog", "reconciler", { since: launchedAt }, t);
           const event = appendEvent(db, { source: "reconciler", kind: "run.blocked_dialog", runId: run.id, taskId: run.task_id, payload: { waited_ms: t - launchedAt } });
           openRunItemOnce(db, "trust_dialog", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} has not started ${Math.round((t - launchedAt) / 1000)}s after launch; a dialog may be blocking pane ${run.pane_id}`, t);
+          explainTrust(db, run, launchedAt, tm.trust_wedge_ms, t);
         } else setLiveness(db, run, "starting", "reconciler", {}, t);
         return;
       }
       const busy = run.busy_until !== null && run.busy_until > t;
       const lastHook = run.last_hook_at ?? launchedAt;
       const prompted = findOpenRunItem(db, "blocked_prompt", run.id) !== null;
+      const dialogGone = herdrStatus === "working" || (isSettledHerdrStatus(herdrStatus) && isSettledHerdrStatus(previousHerdrStatus));
       if (prompted) {
         /**
          * Spike c12: Herdr reads "blocked" for exactly the duration of a
@@ -340,12 +343,11 @@ export class Reconciler {
          * still actually up.
          */
         if (run.harness === "claude") {
-          const dialogGone = herdrStatus === "working" || (isSettledHerdrStatus(herdrStatus) && isSettledHerdrStatus(previousHerdrStatus));
           if (dialogGone) {
             clearPrompt(db, run, herdrStatus, "reconciler", t);
           } else return;
         } else return;
-      }
+      } else if (run.harness === "claude" && dialogGone) closeDismissedPromptExplanations(db, run.id, "dialog gone", "reconciler", t);
       const leaseLapsedWithoutStop = !busy && run.idle_since === null;
       /**
        * The backstop (spike c12, Task 11): Herdr's agent_status reads
@@ -359,7 +361,7 @@ export class Reconciler {
        */
       const suspectedPrompt = run.harness === "claude" ? herdrStatus === "blocked" : herdrStatus !== null && herdrStatus !== "working" && herdrStatus !== "unknown";
       if ((busy || leaseLapsedWithoutStop) && run.state === "running" && t - lastHook >= tm.prompt_suspect_ms && !idleByDesign(db, run) && suspectedPrompt) {
-        openBlockedPrompt(db, run, { suspected: true, screen: null, harness: run.harness as "claude" | "pi", lastHook }, t);
+        openBlockedPrompt(db, run, { suspected: true, screen: null, harness: run.harness as "claude" | "pi", lastHook, herdrStatus }, t);
         return;
       }
       setLiveness(db, run, busy ? "busy" : "idle", "reconciler", { lease: busy ? "held" : "expired or released" }, t);
@@ -447,6 +449,17 @@ export class Reconciler {
         const event = appendEvent(db, { source: "reconciler", kind: "run.auto_resumed", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, pane: run.pane_id } });
         resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "blocked_prompt"], "run.auto_resumed", t);
         openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died and was resumed once from its session`, now: t });
+        explain(db, {
+          run,
+          kind: "resume",
+          rule: "resume.auto",
+          reason: "the worker died; resumed once from its stored session",
+          facts: deathFacts(run, husk, t),
+          unblock: [],
+          source: "reconciler",
+          now: t,
+          settled: "resumed",
+        });
         return true;
       });
       if (!claimed) return "dead";
@@ -462,7 +475,7 @@ export class Reconciler {
       if (released.length > 0 && run.stage_state === "active") db.query("UPDATE runs SET stage_state = 'waiting', waiting_since = NULL, stage_note = NULL WHERE id = ?1").run(run.id);
       if (changed) {
         const event = appendEvent(db, { source: "reconciler", kind: "run.died", runId: run.id, taskId: run.task_id, payload: { resume_count: run.resume_count, husk } });
-        openRunItemOnce(
+        const item = openRunItemOnce(
           db,
           "failure_needs_you",
           run,
@@ -470,6 +483,20 @@ export class Reconciler {
           `Worker for ${taskTitle(db, run.task_id)} died${run.resume_count > 0 ? " again after its automatic resume" : ""}; flowryn resume ${run.task_id} or flowryn cancel ${run.task_id}`,
           t,
         );
+        explain(db, {
+          run,
+          kind: "resume",
+          rule: "resume.refused",
+          reason: run.resume_count > 0 ? "the worker died again after its one automatic resume; no second one" : "the worker died with no session to resume",
+          facts: deathFacts(run, husk, t),
+          unblock: [
+            { by: "leader", action: `flowryn resume ${run.task_id}` },
+            { by: "leader", action: `flowryn cancel ${run.task_id}` },
+          ],
+          itemId: item ?? findOpenRunItem(db, "failure_needs_you", run.id)?.id ?? null,
+          source: "reconciler",
+          now: t,
+        });
       }
       return released.length > 0;
     });
@@ -485,7 +512,7 @@ export class Reconciler {
   private deferResume(run: RunRow, gate: Exclude<HarnessCheck, { state: "verified" }>, husk: boolean): "dead" {
     const { db, now } = this.deps;
     const t = now();
-    const why = gate.state === "missing" ? gate.detail : `${gate.harness} ${gate.version} has no passing contract run`;
+    const why = gate.state === "missing" ? gate.detail : gate.stale.length > 0 ? unverifiedReason(gate.harness, gate.version, gate.revision, gate.stale) : `${gate.harness} ${gate.version} has no passing contract run`;
     const deferred = tx(db, () => {
       const updated = db.query("UPDATE runs SET resume_count = resume_count + 1, pending_launch = 'resume', waiting_since = ?2, updated_at = ?2 WHERE id = ?1 AND resume_count = ?3").run(run.id, t, run.resume_count);
       if (updated.changes === 0) return false;
@@ -496,6 +523,16 @@ export class Reconciler {
       resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "blocked_prompt"], "run.resume_deferred", t);
       const waits = gate.state === "missing" ? `waits: ${gate.detail}` : `waits until ${gate.harness} ${gate.version} passes its contract suite (${contractsCommand(gate.harness)})`;
       openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died; its one resume ${waits}`, now: t });
+      explain(db, {
+        run,
+        kind: "resume",
+        rule: "resume.deferred",
+        reason: `the worker died; its one automatic resume waits: ${why}`,
+        facts: [...harnessFacts(gate, t), ...deathFacts(run, husk, t)],
+        unblock: harnessUnblock(gate, "launches the resume"),
+        source: "reconciler",
+        now: t,
+      });
       return true;
     });
     if (deferred) {
@@ -562,4 +599,37 @@ export class Reconciler {
       );
     }
   }
+}
+
+// --- wait explanations (docs/notes/2026-10-12-next-steps-md-wz.md) ---------------------------
+
+/** No worker-start hook after the launch: a dialog (trust, login) may hold the pane. */
+function explainTrust(db: Db, run: RunRow, launchedAt: number, wedgeMs: number, t: number): void {
+  const pane = run.pane_id ?? "(none)";
+  explain(db, {
+    run,
+    kind: "dialog",
+    rule: "dialog.trust",
+    reason: `the worker has not started ${Math.round(wedgeMs / 1000)}s after its launch; a dialog may hold pane ${pane}`,
+    facts: [
+      { name: "launched", value: new Date(launchedAt).toISOString(), at: launchedAt },
+      { name: "worker-start hook", value: "none since the launch", at: t },
+    ],
+    unblock: [
+      { by: "captain", action: `accept or answer the dialog in pane ${pane}` },
+      { by: "flowryn", action: "clears it when the worker-start hook arrives" },
+    ],
+    itemId: findOpenRunItem(db, "trust_dialog", run.id)?.id ?? null,
+    source: "reconciler",
+    now: t,
+  });
+}
+
+/** What the reconciler saw of a dead worker. */
+function deathFacts(run: RunRow, husk: boolean, t: number): Fact[] {
+  return [
+    { name: "process", value: `pid ${run.proc_pid ?? "?"} gone${husk ? "; the pane holds only its shell" : ""}`, at: t },
+    { name: "session", value: run.agent_session ?? "none", at: null },
+    { name: "automatic resumes so far", value: String(run.resume_count), at: null },
+  ];
 }

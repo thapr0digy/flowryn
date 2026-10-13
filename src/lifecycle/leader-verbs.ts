@@ -3,6 +3,7 @@ import { latestVerification, verificationLine } from "../verify/store.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
+import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField } from "../attention/explanations.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
@@ -501,18 +502,42 @@ function latestReport(ctx: ReadCtx, runId: string, text: ShowText): string | nul
   return `${payload.status ?? "-"} · ${age(ctx.now, row.ts)} ago${summary}`;
 }
 
+/** The run's open wait explanations: one terse line by default, each whole with --why (docs/notes/2026-10-12-next-steps-md-wz.md). */
+function waitingView(ctx: ReadCtx, runId: string, why: boolean): { waiting?: unknown } {
+  const rows = openExplanations(ctx.db, runId);
+  if (rows.length === 0) return {};
+  return { waiting: why ? rows.map((row) => explanationDetail(row, ctx.now)) : waitingField(rows) };
+}
+
+/** `flowryn show <task|run> --timeline`: the task's recorded explanations across its runs, oldest first. */
+function timelineView(ctx: ReadCtx, target: string, full: boolean): { data: Record<string, unknown>; hints: string[] } {
+  const taskId = (findRun(ctx.db, target) as RunRow | null)?.task_id ?? target;
+  const rows = taskExplanations(ctx.db, taskId);
+  const known = rows.length > 0 || ctx.db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(taskId) !== null || queuedTask(ctx.db, taskId) !== null;
+  if (!known) throw new FlowrynError("not_found", `no task or run ${target}`, "flowryn fleet");
+  return {
+    data: { task: taskId, timeline: rows.length > 0 ? rows.map((row) => timelineEntry(row, ctx.now, full)) : "no wait explanations recorded" },
+    hints: [`flowryn show ${taskId}`, ...(full || rows.length === 0 ? [] : [`flowryn show ${taskId} --timeline --full`])],
+  };
+}
+
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
   summary: "One task, run, item, decision, plan, divergence, review gate, chat-answer grant or leader session in detail; --full for untruncated text",
   positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>) or leader session (L<N>) id" }],
-  flags: { full: { type: "boolean", help: "untruncated titles, lines and bodies" } },
+  flags: {
+    full: { type: "boolean", help: "untruncated titles, lines and bodies" },
+    why: { type: "boolean", help: "each recorded reason the run waits, whole: its rule, facts with their observation times, and who can end it" },
+    timeline: { type: "boolean", help: "only the task's recorded wait explanations, in order (with --full, each one's facts too)" },
+  },
   kind: "read",
   roles: ["leader", "reader", "human"],
   read(ctx, args) {
     const asked = stringArg(args, "target")!;
     let target = asked;
     const text = new ShowText(boolArg(args, "full"));
+    if (boolArg(args, "timeline")) return timelineView(ctx, target, text.full);
     if (/^[kq]\d+$/.test(target)) {
       const d = getDecision(ctx.db, target);
       if (d) return { data: { ...decisionView(d, text), ...grantsField(ctx, { item: d.id }), ...text.pointer(asked) }, hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };
@@ -605,6 +630,7 @@ const show: VerbSpec = {
         harness: `${run.harness} ${run.harness_version}`,
         state: run.state,
         liveness: run.liveness,
+        ...waitingView(ctx, run.id, boolArg(args, "why")),
         workflow: `${run.workflow}: ${flowLine(runWorkflow(ctx.db, run, policy.kind as "ship" | "scout"))}`,
         stage: stageLabel(run),
         ...(requeued ? { queued: `${requeued.status} · ${requeued.next}` } : {}),
