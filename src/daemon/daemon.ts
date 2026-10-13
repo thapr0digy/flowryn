@@ -86,6 +86,8 @@ const DEFAULT_PASS_MS = 60_000;
 const ATTENTION_TICK_MS = 1_000;
 const TOOL_TIMEOUT_MS = 10_000;
 const SHUTDOWN_GRACE_MS = 12_000;
+/** The daemon's own external commands still running at its stop get this long after SIGTERM. */
+const OWNED_STOP_GRACE_MS = 2_000;
 
 class StartupRefused extends Error {}
 
@@ -761,8 +763,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     reviewOpener.stop();
     deliveryWatcher.stop();
     herdrWatcher.stop();
-    const owned = await stopOwnedProcesses();
-    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start`);
     bus.close();
     urgent.close();
     attention.bus.close();
@@ -772,6 +772,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const closing = listener.close();
     listener = null;
     await Promise.race([Promise.all([closing, journal.stop()]), Bun.sleep(SHUTDOWN_GRACE_MS)]);
+    // After the journal's last tasks-axi call settled (a mutation is never cut mid-write by the stop): what still runs goes.
+    const owned = await stopOwnedProcesses(OWNED_STOP_GRACE_MS);
+    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start`);
     tx(database, () => appendEvent(database, { source: "daemon", kind: "daemon.stopped", payload: { reason } }));
     return 0;
   } catch (error) {

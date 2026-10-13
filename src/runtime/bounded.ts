@@ -66,6 +66,8 @@ interface LiveChild {
   pid: number;
   group: boolean;
   entry: string | null;
+  /** The daemon's stop could not end its group: the entry stays for the next start. */
+  keep: boolean;
 }
 
 let owned: OwnedConfig | null = null;
@@ -195,7 +197,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
     return { code: SPAWN_FAILED, stdout: "", stderr: message, timedOut: false, incomplete: null, spawnError: message, leftover: false };
   }
   const pid = proc.pid;
-  const child: LiveChild = { pid, group, entry: config ? record(config, { pid, spawned_at: spawnedAt, argv0: basename(argv[0] ?? ""), label: opts.label }) : null };
+  const child: LiveChild = { pid, group, entry: config ? record(config, { pid, spawned_at: spawnedAt, argv0: basename(argv[0] ?? ""), label: opts.label }) : null, keep: false };
   live.set(pid, child);
   const target = group ? -pid : pid;
   const out = opts.outputFd === undefined ? collect(proc.stdout as ReadableStream<Uint8Array>, max) : null;
@@ -237,7 +239,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
 
   live.delete(pid);
   if (leftover && config) config.log(`${opts.label} (pid ${pid}): its process group outlived SIGKILL; recorded in ${child.entry ?? "nothing (no ledger entry)"} for the next start`);
-  else forget(child.entry);
+  else if (!child.keep) forget(child.entry);
 
   const stdout = out?.text() ?? "";
   let stderr = err?.text() ?? "";
@@ -269,6 +271,7 @@ export async function stopOwnedProcesses(graceMs = 3_000): Promise<OwnedStop> {
     if (groupAlive(c.pid)) {
       send(-c.pid, "SIGKILL");
       if (!(await waitGroupGone(c.pid, GONE_CONFIRM_MS))) {
+        c.keep = true;
         result.left.push(c.pid);
         continue;
       }
