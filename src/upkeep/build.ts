@@ -8,6 +8,7 @@ import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
+import { runBounded } from "../runtime/bounded.ts";
 
 /**
  * The build after a Flowryn merge (spec 3, phase 3; the review chose "the
@@ -54,26 +55,20 @@ export interface StepResult {
 /** Run one build step, its output appended to the log. */
 export type StepRunner = (argv: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; logPath: string; timeoutMs: number }) => Promise<StepResult>;
 
+/** One step in its own process group (in the daemon), so a timed-out install or compile goes with everything it started. */
 export const runStep: StepRunner = async (argv, opts) => {
   const fd = openSync(opts.logPath, "a", 0o600);
-  let proc;
   try {
     writeSync(fd, `$ ${argv.join(" ")}\n`);
-    proc = Bun.spawn(argv, { cwd: opts.cwd, env: opts.env, stdin: "ignore", stdout: fd, stderr: fd });
-  } catch (error) {
-    writeSync(fd, `${(error as Error).message}\n`);
+    const result = await runBounded(argv, { label: `build ${basename(argv[1] ?? argv[0] ?? "")}`, cwd: opts.cwd, env: opts.env, outputFd: fd, timeoutMs: opts.timeoutMs });
+    if (result.spawnError !== null) {
+      writeSync(fd, `${result.spawnError}\n`);
+      return { exitCode: null, timedOut: false };
+    }
+    return { exitCode: result.code, timedOut: result.timedOut };
+  } finally {
     closeSync(fd);
-    return { exitCode: null, timedOut: false };
   }
-  closeSync(fd);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill("SIGKILL");
-  }, opts.timeoutMs);
-  const exitCode = await proc.exited;
-  clearTimeout(timer);
-  return { exitCode, timedOut };
 };
 
 export interface MergeBuildDeps {
