@@ -6,7 +6,7 @@ import { PROTO_EXEMPT_VERBS } from "../daemon/system-verbs.ts";
 import { authorize, resolveCaller } from "./auth.ts";
 import { errorReply, okReply, parseEnvelope, type Envelope, type Reply } from "./envelope.ts";
 import { FlowrynError, toErrorBody } from "./errors.ts";
-import { validateArgs, type DaemonServices, type HandlerCtx, type HandlerResult, type VerbSpec } from "./verbs.ts";
+import { validateArgs, type Args, type DaemonServices, type HandlerCtx, type HandlerResult, type VerbSpec } from "./verbs.ts";
 
 /** Replies are kept this long, so a retried mutation returns its original result (design section 12). */
 export const IDEMPOTENCY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -28,6 +28,8 @@ export interface GatewayOptions {
  */
 export class Gateway {
   private readonly opts: GatewayOptions;
+  /** Mutations in flight by ULID: a second call with the same key awaits the first one's reply rather than running again. */
+  private readonly inFlight = new Map<string, Promise<Reply>>();
 
   constructor(opts: GatewayOptions) {
     this.opts = opts;
@@ -73,6 +75,31 @@ export class Gateway {
     }
 
     if (!isUlid(env.ulid)) throw new FlowrynError("bad_envelope", "a mutation needs a ULID idempotency key");
+    const running = this.inFlight.get(env.ulid);
+    if (running) {
+      const reply = await running;
+      // The same call spooled while its first copy was still being handled: the spool copy is a duplicate.
+      if (via === "spool") tx(services.db, () => this.markSpoolIngested(env.ulid, caller.runId));
+      return reply;
+    }
+    const attempt = this.mutate(spec, ctx, args, env, via);
+    this.inFlight.set(env.ulid, attempt);
+    try {
+      return await attempt;
+    } finally {
+      this.inFlight.delete(env.ulid);
+    }
+  }
+
+  /**
+   * One mutation: prepare, then apply with its stored reply in one transaction,
+   * then settle. A replay settles the stored reply again: settlement drives
+   * the operation it names by its recorded phase (src/lifecycle/operations.ts),
+   * so it finishes interrupted work and never issues an effect twice.
+   */
+  private async mutate(spec: VerbSpec, ctx: HandlerCtx, args: Args, env: Envelope, via: Via): Promise<Reply> {
+    const services = this.opts.services;
+    const { caller } = ctx;
     if (spec.ephemeral) {
       if (via === "spool") throw new FlowrynError("bad_envelope", `${spec.name} is never spooled`);
       const prepared = spec.prepare ? await spec.prepare(ctx, args) : undefined;
@@ -85,17 +112,24 @@ export class Gateway {
     if (stored) return this.settleStored(spec, ctx, stored);
 
     const prepared = spec.prepare ? await spec.prepare(ctx, args) : undefined;
-    const result = tx(services.db, () => {
+    const result = tx(services.db, (): { stored: Reply } | { applied: HandlerResult } => {
+      // Checked again inside the committing transaction: a reply stored meanwhile is this call's, applied once.
+      const raced = services.db.query("SELECT reply FROM idempotency WHERE ulid = ?1").get(env.ulid) as { reply: string } | null;
+      if (raced) {
+        if (via === "spool") this.markSpoolIngested(env.ulid, caller.runId);
+        return { stored: JSON.parse(raced.reply) as Reply };
+      }
       const applied = spec.apply!(ctx, args, prepared);
       const reply = okReply(applied.data, applied.hints);
       services.db
         .query("INSERT INTO idempotency (ulid, verb, reply, created_at) VALUES (?1, ?2, ?3, ?4)")
         .run(env.ulid, env.verb, JSON.stringify(reply), services.now());
       if (via === "spool") this.markSpoolIngested(env.ulid, caller.runId);
-      return applied;
+      return { applied };
     });
+    if ("stored" in result) return this.settleStored(spec, ctx, result.stored);
     services.journal.kick();
-    const settled = spec.settle ? await spec.settle(ctx, result) : result;
+    const settled = spec.settle ? await spec.settle(ctx, result.applied) : result.applied;
     return okReply(settled.data, settled.hints);
   }
 

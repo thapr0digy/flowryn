@@ -336,6 +336,31 @@ describe("migrations", () => {
     expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([]);
     db.close();
   });
+
+  test("operations: its migration adds an empty operations table to a database in use; a run left mid-launch keeps its row for recovery; one open operation per run", () => {
+    const at = MIGRATIONS.findIndex((m) => m.name === "operations");
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, at));
+    db.exec(`
+      INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes');
+      INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('web-a1', 'web', 'ship', 'no-mistakes', 0, 'fix', 1);
+      INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, pane_id, worktree_path, branch, base_sha, token_hash, started_at, updated_at, launched_at)
+        VALUES ('r1', 'web-a1', 'claude', '2.1.281', 'launching', 'starting', 'fix', 'build', 'w1:p1', '/tmp/wt', 'fm/x', 'abc123', 'h', 1, 1, 5);
+    `);
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([MIGRATIONS[at]!.version]);
+    // Nothing is invented: the reconciler reads the interrupted launch from launched_at and the pane.
+    expect(db.query("SELECT COUNT(*) AS n FROM operations").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT state, pane_id, launched_at, proc_pid FROM runs").get()).toEqual({ state: "launching", pane_id: "w1:p1", launched_at: 5, proc_pid: null });
+    const add = (id: string, phase: string, kind = "launch") =>
+      db.query("INSERT INTO operations (id, run_id, task_id, kind, generation, desired, phase, requested_by, created_at, updated_at) VALUES (?1, 'r1', 'web-a1', ?2, 1, 'worker_running', ?3, 'daemon', 1, 1)").run(id, kind, phase);
+    add("o1", "effect_issued");
+    expect(() => add("o2", "requested", "resume")).toThrow("UNIQUE");
+    add("o3", "failed");
+    expect(() => add("o4", "running")).toThrow("CHECK");
+    expect(() => add("o5", "failed", "deliver")).toThrow("CHECK");
+    expect(migrate(db, MIGRATIONS.slice(0, at + 1))).toEqual([]);
+    db.close();
+  });
 });
 
 describe("events", () => {

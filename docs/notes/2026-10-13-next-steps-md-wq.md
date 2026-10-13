@@ -1,7 +1,7 @@
 # Why is this waiting: fleet, briefing, retention and export
 
 - Status: partial
-- Open: operation identity (package 1, PR #80 not merged) still leaves `explanations.operation` empty; decisions, gates and merges as explanation kinds
+- Open: decisions, gates and merges as explanation kinds
 - Config: `[upkeep] explanations_keep_days`, `[upkeep] explanations_keep_per_run`
 
 `docs/next_steps.md` package 3, its third slice, on top of the explanations table of the first (`2026-10-12-next-steps-md-wz.md`): the terse "waiting: … · next: …" pointer in `flowryn fleet` and the leader briefing, a bounded retention for closed rows, an opt-in redacted diagnostic export, and a count of unresolved waiting time per kind in `flowryn capacity`. No model: every line is read from the table.
@@ -54,7 +54,7 @@ Redaction, unless `--include-text`:
 1. A redacted text field becomes `<redacted: N chars>`, so its presence and size stay diagnosable.
 2. Event payloads: values under free-text keys (`body`, `summary`, `text`, `question`, `answer`, `choice`, `options`, `context`, `recommend`, `recommendation`, `rationale`, `note`, `blocks`, `feedback`, `comment`, `line`, `full_line`, `words`, `prompt`, `title`, `screen`) are redacted, and so is any other string that contains one of the run's decision or gate texts (an item line quoting a question).
 3. Explanations: a dialog's `prompt` fact (a line of the worker's screen) and every row's `signature` (which repeats the fact values) are redacted, and so is any string quoting a decision or gate text.
-4. `run.cancelled`'s `reason` is the canceller's own words (`flowryn cancel --reason`) and is redacted, except the reasons Flowryn writes itself (`by <role>`, `your backlog edit won (divergence <id>)`).
+4. `run.cancelled`'s `reason` is the canceller's own words (`flowryn cancel --reason`) and is redacted, except the reasons Flowryn writes itself (`by <role>`, `cancelled`, `your backlog edit won (divergence <id>)`).
 
 Always, with or without the flag, on every string anywhere in the export: a URL's userinfo (`https://user:pass@host`, `https://user@host`) becomes `https://<redacted>@host`, a secret-looking query value (`?access_token=`, `api_key`, `sig`, `auth`…) becomes `<redacted>`, and a token-looking run (the `TOKEN_LIKE` pattern `flowryn config` uses: `ghp_…`, `github_pat_…`, `sk-…`, `xox?-…`) becomes `<redacted>`. The config snapshot is always redacted, and `redactConfig` now strips URL credentials too, so `flowryn config` shows `[github] api_url = "https://<redacted>@host"`.
 

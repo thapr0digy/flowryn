@@ -84,7 +84,9 @@ starts the agent before saving its process identity. These are concrete
 crash/retry boundaries; duplicate workers or unwanted resumes were not
 reproduced in this review.
 
-**Next step:** persist a small per-run operation identity, execution generation,
+**Next step (done; see
+[docs/notes/2026-10-13-next-steps-md-rz.md](notes/2026-10-13-next-steps-md-rz.md)):**
+persist a small per-run operation identity, execution generation,
 desired outcome and confirmed phase for launch/resume/cancel. Recover the
 operation, not merely the last observed worker state. Recheck idempotency inside
 the committing transaction and coalesce concurrent requests with the same ULID.

@@ -1,7 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
 import { awayLine, getAway } from "../attention/away.ts";
-import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
+import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField, waitingPointer, waitingRuns } from "../attention/explanations.ts";
 import { appendEvent } from "../db/events.ts";
@@ -12,7 +12,7 @@ import { getGrant, grantLines, grantView } from "../policy/grants.ts";
 import { getLease, getSession } from "../lease/lease.ts";
 import { pinHistory } from "../lease/repin.ts";
 import { getDecision } from "./decisions.ts";
-import { cancelRun, findRun, getRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
+import { findRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
@@ -27,6 +27,7 @@ import { divergenceView, getDivergence, resolveCommand } from "../reconcile/dive
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
 import { ShowText } from "./show-text.ts";
+import { getOperation, heldByEscalation, latestOperation, launchKind, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
 import { channelView } from "../lavish/channel.ts";
 import type { Db } from "../db/db.ts";
 
@@ -112,7 +113,10 @@ const answer: VerbSpec = {
 /**
  * `flowryn cancel <task|run>`: stop the worker (verified exit) and return the
  * task to Queued with a parked hold. The worktree stays; removing it is the
- * cleanup guard's job (M4).
+ * cleanup guard's job (M4). The intent is committed first, as a cancel
+ * operation, and the stop follows it, so a daemon that dies between them
+ * finishes the cancel on its restart and never resumes the worker
+ * (docs/notes/2026-10-13-next-steps-md-rz.md).
  */
 const cancel: VerbSpec = {
   name: "cancel",
@@ -121,28 +125,31 @@ const cancel: VerbSpec = {
   flags: { reason: { type: "string", help: "one line, for the backlog hold", placeholder: "text" } },
   kind: "mutation",
   roles: ["leader", "human"],
-  async prepare(ctx, args) {
-    const run = activeRunFor(ctx.db, stringArg(args, "target")!);
-    const exited = await ctx.fleet.exitRun(run.id);
-    if (!exited.ok) throw new FlowrynError("internal", `the worker for ${run.task_id} did not exit (${exited.detail ?? exited.evidence}); nothing was cancelled`);
-    return { exited };
-  },
-  apply(ctx, args, prepared) {
+  apply(ctx, args) {
     const run = activeRunFor(ctx.db, stringArg(args, "target")!);
     const reason = stringArg(args, "reason") ?? `by ${ctx.caller.role}`;
-    cancelRun(ctx.db, run, reason, "cli", ctx.now());
-    return { data: { run: run.id, task: run.task_id, state: "cancelled", exited: (prepared as { exited: { evidence: string } }).exited.evidence } };
+    const op = requestCancel(ctx.db, run, { id: ctx.ulid, by: ctx.caller.role, reason, source: "cli", now: ctx.now() });
+    return { data: { run: run.id, task: run.task_id, operation: op.id } };
   },
+  // Also a replay's settlement: it drives the recorded operation by its phase, so a stored cancel finishes and is never stopped twice.
   async settle(ctx, result) {
-    const runId = String(result.data.run);
-    ctx.fleet.bus.forget(runId);
-    ctx.sched.kick();
-    const run = getRun(ctx.db, runId);
-    const runtime = ctx.fleet.runtime();
-    if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id).catch(() => undefined);
-    return result;
+    // A reply stored before operations existed: its apply already cancelled the run.
+    if (typeof result.data.operation !== "string") return result;
+    const outcome = await ctx.fleet.driveCancel(result.data.operation);
+    if (!outcome.ok) throw new FlowrynError("internal", `the worker for ${String(result.data.task)} did not exit (${outcome.detail ?? outcome.evidence}); nothing was cancelled`);
+    return { data: { ...result.data, state: "cancelled", exited: outcome.evidence } };
   },
 };
+
+/** A resume the grant has not started yet, with the reason its open wait explanation gives. */
+function waitingReply(db: Db, result: HandlerResult): HandlerResult {
+  const why = db
+    .query("SELECT rule, reason FROM explanations WHERE run_id = ?1 AND kind IN ('capacity','resume') AND closed_at IS NULL ORDER BY id DESC LIMIT 1")
+    .get(String(result.data.run)) as { rule: string; reason: string } | null;
+  const state = why ? `waiting: ${why.reason}` : "waiting for its grant";
+  const hints = why?.rule.startsWith("capacity.") ? ["flowryn capacity"] : [`flowryn show ${String(result.data.task)}`];
+  return { data: { ...result.data, state, ...(why ? { rule: why.rule } : {}) }, hints };
+}
 
 /** A run whose dead worker can be resumed from its stored session. */
 function resumable(db: ReadCtx["db"], target: string): RunRow {
@@ -150,8 +157,16 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
   if (!run) throw new FlowrynError("not_found", `no run or task ${target}`);
   if (run.state === "cancelled" || run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
   if (run.cleanup === "done") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is cleaned up: its worktree is gone`, `dispatch ${run.task_id} again`);
-  if (run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
+  // An escalated launch or resume is yours to settle: after looking at its pane, `flowryn resume` is one way out (cancel the other).
+  const held = heldByEscalation(db, run.id);
+  const escalatedStart = held !== null && held.kind !== "cancel";
+  if (!escalatedStart && run.liveness !== "dead" && run.liveness !== "orphaned") throw new FlowrynError("bad_args", `the worker is ${run.liveness}, not dead`);
   if (!run.agent_session) throw new FlowrynError("bad_args", "the run has no stored session to resume");
+  const open = openOperation(db, run.id);
+  if (open?.kind === "cancel") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is being cancelled (${open.id})`, `flowryn show ${run.task_id}`);
+  if (open && open.phase !== "requested") throw new FlowrynError("bad_args", `a ${open.kind} of ${run.task_id} is already under way (${open.id})`, `flowryn show ${run.task_id}`);
+  // A requested launch of another mode (a fresh stage worker waiting for its grant) starts the run when granted: no resume beside it.
+  if (open && open.kind !== "resume") throw new FlowrynError("bad_args", `a ${open.mode ?? open.kind} launch of ${run.task_id} is already requested (${open.id}); it starts when granted`, "flowryn capacity");
   return run;
 }
 
@@ -178,29 +193,44 @@ const resume: VerbSpec = {
   apply(ctx, args) {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     const now = ctx.now();
+    const open = openOperation(ctx.db, run.id);
+    const held = heldByEscalation(ctx.db, run.id);
+    const replacement = held && held.kind !== "cancel" && run.pending_launch && run.pending_launch !== "resume" ? run.pending_launch : null;
+    const mode = replacement ?? "resume";
+    // A resume already asked for (the automatic one waiting for its harness) is the same operation: no second one.
+    const op = open ?? requestOperation(ctx.db, { id: ctx.ulid, run, kind: launchKind(mode), mode, requestedBy: ctx.caller.role, source: "cli", now });
     ctx.db
       .query("UPDATE runs SET state = CASE WHEN state = 'failed' THEN 'running' ELSE state END, liveness = 'starting', resume_count = resume_count + 1, ended_at = NULL, updated_at = ?2 WHERE id = ?1")
       .run(run.id, now);
     // A dead worker holds no slot (design section 11): the scheduler grants its worker slot, and its stage's pools, first.
-    const viaScheduler = !holdsLease(ctx.db, run.id, WORKER_POOL);
-    if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
+    const viaScheduler = replacement !== null || !holdsLease(ctx.db, run.id, WORKER_POOL);
+    if (replacement) ctx.db.query("UPDATE runs SET waiting_since = ?2 WHERE id = ?1").run(run.id, now);
+    else if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
     if (run.state === "failed") {
       // failRun parked the task; take it back to In flight.
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
-    resolveRunItems(ctx.db, run.id, ["failure_needs_you"], "run.resume_requested", now);
+    resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated"], "run.resume_requested", now);
     appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler } });
-    return { data: { run: run.id, task: run.task_id, state: "resuming" }, hints: [`flowryn show ${run.task_id}`] };
+    return { data: { run: run.id, task: run.task_id, state: "resuming", operation: op.id }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
     const row = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
+    const op = typeof result.data.operation === "string" ? getOperation(ctx.db, result.data.operation) : null;
     if (row?.pending_launch === "resume") {
       await ctx.sched.passNow();
       const after = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
-      return after?.pending_launch === "resume" ? { data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity"] } : result;
+      return after?.pending_launch === "resume" ? waitingReply(ctx.db, result) : result;
     }
-    ctx.fleet.launch(String(result.data.run), "resume");
+    if (op?.mode && op.mode !== "resume") {
+      await ctx.sched.passNow();
+      const after = ctx.db.query("SELECT waiting_since FROM runs WHERE id = ?1").get(String(result.data.run)) as { waiting_since: number | null } | null;
+      return after?.waiting_since != null ? waitingReply(ctx.db, result) : result;
+    }
+    // The launcher issues the resume only from `requested`: a replayed settlement finds it issued and starts nothing.
+    // A reply stored before operations existed names none: its resume was launched then.
+    if (typeof result.data.operation === "string") ctx.fleet.launch(String(result.data.run), "resume", result.data.operation);
     return result;
   },
 };
@@ -509,7 +539,19 @@ function latestReport(ctx: ReadCtx, runId: string, text: ShowText): string | nul
 function waitingView(ctx: ReadCtx, runId: string, why: boolean): { waiting?: unknown } {
   const rows = openExplanations(ctx.db, runId);
   if (rows.length === 0) return {};
-  return { waiting: why ? rows.map((row) => explanationDetail(row, ctx.now)) : waitingField(rows) };
+  const describe = (id: string) => {
+    const op = getOperation(ctx.db, id);
+    return op ? `${op.id} ${op.kind} ${op.phase}` : id;
+  };
+  return { waiting: why ? rows.map((row) => explanationDetail(row, ctx.now, describe)) : waitingField(rows) };
+}
+
+/** The run's open operation, or its newest one while it is escalated: what Flowryn is doing to the worker, or waits on you for. */
+function operationView(ctx: ReadCtx, runId: string): { operation?: string } {
+  const op = openOperation(ctx.db, runId) ?? latestOperation(ctx.db, runId);
+  if (!op || (op.phase !== "requested" && op.phase !== "effect_issued" && op.phase !== "escalated")) return {};
+  if (op.phase === "escalated" && !heldByEscalation(ctx.db, runId)) return {};
+  return { operation: operationLine(op) };
 }
 
 /** `flowryn show <task|run> --timeline`: the task's recorded explanations across its runs, oldest first. */
@@ -634,6 +676,7 @@ const show: VerbSpec = {
         state: run.state,
         liveness: run.liveness,
         ...waitingView(ctx, run.id, boolArg(args, "why")),
+        ...operationView(ctx, run.id),
         workflow: `${run.workflow}: ${flowLine(runWorkflow(ctx.db, run, policy.kind as "ship" | "scout"))}`,
         stage: stageLabel(run),
         ...(requeued ? { queued: `${requeued.status} · ${requeued.next}` } : {}),

@@ -46,6 +46,8 @@ export interface NewExplanation {
   now: number;
   /** A decision that waits for nothing (an automatic resume): recorded closed, with this as closed_by. */
   settled?: string;
+  /** The launch, resume or cancel this decision belongs to (src/lifecycle/operations.ts). */
+  operation?: string | null;
 }
 
 export interface ExplanationRow {
@@ -102,8 +104,8 @@ export function explain(db: Db, x: NewExplanation): number | null {
   const event = appendEvent(db, { source: x.source, kind: "run.explained", runId: x.run.id, taskId: x.run.task_id, payload: { kind: x.kind, rule: x.rule }, ts: x.now });
   const result = db
     .query(
-      `INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, event_seq, opened_at, closed_at, closed_by)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+      `INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, event_seq, opened_at, closed_at, closed_by, operation)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
     )
     .run(
       x.run.id,
@@ -120,6 +122,7 @@ export function explain(db: Db, x: NewExplanation): number | null {
       x.now,
       x.settled ? x.now : null,
       x.settled ?? null,
+      x.operation ?? null,
     );
   const id = Number(result.lastInsertRowid);
   for (const row of open) db.query("UPDATE explanations SET closed_at = ?2, closed_by = ?3 WHERE id = ?1").run(row.id, x.now, `superseded by x${id}`);
@@ -242,8 +245,8 @@ function factLine(f: Fact, now: number): string {
   return `${f.name}: ${f.value} (observed ${f.at === null ? "-" : `${clock(f.at, true)}, ${age(now, f.at)} ago`})`;
 }
 
-/** `show --why`: an open explanation whole, from its stored facts. */
-export function explanationDetail(row: ExplanationRow, now: number): Record<string, unknown> {
+/** `show --why`: an open explanation whole, from its stored facts; `operation` describes its operation id. */
+export function explanationDetail(row: ExplanationRow, now: number, operation: (id: string) => string = (id) => id): Record<string, unknown> {
   return {
     id: `x${row.id}`,
     kind: row.kind,
@@ -253,7 +256,7 @@ export function explanationDetail(row: ExplanationRow, now: number): Record<stri
     since: `${clock(row.opened_at, true)} (${age(now, row.opened_at)} ago)`,
     facts: factsOf(row).map((f) => factLine(f, now)),
     unblock: unblockOf(row).map((u) => `${u.by}: ${u.action}`),
-    operation: row.operation ?? "-",
+    operation: row.operation ? operation(row.operation) : "-",
   };
 }
 

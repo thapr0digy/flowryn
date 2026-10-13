@@ -94,9 +94,10 @@ function hideExplanation(x: Record<string, unknown>, quoted: readonly string[]):
 /**
  * The cancel reasons Flowryn itself writes (`flowryn cancel` without
  * --reason, src/lifecycle/leader-verbs.ts; an accepted backlog edit,
- * src/lifecycle/divergences.ts). Any other reason is the caller's own words.
+ * src/lifecycle/divergences.ts; a recovered cancel with no reason,
+ * src/lifecycle/operation-recovery.ts). Any other reason is the caller's own words.
  */
-const GENERATED_CANCEL_REASON = /^(by [a-z]+|your backlog edit won \(divergence [\w-]+\))$/;
+const GENERATED_CANCEL_REASON = /^(by [a-z]+|cancelled|your backlog edit won \(divergence [\w-]+\))$/;
 
 /** An event's payload, redacted: free-text keys, quoted decision and gate texts, and a cancel reason someone typed. */
 function hideEvent(kind: string, payload: unknown, quoted: readonly string[]): unknown {
