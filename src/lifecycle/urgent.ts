@@ -7,6 +7,7 @@ import type { Verified } from "../harness/types.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { knownDialogRefusal } from "./control.ts";
 import { clearPrompt } from "./prompt-wedge.ts";
+import { observedTransition } from "./observed.ts";
 import { getRun, isTerminal, setLiveness, type RunRow } from "./runs.ts";
 import { getMessage, markPreempted, preemptCandidate } from "./steers.ts";
 
@@ -205,7 +206,9 @@ export class UrgentPreempter implements UrgentServices {
    * the dialog is gone (spike c12: a dialog and a running tool never overlap;
    * the reconciler applies the same rule each pass): clear it here rather
    * than wait for the next pass, and restart the tool clock, so a tool you
-   * just approved gets its own threshold.
+   * just approved gets its own threshold. The status is read before an await,
+   * so the release is a guarded transition: a run that changed meanwhile
+   * (a hook, a cancel, another worker) is re-planned instead.
    */
   private async releasedPrompt(run: RunRow): Promise<boolean> {
     const { db, now } = this.deps;
@@ -218,13 +221,15 @@ export class UrgentPreempter implements UrgentServices {
       return false;
     }
     if (status !== "working") return false;
-    tx(db, () => {
-      const current = getRun(db, run.id);
-      if (!current || !findOpenRunItem(db, "blocked_prompt", run.id)) return;
+    const released = observedTransition(db, run, "dialog_gone", "daemon", now(), (current) => {
+      if (!findOpenRunItem(db, "blocked_prompt", current.id)) return false;
       clearPrompt(db, current, status, "daemon", now());
       setLiveness(db, current, "busy", "daemon", { signal: "dialog gone" }, now());
+      return true;
     });
-    this.tools.restart(run.id, now());
+    if (released.applied) this.tools.restart(run.id, now());
+    // Stale too returns true: the caller's kick re-plans from the current row (a new worker, a cancel)
+    // rather than going on to interrupt with the run it read before the await.
     return true;
   }
 }
