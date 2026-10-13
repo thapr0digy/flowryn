@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contractPrefix, removeOwnWorktrees, type GitRun } from "../../src/contracts/cleanup.ts";
@@ -254,7 +254,10 @@ describe("contract harness pin", () => {
     claude.repoint("2.1.291");
     const pin = await pinHarness("claude", claude.link, harnessVersion);
 
-    writeFileSync(file, `#!/bin/sh\necho "2.1.292 (Claude Code)"\n`, { mode: 0o755 });
+    // An updater replaces the file with a new one at the same path. Rewriting it in place instead would make
+    // macOS SIGKILL its next exec (now and then), which reads as "cannot report its version", not an update.
+    writeFileSync(`${file}.new`, `#!/bin/sh\necho "2.1.292 (Claude Code)"\n`, { mode: 0o755 });
+    renameSync(`${file}.new`, file);
     // The version cache keys on mtime; a same-millisecond rewrite must still read as a change.
     utimesSync(file, new Date(), new Date(Date.now() + 5_000));
     const updated = (await pinDrift(pin, harnessVersion))!;

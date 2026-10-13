@@ -32,6 +32,8 @@ interface FakePane {
   typed: string;
   /** pane.process_info reads still to answer with the handoff reply (see `handoffReads`). */
   handoff: number;
+  /** When the pane's last harness exited (see `exitLagMs`). */
+  exitedAt: number | null;
 }
 
 interface FakeWorkspace {
@@ -74,6 +76,12 @@ export class FakeHerdr {
    * foreground group or process list (M0 h02), before the pane is read as usual.
    */
   handoffReads = 0;
+  /**
+   * For this long after a pane's harness exits, pane.process_info still reads
+   * its group in the foreground (with no process in it), as Herdr can before
+   * the pane's shell takes the terminal back: the pane does not read idle.
+   */
+  exitLagMs = 0;
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
   /** The focused workspace. Herdr's list order is `workspaces`' insertion order. */
@@ -271,7 +279,7 @@ export class FakeHerdr {
   }
 
   private addPane(ws: FakeWorkspace, cwd: string, env: Record<string, string>): FakePane {
-    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "", handoff: 0 };
+    const pane: FakePane = { paneId: `${ws.workspaceId}:p${ws.nextPane++}`, workspaceId: ws.workspaceId, cwd, env, tokens: {}, title: null, revision: 0, child: null, kind: null, args: [], starts: 0, typed: "", handoff: 0, exitedAt: null };
     this.panes.set(pane.paneId, pane);
     ws.panes.push(pane.paneId);
     return pane;
@@ -313,6 +321,7 @@ export class FakeHerdr {
     pane.args = args;
     pane.revision++;
     child.on("exit", () => {
+      pane.exitedAt = Date.now();
       pane.revision++;
       this.emit("pane.agent_status_changed", { pane_id: pane.paneId, agent_status: "unknown" });
     });
@@ -364,6 +373,9 @@ export class FakeHerdr {
           return { type: "pane_process_info", process_info: { pane_id: pane.paneId, shell_pid: process.pid } };
         }
         const pid = this.harnessPid(pane.paneId);
+        if (pid === null && pane.child?.pid !== undefined && pane.exitedAt !== null && Date.now() - pane.exitedAt < this.exitLagMs) {
+          return { type: "pane_process_info", process_info: { pane_id: pane.paneId, shell_pid: process.pid, foreground_process_group_id: pane.child.pid, foreground_processes: [] } };
+        }
         const shell = { pid: process.pid, name: "zsh", argv0: "-zsh", argv: ["-zsh"], cmdline: "-zsh", cwd: pane.cwd };
         const harness = pid === null ? null : { pid, name: pane.kind, argv0: pane.kind, argv: [pane.kind, ...pane.args], cmdline: pane.kind, cwd: pane.cwd };
         return {

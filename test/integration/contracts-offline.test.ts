@@ -91,6 +91,17 @@ function recorded(harness: HarnessId): { version: string; report_path: string | 
   }
 }
 
+/**
+ * Panes still open in the fake Herdr: every workspace a run opened must be
+ * closed by the end, its pane with it. Not only those with a live harness: a
+ * pane whose harness was killed but whose workspace stayed open is a leak too,
+ * and a closed pane is gone as soon as Herdr handles the close the doctor
+ * awaits, while a killed harness reads live until this process reaps it.
+ */
+function openPanes(): string[] {
+  return [...fleet.herdr.panes.keys()];
+}
+
 /** Scratch homes this test's runs made and did not remove. */
 function scratchHomes(): string[] {
   return readdirSync(scratchRoot).filter((name) => name.startsWith("fwc-"));
@@ -113,7 +124,7 @@ describe("the harness contract suite against fakes", () => {
       expect(checks.at(-1)).toMatchObject({ check: `contract ${harness}`, status: "ok" });
       expect(code).toBe(0);
       expect(recorded(harness).map((r) => r.version)).toEqual([FAKE_VERSION]);
-      expect(fleet.herdr.livePanes()).toEqual([]);
+      expect(openPanes()).toEqual([]);
       if (process.env.FLOWRYN_TEST_KEEP !== "1") expect(scratchHomes().filter((name) => !before.has(name))).toEqual([]);
     }, 90_000);
   }
@@ -137,7 +148,7 @@ describe("the harness contract suite against fakes", () => {
     expect(recorded("pi").map((r) => r.version)).toEqual([FAKE_VERSION]);
     expect(readFileSync(join(piAgent, "auth.json"), "utf8")).toBe(auth);
     expect(readdirSync(piAgent)).toEqual(["auth.json"]);
-    expect(fleet.herdr.livePanes()).toEqual([]);
+    expect(openPanes()).toEqual([]);
     if (process.env.FLOWRYN_TEST_KEEP !== "1") expect(scratchHomes().filter((name) => !before.has(name))).toEqual([]);
   }, 150_000);
 });

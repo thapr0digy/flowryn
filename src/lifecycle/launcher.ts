@@ -442,7 +442,11 @@ export class Launcher {
   /**
    * Reuse the run's pane when its shell is idle at the prompt; otherwise open
    * a new workspace whose one pane is the worker's, labelled with the task id
-   * alone so Herdr's sidebar names the work.
+   * alone so Herdr's sidebar names the work. A relaunch comes only after the
+   * recorded worker is gone, so a previous workspace whose pane does not read
+   * idle (Herdr can still read the dead worker's group in the foreground just
+   * after it exits) holds only the run's own leftovers: it is closed once the
+   * new one is recorded, as cancel and landing close the current one.
    */
   private async ensurePane(runtime: HerdrRuntime, run: RunWithPolicy, worktree: string, env: Record<string, string>): Promise<string> {
     const { db, now } = this.deps;
@@ -463,6 +467,21 @@ export class Launcher {
       );
       appendEvent(db, { source: "daemon", kind: "run.pane", runId: run.id, taskId: run.task_id, payload: { pane: paneId, workspace: workspace.workspaceId, previous: run.pane_id } });
     });
+    if (run.workspace_id && run.workspace_id !== workspace.workspaceId) await this.closeReplacedWorkspace(runtime, run, run.workspace_id);
     return paneId;
+  }
+
+  /** Close the workspace a relaunch replaced; a failure is logged and recorded, never fails the launch. */
+  private async closeReplacedWorkspace(runtime: HerdrRuntime, run: RunWithPolicy, workspaceId: string): Promise<void> {
+    const { db, now } = this.deps;
+    try {
+      await runtime.closeWorkspace(workspaceId);
+    } catch (error) {
+      const message = (error as Error).message;
+      this.deps.log(`launch ${run.id}: the replaced workspace ${workspaceId} was not closed: ${message}`);
+      tx(db, () =>
+        appendEvent(db, { source: "daemon", kind: "run.workspace_close_failed", runId: run.id, taskId: run.task_id, payload: { workspace: workspaceId, error: message }, ts: now() }),
+      );
+    }
   }
 }

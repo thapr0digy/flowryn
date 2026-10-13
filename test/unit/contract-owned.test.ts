@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stateFiles } from "../../src/config/paths.ts";
 import { removeScratchHome } from "../../src/contracts/runner.ts";
-import { SCRATCH_CONFIG_HEADER, gitWithin, readManifest, recoverOwned, removableHome, writeManifest, type OwnedResources, type RecoverDeps } from "../../src/contracts/owned.ts";
+import { SCRATCH_CONFIG_HEADER, createdWorkspaces, gitWithin, readManifest, recoverOwned, removableHome, writeManifest, type OwnedResources, type RecoverDeps } from "../../src/contracts/owned.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
 import { isAlive, readIdentity, type ProcIdentity } from "../../src/runtime/proc.ts";
 import { FakeHerdr } from "../helpers/fake-herdr.ts";
@@ -114,6 +115,29 @@ describe("releasing what a killed contract run owned", () => {
     },
     30_000,
   );
+
+  test("a workspace a relaunch replaced, named only by the run's pane events, is released with the current one", async () => {
+    const root = tempDir();
+    const herdr = await FakeHerdr.start(join(root, "h.sock"), { env: {}, logDir: root });
+    herdrs.push(herdr);
+    const home = realpathSync(mkdtempSync(join(root, "fwc-")));
+    writeFileSync(join(home, "config.toml"), `# ${SCRATCH_CONFIG_HEADER}\n`);
+    const replaced = await workspace(herdr, home);
+    const current = await workspace(herdr, home);
+    scratchDb(home, current, await sleeper());
+    const db = openDb(stateFiles(join(home, "state")).db);
+    tx(db, () => {
+      for (const ws of [replaced, current]) appendEvent(db, { source: "daemon", kind: "run.pane", runId: "r1", taskId: "t1", payload: { pane: `${ws}:p1`, workspace: ws, previous: null } });
+    });
+    db.close();
+    expect(createdWorkspaces(home).toSorted()).toEqual([current, replaced].toSorted());
+
+    const manifest = join(root, "auto.owned.json");
+    writeManifest(manifest, { runner: null, home, herdr_socket: herdr.socket, branch_prefix: "flowryn/contract-00000000-", project: null, daemon: null, workspaces: [], harnesses: [], cleanup: null });
+    expect(await recoverOwned(manifest, deps())).toMatchObject({ ok: true, problems: [] });
+    expect(herdr.workspaces.has(replaced)).toBe(false);
+    expect(herdr.workspaces.has(current)).toBe(false);
+  }, 30_000);
 
   test("assumption: what cannot be released is an explicit failure naming it, never dropped", async () => {
     const root = tempDir();

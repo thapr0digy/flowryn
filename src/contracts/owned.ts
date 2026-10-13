@@ -107,9 +107,19 @@ function scratchDb<T>(home: string, read: (db: ReturnType<typeof openDb>) => T, 
   }
 }
 
-/** The Herdr workspaces the scratch daemon opened. */
+/** The Herdr workspaces the scratch daemon opened: each run's current one, and any a relaunch replaced (its `run.pane` events). */
 export function createdWorkspaces(home: string): string[] {
-  return scratchDb(home, (db) => (db.query("SELECT workspace_id FROM runs WHERE workspace_id IS NOT NULL").all() as { workspace_id: string }[]).map((r) => r.workspace_id), []);
+  return scratchDb(
+    home,
+    (db) => {
+      const current = (db.query("SELECT workspace_id FROM runs WHERE workspace_id IS NOT NULL").all() as { workspace_id: string }[]).map((r) => r.workspace_id);
+      const opened = (db.query("SELECT json_extract(payload, '$.workspace') AS workspace FROM events WHERE kind = 'run.pane'").all() as { workspace: unknown }[])
+        .map((r) => r.workspace)
+        .filter((w): w is string => typeof w === "string" && w !== "");
+      return [...new Set([...current, ...opened])];
+    },
+    [],
+  );
 }
 
 /** The harness processes the scratch daemon recorded. */
