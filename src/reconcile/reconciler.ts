@@ -3,9 +3,11 @@ import type { Timing } from "../config/workers.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { findOpenRunItem, openItem, resolveRunItems } from "../attention/items.ts";
+import { findOpenRunItem, resolveRunItems } from "../attention/items.ts";
 import { identityOf } from "../lifecycle/control.ts";
 import { getRun, isTerminal, openRunItemOnce, openRuns, recordEvidence, setLiveness, taskTitle, type Liveness, type RunRow } from "../lifecycle/runs.ts";
+import { observedTransition, observeLiveness } from "../lifecycle/observed.ts";
+import { claimAutoResume, deferAutoResume } from "../lifecycle/auto-resume.ts";
 import { flagUnackedSteers, unackedSteers, type SteerBus } from "../lifecycle/steers.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
@@ -22,7 +24,7 @@ import { applyDocker, listLabelled } from "./docker.ts";
 import { checkInvariant } from "./invariant.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
-import { contractsCommand, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import type { HarnessCheck } from "../lifecycle/harness-gate.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -203,19 +205,20 @@ export class Reconciler {
     return stats;
   }
 
-  private setLive(run: RunRow, liveness: Liveness, detail: Record<string, unknown>): void {
+  /** An observed liveness, written only if the run is still the one observed (src/lifecycle/observed.ts). */
+  private setLive(run: RunRow, liveness: Liveness, transition: string, detail: Record<string, unknown>): void {
     const { db, now } = this.deps;
-    tx(db, () => setLiveness(db, run, liveness, "reconciler", detail, now()));
+    observeLiveness(db, run, liveness, transition, "reconciler", detail, now());
   }
 
-  async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown"> {
+  async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown" | "stale"> {
     const { db, now } = this.deps;
     if (this.deps.isLaunching(run.id)) return "launching";
     // A launch the scheduler owns: waiting for its grant, or a fresh stage worker being started.
     if (run.pending_launch) return "launching";
     const runtime = this.deps.runtime();
     if (!runtime) {
-      this.setLive(run, "unknown", { reason: "Herdr is not configured or not reachable" });
+      this.setLive(run, "unknown", "unknown", { reason: "Herdr is not configured or not reachable" });
       return "unknown";
     }
     const identity = identityOf(run);
@@ -230,7 +233,7 @@ export class Reconciler {
       panes = run.pane_id ? await runtime.processes(run.pane_id) : null;
     } catch (error) {
       if (error instanceof HerdrError) {
-        this.setLive(run, "unknown", { reason: `Herdr: ${error.code}` });
+        this.setLive(run, "unknown", "unknown", { reason: `Herdr: ${error.code}` });
         return "unknown";
       }
       throw error;
@@ -262,18 +265,18 @@ export class Reconciler {
 
     if (alive && panes && !inPane && panes.foregroundGroup === null) {
       // Herdr's shell-to-job handoff reply (M0 h02) names no job: not evidence the process left the pane. Read again next pass.
-      this.setLive(run, "unknown", { reason: "Herdr: the pane has no foreground group yet" });
+      this.setLive(run, "unknown", "unknown", { reason: "Herdr: the pane has no foreground group yet" });
       return "unknown";
     }
 
     if (alive) {
       // The recorded process lives but not where the run says: never adopt it (design section 6).
       const summary = `run ${run.id}'s process ${identity!.pid} is alive but ${!panes ? `its pane ${run.pane_id ?? "(none)"} is gone` : !inPane ? `not in pane ${run.pane_id}` : `not in worktree ${run.worktree_path}`}`;
-      tx(db, () => {
+      const orphaned = observedTransition(db, run, "orphaned", "reconciler", t, () => {
         setLiveness(db, run, "orphaned", "reconciler", { summary }, t);
         openDivergence(db, "reconciler", { runId: run.id, taskId: run.task_id, higher: "process", lower: "run", summary }, t);
       });
-      return "orphaned";
+      return orphaned.applied ? "orphaned" : "stale";
     }
 
     return this.handleDeath(run, panes);
@@ -306,7 +309,7 @@ export class Reconciler {
     } catch {
       herdrStatus = null;
     }
-    tx(db, () => {
+    const checked = observedTransition(db, run, "live_checks", "reconciler", t, () => {
       // Read before recordEvidence overwrites run_evidence's one row per (run_id, source) below.
       const previousHerdr = db.query("SELECT value FROM run_evidence WHERE run_id = ?1 AND source = 'herdr'").get(run.id) as { value: string } | null;
       const previousHerdrStatus = previousHerdr ? ((JSON.parse(previousHerdr.value) as { agent_status?: string }).agent_status ?? null) : null;
@@ -380,6 +383,8 @@ export class Reconciler {
         openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} looks busy but sent no hook event for ${Math.round((t - stale.quietFrom) / 60_000)}m; possibly stuck`, t);
       }
     });
+    // A newer hook, cancel or worker overtook this look: the next pass judges the idle carry on current state.
+    if (!checked.applied) return;
     await this.idleCarry(run, runtime, herdrStatus, t);
   }
 
@@ -420,8 +425,10 @@ export class Reconciler {
    * stored session; a second death needs you. The one resume is claimed at
    * once, but it launches only on a harness version with a passing contract
    * (design section 5): otherwise the scheduler holds it until one passes.
+   * Every write here is a guarded transition: the death was observed before
+   * awaits, and a newer hook, cancel or worker voids it (src/lifecycle/observed.ts).
    */
-  private async handleDeath(run: RunRow, panes: PaneProcesses | null): Promise<"dead" | "resumed"> {
+  private async handleDeath(run: RunRow, panes: PaneProcesses | null): Promise<"dead" | "resumed" | "stale"> {
     const { db, now } = this.deps;
     const husk = panes !== null && panes.foregroundGroup === panes.shellPid;
     const resumeDue = !WORK_DONE.includes(run.state) && run.resume_count === 0 && run.agent_session !== null;
@@ -429,31 +436,23 @@ export class Reconciler {
     if (gate && gate.state !== "verified") return this.deferResume(run, gate, husk);
     const t = now();
     if (WORK_DONE.includes(run.state)) {
-      const released = tx(db, () => {
+      const exited = observedTransition(db, run, "exited_after_delivery", "reconciler", t, () => {
         setLiveness(db, run, "dead", "reconciler", { reason: "the worker exited after delivering", husk }, t);
         resolveRunItems(db, run.id, ["blocked_prompt"], "run.died", t);
         // Its pane holds no live worker any more; a declined delivery resumes it through the scheduler.
         return releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker exited", t);
       });
-      if (released.length > 0) this.deps.released?.();
+      if (!exited.applied) return "stale";
+      if (exited.value.length > 0) this.deps.released?.();
       return "dead";
     }
-    if (run.resume_count === 0 && run.agent_session) {
-      const claimed = tx(db, () => {
-        const updated = db.query("UPDATE runs SET resume_count = resume_count + 1, updated_at = ?2 WHERE id = ?1 AND resume_count = ?3").run(run.id, t, run.resume_count);
-        if (updated.changes === 0) return false;
-        setLiveness(db, run, "starting", "reconciler", { reason: "resuming once after the worker died", husk }, t);
-        const event = appendEvent(db, { source: "reconciler", kind: "run.auto_resumed", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, pane: run.pane_id } });
-        resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "blocked_prompt"], "run.auto_resumed", t);
-        openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died and was resumed once from its session`, now: t });
-        return true;
-      });
-      if (!claimed) return "dead";
+    if (resumeDue) {
+      if (!claimAutoResume(db, run, husk, t)) return "stale";
       this.attached.delete(run.id);
       this.deps.launch(run.id, "resume");
       return "resumed";
     }
-    const freed = tx(db, () => {
+    const died = observedTransition(db, run, "died", "reconciler", t, () => {
       const changed = setLiveness(db, run, "dead", "reconciler", { reason: run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume", husk }, t);
       resolveRunItems(db, run.id, ["blocked_prompt"], "run.died", t);
       // Nothing holds a slot for a dead worker (design section 11); `flowryn resume` asks for them again.
@@ -472,36 +471,18 @@ export class Reconciler {
       }
       return released.length > 0;
     });
-    if (freed) this.deps.released?.();
+    if (!died.applied) return "stale";
+    if (died.value) this.deps.released?.();
     return "dead";
   }
 
-  /**
-   * The dead run's one automatic resume, claimed now and handed to the
-   * scheduler (pending_launch resume), which launches it once the harness
-   * version passes its contract suite. A dead worker holds no slot meanwhile.
-   */
-  private deferResume(run: RunRow, gate: Exclude<HarnessCheck, { state: "verified" }>, husk: boolean): "dead" {
-    const { db, now } = this.deps;
-    const t = now();
-    const why = gate.state === "missing" ? gate.detail : `${gate.harness} ${gate.version} has no passing contract run`;
-    const deferred = tx(db, () => {
-      const updated = db.query("UPDATE runs SET resume_count = resume_count + 1, pending_launch = 'resume', waiting_since = ?2, updated_at = ?2 WHERE id = ?1 AND resume_count = ?3").run(run.id, t, run.resume_count);
-      if (updated.changes === 0) return false;
-      setLiveness(db, run, "dead", "reconciler", { reason: `its resume waits: ${why}`, husk }, t);
-      const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
-      if (released.length > 0 && run.stage_state === "active") db.query("UPDATE runs SET stage_state = 'waiting', stage_note = NULL WHERE id = ?1").run(run.id);
-      const event = appendEvent(db, { source: "reconciler", kind: "run.resume_deferred", runId: run.id, taskId: run.task_id, payload: { session: run.agent_session, husk, why } });
-      resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "blocked_prompt"], "run.resume_deferred", t);
-      const waits = gate.state === "missing" ? `waits: ${gate.detail}` : `waits until ${gate.harness} ${gate.version} passes its contract suite (${contractsCommand(gate.harness)})`;
-      openItem(db, { kind: "auto_resumed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Worker for ${taskTitle(db, run.task_id)} died; its one resume ${waits}`, now: t });
-      return true;
-    });
-    if (deferred) {
-      this.attached.delete(run.id);
-      this.deps.log(`reconcile ${run.id}: the worker died; its resume waits: ${why}`);
-      this.deps.released?.();
-    }
+  /** The one resume, claimed now and held by the scheduler until the harness version passes its contract suite. */
+  private deferResume(run: RunRow, gate: Exclude<HarnessCheck, { state: "verified" }>, husk: boolean): "dead" | "stale" {
+    const why = deferAutoResume(this.deps.db, run, gate, husk, this.deps.now());
+    if (why === null) return "stale";
+    this.attached.delete(run.id);
+    this.deps.log(`reconcile ${run.id}: the worker died; its resume waits: ${why}`);
+    this.deps.released?.();
     return "dead";
   }
 

@@ -250,6 +250,22 @@ describe("the Claude preempter", () => {
     expect(events("steer.preempted")).toHaveLength(1);
   });
 
+  test("a replacement worker started while the dialog-gone read was in flight keeps its own liveness (a guarded transition)", async () => {
+    urgentSteer();
+    tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: 0 }, Date.now()));
+    herdrStatus = "working";
+    statusDelayMs = 150;
+    const p = makePreempter();
+    p.tools.start("r1", "toolu_1", Date.now() - 5_000);
+    p.kick("r1");
+    await Bun.sleep(50);
+    tx(db, () => db.query("UPDATE runs SET proc_pid = 4242, proc_start = ?1, launched_at = ?1, liveness = 'starting', busy_until = NULL WHERE id = 'r1'").run(Date.now()));
+    await waitUntil(() => events("run.observation_stale").length === 1, 2_000, "the stale release");
+    expect(events("run.observation_stale")[0]).toMatchObject({ transition: "dialog_gone" });
+    expect(events("run.prompt_cleared")).toHaveLength(0);
+    expect(getRun(db, "r1")!.liveness).toBe("starting");
+  });
+
   test("the interrupt gate refusing (Herdr saw a dialog) defers and tries again; a key sent but unverified is the one cut", async () => {
     const steer = urgentSteer();
     interruptResult = { ok: false, evidence: "refused", detail: "Herdr reads the worker blocked on a dialog; answer it in its pane" };
