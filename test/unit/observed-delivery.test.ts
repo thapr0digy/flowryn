@@ -254,6 +254,26 @@ const CI_WAIT = `run:
     ci,running,2h,"1m ago: log: waiting for checks to register","",starting
 `;
 
+function ciWaits(): number {
+  return (db.query("SELECT COUNT(*) AS n FROM decisions WHERE origin = 'ci-wait'").get() as { n: number }).n;
+}
+
+/** A local-only run merging at HEAD_A under a yolo approval, its merge requested and not in flight. */
+function merging(): void {
+  tx(db, () => {
+    db.query("UPDATE projects SET delivery_mode = 'local-only' WHERE id = 'web'").run();
+    db.query("UPDATE task_policy SET delivery_mode = 'local-only' WHERE task_id = 't1'").run();
+    db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'local', 'b', ?1, ?2)").run(HEAD_A, now);
+    db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('ap1', 't1', 'local:b', ?1, 'yolo', 'yolo', 'merge', ?2, ?3)").run(HEAD_A, now, now + MIN);
+    db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('mg1', 't1', 'local:b', ?1, 'ap1', ?2, 'requested')").run(HEAD_A, now);
+    db.query("UPDATE runs SET state = 'merging', stage_state = 'done' WHERE id = 'r1'").run();
+  });
+}
+
+function mergeState(): string {
+  return (db.query("SELECT state FROM merges WHERE id = 'mg1'").get() as { state: string }).state;
+}
+
 describe("the delivery basis", () => {
   test("assumption: a part not named by the transition never makes it stale", () => {
     readyAtA();
@@ -440,10 +460,6 @@ describe("nm_observation: the no-mistakes status read", () => {
 });
 
 describe("ci_wait: the CI-wait watchdog's reads", () => {
-  function ciWaits(): number {
-    return (db.query("SELECT COUNT(*) AS n FROM decisions WHERE origin = 'ci-wait'").get() as { n: number }).n;
-  }
-
   test("control: a pipeline waiting on CI with no checks asks the user", async () => {
     newValidationSlot(5 * MIN);
     nm.text = CI_WAIT;
@@ -470,21 +486,6 @@ describe("ci_wait: the CI-wait watchdog's reads", () => {
 });
 
 describe("local_merge_proof: a local-only merge's proof", () => {
-  function merging(): void {
-    tx(db, () => {
-      db.query("UPDATE projects SET delivery_mode = 'local-only' WHERE id = 'web'").run();
-      db.query("UPDATE task_policy SET delivery_mode = 'local-only' WHERE task_id = 't1'").run();
-      db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'local', 'b', ?1, ?2)").run(HEAD_A, now);
-      db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('ap1', 't1', 'local:b', ?1, 'yolo', 'yolo', 'merge', ?2, ?3)").run(HEAD_A, now, now + MIN);
-      db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('mg1', 't1', 'local:b', ?1, 'ap1', ?2, 'requested')").run(HEAD_A, now);
-      db.query("UPDATE runs SET state = 'merging', stage_state = 'done' WHERE id = 'r1'").run();
-    });
-  }
-
-  function mergeState(): string {
-    return (db.query("SELECT state FROM merges WHERE id = 'mg1'").get() as { state: string }).state;
-  }
-
   test("control: the head on the local default branch proves the merge and lands the run", async () => {
     merging();
     await watcher().pass();

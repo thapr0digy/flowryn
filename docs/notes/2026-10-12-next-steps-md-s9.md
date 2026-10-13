@@ -1,7 +1,7 @@
 # Guarded observation transitions: liveness and the automatic resume
 
 - Status: partial
-- Open: the same guard for observations that affect delivery or stage progression (docs/next_steps.md package 2, later slices). The reconciler's re-drive of an unfinished launch now goes through its operation (docs/notes/2026-10-13-next-steps-md-rz.md)
+- Open: the delivery and stage-progression observations are the second slice (docs/notes/2026-10-13-next-steps-md-av.md), which lists what is still left. The reconciler's re-drive of an unfinished launch now goes through its operation (docs/notes/2026-10-13-next-steps-md-rz.md)
 
 docs/next_steps.md package 2, first slice. The reconciler reads a run, awaits
 Herdr, `ps` and the harness gate, then writes liveness, releases leases or

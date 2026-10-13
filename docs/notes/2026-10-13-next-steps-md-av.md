@@ -99,29 +99,51 @@ already a row the transitions write.
 
 **Deterministic.** Nothing here needs a model.
 
+## Implementation notes
+
+- `src/lifecycle/observed.ts`: `DeliveryBasis`, `deliveryBasis`, `staleBasis`,
+  `deliveryTransition` (watchers) and `requireDeliveryBasis` (verbs), beside
+  the first slice's `observedTransition`.
+- `src/api/errors.ts`: the `observation_stale` code (exit 2) and
+  `FlowrynError.refusalEvent`; `src/api/gateway.ts` `applyTx` appends that
+  event after a refused apply rolls back. Any verb may use it; only `deliver`
+  and `merge` do.
+- `src/watch/delivery.ts`: each watcher write goes through
+  `deliveryTransition` with its parts (`PR_PARTS`, `NM_PARTS`,
+  `CI_WAIT_PARTS`, `LOCAL_MERGE_PARTS`). The watcher's deps gain an optional
+  `readNmStatus` (defaults to the real read), so a test can pause the status
+  read on a barrier instead of a sleeping stand-in script.
+- `src/lifecycle/worker.ts` (`DELIVER_PARTS`) and `src/policy/verbs.ts`
+  (`MERGE_PARTS`): the basis is read in `prepare` and required in `apply`. A
+  scout's report delivery reads nothing remote and is not guarded.
+- A dropped local merge proof leaves the merge `requested`: if the cancel it
+  raced completes, the run ends cancelled and the watcher no longer looks; if
+  the cancel fails, the next pass reads the proof again against the settled
+  operation.
+
 ## Tests
 
-`test/unit/observed-delivery.test.ts` (new) drives the real watcher and verbs
-on a scratch database with the fake forge, fake git and explicit promise
-barriers in them. For each guarded path one test pauses the observation,
-applies a newer change, releases it, and asserts nothing changed but one
-`run.observation_stale` event naming the transition:
+`test/unit/observed-delivery.test.ts` drives the real `DeliveryWatcher` and
+the real `deliver` and `merge` verbs through the `Gateway`, on a scratch
+database with a fake forge, a fake git and a stand-in status read, each with an
+explicit promise barrier. For each guarded path one test pauses the
+observation, applies a newer change, releases it, and asserts nothing changed
+but one `run.observation_stale` event naming the transition and the changed
+part; beside each, a control with nothing newer shows the same observation
+still applies:
 
-- `pr_observation`: a redelivery at a new head while a conflicting PR read is
-  paused (no nudge, no send-back); a cancel requested while a merged-PR read is
-  paused (not landed).
-- `merge`: a redelivery while the gate's PR read is paused (no merge row, no
-  approval taken, `observation_stale` reply).
-- `deliver`: a second delivery at a newer head commits while the first's PR
-  read is paused (the newer delivery stands); a `decline` while it is paused
-  (the run stays sent back).
-- `nm_observation`: a delivery (slot released, run ready) while an "active"
-  status read is paused; a new slot granted while a stalled read is paused (no
-  stuck episode).
-- `ci_wait`: a `decline` back to `running` with a new slot while the check
-  count read is paused (no question opened).
-- `local_merge_proof`: a cancel requested while the proof is paused (no merge
-  result written).
+| Transition | Paused read | Newer change | Without the guard |
+|---|---|---|---|
+| `pr_observation` | `forge.pull` of a conflicting PR | redelivery at a new head | the new delivery is sent back (conflict nudge) |
+| `pr_observation` | `forge.pull` of a merged PR | cancel requested | the run lands and is cleaned up |
+| `merge` | the gate's `forge.pull` | redelivery at a new head | a merge is requested for the replaced head |
+| `deliver` | `forge.checks` of the older delivery | a newer delivery commits | the older head overwrites the newer |
+| `deliver` | `forge.checks` of a redelivery | send-back (decline) | the run is ready again, the decline undone |
+| `nm_observation` | the status read of a stalled pipeline | a new validation slot | a stuck P1 for the new slot, run `validating` |
+| `ci_wait` | the check-count `forge.pull` | the stage restarted with a new slot | a CI-wait question for the old pipeline |
+| `local_merge_proof` | `git merge-base` (the proof) | cancel requested | the merge is recorded and the run lands |
 
-Plus the basis comparison's own cases, and that an unchanged basis still
-applies (the existing watcher, verb and CI-wait tests keep passing).
+With the guard disabled every race test fails and every control passes. The
+basis has its own cases: a part the transition does not name never makes it
+stale, a terminal run always does, and a hook's liveness or lease write on a
+delivered run is not part of it.
