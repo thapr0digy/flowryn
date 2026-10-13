@@ -16,7 +16,7 @@
  * for its guards and report shape; the run itself only happens under
  * import.meta.main.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { hostname, homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -39,6 +39,12 @@ export const REPORT_KIND = "flowryn-native-acceptance";
 export const REPORT_SCHEMA = 1;
 /** launchd's ThrottleInterval in the plist is 10 s; a clean exit must still be stopped after it. */
 const STAYS_STOPPED_MS = 12_000;
+/** How long teardown waits for an install in flight (bootstrap retries and all) before unloading. */
+const INSTALL_SETTLE_MS = 30_000;
+/** Extra bootouts teardown makes when a late bootstrap loaded the label after its uninstall. */
+const LATE_BOOTOUT_SWEEPS = 3;
+/** The signals that tear the run down, write the report and exit 130 (SIGHUP: the terminal closed). */
+export const TEARDOWN_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const satisfies readonly NodeJS.Signals[];
 
 export const STEPS = [
   { name: "build", does: "compile candidates A and B with scripts/build.sh, stamped with two commits on a scratch origin/main; a truncated copy of B is the broken one" },
@@ -495,50 +501,89 @@ async function run(args: Args, home: string): Promise<number> {
   const runId = ulid();
   const reportPath = resolve(args.report ?? join(REPO_ROOT, "spikes", ".runs", `native-acceptance-${runId}.json`));
   const forge = await FakeGitHub.start();
-  const h = makeHome({
-    home,
-    extraConfig: [
-      ...extraToolLines(home),
-      "[daemon]",
-      "build_poll_ms = 200",
-      "build_settle_ms = 3000",
-      "[upkeep]",
-      "build_after_merge = false",
-      "[herdr]",
-      `socket = ${JSON.stringify(join(home, "herdr.sock"))}`,
-      "[github]",
-      `api_url = ${JSON.stringify(forge.apiUrl)}`,
-    ].join("\n"),
-  });
-  writeFileSync(absentToolPath(home), ABSENT_TOOL, { mode: 0o755 });
-  requireNotificationsOff(h.env, "the native acceptance run");
-  const plan = planFor(home, loadConfig(home).config, h.env);
-  const late = collisions(plan, production);
-  if (plan.label !== planned.label || plan.socket !== planned.socket || plan.plist !== planned.plist || late.length > 0) {
-    await forge.stop();
-    h.cleanup();
-    console.error(`native-acceptance: refused once the home was built:\n  ${[...late, "or the home's config moved an identifier the guards checked"].join("\n  ")}`);
-    return 2;
+  let herdr: { stop(): Promise<void> } | null = null;
+  // A failure before the steps: nothing is loaded yet, so stop what started and remove the home, which did not exist before the guards.
+  const abandonSetup = async (): Promise<void> => {
+    for (const [what, stop] of [["fake Herdr", () => herdr?.stop()], ["fake forge", () => forge.stop()]] as const) {
+      try {
+        await stop();
+      } catch (error) {
+        console.error(`native-acceptance: stopping the ${what}: ${(error as Error).message}`);
+      }
+    }
+    if (home.length > 1) rmSync(home, { recursive: true, force: true });
+  };
+  let h: ReturnType<typeof makeHome>;
+  let plan: Plan;
+  let token: string;
+  try {
+    h = makeHome({
+      home,
+      extraConfig: [
+        ...extraToolLines(home),
+        "[daemon]",
+        "build_poll_ms = 200",
+        "build_settle_ms = 3000",
+        "[upkeep]",
+        "build_after_merge = false",
+        "[herdr]",
+        `socket = ${JSON.stringify(join(home, "herdr.sock"))}`,
+        "[github]",
+        `api_url = ${JSON.stringify(forge.apiUrl)}`,
+      ].join("\n"),
+    });
+    writeFileSync(absentToolPath(home), ABSENT_TOOL, { mode: 0o755 });
+    requireNotificationsOff(h.env, "the native acceptance run");
+    plan = planFor(home, loadConfig(home).config, h.env);
+    const late = collisions(plan, production);
+    if (plan.label !== planned.label || plan.socket !== planned.socket || plan.plist !== planned.plist || late.length > 0) {
+      await abandonSetup();
+      console.error(`native-acceptance: refused once the home was built:\n  ${[...late, "or the home's config moved an identifier the guards checked"].join("\n  ")}`);
+      return 2;
+    }
+    herdr = await FakeHerdr.start(plan.herdrSocket, { env: h.env, logDir: join(home, "herdr-logs") });
+    token = seedLeader(h);
+  } catch (error) {
+    await abandonSetup();
+    console.error(`native-acceptance: setup failed, nothing was installed: ${(error as Error).message}`);
+    return 1;
   }
   let report = newReport(runId, environmentOf(plan, forge.apiUrl), new Date());
-  const herdr = await FakeHerdr.start(plan.herdrSocket, { env: h.env, logDir: join(home, "herdr-logs") });
-  const token = seedLeader(h);
   const callerEnv = { ...h.env, FLOWRYN_TOKEN: token };
 
+  // The install in flight, so a signal during bootstrap tears down after it settles rather than racing it.
+  let installing: Promise<void> | null = null;
   let tornDown: Promise<Teardown> | null = null;
   const teardown = (): Promise<Teardown> => {
     tornDown ??= (async () => {
       const errors: string[] = [];
+      if (installing) await Promise.race([installing.catch(() => undefined), Bun.sleep(INSTALL_SETTLE_MS)]);
       try {
         await uninstallService(plan.label, plan.plist);
       } catch (error) {
         errors.push(`uninstall ${plan.label}: ${(error as Error).message}`);
       }
-      for (const [what, stop] of [["fake Herdr", () => herdr.stop()], ["fake forge", () => forge.stop()]] as const) {
+      for (const [what, stop] of [["fake Herdr", () => herdr?.stop()], ["fake forge", () => forge.stop()]] as const) {
         try {
           await stop();
         } catch (error) {
           errors.push(`${what}: ${(error as Error).message}`);
+        }
+      }
+      // A bootstrap that was still in flight can load the label after the uninstall: boot it out again, a bounded number of times.
+      for (let sweep = 0; sweep < LATE_BOOTOUT_SWEEPS && (await isLoaded(plan.label)); sweep++) {
+        try {
+          await uninstallService(plan.label, plan.plist);
+        } catch (error) {
+          errors.push(`late bootout ${plan.label}: ${(error as Error).message}`);
+        }
+        await Bun.sleep(500);
+      }
+      if (existsSync(plan.plist)) {
+        try {
+          unlinkSync(plan.plist);
+        } catch (error) {
+          errors.push(`remove ${plan.plist}: ${(error as Error).message}`);
         }
       }
       const labelGone = !(await isLoaded(plan.label));
@@ -561,8 +606,7 @@ async function run(args: Args, home: string): Promise<number> {
     console.error(`native-acceptance: ${signal}, tearing down ${plan.label}; report ${reportPath}`);
     void writeReport().finally(() => process.exit(130));
   };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
+  for (const signal of TEARDOWN_SIGNALS) process.once(signal, onSignal);
 
   const state: { a?: Artifact; b?: Artifact; broken?: Artifact; pid?: number } = {};
   const pinnedCaller = (argv: string[]) => sh([plan.pinnedLink, ...argv], { env: callerEnv });
@@ -611,7 +655,8 @@ async function run(args: Args, home: string): Promise<number> {
     install: async () => {
       mkdirSync(dirname(plan.install), { recursive: true });
       installOver(state.a!.path, plan.install);
-      await installService(plan.spec, plan.plist);
+      installing = installService(plan.spec, plan.plist);
+      await installing;
       const up = await waitFor("the launchd daemon to answer", 30_000, () => ping(plan.socket));
       const launchdPid = await agentPid(plan.label);
       check(launchdPid === up.pid, `launchd runs pid ${launchdPid}, the socket answers pid ${up.pid}`, { launchdPid, ...up });
@@ -705,8 +750,7 @@ async function run(args: Args, home: string): Promise<number> {
       }
     }
   } finally {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
+    for (const signal of TEARDOWN_SIGNALS) process.off(signal, onSignal);
     await writeReport();
   }
   const problems = validateReport(report);

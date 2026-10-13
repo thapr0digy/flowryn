@@ -20,6 +20,7 @@ import {
   productionTargets,
   scrubPath,
   STEPS,
+  TEARDOWN_SIGNALS,
   validateReport,
   type Artifact,
   type Environment,
@@ -69,6 +70,10 @@ describe("opt-in", () => {
     expect(invocationRefusals(run, { [OPT_IN_ENV]: "1", FLOWRYN_RUN: "r01X" }, "darwin")[0]).toContain("worker");
     expect(invocationRefusals(run, { [OPT_IN_ENV]: "1" }, "linux")[0]).toContain("macOS");
     expect(invocationRefusals({ ...run, mode: "plan" }, { FLOWRYN_RUN: "r01X" }, "linux")).toEqual([]);
+  });
+
+  test("a closed terminal tears down like Ctrl-C", () => {
+    expect([...TEARDOWN_SIGNALS].toSorted()).toEqual(["SIGHUP", "SIGINT", "SIGTERM"]);
   });
 
   test("arguments: --plan and --run are exclusive, unknown flags are refused", () => {

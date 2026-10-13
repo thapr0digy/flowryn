@@ -99,21 +99,25 @@ ${env}
 
 /**
  * The safety overrides a launchd daemon keeps from whoever installed it (the
- * acceptance run's FLOWRYN_NOTIFY=off and recorded opener). The daemon builds
- * its own spec from its environment, which under launchd is the plist's, so
- * they never read as drift.
+ * acceptance run's FLOWRYN_NOTIFY=off and recorded opener), only for a
+ * non-production label: an override exported in the shell never reaches the
+ * production plist. The daemon builds its own spec from its environment, which
+ * under launchd is the plist's, so they never read as drift.
  */
 export const SERVICE_ENV_PASSTHROUGH = ["FLOWRYN_NOTIFY", "FLOWRYN_NOTIFIER", "FLOWRYN_OPENER"] as const;
 
 export function plistSpecFor(config: FlowrynConfig, home: string, callerEnv: NodeJS.ProcessEnv = process.env): PlistSpec {
   const env: Record<string, string> = { PATH: servicePath(config), HOME: homedir() };
   if (home !== join(homedir(), ".flowryn")) env.FLOWRYN_HOME = home;
-  for (const key of SERVICE_ENV_PASSTHROUGH) {
-    const value = callerEnv[key];
-    if (value !== undefined && value.length > 0) env[key] = value;
+  const label = serviceLabel(home);
+  if (label !== BASE_LABEL) {
+    for (const key of SERVICE_ENV_PASSTHROUGH) {
+      const value = callerEnv[key];
+      if (value !== undefined && value.length > 0) env[key] = value;
+    }
   }
   return {
-    label: serviceLabel(home),
+    label,
     program: [...selfCommand(), "daemon", "run"],
     env,
     logDir: stateFiles(config.state_dir).logs,

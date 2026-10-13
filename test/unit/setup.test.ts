@@ -64,6 +64,17 @@ describe("launchd agent", () => {
     expect(SERVICE_ENV_PASSTHROUGH).toEqual(["FLOWRYN_NOTIFY", "FLOWRYN_NOTIFIER", "FLOWRYN_OPENER"]);
   });
 
+  test("never writes the overrides into the production plist, even when the installer exported them", () => {
+    const home = join(homedir(), ".flowryn");
+    const overrides = { FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: "record:/n.jsonl", FLOWRYN_OPENER: "record:/o.log" };
+    const production = plistSpecFor(defaultConfig(home), home, overrides);
+    expect(production.label).toBe(BASE_LABEL);
+    expect(Object.keys(production.env).toSorted()).toEqual(["HOME", "PATH"]);
+    expect(renderPlist(production)).not.toContain("FLOWRYN_NOTIFY");
+    // A production daemon that inherited them computes the same spec, so no drift either way.
+    expect(plistDrift({ program: production.program, env: production.env, workingDir: production.workingDir }, plistSpecFor(defaultConfig(home), home, {}))).toEqual([]);
+  });
+
   test("assumption: a daemon launched with the plist's environment computes the same spec, so its overrides are no drift", () => {
     const home = tempDir();
     const config = defaultConfig(home);
