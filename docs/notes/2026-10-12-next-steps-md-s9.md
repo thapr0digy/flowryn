@@ -59,6 +59,10 @@ race is visible in `flowryn show`/the event log.
   only after a claim committed; the existing `resume_count` compare stays as
   a second check. The idle carry (typing a steer into the pane) runs only when
   that pass's live checks applied.
+- Wait explanations (docs/notes/2026-10-12-next-steps-md-wz.md) that these
+  transitions write (the trust and dialog holds, the dismissed-dialog close,
+  `resume.auto`, `resume.deferred`, `resume.refused`) are written inside the
+  guarded transition, so a rejected stale observation records no explanation.
 - `UrgentPreempter.releasedPrompt` (the cancel path's dialog-gone release) is the
   one other await-then-write of liveness; it goes through the guard too
   (`dialog_gone`).

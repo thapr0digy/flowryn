@@ -122,6 +122,11 @@ function replaceWorker(db: Db): void {
   );
 }
 
+/** The explanation rules written for r1: a stale observation must write none. */
+function explanationRules(db: Db): string[] {
+  return (db.query("SELECT rule FROM explanations WHERE run_id = 'r1' ORDER BY id").all() as { rule: string }[]).map((r) => r.rule);
+}
+
 function staleEvents(db: Db): { transition: string; changed: Record<string, unknown> }[] {
   return (db.query("SELECT payload FROM events WHERE kind = 'run.observation_stale' AND run_id = 'r1' ORDER BY seq").all() as { payload: string }[]).map(
     (row) => JSON.parse(row.payload) as { transition: string; changed: Record<string, unknown> },
@@ -263,6 +268,7 @@ describe("the automatic resume racing newer truth", () => {
     expect(eventKinds(db)).not.toContain("run.auto_resumed");
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'auto_resumed'").get()).toEqual({ n: 0 });
     expect(staleEvents(db)).toEqual([{ transition: "auto_resume", changed: expect.objectContaining({ state: { seen: "running", current: "cancelled" } }) }]);
+    expect(explanationRules(db)).toEqual([]);
   });
 
   test("a replacement worker started while the old one's death was read is not resumed over", async () => {
@@ -295,6 +301,7 @@ describe("the automatic resume racing newer truth", () => {
     expect(getRun(db, "r1")!).toMatchObject({ state: "cancelled", pending_launch: null, resume_count: 0 });
     expect(eventKinds(db)).not.toContain("run.resume_deferred");
     expect(staleEvents(db).map((e) => e.transition)).toEqual(["auto_resume_deferred"]);
+    expect(explanationRules(db)).toEqual([]);
   });
 
   test("a hook from the resumed worker while its predecessor's second death is read raises no failure", async () => {
@@ -312,6 +319,7 @@ describe("the automatic resume racing newer truth", () => {
     expect(eventKinds(db)).not.toContain("run.died");
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'failure_needs_you'").get()).toEqual({ n: 0 });
     expect(staleEvents(db).map((e) => e.transition)).toEqual(["died"]);
+    expect(explanationRules(db)).toEqual([]);
   });
 
   test("a delivered run's resumed worker is not marked dead by its predecessor's exit", async () => {
@@ -342,5 +350,6 @@ describe("the automatic resume racing newer truth", () => {
     expect(launches).toEqual(["r1:resume"]);
     expect(getRun(db, "r1")!).toMatchObject({ resume_count: 1, liveness: "starting" });
     expect(staleEvents(db)).toEqual([]);
+    expect(explanationRules(db)).toEqual(["resume.auto"]);
   });
 });

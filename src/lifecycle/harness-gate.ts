@@ -6,6 +6,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
+import type { Fact, Unblock } from "../attention/explanations.ts";
 
 /**
  * The harness version gate (design section 5): contract tests gate every
@@ -23,7 +24,7 @@ export type VersionOf = (harness: HarnessId, binary: string) => Promise<string |
 
 export type HarnessCheck =
   | { harness: HarnessId; state: "verified" | "unverified"; version: string }
-  | { harness: HarnessId; state: "missing"; detail: string };
+  | { harness: HarnessId; state: "missing"; detail: string; /** A check that threw: its raw message (detail then names only the error's kind). */ error?: string };
 
 /** The installed harness's version and whether a contract run passed for it. */
 export async function checkHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf): Promise<HarnessCheck> {
@@ -37,6 +38,21 @@ export async function checkHarness(db: Db, config: FlowrynConfig, harness: Harne
 
 export function contractsCommand(harness: HarnessId): string {
   return `flowryn doctor --contracts --harness ${harness}`;
+}
+
+/** The harness gate's verdict as facts. */
+export function harnessFacts(gate: Exclude<HarnessCheck, { state: "verified" }>, t: number): Fact[] {
+  if (gate.state !== "missing") return [{ name: `${gate.harness} version`, value: `${gate.version}: no passing contract run`, at: t }];
+  return [{ name: `${gate.harness}`, value: gate.detail, at: t }, ...(gate.error ? [{ name: "check error", value: gate.error, at: t, same: "a thrown check" }] : [])];
+}
+
+/** Who can end a wait on the harness gate. */
+export function harnessUnblock(gate: Exclude<HarnessCheck, { state: "verified" }>, what: string, auto?: string | null): Unblock[] {
+  if (gate.state === "missing") return [{ by: "captain", action: `fix it (${gate.detail}): flowryn init` }];
+  return [
+    { by: "flowryn", action: auto ?? `${what} once ${gate.harness} ${gate.version} passes its contract suite` },
+    { by: "captain", action: contractsCommand(gate.harness) },
+  ];
 }
 
 /** What a dispatch, a resume or a launch gets when the harness is not verified. With the database and config, the help names an automatic check that is queued or running. */

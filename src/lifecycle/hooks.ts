@@ -3,6 +3,7 @@ import { isAbsolute, join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { intArg, stringArg, type Args, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import * as leader from "../leader/hooks.ts";
+import { closeDismissedPromptExplanations } from "../attention/explanations.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
 import { steerLine, steerPointer, urgentBlockLine } from "../harness/contract-text.ts";
@@ -111,6 +112,7 @@ function markBusy(ctx: HandlerCtx, run: RunWithPolicy, signal: string, hook?: Ho
   recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now, ...(hook ? { hook } : {}) }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "busy", "hook", { signal }, now);
   resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
+  closeDismissedPromptExplanations(ctx.db, run.id, `hook ${signal}`, "hook", now);
 }
 
 function markIdle(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
@@ -119,6 +121,7 @@ function markIdle(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
   recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "idle", "hook", { signal }, now);
   resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
+  closeDismissedPromptExplanations(ctx.db, run.id, `hook ${signal}`, "hook", now);
 }
 
 /** Take the first due steer and mark it rung, carried into a busy turn. Call inside the transaction. */
