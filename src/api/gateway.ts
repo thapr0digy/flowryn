@@ -103,7 +103,7 @@ export class Gateway {
     if (spec.ephemeral) {
       if (via === "spool") throw new FlowrynError("bad_envelope", `${spec.name} is never spooled`);
       const prepared = spec.prepare ? await spec.prepare(ctx, args) : undefined;
-      const applied = tx(services.db, () => spec.apply!(ctx, args, prepared));
+      const applied = this.applyTx(() => spec.apply!(ctx, args, prepared));
       services.journal.kick();
       const settled = spec.settle ? await spec.settle(ctx, applied) : applied;
       return okReply(settled.data, settled.hints);
@@ -112,7 +112,7 @@ export class Gateway {
     if (stored) return this.settleStored(spec, ctx, stored);
 
     const prepared = spec.prepare ? await spec.prepare(ctx, args) : undefined;
-    const result = tx(services.db, (): { stored: Reply } | { applied: HandlerResult } => {
+    const result = this.applyTx((): { stored: Reply } | { applied: HandlerResult } => {
       // Checked again inside the committing transaction: a reply stored meanwhile is this call's, applied once.
       const raced = services.db.query("SELECT reply FROM idempotency WHERE ulid = ?1").get(env.ulid) as { reply: string } | null;
       if (raced) {
@@ -131,6 +131,22 @@ export class Gateway {
     services.journal.kick();
     const settled = spec.settle ? await spec.settle(ctx, result.applied) : result.applied;
     return okReply(settled.data, settled.hints);
+  }
+
+  /**
+   * The committing transaction of a mutation. A refusal that names an event
+   * (a stale observation, src/lifecycle/observed.ts) rolls back the apply and
+   * then appends that event in its own transaction, so the refusal is on record.
+   */
+  private applyTx<T>(fn: () => T): T {
+    const { db } = this.opts.services;
+    try {
+      return tx(db, fn);
+    } catch (error) {
+      const event = error instanceof FlowrynError ? error.refusalEvent : undefined;
+      if (event) tx(db, () => appendEvent(db, event));
+      throw error;
+    }
   }
 
   private storedReply(ulid: string, via: Via, runId: string | null): Reply | null {

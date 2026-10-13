@@ -3,7 +3,9 @@ import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec 
 import { tx, type Db } from "../db/db.ts";
 import { checksLine } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
+import { deliveryBasis, requireDeliveryBasis, staleBasis, type BasisPart, type DeliveryBasis } from "../lifecycle/observed.ts";
 import { landRun } from "../lifecycle/landing.ts";
+import { noteMergedAfterEnd } from "../reconcile/delivery.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import type { DiscardAttempt } from "../lifecycle/landing.ts";
@@ -92,7 +94,12 @@ interface MergePrepared {
   facts: MergeFacts;
   gate: GateResult;
   chosen: ChoiceResult;
+  /** The run as the gate's reads started (docs/notes/2026-10-13-next-steps-md-av.md). */
+  seen: DeliveryBasis;
 }
+
+/** A merge is requested only for the delivery, merge and run state the gate read: a redelivery, cancel or merge in between refuses it. */
+const MERGE_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "merge", "operation"];
 
 async function mergeable(ctx: HandlerCtx, target: string): Promise<{ run: RunWithPolicy; project: ProjectRow }> {
   const { run, project } = runAndProject(ctx.db, target);
@@ -126,6 +133,7 @@ const merge: VerbSpec = {
     const allowRed = stringArg(args, "allow-red");
     if (allowRed !== undefined && allowRed.length === 0) throw new FlowrynError("bad_args", "--allow-red needs the name of the one failing check to waive");
     const { run, project } = await mergeable(ctx, task);
+    const seen = deliveryBasis(ctx.db, run.id);
     const facts = await gatherFacts(mergeContext(ctx), run, project);
     // A chat answer never waives a red check: with --allow-red only the prompt, Pi's confirm or your shell count.
     const grant = allowRed === undefined ? prepareCaptainGrant(ctx, args, { item: `merge:${run.task_id}`, choice: "merge", head: facts.head }, { action: "merge", task }) : null;
@@ -136,11 +144,27 @@ const merge: VerbSpec = {
       if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) chosen.choice = { kind: "attempt", attempt, session: ctx.caller.session };
     }
     const gate = checkGate(facts, chosen);
-    return { facts, gate, chosen };
+    return { facts, gate, chosen, seen };
   },
   apply(ctx, _args, prepared) {
-    const { facts, gate, chosen } = prepared as MergePrepared;
+    const { facts, gate, chosen, seen } = prepared as MergePrepared;
     const now = ctx.now();
+    if (gate.alreadyMerged) {
+      const ended = getRunWithPolicy(ctx.db, facts.run.id)!;
+      const delivered = deliveredOf(ctx.db, ended.task_id);
+      if (isTerminal(ended.state) && delivered && !staleBasis(seen, deliveryBasis(ctx.db, ended.id), ["delivered"]).delivered) {
+        const sha = facts.pr!.mergeSha ?? facts.head;
+        rememberFacts(ctx.db, facts, now);
+        noteMergedAfterEnd(ctx.db, ended, delivered, { mergeSha: sha, source: "github" }, now);
+        const lateMerge = latestMerge(ctx.db, ended.task_id);
+        return {
+          data: { task: ended.task_id, run: ended.id, run_state: ended.state, ...(lateMerge ? { state: lateMerge.state } : {}), merged: "after_end", sha, detail: `the PR was merged after the run was ${ended.state}; the run is not revived and a divergence asks you` },
+          hints: [`flowryn show ${ended.task_id}`],
+        };
+      }
+    }
+    // A PR GitHub already reads merged lands the run whatever else changed, as long as it is still the delivery.
+    requireDeliveryBasis(ctx.db, seen, gate.alreadyMerged ? ["delivered"] : MERGE_PARTS, "merge", "cli", now, `flowryn merge ${facts.run.task_id} again`);
     const run = getRunWithPolicy(ctx.db, facts.run.id)!;
     rememberFacts(ctx.db, facts, now);
     if (gate.alreadyMerged) {
@@ -161,27 +185,36 @@ const merge: VerbSpec = {
       void ctx.delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => ctx.log(`cleanup ${runId}: ${(error as Error).message}`));
       return result;
     }
+    if (result.data.merged === "after_end") return result;
     const mergeId = String(result.data.merge ?? "");
     let row = ctx.db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow | null;
     if (!row) throw new FlowrynError("internal", `merge ${mergeId} is gone`);
+    let endedBefore = null as RunWithPolicy | null;
     if (row.state === "requested" && ctx.delivery.inFlight.has(mergeId) && !executing.has(mergeId)) {
       executing.add(mergeId);
       try {
         const { run, project } = runAndProject(ctx.db, runId);
         const outcome = await executeMerge(mergeContext(ctx), targetOf(row, project, `${taskTitle(ctx.db, run.task_id)} (${run.task_id})`));
-        tx(ctx.db, () => recordMergeResult(ctx.db, getRunWithPolicy(ctx.db, runId)!, mergeId, outcome, ctx.now()));
+        tx(ctx.db, () => {
+          const current = getRunWithPolicy(ctx.db, runId)!;
+          if (isTerminal(current.state)) endedBefore = current;
+          recordMergeResult(ctx.db, current, mergeId, outcome, ctx.now());
+        });
       } finally {
         executing.delete(mergeId);
         ctx.delivery.inFlight.delete(mergeId);
       }
       row = ctx.db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow;
-      if (row.state === "merged") void ctx.delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => ctx.log(`cleanup ${runId}: ${(error as Error).message}`));
+      if (row.state === "merged" && !endedBefore) void ctx.delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => ctx.log(`cleanup ${runId}: ${(error as Error).message}`));
     }
     ctx.delivery.watch(runId);
     const data = { ...result.data, state: row.state, sha: row.merge_sha ?? "-", detail: row.detail ?? "-" };
     if (row.state === "refused") throw new FlowrynError("merge_refused", `merge ${mergeId} refused: ${row.detail ?? "no detail"}`, `flowryn show ${result.data.task}`);
     if (row.state === "unproven" || row.state === "requested") {
       throw new FlowrynError("not_landed", `merge ${mergeId} was requested but is not proven (${row.detail ?? "no answer yet"}); the task is not landed and flowrynd keeps checking`, `flowryn show ${result.data.task}`);
+    }
+    if (endedBefore) {
+      return { data: { ...data, run_state: endedBefore.state, merged: "after_end", detail: `the PR was merged after the run was ${endedBefore.state}; the run is not revived and a divergence asks you` }, hints: [`flowryn show ${result.data.task}`] };
     }
     return { data: { ...data, cleanup: "running" }, hints: [`flowryn show ${result.data.task}`] };
   },
