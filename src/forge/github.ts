@@ -276,7 +276,7 @@ export function tokenSource(env: NodeJS.ProcessEnv, names: string[], gh: string 
     if (cached !== undefined) return cached;
     cached = null;
     if (!gh) return null;
-    const result = await runBounded([gh, "auth", "token", "--hostname", webHost], { label: "gh auth token", timeoutMs: ghTimeoutMs });
+    const result = await runBounded([gh, "auth", "token", "--hostname", webHost], { label: "gh auth token", timeoutMs: ghTimeoutMs, stderr: "ignore" });
     if (result.code === 0 && result.stdout.trim().length > 0) cached = result.stdout.trim();
     return cached;
   };

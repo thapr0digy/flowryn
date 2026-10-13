@@ -164,6 +164,19 @@ describe("docker ps (the extended fake, silent)", () => {
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "docker-silent.pid"));
   });
+
+  test("a docker that answers and exits 0 while a helper it started holds its output, and floods stderr, still lists the containers", async () => {
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const docker = dockerScript(bin, dir);
+    writeFileSync(join(dir, "docker-helper"), "");
+    writeFileSync(join(dir, "docker-ps.txt"), "c1\tweb-1\tr01\tproj\n");
+    const { value, ms } = await timed(() => listLabelled(docker, 5_000));
+    expect(value).toEqual([{ id: "c1", name: "web-1", run: "r01", project: "proj" }]);
+    expect(ms).toBeLessThan(DEFAULT_DRAIN_MS + 2_000);
+    // A normal exit is left alone: the helper still runs.
+    expect(alive(pidIn(join(dir, "docker-helper.pid")))).toBe(true);
+  });
 });
 
 describe("git (gitRunner and runTool)", () => {
@@ -233,6 +246,15 @@ describe("the axi tools and the other helpers, silent", () => {
     expect(value).toBeNull();
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "gh.pid"));
+  });
+
+  test("gh auth token with a flooded stderr held open by a process it started still gives the token", async () => {
+    const gh = join(dir, "gh");
+    writeFileSync(gh, `#!/bin/sh\nsleep 600 >/dev/null &\necho $! > ${JSON.stringify(join(dir, "gh.pid"))}\nhead -c 20000000 /dev/zero >&2\necho tok-123\n`);
+    chmodSync(gh, 0o755);
+    const token = tokenSource({}, [], gh, "https://api.github.com", "https://github.com", 5_000);
+    expect(await token()).toBe("tok-123");
+    expect(alive(pidIn(join(dir, "gh.pid")))).toBe(true);
   });
 
   test("the restart's smoke and launchd reads (runProc) time out within their budget", async () => {

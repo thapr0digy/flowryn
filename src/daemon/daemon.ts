@@ -113,11 +113,14 @@ function ownedName(p: { pid: number; label: string }): string {
 async function recoverOwned(db: Db, dir: string, log: Log): Promise<void> {
   try {
     const found = await recoverOwnedProcesses(dir);
-    if (found.ended.length + found.failed.length + found.unreadable.length === 0) return;
+    if (found.ended.length + found.failed.length + found.unreadable.length + found.discarded.length === 0) return;
     if (found.ended.length > 0) log(`owned: ended ${found.ended.map(ownedName).join(", ")}, left running by the last daemon`);
     if (found.failed.length > 0) log(`owned: could not end ${found.failed.map((f) => `${ownedName(f)}: ${f.detail}`).join("; ")}; kept for the next start`);
     if (found.unreadable.length > 0) log(`owned: cannot read ${found.unreadable.join(", ")}; kept`);
-    tx(db, () => appendEvent(db, { source: "daemon", kind: "daemon.owned_recovery", payload: { ended: found.ended, failed: found.failed, unreadable: found.unreadable } }));
+    if (found.discarded.length > 0) log(`owned: removed torn writes ${found.discarded.join(", ")}`);
+    tx(db, () =>
+      appendEvent(db, { source: "daemon", kind: "daemon.owned_recovery", payload: { ended: found.ended, failed: found.failed, unreadable: found.unreadable, discarded: found.discarded } }),
+    );
   } catch (error) {
     log(`owned: startup recovery failed: ${(error as Error).message}`);
   }
@@ -772,7 +775,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const closing = listener.close();
     listener = null;
     await Promise.race([Promise.all([closing, journal.stop()]), Bun.sleep(SHUTDOWN_GRACE_MS)]);
-    // After the journal's last tasks-axi call settled (a mutation is never cut mid-write by the stop): what still runs goes.
+    // After the journal settles or the shutdown grace runs out: what still runs goes. A tasks-axi
+    // mutation cut here is one the grace did not cover; its intent replays on the next start.
     const owned = await stopOwnedProcesses(OWNED_STOP_GRACE_MS);
     if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start`);
     tx(database, () => appendEvent(database, { source: "daemon", kind: "daemon.stopped", payload: { reason } }));

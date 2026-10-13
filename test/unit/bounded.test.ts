@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, parseEtime, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
+import { psRunner, type PsRunner } from "../../src/runtime/proc.ts";
 
 /**
  * The daemon's bounded external commands (src/runtime/bounded.ts) against real
@@ -106,17 +107,37 @@ describe("runBounded in the daemon (own process group, ledger)", () => {
     expect(await gone(await pidFrom(join(dir, "child")))).toBe(true);
   });
 
-  test("a leader that exits 0 while a descendant holds stdout is incomplete (125) within the drain, and the descendant is left alone", async () => {
+  test("a leader that exits 0 while a descendant holds stdout (a daemon it started) succeeds with what it wrote, within the drain, and the descendant is left alone", async () => {
     own();
     const dir = tempDir();
     const began = Date.now();
-    const result = await runBounded(["/bin/sh", "-c", `sleep 30 & echo $! > ${dir}/child; echo partial`], { label: "leaky", timeoutMs: 10_000, drainMs: 200 });
+    const result = await runBounded(["/bin/sh", "-c", `sleep 30 & echo $! > ${dir}/child; echo answer`], { label: "starter", timeoutMs: 10_000, drainMs: 200 });
     expect(Date.now() - began).toBeLessThan(2_000);
-    expect(result.code).toBe(INCOMPLETE);
-    expect(result.timedOut).toBe(false);
-    expect(result.incomplete).toContain("still open");
-    expect(result.stdout).toContain("partial");
+    expect(result).toMatchObject({ code: 0, stdout: "answer\n", stderr: "", timedOut: false, incomplete: null, lingering: true });
+    expect(lines.join("\n")).toContain("starter");
     expect(alive(await pidFrom(join(dir, "child")))).toBe(true);
+  });
+
+  test("a leader that exits non-zero while a descendant holds stdout keeps its own code", async () => {
+    own();
+    const dir = tempDir();
+    const result = await runBounded(["/bin/sh", "-c", `sleep 30 & echo $! > ${dir}/child; echo why >&2; exit 3`], { label: "failing", timeoutMs: 10_000, drainMs: 200 });
+    expect(result).toMatchObject({ code: 3, stderr: "why\n", timedOut: false, lingering: true });
+    expect(alive(await pidFrom(join(dir, "child")))).toBe(true);
+  });
+
+  test("a leader that does not finish while a descendant holds stdout is 124, not a success", async () => {
+    const dir = tempDir();
+    const result = await runBounded(["/bin/sh", "-c", `sleep 30 & echo $! > ${dir}/child; echo partial; sleep 30`], { label: "unfinished", timeoutMs: 200, graceMs: 200, drainMs: 200 });
+    expect(result.code).toBe(TIMED_OUT);
+    expect(result.lingering).toBe(false);
+    await pidFrom(join(dir, "child"));
+  });
+
+  test("stderr: ignore leaves the result to stdout alone, however much stderr there is", async () => {
+    own();
+    const result = await runBounded(["/bin/sh", "-c", "head -c 5000 /dev/zero >&2; echo token"], { label: "quiet", timeoutMs: 5_000, maxOutputBytes: 1_000, stderr: "ignore" });
+    expect(result).toMatchObject({ code: 0, stdout: "token\n", stderr: "", incomplete: null });
   });
 
   test("output over the cap is incomplete, never a clean read", async () => {
@@ -181,6 +202,12 @@ function writeEntry(dir: string, pid: number, spawnedAt: number, label = "left")
   return path;
 }
 
+/** ps that cannot run for pid 999999, as when it cannot spawn, and answers for the rest. */
+const psFailingFor999999: PsRunner = async (pids) => {
+  if (pids.includes(999_999)) throw new Error("posix_spawn failed");
+  return psRunner(pids);
+};
+
 describe("recoverOwnedProcesses (the next daemon's start)", () => {
   test("a recorded live group is ended, the entry removed, and an unrelated process left alone", async () => {
     const ledger = tempDir();
@@ -232,6 +259,51 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
     expect(alive(notLeader.pid)).toBe(true);
   });
 
+  test("a torn .json.tmp (died between write and rename) is removed, not reported on every start", async () => {
+    const ledger = tempDir();
+    const path = join(ledger, "123.json.tmp");
+    writeFileSync(path, "{");
+    const found = await recoverOwnedProcesses(ledger);
+    expect(found.discarded).toEqual([path]);
+    expect(found.unreadable).toEqual([]);
+    expect(existsSync(path)).toBe(false);
+    expect((await recoverOwnedProcesses(ledger)).discarded).toEqual([]);
+  });
+
+  test("a readable .json.tmp is recovered like an entry", async () => {
+    const ledger = tempDir();
+    const dir = tempDir();
+    const spawnedAt = Date.now();
+    const leader = Bun.spawn(["/bin/sh", "-c", `sleep 60 & echo $! > ${dir}/child; wait`], { detached: true, stdout: "ignore", stderr: "ignore" });
+    strays.push(leader.pid);
+    const child = await pidFrom(join(dir, "child"));
+    const path = join(ledger, `${leader.pid}.json.tmp`);
+    writeFileSync(path, JSON.stringify({ pid: leader.pid, spawned_at: spawnedAt, argv0: "sh", label: "torn rename" }));
+    const found = await recoverOwnedProcesses(ledger, { graceMs: 500 });
+    expect(found.ended).toEqual([{ pid: leader.pid, label: "torn rename" }]);
+    expect(await gone(child)).toBe(true);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test("ps failing for one entry keeps that entry and still recovers the others", async () => {
+    const ledger = tempDir();
+    const dir = tempDir();
+    const spawnedAt = Date.now();
+    const leader = Bun.spawn(["/bin/sh", "-c", `sleep 60 & echo $! > ${dir}/child; wait`], { detached: true, stdout: "ignore", stderr: "ignore" });
+    strays.push(leader.pid);
+    const child = await pidFrom(join(dir, "child"));
+    // "0.json" sorts first: its check fails, as when ps cannot spawn.
+    const broken = join(ledger, "0.json");
+    writeFileSync(broken, JSON.stringify({ pid: 999_999, spawned_at: spawnedAt, argv0: "sh", label: "unchecked" }));
+    const path = writeEntry(ledger, leader.pid, spawnedAt, "docker ps");
+    const found = await recoverOwnedProcesses(ledger, { graceMs: 500, ps: psFailingFor999999 });
+    expect(found.failed).toEqual([{ pid: 999_999, label: "unchecked", detail: "cannot check it: posix_spawn failed" }]);
+    expect(found.ended).toEqual([{ pid: leader.pid, label: "docker ps" }]);
+    expect(existsSync(broken)).toBe(true);
+    expect(existsSync(path)).toBe(false);
+    expect(await gone(child)).toBe(true);
+  });
+
   test("an unreadable entry is kept and reported, never read as nothing", async () => {
     const ledger = tempDir();
     const path = join(ledger, "123.json");
@@ -243,7 +315,7 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
 
   test("a missing ledger directory is nothing to recover", async () => {
     const found = await recoverOwnedProcesses(join(tempDir(), "absent"));
-    expect(found).toEqual({ ended: [], gone: [], failed: [], unreadable: [] });
+    expect(found).toEqual({ ended: [], gone: [], failed: [], unreadable: [], discarded: [] });
   });
 });
 

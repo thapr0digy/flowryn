@@ -39,10 +39,11 @@ export function parseDockerPs(text: string): LabelledContainer[] {
 
 /** The labelled containers, or null when Docker cannot be asked (not installed, daemon not running). */
 export async function listLabelled(docker: string, timeoutMs = DOCKER_TIMEOUT_MS): Promise<LabelledContainer[] | null> {
-  // A cut-off or incomplete listing is a non-zero code: Docker unknown, never "no containers".
+  // A cut-off or over-cap listing is a non-zero code: Docker unknown, never "no containers". Stderr is never read.
   const result = await runBounded([docker, "ps", "--filter", `label=${RUN_LABEL}`, "--format", `{{.ID}}\t{{.Names}}\t{{.Label "${RUN_LABEL}"}}\t{{.Label "${COMPOSE_LABEL}"}}`], {
     label: "docker ps",
     timeoutMs,
+    stderr: "ignore",
   });
   return result.code === 0 ? parseDockerPs(result.stdout) : null;
 }

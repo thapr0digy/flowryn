@@ -10,13 +10,15 @@ import { readIdentity, terminate, type PsRunner } from "./proc.ts";
  * the descendants that inherited its pipes (git's remote helper, a forked
  * node), and an ownership ledger file names it until it settles, so the next
  * daemon can end a group a force-kill left behind. A leader that exits on its
- * own is never followed by a group kill. Output still open after the leader
- * is gone, or over the cap, is reported as incomplete, never as a clean read.
+ * own is never followed by a group kill, and keeps its code: a process it
+ * started that still holds the pipe (a daemon it launched, git's credential
+ * helper) is left running and the output read so far is the answer. Output
+ * over the cap is reported as incomplete, never as a clean read.
  */
 
 /** A call cut off at its deadline (as `timeout(1)` and `gitWithin` report it). */
 export const TIMED_OUT = 124;
-/** The leader exited but its output did not finish (a descendant kept the pipe open) or overflowed the cap. */
+/** The output overflowed the cap: what was read is not the whole of it. */
 export const INCOMPLETE = 125;
 export const SPAWN_FAILED = 127;
 export const DEFAULT_GRACE_MS = 2_000;
@@ -38,6 +40,8 @@ export interface BoundedOptions {
   stdin?: string;
   /** Send both streams to this file descriptor instead of capturing them. */
   outputFd?: number;
+  /** Discard stderr for a caller that never reads it, so its size or a holder of it cannot change the result. */
+  stderr?: "pipe" | "ignore";
   graceMs?: number;
   drainMs?: number;
   maxOutputBytes?: number;
@@ -49,8 +53,10 @@ export interface BoundedResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
-  /** Why the output is not the whole of it, or null. */
+  /** Why the output is not the whole of it (over the cap), or null. */
   incomplete: string | null;
+  /** The leader exited on its own while a process it started still held its output: left running, read so far. */
+  lingering: boolean;
   spawnError: string | null;
   /** The group outlived its SIGKILL: its ledger entry is kept for the next daemon to end. */
   leftover: boolean;
@@ -189,19 +195,19 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
       env: opts.env,
       stdin: opts.stdin === undefined ? "ignore" : new Blob([opts.stdin]),
       stdout: opts.outputFd ?? "pipe",
-      stderr: opts.outputFd ?? "pipe",
+      stderr: opts.outputFd ?? opts.stderr ?? "pipe",
       detached: group,
     });
   } catch (error) {
     const message = (error as Error).message;
-    return { code: SPAWN_FAILED, stdout: "", stderr: message, timedOut: false, incomplete: null, spawnError: message, leftover: false };
+    return { code: SPAWN_FAILED, stdout: "", stderr: message, timedOut: false, incomplete: null, lingering: false, spawnError: message, leftover: false };
   }
   const pid = proc.pid;
   const child: LiveChild = { pid, group, entry: config ? record(config, { pid, spawned_at: spawnedAt, argv0: basename(argv[0] ?? ""), label: opts.label }) : null, keep: false };
   live.set(pid, child);
   const target = group ? -pid : pid;
   const out = opts.outputFd === undefined ? collect(proc.stdout as ReadableStream<Uint8Array>, max) : null;
-  const err = opts.outputFd === undefined ? collect(proc.stderr as ReadableStream<Uint8Array>, max) : null;
+  const err = opts.outputFd === undefined && opts.stderr !== "ignore" ? collect(proc.stderr as ReadableStream<Uint8Array>, max) : null;
 
   let timedOut = false;
   let killAt = Infinity;
@@ -226,20 +232,22 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
   clearTimeout(graceTimer);
 
   let incomplete: string | null = null;
-  if (out && err) {
-    const drained = await Promise.race([Promise.all([out.done, err.done]).then(() => true), Bun.sleep(drainMs).then(() => false)]);
+  let lingering = false;
+  const streams = [out, err].filter((c): c is Collector => c !== null);
+  if (streams.length > 0) {
+    const drained = await Promise.race([Promise.all(streams.map((c) => c.done)).then(() => true), Bun.sleep(drainMs).then(() => false)]);
     if (!drained) {
-      out.cancel();
-      err.cancel();
-      incomplete = `its output was still open ${drainMs} ms after it exited (a process it started holds the pipe)`;
-    } else if (out.overflowed() || err.overflowed()) {
-      incomplete = `its output went over ${max} bytes`;
+      for (const c of streams) c.cancel();
+      // A timed-out call is 124 already; a leader that finished keeps its code and the output it wrote.
+      lingering = !timedOut;
     }
+    if (streams.some((c) => c.overflowed())) incomplete = `its output went over ${max} bytes`;
   }
 
   live.delete(pid);
   if (leftover && config) config.log(`${opts.label} (pid ${pid}): its process group outlived SIGKILL; recorded in ${child.entry ?? "nothing (no ledger entry)"} for the next start`);
   else if (!child.keep) forget(child.entry);
+  if (lingering) config?.log(`${opts.label} (pid ${pid}) exited ${proc.exitCode ?? "on a signal"}; a process it started still holds its output and is left running`);
 
   const stdout = out?.text() ?? "";
   let stderr = err?.text() ?? "";
@@ -252,7 +260,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
     code = INCOMPLETE;
     stderr = `${stderr}${stderr && !stderr.endsWith("\n") ? "\n" : ""}${opts.label} exited ${leaderCode} but ${incomplete}\n`;
   }
-  return { code, stdout, stderr, timedOut, incomplete, spawnError: null, leftover };
+  return { code, stdout, stderr, timedOut, incomplete, lingering, spawnError: null, leftover };
 }
 
 export interface OwnedStop {
@@ -291,6 +299,8 @@ export interface OwnedRecovery {
   failed: { pid: number; label: string; detail: string }[];
   /** Entries that cannot be read: kept, since they may name a process still running. */
   unreadable: string[];
+  /** Torn `.json.tmp` writes (the daemon died between write and rename): removed, since nothing in them names a process. */
+  discarded: string[];
 }
 
 function parseEntry(text: string): LedgerEntry | null {
@@ -346,7 +356,7 @@ export interface RecoverOptions {
  * entry's identity is signalled; its whole group then goes.
  */
 export async function recoverOwnedProcesses(dir: string, options: RecoverOptions = {}): Promise<OwnedRecovery> {
-  const result: OwnedRecovery = { ended: [], gone: [], failed: [], unreadable: [] };
+  const result: OwnedRecovery = { ended: [], gone: [], failed: [], unreadable: [], discarded: [] };
   let names: string[];
   try {
     names = readdirSync(dir).filter((n) => n.endsWith(".json") || n.endsWith(".json.tmp"));
@@ -362,29 +372,43 @@ export async function recoverOwnedProcesses(dir: string, options: RecoverOptions
       entry = null;
     }
     if (!entry) {
-      result.unreadable.push(path);
+      if (name.endsWith(".tmp")) {
+        forget(path);
+        result.discarded.push(path);
+      } else {
+        result.unreadable.push(path);
+      }
       continue;
     }
     if (live.has(entry.pid)) continue;
     const label = entry.label || entry.argv0;
-    const identity = await readIdentity(entry.pid, options.ps);
-    const facts = identity ? await groupFacts(entry.pid) : null;
-    if (!identity || !matchesEntry(entry.pid, facts, entry)) {
-      forget(path);
-      result.gone.push({ pid: entry.pid, label });
-      continue;
+    try {
+      await recoverEntry(path, entry, label, options, result);
+    } catch (error) {
+      // ps could not run for this one: keep its entry and go on with the rest.
+      result.failed.push({ pid: entry.pid, label, detail: `cannot check it: ${(error as Error).message}` });
     }
-    const ended = await terminate(identity, { group: true, graceMs: options.graceMs ?? 3_000, ps: options.ps });
-    if (ended.ok) {
-      // Members that ignored SIGTERM after their leader went: the group cannot be reused while they live.
-      send(-entry.pid, "SIGKILL");
-      if (await waitGroupGone(entry.pid, GONE_CONFIRM_MS)) {
-        forget(path);
-        result.ended.push({ pid: entry.pid, label });
-        continue;
-      }
-    }
-    result.failed.push({ pid: entry.pid, label, detail: ended.ok ? "members of its group outlived SIGKILL" : `its leader did not exit (${ended.evidence})` });
   }
   return result;
+}
+
+async function recoverEntry(path: string, entry: LedgerEntry, label: string, options: RecoverOptions, result: OwnedRecovery): Promise<void> {
+  const identity = await readIdentity(entry.pid, options.ps);
+  const facts = identity ? await groupFacts(entry.pid) : null;
+  if (!identity || !matchesEntry(entry.pid, facts, entry)) {
+    forget(path);
+    result.gone.push({ pid: entry.pid, label });
+    return;
+  }
+  const ended = await terminate(identity, { group: true, graceMs: options.graceMs ?? 3_000, ps: options.ps });
+  if (ended.ok) {
+    // Members that ignored SIGTERM after their leader went: the group cannot be reused while they live.
+    send(-entry.pid, "SIGKILL");
+    if (await waitGroupGone(entry.pid, GONE_CONFIRM_MS)) {
+      forget(path);
+      result.ended.push({ pid: entry.pid, label });
+      return;
+    }
+  }
+  result.failed.push({ pid: entry.pid, label, detail: ended.ok ? "members of its group outlived SIGKILL" : `its leader did not exit (${ended.evidence})` });
 }
