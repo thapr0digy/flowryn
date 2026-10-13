@@ -8,6 +8,7 @@ import { normalizedTitle } from "../journal/diff.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { dismissRunQuestions } from "./gate-questions.ts";
+import { endRunOperations } from "./operations.ts";
 
 /** Design section 13: runs.state, owned by the lifecycle engine. */
 export const RUN_STATES = ["launching", "running", "validating", "ready", "merging", "landed", "cleaned", "failed", "cancelled"] as const;
@@ -166,6 +167,7 @@ export function failRun(db: Db, run: RunRow, reason: string, source: EventSource
   const event = appendEvent(db, { source, kind: "run.failed", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, ["worker_idle", "trust_dialog", "steer_unacked", "blocked_prompt", "worker_report"], "run.failed", now);
   closeExplanations(db, run.id, null, "run.failed", now);
+  endRunOperations(db, run.id, "failed", source, now);
   openRunItemOnce(db, "failure_needs_you", run, event.seq, `Run failed for ${taskTitle(db, run.task_id)}: ${reason}`, now);
   run.state = "failed";
   run.liveness = "dead";
@@ -185,6 +187,7 @@ export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSour
   appendEvent(db, { source, kind: "run.cancelled", runId: run.id, taskId: run.task_id, payload: { reason, from: run.state }, ts: now });
   resolveRunItems(db, run.id, null, "run.cancelled", now);
   closeExplanations(db, run.id, null, "run.cancelled", now);
+  endRunOperations(db, run.id, "cancelled", source, now);
   run.state = "cancelled";
   run.liveness = "dead";
 }

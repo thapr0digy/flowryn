@@ -44,16 +44,44 @@ const counterVerb: VerbSpec = {
     return { data: { applied, seq, role: ctx.caller.role, run: ctx.caller.runId }, hints: ["a", "b", "c"] };
   },
 };
+/** A mutation whose prepare waits on `slowGate` (a call caught between its idempotency check and its commit), counting each step. */
+let slowGate: Promise<void> = Promise.resolve();
+let slowReached: () => void = () => {};
+const slow = { prepared: 0, applied: 0, settled: 0 };
+const slowVerb: VerbSpec = {
+  name: "test slow",
+  summary: "a mutation with an async prepare, for tests",
+  positionals: [],
+  flags: {},
+  kind: "mutation",
+  roles: ["leader", "human", "worker"],
+  async prepare() {
+    slow.prepared++;
+    slowReached();
+    await slowGate;
+    return null;
+  },
+  apply(ctx) {
+    slow.applied++;
+    appendEvent(ctx.db, { source: "cli", kind: "test.slow", payload: {} });
+    return { data: { applied: slow.applied } };
+  },
+  async settle(_ctx, result) {
+    slow.settled++;
+    return result;
+  },
+};
 const readVerb: VerbSpec = { name: "test read", summary: "", positionals: [], flags: {}, kind: "read", roles: ["leader", "human"], read: (ctx) => ({ data: { role: ctx.caller.role } }) };
 const humanVerb: VerbSpec = { name: "test human", summary: "", positionals: [], flags: {}, kind: "read", roles: ["human"], read: () => ({ data: {} }) };
 const workerVerb: VerbSpec = { name: "test worker", summary: "", positionals: [], flags: {}, kind: "read", roles: ["worker"], read: () => ({ data: {} }) };
-const VERBS = new Map([counterVerb, readVerb, humanVerb, workerVerb, ...systemVerbs()].map((v) => [v.name, v]));
+const VERBS = new Map([counterVerb, slowVerb, readVerb, humanVerb, workerVerb, ...systemVerbs()].map((v) => [v.name, v]));
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "fw-gw-"));
   db = openDb(join(dir, "flowryn.db"));
   migrate(db);
   applied = 0;
+  slow.prepared = slow.applied = slow.settled = 0;
   leaderToken = mintToken("leader");
   runToken = mintToken("run");
   const now = Date.now();
@@ -195,6 +223,43 @@ describe("gateway", () => {
     expect(db.query("SELECT run_id FROM spool_ingested WHERE ulid = ?1").get(call.ulid)).toEqual({ run_id: "r1" });
     await gateway.handle(call, "spool");
     expect(applied).toBe(1);
+  });
+
+  test("the same ULID twice in flight: one prepare, one apply, one settle, the same reply for both", async () => {
+    let open!: () => void;
+    slowGate = new Promise((resolve) => (open = resolve));
+    const reached = new Promise<void>((resolve) => (slowReached = resolve));
+    // A worker's call: it gave up waiting and spooled a copy while the first was still in flight.
+    const call = env("test slow", { token: runToken });
+    const first = gateway.handle(call);
+    await reached;
+    const second = gateway.handle(call);
+    const spooled = gateway.handle(call, "spool");
+    open();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toMatchObject({ ok: true, data: { applied: 1 } });
+    expect(b).toEqual(a);
+    await spooled;
+    expect(slow).toEqual({ prepared: 1, applied: 1, settled: 1 });
+    // The spooled copy of the call in flight is a duplicate, recorded as ingested.
+    expect(db.query("SELECT 1 AS n FROM spool_ingested WHERE ulid = ?1").get(call.ulid)).toEqual({ n: 1 });
+  });
+
+  test("a reply stored while the call was in prepare is returned, not applied again (the re-check inside the commit)", async () => {
+    let open!: () => void;
+    slowGate = new Promise((resolve) => (open = resolve));
+    const reached = new Promise<void>((resolve) => (slowReached = resolve));
+    const call = env("test slow");
+    const pending = gateway.handle(call);
+    await reached;
+    // Another path committed this ULID's reply meanwhile.
+    db.query("INSERT INTO idempotency (ulid, verb, reply, created_at) VALUES (?1, 'test slow', ?2, ?3)").run(call.ulid, JSON.stringify({ ok: true, data: { applied: "elsewhere" } }), Date.now());
+    open();
+    expect(await pending).toMatchObject({ ok: true, data: { applied: "elsewhere" } });
+    expect(slow.applied).toBe(0);
+    // The stored reply is still settled: settlement is replay-safe, and the effect it drives is gated by its own record.
+    expect(slow.settled).toBe(1);
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'test.slow'").get()).toEqual({ n: 0 });
   });
 
   test("sweeps stored replies older than seven days", async () => {

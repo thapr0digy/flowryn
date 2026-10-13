@@ -1,7 +1,7 @@
 # Why is this waiting?
 
 - Status: partial
-- Open: the rest of package 3: the briefing and `fleet` reuse, other decision kinds (gates, approvals, merges), a redacted diagnostic export; package 1's operation identity (a reserved column, empty until then)
+- Open: the rest of package 3: the briefing and `fleet` reuse, other decision kinds (gates, approvals, merges), a redacted diagnostic export
 
 `docs/next_steps.md` package 3, its first slice: when Flowryn holds a run on a dialog, refuses it capacity, or resumes it after a death (or refuses to), it records why, durably and compactly, and `flowryn show` says so. Before this, the answer was spread over `runs.liveness`, `run_evidence` (one latest row per source, overwritten every pass), the open items, `meta` and the event payloads, and the scheduler's capacity refusals were written nowhere at all: `flowryn capacity` recomputes a reason from the current state, in a different order from the scheduler's own checks.
 
@@ -22,7 +22,7 @@ One new table, `explanations` (migration 22, `explanations`). A row is one decis
 | `unblock` | JSON array of `{by, action}`, in order: who or what can end the wait. `by` is `captain` (you, in your own terminal or the worker's pane), `leader`, or `flowryn` (an event Flowryn waits for and acts on by itself). An empty array: nothing waits |
 | `signature` | the dedupe key, below |
 | `item_id` | the item that carries the same wait, if any; the row closes when that item resolves |
-| `operation` | reserved for package 1's operation/generation identity: always `NULL` in this slice |
+| `operation` | the launch, resume or cancel the decision belongs to, when it belongs to one (docs/notes/2026-10-13-next-steps-md-rz.md): `resume.auto`, `resume.deferred`, and a `capacity` row of a run whose grant would launch an open operation; otherwise `NULL` |
 | `event_seq` | the `run.explained` event that recorded it |
 | `opened_at`, `closed_at`, `closed_by` | open while the wait lasts; `closed_by` says what ended it |
 
@@ -83,7 +83,7 @@ A pool's holders are facts, so a new holder is a new row: that is a changed inpu
 ### `flowryn show`
 
 - **Default**: a run with open rows gets one field, `waiting`, after `liveness`: each open row, newest first, as `<reason> (since HH:MM); next: <first unblock action> (<by>)`, joined with ` | `. A row with no `unblock` adds nothing after the reason. No open row, no field.
-- **`--why`**: `waiting` becomes a list, one object per open row: `id`, `rule`, `reason`, `since` (time and age), each fact as `name: value (observed HH:MM:SS, <age> ago)` (`observed -` when `at` is null), each unblock as `<by>: <action>`, and `operation: -`.
+- **`--why`**: `waiting` becomes a list, one object per open row: `id`, `rule`, `reason`, `since` (time and age), each fact as `name: value (observed HH:MM:SS, <age> ago)` (`observed -` when `at` is null), each unblock as `<by>: <action>`, and `operation: <id> <kind> <phase>` (or `-`).
 - **`--timeline`** (read-only): instead of the run view, the task's rows across all its runs, in order: `x<N> HH:MM <rule> [<stage>]: <reason> → <closed_by> HH:MM` (or `→ open`). `--full` prints each row's facts and unblock under it. A task with no rows says so.
 
 Times print in local time like the rest of `show`. Everything comes from the table: nothing is recomputed from the live state, so the record explains the decision as it was made.

@@ -1,7 +1,7 @@
 # Guarded observation transitions: liveness and the automatic resume
 
 - Status: partial
-- Open: the same guard for observations that affect delivery or stage progression (docs/next_steps.md package 2, later slices); the reconciler's unguarded re-drive of an unfinished launch after its harness check (package 1's operation identity)
+- Open: the same guard for observations that affect delivery or stage progression (docs/next_steps.md package 2, later slices). The reconciler's re-drive of an unfinished launch now goes through its operation (docs/notes/2026-10-13-next-steps-md-rz.md)
 
 docs/next_steps.md package 2, first slice. The reconciler reads a run, awaits
 Herdr, `ps` and the harness gate, then writes liveness, releases leases or
@@ -79,7 +79,8 @@ with no worker identity (the daemon died mid-launch, or Herdr was down) is
 re-driven with a fresh launch after the reconciler's harness check
 (`Reconciler.reconcileRun`). The launcher's own fresh-launch checks refuse a
 terminal or already-identified run, but recovering that launch as an operation
-belongs to package 1's operation identity.
+belongs to package 1's operation identity, which now does it
+(docs/notes/2026-10-13-next-steps-md-rz.md).
 
 ## Tests
 

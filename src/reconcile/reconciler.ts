@@ -26,6 +26,7 @@ import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
 import type { HarnessCheck } from "../lifecycle/harness-gate.ts";
 import { closeDismissedPromptExplanations, explain } from "../attention/explanations.ts";
+import { heldByEscalation, latestOperation, openOperation, requestOperation, type OperationMode, type OperationRow } from "../lifecycle/operations.ts";
 import { contractRevision } from "../contracts/revision.ts";
 
 /**
@@ -46,8 +47,14 @@ import { contractRevision } from "../contracts/revision.ts";
 export interface ReconcilerDeps {
   db: Db;
   runtime(): HerdrRuntime | null;
-  launch(runId: string, mode: "fresh" | "resume"): void;
+  launch(runId: string, mode: OperationMode, operation?: string): void;
   isLaunching(runId: string): boolean;
+  /**
+   * An open operation with no launcher on it (src/lifecycle/operation-recovery.ts):
+   * a cancel is driven, an issued launch or resume judged against its recorded
+   * candidate. Absent, such a run is left alone.
+   */
+  recoverOperation?(run: RunRow, op: OperationRow): Promise<unknown>;
   bus: SteerBus;
   timing(): Timing;
   log(message: string): void;
@@ -213,9 +220,17 @@ export class Reconciler {
     observeLiveness(db, run, liveness, transition, "reconciler", detail, now());
   }
 
-  async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown" | "stale"> {
+  async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown" | "stale" | "operation"> {
     const { db, now } = this.deps;
     if (this.deps.isLaunching(run.id)) return "launching";
+    // A launch, resume or cancel under way is recovered from what it recorded, before any judgement of the
+    // worker: a run being cancelled is never read as dead and resumed, an issued launch never as a death.
+    const open = openOperation(db, run.id);
+    if (open) return this.recoverOperation(run, open);
+    // An escalated launch or resume waits for you: its candidate may be alive in the pane, so nothing here judges
+    // or relaunches the run. An escalated cancel's worker is the recorded one: it is still watched, never resumed.
+    const held = heldByEscalation(db, run.id);
+    if (held && held.kind !== "cancel") return "operation";
     // A launch the scheduler owns: waiting for its grant, or a fresh stage worker being started.
     if (run.pending_launch) return "launching";
     const runtime = this.deps.runtime();
@@ -225,9 +240,25 @@ export class Reconciler {
     }
     const identity = identityOf(run);
     if (run.state === "launching" && !identity) {
-      // A launch that never finished: the daemon died mid-launch, or Herdr was down. It waits for a verified harness.
-      if (await this.harnessVerified(run.harness)) this.deps.launch(run.id, "fresh");
-      return "launching";
+      // A granted launch with no operation open. One whose start may have been sent before operations were
+      // recorded (launched_at is written just before agent.start) is checked against its pane; otherwise
+      // nothing was issued, and it is launched as a new operation once the harness version is verified.
+      const t = now();
+      const legacy = run.launched_at !== null && latestOperation(db, run.id) === null;
+      const op = tx(db, () =>
+        openOperation(db, run.id)
+          ? null
+          : requestOperation(db, {
+              run,
+              kind: "launch",
+              mode: "fresh",
+              requestedBy: "reconciler",
+              source: "reconciler",
+              now: t,
+              ...(legacy ? { issued: { paneId: run.pane_id, issuedAt: run.launched_at!, detail: "a launch interrupted before operations were recorded" } } : {}),
+            }),
+      );
+      return op ? this.recoverOperation(run, op) : "launching";
     }
 
     let panes: PaneProcesses | null = null;
@@ -281,7 +312,34 @@ export class Reconciler {
       return orphaned.applied ? "orphaned" : "stale";
     }
 
-    return this.handleDeath(run, panes);
+    return this.handleDeath(run, panes, held ? "died after a cancel that could not stop it" : null);
+  }
+
+  /**
+   * A run with an open operation: a cancel or an issued launch goes to its
+   * recovery; a requested launch or resume that no grant holds (its grant was
+   * taken, or the automatic resume claimed, and the daemon stopped before the
+   * launcher claimed it) is launched under the same operation once the harness
+   * version is verified. The launcher's claim re-checks the operation, so a
+   * cancel that lands during the harness check wins.
+   */
+  private async recoverOperation(run: RunRow, op: OperationRow): Promise<"operation"> {
+    const { db } = this.deps;
+    if (op.kind === "cancel" || op.phase === "effect_issued") {
+      if (!this.deps.recoverOperation) return "operation";
+      await this.deps.recoverOperation(run, op);
+    }
+    const current = getRun(db, run.id);
+    const requested = openOperation(db, run.id);
+    if (!current || isTerminal(current.state) || !requested || requested.kind === "cancel" || requested.phase !== "requested") return "operation";
+    if (current.pending_launch === requested.mode || current.pending_launch === "resume" || current.pending_launch === "fresh") return "operation";
+    if (this.deps.isLaunching(run.id)) return "operation";
+    if (!(await this.harnessVerified(current.harness))) return "operation";
+    // Read again after the await: a cancel (or a launch) that landed meanwhile owns the run now.
+    const still = openOperation(db, run.id);
+    if (still?.id !== requested.id || still.phase !== "requested" || this.deps.isLaunching(run.id)) return "operation";
+    this.deps.launch(run.id, requested.mode ?? (requested.kind === "resume" ? "resume" : "fresh"), requested.id);
+    return "operation";
   }
 
   /** The harness gate before a launch this reconciler starts; a check that throws counts as unverified. */
@@ -434,10 +492,10 @@ export class Reconciler {
    * Every write here is a guarded transition: the death was observed before
    * awaits, and a newer hook, cancel or worker voids it (src/lifecycle/observed.ts).
    */
-  private async handleDeath(run: RunRow, panes: PaneProcesses | null): Promise<"dead" | "resumed" | "stale"> {
+  private async handleDeath(run: RunRow, panes: PaneProcesses | null, noResume: string | null = null): Promise<"dead" | "resumed" | "stale"> {
     const { db, now } = this.deps;
     const husk = panes !== null && panes.foregroundGroup === panes.shellPid;
-    const resumeDue = !WORK_DONE.includes(run.state) && run.resume_count === 0 && run.agent_session !== null;
+    const resumeDue = noResume === null && !WORK_DONE.includes(run.state) && run.resume_count === 0 && run.agent_session !== null;
     const gate = resumeDue ? await this.harnessCheck(run.harness) : null;
     if (gate && gate.state !== "verified") return this.deferResume(run, gate, husk);
     const t = now();
@@ -453,13 +511,14 @@ export class Reconciler {
       return "dead";
     }
     if (resumeDue) {
-      if (!claimAutoResume(db, run, husk, t)) return "stale";
+      const operation = claimAutoResume(db, run, husk, t);
+      if (!operation) return "stale";
       this.attached.delete(run.id);
-      this.deps.launch(run.id, "resume");
+      this.deps.launch(run.id, "resume", operation);
       return "resumed";
     }
     const died = observedTransition(db, run, "died", "reconciler", t, () => {
-      const changed = setLiveness(db, run, "dead", "reconciler", { reason: run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume", husk }, t);
+      const changed = setLiveness(db, run, "dead", "reconciler", { reason: noResume ?? (run.resume_count > 0 ? "died again after its automatic resume" : "no session to resume"), husk }, t);
       resolveRunItems(db, run.id, ["blocked_prompt"], "run.died", t);
       // Nothing holds a slot for a dead worker (design section 11); `flowryn resume` asks for them again.
       const released = releaseLeases(db, run.id, run.task_id, { keepWorker: false }, "the worker died", t);
@@ -471,14 +530,14 @@ export class Reconciler {
           "failure_needs_you",
           run,
           event.seq,
-          `Worker for ${taskTitle(db, run.task_id)} died${run.resume_count > 0 ? " again after its automatic resume" : ""}; flowryn resume ${run.task_id} or flowryn cancel ${run.task_id}`,
+          `Worker for ${taskTitle(db, run.task_id)} ${noResume ?? `died${run.resume_count > 0 ? " again after its automatic resume" : ""}`}; flowryn resume ${run.task_id} or flowryn cancel ${run.task_id}`,
           t,
         );
         explain(db, {
           run,
           kind: "resume",
           rule: "resume.refused",
-          reason: run.resume_count > 0 ? "the worker died again after its one automatic resume; no second one" : "the worker died with no session to resume",
+          reason: noResume ? `the worker ${noResume}` : run.resume_count > 0 ? "the worker died again after its one automatic resume; no second one" : "the worker died with no session to resume",
           facts: deathFacts(run, husk, t),
           unblock: [
             { by: "leader", action: `flowryn resume ${run.task_id}` },
