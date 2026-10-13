@@ -553,7 +553,9 @@ async function run(args: Args, home: string): Promise<number> {
     return tornDown;
   };
   const writeReport = async (): Promise<void> => {
-    await writeReport();
+    report = finishReport(report, await teardown(), new Date());
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   };
   const onSignal = (signal: NodeJS.Signals) => {
     console.error(`native-acceptance: ${signal}, tearing down ${plan.label}; report ${reportPath}`);
@@ -705,9 +707,7 @@ async function run(args: Args, home: string): Promise<number> {
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
-    report = finishReport(report, await teardown(), new Date());
-    mkdirSync(dirname(reportPath), { recursive: true });
-    writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
+    await writeReport();
   }
   const problems = validateReport(report);
   if (problems.length > 0) console.log(`report shape: ${problems.join(", ")}`);
