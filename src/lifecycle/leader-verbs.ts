@@ -1,7 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
 import { awayLine, getAway } from "../attention/away.ts";
-import { boolArg, stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
+import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField } from "../attention/explanations.ts";
 import { appendEvent } from "../db/events.ts";
@@ -141,6 +141,16 @@ const cancel: VerbSpec = {
   },
 };
 
+/** A resume the grant has not started yet, with the reason its open wait explanation gives. */
+function waitingReply(db: Db, result: HandlerResult): HandlerResult {
+  const why = db
+    .query("SELECT rule, reason FROM explanations WHERE run_id = ?1 AND kind IN ('capacity','resume') AND closed_at IS NULL ORDER BY id DESC LIMIT 1")
+    .get(String(result.data.run)) as { rule: string; reason: string } | null;
+  const state = why ? `waiting: ${why.reason}` : "waiting for its grant";
+  const hints = why?.rule.startsWith("capacity.") ? ["flowryn capacity"] : [`flowryn show ${String(result.data.task)}`];
+  return { data: { ...result.data, state, ...(why ? { rule: why.rule } : {}) }, hints };
+}
+
 /** A run whose dead worker can be resumed from its stored session. */
 function resumable(db: ReadCtx["db"], target: string): RunRow {
   const run = findRun(db, target);
@@ -211,12 +221,12 @@ const resume: VerbSpec = {
     if (row?.pending_launch === "resume") {
       await ctx.sched.passNow();
       const after = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
-      return after?.pending_launch === "resume" ? { data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity"] } : result;
+      return after?.pending_launch === "resume" ? waitingReply(ctx.db, result) : result;
     }
     if (op?.mode && op.mode !== "resume") {
       await ctx.sched.passNow();
       const after = ctx.db.query("SELECT waiting_since FROM runs WHERE id = ?1").get(String(result.data.run)) as { waiting_since: number | null } | null;
-      return after?.waiting_since != null ? { data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity"] } : result;
+      return after?.waiting_since != null ? waitingReply(ctx.db, result) : result;
     }
     // The launcher issues the resume only from `requested`: a replayed settlement finds it issued and starts nothing.
     // A reply stored before operations existed names none: its resume was launched then.

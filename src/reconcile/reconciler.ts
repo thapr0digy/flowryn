@@ -331,7 +331,8 @@ export class Reconciler {
     }
     const current = getRun(db, run.id);
     const requested = openOperation(db, run.id);
-    if (!current || isTerminal(current.state) || current.pending_launch || !requested || requested.kind === "cancel" || requested.phase !== "requested") return "operation";
+    if (!current || isTerminal(current.state) || !requested || requested.kind === "cancel" || requested.phase !== "requested") return "operation";
+    if (current.pending_launch === requested.mode || current.pending_launch === "resume" || current.pending_launch === "fresh") return "operation";
     if (this.deps.isLaunching(run.id)) return "operation";
     if (!(await this.harnessVerified(current.harness))) return "operation";
     // Read again after the await: a cancel (or a launch) that landed meanwhile owns the run now.

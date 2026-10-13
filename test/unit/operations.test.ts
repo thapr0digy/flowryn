@@ -6,6 +6,7 @@ import { hashToken, mintToken } from "../../src/api/auth.ts";
 import type { Envelope, Reply } from "../../src/api/envelope.ts";
 import { Gateway } from "../../src/api/gateway.ts";
 import type { DaemonServices } from "../../src/api/verbs.ts";
+import { explain } from "../../src/attention/explanations.ts";
 import { inertAttention } from "../../src/attention/services.ts";
 import { defaultConfig, parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
@@ -16,6 +17,7 @@ import { Journal } from "../../src/journal/journal.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { inertLavish } from "../../src/lavish/services.ts";
 import { inertFleet } from "../../src/lifecycle/fleet-services.ts";
+import { claimAutoResume } from "../../src/lifecycle/auto-resume.ts";
 import { launchable } from "../../src/lifecycle/launcher.ts";
 import { LEADER_RUN_VERBS } from "../../src/lifecycle/leader-verbs.ts";
 import { Operations } from "../../src/lifecycle/operation-recovery.ts";
@@ -498,7 +500,15 @@ describe("an issued launch with no launcher is judged against its recorded candi
     await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     expect(getOperation(db, op.id)!.phase).toBe("escalated");
     const resume = envelope("resume", { target: "t1" });
-    expect(await d.gateway.handle(resume)).toMatchObject({ ok: true, data: { operation: resume.ulid } });
+    tx(db, () =>
+      explain(db, { run: { id: "r1", task_id: "t1", stage: "investigate" }, kind: "capacity", rule: "capacity.harness_unverified", reason: "claude 1 has no passing contract", facts: [], unblock: [], source: "daemon", now: Date.now() }),
+    );
+    // Its grant has not started it: the reply says why, from the open wait explanation, not that it waits for capacity.
+    expect(await d.gateway.handle(resume)).toMatchObject({
+      ok: true,
+      data: { operation: resume.ulid, state: "waiting: claude 1 has no passing contract", rule: "capacity.harness_unverified" },
+      hints: ["flowryn capacity"],
+    });
     expect(getOperation(db, resume.ulid)).toMatchObject({ kind: "launch", mode: "stage", phase: "requested" });
     expect(getRun(db, "r1")).toMatchObject({ pending_launch: "stage", stage_note: "checked" });
     expect(d.launches).toEqual([]);
@@ -603,6 +613,36 @@ describe("a requested launch or resume no launcher claimed", () => {
     expect(operationRows()).toHaveLength(1);
     expect(db.query("SELECT kind FROM items WHERE run_id = 'r1' AND kind = 'failure_needs_you'").all()).toEqual([]);
     expect(db.query("SELECT operation FROM explanations WHERE run_id = 'r1' AND rule = 'resume.auto'").all()).toEqual([{ operation: resume!.id }]);
+  });
+
+  test("an automatic resume left under a waiting stage replacement is launched in its own mode after a restart, once; the stage stays the grant's", async () => {
+    tx(db, () => db.query("UPDATE runs SET stage_state = 'waiting', pending_launch = 'stage', waiting_since = 1 WHERE id = 'r1'").run());
+    deadRun();
+    // The worker died while its fresh stage waited; the automatic resume is claimed and that daemon dies before its launcher claimed it.
+    expect(claimAutoResume(db, getRun(db, "r1")!, false, Date.now())).not.toBeNull();
+    const [resume] = operationRows();
+    expect(resume).toMatchObject({ kind: "resume", mode: "resume", phase: "requested" });
+    expect(getRun(db, "r1")!.pending_launch).toBe("stage");
+
+    const second = daemon();
+    await second.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
+    expect(second.launches).toEqual([`r1:resume:${resume!.id}`]);
+    // The launcher claims it; the next pass judges the issued resume and starts nothing more.
+    tx(db, () => claimOperation(db, resume!.id, { paneId: "w:1", agentName: "flowryn-x" }, "daemon", Date.now()));
+    await second.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
+    expect(second.launches).toEqual([`r1:resume:${resume!.id}`]);
+    expect(operationRows()).toHaveLength(1);
+  });
+
+  test("a requested stage replacement is never launched by the reconciler: only the grant starts it", async () => {
+    deadRun();
+    tx(db, () => {
+      db.query("UPDATE runs SET pending_launch = 'stage' WHERE id = 'r1'").run();
+      requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "scheduler", source: "daemon", now: Date.now() });
+    });
+    const d = daemon();
+    await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
+    expect(d.launches).toEqual([]);
   });
 
   test("a cancel that lands during the harness check wins: no launch", async () => {

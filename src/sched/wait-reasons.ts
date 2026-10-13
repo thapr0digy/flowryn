@@ -117,6 +117,9 @@ export function operationModeRefusal(op: Pick<OperationRow, "id" | "kind" | "mod
     rule: "capacity.operation_mode",
     reason: `its open ${op.kind} ${op.id} is a ${op.mode ?? "modeless"} launch, not the ${launch} launch the grant would start`,
     facts: [{ name: "operation", value: `${op.id} (${op.kind}, ${op.mode ?? "no mode"})`, at: op.created_at }],
-    unblock: [{ by: "captain", action: `flowryn cancel ${op.task_id}` }],
+    unblock: [
+      { by: "captain", action: `flowryn resume ${op.task_id}` },
+      { by: "captain", action: `flowryn cancel ${op.task_id}` },
+    ],
   };
 }
