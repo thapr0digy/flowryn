@@ -101,7 +101,7 @@ function indentOf(line: string): number {
  */
 function parseGateStep(text: string): string {
   const lines = text.split("\n");
-  const at = lines.findIndex((l) => /^gate:/.test(l));
+  const at = lines.findIndex((l) => l.startsWith("gate:"));
   if (at < 0) return "";
   const inline = stripQuotes(lines[at]!.slice("gate:".length));
   if (inline !== "") return inline;
