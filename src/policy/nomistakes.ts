@@ -28,7 +28,7 @@ export interface NmRun {
   pr: string;
   awaiting: boolean;
   gate: boolean;
-  /** The step the run is parked at (the top-level `gate:` line), empty when it is not parked. */
+  /** The step the run is parked at (the top-level `gate:` line or its nested `step:`), empty when it is not parked. */
   gateStep: string;
   /** The parked gate's `findings` table; null when the status has none or it does not decode. */
   findings: NmFinding[] | null;
@@ -90,20 +90,45 @@ export function parseActiveSteps(text: string): NmActiveStep[] | null {
   return (rows as Record<string, unknown>[]).map((r) => ({ step: cell(r, "step"), status: cell(r, "status"), activeFor: cell(r, "active_for"), lastActivity: cell(r, "last_activity"), agentPid: cell(r, "agent_pid") }));
 }
 
+/** A non-blank line's leading whitespace width; -1 for a blank line, so it ends an indented block. */
+function indentOf(line: string): number {
+  return /\S/.test(line) ? /^[ \t]*/.exec(line)![0].length : -1;
+}
+
 /**
- * The `findings[N]{...}:` table of a parked gate, read by column name. Only
- * that block is decoded: the status around it (a free-text `help` list) is
- * not always strict TOON. Null when there is no table or it does not decode.
+ * The step a run is parked at: the inline `gate: <step>` (the flat shape), or
+ * the `step:` field of the block under a top-level `gate:` (v1.84.0 nests it).
+ */
+function parseGateStep(text: string): string {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => /^gate:/.test(l));
+  if (at < 0) return "";
+  const inline = stripQuotes(lines[at]!.slice("gate:".length));
+  if (inline !== "") return inline;
+  for (let i = at + 1; i < lines.length && indentOf(lines[i]!) > 0; i++) {
+    const step = /^\s+step:[ \t]*(.*)$/.exec(lines[i]!);
+    if (step) return stripQuotes(step[1]!);
+  }
+  return "";
+}
+
+/**
+ * The `findings[N]{...}:` table of a parked gate, at the top level (the flat
+ * shape) or nested under `gate:` (v1.84.0), read by column name. Only that
+ * block is decoded, dedented: the status around it (a free-text `help` list)
+ * is not always strict TOON. Null when there is no table or it does not decode.
  */
 export function parseFindings(text: string): NmFinding[] | null {
   const lines = text.split("\n");
-  const start = lines.findIndex((l) => /^findings\[\d+\]\{[^}]*\}:\s*$/.test(l));
+  const header = /^([ \t]*)findings\[\d+\]\{[^}]*\}:\s*$/;
+  const start = lines.findIndex((l) => header.test(l));
   if (start < 0) return null;
+  const indent = header.exec(lines[start]!)![1]!.length;
   let end = start + 1;
-  while (end < lines.length && /^\s+\S/.test(lines[end]!)) end++;
+  while (end < lines.length && indentOf(lines[end]!) > indent) end++;
   let doc: unknown;
   try {
-    doc = decodeToon(lines.slice(start, end).join("\n"));
+    doc = decodeToon(lines.slice(start, end).map((l) => l.slice(indent)).join("\n"));
   } catch {
     return null;
   }
@@ -144,7 +169,7 @@ export function parseNmStatus(text: string): NmRun | null {
     pr: field(text, "pr"),
     awaiting: /^\s*awaiting_agent:/m.test(text),
     gate: /^\s*gate:/m.test(text),
-    gateStep: stripQuotes(/^gate:[ \t]*(\S*)/m.exec(text)?.[1] ?? ""),
+    gateStep: parseGateStep(text),
     findings: parseFindings(text),
     activeSteps: parseActiveSteps(text),
   };

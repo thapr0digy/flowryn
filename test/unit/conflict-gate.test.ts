@@ -19,8 +19,16 @@ import { DeliveryWatcher } from "../../src/watch/delivery.ts";
 const HEAD = "4f3c2b1a0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b";
 const CONFLICT_ROW = 'ci-1,error,"",,auto-fix,PR has merge conflicts with the base branch';
 
-/** `axi status` of a run parked at a gate, in the v1.84.0 shape (no category column; a free-text help list). */
-function parked(gate: string, rows: string[], header = "{id,severity,file,line,action,description}", branch = "b"): string {
+/**
+ * `axi status` of a run parked at a gate, by default in the v1.84.0 shape
+ * (the gate nested as an object, no category column, a free-text help list);
+ * `flat` puts `gate: <step>` and the findings table at the top level.
+ */
+function parked(gate: string, rows: string[], header = "{id,severity,file,line,action,description}", branch = "b", shape: "nested" | "flat" = "nested"): string {
+  const gateBlock =
+    shape === "flat"
+      ? [`gate: ${gate}`, `findings[${rows.length}]${header}:`, ...rows.map((r) => `  ${r}`)]
+      : ["gate:", `  step: ${gate}`, "  status: awaiting_approval", '  note: "the step found issues"', `  findings[${rows.length}]${header}:`, ...rows.map((r) => `    ${r}`)];
   return [
     "run:",
     '  id: "01NMCONFLICT"',
@@ -30,9 +38,7 @@ function parked(gate: string, rows: string[], header = "{id,severity,file,line,a
     `  head: ${HEAD.slice(0, 8)}`,
     `  head_sha: ${HEAD}`,
     '  pr: "https://github.com/acme/web/pull/7"',
-    `gate: ${gate}`,
-    `findings[${rows.length}]${header}:`,
-    ...rows.map((r) => `  ${r}`),
+    ...gateBlock,
     "help[2]:",
     "  Run `no-mistakes axi respond --action approve` to accept this step and continue",
     "  Run `no-mistakes axi logs --step ci --full` to read the full step log",
@@ -49,6 +55,14 @@ describe("a parked conflict gate", () => {
     const nm = parseNmStatus(parked("ci", [CONFLICT_ROW]))!;
     expect(nm).toMatchObject({ gateStep: "ci", headSha: HEAD, head: HEAD.slice(0, 8), gate: true });
     expect(parseFindings('run:\n  id: "x"\n')).toBeNull();
+  });
+
+  test("the flat shape (a top-level `gate: <step>` and findings table) still reads", () => {
+    const flat = parked("ci", [CONFLICT_ROW], undefined, undefined, "flat");
+    expect(parseFindings(flat)).toEqual([{ id: "ci-1", action: "auto-fix", description: "PR has merge conflicts with the base branch", category: "" }]);
+    expect(parseNmStatus(flat)).toMatchObject({ gateStep: "ci", gate: true });
+    expect(isConflictGate(parseNmStatus(flat)!)).toBe(true);
+    expect(isConflictGate(parseNmStatus(parked("review", [CONFLICT_ROW], undefined, undefined, "flat"))!)).toBe(false);
   });
 
   test("is a ci gate whose every finding is a merge conflict", () => {
@@ -140,6 +154,14 @@ describe("the delivery watcher and a conflict gate", () => {
     expect(openItems()).toEqual([]);
     expect(evidence()).toMatchObject({ id: "01NMCONFLICT", conflict_gate: "conflict_nudged" });
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'run.validating'").get()).toEqual({ n: 0 });
+  });
+
+  test("the flat status shape is covered the same way", async () => {
+    nudged("run.conflict_nudged", HEAD);
+    writeFileSync(status, parked("ci", [CONFLICT_ROW], undefined, undefined, "flat"));
+    await watcher.pass();
+    expect(state()).toBe("running");
+    expect(evidence()).toMatchObject({ conflict_gate: "conflict_nudged" });
   });
 
   test("once the nudges are spent, the pr_conflict covers it", async () => {
