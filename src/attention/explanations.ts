@@ -180,7 +180,11 @@ export function sweepExplanations(db: Db, now: number): number {
        WHERE x.closed_at IS NULL AND (
          r.id IS NULL OR r.state IN ('cleaned','failed','cancelled')
          OR i.state = 'resolved'
-         OR (i.state = 'dismissed' AND ((x.kind = 'dialog' AND i.kind = 'trust_dialog' AND r.liveness != 'blocked_dialog') OR (x.kind = 'resume' AND r.liveness != 'dead')))
+         OR (i.state = 'dismissed' AND (
+              (x.kind = 'dialog' AND i.kind = 'trust_dialog' AND r.liveness != 'blocked_dialog')
+              -- A dismissed prompt's dialog died with its worker: dead, or a new worker starting (a resume).
+              OR (x.kind = 'dialog' AND i.kind = 'blocked_prompt' AND r.liveness IN ('dead','starting'))
+              OR (x.kind = 'resume' AND r.liveness != 'dead')))
          OR (x.item_id IS NULL AND x.kind IN ('capacity','resume')
              AND NOT ((r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead'))))`,
     )

@@ -250,6 +250,20 @@ describe("dialog: a blocked-dialog hold", () => {
     tx(db, () => closeDismissedPromptExplanations(db, "r1", "hook post-tool", "hook", t + 2_000));
     expect(rows("r1")[0]).toMatchObject({ closed_by: "item dismissed; hook post-tool", closed_at: t + 2_000 });
   });
+
+  test("a dismissed prompt item's row closes on the sweep once its worker died or a new one is starting", async () => {
+    const t = Date.now();
+    tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: t }, t));
+    dismiss(rows("r1")[0]!.item_id!);
+    expect(sweep(t + 1_000)).toBe(0);
+    // The worker dies and resumes once: the death path resolves only open blocked_prompt items, so the dismissed one is the sweep's.
+    const rec = reconciler({ now: () => t + 2_000 });
+    await rec.reconcileRun(getRun(db, "r1")!, "steady");
+    rec.stop();
+    expect(getRun(db, "r1")!.liveness).toBe("starting");
+    expect(sweep(t + 3_000)).toBe(1);
+    expect(rows("r1").find((r) => r.kind === "dialog")).toMatchObject({ closed_by: "item dismissed; no longer waiting", closed_at: t + 3_000 });
+  });
 });
 
 describe("capacity: a scheduler wait", () => {
@@ -268,7 +282,7 @@ describe("capacity: a scheduler wait", () => {
     const [why] = show("t2", { why: true }, clock).waiting as Record<string, unknown>[];
     expect(why).toMatchObject({ kind: "capacity", rule: "capacity.pools_full", stage: "check" });
     expect(why!.facts).toEqual([expect.stringMatching(/^pool gpu: 1\/1 held by t3 \(observed \d\d:\d\d:\d\d, 15s ago\)$/)]);
-    expect(why!.unblock).toEqual(["flowryn: grants when a slot in gpu frees (a holder's stage or run ends)", "captain: raise [capacity] gpu in config.toml"]);
+    expect(why!.unblock).toEqual(["flowryn: grants when a slot in gpu frees (a holder's stage, run or job ends)", "captain: raise [capacity] gpu in config.toml"]);
 
     // The slot changes hands: a changed input, so one more row.
     tx(db, () => {
@@ -281,7 +295,7 @@ describe("capacity: a scheduler wait", () => {
       [1, "superseded by x2"],
       [2, null],
     ]);
-    expect(show("t2").waiting).toMatch(/^no free slot in gpu \(since \d\d:\d\d\); next: grants when a slot in gpu frees \(a holder's stage or run ends\) \(flowryn\)$/);
+    expect(show("t2").waiting).toMatch(/^no free slot in gpu \(since \d\d:\d\d\); next: grants when a slot in gpu frees \(a holder's stage, run or job ends\) \(flowryn\)$/);
 
     tx(db, () => releaseLeases(db, "r1", "t1", { keepWorker: true }, "test", clock));
     clock += 5_000;
@@ -354,6 +368,19 @@ describe("capacity: a scheduler wait", () => {
 function freshLaunch(at: number): void {
   db.query("UPDATE runs SET state = 'launching', pending_launch = 'fresh', waiting_since = ?1, proc_pid = NULL, proc_start = NULL, proc_exe = NULL WHERE id = 'r2'").run(at);
 }
+
+describe("capacity: a pool held by a job", () => {
+  test("a verify job's lease is named among the holders, as liveCounts counts it", async () => {
+    const clock = 8_000_000;
+    waitForGpu(null, clock);
+    db.query("INSERT INTO job_leases (pool, kind, job_id, granted_at) VALUES ('gpu', 'verify', 'v3', ?1)").run(clock);
+    const s = scheduler({ now: () => clock });
+    await s.passNow();
+    s.stop();
+    const [row] = openExplanations(db, "r2");
+    expect((JSON.parse(row!.facts) as { value: string }[]).map((f) => f.value)).toEqual(["1/1 held by verify v3"]);
+  });
+});
 
 describe("capacity: the quota floor and the harness gate, across passes", () => {
   test("a new Claude run under the quota floor is one explanation over several passes, naming the reading and the captain's override", async () => {

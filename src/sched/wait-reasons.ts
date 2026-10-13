@@ -87,7 +87,17 @@ export function hostRefusal(host: HostState | null, cfg: HostCheckConfig, reason
 export function poolsRefusal(db: Db, caps: Record<string, number>, full: readonly string[], now: number): Refusal {
   const counts = liveCounts(db);
   const facts = full.map((pool) => {
-    const holders = (db.query("SELECT DISTINCT r.task_id FROM pool_leases l JOIN runs r ON r.id = l.run_id WHERE l.pool = ?1 AND l.released_at IS NULL ORDER BY r.task_id").all(pool) as { task_id: string }[]).map((h) => h.task_id);
+    // Runs by task id, and heavy work that is not a run (a flowryn verify) by its job id: the same leases liveCounts counts.
+    const holders = (
+      db
+        .query(
+          `SELECT holder FROM (
+             SELECT DISTINCT r.task_id AS holder FROM pool_leases l JOIN runs r ON r.id = l.run_id WHERE l.pool = ?1 AND l.released_at IS NULL
+             UNION SELECT kind || ' ' || job_id FROM job_leases WHERE pool = ?1 AND released_at IS NULL)
+           ORDER BY holder`,
+        )
+        .all(pool) as { holder: string }[]
+    ).map((h) => h.holder);
     return { name: `pool ${pool}`, value: `${counts[pool] ?? 0}/${caps[pool] ?? 0} held by ${holders.join(", ") || "-"}`, at: now };
   });
   return {
@@ -95,7 +105,7 @@ export function poolsRefusal(db: Db, caps: Record<string, number>, full: readonl
     reason: `no free slot in ${full.join(", ")}`,
     facts,
     unblock: [
-      { by: "flowryn", action: `grants when a slot in ${full.join(", ")} frees (a holder's stage or run ends)` },
+      { by: "flowryn", action: `grants when a slot in ${full.join(", ")} frees (a holder's stage, run or job ends)` },
       { by: "captain", action: `raise [capacity] ${full[0]} in config.toml` },
     ],
   };
