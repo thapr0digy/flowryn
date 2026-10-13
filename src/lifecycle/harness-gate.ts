@@ -77,6 +77,12 @@ function staleNote(revision: number, stale: number[]): string {
   return `passed only at contract ${stale.map(revisionLabel).join(", ")}, not revision ${revision}`;
 }
 
+/** Why a wait on the harness gate holds, naming a stale contract revision when the version passed only at another. */
+export function harnessWaitReason(gate: Exclude<HarnessCheck, { state: "verified" }>): string {
+  if (gate.state === "missing") return gate.detail;
+  return `${gate.harness} ${gate.version} ${gate.stale.length > 0 ? staleNote(gate.revision, gate.stale) : "has no passing contract run"}`;
+}
+
 /** Who can end a wait on the harness gate. */
 export function harnessUnblock(gate: Exclude<HarnessCheck, { state: "verified" }>, what: string, auto?: string | null): Unblock[] {
   if (gate.state === "missing") return [{ by: "captain", action: `fix it (${gate.detail}): flowryn init` }];

@@ -13,7 +13,7 @@ import { backupIfDue } from "../../src/db/backup.ts";
 import { notifyMacosCheck, restoreBackup } from "../../src/doctor/doctor.ts";
 import { runInit, type InitDeps } from "../../src/init/init.ts";
 import { POLICY_MODE_LINES } from "../../src/config/policy.ts";
-import { renderPlist, plistSpecFor, serviceLabel, BASE_LABEL } from "../../src/service/launchd.ts";
+import { renderPlist, plistDrift, plistSpecFor, serviceLabel, BASE_LABEL, SERVICE_ENV_PASSTHROUGH } from "../../src/service/launchd.ts";
 import { stateFiles } from "../../src/config/paths.ts";
 import { tryExclusiveLock } from "../../src/util/flock.ts";
 import { homedir } from "node:os";
@@ -50,6 +50,40 @@ describe("launchd agent", () => {
     const path = join(home, "agent.plist");
     writeFileSync(path, renderPlist(plistSpecFor(config, home)));
     expect(Bun.spawnSync(["/usr/bin/plutil", "-lint", path]).exitCode).toBe(0);
+  });
+
+  test("carries the safety overrides from the installer's environment, and nothing else of it", () => {
+    const home = tempDir();
+    const config = defaultConfig(home);
+    const plain = plistSpecFor(config, home, { PATH: "/x", FLOWRYN_SOCK: "/elsewhere.sock" });
+    expect(Object.keys(plain.env).toSorted()).toEqual(["FLOWRYN_HOME", "HOME", "PATH"]);
+    const overrides = { FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: "record:/n.jsonl", FLOWRYN_OPENER: "record:/o.log" };
+    const safe = plistSpecFor(config, home, { ...overrides, FLOWRYN_TOKEN: "t", FLOWRYN_NOTIFY_EXTRA: "x" });
+    expect(safe.env).toMatchObject(overrides);
+    expect(Object.keys(safe.env).toSorted()).toEqual(["FLOWRYN_HOME", "FLOWRYN_NOTIFIER", "FLOWRYN_NOTIFY", "FLOWRYN_OPENER", "HOME", "PATH"]);
+    expect(SERVICE_ENV_PASSTHROUGH).toEqual(["FLOWRYN_NOTIFY", "FLOWRYN_NOTIFIER", "FLOWRYN_OPENER"]);
+  });
+
+  test("never writes the overrides into the production plist, even when the installer exported them", () => {
+    const home = join(homedir(), ".flowryn");
+    const overrides = { FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: "record:/n.jsonl", FLOWRYN_OPENER: "record:/o.log" };
+    const production = plistSpecFor(defaultConfig(home), home, overrides);
+    expect(production.label).toBe(BASE_LABEL);
+    expect(Object.keys(production.env).toSorted()).toEqual(["HOME", "PATH"]);
+    expect(renderPlist(production)).not.toContain("FLOWRYN_NOTIFY");
+    // A production daemon that inherited them computes the same spec, so no drift either way.
+    expect(plistDrift({ program: production.program, env: production.env, workingDir: production.workingDir }, plistSpecFor(defaultConfig(home), home, {}))).toEqual([]);
+  });
+
+  test("assumption: a daemon launched with the plist's environment computes the same spec, so its overrides are no drift", () => {
+    const home = tempDir();
+    const config = defaultConfig(home);
+    const installed = plistSpecFor(config, home, { FLOWRYN_NOTIFY: "off", FLOWRYN_OPENER: "record:/o.log" });
+    const daemonSide = plistSpecFor(config, home, installed.env);
+    expect(plistDrift({ program: installed.program, env: installed.env, workingDir: installed.workingDir }, daemonSide)).toEqual([]);
+    // A daemon whose plist lacks them (a production install) computes a spec without them.
+    const production = plistSpecFor(config, home, {});
+    expect(plistDrift({ program: production.program, env: production.env, workingDir: production.workingDir }, plistSpecFor(config, home, production.env))).toEqual([]);
   });
 
   test("the default home uses the base label; others get their own", () => {

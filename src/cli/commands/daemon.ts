@@ -237,7 +237,7 @@ const install: VerbSpec = {
     if (refused !== null) return refused;
     const home = flowrynHome(io.env);
     const { config } = loadConfig(home);
-    const spec = plistSpecFor(config, home);
+    const spec = plistSpecFor(config, home, io.env);
     const path = plistPath(spec.label);
     if (boolArg(args, "print")) {
       io.stdout(renderPlist(spec));

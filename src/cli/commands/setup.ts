@@ -295,7 +295,7 @@ const init: VerbSpec = {
         version: firstLine,
         listTasks: async (tasksAxi, node, file) => (await listTasks(processRunner(tasksAxi, node), file)).length,
         installService: async (config, home) => {
-          const spec = plistSpecFor(config, home);
+          const spec = plistSpecFor(config, home, io.env);
           await installService(spec, plistPath(spec.label));
           return `installed ${plistPath(spec.label)}`;
         },

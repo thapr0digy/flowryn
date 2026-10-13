@@ -126,11 +126,14 @@ export interface HomeOptions {
   tasksAxi?: string;
   /** Appended after [tools]; lines before its first table header add tools. A function gets the home path. */
   extraConfig?: string | ((home: string) => string);
+  /** A directory to create as the home (it must not exist) in place of a fresh one under the temp directory. */
+  home?: string;
 }
 
 /** A throwaway Flowryn home: config.toml, data and state directories, short enough for a socket path. */
 export function makeHome(options: HomeOptions = {}): TestHome {
-  const home = mkdtempSync(join(tmpdir(), "fw-"));
+  const home = options.home ?? mkdtempSync(join(tmpdir(), "fw-"));
+  if (options.home) mkdirSync(home, { mode: 0o700 });
   const extraConfig = typeof options.extraConfig === "function" ? options.extraConfig(home) : (options.extraConfig ?? "");
   const dataDir = join(home, "data");
   const stateDir = join(home, "state");
