@@ -72,3 +72,30 @@ Never included: chat or harness transcripts (only `transcript_path`, a path), st
 - Retention: by age (an old closed row goes, an old open row stays), by count per run (the newest N closed rows stay), `0` turns each off, one `explanations.pruned` event, none when nothing is deleted; the upkeep pass prunes even when it waits; config validation of the two keys.
 - Export: through the real CLI against a daemon and against the read-only fallback; a token-looking config value (`[workers.pi] env`, an `extra_args` token, a token-like string in a decision) and a decision's question and answer text never appear in the file without `--include-text`, and do appear (except tokens and config secrets) with it; an existing file is not overwritten; the file is mode 0600; a worker token is refused; unknown target exits 4.
 - Capacity: `unresolved` per kind with an open dialog and capacity row, `-` with none.
+
+## Implementation notes
+
+- The redaction marker is `<redacted: N chars>` for hidden text and `<redacted>` (the `flowryn config` marker) for a token; `TOKEN_LIKE` is now exported from `src/config/effective.ts` and applied to every string in the export, inside longer strings too (only the token is replaced there).
+- A decision or gate text is matched inside other event strings only from 8 characters up, so a short option such as `yes` never hides an unrelated string.
+- The run row leaves out `token_hash` and `workflow_def` (the frozen workflow is the `stages` section).
+- The upkeep pass logs a prune only when it deleted something; a prune that throws is logged and the pass goes on.
+- `flowryn capacity`'s `unresolved` counts only runs not ended, like the fleet and briefing pointer.
+
+## Usage
+
+```sh
+flowryn fleet                                   # waiting[]: task, waiting, next
+flowryn capacity                                # unresolved: capacity 2 (longest 10m, total 15m) · dialog 1 (…)
+flowryn diag export web-fix-a1 --out diag.json  # redacted
+flowryn diag export web-fix-a1 --out diag-full.json --include-text
+```
+
+```toml
+[upkeep]
+explanations_keep_days = 30      # 0 keeps closed rows whatever their age
+explanations_keep_per_run = 200  # 0 sets no per-run cap
+```
+
+## Tests
+
+`test/unit/explanation-views.test.ts` (fleet and briefing lines, including none when nothing waits and none for an ended run; capacity's `unresolved`; retention by age and by count, `0`, the event, the upkeep pass pruning while it waits; the export's redaction with and without `--include-text`, not found), `test/unit/upkeep-sync.test.ts` (the two keys), `test/integration/diag-export.test.ts` (the real CLI with a daemon and with the read-only fallback: mode 0600, no overwrite, a worker refused, not found, `--out` required).

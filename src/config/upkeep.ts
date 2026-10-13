@@ -14,6 +14,9 @@ import { table, type FlowrynConfig } from "./config.ts";
  *   cleanup guard once it has been idle this long; 0 turns it off.
  * - `nudge_conflicts`: a delivered PR GitHub reads as unmergeable sends its
  *   ship back to merge origin's default branch and deliver again.
+ * - `explanations_keep_days`, `explanations_keep_per_run`: closed wait
+ *   explanations older than this many days, and beyond a run's newest this
+ *   many, are deleted; 0 turns either bound off. Open ones always stay.
  *
  * `interval_ms` is the upkeep clock; it exists so tests can shrink it.
  */
@@ -23,6 +26,8 @@ export interface UpkeepConfig {
   sync_primary: boolean;
   clean_ended_hours: number;
   nudge_conflicts: boolean;
+  explanations_keep_days: number;
+  explanations_keep_per_run: number;
   interval_ms: number;
 }
 
@@ -31,12 +36,20 @@ export const DEFAULT_UPKEEP: UpkeepConfig = {
   sync_primary: true,
   clean_ended_hours: 24,
   nudge_conflicts: true,
+  explanations_keep_days: 30,
+  explanations_keep_per_run: 200,
   interval_ms: 600_000,
 };
 
 function bool(value: unknown, key: keyof UpkeepConfig): boolean {
   if (value === undefined) return DEFAULT_UPKEEP[key] as boolean;
   if (typeof value !== "boolean") throw new FlowrynError("config_invalid", `[upkeep] ${key} must be true or false`);
+  return value;
+}
+
+function keep(value: unknown, key: "explanations_keep_days" | "explanations_keep_per_run"): number {
+  if (value === undefined) return DEFAULT_UPKEEP[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw new FlowrynError("config_invalid", `[upkeep] ${key} must be a whole number, 0 or more (0 turns it off)`);
   return value;
 }
 
@@ -54,6 +67,8 @@ export function upkeepConfig(config: FlowrynConfig): UpkeepConfig {
     sync_primary: bool(raw.sync_primary, "sync_primary"),
     clean_ended_hours: hours,
     nudge_conflicts: bool(raw.nudge_conflicts, "nudge_conflicts"),
+    explanations_keep_days: keep(raw.explanations_keep_days, "explanations_keep_days"),
+    explanations_keep_per_run: keep(raw.explanations_keep_per_run, "explanations_keep_per_run"),
     interval_ms: interval,
   };
 }

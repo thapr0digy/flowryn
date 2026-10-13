@@ -145,7 +145,7 @@ export const REDACTED = "<redacted>";
 const SECRET_NAME = /token|secret|passw(or)?d|api[-_]?key|credential|private[-_]?key/i;
 /** Names that look secret but hold no secret: [github] token_env lists environment variable names. */
 const NOT_SECRET_PATHS = new Set(["github.token_env"]);
-const TOKEN_LIKE = /\b(gh[opusr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{8,}/;
+export const TOKEN_LIKE = /\b(gh[opusr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{8,}/;
 const SECRET_FLAG = /^--?[\w-]*(token|secret|passw(or)?d|api[-_]?key|credential|private[-_]?key)[\w-]*$/i;
 const SECRET_FLAG_VALUE = /^(--?[\w-]*(?:token|secret|passw(?:or)?d|api[-_]?key|credential|private[-_]?key)[\w-]*)=.*/i;
 
