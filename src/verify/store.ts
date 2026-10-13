@@ -40,7 +40,7 @@ export interface VerificationRow {
   project_path: string;
   started_at: number;
   finished_at: number | null;
-  /** The verify policy it ran under (src/verify/policy.ts); null on a row from before migration 23. */
+  /** The verify policy it ran under (src/verify/policy.ts); null on a row from before migration 24. */
   policy_id: string | null;
 }
 
