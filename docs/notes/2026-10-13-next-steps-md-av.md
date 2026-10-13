@@ -78,7 +78,7 @@ verification; `merge` before `gatherFacts`.
 
 **Stale verbs are refused, and the refusal is recorded.** A verb's `apply`
 runs inside the gateway's transaction, and a throw rolls that back, event and
-all. A stale `deliver` or `merge` therefore throws `ObservationStaleError`
+all. A stale `deliver` or `merge` therefore throws a `FlowrynError`
 (`observation_stale`, exit 2 policy, with the changed parts in the message and
 "deliver again"/"merge again" as help), which carries its event; the gateway
 appends that event in its own transaction after the rollback and rethrows. No
