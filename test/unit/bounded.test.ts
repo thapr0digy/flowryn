@@ -304,6 +304,31 @@ describe("recoverOwnedProcesses (the next daemon's start)", () => {
     expect(await gone(child)).toBe(true);
   });
 
+  test("a live leader whose group cannot be read is kept as failed, never dropped as gone", async () => {
+    const ledger = tempDir();
+    const dir = tempDir();
+    const spawnedAt = Date.now();
+    const leader = Bun.spawn(["/bin/sh", "-c", `sleep 60 & echo $! > ${dir}/child; wait`], { detached: true, stdout: "ignore", stderr: "ignore" });
+    strays.push(leader.pid);
+    const child = await pidFrom(join(dir, "child"));
+    const failingPs = join(dir, "ps");
+    writeFileSync(failingPs, "#!/bin/sh\necho 'ps: no table' >&2\nexit 1\n", { mode: 0o755 });
+    const garblingPs = join(dir, "ps-garbled");
+    writeFileSync(garblingPs, "#!/bin/sh\necho 'not a group'\n", { mode: 0o755 });
+    const path = writeEntry(ledger, leader.pid, spawnedAt, "docker ps");
+    for (const groupPs of [failingPs, garblingPs]) {
+      const found = await recoverOwnedProcesses(ledger, { graceMs: 500, groupPs });
+      expect(found.gone).toEqual([]);
+      expect(found.failed.map((f) => f.pid)).toEqual([leader.pid]);
+      expect(found.failed[0]!.detail).toStartWith("cannot check it: ");
+      expect(existsSync(path)).toBe(true);
+      expect(alive(child)).toBe(true);
+    }
+    const found = await recoverOwnedProcesses(ledger, { graceMs: 500 });
+    expect(found.ended).toEqual([{ pid: leader.pid, label: "docker ps" }]);
+    expect(await gone(child)).toBe(true);
+  });
+
   test("an unreadable entry is kept and reported, never read as nothing", async () => {
     const ledger = tempDir();
     const path = join(ledger, "123.json");

@@ -327,27 +327,27 @@ interface GroupFacts {
   startedAt: number;
 }
 
-/** The process group a pid leads and when it started, from ps; null when it is gone or ps cannot say. */
-async function groupFacts(pid: number): Promise<GroupFacts | null> {
-  const proc = Bun.spawn(["/bin/ps", "-o", "pgid=,etime=", "-p", String(pid)], { stdin: "ignore", stdout: "pipe", stderr: "ignore", env: { ...process.env, LC_ALL: "C" } });
-  const timer = setTimeout(() => proc.kill("SIGKILL"), 5_000);
-  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  clearTimeout(timer);
-  const [pgid, etime] = out.trim().split(/\s+/);
+/** The process group a pid ps has just seen alive leads, and when it started; throws when ps cannot say. */
+async function groupFacts(pid: number, ps: string): Promise<GroupFacts> {
+  const read = await runBounded([ps, "-o", "pgid=,etime=", "-p", String(pid)], { label: "ps", timeoutMs: 5_000, env: { ...process.env, LC_ALL: "C" } });
+  if (read.code !== 0) throw new Error(`${ps} exited ${read.code} reading its group: ${read.stderr.trim() || "no stderr"}`);
+  const [pgid, etime] = read.stdout.trim().split(/\s+/);
   const elapsed = parseEtime(etime ?? "");
-  if (!pgid || !Number.isInteger(Number(pgid)) || elapsed === null) return null;
+  if (!pgid || !Number.isInteger(Number(pgid)) || elapsed === null) throw new Error(`${ps} printed an unreadable group: ${JSON.stringify(read.stdout.trim())}`);
   return { pgid: Number(pgid), startedAt: Date.now() - elapsed };
 }
 
 /** Is this live process the leader an entry recorded: its own group's leader, started when the entry says it was spawned? */
-export function matchesEntry(pid: number, facts: GroupFacts | null, entry: Pick<LedgerEntry, "pid" | "spawned_at">): boolean {
-  if (!facts || pid !== entry.pid || facts.pgid !== entry.pid) return false;
+export function matchesEntry(pid: number, facts: GroupFacts, entry: Pick<LedgerEntry, "pid" | "spawned_at">): boolean {
+  if (pid !== entry.pid || facts.pgid !== entry.pid) return false;
   return facts.startedAt >= entry.spawned_at - START_SLACK_BEFORE_MS && facts.startedAt <= entry.spawned_at + START_SLACK_AFTER_MS;
 }
 
 export interface RecoverOptions {
   graceMs?: number;
   ps?: PsRunner;
+  /** The ps that reads a live leader's group and start (default /bin/ps). */
+  groupPs?: string;
 }
 
 /**
@@ -385,7 +385,7 @@ export async function recoverOwnedProcesses(dir: string, options: RecoverOptions
     try {
       await recoverEntry(path, entry, label, options, result);
     } catch (error) {
-      // ps could not run for this one: keep its entry and go on with the rest.
+      // ps could not say for this one: keep its entry and go on with the rest.
       result.failed.push({ pid: entry.pid, label, detail: `cannot check it: ${(error as Error).message}` });
     }
   }
@@ -394,8 +394,7 @@ export async function recoverOwnedProcesses(dir: string, options: RecoverOptions
 
 async function recoverEntry(path: string, entry: LedgerEntry, label: string, options: RecoverOptions, result: OwnedRecovery): Promise<void> {
   const identity = await readIdentity(entry.pid, options.ps);
-  const facts = identity ? await groupFacts(entry.pid) : null;
-  if (!identity || !matchesEntry(entry.pid, facts, entry)) {
+  if (!identity || !matchesEntry(entry.pid, await groupFacts(entry.pid, options.groupPs ?? "/bin/ps"), entry)) {
     forget(path);
     result.gone.push({ pid: entry.pid, label });
     return;
