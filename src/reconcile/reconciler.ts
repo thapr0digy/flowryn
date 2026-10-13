@@ -309,11 +309,14 @@ export class Reconciler {
     } catch {
       herdrStatus = null;
     }
-    const checked = observedTransition(db, run, "live_checks", "reconciler", t, () => {
-      // Read before recordEvidence overwrites run_evidence's one row per (run_id, source) below.
+    // Herdr's status is evidence of its moment, recorded even when a newer hook voids this pass's
+    // judgments, so the dialog-gone check's two settled reads still count it. Read the previous one first.
+    const previousHerdrStatus = tx(db, () => {
       const previousHerdr = db.query("SELECT value FROM run_evidence WHERE run_id = ?1 AND source = 'herdr'").get(run.id) as { value: string } | null;
-      const previousHerdrStatus = previousHerdr ? ((JSON.parse(previousHerdr.value) as { agent_status?: string }).agent_status ?? null) : null;
       if (herdrStatus !== null) recordEvidence(db, run.id, "herdr", 5, { agent_status: herdrStatus }, t);
+      return previousHerdr ? ((JSON.parse(previousHerdr.value) as { agent_status?: string }).agent_status ?? null) : null;
+    });
+    const checked = observedTransition(db, run, "live_checks", "reconciler", t, () => {
       if (!started) {
         if (t - launchedAt >= tm.trust_wedge_ms) {
           setLiveness(db, run, "blocked_dialog", "reconciler", { since: launchedAt }, t);

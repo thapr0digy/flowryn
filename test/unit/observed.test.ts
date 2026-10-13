@@ -6,6 +6,7 @@ import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
 import { observedTransition, staleFields } from "../../src/lifecycle/observed.ts";
+import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { cancelRun, getRun, setLiveness, type RunRow } from "../../src/lifecycle/runs.ts";
 import type { SteerBus } from "../../src/lifecycle/steers.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
@@ -84,7 +85,7 @@ function reconcilerFor(db: Db, fakes: Fakes, launches: string[] = []): Reconcile
     runtime: () => runtime,
     launch: (runId, mode) => launches.push(`${runId}:${mode}`),
     isLaunching: () => false,
-    bus: { notify() {} } as unknown as SteerBus,
+    bus: { notify() {}, hasWaiter: () => false } as unknown as SteerBus,
     timing: () => DEFAULT_TIMING,
     log: () => {},
     now: Date.now,
@@ -173,6 +174,26 @@ describe("the observation guard", () => {
 });
 
 describe("reconciler observations racing newer truth", () => {
+  test("a stale live-checks pass still records Herdr's status, so the next pass's second settled read releases the dialog", async () => {
+    const db = runDb();
+    tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: 0 }, Date.now()));
+    const gate = barrier();
+    const first = reconcilerFor(db, { agentStatus: () => gate.hold<string | null>("idle") });
+    const pass = first.reconcileRun(getRun(db, "r1")!, "steady");
+    await gate.reached;
+    // A newer hook that leaves the prompt alone (what session-end writes).
+    tx(db, () => db.query("UPDATE runs SET busy_until = NULL, last_hook_at = ?1, updated_at = ?1 WHERE id = 'r1'").run(Date.now()));
+    gate.open();
+    await pass;
+    expect(staleEvents(db).map((e) => e.transition)).toEqual(["live_checks"]);
+    expect(db.query("SELECT value FROM run_evidence WHERE run_id = 'r1' AND source = 'herdr'").get()).toEqual({ value: JSON.stringify({ agent_status: "idle" }) });
+    expect(eventKinds(db)).not.toContain("run.prompt_cleared");
+
+    await reconcilerFor(db, { agentStatus: () => Promise.resolve("idle") }).reconcileRun(getRun(db, "r1")!, "steady");
+    expect(eventKinds(db)).toContain("run.prompt_cleared");
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'blocked_prompt' AND state IN ('open','presented')").get()).toEqual({ n: 0 });
+  });
+
   test("a hook that lands while the live checks read Herdr keeps its busy liveness", async () => {
     const db = runDb();
     const gate = barrier();

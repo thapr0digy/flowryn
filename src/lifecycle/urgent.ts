@@ -228,6 +228,8 @@ export class UrgentPreempter implements UrgentServices {
       return true;
     });
     if (released.applied) this.tools.restart(run.id, now());
+    // Stale too returns true: the caller's kick re-plans from the current row (a new worker, a cancel)
+    // rather than going on to interrupt with the run it read before the await.
     return true;
   }
 }

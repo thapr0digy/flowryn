@@ -1,7 +1,7 @@
 # Guarded observation transitions: liveness and the automatic resume
 
 - Status: partial
-- Open: the same guard for observations that affect delivery or stage progression (docs/next_steps.md package 2, later slices); package 1's operation identity
+- Open: the same guard for observations that affect delivery or stage progression (docs/next_steps.md package 2, later slices); the reconciler's unguarded re-drive of an unfinished launch after its harness check (package 1's operation identity)
 
 docs/next_steps.md package 2, first slice. The reconciler reads a run, awaits
 Herdr, `ps` and the harness gate, then writes liveness, releases leases or
@@ -70,7 +70,12 @@ and those in-transaction callers share.
 
 **Not in this slice.** Delivery and stage-progression observations, the
 scheduler's own transitions, the launcher's identity write, a repository layer
-over run SQL.
+over run SQL. One await-then-launch stays unguarded: a run still `launching`
+with no worker identity (the daemon died mid-launch, or Herdr was down) is
+re-driven with a fresh launch after the reconciler's harness check
+(`Reconciler.reconcileRun`). The launcher's own fresh-launch checks refuse a
+terminal or already-identified run, but recovering that launch as an operation
+belongs to package 1's operation identity.
 
 ## Tests
 
@@ -80,5 +85,6 @@ fakes: each test pauses an observation, applies a newer hook, a cancellation
 or a replacement worker, then releases it, and asserts the current liveness,
 state and resume count survive, no launch happens, and a
 `run.observation_stale` event names the transition. The guard's field
-comparison has its own cases. `test/unit/urgent.test.ts` covers the
-dialog-gone release.
+comparison has its own cases, and one checks that a stale live-checks pass
+still records Herdr's status, so the next pass's second settled read releases
+the dialog. `test/unit/urgent.test.ts` covers the dialog-gone release.
