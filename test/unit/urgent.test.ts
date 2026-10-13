@@ -28,6 +28,7 @@ let interrupts: number;
 let interruptResult: Verified;
 let herdrStatus: string | null;
 let statusDelayMs: number;
+let statusGates: Barrier[];
 let preempter: UrgentPreempter | null;
 
 function seedRun(id: string, harness: "claude" | "pi"): void {
@@ -48,9 +49,29 @@ function events(kind: string): Record<string, unknown>[] {
   return (db.query("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq").all(kind) as { payload: string }[]).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
 }
 
+type Barrier = ReturnType<typeof barrier>;
+
+/** A barrier the fake parks an agentStatus read on: `reached` once it is held, `open()` lets it through. */
+function barrier() {
+  let open!: () => void;
+  let reached!: () => void;
+  const opened = new Promise<void>((resolve) => (open = resolve));
+  const held = new Promise<void>((resolve) => (reached = resolve));
+  return {
+    reached: held,
+    open,
+    async hold(): Promise<void> {
+      reached();
+      await opened;
+    },
+  };
+}
+
 function makePreempter(): UrgentPreempter {
   const runtime = {
     agentStatus: async () => {
+      const gate = statusGates.shift();
+      if (gate) await gate.hold();
       if (statusDelayMs > 0) await Bun.sleep(statusDelayMs);
       return herdrStatus;
     },
@@ -78,6 +99,7 @@ beforeEach(() => {
   interruptResult = { ok: true, evidence: "transcript" };
   herdrStatus = "working";
   statusDelayMs = 0;
+  statusGates = [];
   preempter = null;
   tx(db, () => {
     db.query("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('p', '', '/p', 'main', 'local-only')").run();
@@ -250,20 +272,30 @@ describe("the Claude preempter", () => {
     expect(events("steer.preempted")).toHaveLength(1);
   });
 
-  test("a replacement worker started while the dialog-gone read was in flight keeps its own liveness (a guarded transition)", async () => {
+  test("a replacement worker started while the dialog-gone read was in flight keeps its own liveness; the re-plan releases on a fresh read", async () => {
     urgentSteer();
     tx(db, () => openBlockedPrompt(db, getRun(db, "r1")!, { suspected: false, screen: "Do you want to proceed?", harness: "claude", lastHook: 0 }, Date.now()));
     herdrStatus = "working";
-    statusDelayMs = 150;
+    const stale = barrier();
+    const replan = barrier();
+    statusGates = [stale, replan];
     const p = makePreempter();
     p.tools.start("r1", "toolu_1", Date.now() - 5_000);
     p.kick("r1");
-    await Bun.sleep(50);
+    await stale.reached;
     tx(db, () => db.query("UPDATE runs SET proc_pid = 4242, proc_start = ?1, launched_at = ?1, liveness = 'starting', busy_until = NULL WHERE id = 'r1'").run(Date.now()));
-    await waitUntil(() => events("run.observation_stale").length === 1, 2_000, "the stale release");
+    stale.open();
+    await replan.reached;
+    expect(events("run.observation_stale")).toHaveLength(1);
     expect(events("run.observation_stale")[0]).toMatchObject({ transition: "dialog_gone" });
     expect(events("run.prompt_cleared")).toHaveLength(0);
     expect(getRun(db, "r1")!.liveness).toBe("starting");
+    // The re-plan reads the replacement worker afresh: Herdr still reads working, so its release is current truth.
+    replan.open();
+    await waitUntil(() => events("run.prompt_cleared").length === 1, 2_000, "the fresh release");
+    expect(getRun(db, "r1")!.liveness).toBe("busy");
+    expect(getRun(db, "r1")!.proc_pid).toBe(4242);
+    expect(events("run.observation_stale")).toHaveLength(1);
   });
 
   test("the interrupt gate refusing (Herdr saw a dialog) defers and tries again; a key sent but unverified is the one cut", async () => {
