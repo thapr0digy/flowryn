@@ -26,6 +26,7 @@ import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
 import type { HarnessCheck } from "../lifecycle/harness-gate.ts";
 import { closeDismissedPromptExplanations, explain } from "../attention/explanations.ts";
+import { latestOperation, openOperation, requestOperation, type OperationMode, type OperationRow } from "../lifecycle/operations.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -45,8 +46,14 @@ import { closeDismissedPromptExplanations, explain } from "../attention/explanat
 export interface ReconcilerDeps {
   db: Db;
   runtime(): HerdrRuntime | null;
-  launch(runId: string, mode: "fresh" | "resume"): void;
+  launch(runId: string, mode: OperationMode, operation?: string): void;
   isLaunching(runId: string): boolean;
+  /**
+   * An open operation with no launcher on it (src/lifecycle/operation-recovery.ts):
+   * a cancel is driven, an issued launch or resume judged against its recorded
+   * candidate. Absent, such a run is left alone.
+   */
+  recoverOperation?(run: RunRow, op: OperationRow): Promise<unknown>;
   bus: SteerBus;
   timing(): Timing;
   log(message: string): void;
@@ -212,9 +219,14 @@ export class Reconciler {
     observeLiveness(db, run, liveness, transition, "reconciler", detail, now());
   }
 
-  async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown" | "stale"> {
+  async reconcileRun(run: RunRow, reason: PassReason): Promise<"alive" | "reattached" | "dead" | "resumed" | "orphaned" | "launching" | "unknown" | "stale" | "operation"> {
     const { db, now } = this.deps;
     if (this.deps.isLaunching(run.id)) return "launching";
+    // A launch, resume or cancel under way is recovered from what it recorded, before any judgement of the
+    // worker: a run being cancelled is never read as dead and resumed, an issued launch never as a death.
+    const open = openOperation(db, run.id);
+    if (open) return this.recoverOperation(run, open);
+    if (this.escalated(run.id)) return "operation";
     // A launch the scheduler owns: waiting for its grant, or a fresh stage worker being started.
     if (run.pending_launch) return "launching";
     const runtime = this.deps.runtime();
@@ -224,9 +236,25 @@ export class Reconciler {
     }
     const identity = identityOf(run);
     if (run.state === "launching" && !identity) {
-      // A launch that never finished: the daemon died mid-launch, or Herdr was down. It waits for a verified harness.
-      if (await this.harnessVerified(run.harness)) this.deps.launch(run.id, "fresh");
-      return "launching";
+      // A granted launch with no operation open. One whose start may have been sent before operations were
+      // recorded (launched_at is written just before agent.start) is checked against its pane; otherwise
+      // nothing was issued, and it is launched as a new operation once the harness version is verified.
+      const t = now();
+      const legacy = run.launched_at !== null && latestOperation(db, run.id) === null;
+      const op = tx(db, () =>
+        openOperation(db, run.id)
+          ? null
+          : requestOperation(db, {
+              run,
+              kind: "launch",
+              mode: "fresh",
+              requestedBy: "reconciler",
+              source: "reconciler",
+              now: t,
+              ...(legacy ? { issued: { paneId: run.pane_id, issuedAt: run.launched_at!, detail: "a launch interrupted before operations were recorded" } } : {}),
+            }),
+      );
+      return op ? this.recoverOperation(run, op) : "launching";
     }
 
     let panes: PaneProcesses | null = null;
@@ -281,6 +309,35 @@ export class Reconciler {
     }
 
     return this.handleDeath(run, panes);
+  }
+
+  /**
+   * A run with an open operation: a cancel or an issued launch goes to its
+   * recovery; a requested launch or resume that no grant holds (its grant was
+   * taken, or the automatic resume claimed, and the daemon stopped before the
+   * launcher claimed it) is launched under the same operation once the harness
+   * version is verified. The launcher's claim re-checks the operation, so a
+   * cancel that lands during the harness check wins.
+   */
+  private async recoverOperation(run: RunRow, op: OperationRow): Promise<"operation"> {
+    const { db } = this.deps;
+    if (op.kind === "cancel" || op.phase === "effect_issued") {
+      if (!this.deps.recoverOperation) return "operation";
+      await this.deps.recoverOperation(run, op);
+    }
+    const current = getRun(db, run.id);
+    const requested = openOperation(db, run.id);
+    if (!current || isTerminal(current.state) || current.pending_launch || !requested || requested.kind === "cancel" || requested.phase !== "requested") return "operation";
+    if (this.deps.isLaunching(run.id)) return "operation";
+    if (await this.harnessVerified(current.harness)) this.deps.launch(run.id, requested.mode ?? (requested.kind === "resume" ? "resume" : "fresh"), requested.id);
+    return "operation";
+  }
+
+  /** The run's newest operation escalated and its P1 is still open: nothing happens to it by itself until you act. */
+  private escalated(runId: string): boolean {
+    const op = latestOperation(this.deps.db, runId);
+    if (op?.phase !== "escalated" || !op.item_id) return false;
+    return this.deps.db.query("SELECT 1 FROM items WHERE id = ?1 AND state IN ('open','presented')").get(op.item_id) !== null;
   }
 
   /** The harness gate before a launch this reconciler starts; a check that throws counts as unverified. */
@@ -452,9 +509,10 @@ export class Reconciler {
       return "dead";
     }
     if (resumeDue) {
-      if (!claimAutoResume(db, run, husk, t)) return "stale";
+      const operation = claimAutoResume(db, run, husk, t);
+      if (!operation) return "stale";
       this.attached.delete(run.id);
-      this.deps.launch(run.id, "resume");
+      this.deps.launch(run.id, "resume", operation);
       return "resumed";
     }
     const died = observedTransition(db, run, "died", "reconciler", t, () => {

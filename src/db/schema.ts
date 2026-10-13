@@ -554,8 +554,8 @@ CREATE INDEX job_live ON job_leases(pool) WHERE released_at IS NULL;
  * Wait explanations (docs/notes/2026-10-12-next-steps-md-wz.md): one row per decision that holds,
  * refuses or resumes a run (a dialog, a capacity refusal, a resume), with the rule, its reason, the
  * facts it decided on and when each was observed, and who or what can end the wait. Written only
- * when the explanation changes; open while the wait lasts. `operation` is reserved for package 1's
- * operation identity and stays NULL until that exists. Databases from before start empty.
+ * when the explanation changes; open while the wait lasts. `operation` names the launch, resume or
+ * cancel the explanation belongs to (migration 23), when it belongs to one. Databases from before start empty.
  */
 const EXPLANATIONS_SQL = /* sql */ `
 CREATE TABLE explanations (
@@ -567,6 +567,30 @@ CREATE TABLE explanations (
   opened_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT);
 CREATE INDEX explanations_open ON explanations(run_id) WHERE closed_at IS NULL;
 CREATE INDEX explanations_task ON explanations(task_id, id);
+`;
+
+/**
+ * Lifecycle operations (docs/notes/2026-10-13-next-steps-md-rz.md): one row per launch, resume or
+ * cancel Flowryn was asked for, with the phase it reached (requested, effect_issued, then confirmed,
+ * failed or escalated), the candidate committed before Herdr's agent.start (pane, agent name, when)
+ * and the worker identity it confirmed. At most one open (requested or effect_issued) row per run.
+ * Databases from before start empty; recovery reads a run left mid-launch from its own row.
+ */
+const OPERATIONS_SQL = /* sql */ `
+CREATE TABLE operations (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL, task_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('launch','resume','cancel')),
+  mode TEXT CHECK (mode IN ('fresh','resume','stage','relaunch')),
+  generation INTEGER NOT NULL,
+  desired TEXT NOT NULL CHECK (desired IN ('worker_running','run_cancelled')),
+  phase TEXT NOT NULL CHECK (phase IN ('requested','effect_issued','confirmed','failed','escalated')),
+  requested_by TEXT NOT NULL, reason TEXT,
+  pane_id TEXT, agent_name TEXT, issued_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+  proc_pid INTEGER, proc_start INTEGER, detail TEXT, item_id TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, settled_at INTEGER);
+CREATE UNIQUE INDEX operations_one_open ON operations(run_id) WHERE phase IN ('requested','effect_issued');
+CREATE INDEX operations_run ON operations(run_id, created_at);
 `;
 
 export const MIGRATIONS: readonly Migration[] = [
@@ -592,6 +616,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 20, name: "gate-channel", sql: GATE_CHANNEL_SQL },
   { version: 21, name: "job-leases", sql: JOB_LEASES_SQL },
   { version: 22, name: "explanations", sql: EXPLANATIONS_SQL },
+  { version: 23, name: "operations", sql: OPERATIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

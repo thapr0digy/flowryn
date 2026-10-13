@@ -14,7 +14,7 @@ import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { adapterFor } from "../harness/registry.ts";
 import type { RunContext } from "../harness/types.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
-import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import type { HarnessProcess, HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate } from "../runtime/proc.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
@@ -25,6 +25,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
+import { claimOperation, confirmOperation, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
 /**
  * fresh: the run's first launch; resume: its stored session again; stage: a
@@ -116,6 +117,12 @@ function textOrNull(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+/** Whether the launcher may start this run now: its open operation is a requested launch or resume (the named one, when named). */
+function launchable(open: OperationRow | null, operation: string | undefined): boolean {
+  if (!open) return operation === undefined;
+  return open.kind !== "cancel" && open.phase === "requested" && (operation === undefined || open.id === operation);
+}
+
 export function dispatchedTask(db: Db, runId: string): DispatchedTask | null {
   const row = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.dispatched' ORDER BY seq LIMIT 1").get(runId) as { payload: string } | null;
   if (!row) return null;
@@ -152,16 +159,21 @@ export class Launcher {
     return [...this.active];
   }
 
-  /** Launch in the background; failures are recorded on the run, never thrown. */
-  start(runId: string, mode: LaunchMode = "fresh"): void {
-    void this.launch(runId, mode);
+  /**
+   * Launch in the background; failures are recorded on the run, never thrown.
+   * `operation` names the requested launch or resume this starts
+   * (src/lifecycle/operations.ts); without one, the run's open requested one
+   * is used, or one is opened.
+   */
+  start(runId: string, mode: LaunchMode = "fresh", operation?: string): void {
+    void this.launch(runId, mode, operation);
   }
 
-  async launch(runId: string, mode: LaunchMode = "fresh"): Promise<"launched" | "skipped" | "failed" | "deferred"> {
+  async launch(runId: string, mode: LaunchMode = "fresh", operation?: string): Promise<"launched" | "skipped" | "failed" | "deferred"> {
     if (this.active.has(runId)) return "skipped";
     this.active.add(runId);
     try {
-      return (await this.run(runId, mode)) ? "launched" : "skipped";
+      return (await this.run(runId, mode, operation)) ? "launched" : "skipped";
     } catch (error) {
       const { db, log, now } = this.deps;
       if (error instanceof TransientLaunchError || (error instanceof HerdrError && (error.code === "unreachable" || error.code === "timeout"))) {
@@ -186,10 +198,12 @@ export class Launcher {
     }
   }
 
-  private async run(runId: string, mode: LaunchMode): Promise<boolean> {
+  private async run(runId: string, mode: LaunchMode, operation: string | undefined): Promise<boolean> {
     const { db, now } = this.deps;
     const run = getRunWithPolicy(db, runId);
     if (!run || isTerminal(run.state)) return false;
+    // Before any side effect (ensurePane may open a workspace): only a requested launch or resume is started here.
+    if (!launchable(openOperation(db, run.id), operation)) return false;
     // A fresh launch happens once; a replayed dispatch or a second kick must not start another worker.
     if (mode === "fresh" && (run.state !== "launching" || run.proc_pid !== null || run.pending_launch === "fresh")) return false;
     // A fresh stage worker, or a relaunched one, starts only once the scheduler stopped the old one.
@@ -280,20 +294,54 @@ export class Launcher {
 
     const paneId = await this.ensurePane(runtime, run, worktree, env);
     tx(db, () => noteHerdrUp(db, "daemon", now()));
-    tx(db, () => {
+    const agentName = `flowryn-${run.id.slice(-8).toLowerCase()}-${now().toString(36)}`;
+    // The candidate is committed before agent.start, in the compare-and-set that issues it: a daemon that
+    // dies after the call leaves an issued operation recovery checks against this pane, never a second start.
+    const claimed = tx(db, () => {
+      const current = getRunWithPolicy(db, run.id);
+      if (!current || isTerminal(current.state)) return null;
+      let open = openOperation(db, run.id);
+      if (!open && operation === undefined) open = requestOperation(db, { run, kind: launchKind(mode), mode, requestedBy: "daemon", source: "daemon", now: now() });
+      if (!launchable(open, operation)) return null;
+      const op = claimOperation(db, open!.id, { paneId, agentName }, "daemon", now());
+      if (!op) return null;
       db.query("UPDATE runs SET launched_at = ?2, liveness = 'starting', busy_until = NULL, idle_since = NULL, updated_at = ?2 WHERE id = ?1").run(run.id, now());
-      appendEvent(db, { source: "daemon", kind: "run.launching", runId: run.id, taskId: run.task_id, payload: { mode, pane: paneId, trust: trust.detail, args: plan.args.length } });
+      appendEvent(db, { source: "daemon", kind: "run.launching", runId: run.id, taskId: run.task_id, payload: { mode, pane: paneId, trust: trust.detail, args: plan.args.length, operation: op.id } });
       // A steer carried to the old process (its waiter outlives it) and never seen went with it: ring it to the new one.
       markLost(db, run, "worker relaunched", now());
+      return op;
     });
-    await runtime.startAgent(paneId, { kind: plan.kind, name: `flowryn-${run.id.slice(-8).toLowerCase()}-${now().toString(36)}`, args: plan.args });
+    if (!claimed) return false;
+    await runtime.startAgent(paneId, { kind: plan.kind, name: agentName, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
     if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms`);
-    // Recorded even when the run ended meanwhile (an isolation failure at worker-start races this),
-    // so the process can still be found and stopped by its identity.
-    const endedMeanwhile = tx(db, () => {
+    return this.recordWorker(run, mode, claimed, paneId, harness);
+  }
+
+  /**
+   * The worker's identity, and its operation confirmed, in one transaction.
+   * Recorded even when the run ended meanwhile (an isolation failure at
+   * worker-start races this) or a cancel superseded the launch, so the process
+   * can still be found; then it is stopped here. Whether the worker stays.
+   */
+  private async recordWorker(run: RunWithPolicy, mode: LaunchMode, claimed: OperationRow, paneId: string, harness: HarnessProcess): Promise<boolean> {
+    const { db, now } = this.deps;
+    const timing = timingConfig(this.deps.config());
+    const stop = tx(db, () => {
       const current = getRunWithPolicy(db, run.id);
       if (!current) return true;
+      const ours = confirmOperation(db, claimed, { identity: harness.identity, detail: `started in pane ${paneId}` }, "daemon", now());
+      if (!ours) {
+        db.query("UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, updated_at = ?5 WHERE id = ?1").run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now());
+        appendEvent(db, {
+          source: "daemon",
+          kind: "run.launch_superseded",
+          runId: run.id,
+          taskId: run.task_id,
+          payload: { mode, pane: paneId, pid: harness.identity.pid, operation: claimed.id, phase: getOperation(db, claimed.id)?.phase ?? null },
+        });
+        return true;
+      }
       db.query(
         `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END,
            pending_launch = CASE WHEN pending_launch = ?7 THEN NULL ELSE pending_launch END,
@@ -304,11 +352,11 @@ export class Launcher {
         kind: "run.launched",
         runId: run.id,
         taskId: run.task_id,
-        payload: { mode, pane: paneId, pid: harness.identity.pid, exe: harness.identity.exe, argv0: harness.process.argv0 },
+        payload: { mode, pane: paneId, pid: harness.identity.pid, exe: harness.identity.exe, argv0: harness.process.argv0, operation: claimed.id },
       });
       return isTerminal(current.state);
     });
-    if (endedMeanwhile) {
+    if (stop) {
       await terminate(harness.identity, { graceMs: timing.exit_grace_ms, group: true });
       return false;
     }
