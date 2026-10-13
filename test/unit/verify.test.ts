@@ -91,33 +91,34 @@ describe("[projects.<id>] verify", () => {
   });
 });
 
+const policyOf = (steps: string[], binary: string | null = null) => verifyPolicyId({ steps, binary });
+
 describe("the verify policy identity", () => {
-  const id = (steps: string[], binary: string | null = null) => verifyPolicyId({ steps, binary });
 
   test("assumption: formatting noise in a step (outer whitespace, runs of spaces and tabs) does not change the identity", () => {
     expect(normalizeStep("  bun   install\t--frozen-lockfile  ")).toBe("bun install --frozen-lockfile");
-    expect(id(["  bun   install\t--frozen-lockfile ", "bun test"])).toBe(id(["bun install --frozen-lockfile", "bun test"]));
+    expect(policyOf(["  bun   install\t--frozen-lockfile ", "bun test"])).toBe(policyOf(["bun install --frozen-lockfile", "bun test"]));
   });
 
   test("assumption: whitespace inside quotes or after a backslash is part of an argument, and a newline separates commands", () => {
     expect(normalizeStep(`echo "a  b"   'c\t d'`)).toBe(`echo "a  b" 'c\t d'`);
-    expect(id([`echo "a  b"`])).not.toBe(id([`echo "a b"`]));
+    expect(policyOf([`echo "a  b"`])).not.toBe(policyOf([`echo "a b"`]));
     expect(normalizeStep(String.raw`echo "a \"  b"   c`)).toBe(String.raw`echo "a \"  b" c`);
     expect(normalizeStep(String.raw`echo a\    b`)).toBe(String.raw`echo a\  b`);
-    expect(id([String.raw`echo a\  b`])).not.toBe(id([String.raw`echo a\ b`]));
-    expect(id(["true\nfalse"])).not.toBe(id(["true false"]));
+    expect(policyOf([String.raw`echo a\  b`])).not.toBe(policyOf([String.raw`echo a\ b`]));
+    expect(policyOf(["true\nfalse"])).not.toBe(policyOf(["true false"]));
   });
 
   test("assumption: a changed, added, removed or reordered step, or a changed or added artifact, is another policy", () => {
-    const base = id(["bun install", "bun test"]);
-    expect(id(["bun install", "bun test --bail"])).not.toBe(base);
-    expect(id(["bun install", "npx oxlint", "bun test"])).not.toBe(base);
-    expect(id(["bun install"])).not.toBe(base);
-    expect(id(["bun test", "bun install"])).not.toBe(base);
-    expect(id(["bun install", "bun test"], "dist/flowryn")).not.toBe(base);
-    expect(id(["bun install", "bun test"], "dist/flowryn")).not.toBe(id(["bun install", "bun test"], "dist/other"));
+    const base = policyOf(["bun install", "bun test"]);
+    expect(policyOf(["bun install", "bun test --bail"])).not.toBe(base);
+    expect(policyOf(["bun install", "npx oxlint", "bun test"])).not.toBe(base);
+    expect(policyOf(["bun install"])).not.toBe(base);
+    expect(policyOf(["bun test", "bun install"])).not.toBe(base);
+    expect(policyOf(["bun install", "bun test"], "dist/flowryn")).not.toBe(base);
+    expect(policyOf(["bun install", "bun test"], "dist/flowryn")).not.toBe(policyOf(["bun install", "bun test"], "dist/other"));
     // Joining two steps into one is another run (a step's exit code is checked on its own).
-    expect(id(["bun install bun test"])).not.toBe(base);
+    expect(policyOf(["bun install bun test"])).not.toBe(base);
   });
 
   test("the time limit is not part of it, and the artifact is compared as verifyConfig normalizes it", () => {
@@ -128,7 +129,7 @@ describe("the verify policy identity", () => {
 
   test("assumption: the encoding is stable, so an upgrade does not quietly invalidate (or revalidate) stored results", () => {
     // sha256 of ["flowryn-verify-policy",1,["bun install --frozen-lockfile","bun test"],"dist/flowryn"]
-    expect(id(["bun install --frozen-lockfile", "bun test"], "dist/flowryn")).toBe("vp1:1e030c6a4a029f17bd56c322243558966e23287d43b2937919e2f52f951c836f");
+    expect(policyOf(["bun install --frozen-lockfile", "bun test"], "dist/flowryn")).toBe("vp1:1e030c6a4a029f17bd56c322243558966e23287d43b2937919e2f52f951c836f");
   });
 });
 
@@ -649,10 +650,13 @@ function forge(annotations: Record<number, Annotation[]>): Forge & { asked: numb
 
 const failure = (message: string): Annotation => ({ level: "failure", message });
 
+/** A result at this head under the given policy (null: legacy). */
+const under = (v: Verification, policy: string | null): Verification => ({ ...v, policy_id: policy });
+/** Gate facts with no same-policy result at this head, only `other`. */
+const stale = (other: Verification, over: Partial<MergeFacts["local"] & object> = {}) => facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, atHead: null, otherPolicyAtHead: other, lastPassed: other, ...over } });
+
 describe("local green needs today's verify policy", () => {
   const OLD = verifyPolicyId({ steps: ["bun test"], binary: null });
-  const under = (v: Verification, policy: string | null): Verification => ({ ...v, policy_id: policy });
-  const stale = (other: Verification, over: Partial<MergeFacts["local"] & object> = {}) => facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, atHead: null, otherPolicyAtHead: other, lastPassed: other, ...over } });
 
   test("an unchanged policy reuses the pass at this head", () => {
     const passed = verification("v4", "h2", "passed");
