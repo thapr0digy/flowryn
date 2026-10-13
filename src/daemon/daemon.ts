@@ -804,7 +804,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     // After the journal settles or the shutdown grace runs out: what still runs goes. A tasks-axi
     // mutation cut here is one the grace did not cover; its intent replays on the next start.
     const owned = await stopOwnedProcesses(OWNED_STOP_GRACE_MS);
-    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded; their leaders are gone, so the next start drops the entries and does not end the members`);
+    if (owned.left.length > 0) log(`stopping: external commands that outlived SIGKILL (pids ${owned.left.join(", ")}) stay recorded for the next start, which ends a group whose leader is still alive and drops the entry of one whose leader is gone`);
     tx(database, () => appendEvent(database, { source: "daemon", kind: "daemon.stopped", payload: { reason } }));
     return 0;
   } catch (error) {
