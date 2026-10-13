@@ -5,3 +5,11 @@
 # test step still runs the full `bun test` on the Mac. Remove this line when CI is re-enabled
 # (`gh workflow enable CI`), see docs/v1-status.md "CI is off".
 no_ci: true
+
+# Workers never rewrite history: a conflicting PR parks at the CI gate; Flowryn's `nudge_conflicts` sends the ship back to merge origin/main.
+auto_fix:
+  ci: 0
+
+# Workers never rewrite history: the Rebase step merges a moved main (a merge commit) instead of replaying the branch on it.
+rebase:
+  strategy: merge
