@@ -77,6 +77,16 @@ export function heldByEscalation(db: Db, runId: string): OperationRow | null {
   return op?.phase === "escalated" ? op : null;
 }
 
+/**
+ * The run's newest settled launch or resume, when it escalated: the process it
+ * may have started was never confirmed gone, so its pane is left alone even
+ * when the explicit `flowryn resume` that follows moves to a new workspace.
+ */
+export function escalatedStart(db: Db, runId: string): OperationRow | null {
+  const op = db.query(`SELECT * FROM operations WHERE run_id = ?1 AND kind IN ('launch','resume') AND NOT (${OPEN}) ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(runId) as OperationRow | null;
+  return op?.phase === "escalated" ? op : null;
+}
+
 export function launchKind(mode: OperationMode): "launch" | "resume" {
   return mode === "resume" ? "resume" : "launch";
 }

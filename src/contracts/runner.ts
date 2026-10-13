@@ -19,7 +19,7 @@ import type { MessageRow } from "../lifecycle/steers.ts";
 import { descendantCommands, isAlive, readIdentity, readProcessTable, terminate } from "../runtime/proc.ts";
 import { contractPrefix } from "./cleanup.ts";
 import { contractContext, type ContractContext } from "./context.ts";
-import { RELEASE_LIMITS, SCRATCH_CONFIG_HEADER, createdWorkspaces, harnessProcesses, releaseOwned, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
+import { RELEASE_LIMITS, SCRATCH_CONFIG_HEADER, createdWorkspaces, harnessProcesses, releaseOwned, withScratchIds, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
 import { piAgentDir, piAgentSource, realPiTable, scriptedPiTable, seedAgentDir, writeScriptedProvider, type PiProfile } from "./pi-profile.ts";
 import { pinDrift, pinHarness, type HarnessPin } from "./pin.ts";
 import { contractRevision } from "./revision.ts";
@@ -255,6 +255,17 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
         keepHome = "its database is the only record of the run's workspaces and harnesses";
       }
       problems.push(...(await teardown(call, state, daemon)));
+      // A launch still in flight when the snapshot above was taken records its workspace and harness after it:
+      // with the daemon stopped the database is final, so read it again and release both sets.
+      if (!keepHome) {
+        try {
+          const merged = withScratchIds(owned);
+          note({ workspaces: merged.workspaces, harnesses: merged.harnesses });
+        } catch (error) {
+          problems.push(`the scratch database in ${home} is unreadable after the daemon stopped: ${(error as Error).message}`);
+          keepHome = "its database is the only record of the run's workspaces and harnesses";
+        }
+      }
       // A run that failed is not cancellable, so its workspace may still be open; release everything by id.
       const removeHome = (path: string) => (options.keep ? Promise.resolve(true) : removeScratchHome(path, options.log));
       problems.push(...(await releaseOwned(owned, { log: options.log, removeHome }, { keepHome })));
