@@ -25,7 +25,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
-import { claimOperation, confirmOperation, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
+import { claimOperation, confirmOperation, escalatedStart, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
 /**
  * fresh: the run's first launch; resume: its stored session again; stage: a
@@ -446,7 +446,10 @@ export class Launcher {
    * recorded worker is gone, so a previous workspace whose pane does not read
    * idle (Herdr can still read the dead worker's group in the foreground just
    * after it exits) holds only the run's own leftovers: it is closed once the
-   * new one is recorded, as cancel and landing close the current one.
+   * new one is recorded, as cancel and landing close the current one. The
+   * exception is a resume over an escalated launch or resume: the process that
+   * start left may still be live in the old pane, and a resume never stops it
+   * (docs/notes/2026-10-13-next-steps-md-rz.md), so that workspace stays open.
    */
   private async ensurePane(runtime: HerdrRuntime, run: RunWithPolicy, worktree: string, env: Record<string, string>): Promise<string> {
     const { db, now } = this.deps;
@@ -467,7 +470,8 @@ export class Launcher {
       );
       appendEvent(db, { source: "daemon", kind: "run.pane", runId: run.id, taskId: run.task_id, payload: { pane: paneId, workspace: workspace.workspaceId, previous: run.pane_id } });
     });
-    if (run.workspace_id && run.workspace_id !== workspace.workspaceId) await this.closeReplacedWorkspace(runtime, run, run.workspace_id);
+    const replaced = run.workspace_id && run.workspace_id !== workspace.workspaceId ? run.workspace_id : null;
+    if (replaced && !escalatedStart(db, run.id)) await this.closeReplacedWorkspace(runtime, run, replaced);
     return paneId;
   }
 

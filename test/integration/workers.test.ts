@@ -13,6 +13,8 @@ import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { loadConfig } from "../../src/config/config.ts";
 import { configStaticLayers } from "../../src/policy/static.ts";
+import { tx } from "../../src/db/db.ts";
+import { claimOperation, escalateOperation, requestOperation } from "../../src/lifecycle/operations.ts";
 
 const envs: FleetEnv[] = [];
 async function fleet(options: Parameters<typeof makeFleetEnv>[0] = {}): Promise<FleetEnv> {
@@ -343,6 +345,36 @@ describe("recovery", () => {
       await waitUntil(() => !env.herdr.workspaces.has(busy.workspace_id!), 5_000, "the replaced workspace closed");
       expect(env.events(run)).not.toContain("run.workspace_close_failed");
       await env.waitRun(run, delivered, "the resumed run to deliver", 30_000);
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a resume over an escalated start leaves the old workspace, and whatever runs in it, open",
+    async () => {
+      const env = await fleet();
+      const { run } = await env.dispatch("Scout\nFAKE: sleep 20000");
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      // A resume issued into the busy pane escalated: whether its process started is unknown, so it may be live there.
+      await env.daemon.kill9();
+      const db = env.h.db();
+      try {
+        tx(db, () => {
+          const op = requestOperation(db, { run: { id: run, task_id: busy.task_id }, kind: "resume", mode: "resume", requestedBy: "daemon", source: "daemon", now: Date.now() });
+          const issued = claimOperation(db, op.id, { paneId: busy.pane_id, agentName: null }, "daemon", Date.now())!;
+          escalateOperation(db, issued, "the agent never appeared", "daemon", Date.now());
+        });
+      } finally {
+        db.close();
+      }
+      await env.restartDaemon();
+      const resumed = await env.json(["resume", run]);
+      expect(resumed.code).toBe(0);
+      const moved = await env.waitRun(run, (r) => r.proc_pid !== null && r.proc_pid !== busy.proc_pid, "the resumed worker", 30_000);
+      expect(moved.workspace_id).not.toBe(busy.workspace_id);
+      await Bun.sleep(1_000);
+      expect(env.herdr.workspaces.has(busy.workspace_id!)).toBe(true);
+      expect(env.herdr.calls.some((c) => c.method === "workspace.close" && c.params.workspace_id === busy.workspace_id)).toBe(false);
     },
     { timeout: 60_000 },
   );
