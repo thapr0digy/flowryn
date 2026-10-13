@@ -5,7 +5,7 @@ import type { ChecksSummary, PullRequest } from "../forge/types.ts";
 import { prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { askedCiWait } from "../lifecycle/ci-wait.ts";
-import { recordEvidence, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { isTerminal, recordEvidence, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
@@ -189,6 +189,34 @@ export function applyPrObservation(
     resolveRunItems(db, run.id, ["checks_red"], "checks green", now);
   }
   return { landed: false };
+}
+
+/**
+ * A merge proven after the run ended (cancelled or failed while the proof was
+ * read): the run is not revived, but the fact is kept. An open merge request
+ * is recorded merged, and a divergence (P1) says the work landed under an
+ * ended run, so you decide what the task is now. Returns whether it applied.
+ * Call inside a transaction.
+ */
+export function noteMergedAfterEnd(db: Db, run: RunRow, delivered: Delivered, proof: { mergeSha: string; source: "github" | "daemon" }, now: number): boolean {
+  if (!isTerminal(run.state)) return false;
+  const merge = latestMerge(db, run.task_id);
+  if (merge && (merge.state === "requested" || merge.state === "unproven")) {
+    db.query("UPDATE merges SET state = 'merged', merge_sha = ?2, proven_at = ?3, checked_at = ?3, detail = COALESCE(detail || '; ', '') || ?4 WHERE id = ?1").run(
+      merge.id,
+      proof.mergeSha,
+      now,
+      `proven after the run was ${run.state}`,
+    );
+  }
+  appendEvent(db, { source: proof.source, kind: "run.merged_after_end", runId: run.id, taskId: run.task_id, payload: { ref: delivered.ref, head: delivered.head, merge_sha: proof.mergeSha, state: run.state, merge: merge?.id ?? null }, ts: now });
+  openDivergence(
+    db,
+    proof.source,
+    { runId: run.id, taskId: run.task_id, higher: proof.source === "github" ? "github" : "git", lower: "run", summary: `${delivered.ref} merged at ${proof.mergeSha.slice(0, 8)} after the run was ${run.state}; the merge stands, the run is not revived` },
+    now,
+  );
+  return true;
 }
 
 /**

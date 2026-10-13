@@ -1,7 +1,7 @@
 # Guarded observation transitions: liveness and the automatic resume
 
 - Status: partial
-- Open: the same guard for observations that affect delivery or stage progression (docs/next_steps.md package 2, later slices). The reconciler's re-drive of an unfinished launch now goes through its operation (docs/notes/2026-10-13-next-steps-md-rz.md)
+- Open: the delivery and stage-progression observations are the second slice (docs/notes/2026-10-13-next-steps-md-av.md), which lists what is still left. The reconciler's re-drive of an unfinished launch now goes through its operation (docs/notes/2026-10-13-next-steps-md-rz.md)
 
 docs/next_steps.md package 2, first slice. The reconciler reads a run, awaits
 Herdr, `ps` and the harness gate, then writes liveness, releases leases or
@@ -42,6 +42,17 @@ Package 1's operation identity is not used here.
 the next pass (or the reconcile the hook, cancel or launch already schedules)
 reads the newer state. A rejection never opens an item; it is an event so the
 race is visible in `flowryn show`/the event log.
+
+**A hook-only overtake is coalesced.** In production a busy worker's hooks
+overtook almost every pass (221 `live_checks` rejections in about six hours,
+each only because `last_hook_at`/`busy_until` advanced). A rejection whose
+only changed fields are the hook watermark (`last_hook_at`, `busy_until`,
+`idle_since`) on a live run is still dropped, but records its event (payload
+`watermark_only: true`) at most once per run per
+`WATERMARK_EVENT_WINDOW_MS` (10 minutes). Any other change (state, worker
+generation, liveness, a terminal run) records its event every time. Added by
+docs/notes/2026-10-13-next-steps-md-av.md's ship; the test is in
+`test/unit/observed.test.ts`.
 
 **Where it applies (this slice).**
 

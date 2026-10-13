@@ -3,16 +3,17 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
-import { deliveredOf } from "../lifecycle/delivery.ts";
+import { deliveredOf, type Delivered } from "../lifecycle/delivery.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
-import { getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { deliveryBasis, deliveryTransition, type BasisPart } from "../lifecycle/observed.ts";
+import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
 import { headHistory, type HeadHistory } from "../policy/head-history.ts";
-import { applyNmObservation, applyPrObservation, headMoveRecorded, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
+import { applyNmObservation, applyPrObservation, headMoveRecorded, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
 /**
@@ -32,6 +33,8 @@ export interface DeliveryWatcherDeps {
   webUrl(): string;
   git: GitRunner;
   noMistakes(): string | null;
+  /** The status read itself (readNmStatus); tests pause it on a barrier. */
+  readNmStatus?: typeof readNmStatus;
   nmTimeoutMs(): number;
   /** A validation slot held this long with no progress opens a validation_stuck P1 ([sched] validation_stuck_ms). */
   validationStuckMs(): number;
@@ -56,6 +59,22 @@ const NM_DOWN_AFTER = 3;
 export const VALIDATION_READ_MIN_GAP_MS = 15_000;
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
+
+/**
+ * What each watcher's write depends on (docs/notes/2026-10-13-next-steps-md-av.md):
+ * a read is applied only if these parts of the run's delivery basis are what
+ * they were before the read's awaits, else it is dropped with an event.
+ */
+const PR_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "merge", "operation"];
+const NM_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "operation", "validation"];
+const CI_WAIT_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "operation", "validation"];
+const LOCAL_MERGE_PARTS: readonly BasisPart[] = ["state", "merge", "operation"];
+/**
+ * A proven merge of the delivered work cannot be undone, so it wins over a
+ * newer cancel, operation or merge-row change: it depends on the delivery
+ * alone. A run that ended meanwhile is not revived (noteMergedAfterEnd).
+ */
+const MERGED_PARTS: readonly BasisPart[] = ["delivered"];
 
 export class DeliveryWatcher {
   private readonly deps: DeliveryWatcherDeps;
@@ -145,6 +164,8 @@ export class DeliveryWatcher {
     const forge = this.deps.forge();
     for (const run of runs) {
       if (this.stopped) return;
+      // The delivery the PR is compared with is the one the basis holds: a redelivery during the read makes it stale.
+      const seen = deliveryBasis(db, run.id);
       const delivered = deliveredOf(db, run.task_id);
       if (!delivered || delivered.kind !== "pr") continue;
       const ref = parsePrUrl(delivered.ref, this.deps.webUrl());
@@ -153,11 +174,13 @@ export class DeliveryWatcher {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
         const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
-        const applied = tx(db, () => {
-          noteForgeUp(db, "github", now());
-          const current = getRunWithPolicy(db, run.id);
-          return current ? applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history }) : { landed: false };
-        });
+        tx(db, () => noteForgeUp(db, "github", now()));
+        const mergeSha = pr.state === "merged" ? pr.mergeSha : null;
+        const observed = deliveryTransition(db, seen, mergeSha ? MERGED_PARTS : PR_PARTS, "pr_observation", "github", now(), (current) =>
+          applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history }),
+        );
+        if (!observed.applied && mergeSha && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, mergeSha, "github");
+        const applied = observed.applied ? observed.value : { landed: false, nudged: false };
         this.backoffMs = 0;
         if (applied.landed) this.deps.cleanup(run.id);
         if (applied.nudged) this.deps.kickScheduler();
@@ -185,6 +208,16 @@ export class DeliveryWatcher {
     return headHistory(this.deps.git, cwd, delivered, head, prNumber).catch(() => "unknown" as const);
   }
 
+  /** A merge proven after its run ended: kept as a fact, the run not revived (noteMergedAfterEnd). */
+  private keepLateMerge(runId: string, delivered: Delivered, mergeSha: string, source: "github" | "daemon"): void {
+    const { db, now } = this.deps;
+    const kept = tx(db, () => {
+      const run = getRun(db, runId);
+      return run ? noteMergedAfterEnd(db, run, delivered, { mergeSha, source }, now()) : false;
+    });
+    if (kept) this.deps.log(`delivery watcher: ${delivered.ref} merged at ${mergeSha.slice(0, 8)} after its run ended; a divergence asks you`);
+  }
+
   /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
   private forgeFailed(error: unknown): void {
     const { db, now } = this.deps;
@@ -206,14 +239,16 @@ export class DeliveryWatcher {
       const merge = latestMerge(db, run.task_id);
       const project = getProject(db, run.project_id);
       if (!merge || !project || (merge.state !== "requested" && merge.state !== "unproven") || this.deps.inFlight.has(merge.id)) continue;
+      const seen = deliveryBasis(db, run.id);
       const proof = await proveLocal(this.deps.git, project, merge.head_sha);
-      const landed = tx(db, () => {
-        const current = getRunWithPolicy(db, run.id);
-        if (!current) return false;
+      const parts = proof.state === "merged" ? MERGED_PARTS : LOCAL_MERGE_PARTS;
+      const observed = deliveryTransition(db, seen, parts, "local_merge_proof", "daemon", now(), (current) => {
         recordMergeResult(db, current, merge.id, proof.state === "merged" ? proof : { state: "unproven", detail: `${proof.detail}; the daemon stopped before the merge's result was known` }, now());
         return proof.state === "merged";
       });
-      if (landed) this.deps.cleanup(run.id);
+      const delivered = deliveredOf(db, run.task_id);
+      if (!observed.applied && proof.state === "merged" && delivered && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, proof.sha, "daemon");
+      if (observed.applied && observed.value) this.deps.cleanup(run.id);
     }
   }
 
@@ -264,7 +299,8 @@ export class DeliveryWatcher {
     );
     for (const run of runs) {
       if (this.stopped || !existsSync(run.worktree_path)) continue;
-      const status = await readNmStatus(noMistakes, run.worktree_path, this.deps.nmTimeoutMs());
+      const seen = deliveryBasis(db, run.id);
+      const status = await (this.deps.readNmStatus ?? readNmStatus)(noMistakes, run.worktree_path, this.deps.nmTimeoutMs());
       if (status.code !== 0) {
         this.nmFailures++;
         if (this.nmFailures >= NM_DOWN_AFTER) tx(db, () => noteNmOutage(db, true, status.text.trim().split("\n")[0]?.slice(0, 120) || `exit ${status.code}`, now()));
@@ -273,12 +309,9 @@ export class DeliveryWatcher {
       if (this.nmFailures > 0) tx(db, () => noteNmOutage(db, false, "", now()));
       this.nmFailures = 0;
       const nm = parseNmStatus(status.text);
-      const observed = tx(db, () => {
-        const current = getRunWithPolicy(db, run.id);
-        return current ? applyNmObservation(db, current, nm, this.deps.validationStuckMs(), now()) : null;
-      });
+      const observed = deliveryTransition(db, seen, NM_PARTS, "nm_observation", "nomistakes", now(), (current) => applyNmObservation(db, current, nm, this.deps.validationStuckMs(), now()));
       // The poll asks the watchdog; the restart guard's read only refreshes the status.
-      if (observed && !leasedOnly) await this.watchCiWait(run, nm, observed.ciSince);
+      if (observed.applied && !leasedOnly) await this.watchCiWait(run, nm, observed.value.ciSince);
     }
   }
 
@@ -298,19 +331,20 @@ export class DeliveryWatcher {
     tx(db, () => closeCiWaits(db, run, "a new pipeline run", now(), nm.id));
     const alert = this.deps.ciWaitAlertMin();
     if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return;
+    const seen = deliveryBasis(db, run.id);
     const checks = await this.prCheckCount(nm.pr);
     if (checks === null || checks > 0) return;
     const project = getProject(db, run.project_id);
     if (!project) return;
     const facts = await readBranchFacts(this.deps.git, run.worktree_path, project.default_branch);
-    const opened = tx(db, () => {
-      const current = getRunWithPolicy(db, run.id);
-      if (!current || (current.state !== "validating" && current.state !== "running")) return null;
+    const observed = deliveryTransition(db, seen, CI_WAIT_PARTS, "ci_wait", "nomistakes", now(), (current) => {
+      if (current.state !== "validating" && current.state !== "running") return null;
       if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return null;
       const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: project.default_branch }, facts, alert, now());
       yieldToCiWait(db, current, nm, now());
       return id;
     });
+    const opened = observed.applied ? observed.value : null;
     if (opened) this.deps.log(`delivery watcher: ${run.task_id} waited ${minutes} min on CI with no checks; asked the user (${opened})`);
   }
 
