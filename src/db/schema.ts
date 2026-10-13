@@ -550,6 +550,25 @@ CREATE UNIQUE INDEX job_one_live ON job_leases(pool, kind, job_id) WHERE release
 CREATE INDEX job_live ON job_leases(pool) WHERE released_at IS NULL;
 `;
 
+/**
+ * Wait explanations (docs/notes/2026-10-12-next-steps-md-wz.md): one row per decision that holds,
+ * refuses or resumes a run (a dialog, a capacity refusal, a resume), with the rule, its reason, the
+ * facts it decided on and when each was observed, and who or what can end the wait. Written only
+ * when the explanation changes; open while the wait lasts. `operation` is reserved for package 1's
+ * operation identity and stays NULL until that exists. Databases from before start empty.
+ */
+const EXPLANATIONS_SQL = /* sql */ `
+CREATE TABLE explanations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL, task_id TEXT NOT NULL, stage TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('dialog','capacity','resume')),
+  rule TEXT NOT NULL, reason TEXT NOT NULL, facts TEXT NOT NULL, unblock TEXT NOT NULL,
+  signature TEXT NOT NULL, item_id TEXT, operation TEXT, event_seq INTEGER NOT NULL,
+  opened_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT);
+CREATE INDEX explanations_open ON explanations(run_id) WHERE closed_at IS NULL;
+CREATE INDEX explanations_task ON explanations(task_id, id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -572,6 +591,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 19, name: "leader-repin", sql: LEADER_REPIN_SQL },
   { version: 20, name: "gate-channel", sql: GATE_CHANNEL_SQL },
   { version: 21, name: "job-leases", sql: JOB_LEASES_SQL },
+  { version: 22, name: "explanations", sql: EXPLANATIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

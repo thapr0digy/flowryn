@@ -1,6 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
+import { closeItemExplanations } from "./explanations.ts";
 
 export type Lane = "P0" | "P1" | "P2";
 export type ItemClass = "actionable" | "info";
@@ -216,13 +217,15 @@ export function findOpenRunItem(db: Db, kind: ItemKind, runId: string): ItemRow 
     .get(kind, runId) as ItemRow | null;
 }
 
-/** Resolve a run's open items of the given kinds (all kinds when none are named). */
+/** Resolve a run's open items of the given kinds (all kinds when none are named), and close the wait explanations they carried. */
 export function resolveRunItems(db: Db, runId: string, kinds: readonly ItemKind[] | null, resolvedBy: string, now = Date.now()): number {
   if (kinds && kinds.length === 0) return 0;
   const filter = kinds ? `AND kind IN (${kinds.map((_, i) => `?${i + 4}`).join(", ")})` : "";
-  return db
-    .query(`UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE run_id = ?1 AND state IN ('open','presented') ${filter}`)
-    .run(runId, resolvedBy, now, ...(kinds ?? [])).changes;
+  const resolved = db
+    .query(`UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE run_id = ?1 AND state IN ('open','presented') ${filter} RETURNING id`)
+    .all(runId, resolvedBy, now, ...(kinds ?? [])) as { id: string }[];
+  closeItemExplanations(db, resolved.map((r) => r.id), resolvedBy, now);
+  return resolved.length;
 }
 
 export function openItems(db: Db): ItemRow[] {
