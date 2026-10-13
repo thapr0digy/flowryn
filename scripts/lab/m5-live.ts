@@ -32,6 +32,7 @@ import type { Reply } from "../../src/api/envelope.ts";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
 import { contractPrefix, removeOwnWorktrees } from "../../src/contracts/cleanup.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
@@ -652,9 +653,9 @@ async function main(): Promise<number> {
   // The contract gate: dispatch refuses a harness version with no passing contract run.
   if (values["seed-contracts"]) {
     const db = openDb(dbPath);
-    const versions: [string, string][] = [["pi", Bun.spawnSync([PI_BIN, "--version"]).stdout.toString().trim()], ["claude", /(\d+\.\d+\.\d+)/.exec(Bun.spawnSync([which("claude"), "--version"]).stdout.toString())?.[1] ?? "?"]];
+    const versions: ["pi" | "claude", string][] = [["pi", Bun.spawnSync([PI_BIN, "--version"]).stdout.toString().trim()], ["claude", /(\d+\.\d+\.\d+)/.exec(Bun.spawnSync([which("claude"), "--version"]).stdout.toString())?.[1] ?? "?"]];
     tx(db, () => {
-      for (const [h, v] of versions) db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, passed_at, report_path) VALUES (?1, ?2, ?3, 'seeded by m5-live --seed-contracts')").run(h, v, Date.now());
+      for (const [h, v] of versions) db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, revision, passed_at, report_path) VALUES (?1, ?2, ?3, ?4, 'seeded by m5-live --seed-contracts')").run(h, v, contractRevision(h), Date.now());
     });
     db.close();
     log(`contracts seeded (not run): ${JSON.stringify(versions)}`);
@@ -668,7 +669,7 @@ async function main(): Promise<number> {
       const proc = Bun.spawn(["script", "-q", "/dev/null", BUN, MAIN, ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       const [out, , code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
       writeFileSync(join(home, `contract-${harness}.log`), out);
-      const recorded = withDb((db) => db.query("SELECT version FROM harness_contracts WHERE harness = ?1").get(harness) as { version: string } | null);
+      const recorded = withDb((db) => db.query("SELECT version FROM harness_contracts WHERE harness = ?1 AND revision = ?2").get(harness, contractRevision(harness)) as { version: string } | null);
       record("contracts", harness, recorded !== null, recorded ? `${harness} ${recorded.version} passed and was recorded` : `not recorded (exit ${code}); see ${home}/contract-${harness}.log`, started);
     }
   }

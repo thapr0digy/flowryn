@@ -13,10 +13,13 @@ import { DEFAULT_POLICY_MODE, policyMode } from "../../src/config/policy.ts";
 import { configSectionProblems } from "../../src/config/effective.ts";
 import { checkLeaderReport, recordGrant, type GrantInput } from "../../src/contracts/grant.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
+import { BASELINE_REVISION, contractRevision } from "../../src/contracts/revision.ts";
 import { CONTRACT_VERBS } from "../../src/contracts/verbs.ts";
 import { inertRestart } from "../../src/daemon/restart.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
-import { policyCheck } from "../../src/doctor/doctor.ts";
+import { contractCheck, policyCheck } from "../../src/doctor/doctor.ts";
+import { launchProfile, parseHerdrVersion } from "../../src/contracts/context.ts";
+import { recordedCheck } from "../../src/cli/commands/setup.ts";
 import { Journal } from "../../src/journal/journal.ts";
 import { BacklogWatcher } from "../../src/journal/watcher.ts";
 import { inertLavish } from "../../src/lavish/services.ts";
@@ -29,6 +32,8 @@ import { writeLeaderFiles } from "../../src/bridges/files.ts";
 import { configStaticLayers } from "../../src/policy/static.ts";
 
 const INSTALLED = "ab12cd34ef56";
+const CLAUDE_REVISION = contractRevision("claude");
+const CONTEXT = { platform: "darwin-arm64 25.3.0", herdr: "0.7.5", launch_profile: "model=default effort=default permission_mode=auto pretrust=register" };
 const PR_BUILD = "0f0f0f0f0f0f";
 
 function refusal(input: GrantInput): string | null {
@@ -160,7 +165,7 @@ afterEach(() => {
 
 /** A report as `flowryn doctor --contracts` writes it. */
 function writeReport(stamp: { mode: "record" | "verify-only"; build: string | null }, overrides: Record<string, unknown> = {}): string {
-  const result = { harness: "claude" as const, version: "2.1.300", passed: true, steps: [], scratch: "/tmp/x", ...overrides };
+  const result = { harness: "claude" as const, version: "2.1.300", revision: CLAUDE_REVISION, context: CONTEXT, passed: true, steps: [], scratch: "/tmp/x", ...overrides };
   return dataDirReport(config, result as never, { ...stamp, by: "leader" });
 }
 
@@ -186,12 +191,14 @@ function recordedItems(): { line: string; class: string; lane: string }[] {
 }
 
 describe("contracts.record and contracts.may_record", () => {
-  test("your own terminal records as before: no build, no report check, no item", async () => {
+  test("your own terminal records as before: no build, no report check, no item; a report that names no revision records the baseline", async () => {
     useConfig("");
     const reply = await record(null, { report: "/anywhere.json" }, "tty");
-    expect(reply).toMatchObject({ ok: true, data: { recorded: true, by: "human" } });
+    expect(reply).toMatchObject({ ok: true, data: { recorded: true, by: "human", revision: BASELINE_REVISION, current: BASELINE_REVISION === CLAUDE_REVISION, required_revision: CLAUDE_REVISION } });
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
-    expect(passedEvents()).toEqual([{ harness: "claude", version: "2.1.300", report: "/anywhere.json", by: "human", build: null, session: null }]);
+    expect(passedEvents()).toEqual([
+      { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, report: "/anywhere.json", by: "human", build: null, session: null, platform: null, herdr_version: null, launch_profile: null },
+    ]);
     expect(recordedItems()).toEqual([]);
     expect((await mayRecord(null, {}, "tty")).ok).toBe(true);
   });
@@ -223,9 +230,22 @@ describe("contracts.record and contracts.may_record", () => {
     expect((await mayRecord(leaderToken, { build: INSTALLED })).data).toEqual({ may_record: true, by: "leader" });
     const report = writeReport({ mode: "record", build: INSTALLED });
     const reply = await record(leaderToken, { report, build: INSTALLED });
-    expect(reply).toMatchObject({ ok: true, data: { recorded: true, by: "leader" } });
+    expect(reply).toMatchObject({ ok: true, data: { recorded: true, by: "leader", revision: CLAUDE_REVISION, current: true } });
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
-    expect(passedEvents()).toEqual([{ harness: "claude", version: "2.1.300", report, by: "leader", build: INSTALLED, session: "L1" }]);
+    expect(passedEvents()).toEqual([
+      {
+        harness: "claude",
+        version: "2.1.300",
+        revision: CLAUDE_REVISION,
+        report,
+        by: "leader",
+        build: INSTALLED,
+        session: "L1",
+        platform: CONTEXT.platform,
+        herdr_version: CONTEXT.herdr,
+        launch_profile: CONTEXT.launch_profile,
+      },
+    ]);
     expect(recordedItems()).toEqual([{ line: `claude 2.1.300 passed, recorded by the leader (build ${INSTALLED})`, class: "info", lane: "P1" }]);
     const briefing = composeBriefing(db, { session: null, now: Date.now(), morningHour: 5, ageMs: 0, markMorning: false });
     expect(briefing.text).toContain(`claude 2.1.300 passed, recorded by the leader (build ${INSTALLED}).`);
@@ -256,6 +276,8 @@ describe("contracts.record and contracts.may_record", () => {
       [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { passed: false }) }), "not a passing run"],
       [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { version: "2.1.299" }) }), "is for claude 2.1.299"],
       [() => ({ report: writeReport({ mode: "record", build: PR_BUILD }) }), `written by build ${PR_BUILD}`],
+      // The daemon's own build always proves its own revision; a report claiming another does not do.
+      [() => ({ report: writeReport({ mode: "record", build: INSTALLED }, { revision: CLAUDE_REVISION + 1 }) }), `proves contract revision ${CLAUDE_REVISION + 1}, not this daemon's revision ${CLAUDE_REVISION}`],
     ];
     for (const [args, why] of cases) {
       const reply = await record(leaderToken, { build: INSTALLED, ...args() });
@@ -273,6 +295,87 @@ describe("contracts.record and contracts.may_record", () => {
   });
 });
 
+function contractRows(): Record<string, unknown>[] {
+  return db.query("SELECT harness, version, revision, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY revision").all() as Record<string, unknown>[];
+}
+
+describe("contract revision on a record", () => {
+  test("a record carries the revision and the platform, Herdr version and launch profile its report names", async () => {
+    useConfig("");
+    const report = writeReport({ mode: "record", build: INSTALLED });
+    const reply = await record(null, { report, build: INSTALLED }, "tty");
+    expect(reply.data).toMatchObject({ revision: CLAUDE_REVISION, current: true, required_revision: CLAUDE_REVISION });
+    expect(contractRows()).toEqual([
+      { harness: "claude", version: "2.1.300", revision: CLAUDE_REVISION, report_path: report, platform: CONTEXT.platform, herdr_version: CONTEXT.herdr, launch_profile: CONTEXT.launch_profile },
+    ]);
+  });
+
+  test("a report for another harness version names nothing for this one: your own terminal's record is at the baseline, with no context", async () => {
+    useConfig("");
+    const report = writeReport({ mode: "record", build: INSTALLED }, { version: "2.1.299", revision: CLAUDE_REVISION + 1 });
+    expect((await record(null, { report }, "tty")).data).toMatchObject({ revision: BASELINE_REVISION });
+    expect(contractRows()).toEqual([expect.objectContaining({ revision: BASELINE_REVISION, platform: null, herdr_version: null, launch_profile: null })]);
+  });
+
+  test("a report written before revisions is at the baseline: what every pass then proved", async () => {
+    useConfig("");
+    const report = writeReport({ mode: "record", build: INSTALLED }, { revision: undefined, context: undefined });
+    expect((await record(null, { report }, "tty")).data).toMatchObject({ revision: BASELINE_REVISION, current: BASELINE_REVISION === CLAUDE_REVISION });
+  });
+
+  test("a pass at another revision never overwrites the current one: each (harness, version, revision) is its own record", async () => {
+    useConfig("");
+    const current = writeReport({ mode: "record", build: INSTALLED });
+    await record(null, { report: current }, "tty");
+    // A PR build with a bumped revision, run in your terminal, records the same version afterwards.
+    await Bun.sleep(2);
+    const other = writeReport({ mode: "record", build: PR_BUILD }, { revision: CLAUDE_REVISION + 1 });
+    expect((await record(null, { report: other }, "tty")).data).toMatchObject({ revision: CLAUDE_REVISION + 1, current: false });
+    expect(contractRows().map((r) => [r.revision, r.report_path])).toEqual([
+      [CLAUDE_REVISION, current],
+      [CLAUDE_REVISION + 1, other],
+    ]);
+  });
+});
+
+describe("contract revision: what each surface says", () => {
+  test("doctor: ok only at this build's revision; a pass at another one is named as stale", () => {
+    const day = Date.UTC(2026, 9, 12);
+    expect(contractCheck("claude", "2.1.300", [{ revision: CLAUDE_REVISION, passed_at: day }])).toEqual({
+      check: "contract claude",
+      status: "ok",
+      detail: `2.1.300 passed 2026-10-12 at contract revision ${CLAUDE_REVISION}`,
+    });
+    expect(contractCheck("claude", "2.1.300", [{ revision: CLAUDE_REVISION + 1, passed_at: day }])).toEqual({
+      check: "contract claude",
+      status: "warn",
+      detail: `claude 2.1.300 passed only at contract revision ${CLAUDE_REVISION + 1}, not revision ${CLAUDE_REVISION}, so dispatch refuses it: flowryn doctor --contracts --harness claude`,
+    });
+    expect(contractCheck("claude", "2.1.300", []).detail).toBe("no passing contract run for claude 2.1.300, so dispatch refuses it: flowryn doctor --contracts --harness claude");
+  });
+
+  test("doctor --contracts: a record at another revision than the daemon's is a warning, not ok", () => {
+    expect(recordedCheck("claude", "2.1.300", "/r.json", { current: true, revision: CLAUDE_REVISION })).toMatchObject({ status: "ok", detail: "2.1.300 passed and was recorded; report /r.json" });
+    expect(recordedCheck("claude", "2.1.300", "/r.json", { current: false, revision: CLAUDE_REVISION, required_revision: CLAUDE_REVISION + 1 })).toMatchObject({
+      status: "warn",
+      detail: expect.stringContaining(`recorded at contract revision ${CLAUDE_REVISION}, but the daemon checks revision ${CLAUDE_REVISION + 1}, so dispatch still refuses it`),
+    });
+    // An older daemon's reply has no `current`: it gated by version alone, so the record counts.
+    expect(recordedCheck("claude", "2.1.300", "/r.json", { recorded: true }).status).toBe("ok");
+  });
+
+  test("context: the Herdr version from its --version line, and the launch profile the suite's worker gets", () => {
+    expect(parseHerdrVersion("herdr 0.7.5\n")).toBe("0.7.5");
+    expect(parseHerdrVersion("herdr v0.8.0-rc.1")).toBe("0.8.0-rc.1");
+    expect(parseHerdrVersion("command not found")).toBeNull();
+    const claude = parseConfig('[workers.claude]\nmodel = "opus"\npermission_mode = "auto"\nextra_args = ["--verbose"]\n', "/h");
+    expect(launchProfile(claude, "claude", null, undefined)).toBe("model=opus effort=default permission_mode=auto pretrust=register extra_args=--verbose");
+    expect(launchProfile(claude, "claude", "haiku", undefined)).toStartWith("model=haiku ");
+    expect(launchProfile(claude, "pi", null, "scripted")).toBe("scripted");
+    expect(launchProfile(claude, "pi", "gpt", "real")).toBe("real model=gpt");
+  });
+});
+
 describe("contract reports", () => {
   test("a verify-only report says so in its name and its body; a recording one carries mode, build and caller", () => {
     useConfig("");
@@ -281,7 +384,7 @@ describe("contract reports", () => {
     expect(JSON.parse(readFileSync(verify, "utf8"))).toMatchObject({ mode: "verify-only", build: PR_BUILD, by: "leader", passed: true });
     const rec = writeReport({ mode: "record", build: INSTALLED });
     expect(basename(rec)).not.toContain("verify-only");
-    expect(JSON.parse(readFileSync(rec, "utf8"))).toMatchObject({ mode: "record", build: INSTALLED });
+    expect(JSON.parse(readFileSync(rec, "utf8"))).toMatchObject({ mode: "record", build: INSTALLED, revision: CLAUDE_REVISION, context: CONTEXT });
   });
 
   test("checkLeaderReport resolves symlinks: a link in data_dir/contracts to a file elsewhere is refused", () => {
@@ -290,7 +393,7 @@ describe("contract reports", () => {
     writeFileSync(outside, readFileSync(writeReport({ mode: "record", build: INSTALLED }), "utf8"));
     const link = join(config.data_dir, "contracts", "link.json");
     symlinkSync(outside, link);
-    expect(() => checkLeaderReport(config.data_dir, link, { harness: "claude", version: "2.1.300", build: INSTALLED })).toThrow("is not in");
+    expect(() => checkLeaderReport(config.data_dir, link, { harness: "claude", version: "2.1.300", build: INSTALLED, revision: CLAUDE_REVISION })).toThrow("is not in");
   });
 
   test("checkLeaderReport names the missing contracts directory, not the report, when data_dir/contracts is gone", () => {
@@ -299,8 +402,8 @@ describe("contract reports", () => {
     writeFileSync(report, "{}");
     const contractsDir = join(config.data_dir, "contracts");
     expect(existsSync(contractsDir)).toBe(false);
-    expect(() => checkLeaderReport(config.data_dir, report, { harness: "claude", version: "2.1.300", build: INSTALLED })).toThrow(`${contractsDir} does not exist`);
-    expect(() => checkLeaderReport(config.data_dir, join(dir, "missing.json"), { harness: "claude", version: "2.1.300", build: INSTALLED })).toThrow(`${join(dir, "missing.json")} does not exist`);
+    expect(() => checkLeaderReport(config.data_dir, report, { harness: "claude", version: "2.1.300", build: INSTALLED, revision: CLAUDE_REVISION })).toThrow(`${contractsDir} does not exist`);
+    expect(() => checkLeaderReport(config.data_dir, join(dir, "missing.json"), { harness: "claude", version: "2.1.300", build: INSTALLED, revision: CLAUDE_REVISION })).toThrow(`${join(dir, "missing.json")} does not exist`);
   });
 });
 

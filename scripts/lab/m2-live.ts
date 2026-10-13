@@ -315,7 +315,7 @@ async function main(): Promise<number> {
   if (phases.includes("contracts")) await contracts();
   if (phases.some((p) => p !== "contracts")) {
     const db = openDb(join(home, "state", "flowryn.db"), { readonly: true });
-    const passed = db.query("SELECT harness, version FROM harness_contracts").all();
+    const passed = db.query("SELECT harness, version, revision FROM harness_contracts").all();
     db.close();
     log(`recorded contract passes: ${JSON.stringify(passed)}`);
   }

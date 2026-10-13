@@ -8,6 +8,9 @@ import { backupIfDue, listBackups, BACKUPS_KEPT } from "../../src/db/backup.ts";
 import { MIGRATIONS, type Migration } from "../../src/db/schema.ts";
 import { openItem, resolveItems, findOpenItem, openItems } from "../../src/attention/items.ts";
 import { positionOf, runWorkflow } from "../../src/lifecycle/stages.ts";
+import { parseConfig } from "../../src/config/config.ts";
+import { BASELINE_REVISION } from "../../src/contracts/revision.ts";
+import { checkHarness } from "../../src/lifecycle/harness-gate.ts";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -46,6 +49,11 @@ const DESIGN_TABLES = [
   "notifications",
   "harness_contracts",
 ];
+
+/** The installed versions the migration 23 case checks against. */
+async function installedVersion(harness: string): Promise<string> {
+  return harness === "claude" ? "2.1.300" : "0.90.0";
+}
 
 describe("migrations", () => {
   test("a fresh database gets every section 13 table, in WAL mode with foreign keys", () => {
@@ -292,16 +300,39 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("operations: migration 23 adds an empty operations table to a database in use; a run left mid-launch keeps its row for recovery; one open operation per run", () => {
+  test("contract revision: migration 23 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 22));
+    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([23]);
+    expect(db.query("SELECT harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY harness").all()).toEqual([
+      { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, passed_at: 5, report_path: "/r.json", platform: null, herdr_version: null, launch_profile: null },
+      { harness: "pi", version: "0.90.0", revision: BASELINE_REVISION, passed_at: 6, report_path: null, platform: null, herdr_version: null, launch_profile: null },
+    ]);
+    // The upgrade refuses nothing: the gate at revision 1 verifies the carried-over passes; only a bump to 2 makes them stale.
+    const config = parseConfig('[tools]\nclaude = "/x/claude"\npi = "/x/pi"\n', "/h");
+    const baseline = { claude: BASELINE_REVISION, pi: BASELINE_REVISION };
+    expect(await checkHarness(db, config, "claude", installedVersion, baseline)).toMatchObject({ state: "verified", revision: BASELINE_REVISION });
+    expect(await checkHarness(db, config, "pi", installedVersion, baseline)).toMatchObject({ state: "verified" });
+    expect(await checkHarness(db, config, "claude", installedVersion, { ...baseline, claude: 2 })).toMatchObject({ state: "unverified", revision: 2, stale: [BASELINE_REVISION] });
+    db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 7)");
+    expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 8)")).toThrow("UNIQUE");
+    expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.301', 0, 8)")).toThrow("CHECK");
+    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([]);
+    expect(integrityProblems(db)).toEqual([]);
+    db.close();
+  });
+
+  test("operations: migration 24 adds an empty operations table to a database in use; a run left mid-launch keeps its row for recovery; one open operation per run", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 23));
     db.exec(`
       INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes');
       INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('web-a1', 'web', 'ship', 'no-mistakes', 0, 'fix', 1);
       INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, pane_id, worktree_path, branch, base_sha, token_hash, started_at, updated_at, launched_at)
         VALUES ('r1', 'web-a1', 'claude', '2.1.281', 'launching', 'starting', 'fix', 'build', 'w1:p1', '/tmp/wt', 'fm/x', 'abc123', 'h', 1, 1, 5);
     `);
-    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([23]);
+    expect(migrate(db, MIGRATIONS.slice(0, 24))).toEqual([24]);
     // Nothing is invented: the reconciler reads the interrupted launch from launched_at and the pane.
     expect(db.query("SELECT COUNT(*) AS n FROM operations").get()).toEqual({ n: 0 });
     expect(db.query("SELECT state, pane_id, launched_at, proc_pid FROM runs").get()).toEqual({ state: "launching", pane_id: "w1:p1", launched_at: 5, proc_pid: null });
@@ -312,7 +343,7 @@ describe("migrations", () => {
     add("o3", "failed");
     expect(() => add("o4", "running")).toThrow("CHECK");
     expect(() => add("o5", "failed", "deliver")).toThrow("CHECK");
-    expect(migrate(db, MIGRATIONS.slice(0, 23))).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 24))).toEqual([]);
     db.close();
   });
 });

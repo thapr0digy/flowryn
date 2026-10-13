@@ -95,7 +95,7 @@ interface DaemonOptions {
   /** The cancel's stop. Default: the worker exits at once. */
   exitRun?(runId: string): Promise<Verified>;
   processes?(paneId: string): Promise<PaneProcesses | null>;
-  harnessGate?(): Promise<{ harness: "claude"; state: "verified"; version: string }>;
+  harnessGate?(): Promise<{ harness: "claude"; state: "verified"; version: string; revision: number }>;
   launching?: Set<string>;
   /** In place of the cancel's driver: a daemon that dies before its settle drives the operation. */
   driveCancel?(id: string): Promise<never>;
@@ -520,7 +520,7 @@ describe("a requested launch or resume no launcher claimed", () => {
     deadRun();
     tx(db, () => requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "reconciler", source: "reconciler", now: Date.now() }));
     const gate = barrier();
-    const d = daemon({ harnessGate: () => gate.hold(() => ({ harness: "claude", state: "verified", version: "1" }) as const) });
+    const d = daemon({ harnessGate: () => gate.hold(() => ({ harness: "claude", state: "verified", version: "1", revision: 1 }) as const) });
     const pass = d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     await gate.reached;
     tx(db, () => {

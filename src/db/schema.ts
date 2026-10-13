@@ -555,7 +555,7 @@ CREATE INDEX job_live ON job_leases(pool) WHERE released_at IS NULL;
  * refuses or resumes a run (a dialog, a capacity refusal, a resume), with the rule, its reason, the
  * facts it decided on and when each was observed, and who or what can end the wait. Written only
  * when the explanation changes; open while the wait lasts. `operation` names the launch, resume or
- * cancel the explanation belongs to (migration 23), when it belongs to one. Databases from before start empty.
+ * cancel the explanation belongs to (migration 24), when it belongs to one. Databases from before start empty.
  */
 const EXPLANATIONS_SQL = /* sql */ `
 CREATE TABLE explanations (
@@ -567,6 +567,26 @@ CREATE TABLE explanations (
   opened_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT);
 CREATE INDEX explanations_open ON explanations(run_id) WHERE closed_at IS NULL;
 CREATE INDEX explanations_task ON explanations(task_id, id);
+`;
+
+/**
+ * Contract revision (docs/notes/2026-10-12-next-steps-md-ez.md): a pass is identified by harness,
+ * version and the adapter/contract compatibility revision it proved, with the platform, Herdr version
+ * and launch profile it ran on. Passes recorded before this carry over as revision 1, the baseline:
+ * revision 1 is defined as the adapter behaviour when revisions were introduced, which is what they
+ * proved (this migration's change proves no new behaviour), so an upgrade refuses nothing. Only a
+ * later bump of CONTRACT_REVISIONS makes them stale.
+ */
+const CONTRACT_REVISION_SQL = /* sql */ `
+CREATE TABLE harness_contracts_v23 (harness TEXT NOT NULL, version TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  passed_at INTEGER NOT NULL, report_path TEXT,
+  platform TEXT, herdr_version TEXT, launch_profile TEXT,
+  PRIMARY KEY (harness, version, revision));
+INSERT INTO harness_contracts_v23 (harness, version, revision, passed_at, report_path)
+  SELECT harness, version, 1, passed_at, report_path FROM harness_contracts;
+DROP TABLE harness_contracts;
+ALTER TABLE harness_contracts_v23 RENAME TO harness_contracts;
 `;
 
 /**
@@ -616,7 +636,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 20, name: "gate-channel", sql: GATE_CHANNEL_SQL },
   { version: 21, name: "job-leases", sql: JOB_LEASES_SQL },
   { version: 22, name: "explanations", sql: EXPLANATIONS_SQL },
-  { version: 23, name: "operations", sql: OPERATIONS_SQL },
+  { version: 23, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
+  { version: 24, name: "operations", sql: OPERATIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

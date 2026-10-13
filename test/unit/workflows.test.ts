@@ -6,6 +6,7 @@ import { FlowrynError } from "../../src/api/errors.ts";
 import { resolveRunItems } from "../../src/attention/items.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleBlock, workflowConfigProblems, workflowFor, workflowsConfig, type WorkflowDef } from "../../src/config/workflows.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
 import { escalateOperation } from "../../src/lifecycle/operations.ts";
@@ -399,7 +400,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
         ).run(run, def, 4100 + Number(run.slice(1)), `old-${run}`);
         grantLeases(db, run, run.replace("r", "t"), "build", ["worker"], caps, 1);
       });
-    tx(db, () => db.query("INSERT INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 0)").run());
+    tx(db, () => db.query("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '1', ?1, 0)").run(contractRevision("claude")));
     for (const run of runs) wait(run);
     const launches: string[] = [];
     const launchOps: string[] = [];
