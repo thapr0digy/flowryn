@@ -32,6 +32,8 @@ export interface DeliveryWatcherDeps {
   webUrl(): string;
   git: GitRunner;
   noMistakes(): string | null;
+  /** The status read itself (readNmStatus); tests pause it on a barrier. */
+  readNmStatus?: typeof readNmStatus;
   nmTimeoutMs(): number;
   /** A validation slot held this long with no progress opens a validation_stuck P1 ([sched] validation_stuck_ms). */
   validationStuckMs(): number;
@@ -262,7 +264,7 @@ export class DeliveryWatcher {
     for (const run of runs) {
       if (this.stopped || !existsSync(run.worktree_path)) continue;
       const seen = deliveryBasis(db, run.id);
-      const status = await readNmStatus(noMistakes, run.worktree_path, this.deps.nmTimeoutMs());
+      const status = await (this.deps.readNmStatus ?? readNmStatus)(noMistakes, run.worktree_path, this.deps.nmTimeoutMs());
       if (status.code !== 0) {
         this.nmFailures++;
         if (this.nmFailures >= NM_DOWN_AFTER) tx(db, () => noteNmOutage(db, true, status.text.trim().split("\n")[0]?.slice(0, 120) || `exit ${status.code}`, now()));
