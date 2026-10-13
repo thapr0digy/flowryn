@@ -2,6 +2,7 @@ import type { Fact, Unblock } from "../attention/explanations.ts";
 import type { HostCheckConfig } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { harnessFacts, harnessUnblock, harnessWaitReason, type AutoAttempt, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import type { OperationRow } from "../lifecycle/operations.ts";
 import { liveCounts } from "./pools.ts";
 import { quotaState } from "./quota.ts";
 import type { HostState } from "./scheduler.ts";
@@ -107,6 +108,18 @@ export function poolsRefusal(db: Db, caps: Record<string, number>, full: readonl
     unblock: [
       { by: "flowryn", action: `grants when a slot in ${full.join(", ")} frees (a holder's stage, run or job ends)` },
       { by: "captain", action: `raise [capacity] ${full[0]} in config.toml` },
+    ],
+  };
+}
+
+export function operationModeRefusal(op: Pick<OperationRow, "id" | "kind" | "mode" | "task_id" | "created_at">, launch: string): Refusal {
+  return {
+    rule: "capacity.operation_mode",
+    reason: `its open ${op.kind} ${op.id} is a ${op.mode ?? "modeless"} launch, not the ${launch} launch the grant would start`,
+    facts: [{ name: "operation", value: `${op.id} (${op.kind}, ${op.mode ?? "no mode"})`, at: op.created_at }],
+    unblock: [
+      { by: "captain", action: `flowryn resume ${op.task_id}` },
+      { by: "captain", action: `flowryn cancel ${op.task_id}` },
     ],
   };
 }

@@ -24,6 +24,7 @@
  *   FAKE: no-start                   never report worker-start (a trust wedge)
  *   FAKE: cwd <path>                 report this cwd at worker-start (isolation test)
  *   FAKE: ignore-steers              never acknowledge a steer
+ *   FAKE: ignore-term                ignore SIGTERM, so only the exit's SIGKILL after the grace stops it
  *   FAKE: commit <file> <text...>    write <file> in the worktree and commit it
  *   FAKE: scratch <file> <text...>   write <file> in the worktree and leave it uncommitted
  *   FAKE: push                       git push origin HEAD (the run branch)
@@ -194,7 +195,9 @@ process.on("SIGINT", () => {
   appendFileSync(transcript, JSON.stringify({ type: "user", message: "[Request interrupted by user for tool use]" }) + "\n");
   abortSleep?.();
 });
-process.on("SIGTERM", () => process.exit(0));
+process.on("SIGTERM", () => {
+  if (!steps.includes("ignore-term")) process.exit(0);
+});
 
 /** A tool call's wait; an interrupt that landed before it started still ends it, as Pi's abort ends the whole run. */
 function sleep(ms: number): Promise<void> {

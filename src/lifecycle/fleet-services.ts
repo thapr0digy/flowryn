@@ -9,6 +9,7 @@ import { pinnedLink, unpinForScript } from "../daemon/caller-binary.ts";
 import { ensureDir } from "../util/fsx.ts";
 import { SteerBus } from "./steers.ts";
 import { inertUrgent, type UrgentServices } from "./urgent.ts";
+import type { CancelOutcome } from "./operation-recovery.ts";
 
 /**
  * What the M2 verbs need from the running daemon beyond the database: the
@@ -19,12 +20,14 @@ export interface FleetServices {
   runtime(): HerdrRuntime | null;
   bus: SteerBus;
   timing(): Timing;
-  /** Start or resume a run in the background. */
-  launch(runId: string, mode: "fresh" | "resume"): void;
+  /** Start or resume a run in the background, for the named requested operation (src/lifecycle/operations.ts). */
+  launch(runId: string, mode: "fresh" | "resume", operation?: string): void;
   isLaunching(runId: string): boolean;
   flowrynBin(): Promise<string>;
   harnessVersion(harness: HarnessId, binary: string): Promise<string | null>;
   exitRun(runId: string): Promise<Verified>;
+  /** Drive a cancel operation to its end: one attempt shared by every caller (src/lifecycle/operation-recovery.ts). */
+  driveCancel(operation: string): Promise<CancelOutcome>;
   interruptRun(runId: string, waitMs?: number): Promise<Verified>;
   /** Ask the reconciler to look at one run, or at every run, soon. */
   reconcile(runId?: string): void;
@@ -47,6 +50,7 @@ export function inertFleet(overrides: Partial<FleetServices> = {}): FleetService
     flowrynBin: async () => "/usr/bin/false",
     harnessVersion: async () => null,
     exitRun: async () => ({ ok: false, evidence: "timeout", detail: "no runtime" }),
+    driveCancel: async () => ({ ok: false, phase: "failed", evidence: "timeout", detail: "no runtime" }),
     interruptRun: async () => ({ ok: false, evidence: "timeout", detail: "no runtime" }),
     reconcile: () => {},
     turnEndGuard: () => true,

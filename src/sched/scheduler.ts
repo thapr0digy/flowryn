@@ -21,7 +21,8 @@ import { fullPools, OverCapacity } from "./pools.ts";
 import { probeQuota, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
 import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
-import { harnessRefusalOf, hostRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
+import { ensureLaunchOperation, getOperation, heldByEscalation, openOperation } from "../lifecycle/operations.ts";
+import { harnessRefusalOf, hostRefusal, operationModeRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
 
 /**
  * The scheduler (design sections 4 and 11): it grants stage starts against the
@@ -42,8 +43,8 @@ export interface SchedulerDeps {
   config(): FlowrynConfig;
   now(): number;
   log(message: string): void;
-  /** Start or resume a worker in the background (the launcher). */
-  launch(runId: string, mode: LaunchMode): void;
+  /** Start or resume a worker in the background (the launcher), for the named requested operation. */
+  launch(runId: string, mode: LaunchMode, operation?: string): void;
   isLaunching(runId: string): boolean;
   /** Stop the run's worker process by its recorded identity (a fresh stage worker, a relaunch); whether it is gone. */
   exitWorker(runId: string): Promise<{ ok: boolean; detail?: string }>;
@@ -250,14 +251,15 @@ export class Scheduler {
         `SELECT r.*, tp.project_id, tp.kind, tp.delivery_mode, tp.sensitive, COALESCE(p.priority, 2) AS priority
          FROM runs r JOIN task_policy tp ON tp.task_id = r.task_id LEFT JOIN projects p ON p.id = tp.project_id
          WHERE r.state NOT IN ('cleaned','failed','cancelled') AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL)
-           AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')`,
+           AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')
+           AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.run_id = r.id AND (o.phase = 'effect_issued' OR (o.kind = 'cancel' AND o.phase = 'requested')))`,
       )
       .all() as (RunWithPolicy & { priority: number })[];
     const t = now();
     // A run that no longer waits for its replacement (cancelled, failed) drops its refusal count.
     for (const runId of this.exitRefusals.keys()) if (!rows.some((run) => run.id === runId)) this.exitRefusals.delete(runId);
     return rows
-      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id) && !this.backingOff(run.id, t))
+      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id) && !this.backingOff(run.id, t) && !heldByEscalation(db, run.id))
       .map((run) => {
         const pos = positionOf(db, run, run.kind);
         return { run, pos, needs: neededPools(db, run, pos), remaining: pos.def.stages.length - 1 - pos.index, priority: run.priority, since: run.waiting_since ?? t };
@@ -300,20 +302,29 @@ export class Scheduler {
       activated = tx(db, () => {
         const fresh = getRunWithPolicy(db, c.run.id);
         if (!fresh || isTerminal(fresh.state) || (fresh.stage_state !== "waiting" && !fresh.pending_launch)) return null;
+        // A cancel or an issued launch owns the run (src/lifecycle/operations.ts): nothing is granted over it.
+        const open = openOperation(db, fresh.id);
+        if (open && (open.kind === "cancel" || open.phase !== "requested")) return null;
+        if (heldByEscalation(db, fresh.id)) return null;
+        if (open && fresh.pending_launch && open.mode !== fresh.pending_launch) return { refusal: operationModeRefusal(open, fresh.pending_launch) };
         const started = activateStage(db, config, fresh, now(), { steer });
         if (started && usage === "probe") claimProbe(db, c.run.id, now());
         if (started) closeExplanations(db, c.run.id, ["capacity", "resume"], "granted", now());
-        return started;
+        // The grant's launch is an operation from here: a daemon that stops before the launcher claims it recovers it.
+        const operation = started?.launch ? (ensureLaunchOperation(db, fresh, started.launch, "scheduler", "daemon", now())?.id ?? null) : null;
+        return started ? { ...started, operation } : null;
       });
     } catch (error) {
       if (error instanceof OverCapacity) return this.refuse(c, poolsRefusal(db, capacity.pools, fullPools(db, capacity.pools, c.needs), now()));
       throw error;
     }
     if (!activated) return false;
+    if (activated.refusal) return this.refuse(c, activated.refusal);
     if (activated.steer) this.deps.notify(c.run.id);
-    if (activated.launch === "stage") await this.freshWorker(c.run.id);
-    else if (activated.launch === "relaunch") await this.relaunchWorker(c.run.id);
-    else if (activated.launch) this.deps.launch(c.run.id, activated.launch);
+    const operation = activated.operation ?? undefined;
+    if (activated.launch === "stage") await this.freshWorker(c.run.id, operation);
+    else if (activated.launch === "relaunch") await this.relaunchWorker(c.run.id, operation);
+    else if (activated.launch) this.deps.launch(c.run.id, activated.launch, operation);
     return true;
   }
 
@@ -322,7 +333,7 @@ export class Scheduler {
    * identity, and its own session resumes in the same worktree, so its context
    * survives while its contract, task file and sandbox settings change.
    */
-  private async relaunchWorker(runId: string): Promise<void> {
+  private async relaunchWorker(runId: string, operation: string | undefined): Promise<void> {
     const { db, now } = this.deps;
     this.relaunching.add(runId);
     try {
@@ -337,7 +348,7 @@ export class Scheduler {
         const run = getRunWithPolicy(db, runId);
         appendEvent(db, { source: "daemon", kind: "run.relaunch", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null, session: run?.agent_session ?? null }, ts: now() });
       });
-      this.deps.launch(runId, "relaunch");
+      this.deps.launch(runId, "relaunch", operation);
     } finally {
       this.relaunching.delete(runId);
     }
@@ -365,7 +376,9 @@ export class Scheduler {
     tx(db, () => {
       const run = getRunWithPolicy(db, c.run.id);
       if (!run || isTerminal(run.state)) return;
-      explain(db, { run: { id: run.id, task_id: run.task_id, stage: c.pos.stage.id }, kind: "capacity", ...why, source: "daemon", now: now() });
+      // A grant that would launch a requested operation (a resume waiting for capacity) names it.
+      const operation = openOperation(db, run.id)?.id ?? null;
+      explain(db, { run: { id: run.id, task_id: run.task_id, stage: c.pos.stage.id }, kind: "capacity", ...why, operation, source: "daemon", now: now() });
     });
     return false;
   }
@@ -376,7 +389,7 @@ export class Scheduler {
    * that did not stop keeps it, its slots and its pending replacement, and the
    * next pass tries again (docs/notes/2026-10-12-next-steps-md-we.md).
    */
-  private async freshWorker(runId: string): Promise<void> {
+  private async freshWorker(runId: string, operation: string | undefined): Promise<void> {
     const { db, now } = this.deps;
     this.relaunching.add(runId);
     try {
@@ -386,6 +399,8 @@ export class Scheduler {
         return;
       }
       this.exitRefusals.delete(runId);
+      // A cancel that superseded the replacement while the old worker exited: no new session for it.
+      if (operation && getOperation(db, operation)?.phase !== "requested") return;
       tx(db, () => {
         db.query(
           `UPDATE runs SET agent_session = ?2, proc_pid = NULL, proc_start = NULL, proc_exe = NULL, worker_started_at = NULL,
@@ -395,7 +410,7 @@ export class Scheduler {
         appendEvent(db, { source: "daemon", kind: "run.fresh_worker", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null }, ts: now() });
         resolveRunItems(db, runId, ["worker_not_exited"], "run.fresh_worker", now());
       });
-      this.deps.launch(runId, "stage");
+      this.deps.launch(runId, "stage", operation);
     } finally {
       this.relaunching.delete(runId);
     }

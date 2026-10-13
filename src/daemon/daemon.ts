@@ -43,6 +43,8 @@ import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
 import { configureOwnedProcesses, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../runtime/bounded.ts";
+import { Operations } from "../lifecycle/operation-recovery.ts";
+import { adapterFor } from "../harness/registry.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
@@ -236,6 +238,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
     // This daemon owns its external commands from here (process groups and the ledger); first, end what the last one left.
+    // Before the reconciler's first pass, where launch/resume/cancel operations recover: a relaunch's
+    // `git worktree add` then never races a git the last daemon left holding the worktree's locks.
     const ownedDir = join(config.state_dir, "owned");
     await recoverOwned(database, ownedDir, log);
     configureOwnedProcesses({ dir: ownedDir, log });
@@ -304,11 +308,32 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     });
     const control: ControlDeps = { db: database, runtime: () => runtime, bus, timing, now: Date.now };
     const urgent = new UrgentPreempter({ db: database, timing, now: Date.now, runtime: () => runtime, interrupt: (runId) => interruptRun(control, runId, undefined, { recordRefusal: false }), log });
+    // Launch, resume and cancel as operations (docs/notes/2026-10-13-next-steps-md-rz.md).
+    const operations = new Operations({
+      db: database,
+      runtime: () => runtime,
+      timing,
+      now: Date.now,
+      log,
+      exitRun: (runId) => exitRun(control, runId),
+      cancelled: async (runId) => {
+        bus.forget(runId);
+        scheduler?.kick();
+        const run = getRun(database, runId);
+        if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id).catch(() => undefined);
+      },
+      matchesHarness: (harness) => {
+        const binary = resolveTool(config, harness);
+        return binary ? (p) => adapterFor(harness).matchesProcess(p, binary) : null;
+      },
+      isLaunching: (runId) => launcher.isActive(runId),
+    });
     const fleet: FleetServices = {
       runtime: () => runtime,
       bus,
       timing,
-      launch: (runId, mode) => launcher.start(runId, mode),
+      launch: (runId, mode, operation) => launcher.start(runId, mode, operation),
+      driveCancel: (operation) => operations.driveCancel(operation),
       isLaunching: (runId) => launcher.isActive(runId),
       flowrynBin: async () => workerBinary(config.state_dir),
       harnessVersion,
@@ -327,7 +352,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     reconciler = new Reconciler({
       db: database,
       runtime: () => runtime,
-      launch: (runId, mode) => launcher.start(runId, mode),
+      launch: (runId, mode, operation) => launcher.start(runId, mode, operation),
+      recoverOperation: (run, op) => operations.recover(run, op),
       isLaunching: (runId) => launcher.isActive(runId),
       bus,
       timing,
@@ -481,7 +507,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       config: () => config,
       now: Date.now,
       log,
-      launch: (runId, mode) => launcher.start(runId, mode),
+      launch: (runId, mode, operation) => launcher.start(runId, mode, operation),
       isLaunching: (runId) => launcher.isActive(runId),
       exitWorker: async (runId) => {
         const exited = await exitRun(control, runId);

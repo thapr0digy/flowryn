@@ -3,11 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
+import { resolveRunItems } from "../../src/attention/items.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleBlock, workflowConfigProblems, workflowFor, workflowsConfig, type WorkflowDef } from "../../src/config/workflows.ts";
 import { contractRevision } from "../../src/contracts/revision.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
+import { escalateOperation, requestOperation } from "../../src/lifecycle/operations.ts";
 import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
@@ -401,6 +403,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     tx(db, () => db.query("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '1', ?1, 0)").run(contractRevision("claude")));
     for (const run of runs) wait(run);
     const launches: string[] = [];
+    const launchOps: string[] = [];
     const exitCalls: string[] = [];
     let clock = 10;
     const scheduler = new Scheduler({
@@ -408,8 +411,9 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
       config: () => config,
       now: () => ++clock,
       log: () => {},
-      launch: (runId, mode) => {
+      launch: (runId, mode, operation) => {
         launches.push(`${runId}:${mode}`);
+        launchOps.push(operation ?? "-");
         db.query("UPDATE runs SET pending_launch = NULL, proc_pid = 5000, proc_start = 2, proc_exe = 'claude' WHERE id = ?1").run(runId);
       },
       isLaunching: () => false,
@@ -433,7 +437,7 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
       clock += ms;
     };
     const attempts = (runId: string) => exitCalls.filter((r) => r === runId).length;
-    return { db, scheduler, launches, exitCalls, attempts, wait, advance, row, kinds, workerLeases, openExitItems };
+    return { db, scheduler, launches, launchOps, exitCalls, attempts, wait, advance, row, kinds, workerLeases, openExitItems };
   }
 
   test("a false exit result resets no identity and launches nothing; the run keeps its slot and its pending replacement, and other work still goes", async () => {
@@ -523,6 +527,75 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     expect(f.launches).toEqual(["r3:stage", "r1:stage"]);
     expect(f.openExitItems("r1")).toBe(0);
     expect(f.kinds("r1")).toContain("run.worker_not_exited");
+    f.db.close();
+  });
+
+  test("the grant's replacement is one launch operation, named to the launcher; a refused exit keeps the same one for the retry", async () => {
+    const f = freshStage({ r1: [{ ok: false }] });
+    const operationsOf = (runId: string) => f.db.query("SELECT id, kind, mode, phase FROM operations WHERE run_id = ?1").all(runId) as { id: string; kind: string; mode: string; phase: string }[];
+    await f.scheduler.passNow();
+    const [r2] = operationsOf("r2");
+    expect(r2).toMatchObject({ kind: "launch", mode: "stage", phase: "requested" });
+    expect(f.launchOps).toEqual([r2!.id]);
+    const [r1] = operationsOf("r1");
+    expect(r1).toMatchObject({ kind: "launch", mode: "stage", phase: "requested" });
+    f.advance(schedTiming(cfg(FRESH_CONFIG)).pass_ms);
+    await f.scheduler.passNow();
+    expect(f.launches).toEqual(["r2:stage", "r1:stage"]);
+    expect(f.launchOps).toEqual([r2!.id, r1!.id]);
+    expect(operationsOf("r1")).toHaveLength(1);
+    f.db.close();
+  });
+
+  test("a run whose cancel is open, or whose launch was issued, is never granted: no exit attempt, no launch", async () => {
+    const f = freshStage({});
+    tx(f.db, () => {
+      const at = Date.now();
+      f.db.query("INSERT INTO operations (id, run_id, task_id, kind, generation, desired, phase, requested_by, created_at, updated_at) VALUES ('oc', 'r1', 't1', 'cancel', 1, 'run_cancelled', 'requested', 'leader', ?1, ?1)").run(at);
+      f.db.query("INSERT INTO operations (id, run_id, task_id, kind, mode, generation, desired, phase, requested_by, pane_id, issued_at, attempts, created_at, updated_at) VALUES ('ol', 'r2', 't2', 'launch', 'stage', 2, 'worker_running', 'effect_issued', 'scheduler', 'w:2', ?1, 1, ?1, ?1)").run(at);
+    });
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
+    f.db.close();
+  });
+
+  test("an escalated stage replacement is held, even once its P1 is resolved or dismissed: no exit attempt, no launch; a newer operation you open releases it", async () => {
+    const f = freshStage({}, ["r1"]);
+    tx(f.db, () => {
+      const at = Date.now();
+      f.db.query("INSERT INTO operations (id, run_id, task_id, kind, mode, generation, desired, phase, requested_by, pane_id, issued_at, attempts, created_at, updated_at) VALUES ('oe', 'r1', 't1', 'launch', 'stage', 1, 'worker_running', 'effect_issued', 'scheduler', 'w:1', ?1, 3, ?1, ?1)").run(at);
+      expect(escalateOperation(f.db, { id: "oe", attempts: 3 }, "the agent never appeared after 3 issues", "daemon", at)).not.toBeNull();
+    });
+    await f.scheduler.passNow();
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
+    tx(f.db, () => resolveRunItems(f.db, "r1", ["operation_escalated"], "human", Date.now()));
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    // What `flowryn resume` opens on it: a newer operation in the replacement's own mode, which the grant launches once.
+    const again = tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "launch", mode: "stage", requestedBy: "human", source: "cli", now: Date.now() }));
+    await f.scheduler.passNow();
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual(["r1"]);
+    expect(f.launches).toEqual(["r1:stage"]);
+    expect(f.launchOps).toEqual([again.id]);
+    f.db.close();
+  });
+
+  test("an open requested operation of another mode is never launched under: the grant is refused with why, no exit, no launch", async () => {
+    const f = freshStage({}, ["r1"]);
+    const op = tx(f.db, () => requestOperation(f.db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "human", source: "cli", now: Date.now() }));
+    await f.scheduler.passNow();
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
+    expect(f.db.query("SELECT rule, operation FROM explanations WHERE run_id = 'r1' AND closed_at IS NULL").all()).toEqual([{ rule: "capacity.operation_mode", operation: op.id }]);
     f.db.close();
   });
 });
