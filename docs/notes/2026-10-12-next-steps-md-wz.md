@@ -1,7 +1,7 @@
 # Why is this waiting?
 
 - Status: partial
-- Open: the rest of package 3: the briefing and `fleet` reuse, other decision kinds (gates, approvals, merges), a redacted diagnostic export
+- Open: other decision kinds (gates, approvals, merges). The briefing and `fleet` reuse, retention and the redacted diagnostic export are `2026-10-13-next-steps-md-wq.md`
 
 `docs/next_steps.md` package 3, its first slice: when Flowryn holds a run on a dialog, refuses it capacity, or resumes it after a death (or refuses to), it records why, durably and compactly, and `flowryn show` says so. Before this, the answer was spread over `runs.liveness`, `run_evidence` (one latest row per source, overwritten every pass), the open items, `meta` and the event payloads, and the scheduler's capacity refusals were written nowhere at all: `flowryn capacity` recomputes a reason from the current state, in a different order from the scheduler's own checks.
 

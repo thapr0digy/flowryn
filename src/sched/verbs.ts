@@ -1,4 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
+import { unresolvedLine } from "../attention/explanations.ts";
 import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
@@ -89,6 +90,7 @@ const capacity: VerbSpec = {
             ? `${quotaLine(quota)} (since ${age(ctx.now, quota.since)} ago)`
             : `not read yet (floor ${cfg.quota.floor}%; read before a new Claude run starts)`,
       waiting: waiting.slice(0, MAX_WAITING_ROWS),
+      unresolved: unresolvedLine(ctx.db, ctx.now),
     };
     const jobs = liveJobLeases(ctx.db);
     if (jobs.length > 0) data.jobs = jobs.map((j) => ({ job: j.job_id, kind: j.kind, pool: j.pool, task: j.task_id ?? "-", held: age(ctx.now, j.granted_at) }));

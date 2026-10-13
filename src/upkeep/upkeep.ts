@@ -1,4 +1,5 @@
 import type { UpkeepConfig } from "../config/upkeep.ts";
+import { pruneExplanations, type PruneReport } from "../attention/explanations.ts";
 import { tx, type Db } from "../db/db.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
@@ -11,7 +12,10 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * as plain code on a timer. Each pass, in order: sync every project's primary
  * checkout (`[upkeep] sync_primary`), build the Flowryn checkout's new merge
  * (`build_after_merge`), then clean ended worktrees past their wait
- * (`clean_ended_hours`). The fourth hook, the conflict nudge, rides the
+ * (`clean_ended_hours`). Before all three, and even when the pass otherwise
+ * waits, it prunes closed wait explanations past their retention
+ * (`explanations_keep_days`, `explanations_keep_per_run`): one SQLite
+ * transaction, no checkout. The fourth hook, the conflict nudge, rides the
  * delivery watcher's PR reads (src/reconcile/delivery.ts).
  *
  * A pass runs every `interval_ms` and soon after a run lands (`kick`), never
@@ -39,6 +43,7 @@ export interface UpkeepDeps {
 
 export interface PassReport {
   waited?: string;
+  pruned: PruneReport | null;
   synced: string[];
   build: BuildPass | null;
   swept: { run: string; outcome: string; reason: string }[];
@@ -92,7 +97,7 @@ export class Upkeep {
     this.running = this.passOnce()
       .catch((error: unknown) => {
         this.deps.log(`upkeep: ${(error as Error).stack ?? String(error)}`);
-        return { synced: [], build: null, swept: [] } satisfies PassReport;
+        return { pruned: null, synced: [], build: null, swept: [] } satisfies PassReport;
       })
       .finally(() => {
         this.running = null;
@@ -100,9 +105,21 @@ export class Upkeep {
     return this.running;
   }
 
+  private prune(config: UpkeepConfig): PruneReport | null {
+    try {
+      const pruned = pruneExplanations(this.deps.db, { keepDays: config.explanations_keep_days, keepPerRun: config.explanations_keep_per_run }, this.deps.now());
+      if (pruned.deleted > 0) this.deps.log(`upkeep: pruned ${pruned.deleted} closed wait explanations (${pruned.byAge} by age, ${pruned.byCount} over the per-run cap)`);
+      return pruned;
+    } catch (error) {
+      // A failed prune must not stop the sync, build and sweep behind it.
+      this.deps.log(`upkeep: pruning wait explanations failed: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
   private async passOnce(): Promise<PassReport> {
-    const report: PassReport = { synced: [], build: null, swept: [] };
     const config = this.deps.config();
+    const report: PassReport = { pruned: this.prune(config), synced: [], build: null, swept: [] };
     const waiting = this.deps.busy();
     if (waiting) {
       report.waited = waiting;
