@@ -295,7 +295,7 @@ export interface OwnedRecovery {
   ended: { pid: number; label: string }[];
   /** Entries whose leader was gone, or whose pid is another process now: removed, nothing signalled. */
   gone: { pid: number; label: string }[];
-  /** Recorded groups that would not die: their entries stay for the next start. */
+  /** Recorded groups that would not die, or whose entries ps could not check: their entries stay for the next start. */
   failed: { pid: number; label: string; detail: string }[];
   /** Entries that cannot be read: kept, since they may name a process still running. */
   unreadable: string[];
