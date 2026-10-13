@@ -35,8 +35,11 @@ function commit(cwd: string, file: string, text: string): string {
   return sh(cwd, ["rev-parse", "HEAD"]);
 }
 
+const git = () => gitRunner("git", 10_000, GIT_ENV);
+/** A GitRunner whose ancestry call is cut off at its deadline. */
+const cutOff = async (args: string[]) => (args[0] === "merge-base" ? { code: 124, stdout: "", stderr: "timed out" } : { code: 0, stdout: "", stderr: "" });
+
 describe("how a delivered head moved", () => {
-  const git = () => gitRunner("git", 10_000, GIT_ENV);
 
   test("new commits on top descend; a rebase onto main, fetched from the PR's ref, is a rewrite", async () => {
     const { primary, other } = scratchRepos(dir);
@@ -59,7 +62,6 @@ describe("how a delivered head moved", () => {
     expect(await headHistory(git(), primary, head, absent, 7)).toBe("unknown");
     expect(await headHistory(git(), primary, head, absent, null)).toBe("unknown");
     expect(await headHistory(git(), primary, absent, head, 7)).toBe("unknown");
-    const cutOff = async (args: string[]) => (args[0] === "merge-base" ? { code: 124, stdout: "", stderr: "timed out" } : { code: 0, stdout: "", stderr: "" });
     expect(await headHistory(cutOff, primary, head, head, 7)).toBe("unknown");
   });
 });
