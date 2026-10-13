@@ -9,7 +9,7 @@ import { PolicyFollower } from "../upkeep/policy-follow.ts";
 import { listProjects } from "../lifecycle/projects.ts";
 import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { loadConfig, resolveTool, type FlowrynConfig } from "../config/config.ts";
@@ -60,7 +60,7 @@ import { GitHubForge, tokenSource } from "../forge/github.ts";
 import { cleanupRun, type CleanupReport, type LandingDeps } from "../lifecycle/landing.ts";
 import { getRun } from "../lifecycle/runs.ts";
 import { ChallengeStore } from "../policy/approvals.ts";
-import { gitRunner } from "../policy/git.ts";
+import { gitLabel, gitRunner } from "../policy/git.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { DeliveryWatcher } from "../watch/delivery.ts";
 import { Scheduler } from "../sched/scheduler.ts";
@@ -97,7 +97,7 @@ function say(message: string): void {
 
 async function runTool(path: string | null, args: string[], cwd?: string) {
   if (!path) return { exitCode: 127, stdout: "", stderr: "tool not found" };
-  const result = await runBounded([path, ...args], { label: `${basename(path)} ${args.find((a) => !a.startsWith("-")) ?? ""}`.trim(), cwd, timeoutMs: TOOL_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  const result = await runBounded([path, ...args], { label: gitLabel(args), cwd, timeoutMs: TOOL_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
   return { exitCode: result.code, stdout: result.stdout, stderr: result.stderr };
 }
 

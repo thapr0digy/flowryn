@@ -6,7 +6,7 @@ import { runProc } from "../../src/daemon/restart.ts";
 import { GitHubForge, tokenSource } from "../../src/forge/github.ts";
 import { ForgeError } from "../../src/forge/types.ts";
 import { processRunner } from "../../src/journal/tasks-axi.ts";
-import { gitRunner } from "../../src/policy/git.ts";
+import { gitLabel, gitRunner } from "../../src/policy/git.ts";
 import { concludeParkedRun, readNmStatus } from "../../src/policy/nomistakes.ts";
 import { listLabelled } from "../../src/reconcile/docker.ts";
 import { DEFAULT_DRAIN_MS, DEFAULT_GRACE_MS, TIMED_OUT, configureOwnedProcesses } from "../../src/runtime/bounded.ts";
@@ -167,6 +167,14 @@ describe("docker ps (the extended fake, silent)", () => {
 });
 
 describe("git (gitRunner and runTool)", () => {
+  test("the label names the subcommand past git's global options and their values", () => {
+    expect(gitLabel(["-C", "/some/worktree", "rev-parse", "HEAD"])).toBe("git rev-parse");
+    expect(gitLabel(["-c", "core.sshCommand=ssh -v", "fetch", "origin"])).toBe("git fetch");
+    expect(gitLabel(["--git-dir", "/r/.git", "--work-tree", "/r", "--no-pager", "worktree", "list"])).toBe("git worktree");
+    expect(gitLabel(["--git-dir=/r/.git", "status"])).toBe("git status");
+    expect(gitLabel(["-C", "/r"])).toBe("git");
+  });
+
   test("a fetch over a silent ssh is cut off within its budget; ssh is gone, the refs and an unrelated worktree untouched", async () => {
     const { repo, unrelated } = repoWithWorktree();
     git(repo, ["remote", "add", "origin", "ssh://silent.invalid/r.git"]);
@@ -174,6 +182,7 @@ describe("git (gitRunner and runTool)", () => {
     const ssh = silentTool("ssh");
     const { value, ms } = await timed(() => gitRunner("git", TIMEOUT_MS)(["-c", `core.sshCommand=${ssh}`, "fetch", "origin"], repo));
     expect(value.code).toBe(TIMED_OUT);
+    expect(value.stderr).toContain("git fetch did not finish");
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "ssh.pid"));
     expect(git(repo, ["for-each-ref"])).toBe(before);
