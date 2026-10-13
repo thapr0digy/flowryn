@@ -343,9 +343,11 @@ export class Scheduler {
     try {
       return await gateHarness(this.deps.db, config, harness, this.deps.startDeps.harnessVersion, "daemon", "launch", this.deps.now);
     } catch (error) {
-      const detail = (error as Error).message;
-      this.deps.log(`sched: checking ${harness} failed: ${detail}`);
-      return { harness, state: "missing", detail: `checking ${harness} failed: ${detail}` };
+      const message = (error as Error).message;
+      this.deps.log(`sched: checking ${harness} failed: ${message}`);
+      // The message can differ on every pass (pids, timings): the detail names only the error's kind, so an unchanged failure explains the same way.
+      const kind = (error as { code?: unknown }).code ?? (error as Error).name ?? "Error";
+      return { harness, state: "missing", detail: `checking ${harness} failed (${String(kind)})`, error: message };
     }
   }
 

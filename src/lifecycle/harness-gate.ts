@@ -24,7 +24,7 @@ export type VersionOf = (harness: HarnessId, binary: string) => Promise<string |
 
 export type HarnessCheck =
   | { harness: HarnessId; state: "verified" | "unverified"; version: string }
-  | { harness: HarnessId; state: "missing"; detail: string };
+  | { harness: HarnessId; state: "missing"; detail: string; /** A check that threw: its raw message (detail then names only the error's kind). */ error?: string };
 
 /** The installed harness's version and whether a contract run passed for it. */
 export async function checkHarness(db: Db, config: FlowrynConfig, harness: HarnessId, versionOf: VersionOf): Promise<HarnessCheck> {
@@ -42,7 +42,8 @@ export function contractsCommand(harness: HarnessId): string {
 
 /** The harness gate's verdict as facts. */
 export function harnessFacts(gate: Exclude<HarnessCheck, { state: "verified" }>, t: number): Fact[] {
-  return gate.state === "missing" ? [{ name: `${gate.harness}`, value: gate.detail, at: t }] : [{ name: `${gate.harness} version`, value: `${gate.version}: no passing contract run`, at: t }];
+  if (gate.state !== "missing") return [{ name: `${gate.harness} version`, value: `${gate.version}: no passing contract run`, at: t }];
+  return [{ name: `${gate.harness}`, value: gate.detail, at: t }, ...(gate.error ? [{ name: "check error", value: gate.error, at: t, same: "a thrown check" }] : [])];
 }
 
 /** Who can end a wait on the harness gate. */

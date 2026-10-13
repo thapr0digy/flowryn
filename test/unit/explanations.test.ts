@@ -96,7 +96,7 @@ function reconciler(opts: { now: () => number; launches?: string[]; harnessGate?
   });
 }
 
-function scheduler(opts: { now: () => number; host?: HostVerdict; launches?: string[] }) {
+function scheduler(opts: { now: () => number; host?: HostVerdict; launches?: string[]; quotaPercent?: number; harnessVersion?: () => Promise<string | null> }) {
   const config = parseConfig(CONFIG, HOME);
   return new Scheduler({
     db,
@@ -110,10 +110,10 @@ function scheduler(opts: { now: () => number; host?: HostVerdict; launches?: str
     isLaunching: () => false,
     exitWorker: async () => ({ ok: true }),
     notify: () => {},
-    startDeps: { db, config: () => config, runtime: () => null, harnessVersion: async () => "1", git: async () => null, now: opts.now },
+    startDeps: { db, config: () => config, runtime: () => null, harnessVersion: opts.harnessVersion ?? (async () => "1"), git: async () => null, now: opts.now },
     kickJournal: () => {},
     host: async () => opts.host ?? ({ ok: true, reason: "test" } as HostVerdict),
-    quota: async () => ({ state: "known", percent: 80, window: null, resets_at: null }),
+    quota: async () => ({ state: "known", percent: opts.quotaPercent ?? 80, window: "five_hour", resets_at: null }),
   });
 }
 
@@ -214,6 +214,9 @@ describe("dialog: a blocked-dialog hold", () => {
     expect(rows("r1")).toHaveLength(1);
     expect(row!.item_id).not.toBe(first);
     expect(row!.closed_at).toBeNull();
+    // The relink is a mutation, so it has its event.
+    const relinked = db.query("SELECT payload FROM events WHERE run_id = 'r1' AND kind = 'run.explanation_relinked'").all() as { payload: string }[];
+    expect(relinked.map((e) => JSON.parse(e.payload))).toEqual([{ explanation: row!.id, from: first, item: row!.item_id }]);
     tx(db, () => resolveRunItems(db, "r1", ["trust_dialog"], "run.worker_started", clock));
     expect(rows("r1")[0]).toMatchObject({ closed_by: "run.worker_started" });
   });
@@ -344,6 +347,82 @@ describe("capacity: a scheduler wait", () => {
     s.stop();
     expect(rows("r2")[0]).toMatchObject({ closed_by: "no longer waiting" });
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'run.explanations_closed'").get()).toEqual({ n: 1 });
+  });
+});
+
+describe("capacity: the quota floor and the harness gate, across passes", () => {
+  /** r2: a new Claude run waiting for its first launch. */
+  function freshLaunch(at: number): void {
+    db.query("UPDATE runs SET state = 'launching', pending_launch = 'fresh', waiting_since = ?1, proc_pid = NULL, proc_start = NULL, proc_exe = NULL WHERE id = 'r2'").run(at);
+  }
+
+  test("a new Claude run under the quota floor is one explanation over several passes, naming the reading and the captain's override", async () => {
+    let clock = 5_000_000;
+    freshLaunch(clock);
+    const s = scheduler({ now: () => clock, quotaPercent: 2 });
+    for (let pass = 0; pass < 3; pass++) {
+      await s.passNow();
+      clock += 5_000;
+    }
+    s.stop();
+    expect(rows("r2").map((r) => [r.rule, r.reason, r.closed_at])).toEqual([["capacity.quota_floor", "the Claude quota is 2%, under the 5% floor", null]]);
+    reopen();
+    const [why] = show("t2", { why: true }, clock).waiting as Record<string, unknown>[];
+    expect(why!.facts).toEqual([expect.stringMatching(/^quota remaining: 2% \(five_hour\) \(observed /), expect.stringMatching(/^floor: 5% \(observed /)]);
+    expect(why!.unblock).toEqual(["flowryn: starts it once a quota reading is at or over the floor", `captain: ${RESUME_COMMAND}`]);
+  });
+
+  test("an untested harness version holds a launch: one explanation over several passes, with the contract command", async () => {
+    let clock = 6_000_000;
+    freshLaunch(clock);
+    const s = scheduler({ now: () => clock });
+    for (let pass = 0; pass < 3; pass++) {
+      await s.passNow();
+      clock += 5_000;
+    }
+    s.stop();
+    const open = openExplanations(db, "r2");
+    expect(open.map((r) => [r.rule, r.reason])).toEqual([["capacity.harness_unverified", "claude 1 has no passing contract run"]]);
+    expect(rows("r2")).toHaveLength(1);
+    expect(JSON.parse(open[0]!.unblock)).toEqual([
+      { by: "flowryn", action: "launches it once claude 1 passes its contract suite" },
+      { by: "captain", action: "flowryn doctor --contracts --harness claude" },
+    ]);
+  });
+
+  test("a harness check that throws a different message each pass is still one explanation; the raw message is kept as a fact", async () => {
+    let clock = 7_000_000;
+    let calls = 0;
+    freshLaunch(clock);
+    const s = scheduler({
+      now: () => clock,
+      harnessVersion: async () => {
+        calls++;
+        throw Object.assign(new Error(`spawn claude: pid ${4000 + calls} timed out after ${1000 + calls} ms`), { code: "ETIMEDOUT" });
+      },
+    });
+    for (let pass = 0; pass < 3; pass++) {
+      await s.passNow();
+      clock += 5_000;
+    }
+    s.stop();
+    expect(calls).toBe(3);
+    const all = rows("r2");
+    expect(all.map((r) => [r.rule, r.reason, r.closed_at])).toEqual([["capacity.harness_unverified", "the harness cannot launch: checking claude failed (ETIMEDOUT)", null]]);
+    const facts = JSON.parse(all[0]!.facts) as { name: string; value: string }[];
+    expect(facts.map((f) => [f.name, f.value])).toEqual([
+      ["claude", "checking claude failed (ETIMEDOUT)"],
+      ["check error", "spawn claude: pid 4001 timed out after 1001 ms"],
+    ]);
+  });
+});
+
+describe("show --timeline", () => {
+  test("a target that is no task or run is not found, not an empty timeline", () => {
+    const spec = LEADER_RUN_VERBS.find((v) => v.name === "show")!;
+    const ctx = { db, config: parseConfig("", HOME), now: Date.now(), caller: { role: "human" as const, runId: null, taskId: null } };
+    expect(() => spec.read!(ctx, { target: "nope-1", timeline: true })).toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(show("t1", { timeline: true }).timeline).toBe("no wait explanations recorded");
   });
 });
 

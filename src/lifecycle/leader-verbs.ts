@@ -513,6 +513,8 @@ function waitingView(ctx: ReadCtx, runId: string, why: boolean): { waiting?: unk
 function timelineView(ctx: ReadCtx, target: string, full: boolean): { data: Record<string, unknown>; hints: string[] } {
   const taskId = (findRun(ctx.db, target) as RunRow | null)?.task_id ?? target;
   const rows = taskExplanations(ctx.db, taskId);
+  const known = rows.length > 0 || ctx.db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(taskId) !== null || queuedTask(ctx.db, taskId) !== null;
+  if (!known) throw new FlowrynError("not_found", `no task or run ${target}`, "flowryn fleet");
   return {
     data: { task: taskId, timeline: rows.length > 0 ? rows.map((row) => timelineEntry(row, ctx.now, full)) : "no wait explanations recorded" },
     hints: [`flowryn show ${taskId}`, ...(full || rows.length === 0 ? [] : [`flowryn show ${taskId} --timeline --full`])],

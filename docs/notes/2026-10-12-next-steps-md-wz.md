@@ -99,7 +99,7 @@ All rules stay where they decide today (`src/lifecycle/prompt-wedge.ts`, `src/re
 ### Tests
 
 - `test/unit/db.test.ts`: migration 21 on a database in use (a run and an open item survive; the table starts empty).
-- `test/unit/explanations.test.ts` (new): dedupe (the same observation twice writes one row; a changed fact supersedes; a changed `at` alone does not; kinds are independent; a settled decision is recorded closed), item-linked closing, the sweep and a cancel, and the `show` lines (default, `--why`, `--timeline`, `--timeline --full`).
+- `test/unit/explanations.test.ts` (new): the quota floor, the harness gate and a throwing harness check, each one row over several passes; `--timeline` not found; dedupe (the same observation twice writes one row; a changed fact supersedes; a changed `at` alone does not; kinds are independent; a settled decision is recorded closed), item-linked closing, the sweep and a cancel, and the `show` lines (default, `--why`, `--timeline`, `--timeline --full`).
 - Per decision kind, through the real code path, then replayed offline: the database file is closed, reopened, and `show --why` / `--timeline` explain it from the table alone:
   - dialog: `openBlockedPrompt` (confirmed), the reconciler's trust wedge over several passes (one row), and hook activity closing it;
   - capacity: a `Scheduler` with a full pool over several passes (one row), a new holder (a second row, the first superseded), the grant closing it, and the usage pause and host rules;
@@ -107,7 +107,9 @@ All rules stay where they decide today (`src/lifecycle/prompt-wedge.ts`, `src/re
 
 ### Implementation notes
 
-- The harness gate's facts and unblock (`harnessFacts`, `harnessUnblock`) live in `src/lifecycle/harness-gate.ts`, shared by the reconciler's deferred resume and the scheduler's launch gate; the scheduler's other refusal builders are `src/sched/wait-reasons.ts`. A harness check that throws is now an explicit `missing` verdict (it was `false` before), so its reason is recorded.
+- The harness gate's facts and unblock (`harnessFacts`, `harnessUnblock`) live in `src/lifecycle/harness-gate.ts`, shared by the reconciler's deferred resume and the scheduler's launch gate; the scheduler's other refusal builders are `src/sched/wait-reasons.ts`. A harness check that throws is now an explicit `missing` verdict (it was `false` before), so its reason is recorded. Its detail names only the error's kind (`checking claude failed (ETIMEDOUT)`), and the raw message is a `check error` fact whose dedupe value is fixed (`Fact.same`): a message with pids or timings in it would otherwise supersede the row on every pass. The row keeps the first message it saw.
+- Relinking an open row to a new item (the dedupe branch, after a dismissal) appends a `run.explanation_relinked` event (`{explanation, from, item}`).
+- `show --timeline` on a target that is no run, no task with a policy and no queued task refuses with `not_found` (exit 4), not an empty timeline.
 - `resolveRunItems` returns the resolved ids (`RETURNING id`) to close the explanations they carried; its count is unchanged.
 - The pools rule records each full pool's holders by task id; the order is by task id, so the same holders in another order are not a change.
 

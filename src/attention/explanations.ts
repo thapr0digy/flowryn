@@ -20,6 +20,12 @@ export interface Fact {
   name: string;
   value: string;
   at: number | null;
+  /**
+   * What the dedupe compares in place of `value`, for a value that varies on
+   * every read without being a new input (a raw error message with pids or
+   * timings in it). Not stored: the row keeps the first value it saw.
+   */
+  same?: string;
 }
 
 export interface Unblock {
@@ -80,14 +86,17 @@ export function explain(db: Db, x: NewExplanation): number | null {
   const reason = sanitizeLine(x.reason, MAX_REASON_CHARS);
   const facts = x.facts.map((f) => ({ name: f.name, value: sanitizeLine(f.value, MAX_VALUE_CHARS), at: f.at }));
   const unblock = x.unblock.map((u) => ({ by: u.by, action: sanitizeLine(u.action, MAX_VALUE_CHARS) }));
-  const signature = signatureOf(x, reason, facts, unblock);
+  const signature = signatureOf(x, reason, x.facts.map((f, i) => ({ ...facts[i]!, value: f.same ?? facts[i]!.value })), unblock);
   const open = db.query("SELECT id, signature, item_id FROM explanations WHERE run_id = ?1 AND kind = ?2 AND closed_at IS NULL ORDER BY id").all(x.run.id, x.kind) as {
     id: number;
     signature: string;
     item_id: string | null;
   }[];
   if (!x.settled && open.length === 1 && open[0]!.signature === signature) {
-    if (x.itemId && open[0]!.item_id !== x.itemId) db.query("UPDATE explanations SET item_id = ?2 WHERE id = ?1").run(open[0]!.id, x.itemId);
+    if (x.itemId && open[0]!.item_id !== x.itemId) {
+      db.query("UPDATE explanations SET item_id = ?2 WHERE id = ?1").run(open[0]!.id, x.itemId);
+      appendEvent(db, { source: x.source, kind: "run.explanation_relinked", runId: x.run.id, taskId: x.run.task_id, payload: { explanation: open[0]!.id, from: open[0]!.item_id, item: x.itemId }, ts: x.now });
+    }
     return null;
   }
   const event = appendEvent(db, { source: x.source, kind: "run.explained", runId: x.run.id, taskId: x.run.task_id, payload: { kind: x.kind, rule: x.rule }, ts: x.now });
