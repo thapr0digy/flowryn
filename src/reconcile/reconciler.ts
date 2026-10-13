@@ -26,7 +26,7 @@ import { releaseLeases } from "../sched/pools.ts";
 import type { HarnessId } from "../harness/types.ts";
 import type { HarnessCheck } from "../lifecycle/harness-gate.ts";
 import { closeDismissedPromptExplanations, explain } from "../attention/explanations.ts";
-import { latestOperation, openOperation, requestOperation, type OperationMode, type OperationRow } from "../lifecycle/operations.ts";
+import { heldByEscalation, latestOperation, openOperation, requestOperation, type OperationMode, type OperationRow } from "../lifecycle/operations.ts";
 
 /**
  * The reconciler (design section 6): the one owner of current-state truth for
@@ -226,7 +226,7 @@ export class Reconciler {
     // worker: a run being cancelled is never read as dead and resumed, an issued launch never as a death.
     const open = openOperation(db, run.id);
     if (open) return this.recoverOperation(run, open);
-    if (this.escalated(run.id)) return "operation";
+    if (heldByEscalation(this.deps.db, run.id)) return "operation";
     // A launch the scheduler owns: waiting for its grant, or a fresh stage worker being started.
     if (run.pending_launch) return "launching";
     const runtime = this.deps.runtime();
@@ -335,13 +335,6 @@ export class Reconciler {
     if (still?.id !== requested.id || still.phase !== "requested" || this.deps.isLaunching(run.id)) return "operation";
     this.deps.launch(run.id, requested.mode ?? (requested.kind === "resume" ? "resume" : "fresh"), requested.id);
     return "operation";
-  }
-
-  /** The run's newest operation escalated and its P1 is still open: nothing happens to it by itself until you act. */
-  private escalated(runId: string): boolean {
-    const op = latestOperation(this.deps.db, runId);
-    if (op?.phase !== "escalated" || !op.item_id) return false;
-    return this.deps.db.query("SELECT 1 FROM items WHERE id = ?1 AND state IN ('open','presented')").get(op.item_id) !== null;
   }
 
   /** The harness gate before a launch this reconciler starts; a check that throws counts as unverified. */

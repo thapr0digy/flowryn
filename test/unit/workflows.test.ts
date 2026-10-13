@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
+import { resolveRunItems } from "../../src/attention/items.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleBlock, workflowConfigProblems, workflowFor, workflowsConfig, type WorkflowDef } from "../../src/config/workflows.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
+import { escalateOperation } from "../../src/lifecycle/operations.ts";
 import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
@@ -555,6 +557,25 @@ describe("a fresh stage replaces its worker only on a verified exit (docs/notes/
     expect(f.exitCalls).toEqual([]);
     expect(f.launches).toEqual([]);
     expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
+    f.db.close();
+  });
+
+  test("an escalated stage replacement is held while its P1 is open: no exit attempt, no launch; granted again once the item is resolved", async () => {
+    const f = freshStage({}, ["r1"]);
+    tx(f.db, () => {
+      const at = Date.now();
+      f.db.query("INSERT INTO operations (id, run_id, task_id, kind, mode, generation, desired, phase, requested_by, pane_id, issued_at, attempts, created_at, updated_at) VALUES ('oe', 'r1', 't1', 'launch', 'stage', 1, 'worker_running', 'effect_issued', 'scheduler', 'w:1', ?1, 3, ?1, ?1)").run(at);
+      expect(escalateOperation(f.db, { id: "oe", attempts: 3 }, "the agent never appeared after 3 issues", "daemon", at)).not.toBeNull();
+    });
+    await f.scheduler.passNow();
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual([]);
+    expect(f.launches).toEqual([]);
+    expect(f.row("r1")).toMatchObject({ proc_pid: 4101, pending_launch: "stage" });
+    tx(f.db, () => resolveRunItems(f.db, "r1", ["operation_escalated"], "human", Date.now()));
+    await f.scheduler.passNow();
+    expect(f.exitCalls).toEqual(["r1"]);
+    expect(f.launches).toEqual(["r1:stage"]);
     f.db.close();
   });
 });

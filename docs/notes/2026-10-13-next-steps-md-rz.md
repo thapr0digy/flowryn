@@ -111,7 +111,7 @@ Recovery of a launch or resume not in flight in this process (the reconciler, be
   - The recorded pane is gone, or shows only its shell, and `issued_at` is older than `[reconcile] launch_timeout_ms` (the launcher's own wait for a harness to appear): the effect did not take. The operation returns to `requested` (`operation.reissued` event) and is launched again under the same id: one operation, `attempts` counts the issues. After 3 issues it escalates instead. Within the timeout it waits for the next pass.
   - Anything else (the pane runs some other foreground process, or a harness that started before `issued_at`): escalated.
 
-The scheduler leaves out of its candidates a run whose operation is `effect_issued` or whose open operation is a `cancel`: recovery owns them, so a fresh-stage replacement is never started over an ambiguous launch. A grant re-checks in its activation transaction.
+The scheduler leaves out of its candidates a run whose operation is `effect_issued` or whose open operation is a `cancel`: recovery owns them, so a fresh-stage replacement is never started over an ambiguous launch. It also leaves out a run whose newest operation escalated while its `operation_escalated` item is open or presented (`heldByEscalation` in `src/lifecycle/operations.ts`, the same check the reconciler holds the run by), so an escalated stage or relaunch replacement is not granted a fourth issue; once the item is resolved or dismissed the run is a candidate again. A grant re-checks both in its activation transaction.
 
 ### Generation
 

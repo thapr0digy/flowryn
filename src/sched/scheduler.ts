@@ -21,7 +21,7 @@ import { fullPools, OverCapacity } from "./pools.ts";
 import { probeQuota, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
 import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
-import { ensureLaunchOperation, getOperation, openOperation } from "../lifecycle/operations.ts";
+import { ensureLaunchOperation, getOperation, heldByEscalation, openOperation } from "../lifecycle/operations.ts";
 import { harnessRefusalOf, hostRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
 
 /**
@@ -259,7 +259,7 @@ export class Scheduler {
     // A run that no longer waits for its replacement (cancelled, failed) drops its refusal count.
     for (const runId of this.exitRefusals.keys()) if (!rows.some((run) => run.id === runId)) this.exitRefusals.delete(runId);
     return rows
-      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id) && !this.backingOff(run.id, t))
+      .filter((run) => !this.relaunching.has(run.id) && !this.deps.isLaunching(run.id) && !this.backingOff(run.id, t) && !heldByEscalation(db, run.id))
       .map((run) => {
         const pos = positionOf(db, run, run.kind);
         return { run, pos, needs: neededPools(db, run, pos), remaining: pos.def.stages.length - 1 - pos.index, priority: run.priority, since: run.waiting_since ?? t };
@@ -305,6 +305,7 @@ export class Scheduler {
         // A cancel or an issued launch owns the run (src/lifecycle/operations.ts): nothing is granted over it.
         const open = openOperation(db, fresh.id);
         if (open && (open.kind === "cancel" || open.phase !== "requested")) return null;
+        if (heldByEscalation(db, fresh.id)) return null;
         const started = activateStage(db, config, fresh, now(), { steer });
         if (started && usage === "probe") claimProbe(db, c.run.id, now());
         if (started) closeExplanations(db, c.run.id, ["capacity", "resume"], "granted", now());
