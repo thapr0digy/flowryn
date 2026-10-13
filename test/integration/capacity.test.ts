@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 
 /**
  * The M5 capacity exit (design section 17, "20 workers under the caps"),
@@ -16,11 +17,14 @@ import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
  */
 
 let env: FleetEnv | null = null;
+let ship: ShipEnv | null = null;
 const dirs: string[] = [];
 
 afterEach(async () => {
   await env?.cleanup();
   env = null;
+  await ship?.cleanup();
+  ship = null;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -48,12 +52,19 @@ function query<T>(e: FleetEnv, sql: string, ...params: (string | number)[]): T[]
   }
 }
 
+/** Live slots per pool: the runs' leases and the jobs' (a verify) alike. */
 function counts(e: FleetEnv): Record<string, number> {
-  return Object.fromEntries(query<{ pool: string; n: number }>(e, "SELECT pool, COUNT(*) AS n FROM pool_leases WHERE released_at IS NULL GROUP BY pool").map((r) => [r.pool, r.n]));
+  return Object.fromEntries(
+    query<{ pool: string; n: number }>(
+      e,
+      `SELECT pool, SUM(n) AS n FROM (SELECT pool, COUNT(*) AS n FROM pool_leases WHERE released_at IS NULL GROUP BY pool
+         UNION ALL SELECT pool, COUNT(*) AS n FROM job_leases WHERE released_at IS NULL GROUP BY pool) GROUP BY pool`,
+    ).map((r) => [r.pool, r.n]),
+  );
 }
 
 /** Samples the live leases until stopped; any sample over a cap is recorded. */
-function sampler(e: FleetEnv): { stop(): Promise<{ max: Record<string, number>; over: string[]; samples: number }> } {
+function sampler(e: FleetEnv, caps: Record<string, number> = CAPS): { stop(): Promise<{ max: Record<string, number>; over: string[]; samples: number }> } {
   const max: Record<string, number> = {};
   const over: string[] = [];
   let samples = 0;
@@ -64,7 +75,7 @@ function sampler(e: FleetEnv): { stop(): Promise<{ max: Record<string, number>; 
       samples++;
       for (const [pool, n] of Object.entries(now)) {
         max[pool] = Math.max(max[pool] ?? 0, n);
-        const cap = CAPS[pool as keyof typeof CAPS];
+        const cap = caps[pool];
         if (cap !== undefined && n > cap) over.push(`${pool} ${n}/${cap}`);
       }
       await Bun.sleep(50);
@@ -208,6 +219,60 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       expect(seen.samples).toBeGreaterThan(100);
     },
     { timeout: 300_000 },
+  );
+
+  test(
+    "a verify and a ship share the validation budget: neither oversubscribes it, the freed slot goes to the waiting ship, and a full pool refuses a verify",
+    async () => {
+      const gateDir = mkdtempSync(join(tmpdir(), "fw-verify-go-"));
+      dirs.push(gateDir);
+      const go = join(gateDir, "go");
+      const steps = [`while [ ! -f ${go} ]; do sleep 0.05; done`, "true"];
+      ship = await makeShipEnv({
+        mode: "direct-PR",
+        extraConfig: `[projects.web]\nverify = ${JSON.stringify(steps)}\n[capacity]\nvalidation = 1\n[sched]\npass_ms = 300\n`,
+      });
+      const s = ship;
+      const f = s.fleet;
+      const watch = sampler(f, { validation: 1 });
+      // A delivered PR to verify; its ship stage released the slot at the delivery.
+      s.github.repo("acme/web").defaultChecks = [{ name: "ci", state: "red", notStarted: true }];
+      const delivered = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], {
+        env: { FLOWRYN_TOKEN: s.leaderToken() },
+        stdin: `Verified\nFAKE: commit a.txt a\nFAKE: push\nFAKE: pr ${s.github.apiUrl} acme/web\nFAKE: deliver-pr\nFAKE: sleep 600000`,
+      });
+      await f.waitRun(String((delivered.reply.data as { run: string }).run), (r) => r.state === "ready", "the PR delivered");
+      expect(counts(f).validation ?? 0).toBe(0);
+
+      const verify = await f.json(["verify", "1", "--detach"]);
+      expect(verify.reply.data).toMatchObject({ verification: "v1", attached: false });
+      expect(counts(f)).toMatchObject({ validation: 1 });
+
+      // A ship reaching its validation stage waits for the verify's slot, and capacity says why.
+      const waiting = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { stdin: "Waits\nFAKE: commit b.txt b\nFAKE: stage-done\nFAKE: sleep 600000" });
+      const { run, task } = waiting.reply.data as { run: string; task: string };
+      await f.waitRun(run, (r) => r.stage === "ship" && r.stage_state === "waiting", "the ship stage waiting");
+      const view = await f.json(["capacity"]);
+      expect(view.reply.data).toMatchObject({ waiting: [{ task, stage: "ship", why: "full: validation" }], jobs: [{ job: "v1", pool: "validation" }] });
+
+      // The verify ends: its slot is freed after its worktree, and the scheduler hands it to the ship.
+      writeFileSync(go, "");
+      await f.waitRun(run, (r) => r.stage === "ship" && r.stage_state === "active", "the ship stage granted");
+      expect(query<{ state: string }>(f, "SELECT state FROM verifications WHERE id = 'v1'")[0]!.state).toBe("passed");
+      expect(query<{ run_id: string }>(f, "SELECT run_id FROM pool_leases WHERE pool = 'validation' AND released_at IS NULL")).toEqual([{ run_id: run }]);
+
+      // Now the ship holds the one slot: a new verify is refused, naming who holds it, and records nothing.
+      const refused = await f.json(["verify", "1", "--detach"]);
+      expect(refused.code).toBe(2);
+      expect(refused.reply.error).toMatchObject({ code: "no_capacity" });
+      expect(JSON.stringify(refused.reply.error)).toContain(`validation pool is full (1/1: ${task} (ship))`);
+      expect(query(f, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+
+      const seen = await watch.stop();
+      expect(seen.over).toEqual([]);
+      expect(seen.max).toMatchObject({ validation: 1 });
+    },
+    { timeout: 120_000 },
   );
 
   test(

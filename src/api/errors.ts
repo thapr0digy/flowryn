@@ -53,6 +53,8 @@ export const ERROR_CODES = {
   wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
   stage_waiting: EXIT.policy,
+  // heavy work outside a run (a verify) refused: its pool is full or the host check fails
+  no_capacity: EXIT.policy,
   // a review gate whose own questions are still open
   questions_open: EXIT.policy,
   // a chat-answer grant names another item or choice than the command

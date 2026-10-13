@@ -50,7 +50,7 @@ const DESIGN_TABLES = [
   "harness_contracts",
 ];
 
-/** The installed versions the migration 21 case checks against. */
+/** The installed versions the migration 22 case checks against. */
 async function installedVersion(harness: string): Promise<string> {
   return harness === "claude" ? "2.1.300" : "0.90.0";
 }
@@ -258,11 +258,28 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("contract revision: migration 21 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+  test("job leases: migration 21 on a database in use; a verification running before it holds no slot; one live lease per pool and job; only a verify job", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 20));
-    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'u', '/w', 'main', 'direct-PR')");
+    db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES ('v1', 'web', 'https://github.com/a/w/pull/1', 'h', 'running', '[]', '/d', '/d/wt', '/w', 1)");
     expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([21]);
+    expect(db.query("SELECT COUNT(*) AS n FROM job_leases").get()).toEqual({ n: 0 });
+    const lease = (job: string, kind = "verify") => db.query("INSERT INTO job_leases (pool, kind, job_id, granted_at) VALUES ('validation', ?1, ?2, 1)").run(kind, job);
+    lease("v2");
+    expect(() => lease("v2")).toThrow("UNIQUE");
+    expect(() => lease("b1", "build")).toThrow("CHECK");
+    db.exec("UPDATE job_leases SET released_at = 2, released_by = 'x' WHERE job_id = 'v2'");
+    lease("v2");
+    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([]);
+    db.close();
+  });
+
+  test("contract revision: migration 22 carries every pass over at the baseline revision 1, so it stays verified; a bump makes it stale; another revision is its own row", async () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 21));
+    db.exec("INSERT INTO harness_contracts (harness, version, passed_at, report_path) VALUES ('claude', '2.1.300', 5, '/r.json'), ('pi', '0.90.0', 6, NULL)");
+    expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([22]);
     expect(db.query("SELECT harness, version, revision, passed_at, report_path, platform, herdr_version, launch_profile FROM harness_contracts ORDER BY harness").all()).toEqual([
       { harness: "claude", version: "2.1.300", revision: BASELINE_REVISION, passed_at: 5, report_path: "/r.json", platform: null, herdr_version: null, launch_profile: null },
       { harness: "pi", version: "0.90.0", revision: BASELINE_REVISION, passed_at: 6, report_path: null, platform: null, herdr_version: null, launch_profile: null },
@@ -276,7 +293,7 @@ describe("migrations", () => {
     db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 7)");
     expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.300', 2, 8)")).toThrow("UNIQUE");
     expect(() => db.exec("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '2.1.301', 0, 8)")).toThrow("CHECK");
-    expect(migrate(db, MIGRATIONS.slice(0, 21))).toEqual([]);
+    expect(migrate(db, MIGRATIONS.slice(0, 22))).toEqual([]);
     expect(integrityProblems(db)).toEqual([]);
     db.close();
   });

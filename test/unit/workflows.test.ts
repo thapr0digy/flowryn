@@ -12,7 +12,7 @@ import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
 import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.ts";
-import { fullPools, grantLeases, liveCounts, OverCapacity, releaseLeases, runLeases } from "../../src/sched/pools.ts";
+import { fullPools, grantJobLease, grantLeases, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
 import { EXIT_BACKOFF_MAX_MS, Scheduler } from "../../src/sched/scheduler.ts";
 import { claimProbe, clearUsageLimit, noteUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
@@ -194,6 +194,60 @@ describe("capacity pools (design sections 11 and 14)", () => {
     expect(runLeases(db, "r1").map((l) => l.pool)).toEqual(["worker"]);
     tx(db, () => grantLeases(db, "r2", "t2", "qa", ["worker", "docker_env"], caps, 5));
     expect(liveCounts(db)).toEqual({ worker: 2, docker_env: 1 });
+    db.close();
+  });
+});
+
+function events(db: Db, kind: string): Record<string, unknown>[] {
+  return (db.query("SELECT payload FROM events WHERE kind = ?1 ORDER BY seq").all(kind) as { payload: string }[]).map((e) => JSON.parse(e.payload) as Record<string, unknown>);
+}
+
+describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-next-steps-md-64.md)", () => {
+  const v1 = { kind: "verify" as const, id: "v1", taskId: "t9" };
+  const v2 = { kind: "verify" as const, id: "v2", taskId: null };
+
+  test("assumption: a job's slot and a run's slot count against the same cap, so neither admission overfills the other", () => {
+    const db = scratchDb();
+    const caps = { worker: 3, validation: 2 };
+    tx(db, () => grantLeases(db, "r1", "t1", "ship", ["validation"], caps, 1));
+    tx(db, () => grantJobLease(db, v1, "validation", caps, 2));
+    expect(liveCounts(db)).toEqual({ validation: 2 });
+    expect(fullPools(db, caps, ["validation"])).toEqual(["validation"]);
+    // A run's grant re-counts the job's slot, and a job's grant the run's: both refuse and take nothing.
+    expect(() => tx(db, () => grantLeases(db, "r2", "t2", "ship", ["validation"], caps, 3))).toThrow(OverCapacity);
+    expect(() => tx(db, () => grantJobLease(db, v2, "validation", caps, 3))).toThrow(OverCapacity);
+    expect(runLeases(db, "r2")).toEqual([]);
+    expect(liveJobLeases(db).map((l) => l.job_id)).toEqual(["v1"]);
+    expect(poolHolders(db, "validation")).toBe("t1 (ship), v1 (verify)");
+    // The job ends: its slot goes to the waiting run.
+    expect(tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 4))).toEqual(["validation"]);
+    tx(db, () => grantLeases(db, "r2", "t2", "ship", ["validation"], caps, 5));
+    expect(liveCounts(db)).toEqual({ validation: 2 });
+    expect(events(db, "pool.granted").filter((e) => e.job === "v1")).toEqual([{ job: "v1", kind: "verify", pools: ["validation"] }]);
+    db.close();
+  });
+
+  test("a job lease is released exactly once: a second release finds nothing and records nothing", () => {
+    const db = scratchDb();
+    const caps = { validation: 1 };
+    tx(db, () => grantJobLease(db, v1, "validation", caps, 1));
+    expect(tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 2))).toEqual(["validation"]);
+    expect(tx(db, () => releaseJobLeases(db, v1, "recovered at startup", 3))).toEqual([]);
+    expect(events(db, "pool.released")).toEqual([{ job: "v1", kind: "verify", pools: ["validation"], reason: "verification v1 ended" }]);
+    expect(db.query("SELECT released_at, released_by FROM job_leases").all()).toEqual([{ released_at: 2, released_by: "verification v1 ended" }]);
+    expect(liveCounts(db)).toEqual({});
+    db.close();
+  });
+
+  test("a step's process is recorded only on a live lease, with its event", () => {
+    const db = scratchDb();
+    tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
+    const proc = { pid: 4242, start: 1_000, exe: "/bin/sh" };
+    expect(tx(db, () => recordJobProcess(db, v1, proc, 2))).toBe(true);
+    expect(liveJobLeases(db)[0]).toMatchObject({ proc_pid: 4242, proc_start: 1_000, proc_exe: "/bin/sh" });
+    tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 3));
+    expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4343 }, 4))).toBe(false);
+    expect(events(db, "pool.job_process")).toEqual([{ job: "v1", kind: "verify", pid: 4242 }]);
     db.close();
   });
 });

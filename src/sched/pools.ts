@@ -2,6 +2,7 @@ import { resolveRunItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { WORKER_POOL } from "../config/workflows.ts";
+import type { ProcIdentity } from "../runtime/proc.ts";
 
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
@@ -27,9 +28,16 @@ export interface LeaseRow {
 
 export class OverCapacity extends Error {}
 
-/** Live leases per pool. */
+/** Live leases per pool: runs' and jobs' alike, since both count against the same caps. */
 export function liveCounts(db: Db): Record<string, number> {
-  const rows = db.query("SELECT pool, COUNT(*) AS n FROM pool_leases WHERE released_at IS NULL GROUP BY pool").all() as { pool: string; n: number }[];
+  const rows = db
+    .query(
+      `SELECT pool, SUM(n) AS n FROM (
+         SELECT pool, COUNT(*) AS n FROM pool_leases WHERE released_at IS NULL GROUP BY pool
+         UNION ALL SELECT pool, COUNT(*) AS n FROM job_leases WHERE released_at IS NULL GROUP BY pool)
+       GROUP BY pool`,
+    )
+    .all() as { pool: string; n: number }[];
   return Object.fromEntries(rows.map((r) => [r.pool, r.n]));
 }
 
@@ -75,5 +83,76 @@ export function releaseLeases(db: Db, runId: string, taskId: string | null, opts
   const pools = live.map((l) => l.pool);
   appendEvent(db, { source: "daemon", kind: "pool.released", runId, taskId, payload: { pools, reason }, ts: now });
   if (pools.includes(VALIDATION_POOL)) resolveRunItems(db, runId, ["validation_stuck"], `slot released: ${reason}`, now);
+  return pools;
+}
+
+/**
+ * Job leases (docs/notes/2026-10-12-next-steps-md-64.md): heavy work that is
+ * not a run, a `flowryn verify`, holds a slot of a pool in job_leases. It is
+ * counted by liveCounts with the runs' leases, so the scheduler and a job
+ * never overfill a pool between them: each re-counts inside its own immediate
+ * transaction. A job lease is released once, after the job's processes and
+ * its worktree are gone.
+ */
+
+export type JobKind = "verify";
+
+export interface JobRef {
+  kind: JobKind;
+  id: string;
+  taskId: string | null;
+}
+
+export interface JobLeaseRow {
+  id: number;
+  pool: string;
+  kind: JobKind;
+  job_id: string;
+  task_id: string | null;
+  granted_at: number;
+  released_at: number | null;
+  released_by: string | null;
+  proc_pid: number | null;
+  proc_start: number | null;
+  proc_exe: string | null;
+}
+
+export function liveJobLeases(db: Db, kind?: JobKind): JobLeaseRow[] {
+  return (kind
+    ? db.query("SELECT * FROM job_leases WHERE released_at IS NULL AND kind = ?1 ORDER BY id").all(kind)
+    : db.query("SELECT * FROM job_leases WHERE released_at IS NULL ORDER BY id").all()) as JobLeaseRow[];
+}
+
+/** Who holds the pool's live slots, for a refusal: "t3 (ship), v2 (verify)". */
+export function poolHolders(db: Db, pool: string): string {
+  const runs = db.query("SELECT r.task_id, l.stage FROM pool_leases l JOIN runs r ON r.id = l.run_id WHERE l.pool = ?1 AND l.released_at IS NULL ORDER BY l.granted_at, l.id").all(pool) as { task_id: string; stage: string }[];
+  const jobs = db.query("SELECT kind, job_id FROM job_leases WHERE pool = ?1 AND released_at IS NULL ORDER BY granted_at, id").all(pool) as { kind: string; job_id: string }[];
+  return [...runs.map((r) => `${r.task_id} (${r.stage})`), ...jobs.map((j) => `${j.job_id} (${j.kind})`)].join(", ");
+}
+
+/** Take one slot of `pool` for the job. Call inside a transaction; throws OverCapacity (and takes nothing) when the pool is full. */
+export function grantJobLease(db: Db, job: JobRef, pool: string, caps: Record<string, number>, now: number): void {
+  if (fullPools(db, caps, [pool]).length > 0) throw new OverCapacity(`no free slot in ${pool}`);
+  db.query("INSERT INTO job_leases (pool, kind, job_id, task_id, granted_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(pool, job.kind, job.id, job.taskId, now);
+  appendEvent(db, { source: "daemon", kind: "pool.granted", taskId: job.taskId, payload: { job: job.id, kind: job.kind, pools: [pool] }, ts: now });
+}
+
+/** Record the job's running step (its process group leader) on its live leases. Call inside a transaction; whether a live lease took it. */
+export function recordJobProcess(db: Db, job: JobRef, proc: ProcIdentity, now: number): boolean {
+  const changed = db
+    .query("UPDATE job_leases SET proc_pid = ?3, proc_start = ?4, proc_exe = ?5 WHERE kind = ?1 AND job_id = ?2 AND released_at IS NULL")
+    .run(job.kind, job.id, proc.pid, proc.start, proc.exe).changes;
+  if (changed === 0) return false;
+  appendEvent(db, { source: "daemon", kind: "pool.job_process", taskId: job.taskId, payload: { job: job.id, kind: job.kind, pid: proc.pid }, ts: now });
+  return true;
+}
+
+/** Release the job's live leases, once: a second call finds none and records nothing. Call inside a transaction. Returns the pools released. */
+export function releaseJobLeases(db: Db, job: JobRef, reason: string, now: number): string[] {
+  const live = db.query("SELECT * FROM job_leases WHERE kind = ?1 AND job_id = ?2 AND released_at IS NULL ORDER BY id").all(job.kind, job.id) as JobLeaseRow[];
+  if (live.length === 0) return [];
+  for (const lease of live) db.query("UPDATE job_leases SET released_at = ?2, released_by = ?3 WHERE id = ?1 AND released_at IS NULL").run(lease.id, now, reason);
+  const pools = live.map((l) => l.pool);
+  appendEvent(db, { source: "daemon", kind: "pool.released", taskId: job.taskId, payload: { job: job.id, kind: job.kind, pools, reason }, ts: now });
   return pools;
 }

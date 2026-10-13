@@ -1,3 +1,5 @@
+import type { HostVerdict } from "./host.ts";
+
 /**
  * What the M5 verbs need from the running daemon's scheduler: a nudge after a
  * change that may free or need capacity, and a pass awaited when the reply
@@ -15,8 +17,10 @@ export interface SchedServices {
    * the run's stage is now active.
    */
   grantNow(runId: string): Promise<boolean>;
+  /** The scheduler's host check (cached like its own grants'), for heavy work outside a run: a verify. */
+  host(): Promise<HostVerdict>;
 }
 
 export function inertSched(overrides: Partial<SchedServices> = {}): SchedServices {
-  return { kick: () => {}, passNow: async () => {}, grantNow: async () => false, ...overrides };
+  return { kick: () => {}, passNow: async () => {}, grantNow: async () => false, host: async () => ({ ok: true, sample: null, reason: "ok" }), ...overrides };
 }

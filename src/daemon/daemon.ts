@@ -460,7 +460,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       startDeps,
       kickJournal: () => journal.kick(),
     });
-    const sched: SchedServices = { kick: () => scheduler?.kick(), passNow: async () => scheduler?.passNow(), grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false };
+    const sched: SchedServices = {
+      kick: () => scheduler?.kick(),
+      passNow: async () => scheduler?.passNow(),
+      grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false,
+      host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
+    };
 
     // Leader-safe restart: the guards read this daemon's in-memory work; launchd (or a test's script) restarts it.
     const supervisorFile = env.FLOWRYN_SUPERVISOR;
