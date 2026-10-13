@@ -418,6 +418,15 @@ describe("a cancel a landing overtook", () => {
     expect(reply.error).toMatchObject({ code: "run_not_active", message: `t1: ${LANDED_BEFORE_CANCEL} (merge ${MERGED.slice(0, 8)}); nothing was cancelled` });
     expect(state()).toBe("landed");
   });
+
+  test("a cancel of a run that already landed is refused: the run stays landed and no cancel is recorded", async () => {
+    readyAtA();
+    tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: MERGED, how: "merged_elsewhere" }, now));
+    const reply = await call("cancel", { target: "t1" }, "human");
+    expect(reply.error).toMatchObject({ code: "run_not_active", message: "t1 landed: its merge is proven and stands; nothing was cancelled" });
+    expect(state()).toBe("landed");
+    expect(db.query("SELECT COUNT(*) AS n FROM operations WHERE run_id = 'r1' AND kind = 'cancel'").get()).toEqual({ n: 0 });
+  });
 });
 
 describe("merge: the merge verb's gate reads", () => {

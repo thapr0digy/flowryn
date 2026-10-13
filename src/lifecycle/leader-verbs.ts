@@ -128,6 +128,7 @@ const cancel: VerbSpec = {
   roles: ["leader", "human"],
   apply(ctx, args) {
     const run = activeRunFor(ctx.db, stringArg(args, "target")!);
+    if (run.state === "landed") throw new FlowrynError("run_not_active", `${run.task_id} landed: its merge is proven and stands; nothing was cancelled`, `flowryn cleanup ${run.task_id}`);
     const reason = stringArg(args, "reason") ?? `by ${ctx.caller.role}`;
     const op = requestCancel(ctx.db, run, { id: ctx.ulid, by: ctx.caller.role, reason, source: "cli", now: ctx.now() });
     return { data: { run: run.id, task: run.task_id, operation: op.id } };

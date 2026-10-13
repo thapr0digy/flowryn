@@ -83,6 +83,8 @@ new delivery, and a merged PR still reads merged then). The reversible effects
   is in flight then finds its operation settled and stops there, and
   `flowryn cancel` answers `run_not_active` with that line instead of a stop
   failure. The worker of a landed run is stopped by its cleanup as usual.
+  A fresh `flowryn cancel` of a run already landed is refused (`run_not_active`,
+  pointing at `flowryn cleanup`) before any cancel operation is recorded.
 - **A merge proven after the run already ended** (the cancel committed before
   the read came back) does not revive the run: terminal work stays terminal.
   `noteMergedAfterEnd` records the fact instead: an open merge request is
