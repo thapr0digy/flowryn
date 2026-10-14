@@ -9,6 +9,7 @@ import type { DeliveryServices } from "../policy/services.ts";
 import type { SchedServices } from "../sched/services.ts";
 import type { LavishServices } from "../lavish/services.ts";
 import { FlowrynError } from "./errors.ts";
+import type { ReportRead } from "../attention/read-close.ts";
 import type { RestartController } from "../daemon/restart.ts";
 
 /**
@@ -55,6 +56,8 @@ export interface PositionalSpec {
 export interface HandlerResult {
   data: Record<string, unknown>;
   hints?: string[];
+  /** Reads: the report items this read printed whole, for its afterRead hook; never sent in the reply. */
+  reportsRead?: ReportRead[];
 }
 
 export interface DaemonInfo {
@@ -154,6 +157,12 @@ export interface VerbSpec {
   settle?: (ctx: HandlerCtx, result: HandlerResult) => Promise<HandlerResult>;
   /** Reads: pure SQLite reads, shared by the daemon and the read-only fallback. */
   read?: (ctx: ReadCtx, args: Args) => HandlerResult;
+  /**
+   * Reads: what being read records, such as a report the leader read whole
+   * closing (src/attention/read-close.ts). The daemon runs it right after
+   * `read`, in its own transaction; the read-only fallback never does.
+   */
+  afterRead?: (ctx: HandlerCtx, result: HandlerResult) => HandlerResult;
   /** Local verbs run in the CLI process only. Returns the exit code. */
   local?: (args: Args, io: CliIo) => Promise<number>;
 }

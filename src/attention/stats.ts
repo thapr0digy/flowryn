@@ -516,13 +516,32 @@ export function answeredAsRecommended(db: Db, list: readonly Intervention[]): { 
   return { matched, of };
 }
 
+/**
+ * Items the leader's read closed in the window (`item.read`, src/attention/read-close.ts), by kind.
+ * A read is not a dismissal and not an intervention, so U1 never counts it; its detail names them,
+ * so the dismissals reading replaced show where they went.
+ */
+export function readClosures(db: Db, scope: Scope): string[] {
+  const rows = db
+    .query(
+      `SELECT json_extract(payload, '$.kind') AS kind FROM events
+       WHERE seq >= $first AND ts >= $since AND kind = 'item.read' AND ${inProject("task_id")}
+       LIMIT $limit`,
+    )
+    .all({ first: scope.firstSeq, since: scope.since, project: scope.project, limit: MAX_EVENT_ROWS }) as { kind: string | null }[];
+  return rows.map((r) => r.kind ?? "-");
+}
+
 export function unneeded(db: Db, scope: Scope, list: readonly Intervention[], gaps: string[]): UnneededRow[] {
   const u1 = dismissedAlone(list, scope.now);
+  const reads = readClosures(db, scope);
+  if (reads.length === MAX_EVENT_ROWS) gaps.push(`read closures: capped at ${MAX_EVENT_ROWS} rows`);
+  const readDetail = reads.length > 0 ? `; closed on read, not dismissed: ${tally(reads)}` : "";
   if (u1.taskless > 0) gaps.push(`dismissed alone: ${u1.taskless} dismissals of items with no task (system alerts) left out: no recorded action can follow them`);
   const u2 = steeredBusy(db, scope, list, gaps);
   const u3 = answeredAsRecommended(db, list);
   return [
-    { rule: "U1 dismissed alone", n: u1.matched.length, of: u1.of, detail: tally(u1.matched.map((d) => String(d.payload.kind ?? "-"))) },
+    { rule: "U1 dismissed alone", n: u1.matched.length, of: u1.of, detail: `${tally(u1.matched.map((d) => String(d.payload.kind ?? "-")))}${readDetail}` },
     { rule: "U2 steer to a busy run", n: u2.matched.length, of: u2.of, detail: tally(u2.matched.map((s) => s.task_id ?? "-")) },
     { rule: "U3 answered as recommended", n: u3.matched.length, of: u3.of, detail: tally(u3.matched.map((m) => `asked ${m.asked}`)) },
   ];

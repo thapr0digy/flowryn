@@ -71,7 +71,8 @@ export class Gateway {
 
     if (spec.kind === "read") {
       const result = spec.read!({ db: services.db, config: services.config(), now: services.now(), caller, info: services.info(), configStatus: services.configStatus?.() }, args);
-      return okReply(result.data, result.hints);
+      const recorded = spec.afterRead ? this.afterRead(spec, ctx, result) : result;
+      return okReply(recorded.data, recorded.hints);
     }
 
     if (!isUlid(env.ulid)) throw new FlowrynError("bad_envelope", "a mutation needs a ULID idempotency key");
@@ -88,6 +89,20 @@ export class Gateway {
       return await attempt;
     } finally {
       this.inFlight.delete(env.ulid);
+    }
+  }
+
+  /**
+   * A read's recorded effect, in its own transaction. Its failure never fails
+   * the read: the reply says what was not recorded, and the daemon logs why.
+   */
+  private afterRead(spec: VerbSpec, ctx: HandlerCtx, result: HandlerResult): HandlerResult {
+    try {
+      return tx(ctx.db, () => spec.afterRead!(ctx, result));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.opts.services.log(`gateway: ${spec.name} afterRead failed: ${error instanceof Error ? (error.stack ?? reason) : reason}`);
+      return { data: { ...result.data, read: `not closed (${reason})` }, hints: result.hints };
     }
   }
 

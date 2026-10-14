@@ -442,7 +442,7 @@ const deliver: VerbSpec = {
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id}${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}`,
+      line: `Report ready: ${taskTitle(ctx.db, run.task_id)} (${run.project_id}); flowryn show ${run.task_id} --full${opened.length > 0 ? `; ${opened.length} open decision${opened.length === 1 ? "" : "s"}` : ""}`,
       now,
     });
     // A scout's workflow ends in no gate: the verified report lands it, and the daemon cleans up (design section 8).

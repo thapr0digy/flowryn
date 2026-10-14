@@ -13,8 +13,11 @@ import { DIGEST_HEADER } from "../../src/attention/router.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
+import { openItem } from "../../src/attention/items.ts";
+import { tx } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
-import { waitUntil } from "../helpers/harness.ts";
+import { cliJson, makeHome, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 
 const envs: FleetEnv[] = [];
 async function fleet(): Promise<FleetEnv> {
@@ -79,7 +82,7 @@ const FINDING = "Pi contract c12 fails on the installed build: the steer-seen ho
 
 describe("worker reports reach the leader", () => {
   test(
-    "a finding opens one P1 item: the digest line, fleet needs, the full text in show; a repeat adds none, progress opens none, dismiss closes it",
+    "a finding opens one P1 item: the digest line, fleet needs, the full text in show, which closes it as read; a repeat adds none, progress opens none",
     async () => {
       const env = await fleet();
       const { task, run } = await env.dispatch(`Check the contract\nFAKE: wait-file go\nFAKE: report finding ${FINDING}\nFAKE: report finding ${FINDING}\nFAKE: report progress halfway there\nFAKE: sleep 60000`);
@@ -110,22 +113,26 @@ describe("worker reports reach the leader", () => {
       expect(fleetData.needs).toContainEqual(expect.objectContaining({ id: item.id, lane: "P1" }));
       expect(fleetData.fleet.find((r) => r.id === task)?.needs).toBe("report");
 
-      // show <item>: the report itself, with the whole body.
+      // show <item>: the report itself, with the whole body; the leader has read it, so it closes (docs/notes/2026-10-14-auto-close-a-xn.md).
       const shown = await env.json(["show", item.id], { env: { FLOWRYN_TOKEN: leader } });
-      expect(shown.reply.data).toMatchObject({ item: item.id, kind: "worker_report", status: "finding", task, run, body: FINDING });
+      expect(shown.reply.data).toMatchObject({ item: item.id, kind: "worker_report", status: "finding", task, run, body: FINDING, state: "resolved", read: `closed ${item.id}` });
+      expect(reportItems(env, run)).toMatchObject([{ state: "resolved", resolved_by: "read by leader" }]);
+      expect(env.events(run)).toContain("item.read");
       // show <run>: the latest report of any status.
       const runView = await env.json(["show", run], { env: { FLOWRYN_TOKEN: leader } });
       expect(String((runView.reply.data as { report: string }).report)).toMatch(/^progress · \S+ ago · halfway there$/);
 
+      // Read, it needs no dismissal, and fleet no longer asks for it.
       const dismissed = await env.json(["dismiss", item.id], { env: { FLOWRYN_TOKEN: leader } });
-      expect(dismissed.code).toBe(0);
-      expect(reportItems(env, run).map((i) => i.state)).toEqual(["dismissed"]);
+      expect(dismissed.reply.error).toMatchObject({ code: "bad_args", message: `item ${item.id} is already resolved` });
+      const after = await env.json(["fleet"], { env: { FLOWRYN_TOKEN: leader } });
+      expect((after.reply.data as { fleet: { id: string; needs: string }[] }).fleet.find((r) => r.id === task)?.needs).not.toBe("report");
     },
     T,
   );
 
   test(
-    "a multi-line body keeps its lines in show, plain and --json; a status outside the table opens an item",
+    "a multi-line body keeps its lines in show, plain and --json; a status outside the table opens an item that reading leaves open, and dismiss closes it",
     async () => {
       const env = await fleet();
       const { run } = await env.dispatch("Check the build\nFAKE: report flaky FLOWRYN-MARK-L1 first line\\nFLOWRYN-MARK-L2 second line\nFAKE: sleep 60000");
@@ -138,6 +145,9 @@ describe("worker reports reach the leader", () => {
       expect(plain).toContain("FLOWRYN-MARK-L1 first line");
       expect(plain).toContain("FLOWRYN-MARK-L2 second line");
       expect(plain).toContain(`flowryn dismiss ${item.id}`);
+      expect(reportItems(env, run).map((i) => i.state)).toEqual(["open"]);
+      expect((await env.json(["dismiss", item.id])).code).toBe(0);
+      expect(reportItems(env, run).map((i) => i.state)).toEqual(["dismissed"]);
     },
     T,
   );
@@ -155,4 +165,49 @@ describe("worker reports reach the leader", () => {
     },
     T,
   );
+});
+
+describe("reading a report closes it only through the daemon", () => {
+  const homes: TestHome[] = [];
+  const daemons: DaemonProc[] = [];
+  afterEach(async () => {
+    for (const d of daemons.splice(0)) await d.kill9().catch(() => {});
+    for (const h of homes.splice(0)) h.cleanup();
+  });
+
+  test("the leader's show closes a finding when the daemon serves it; the read-only fallback leaves the next one open", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const env = { FLOWRYN_TOKEN: seedLeader(h) };
+    const { runId, taskId } = seedRun(h);
+    const db = h.db();
+    const [served, offline] = ["first", "second"].map((n) =>
+      tx(db, () => {
+        const event = appendEvent(db, { source: "cli", kind: "worker.report", runId, taskId, payload: { status: "finding", summary: n, body: `the ${n} finding` } });
+        return openItem(db, { kind: "worker_report", eventSeq: event.seq, taskId, runId, line: `Report (finding): ${n}` });
+      }),
+    );
+    db.close();
+    const state = (id: string) => {
+      const read = h.db();
+      try {
+        return (read.query("SELECT state FROM items WHERE id = ?1").get(id) as { state: string }).state;
+      } finally {
+        read.close();
+      }
+    };
+
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const shown = await cliJson(h, ["show", served!], { env });
+    expect(shown.reply.data).toMatchObject({ body: "the first finding", state: "resolved", read: `closed ${served}` });
+    expect(state(served!)).toBe("resolved");
+
+    await d.stop();
+    const fallback = await cliJson(h, ["show", offline!], { env });
+    expect(fallback.code).toBe(0);
+    expect(fallback.reply.data).toMatchObject({ body: "the second finding", state: "open" });
+    expect((fallback.reply.data as { read?: string }).read).toBeUndefined();
+    expect(state(offline!)).toBe("open");
+  });
 });
