@@ -47,6 +47,7 @@ export function deliveryLines(d: ContractDelivery): string[] {
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
     ...beginLines(d),
     "  An ask-user finding: $FLOWRYN_BIN ask --options <its choices> --blocks <what waits> --body-file - with it; never answer it yourself.",
+    `  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/${d.defaultBranch}, resolve, commit, plain git push, then run the pipeline again.`,
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",
   ];

@@ -1,7 +1,7 @@
 # no-mistakes never rewrites a PR on a merge conflict
 
 - Status: done
-- Open: not seen live yet (no PR has conflicted since); a worker whose own pipeline parks at a conflict gate before it delivers is not covered (see "Not in scope")
+- Open: not seen live yet (no PR has conflicted since); the worker contract's pre-delivery conflict-gate line (follow-up below) not yet seen live
 
 The scout report on the no-mistakes v1.84.0 CI monitor (`scout-no-code-qn`) found that a PR that starts to conflict with `main` after delivery is repaired by the monitor itself: the repair counts against `auto_fix.ci` (here 3, from the global config), always rebases, revalidates from Review and force-pushes. `auto_fix.rebase` does not cover it. Flowryn's own `[upkeep] nudge_conflicts` races it, and the result was five human decisions on 2026-10-12/13 (q58, q60, q62, q63, q66). This change stops the rewrite at the source and makes Flowryn treat what is left as the conflict nudge's business. Plain code throughout (a config file, a parser, a classifier, a git ancestry check, a doctor check); no model.
 
@@ -12,7 +12,7 @@ The scout report on the no-mistakes v1.84.0 CI monitor (`scout-no-code-qn`) foun
 - `auto_fix: { ci: 0 }`: the CI monitor never starts a fix round, so a `ci-merge-conflict` finding parks the `ci` step at an approval gate instead of rebasing. Flowryn's nudge then sends the ship back to merge `origin/main` with a new commit.
 - `rebase: { strategy: merge }`: a clean Rebase step at the start of a run merges a moved `origin/main` (a `--no-ff` merge commit) instead of replaying the branch on it, the other rewrite path the report names.
 
-Verified against the installed binary (v1.84.0), not memory: its embedded config sample lists `auto_fix:` with `ci: 3` among `rebase`, `lint`, `test`, `review`, `document`; its config struct has `yaml:"rebase"` with `yaml:"strategy"`, and its validator reads `rebase.strategy: %q is not a valid strategy (want %q or %q)` (rebase or merge). no-mistakes trusts the file from the default branch, so it takes effect for branches cut from (or merging) `main` after this PR lands. `~/.no-mistakes/config.yaml` is not touched.
+Verified against the installed binary (v1.84.0), not memory: its embedded config sample lists `auto_fix:` with `ci: 3` among `rebase`, `lint`, `test`, `review`, `document`; its config struct has `yaml:"rebase"` with `yaml:"strategy"`, and its validator reads `rebase.strategy: %q is not a valid strategy (want %q or %q)` (rebase or merge). no-mistakes reads the two keys from different places: `auto_fix` is a non-executing field, read from the pushed branch, and only `rebase.strategy` is read from the default branch. Both take effect for branches cut from (or merging) `main` after this PR lands; an older branch still runs with the global `auto_fix.ci` (3) until it merges `main`. `~/.no-mistakes/config.yaml` is not touched.
 
 **2. A parked conflict gate is the nudge's (`src/policy/nomistakes.ts`, `src/reconcile/delivery.ts`).**
 
@@ -47,7 +47,7 @@ As designed, with these specifics:
 - Doctor's check is `src/doctor/nomistakes.ts` (`no-mistakes auto_fix.ci (<project>)`). Run read-only against this machine before the merge: `warn`, `3 (from ~/.no-mistakes/config.yaml)`, since `main` does not have this PR's `.no-mistakes.yaml` yet.
 - Tests: `test/unit/conflict-gate.test.ts` (parser, classifier, and the delivery watcher with a stand-in no-mistakes), `test/unit/restart.test.ts` (the restart guard), `test/unit/head-history.test.ts` (scratch repos), `test/integration/delivery.test.ts` (a commit on top is not tagged), `test/unit/doctor-nomistakes.test.ts` (fixtures).
 
-**Not in scope.** A worker still in its ship stage whose pipeline parks at a conflict gate before delivery is not covered by the nudge (the nudge only acts on delivered runs); the worker contract does not yet say what to do with that gate. Reported to the leader as a follow-up.
+**Not in scope here.** A worker still in its ship stage whose pipeline parks at a conflict gate before delivery is not covered by the nudge (the nudge only acts on delivered runs). The follow-up below gives the worker contract a line for that gate.
 
 ## Follow-up: the conflict gate before delivery (follow-up-to-am)
 
@@ -67,3 +67,11 @@ Closes the "Not in scope" gap above and corrects two details of this file. Plain
 - `DeliveryWatcherDeps.headFetchGit` (optional, falls back to `git`); the daemon wires `gitRunner(<git>, HEAD_FETCH_TIMEOUT_MS)`. The other calls (`cat-file`, `merge-base`) are local and keep `deliveryGit`.
 - A cut-off fetch is `runBounded`'s code 124, which `headHistory` already reads as `unknown`; the divergence then carries `ancestry unknown`, as for any other failed fetch.
 - Test: a scratch repo whose `origin` upload-pack sleeps, with a fetch runner of a short deadline, yields `unknown` well before the long runner's deadline; and the watcher passes its `headFetchGit` to the fetch only.
+
+### Built
+
+As designed:
+
+- Contract line (no-mistakes ships only, `origin/<default branch>` filled in): `A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/<base>, resolve, commit, plain git push, then run the pipeline again.` No `CONTRACT_REVISIONS` bump, no fake change (the suite has no no-mistakes step).
+- `HEAD_FETCH_TIMEOUT_MS` (20 s) in `src/policy/head-history.ts`; the daemon gives the delivery watcher `headFetchGit`, a `gitRunner` with that deadline, used only for the `refs/pull/<n>/head` fetch.
+- Tests: `test/unit/harness.test.ts` (the line in Claude and Pi no-mistakes contracts, absent in direct-PR and local-only); `test/unit/head-history.test.ts` (a scratch origin whose upload-pack sleeps: a 500 ms fetch runner reads `unknown` in well under the long deadline; only the fetch uses the fetch runner); `test/unit/observed-delivery.test.ts` (the watcher routes the moved head's fetch to `headFetchGit`, and its cut-off tags the divergence `ancestry unknown`).

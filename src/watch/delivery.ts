@@ -32,6 +32,8 @@ export interface DeliveryWatcherDeps {
   forge(): Forge;
   webUrl(): string;
   git: GitRunner;
+  /** The ancestry check's PR-head fetch, with a short deadline (HEAD_FETCH_TIMEOUT_MS); `git` when absent. */
+  headFetchGit?: GitRunner;
   noMistakes(): string | null;
   /** The status read itself (readNmStatus); tests pause it on a barrier. */
   readNmStatus?: typeof readNmStatus;
@@ -205,7 +207,7 @@ export class DeliveryWatcher {
     if (!open || run.state !== "ready" || head === delivered || headMoveRecorded(this.deps.db, run.id, delivered, head)) return undefined;
     const cwd = existsSync(run.worktree_path) ? run.worktree_path : getProject(this.deps.db, run.project_id)?.path;
     if (!cwd) return "unknown";
-    return headHistory(this.deps.git, cwd, delivered, head, prNumber).catch(() => "unknown" as const);
+    return headHistory(this.deps.git, cwd, delivered, head, prNumber, this.deps.headFetchGit ?? this.deps.git).catch(() => "unknown" as const);
   }
 
   /** A merge proven after its run ended: kept as a fact, the run not revived (noteMergedAfterEnd). */
