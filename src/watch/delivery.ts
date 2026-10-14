@@ -12,7 +12,8 @@ import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
-import { applyNmObservation, applyPrObservation, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
+import { headHistory, type HeadHistory } from "../policy/head-history.ts";
+import { applyNmObservation, applyPrObservation, headMoveRecorded, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 
 /**
@@ -172,10 +173,11 @@ export class DeliveryWatcher {
       try {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
+        const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
         tx(db, () => noteForgeUp(db, "github", now()));
         const mergeSha = pr.state === "merged" ? pr.mergeSha : null;
         const observed = deliveryTransition(db, seen, mergeSha ? MERGED_PARTS : PR_PARTS, "pr_observation", "github", now(), (current) =>
-          applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts() }),
+          applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history }),
         );
         if (!observed.applied && mergeSha && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, mergeSha, "github");
         const applied = observed.applied ? observed.value : { landed: false, nudged: false };
@@ -191,6 +193,19 @@ export class DeliveryWatcher {
         return;
       }
     }
+  }
+
+  /**
+   * How a delivered run's open PR head moved, asked of git once per head move
+   * (a divergence already recorded for it skips the call): in the run's
+   * worktree, or the project checkout once it is gone. Undefined when the
+   * head did not move or nothing is asked.
+   */
+  private async headHistoryOf(run: RunWithPolicy, delivered: string, head: string, open: boolean, prNumber: number): Promise<HeadHistory | undefined> {
+    if (!open || run.state !== "ready" || head === delivered || headMoveRecorded(this.deps.db, run.id, delivered, head)) return undefined;
+    const cwd = existsSync(run.worktree_path) ? run.worktree_path : getProject(this.deps.db, run.project_id)?.path;
+    if (!cwd) return "unknown";
+    return headHistory(this.deps.git, cwd, delivered, head, prNumber).catch(() => "unknown" as const);
   }
 
   /** A merge proven after its run ended: kept as a fact, the run not revived (noteMergedAfterEnd). */

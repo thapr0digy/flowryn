@@ -223,6 +223,17 @@ describe("the validation guard and a CI wait", () => {
     expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
   });
 
+  test("a run parked at a merge conflict the conflict nudge covers does not block; an uncovered parked gate does", () => {
+    const parked = 'run:\n  id: "01NMC"\n  branch: b\n  status: awaiting_approval\n  awaiting_agent: parked 3m\n  head: abc\n  pr: ""\ngate: ci\n';
+    tx(db, () => {
+      db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', 'r1', 'ship', ?1)").run(Date.now() - 34 * 60_000);
+      recordEvidence(db, "r1", "nomistakes", 1, { id: "01NMC", branch: "b", status: "awaiting_approval", outcome: "", head: "abc", pr: "", active_steps: null, conflict_gate: "conflict_nudged" }, Date.now() - 5_000);
+    });
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    validating("r2", parked);
+    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => [g.kind, g.task])).toEqual([["validation", "t2"]]);
+  });
+
   test("a step with a local agent blocks, naming the oldest step and its agent", () => {
     validating("r1", NM_REVIEW);
     const guards = restartGuards(db, NO_WORK, Date.now());

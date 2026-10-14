@@ -10,6 +10,8 @@ export interface DivergenceInput {
   higher: string;
   lower: string;
   summary: string;
+  /** Extra facts for the `divergence.opened` event (a moved PR head's `history`). */
+  detail?: Record<string, unknown>;
 }
 
 export interface DivergenceRow {
@@ -78,7 +80,7 @@ export function openDivergence(db: Db, source: EventSource, input: DivergenceInp
     kind: "divergence.opened",
     runId: input.runId,
     taskId: input.taskId,
-    payload: { divergence: id, higher: input.higher, lower: input.lower, summary: input.summary },
+    payload: { divergence: id, higher: input.higher, lower: input.lower, summary: input.summary, ...input.detail },
     ts: now,
   });
   openItem(db, { kind: "divergence", eventSeq: event.seq, taskId: input.taskId, runId: input.runId, line: itemLine(id, input), now });

@@ -23,6 +23,7 @@ import { capacityConfig, workflowsConfig } from "../config/workflows.ts";
 import { INSTALL_HINTS } from "../init/install.ts";
 import { checkHost } from "../sched/host.ts";
 import { judgeQuota, probeQuota, type QuotaReading } from "../sched/quota.ts";
+import { nmAutoFixChecks } from "./nomistakes.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -366,6 +367,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(await herdrCheck(config));
   checks.push(await piExtensionCheck());
   checks.push(...(await contractChecks(config)));
+  checks.push(...(await nmAutoFixChecks(config, env.env)));
   const policy = policyCheck(config);
   if (policy) checks.push(policy);
   checks.push(await hostCheckNow(config));

@@ -209,7 +209,8 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   // TZ=UTC: bun test pins the test file's own clock to UTC regardless of TZ, but a daemon/CLI spawned via
   // Bun.spawn runs in the box's real local zone unless told otherwise, so every spawned process agrees with
   // bun test's own "today" at any hour (see test/unit/tz.test.ts).
-  const env = { ...cleanEnv(), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}`, FLOWRYN_OPENER: `record:${join(home, "browser-opens.log")}`, TZ: "UTC" };
+  // Nor this machine's no-mistakes config: doctor reads $NM_HOME/config.yaml (src/doctor/nomistakes.ts).
+  const env = { ...cleanEnv(), NM_HOME: join(home, "no-mistakes-home"), FLOWRYN_HOME: home, FLOWRYN_NOTIFY: "off", FLOWRYN_NOTIFIER: `record:${join(home, "notified.jsonl")}`, FLOWRYN_OPENER: `record:${join(home, "browser-opens.log")}`, TZ: "UTC" };
   return {
     home,
     stateDir,

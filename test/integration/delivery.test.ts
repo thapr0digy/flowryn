@@ -224,6 +224,10 @@ describe("the merge gate", () => {
       expect(moved.code).toBe(2);
       expect(errorCode(moved.reply)).toBe("head_moved");
       await waitUntil(() => openItems(e, "divergence").some((i) => i.line.includes("head moved")), 10_000, "a head-moved divergence");
+      // A commit on top of the delivered head: git says it descends, so the divergence is not tagged as a rewrite.
+      const movedLine = openItems(e, "divergence").find((i) => i.line.includes("head moved"))!.line;
+      expect(movedLine).not.toContain("history rewritten");
+      expect(movedLine).not.toContain("ancestry unknown");
       // The approval was for the old head; approving the new head needs a new delivery first.
       const again = await e.approve(task);
       expect(errorCode(again as never)).toBe("head_moved");

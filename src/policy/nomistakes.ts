@@ -22,10 +22,16 @@ export interface NmRun {
   branch: string;
   status: string;
   head: string;
+  /** The full head (`head_sha`); empty when the status prints only the short `head`. */
+  headSha: string;
   outcome: string;
   pr: string;
   awaiting: boolean;
   gate: boolean;
+  /** The step the run is parked at (the top-level `gate:` line or its nested `step:`), empty when it is not parked. */
+  gateStep: string;
+  /** The parked gate's `findings` table; null when the status has none or it does not decode. */
+  findings: NmFinding[] | null;
   /** The steps running now (`active_steps`); null when the status has no such table (an older no-mistakes). */
   activeSteps: NmActiveStep[] | null;
 }
@@ -41,6 +47,14 @@ export interface NmActiveStep {
   activeFor: string;
   lastActivity: string;
   agentPid: string;
+}
+
+/** One row of a parked gate's `findings` table; `category` is empty when the status prints no such column (v1.84.0 does not). */
+export interface NmFinding {
+  id: string;
+  action: string;
+  description: string;
+  category: string;
 }
 
 function stripQuotes(value: string): string {
@@ -76,6 +90,71 @@ export function parseActiveSteps(text: string): NmActiveStep[] | null {
   return (rows as Record<string, unknown>[]).map((r) => ({ step: cell(r, "step"), status: cell(r, "status"), activeFor: cell(r, "active_for"), lastActivity: cell(r, "last_activity"), agentPid: cell(r, "agent_pid") }));
 }
 
+/** A non-blank line's leading whitespace width; -1 for a blank line, so it ends an indented block. */
+function indentOf(line: string): number {
+  return /\S/.test(line) ? /^[ \t]*/.exec(line)![0].length : -1;
+}
+
+/**
+ * The step a run is parked at: the inline `gate: <step>` (the flat shape), or
+ * the `step:` field of the block under a top-level `gate:` (v1.84.0 nests it).
+ */
+function parseGateStep(text: string): string {
+  const lines = text.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("gate:"));
+  if (at < 0) return "";
+  const inline = stripQuotes(lines[at]!.slice("gate:".length));
+  if (inline !== "") return inline;
+  for (let i = at + 1; i < lines.length && indentOf(lines[i]!) > 0; i++) {
+    const step = /^\s+step:[ \t]*(.*)$/.exec(lines[i]!);
+    if (step) return stripQuotes(step[1]!);
+  }
+  return "";
+}
+
+/**
+ * The `findings[N]{...}:` table of a parked gate, at the top level (the flat
+ * shape) or nested under `gate:` (v1.84.0), read by column name. Only that
+ * block is decoded, dedented: the status around it (a free-text `help` list)
+ * is not always strict TOON. Null when there is no table or it does not decode.
+ */
+export function parseFindings(text: string): NmFinding[] | null {
+  const lines = text.split("\n");
+  const header = /^([ \t]*)findings\[\d+\]\{[^}]*\}:\s*$/;
+  const start = lines.findIndex((l) => header.test(l));
+  if (start < 0) return null;
+  const indent = header.exec(lines[start]!)![1]!.length;
+  let end = start + 1;
+  while (end < lines.length && indentOf(lines[end]!) > indent) end++;
+  let doc: unknown;
+  try {
+    doc = decodeToon(lines.slice(start, end).map((l) => l.slice(indent)).join("\n"));
+  } catch {
+    return null;
+  }
+  const rows = (doc as { findings?: unknown } | null)?.findings;
+  if (!Array.isArray(rows) || !rows.every((r) => r !== null && typeof r === "object")) return null;
+  return (rows as Record<string, unknown>[]).map((r) => ({ id: cell(r, "id"), action: cell(r, "action"), description: cell(r, "description"), category: cell(r, "category") }));
+}
+
+/** no-mistakes' own text for a PR that conflicts with its base (category `ci-merge-conflict`), the only way to tell it when the table has no category column. */
+export const MERGE_CONFLICT_DESCRIPTION = "PR has merge conflicts with the base branch";
+
+function isMergeConflict(f: NmFinding): boolean {
+  return f.category !== "" ? f.category === "ci-merge-conflict" : f.description.trim() === MERGE_CONFLICT_DESCRIPTION;
+}
+
+/**
+ * The run is parked at its `ci` gate on a merge conflict and nothing else:
+ * no outcome, at least one finding, and every finding a merge conflict. With
+ * `auto_fix.ci: 0` this is how the CI monitor reports a PR that started to
+ * conflict, instead of rebasing it; Flowryn's conflict nudge owns it
+ * (conflictCovered, src/reconcile/delivery.ts).
+ */
+export function isConflictGate(run: Pick<NmRun, "outcome" | "gateStep" | "findings">): boolean {
+  return run.outcome === "" && run.gateStep === "ci" && run.findings !== null && run.findings.length > 0 && run.findings.every(isMergeConflict);
+}
+
 /** Parse `no-mistakes axi status` TOON; null when it names no run. */
 export function parseNmStatus(text: string): NmRun | null {
   const id = field(text, "id");
@@ -85,10 +164,13 @@ export function parseNmStatus(text: string): NmRun | null {
     branch: field(text, "branch"),
     status: field(text, "status"),
     head: field(text, "head"),
+    headSha: field(text, "head_sha"),
     outcome: field(text, "outcome"),
     pr: field(text, "pr"),
     awaiting: /^\s*awaiting_agent:/m.test(text),
     gate: /^\s*gate:/m.test(text),
+    gateStep: parseGateStep(text),
+    findings: parseFindings(text),
     activeSteps: parseActiveSteps(text),
   };
 }
