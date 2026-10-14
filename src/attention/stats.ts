@@ -441,9 +441,9 @@ function tally(values: readonly string[]): string {
   return [...counts].toSorted((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k, n]) => `${k} ${n}`).join(", ") || "-";
 }
 
-/** U1: a dismissal after which nobody acted on the same task within DISMISS_ALONE_MS. */
-export function dismissedAlone(list: readonly Intervention[]): { matched: Intervention[]; of: number } {
-  const dismissals = list.filter((i) => i.action === "dismiss");
+/** U1: a dismissal after which nobody acted on the same task within DISMISS_ALONE_MS; one whose window has not ended by `now` is not counted. */
+export function dismissedAlone(list: readonly Intervention[], now: number): { matched: Intervention[]; of: number } {
+  const dismissals = list.filter((i) => i.action === "dismiss" && i.ts + DISMISS_ALONE_MS <= now);
   const matched = dismissals.filter(
     (d) => !list.some((i) => i.action !== "dismiss" && i.task_id !== null && i.task_id === d.task_id && i.ts > d.ts && i.ts <= d.ts + DISMISS_ALONE_MS),
   );
@@ -486,7 +486,7 @@ export function answeredAsRecommended(db: Db, list: readonly Intervention[]): { 
 }
 
 export function unneeded(db: Db, scope: Scope, list: readonly Intervention[], gaps: string[]): UnneededRow[] {
-  const u1 = dismissedAlone(list);
+  const u1 = dismissedAlone(list, scope.now);
   const u2 = steeredBusy(db, scope, list, gaps);
   const u3 = answeredAsRecommended(db, list);
   return [

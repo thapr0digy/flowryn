@@ -16,6 +16,8 @@ import { ATTENTION_VERBS } from "./verbs.ts";
 export const MAX_SCANNED_EVENTS = 1_000_000;
 /** Entries the state directory walk visits in all. */
 export const MAX_DIR_ENTRIES = 20_000;
+/** UTC days the events-per-day table lists at most, the newest kept. */
+export const MAX_EVENT_DAYS = 400;
 const TOP_KINDS = 10;
 const LATENCY_RUNS = 3;
 /** The reads whose latency is reported: what the leader runs most. */
@@ -88,9 +90,12 @@ export function eventGrowth(db: Db, scope: { since: number; firstSeq: number }, 
   const window = "seq >= $first AND seq < $last AND ts >= $since";
   const capped = db.query("SELECT 1 FROM events WHERE seq >= $last LIMIT 1").get({ last: params.last });
   if (capped) gaps.push(`event growth: only the window's first ${MAX_SCANNED_EVENTS} events are counted`);
-  const days = db
-    .query(`SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS n, SUM(length(payload)) AS bytes FROM events WHERE ${window} GROUP BY day ORDER BY day LIMIT 400`)
-    .all(params) as { day: string; n: number; bytes: number }[];
+  const days = (
+    db
+      .query(`SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS n, SUM(length(payload)) AS bytes FROM events WHERE ${window} GROUP BY day ORDER BY day DESC LIMIT ${MAX_EVENT_DAYS}`)
+      .all(params) as { day: string; n: number; bytes: number }[]
+  ).toReversed();
+  if (days.length === MAX_EVENT_DAYS) gaps.push(`events per day: only the newest ${MAX_EVENT_DAYS} days are listed`);
   const kinds = db
     .query(`SELECT kind, COUNT(*) AS n, SUM(length(payload)) AS bytes FROM events WHERE ${window} GROUP BY kind ORDER BY n DESC, kind LIMIT ${TOP_KINDS}`)
     .all(params) as { kind: string; n: number; bytes: number }[];

@@ -22,7 +22,7 @@ import {
   type Scope,
   type Wait,
 } from "../../src/attention/stats.ts";
-import { dbLine, eventGrowth, readLatency, stateDirSizes, tableRows } from "../../src/attention/store-stats.ts";
+import { dbLine, eventGrowth, MAX_EVENT_DAYS, readLatency, stateDirSizes, tableRows } from "../../src/attention/store-stats.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent, type EventSource } from "../../src/db/events.ts";
@@ -309,9 +309,17 @@ describe("unneeded: three rules", () => {
     ev("steer.created", t + DISMISS_ALONE_MS, "r2", { steer: "m1", decision: null });
     ev("item.dismissed", t + DISMISS_ALONE_MS + 1, "r4", { kind: "worker_report", by: "leader" });
     ev("run.resume_requested", t + 2 * DISMISS_ALONE_MS + 2, "r4", { by: "leader" });
-    const u1 = dismissedAlone(interventions(db, scope(), []));
+    const u1 = dismissedAlone(interventions(db, scope(), []), NOW);
     expect(u1.of).toBe(3);
     expect(u1.matched.map((d) => d.task_id)).toEqual(["t1", "t4"]);
+  });
+
+  test("U1: a dismissal whose 10 minutes have not ended by now is not counted", () => {
+    ev("item.dismissed", NOW - DISMISS_ALONE_MS, "r1", { kind: "worker_report", by: "leader" });
+    ev("item.dismissed", NOW - MIN, "r2", { kind: "worker_report", by: "leader" });
+    const u1 = dismissedAlone(interventions(db, scope(), []), NOW);
+    expect(u1.of).toBe(1);
+    expect(u1.matched.map((d) => d.task_id)).toEqual(["t1"]);
   });
 
   test("U2: a non-urgent steer to a busy run that had no open actionable item", () => {
@@ -364,6 +372,18 @@ describe("store growth", () => {
       { kind: "a", n: 2, bytes: "14 B" },
       { kind: "b", n: 1, bytes: "2 B" },
     ]);
+  });
+
+  test("events per day keep the newest days, with a gap line at the cap", () => {
+    const since = NOW - (MAX_EVENT_DAYS + 5) * DAY;
+    for (let d = MAX_EVENT_DAYS + 4; d >= 0; d -= 1) ev("a", NOW - d * DAY, null);
+    const gaps: string[] = [];
+    const days = eventGrowth(db, scope(null, since), gaps).events_per_day_utc;
+    expect(days.length).toBe(MAX_EVENT_DAYS);
+    expect(days.at(-1)!.day).toBe(new Date(NOW).toISOString().slice(0, 10));
+    expect(days[0]!.day < days.at(-1)!.day).toBe(true);
+    expect(gaps).toEqual([`events per day: only the newest ${MAX_EVENT_DAYS} days are listed`]);
+    expect(eventGrowth(db, scope(), []).events_per_day_utc.length).toBeLessThan(MAX_EVENT_DAYS);
   });
 
   test("the fleet and brief reads are timed through their own verbs", () => {

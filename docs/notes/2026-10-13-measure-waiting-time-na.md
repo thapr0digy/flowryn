@@ -62,7 +62,7 @@ An intervention is a verb a person or the leader ran that changed a run, read fr
 
 Each is a pure rule over recorded rows; the `unneeded` table lists `rule`, `n`, `of` (what it is counted out of) and `detail`.
 
-- **U1 `dismissed alone`**: an `item.dismissed` after which nobody intervened on the same task (any action in the table above other than `dismiss`) within 10 minutes. The item asked for attention it did not need; `detail` lists the item kinds, most first (that is where the noise comes from). Out of: dismissals.
+- **U1 `dismissed alone`**: an `item.dismissed` after which nobody intervened on the same task (any action in the table above other than `dismiss`) within 10 minutes. A dismissal less than 10 minutes before `now` is left out of both `n` and `of`, since its follow-up may still come. The item asked for attention it did not need; `detail` lists the item kinds, most first (that is where the noise comes from). Out of: dismissals.
 - **U2 `steer to a busy run`**: a non-urgent `steer` whose run's last `run.liveness` before it was `busy` (the worker was mid-turn) and that had no open actionable item at that moment. Nothing about the run asked for one. Out of: steers. Read per steer with the `events_run` index (the latest `run.liveness` with a lower `seq`).
 - **U3 `answered as recommended`**: a `decision.answered` whose answer equals the decision's non-empty `recommendation`. The asker already knew the answer it got, so a default could have stood. `detail` splits it by asked-to (captain or leader). Out of: answers to decisions with a recommendation.
 
@@ -78,7 +78,7 @@ Rules only count. None of them changes behaviour; they show where an automatic d
 
 ### Bounds
 
-- `events` has no time index. The window's first event is found by binary search on `seq` (`O(log n)` primary-key reads), assuming `ts` does not decrease as `seq` grows (the daemon appends with its own clock; a clock stepping back can move the edge by those few events). Every event query then reads only `seq >= that`: a query returning rows has `LIMIT 20 000`, and the two aggregates (events per day, largest kinds) read at most the window's first 1 000 000 events; either limit hit is a gap line.
+- `events` has no time index. The window's first event is found by binary search on `seq` (`O(log n)` primary-key reads), assuming `ts` does not decrease as `seq` grows (the daemon appends with its own clock; a clock stepping back can move the edge by those few events). Every event query then reads only `seq >= that`: a query returning rows has `LIMIT 20 000`, and the two aggregates (events per day, largest kinds) read at most the window's first 1 000 000 events, and events per day lists at most the newest 400 days; any of these limits hit is a gap line.
 - `decisions`, `gates`, `items` and `explanations` have no time index either; they hold one row per wait or decision, orders of magnitude fewer than `events`. Each read takes the rows ending in the window or open, `LIMIT 5 000`; a hit limit is a gap line. `took` shows when this stops being cheap.
 - Per-steer and per-nudge lookups use `events_run (run_id, seq)`.
 
