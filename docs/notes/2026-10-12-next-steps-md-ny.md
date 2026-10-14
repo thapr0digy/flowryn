@@ -1,7 +1,7 @@
 # Native deployment acceptance run
 
-- Status: partial
-- Open: the one authorized live run on a Mac (the leader's), with its report; nothing here has driven launchd yet
+- Status: done
+- Live: run once on 2026-10-14 with the user's authorization (tomato-mac, macOS 26.3.1 arm64, Bun 1.3.8, Flowryn 0.24.0, commit ad25735, clean tree): pass, 7/7 steps (build, install, pinned-callers, replacement, failed-candidate, shutdown, uninstall) in 31 s; teardown left no label and no plist; the production daemon was untouched. Report kept locally at `spikes/.runs/native-acceptance-01M4XBRWRWHTBXQSR30BD60HS9.json` (git-ignored)
 
 next_steps.md package 4, "Close the native deployment loop", third slice. `test/integration/binary.test.ts` proves a compiled daemon pins its build and restarts onto a new merged build, but under a script supervisor; the build-after-merge notes leave "a build by the launchd daemon … not yet run live". This slice adds an opt-in script that runs the whole loop under real launchd, on a separate home and label, with compiled artifacts and the fake external services, and keeps a report of exactly what ran.
 
