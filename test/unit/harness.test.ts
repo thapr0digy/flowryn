@@ -184,6 +184,13 @@ describe("worker contract text", () => {
     expect(workerContract("pi", null, deliveries[3]).split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"))).toHaveLength(3);
   });
 
+  test("a no-mistakes ship merges its base on a conflict-only ci gate, never responds to it; other modes do not carry the line", () => {
+    const line = "  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/trunk, resolve, commit, plain git push, then run the pipeline again.";
+    const nm: ContractDelivery = { kind: "ship", mode: "no-mistakes", defaultBranch: "trunk", lastStage: { id: "ship", pools: ["validation"] } };
+    for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, STYLE_BLOCK, nm).split("\n")).toContain(line);
+    for (const mode of ["direct-PR", "local-only"] as const) expect(workerContract("claude", STYLE_BLOCK, { kind: "ship", mode, defaultBranch: "trunk" })).not.toContain("merge conflicts");
+  });
+
   test("the prompt line is one short line that points at the full task", () => {
     expect(promptLine("scout", "t1", "/r/task.md")).toBe("Flowryn scout t1. Your full task is in /r/task.md; read it first, then do it.");
   });

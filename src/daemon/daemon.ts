@@ -63,6 +63,7 @@ import { cleanupRun, type CleanupReport, type LandingDeps } from "../lifecycle/l
 import { getRun } from "../lifecycle/runs.ts";
 import { ChallengeStore } from "../policy/approvals.ts";
 import { gitLabel, gitRunner } from "../policy/git.ts";
+import { HEAD_FETCH_TIMEOUT_MS } from "../policy/head-history.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { DeliveryWatcher } from "../watch/delivery.ts";
 import { Scheduler } from "../sched/scheduler.ts";
@@ -476,6 +477,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       forge,
       webUrl: () => github().web_url,
       git: deliveryGit,
+      headFetchGit: gitRunner(resolveTool(config, "git") ?? "git", HEAD_FETCH_TIMEOUT_MS),
       noMistakes: () => resolveTool(config, "no_mistakes"),
       nmTimeoutMs: () => cleanupConfig(config).nomistakes_timeout_ms,
       validationStuckMs: () => schedTiming(config).validation_stuck_ms,
