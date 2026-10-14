@@ -90,12 +90,11 @@ export function eventGrowth(db: Db, scope: { since: number; firstSeq: number }, 
   const window = "seq >= $first AND seq < $last AND ts >= $since";
   const capped = db.query("SELECT 1 FROM events WHERE seq >= $last LIMIT 1").get({ last: params.last });
   if (capped) gaps.push(`event growth: only the window's first ${MAX_SCANNED_EVENTS} events are counted`);
-  const days = (
-    db
-      .query(`SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS n, SUM(length(payload)) AS bytes FROM events WHERE ${window} GROUP BY day ORDER BY day DESC LIMIT ${MAX_EVENT_DAYS}`)
-      .all(params) as { day: string; n: number; bytes: number }[]
-  ).toReversed();
-  if (days.length === MAX_EVENT_DAYS) gaps.push(`events per day: only the newest ${MAX_EVENT_DAYS} days are listed`);
+  const newestDays = db
+    .query(`SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*) AS n, SUM(length(payload)) AS bytes FROM events WHERE ${window} GROUP BY day ORDER BY day DESC LIMIT ${MAX_EVENT_DAYS + 1}`)
+    .all(params) as { day: string; n: number; bytes: number }[];
+  const days = newestDays.slice(0, MAX_EVENT_DAYS).toReversed();
+  if (newestDays.length > MAX_EVENT_DAYS) gaps.push(`events per day: only the newest ${MAX_EVENT_DAYS} days are listed`);
   const kinds = db
     .query(`SELECT kind, COUNT(*) AS n, SUM(length(payload)) AS bytes FROM events WHERE ${window} GROUP BY kind ORDER BY n DESC, kind LIMIT ${TOP_KINDS}`)
     .all(params) as { kind: string; n: number; bytes: number }[];

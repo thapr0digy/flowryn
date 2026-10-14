@@ -386,6 +386,16 @@ describe("store growth", () => {
     expect(eventGrowth(db, scope(), []).events_per_day_utc.length).toBeLessThan(MAX_EVENT_DAYS);
   });
 
+  test("events per day with exactly the cap's days list them all, with no gap line", () => {
+    const since = NOW - MAX_EVENT_DAYS * DAY;
+    for (let d = MAX_EVENT_DAYS - 1; d >= 0; d -= 1) ev("a", NOW - d * DAY, null);
+    const gaps: string[] = [];
+    const days = eventGrowth(db, scope(null, since), gaps).events_per_day_utc;
+    expect(days.length).toBe(MAX_EVENT_DAYS);
+    expect(days[0]!.day).toBe(new Date(NOW - (MAX_EVENT_DAYS - 1) * DAY).toISOString().slice(0, 10));
+    expect(gaps).toEqual([]);
+  });
+
   test("the fleet and brief reads are timed through their own verbs", () => {
     const latency = readLatency(ctx());
     expect(latency.map((l) => l.read)).toEqual(["fleet", "brief"]);
