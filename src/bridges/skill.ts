@@ -16,7 +16,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines that start with "F
 
 ## Look
 - \`flowryn fleet\`: every worker, and every item that needs the user.
-- \`flowryn show <task|run|item>\`: one in detail.
+- \`flowryn show <task|run|item>\`: one in detail. Showing a report item, or a task or run with \`--full\`, prints the report whole and closes its item as read (not a \`blocked\` or failure report, which stays open until you act or dismiss it).
 - \`flowryn brief\`: the briefing again.
 - \`flowryn leader status\`: which session leads.
 - \`flowryn daemon status\`: the daemon's version, build and any pending restart.

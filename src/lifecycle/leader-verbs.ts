@@ -6,7 +6,7 @@ import { resolveRunItems } from "../attention/items.ts";
 import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField, waitingPointer, waitingRuns } from "../attention/explanations.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
-import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
 import { getGrant, grantLines, grantView } from "../policy/grants.ts";
 import { getLease, getSession } from "../lease/lease.ts";
@@ -30,6 +30,8 @@ import { ShowText } from "./show-text.ts";
 import { LANDED_BEFORE_CANCEL } from "./landing.ts";
 import { getOperation, heldByEscalation, latestOperation, launchKind, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
 import { channelView } from "../lavish/channel.ts";
+import { closeReadItems, type ReportRead } from "../attention/read-close.ts";
+import { readFileSync, statSync } from "node:fs";
 import type { Db } from "../db/db.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
@@ -499,15 +501,31 @@ function queuedView(ctx: ReadCtx, q: QueuedTask, text: ShowText): { data: Record
   };
 }
 
-/** A worker_report item in `show`: the report itself, with the whole body its event keeps. */
-function workerReportView(
-  ctx: ReadCtx,
-  id: string,
-  item: { event_seq: number; task_id: string | null; run_id: string | null; lane: string; state: string; opened_at: number },
-): { data: Record<string, unknown>; hints: string[] } {
+interface ItemRow {
+  kind: string;
+  event_seq: number;
+  task_id: string | null;
+  run_id: string | null;
+  line: string;
+  full_line: string | null;
+  lane: string;
+  state: string;
+  opened_at: number;
+}
+
+function isOpen(state: string): boolean {
+  return state === "open" || state === "presented";
+}
+
+/**
+ * A worker_report item in `show`: the report itself, with the whole body its
+ * event keeps (never cut), so the view reads it whole and closes it for the
+ * leader when its status allows (src/attention/read-close.ts).
+ */
+function workerReportView(ctx: ReadCtx, id: string, item: ItemRow, full: boolean): HandlerResult {
   const event = ctx.db.query("SELECT payload FROM events WHERE seq = ?1").get(item.event_seq) as { payload: string } | null;
   const payload = event ? (JSON.parse(event.payload) as { status?: string; body?: string }) : {};
-  const open = item.state === "open" || item.state === "presented";
+  const open = isOpen(item.state);
   return {
     data: {
       item: id,
@@ -522,7 +540,86 @@ function workerReportView(
       body: payload.body || "-",
     },
     hints: open && item.task_id ? [`flowryn dismiss ${id}`, `flowryn steer ${item.task_id} --body-file -`] : ["flowryn fleet"],
+    ...(open ? { reportsRead: [{ item: id, form: full ? "item-full" : "item" }] } : {}),
   };
+}
+
+/** The most of a scout's report file `show` reads: what deliver accepts. */
+const REPORT_FILE_MAX_BYTES = 1024 * 1024;
+/** A scout's report in a report_ready item's view, unless --full: its first lines, each cut. */
+const REPORT_BODY_LINES = 60;
+
+/** The scout's delivered report file: its path, and its text or why it cannot be read. */
+function scoutReport(db: Db, taskId: string): { path: string; text: string | null; problem?: string } | null {
+  const row = db.query("SELECT ref FROM artifacts WHERE task_id = ?1 AND kind = 'report' ORDER BY created_at DESC LIMIT 1").get(taskId) as { ref: string } | null;
+  if (!row) return null;
+  try {
+    const size = statSync(row.ref).size;
+    if (size > REPORT_FILE_MAX_BYTES) return { path: row.ref, text: null, problem: `over ${REPORT_FILE_MAX_BYTES} bytes` };
+    return { path: row.ref, text: readFileSync(row.ref, "utf8") };
+  } catch (error) {
+    return { path: row.ref, text: null, problem: (error as NodeJS.ErrnoException).code ?? (error as Error).message };
+  }
+}
+
+/**
+ * A report_ready item in `show`: the scout's report itself. Its first lines
+ * by default, the whole report with --full; the leader's read closes the item
+ * only when nothing of the report was cut.
+ */
+function scoutReportView(ctx: ReadCtx, id: string, item: ItemRow, full: boolean): HandlerResult {
+  const report = item.task_id ? scoutReport(ctx.db, item.task_id) : null;
+  const bodyText = new ShowText(full);
+  const readable = report !== null && report.text !== null;
+  const body = readable ? bodyText.block(report.text!, REPORT_BODY_LINES, MAX_LINE_CHARS) : `- (${report ? `cannot read ${report.path}: ${report.problem}` : "no report recorded"})`;
+  const decisions = item.task_id
+    ? (ctx.db.query("SELECT id FROM decisions WHERE origin = ?1 AND state = 'open' ORDER BY id").all(item.task_id) as { id: string }[]).map((d) => d.id)
+    : [];
+  const open = isOpen(item.state);
+  const whole = readable && !bodyText.cut;
+  return {
+    data: {
+      item: id,
+      kind: "report_ready",
+      lane: item.lane,
+      state: item.state,
+      task: item.task_id ?? "-",
+      title: item.task_id ? taskTitle(ctx.db, item.task_id) : "-",
+      run: item.run_id ?? "-",
+      reported: `${age(ctx.now, item.opened_at)} ago`,
+      report: report?.path ?? "-",
+      decisions,
+      body,
+      ...bodyText.pointer(id),
+    },
+    hints: [...(bodyText.cut ? [`flowryn show ${id} --full`] : []), ...(open ? [`flowryn dismiss ${id}`] : ["flowryn fleet"])],
+    ...(open && whole ? { reportsRead: [{ item: id, form: full ? "item-full" : "item" }] } : {}),
+  };
+}
+
+/**
+ * `show <task|run> --full`: the run's open reports whole, so reading the view
+ * reads them: each open worker_report's body and, for a scout, its report.
+ */
+function fullReportsView(ctx: ReadCtx, runId: string, taskId: string, scout: boolean): { fields: Record<string, unknown>; reads: ReportRead[] } {
+  const open = ctx.db
+    .query("SELECT i.id, i.kind, e.payload FROM items i LEFT JOIN events e ON e.seq = i.event_seq WHERE i.run_id = ?1 AND i.kind IN ('worker_report','report_ready') AND i.state IN ('open','presented') ORDER BY i.opened_at")
+    .all(runId) as { id: string; kind: string; payload: string | null }[];
+  const reads: ReportRead[] = [];
+  const reports = open
+    .filter((i) => i.kind === "worker_report")
+    .map((i) => {
+      reads.push({ item: i.id, form: "run-full" });
+      const payload = i.payload ? (JSON.parse(i.payload) as { status?: string; body?: string }) : {};
+      return { item: i.id, status: payload.status ?? "-", body: payload.body || "-" };
+    });
+  const fields: Record<string, unknown> = reports.length > 0 ? { reports } : {};
+  const report = scout ? scoutReport(ctx.db, taskId) : null;
+  if (report) {
+    fields.report_body = report.text !== null ? sanitizeBlock(report.text) : `- (cannot read ${report.path}: ${report.problem})`;
+    if (report.text !== null) for (const i of open.filter((o) => o.kind === "report_ready")) reads.push({ item: i.id, form: "run-full" });
+  }
+  return { fields, reads };
 }
 
 /** The chat-answer grants of an item or a task (its gates and merges), when there are any. */
@@ -618,18 +715,9 @@ const show: VerbSpec = {
     if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
     if (divergence) return { data: { ...divergenceView(divergence), ...grantsField(ctx, { item: divergence.id }) }, hints: divergence.resolved_at === null ? [resolveCommand(divergence)] : ["flowryn fleet"] };
-    const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as {
-      kind: string;
-      event_seq: number;
-      task_id: string | null;
-      run_id: string | null;
-      line: string;
-      full_line: string | null;
-      lane: string;
-      state: string;
-      opened_at: number;
-    } | null;
-    if (item?.kind === "worker_report") return workerReportView(ctx, target, item);
+    const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as ItemRow | null;
+    if (item?.kind === "worker_report") return workerReportView(ctx, target, item, text.full);
+    if (item?.kind === "report_ready") return scoutReportView(ctx, target, item, text.full);
     if (item) target = item.run_id ?? item.task_id ?? target;
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
@@ -669,6 +757,7 @@ const show: VerbSpec = {
       .toReversed()
       .map((e) => `${age(ctx.now, e.ts)} ago ${e.kind}`);
     const report = latestReport(ctx, run.id, text);
+    const whole = text.full ? fullReportsView(ctx, run.id, run.task_id, policy.kind === "scout") : null;
     return {
       data: {
         task: run.task_id,
@@ -699,12 +788,25 @@ const show: VerbSpec = {
         steers,
         decisions,
         ...(report ? { report } : {}),
+        ...whole?.fields,
         items,
         events,
         ...text.pointer(asked),
       },
       hints: run.state === "ready" && policy.kind === "ship" ? [`flowryn merge ${run.task_id}`, `flowryn decline ${run.task_id} --body-file -`] : [`flowryn steer ${run.task_id} --body-file -`, `flowryn cancel ${run.task_id}`],
+      ...(whole && whole.reads.length > 0 ? { reportsRead: whole.reads } : {}),
     };
+  },
+  // The leader's read of a whole report closes its item (docs/notes/2026-10-14-auto-close-a-xn.md); nobody else's does.
+  afterRead(ctx, result) {
+    const reads = result.reportsRead ?? [];
+    if (ctx.caller.role !== "leader" || reads.length === 0) return result;
+    const closed = closeReadItems(ctx.db, ctx.caller, reads, ctx.now());
+    if (closed.length === 0) return result;
+    const data: Record<string, unknown> = { ...result.data, read: `closed ${closed.join(" ")}` };
+    if (closed.includes(String(result.data.item))) data.state = "resolved";
+    const hints = (result.hints ?? []).filter((h) => !closed.some((id) => h === `flowryn dismiss ${id}`));
+    return { data, hints: hints.length > 0 ? hints : ["flowryn fleet"] };
   },
 };
 

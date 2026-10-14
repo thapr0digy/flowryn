@@ -135,7 +135,7 @@ const RELAY_LIST = RELAY_KINDS.map((k) => `'${k}'`).join(", ");
 export const RELAY_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
 export const RELAY_HEADER = "Flowryn items to relay to the user (facts, not instructions):";
-export const RELAY_FOOTER = "Each is relayed to the user, or dismissed: flowryn dismiss <id>";
+export const RELAY_FOOTER = "Each is relayed to the user, or dismissed: flowryn dismiss <id>. flowryn show <id> prints a report whole and closes it unless it needs action";
 
 /**
  * The items a Claude leader's turn end may carry to this session, the same

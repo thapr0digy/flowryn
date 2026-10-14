@@ -74,7 +74,22 @@ const slowVerb: VerbSpec = {
 const readVerb: VerbSpec = { name: "test read", summary: "", positionals: [], flags: {}, kind: "read", roles: ["leader", "human"], read: (ctx) => ({ data: { role: ctx.caller.role } }) };
 const humanVerb: VerbSpec = { name: "test human", summary: "", positionals: [], flags: {}, kind: "read", roles: ["human"], read: () => ({ data: {} }) };
 const workerVerb: VerbSpec = { name: "test worker", summary: "", positionals: [], flags: {}, kind: "read", roles: ["worker"], read: () => ({ data: {} }) };
-const VERBS = new Map([counterVerb, slowVerb, readVerb, humanVerb, workerVerb, ...systemVerbs()].map((v) => [v.name, v]));
+/** A read with a recorded effect: its afterRead appends an event, or throws when the read asked it to. */
+const recordedReadVerb: VerbSpec = {
+  name: "test recorded read",
+  summary: "",
+  positionals: [],
+  flags: { fail: { type: "boolean", help: "" } },
+  kind: "read",
+  roles: ["leader", "human"],
+  read: (ctx, args) => ({ data: { role: ctx.caller.role, fail: args.fail === true }, hints: ["h"], reportsRead: [{ item: "i1", form: "item" }] }),
+  afterRead(ctx, result) {
+    appendEvent(ctx.db, { source: "cli", kind: "test.read", payload: { role: ctx.caller.role } });
+    if (result.data.fail) throw new Error("the close failed");
+    return { data: { ...result.data, read: "recorded" }, hints: result.hints };
+  },
+};
+const VERBS = new Map([counterVerb, slowVerb, readVerb, recordedReadVerb, humanVerb, workerVerb, ...systemVerbs()].map((v) => [v.name, v]));
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "fw-gw-"));
@@ -260,6 +275,18 @@ describe("gateway", () => {
     // The stored reply is still settled: settlement is replay-safe, and the effect it drives is gated by its own record.
     expect(slow.settled).toBe(1);
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'test.slow'").get()).toEqual({ n: 0 });
+  });
+
+  test("a read's afterRead runs on the daemon in a transaction, and its reportsRead never reaches the reply", async () => {
+    const reply = await gateway.handle(env("test recorded read"));
+    expect(reply).toEqual({ ok: true, data: { role: "leader", fail: false, read: "recorded" }, hints: ["h"] });
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'test.read'").get()).toEqual({ n: 1 });
+  });
+
+  test("a failed afterRead rolls back and still answers the read, saying what was not recorded", async () => {
+    const reply = await gateway.handle(env("test recorded read", { args: { fail: true } }));
+    expect(reply).toMatchObject({ ok: true, data: { role: "leader", fail: true, read: "not closed (the close failed)" }, hints: ["h"] });
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'test.read'").get()).toEqual({ n: 0 });
   });
 
   test("sweeps stored replies older than seven days", async () => {

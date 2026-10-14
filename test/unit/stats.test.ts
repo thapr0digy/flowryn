@@ -393,6 +393,21 @@ describe("unneeded: three rules", () => {
     expect(summarizeInterventions(list).find((r) => r.action === "dismiss" && r.by === "leader")).toMatchObject({ n: 2 });
   });
 
+  test("U1: an item closed on read is neither a dismissal nor a follow-up; the detail counts it apart", () => {
+    const t = NOW - HOUR;
+    ev("item.read", t - 1, "r1", { item: "i1", kind: "worker_report", status: "finding", by: "leader", form: "item" });
+    ev("item.dismissed", t, "r1", { kind: "worker_report", by: "leader" });
+    ev("item.read", t + MIN, "r1", { item: "i2", kind: "worker_report", status: "finding", by: "leader", form: "item" });
+    ev("item.read", t + 2 * MIN, "r4", { item: "i3", kind: "report_ready", status: null, by: "leader", form: "run-full" });
+    const list = interventions(db, scope(), []);
+    expect(list.map((i) => i.action)).toEqual(["dismiss"]);
+    expect(dismissedAlone(list, NOW)).toMatchObject({ of: 1, matched: [expect.objectContaining({ task_id: "t1" })] });
+    const u1 = unneeded(db, scope(), list, []).find((r) => r.rule === "U1 dismissed alone");
+    expect(u1).toMatchObject({ n: 1, of: 1, detail: "worker_report 1; closed on read, not dismissed: worker_report 2, report_ready 1" });
+    const web = unneeded(db, scope("web"), interventions(db, scope("web"), []), []).find((r) => r.rule === "U1 dismissed alone");
+    expect(web!.detail).toBe("worker_report 1; closed on read, not dismissed: worker_report 2");
+  });
+
   test("U2: a non-urgent steer to a busy run that had no open actionable item", () => {
     const t = NOW - HOUR;
     ev("run.liveness", t, "r1", { from: "idle", to: "busy" }, "hook");
