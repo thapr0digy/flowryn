@@ -173,7 +173,7 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
 export interface Timing {
   /** Steady-state reconcile pass. */
   pass_ms: number;
-  /** No worker-start this long after a launch: blocked_dialog (trust wedge). */
+  /** No worker hook this long after a launch: blocked_dialog (trust wedge). */
   trust_wedge_ms: number;
   /** Busy is a lease hooks refresh; nothing fires after an interrupt. */
   busy_lease_ms: number;
