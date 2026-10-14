@@ -12,6 +12,7 @@ import {
   firstSeqAtOrAfter,
   formatDuration,
   interventions,
+  MAX_EVENT_ROWS,
   MAX_WAIT_ROWS,
   parseSince,
   percentile,
@@ -19,6 +20,7 @@ import {
   steeredBusy,
   summarizeInterventions,
   summarizeWaits,
+  unneeded,
   type Scope,
   type Wait,
 } from "../../src/attention/stats.ts";
@@ -51,15 +53,17 @@ beforeEach(() => {
       ["t3", "r3", "web", "cancelled"],
       ["t4", "r4", "api", "running"],
     ] as const;
-    for (const [task, run, project, state] of runs) {
-      db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, ?2, 'ship', 'local-only', 0, 'fix', 0)").run(task, project);
-      db.query(
-        `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at, ended_at)
-         VALUES (?1, ?2, 'claude', '1', ?3, 'busy', 'fix', 'build', ?4, 'b', 'abc', 'h', ?5, ?5, ?6)`,
-      ).run(run, task, state, dir, NOW - 9 * DAY, state === "cancelled" ? NOW - 2 * HOUR : null);
-    }
+    for (const [task, run, project, state] of runs) addRun(task, run, project, state, state === "cancelled" ? NOW - 2 * HOUR : null);
   });
 });
+
+function addRun(task: string, run: string, project: string, state: string, ended: number | null): void {
+  db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, ?2, 'ship', 'local-only', 0, 'fix', 0)").run(task, project);
+  db.query(
+    `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at, ended_at)
+     VALUES (?1, ?2, 'claude', '1', ?3, 'busy', 'fix', 'build', ?4, 'b', 'abc', 'h', ?5, ?6, ?7)`,
+  ).run(run, task, state, dir, NOW - 9 * DAY, ended ?? NOW - 9 * DAY, ended);
+}
 
 afterEach(() => {
   db.close();
@@ -216,6 +220,19 @@ describe("waits by reason", () => {
     expect(rows["conflict nudge"]).toMatchObject({ n: 2, median: "60m", max: "60m", open: 1, oldest: "8.0d t2" });
   });
 
+  test("conflict nudges from before the window count when their run delivered or ended in it; a run ended before the window's do not", () => {
+    addRun("t5", "r5", "web", "cleaned", NOW - HOUR);
+    addRun("t6", "r6", "web", "failed", NOW - 3 * HOUR);
+    addRun("t7", "r7", "web", "cleaned", NOW - 8 * DAY);
+    ev("run.conflict_nudged", NOW - 9 * DAY, "r7", {}, "github");
+    ev("run.conflict_nudged", NOW - 8 * DAY - HOUR, "r5", {}, "github");
+    ev("run.conflict_nudged", NOW - 8 * DAY, "r6", {}, "github");
+    ev("run.delivered", NOW - 2 * HOUR, "r5");
+    const rows = byReason(allWaits(db, scope(), []));
+    // r5: delivered again in the window, 8d - 1h after its nudge; r6: failed in the window without delivering, 8d - 3h after; r7 ended before the window.
+    expect(rows["conflict nudge"]).toMatchObject({ n: 2, median: "7.9d", max: "8.0d", open: 0 });
+  });
+
   test("--project keeps one project's waits", () => {
     gate("g1", "r1", "review", NOW - HOUR, NOW - MIN);
     gate("g2", "r4", "review", NOW - HOUR, NOW - MIN);
@@ -233,6 +250,32 @@ describe("waits by reason", () => {
     const gaps: string[] = [];
     allWaits(db, scope(), gaps);
     expect(gaps).toContain(`items: capped at ${MAX_WAIT_ROWS} rows`);
+  });
+
+  test("a source at its row limit keeps its open waits and drops its oldest closed ones", () => {
+    const closed = NOW - HOUR;
+    const seq = ev("item.test", NOW - 2 * HOUR, "r1");
+    tx(db, () => {
+      const insertItem = db.query("INSERT INTO items (id, event_seq, class, lane, kind, task_id, run_id, line, state, opened_at, resolved_at) VALUES (?1, ?2, 'actionable', 'P1', 'x', 't1', 'r1', 'l', ?3, ?4, ?5)");
+      for (let i = 0; i < MAX_WAIT_ROWS; i += 1) {
+        explanation("r1", "capacity.pools_full", closed - MIN, closed);
+        decision(`q${i}`, "r1", closed - MIN, closed);
+        gate(`g${i}`, "r1", "review", closed - MIN, closed);
+        insertItem.run(`i${i}`, seq, "resolved", closed - MIN, closed);
+      }
+      explanation("r2", "dialog.confirmed", NOW - 2 * DAY, null);
+      decision("qopen", "r2", NOW - 2 * DAY, null);
+      gate("gopen", "r2", "review", NOW - 2 * DAY, null);
+      insertItem.run("iopen", seq, "open", NOW - 2 * DAY, null);
+      ev("run.conflict_nudged", NOW - 2 * DAY, "r2", {}, "github");
+      for (let i = 0; i < MAX_WAIT_ROWS; i += 1) ev("run.conflict_nudged", NOW - 3 * HOUR, "r3", {}, "github");
+    });
+    const gaps: string[] = [];
+    const rows = byReason(allWaits(db, scope(), gaps));
+    for (const reason of ["dialog.confirmed", "decision (leader)", "gate review", "item x", "conflict nudge"]) {
+      expect({ reason, open: rows[reason]?.open, oldest: rows[reason]?.oldest.split(" ")[0] }).toEqual({ reason, open: 1, oldest: "2.0d" });
+    }
+    for (const source of ["wait explanations", "decisions", "gates", "items", "conflict nudges"]) expect(gaps).toContain(`${source}: capped at ${MAX_WAIT_ROWS} rows`);
   });
 });
 
@@ -278,18 +321,32 @@ describe("interventions", () => {
     expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(13);
   });
 
-  test("steers: the leader's and yours, not Flowryn's stage-start or policy-follow steers, nor an answer's", () => {
+  test("steers: the leader's and yours, not Flowryn's stage-start or policy-follow steers (matched by the id they name), nor an answer's", () => {
     const t = NOW - HOUR;
     ev("steer.created", t, "r1", { steer: "m1", decision: null });
     ev("steer.created", t + 1, "r1", { steer: "m2", decision: null });
+    ev("item.test", t + 1, "r2", {}, "daemon");
     ev("stage.started", t + 1, "r1", { stage: "qa", steer: "m2" }, "daemon");
     ev("steer.created", t + 2, "r1", { steer: "m3", decision: null });
+    ev("run.liveness", t + 2, "r1", { from: "busy", to: "idle" }, "hook");
     ev(POLICY_EVENT, t + 2, "r1", { via: "steer", steer: "m3" }, "daemon");
     ev("steer.created", t + 3, "r1", { steer: "m4", decision: "q1" });
     ev("steer.created", t + 4, "r1", { steer: "m5", decision: null });
     ev("stage.started", t + 4, "r1", { stage: "qa", steer: "m9" }, "daemon");
+    ev("steer.created", t + 5, "r1", { steer: "m6", decision: null });
+    ev("item.test", t + 5, "r1", { steer: "m6" }, "daemon");
+    ev("stage.started", t + 5, "r1", { stage: "qa", steer: null }, "daemon");
     const steers = interventions(db, scope(), []).filter((i) => i.action === "steer");
-    expect(steers.map((s) => s.payload.steer)).toEqual(["m1", "m5"]);
+    expect(steers.map((s) => s.payload.steer)).toEqual(["m1", "m5", "m6"]);
+  });
+
+  test("the steers Flowryn names, at their row limit, say so in gaps", () => {
+    tx(db, () => {
+      for (let i = 0; i < MAX_EVENT_ROWS; i += 1) ev("stage.started", NOW - HOUR, "r1", { stage: "qa", steer: `m${i}` }, "daemon");
+    });
+    const gaps: string[] = [];
+    interventions(db, scope(), gaps);
+    expect(gaps).toContain(`stage-start and policy steer events: capped at ${MAX_EVENT_ROWS} rows`);
   });
 
   test("events before the window and of other projects are left out", () => {
@@ -320,6 +377,20 @@ describe("unneeded: three rules", () => {
     const u1 = dismissedAlone(interventions(db, scope(), []), NOW);
     expect(u1.of).toBe(1);
     expect(u1.matched.map((d) => d.task_id)).toEqual(["t1"]);
+  });
+
+  test("U1: a dismissal of an item with no task (a system alert) is not judged, and the gaps say how many", () => {
+    const t = NOW - HOUR;
+    ev("item.dismissed", t, null, { kind: "nomistakes_down", by: "leader" });
+    ev("item.dismissed", t + 1, null, { kind: "forge_unavailable", by: "human" });
+    ev("item.dismissed", t + 2, "r1", { kind: "worker_report", by: "leader" });
+    const list = interventions(db, scope(), []);
+    expect(dismissedAlone(list, NOW)).toMatchObject({ of: 1, taskless: 2 });
+    const gaps: string[] = [];
+    const u1 = unneeded(db, scope(), list, gaps).find((r) => r.rule === "U1 dismissed alone");
+    expect(u1).toMatchObject({ n: 1, of: 1, detail: "worker_report 1" });
+    expect(gaps).toContain("dismissed alone: 2 dismissals of items with no task (system alerts) left out: no recorded action can follow them");
+    expect(summarizeInterventions(list).find((r) => r.action === "dismiss" && r.by === "leader")).toMatchObject({ n: 2 });
   });
 
   test("U2: a non-urgent steer to a busy run that had no open actionable item", () => {

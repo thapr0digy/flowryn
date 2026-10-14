@@ -4,7 +4,7 @@ import type { Db } from "../db/db.ts";
 import { upkeepConfig } from "../config/upkeep.ts";
 import { isValidIsoDate, localDate } from "../lifecycle/dates.ts";
 import { getProject } from "../lifecycle/projects.ts";
-import { isTerminal, type RunState } from "../lifecycle/runs.ts";
+import { isTerminal, TERMINAL_STATES, type RunState } from "../lifecycle/runs.ts";
 import { POLICY_EVENT } from "../upkeep/policy-follow.ts";
 import { storeStats, type StoreSection } from "./store-stats.ts";
 
@@ -26,7 +26,7 @@ export const MAX_WAIT_ROWS = 5_000;
 export const MAX_EVENT_ROWS = 20_000;
 /** U1: a dismissal followed by no other action on its task within this long needed nothing. */
 export const DISMISS_ALONE_MS = 10 * MINUTE;
-const TERMINAL = "('cleaned','failed','cancelled')";
+const TERMINAL = `(${TERMINAL_STATES.map((s) => `'${s}'`).join(",")})`;
 
 export interface Scope {
   since: number;
@@ -87,6 +87,12 @@ export function formatDuration(ms: number | null): string {
   return `${(s / 86_400).toFixed(1)}d`;
 }
 
+function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
 /** SQL that is true when `column` (a task id) belongs to the scope's project, or always without --project. */
 function inProject(column: string): string {
   return `($project IS NULL OR ${column} IN (SELECT task_id FROM task_policy WHERE project_id = $project))`;
@@ -134,7 +140,7 @@ export function explanationWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
     .query(
       `SELECT id, run_id, rule, opened_at, closed_at, closed_by FROM explanations
        WHERE run_id IN (SELECT run_id FROM explanations WHERE (closed_at IS NULL OR closed_at >= $since) AND ${inProject("task_id")})
-       ORDER BY run_id, id LIMIT $limit`,
+       ORDER BY run_id IN (SELECT run_id FROM explanations WHERE closed_at IS NULL) DESC, run_id, id LIMIT $limit`,
     )
     .all({ since: scope.since, project: scope.project, limit: MAX_WAIT_ROWS }) as ExplanationSpan[];
   if (rows.length === MAX_WAIT_ROWS) gaps.push(`wait explanations: capped at ${MAX_WAIT_ROWS} rows`);
@@ -165,7 +171,7 @@ export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
     .query(
       `SELECT id, created_at, answered_at, state, reserved_reason, gate_id FROM decisions
        WHERE (state = 'open' OR answered_at >= $since) AND ${inProject("task_id")}
-       ORDER BY answered_at IS NULL, answered_at DESC LIMIT $limit`,
+       ORDER BY state = 'open' DESC, answered_at DESC LIMIT $limit`,
     )
     .all({ since: scope.since, project: scope.project, limit: MAX_WAIT_ROWS }) as {
     id: string;
@@ -194,7 +200,7 @@ export function gateWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
     .query(
       `SELECT g.id, g.kind, g.state, g.opened_at, g.closed_at FROM gates g JOIN runs r ON r.id = g.run_id
        WHERE ((g.state = 'open' AND r.state NOT IN ${TERMINAL}) OR g.closed_at >= $since) AND ${inProject("r.task_id")}
-       ORDER BY g.closed_at IS NULL, g.closed_at DESC LIMIT $limit`,
+       ORDER BY g.state = 'open' DESC, g.closed_at DESC LIMIT $limit`,
     )
     .all({ since: scope.since, project: scope.project, limit: MAX_WAIT_ROWS }) as { id: string; kind: string; state: string; opened_at: number; closed_at: number | null }[];
   if (rows.length === MAX_WAIT_ROWS) gaps.push(`gates: capped at ${MAX_WAIT_ROWS} rows`);
@@ -207,25 +213,26 @@ export function itemWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
     .query(
       `SELECT id, kind, state, opened_at, resolved_at FROM items
        WHERE class = 'actionable' AND decision_id IS NULL AND (state IN ('open','presented') OR resolved_at >= $since) AND ${inProject("task_id")}
-       ORDER BY resolved_at IS NULL, resolved_at DESC LIMIT $limit`,
+       ORDER BY state IN ('open','presented') DESC, resolved_at DESC LIMIT $limit`,
     )
     .all({ since: scope.since, project: scope.project, limit: MAX_WAIT_ROWS }) as { id: string; kind: string; state: string; opened_at: number; resolved_at: number | null }[];
   if (rows.length === MAX_WAIT_ROWS) gaps.push(`items: capped at ${MAX_WAIT_ROWS} rows`);
   return rows.map((r) => ({ reason: `item ${r.kind}`, id: r.id, start: r.opened_at, end: r.state === "open" || r.state === "presented" ? null : r.resolved_at }));
 }
 
-/** Conflict nudges: the nudge → the run's next delivery, or the run's end; open while the run lives. */
+/**
+ * Conflict nudges: the nudge → the run's next delivery, or the run's end; open
+ * while the run lives. Both ends come no later than the run's end, so every
+ * nudge of a run live now or ended in the window is read, whenever it was sent.
+ */
 export function nudgeWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
   const rows = db
     .query(
-      `SELECT seq, ts, run_id, task_id FROM events
-       WHERE seq >= $first AND kind = 'run.conflict_nudged' AND ${inProject("task_id")}
-       UNION
-       SELECT e.seq, e.ts, e.run_id, e.task_id FROM runs r JOIN events e ON e.run_id = r.id
-       WHERE r.state NOT IN ${TERMINAL} AND e.kind = 'run.conflict_nudged' AND ${inProject("r.task_id")}
-       ORDER BY seq DESC LIMIT $limit`,
+      `SELECT e.seq, e.ts, e.run_id, e.task_id, r.state NOT IN ${TERMINAL} AS live FROM runs r JOIN events e ON e.run_id = r.id
+       WHERE (r.state NOT IN ${TERMINAL} OR COALESCE(r.ended_at, r.updated_at) >= $since) AND e.kind = 'run.conflict_nudged' AND ${inProject("r.task_id")}
+       ORDER BY live DESC, e.seq DESC LIMIT $limit`,
     )
-    .all({ first: scope.firstSeq, project: scope.project, limit: MAX_WAIT_ROWS }) as { seq: number; ts: number; run_id: string; task_id: string }[];
+    .all({ since: scope.since, project: scope.project, limit: MAX_WAIT_ROWS }) as { seq: number; ts: number; run_id: string; task_id: string }[];
   if (rows.length === MAX_WAIT_ROWS) gaps.push(`conflict nudges: capped at ${MAX_WAIT_ROWS} rows`);
   const delivered = db.query("SELECT ts FROM events WHERE run_id = ?1 AND seq > ?2 AND kind = 'run.delivered' ORDER BY seq LIMIT 1");
   const run = db.query("SELECT state, ended_at, updated_at FROM runs WHERE id = ?1");
@@ -243,7 +250,7 @@ export function nudgeWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
 /** Per reason: the waits that ended in the window (count and percentiles) and the ones open now. */
 export function summarizeWaits(waits: readonly Wait[], scope: Pick<Scope, "since" | "now">): WaitRow[] {
   const groups = new Map<string, Wait[]>();
-  for (const w of waits) groups.set(w.reason, [...(groups.get(w.reason) ?? []), w]);
+  for (const w of waits) pushTo(groups, w.reason, w);
   const rows: (WaitRow & { order: [number, number] })[] = [];
   for (const [reason, list] of groups) {
     const ended = list.filter((w) => w.end !== null && w.end >= scope.since && w.end <= scope.now);
@@ -298,8 +305,8 @@ const ACTION_EVENTS = [
   "sched.quota_override",
 ] as const;
 
-/** Flowryn's own steers: written with the event that follows them in the same transaction, naming them. */
-const OWN_STEER_FOLLOWERS = new Set(["stage.started", POLICY_EVENT]);
+/** The events that name Flowryn's own steers (payload `steer`): a stage start's and the policy follow-through's. */
+const OWN_STEER_EVENTS = ["stage.started", POLICY_EVENT] as const;
 
 /** The roles a verb records as its caller: anything else in a `by` is Flowryn's own doing. */
 const CALLERS = new Set(["leader", "human", "captain"]);
@@ -365,6 +372,20 @@ function asIntervention(e: EventLite): Intervention | null {
   }
 }
 
+/** The steer ids Flowryn sent itself in the window: the ones a stage start or a policy follow-through names. */
+function ownSteers(db: Db, scope: Scope, gaps: string[]): Set<string> {
+  const kinds = OWN_STEER_EVENTS.map((k) => `'${k}'`).join(", ");
+  const rows = db
+    .query(
+      `SELECT json_extract(payload, '$.steer') AS steer FROM events
+       WHERE seq >= $first AND kind IN (${kinds}) AND json_extract(payload, '$.steer') IS NOT NULL
+       ORDER BY seq LIMIT $limit`,
+    )
+    .all({ first: scope.firstSeq, limit: MAX_EVENT_ROWS }) as { steer: unknown }[];
+  if (rows.length === MAX_EVENT_ROWS) gaps.push(`stage-start and policy steer events: capped at ${MAX_EVENT_ROWS} rows`);
+  return new Set(rows.map((r) => String(r.steer)));
+}
+
 /**
  * Every intervention in the window: the action events, the leader's and your
  * steers (not Flowryn's stage-start and policy-follow steers, nor an answer's
@@ -382,19 +403,19 @@ export function interventions(db: Db, scope: Scope, gaps: string[]): Interventio
     .all({ first: scope.firstSeq, since: scope.since, project: scope.project, limit: MAX_EVENT_ROWS }) as EventLite[];
   if (events.length === MAX_EVENT_ROWS) gaps.push(`intervention events: capped at ${MAX_EVENT_ROWS} rows`);
   const out = events.map(asIntervention).filter((i): i is Intervention => i !== null);
+  const own = ownSteers(db, scope, gaps);
   const steers = db
     .query(
-      `SELECT e.seq, e.ts, e.run_id, e.task_id, e.payload, n.kind AS next_kind, n.payload AS next_payload
-       FROM events e LEFT JOIN events n ON n.seq = e.seq + 1
-       WHERE e.seq >= $first AND e.ts >= $since AND e.kind = 'steer.created' AND ${inProject("e.task_id")}
-       ORDER BY e.seq LIMIT $limit`,
+      `SELECT seq, ts, run_id, task_id, payload FROM events
+       WHERE seq >= $first AND ts >= $since AND kind = 'steer.created' AND ${inProject("task_id")}
+       ORDER BY seq LIMIT $limit`,
     )
-    .all({ first: scope.firstSeq, since: scope.since, project: scope.project, limit: MAX_EVENT_ROWS }) as (Omit<EventLite, "kind" | "source"> & { next_kind: string | null; next_payload: string | null })[];
+    .all({ first: scope.firstSeq, since: scope.since, project: scope.project, limit: MAX_EVENT_ROWS }) as Omit<EventLite, "kind" | "source">[];
   if (steers.length === MAX_EVENT_ROWS) gaps.push(`steer events: capped at ${MAX_EVENT_ROWS} rows`);
   for (const s of steers) {
     const p = parse(s.payload);
     if (p.decision !== null && p.decision !== undefined) continue;
-    if (s.next_kind && OWN_STEER_FOLLOWERS.has(s.next_kind) && parse(s.next_payload ?? "{}").steer === p.steer) continue;
+    if (typeof p.steer === "string" && own.has(p.steer)) continue;
     out.push({ action: "steer", by: "-", ts: s.ts, seq: s.seq, task_id: s.task_id, run_id: s.run_id, payload: p });
   }
   const approvals = db
@@ -441,13 +462,21 @@ function tally(values: readonly string[]): string {
   return [...counts].toSorted((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k, n]) => `${k} ${n}`).join(", ") || "-";
 }
 
-/** U1: a dismissal after which nobody acted on the same task within DISMISS_ALONE_MS; one whose window has not ended by `now` is not counted. */
-export function dismissedAlone(list: readonly Intervention[], now: number): { matched: Intervention[]; of: number } {
-  const dismissals = list.filter((i) => i.action === "dismiss" && i.ts + DISMISS_ALONE_MS <= now);
-  const matched = dismissals.filter(
-    (d) => !list.some((i) => i.action !== "dismiss" && i.task_id !== null && i.task_id === d.task_id && i.ts > d.ts && i.ts <= d.ts + DISMISS_ALONE_MS),
-  );
-  return { matched, of: dismissals.length };
+/**
+ * U1: a dismissal after which nobody acted on the same task within
+ * DISMISS_ALONE_MS. One whose window has not ended by `now` is not counted,
+ * nor one of an item with no task (a system alert: its fix happens outside
+ * Flowryn, so no recorded action can follow it); `taskless` counts those.
+ */
+export function dismissedAlone(list: readonly Intervention[], now: number): { matched: Intervention[]; of: number; taskless: number } {
+  const settled = list.filter((i) => i.action === "dismiss" && i.ts + DISMISS_ALONE_MS <= now);
+  const dismissals = settled.filter((d) => d.task_id !== null);
+  const followUps = new Map<string, number[]>();
+  for (const i of list) {
+    if (i.action !== "dismiss" && i.task_id !== null) pushTo(followUps, i.task_id, i.ts);
+  }
+  const matched = dismissals.filter((d) => !(followUps.get(d.task_id!) ?? []).some((ts) => ts > d.ts && ts <= d.ts + DISMISS_ALONE_MS));
+  return { matched, of: dismissals.length, taskless: settled.length - dismissals.length };
 }
 
 /** U2: a non-urgent steer to a run that was busy, with no open actionable item, when it was sent. */
@@ -461,11 +490,13 @@ export function steeredBusy(db: Db, scope: Scope, list: readonly Intervention[],
     )
     .all({ since: scope.since, limit: MAX_WAIT_ROWS }) as { run_id: string; opened_at: number; resolved_at: number | null }[];
   if (items.length === MAX_WAIT_ROWS && steers.length > 0) gaps.push(`steer to a busy run: items capped at ${MAX_WAIT_ROWS} rows`);
+  const itemsByRun = new Map<string, typeof items>();
+  for (const i of items) pushTo(itemsByRun, i.run_id, i);
   const matched = steers.filter((s) => {
     if (s.payload.urgent === true || s.run_id === null || s.seq === null) return false;
     const last = liveness.get(s.run_id, s.seq) as { payload: string } | null;
     if (!last || parse(last.payload).to !== "busy") return false;
-    return !items.some((i) => i.run_id === s.run_id && i.opened_at <= s.ts && (i.resolved_at === null || i.resolved_at > s.ts));
+    return !(itemsByRun.get(s.run_id) ?? []).some((i) => i.opened_at <= s.ts && (i.resolved_at === null || i.resolved_at > s.ts));
   });
   return { matched, of: steers.length };
 }
@@ -487,6 +518,7 @@ export function answeredAsRecommended(db: Db, list: readonly Intervention[]): { 
 
 export function unneeded(db: Db, scope: Scope, list: readonly Intervention[], gaps: string[]): UnneededRow[] {
   const u1 = dismissedAlone(list, scope.now);
+  if (u1.taskless > 0) gaps.push(`dismissed alone: ${u1.taskless} dismissals of items with no task (system alerts) left out: no recorded action can follow them`);
   const u2 = steeredBusy(db, scope, list, gaps);
   const u3 = answeredAsRecommended(db, list);
   return [
