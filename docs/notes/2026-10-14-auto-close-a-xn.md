@@ -49,7 +49,7 @@ On the live database every one of the 18 dismissed reports was `finding` (16) or
 ### Stats
 
 - `item.read` is not `item.dismissed`, so it never counts as a `dismiss` intervention or in U1's `of`; it is not an intervention at all (the leader only read), so it is no U1 follow-up either.
-- U1's `detail` adds `; closed on read: <kind n, …>` when the window has any, so the drop in dismissals shows where it went.
+- U1's `detail` adds `; closed on read, not dismissed: <kind n, …>` when the window has any, so the drop in dismissals shows where it went.
 - The `item <kind>` wait of a read-closed item ends at its `resolved_at`, as any resolution.
 
 ### Tests
