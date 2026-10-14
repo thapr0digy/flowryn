@@ -48,3 +48,22 @@ As designed, with these specifics:
 - Tests: `test/unit/conflict-gate.test.ts` (parser, classifier, and the delivery watcher with a stand-in no-mistakes), `test/unit/restart.test.ts` (the restart guard), `test/unit/head-history.test.ts` (scratch repos), `test/integration/delivery.test.ts` (a commit on top is not tagged), `test/unit/doctor-nomistakes.test.ts` (fixtures).
 
 **Not in scope.** A worker still in its ship stage whose pipeline parks at a conflict gate before delivery is not covered by the nudge (the nudge only acts on delivered runs); the worker contract does not yet say what to do with that gate. Reported to the leader as a follow-up.
+
+## Follow-up: the conflict gate before delivery (follow-up-to-am)
+
+### Design
+
+Closes the "Not in scope" gap above and corrects two details of this file. Plain code and fixed text; no model.
+
+**1. Worker contract (`src/harness/contract-text.ts`).** One line in the no-mistakes ship's delivery lines, after the ask-user line: a `ci` gate whose only findings are merge conflicts is not answered with `respond` (its fix action is the CI monitor's rebase); the worker runs `git merge origin/<default branch>`, resolves, commits, pushes plainly and runs the pipeline again, whose new push supersedes the parked run. Only the no-mistakes delivery lines change; direct-PR, local-only and scout contracts are untouched.
+
+- `CONTRACT_REVISIONS` is not bumped and the offline fakes are not changed: the contract suite (`src/contracts/suite.ts`) has no no-mistakes step (it delivers without a pipeline), so nothing it proves changes. The line is checked by `test/unit/harness.test.ts`.
+
+**2. Docs fix (this file).** The Design's "no-mistakes trusts the file from the default branch" is wrong for `auto_fix`: per the scout report, `auto_fix` is a non-executing field read from the pushed branch, and only `rebase.strategy` is read from the default branch. So a branch cut before this lands still runs with the global `auto_fix.ci` (3) until it merges `main`. The doctor check reads the default branch's file, which is what every branch gets once it is cut from or merges `main`; that stays.
+
+**3. A short deadline for the PR-head fetch (`src/policy/head-history.ts`, `src/watch/delivery.ts`, `src/daemon/daemon.ts`).** The ancestry check's `fetch refs/pull/<n>/head` runs serially in the PR watcher loop under `deliveryGit`'s 120 s deadline, so one hanging fetch holds up every other run's poll.
+
+- `headHistory` takes an optional `fetchGit` runner used only for that fetch (default: the same runner). `HEAD_FETCH_TIMEOUT_MS = 20_000` lives beside it.
+- `DeliveryWatcherDeps.headFetchGit` (optional, falls back to `git`); the daemon wires `gitRunner(<git>, HEAD_FETCH_TIMEOUT_MS)`. The other calls (`cat-file`, `merge-base`) are local and keep `deliveryGit`.
+- A cut-off fetch is `runBounded`'s code 124, which `headHistory` already reads as `unknown`; the divergence then carries `ancestry unknown`, as for any other failed fetch.
+- Test: a scratch repo whose `origin` upload-pack sleeps, with a fetch runner of a short deadline, yields `unknown` well before the long runner's deadline; and the watcher passes its `headFetchGit` to the fetch only.
