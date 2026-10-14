@@ -277,6 +277,30 @@ describe("safeguards at start", () => {
   );
 
   test(
+    "any worker hook after the launch, though no worker-start came, ends the trust wait, and a steer queued meanwhile is carried",
+    async () => {
+      const env = await fleet();
+      // A worker that sends no hooks of its own: the test plays Claude's hooks with the run's token, minus worker-start.
+      const { run } = await env.dispatch("Build\nFAKE: no-start");
+      const wedged = await env.waitRun(run, (r) => r.liveness === "blocked_dialog", "blocked_dialog");
+      const id = await steer(env, run, "the ship stage has started");
+      const pane = env.herdr.panes.get(wedged.pane_id!)!;
+      const hook = (name: string) => env.cli(["hook", name, "--harness", "claude"], { env: { FLOWRYN_TOKEN: pane.env.FLOWRYN_TOKEN! }, stdin: "{}" });
+      expect((await hook("prompt")).code).toBe(0);
+      expect(items(env, run).find((i) => i.kind === "trust_dialog")?.state).toBe("resolved");
+      // Later passes keep it released, though no worker-start ever came.
+      await Bun.sleep(1_500);
+      expect(env.run(run).liveness).toBe("busy");
+      expect(env.events(run).filter((e) => e === "run.worker_started")).toHaveLength(0);
+      // The turn's Stop carries the queued steer into a continuation.
+      const stop = await hook("stop");
+      expect(stop.stdout + stop.stderr).toContain(id);
+      expect(ringOf(env, id).ring_state).toBe("carried");
+    },
+    { timeout: 30_000 },
+  );
+
+  test(
     "claude trust is registered in the configured store for the worktree and the project",
     async () => {
       const env = await fleet();
@@ -325,11 +349,33 @@ describe("recovery", () => {
       expect(items(env, run).find((i) => i.kind === "auto_resumed")).toMatchObject({ lane: "P1" });
       const start = env.herdr.calls.filter((c) => c.method === "agent.start").at(-1)!;
       expect(start.params.args as string[]).toContain("--resume");
-      // The resume reused the run's one pane: no second workspace, no extra pane.
-      expect(ready.pane_id).toBe(busy.pane_id);
-      expect(env.herdr.calls.filter((c) => c.method === "workspace.create")).toHaveLength(1);
+      // The resume opened a new workspace with the run's env (a pane's shell keeps no env Flowryn can vouch for), and closed the old one.
+      expect(ready.workspace_id).not.toBe(busy.workspace_id);
+      expect(env.herdr.calls.filter((c) => c.method === "workspace.create")).toHaveLength(2);
+      await waitUntil(() => !env.herdr.workspaces.has(busy.workspace_id!), 5_000, "the replaced workspace closed");
+      expect(env.herdr.livePanes()).toEqual([ready.pane_id!]);
     },
     { timeout: 45_000 },
+  );
+
+  test(
+    "a resume after a Herdr restart relaunches with the run's env, though the restored pane's shell lost it",
+    async () => {
+      const env = await fleet();
+      const { run } = await env.dispatch("Scout\nFAKE: sleep 3000\nFAKE: deliver r.md resumed fine");
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      // The restored pane reads idle at its shell prompt, but that shell has none of the run's variables.
+      env.herdr.restartServer();
+      const ready = await env.waitRun(run, delivered, "the resumed run to deliver", 30_000);
+      expect(ready.resume_count).toBe(1);
+      expect(env.events(run)).toContain("run.worker_started");
+      const pane = env.herdr.panes.get(ready.pane_id!)!;
+      expect(pane.env.FLOWRYN_RUN).toBe(run);
+      expect(pane.env.FLOWRYN_BIN).toBeTruthy();
+      expect(ready.workspace_id).not.toBe(busy.workspace_id);
+      await waitUntil(() => !env.herdr.workspaces.has(busy.workspace_id!), 5_000, "the replaced workspace closed");
+    },
+    { timeout: 60_000 },
   );
 
   test(

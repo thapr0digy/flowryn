@@ -440,23 +440,24 @@ export class Launcher {
   }
 
   /**
-   * Reuse the run's pane when its shell is idle at the prompt; otherwise open
-   * a new workspace whose one pane is the worker's, labelled with the task id
-   * alone so Herdr's sidebar names the work. A relaunch comes only after the
-   * recorded worker is gone, so a previous workspace whose pane does not read
-   * idle (Herdr can still read the dead worker's group in the foreground just
-   * after it exits) holds only the run's own leftovers: it is closed once the
-   * new one is recorded, as cancel and landing close the current one. The
-   * exception is a resume over an escalated launch or resume: the process that
-   * start left may still be live in the old pane, and a resume never stops it
+   * Every launch, resume and relaunch opens a new workspace whose one pane is
+   * the worker's, with this launch's environment, labelled with the task id
+   * alone so Herdr's sidebar names the work. A pane is never reused: only
+   * workspace.create sets a shell's environment (agent.start has none, M0
+   * h04), and Flowryn cannot vouch for an older pane's shell. A Herdr restart
+   * restores each pane under its old id with a fresh shell that lacks the
+   * run's variables (seen live 2026-10-14), so a worker resumed there ran
+   * without $FLOWRYN_BIN and its hooks never reached the daemon
+   * (docs/notes/2026-10-14-resumed-worker-loses-ic.md). A relaunch comes only
+   * after the recorded worker is gone, so the previous workspace holds only
+   * the run's own leftovers: it is closed once the new one is recorded, as
+   * cancel and landing close the current one. The exception is a resume over
+   * an escalated launch or resume: the process that start left may still be
+   * live in the old pane, and a resume never stops it
    * (docs/notes/2026-10-13-next-steps-md-rz.md), so that workspace stays open.
    */
   private async ensurePane(runtime: HerdrRuntime, run: RunWithPolicy, worktree: string, env: Record<string, string>): Promise<string> {
     const { db, now } = this.deps;
-    if (run.pane_id) {
-      const info = await runtime.processes(run.pane_id);
-      if (info && info.foregroundGroup === info.shellPid) return run.pane_id;
-    }
     const workspace = await runtime.openWorkspace(worktree, run.task_id, env);
     const paneId = workspace.rootPaneId;
     await runtime.tagPane(paneId, run.id, `flowryn ${run.task_id}`);

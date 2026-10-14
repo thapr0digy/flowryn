@@ -111,7 +111,8 @@ function markBusy(ctx: HandlerCtx, run: RunWithPolicy, signal: string, hook?: Ho
   // The hook name tells a tool starting (pre-tool) from one ending (post-tool), which share the signal.
   recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now, ...(hook ? { hook } : {}) }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "busy", "hook", { signal }, now);
-  resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
+  // Any hook, not only worker-start, ends a trust wait: Claude runs none before its trust dialog is answered.
+  resolveRunItems(ctx.db, run.id, ["blocked_prompt", "trust_dialog"], `hook ${signal}`, now);
   closeDismissedPromptExplanations(ctx.db, run.id, `hook ${signal}`, "hook", now);
 }
 
@@ -120,7 +121,7 @@ function markIdle(ctx: HandlerCtx, run: RunWithPolicy, signal: string): void {
   ctx.db.query("UPDATE runs SET busy_until = NULL, idle_since = ?2, last_hook_at = ?2, updated_at = ?2 WHERE id = ?1").run(run.id, now);
   recordEvidence(ctx.db, run.id, "hook", 3, { signal, at: now }, now);
   if (run.liveness !== "dead" && run.liveness !== "orphaned") setLiveness(ctx.db, run, "idle", "hook", { signal }, now);
-  resolveRunItems(ctx.db, run.id, ["blocked_prompt"], `hook ${signal}`, now);
+  resolveRunItems(ctx.db, run.id, ["blocked_prompt", "trust_dialog"], `hook ${signal}`, now);
   closeDismissedPromptExplanations(ctx.db, run.id, `hook ${signal}`, "hook", now);
 }
 

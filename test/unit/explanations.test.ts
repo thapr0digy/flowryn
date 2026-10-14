@@ -194,8 +194,8 @@ describe("dialog: a blocked-dialog hold", () => {
     expect(rows("r1").map((r) => [r.rule, r.closed_at])).toEqual([["dialog.trust", null]]);
     reopen();
     const [why] = show("r1", { why: true }).waiting as Record<string, unknown>[];
-    expect(why).toMatchObject({ rule: "dialog.trust", reason: "the worker has not started 30s after its launch; a dialog may hold pane w:1" });
-    expect(why!.unblock).toEqual(["captain: accept or answer the dialog in pane w:1", "flowryn: clears it when the worker-start hook arrives"]);
+    expect(why).toMatchObject({ rule: "dialog.trust", reason: "the worker has not started 30s after its launch; a dialog may hold pane w:1, or its hooks may not reach Flowryn" });
+    expect(why!.unblock).toEqual(["captain: accept or answer the dialog in pane w:1", "flowryn: clears it when any hook of the worker arrives"]);
     tx(db, () => resolveRunItems(db, "r1", ["trust_dialog"], "run.worker_started", clock));
     expect(rows("r1")[0]).toMatchObject({ closed_by: "run.worker_started" });
   });

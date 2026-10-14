@@ -46,7 +46,7 @@ An index on `(run_id) WHERE closed_at IS NULL` and one on `(task_id, id)`. Exist
 | `dialog.confirmed` | `hook notify` permission_prompt (`openBlockedPrompt`, not suspected) | prompt line (screen read at the hook), last hook | captain: answer the dialog in pane P (Flowryn never answers it); flowryn: clears it on the worker's next hook (for Claude, also when Herdr reads the agent working, or settled on two passes) |
 | `dialog.suspected` | reconciler backstop, Claude (Herdr reads `blocked`) | Herdr `agent_status` (observed at the pass), last hook | captain: look at pane P and answer it; flowryn: clears it when Herdr reads the agent working, or settled on two passes, or on the next hook |
 | `dialog.stall` | reconciler backstop, Pi (no activity, Herdr not working) | Herdr `agent_status`, last hook | captain: look at pane P; flowryn: clears it on the worker's next hook |
-| `dialog.trust` | reconciler: no worker-start hook `trust_wedge_ms` after the launch (`trust_dialog` item) | launched at, pane | captain: accept the dialog in pane P; flowryn: clears it when the worker-start hook arrives |
+| `dialog.trust` | reconciler: no worker hook (worker-start or any other) `trust_wedge_ms` after the launch (`trust_dialog` item) | launched at, pane | captain: accept the dialog in pane P; flowryn: clears it when any hook of the worker arrives |
 
 The trust rule runs on every pass while the worker has not started; dedupe keeps it to one row.
 
