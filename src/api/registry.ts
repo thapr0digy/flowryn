@@ -18,6 +18,7 @@ import { POLICY_VERBS } from "../policy/verbs.ts";
 import { VERIFY_VERBS } from "../verify/verbs.ts";
 import { GRANT_VERBS } from "../policy/grant-verbs.ts";
 import { DIAG_VERBS } from "../lifecycle/diag.ts";
+import { STATS_VERBS } from "../attention/stats.ts";
 import type { VerbSpec } from "./verbs.ts";
 
 /** Every verb the daemon serves over the socket. The CLI adds its local verbs on top. */
@@ -42,6 +43,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...VERIFY_VERBS,
   ...GRANT_VERBS,
   ...DIAG_VERBS,
+  ...STATS_VERBS,
   ...systemVerbs(),
 ];
 
