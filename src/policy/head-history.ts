@@ -8,6 +8,9 @@ import type { GitRunner } from "./landed.ts";
  */
 export type HeadHistory = "descends" | "rewritten" | "unknown";
 
+/** The PR-head fetch's own deadline: the PR watcher polls runs one by one, so a hanging fetch must not hold the others for long. */
+export const HEAD_FETCH_TIMEOUT_MS = 20_000;
+
 async function hasCommit(git: GitRunner, cwd: string, sha: string): Promise<boolean> {
   return (await git(["cat-file", "-e", `${sha}^{commit}`], cwd)).code === 0;
 }
@@ -17,11 +20,13 @@ async function hasCommit(git: GitRunner, cwd: string, sha: string): Promise<bool
  * fetched from GitHub's `refs/pull/<n>/head` first when this copy lacks it
  * (a force-pushed head never came through the worktree). `merge-base
  * --is-ancestor` exits 0 for an ancestor and 1 for none; anything else is unknown.
+ * The fetch goes through `fetchGit` (a runner with a shorter deadline); a
+ * cut-off fetch exits 124, so it is unknown too.
  */
-export async function headHistory(git: GitRunner, cwd: string, delivered: string, head: string, prNumber: number | null): Promise<HeadHistory> {
+export async function headHistory(git: GitRunner, cwd: string, delivered: string, head: string, prNumber: number | null, fetchGit: GitRunner = git): Promise<HeadHistory> {
   if (!(await hasCommit(git, cwd, delivered))) return "unknown";
   if (!(await hasCommit(git, cwd, head))) {
-    if (prNumber === null || (await git(["fetch", "--quiet", "--no-tags", "origin", `refs/pull/${prNumber}/head`], cwd)).code !== 0) return "unknown";
+    if (prNumber === null || (await fetchGit(["fetch", "--quiet", "--no-tags", "origin", `refs/pull/${prNumber}/head`], cwd)).code !== 0) return "unknown";
     if (!(await hasCommit(git, cwd, head))) return "unknown";
   }
   const verdict = await git(["merge-base", "--is-ancestor", delivered, head], cwd);

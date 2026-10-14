@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { PullRequest } from "../../src/forge/types.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { gitRunner } from "../../src/policy/git.ts";
-import { headHistory } from "../../src/policy/head-history.ts";
+import { HEAD_FETCH_TIMEOUT_MS, headHistory } from "../../src/policy/head-history.ts";
 import { closeDivergence, getDivergence } from "../../src/reconcile/divergence.ts";
 import { applyPrObservation } from "../../src/reconcile/delivery.ts";
 import { GIT_ENV, scratchRepos, sh } from "../helpers/scratch-git.ts";
@@ -63,6 +63,39 @@ describe("how a delivered head moved", () => {
     expect(await headHistory(git(), primary, head, absent, null)).toBe("unknown");
     expect(await headHistory(git(), primary, absent, head, 7)).toBe("unknown");
     expect(await headHistory(cutOff, primary, head, head, 7)).toBe("unknown");
+  });
+});
+
+describe("the PR-head fetch's own deadline", () => {
+  test("a hanging fetch through the short-deadline runner is cut off and reads as unknown", async () => {
+    const { primary, other } = scratchRepos(dir);
+    const delivered = sh(primary, ["rev-parse", "HEAD"]);
+    const moved = commit(other, "moved.txt", "moved\n");
+    sh(other, ["push", "-q", "origin", "HEAD:refs/pull/7/head"]);
+    // origin answers no fetch: its upload-pack hangs, as a stalled GitHub would.
+    const hang = join(dir, "hang-upload-pack");
+    writeFileSync(hang, "#!/bin/sh\nsleep 60\n");
+    chmodSync(hang, 0o755);
+    sh(primary, ["config", "remote.origin.uploadpack", hang]);
+    const started = Date.now();
+    expect(await headHistory(git(), primary, delivered, moved, 7, gitRunner("git", 500, GIT_ENV))).toBe("unknown");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("only the fetch goes through the fetch runner, and its deadline is well under the delivery runner's", async () => {
+    const { primary, other } = scratchRepos(dir);
+    const delivered = sh(primary, ["rev-parse", "HEAD"]);
+    const moved = commit(other, "moved.txt", "moved\n");
+    sh(other, ["push", "-q", "origin", "HEAD:refs/pull/7/head"]);
+    const verbs: { runner: string; verb: string }[] = [];
+    const record = (runner: string) => (args: string[], cwd: string) => {
+      verbs.push({ runner, verb: args[0]! });
+      return git()(args, cwd);
+    };
+    expect(await headHistory(record("git"), primary, delivered, moved, 7, record("fetch"))).toBe("descends");
+    expect(verbs.filter((v) => v.runner === "fetch").map((v) => v.verb)).toEqual(["fetch"]);
+    expect(verbs.filter((v) => v.runner === "git").map((v) => v.verb)).not.toContain("fetch");
+    expect(HEAD_FETCH_TIMEOUT_MS).toBeLessThanOrEqual(20_000);
   });
 });
 

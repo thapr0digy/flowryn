@@ -191,12 +191,13 @@ function call(verb: string, args: Record<string, unknown>, who: "worker" | "huma
   return gateway.handle(env);
 }
 
-function watcher(opts: { nudgeConflicts?: boolean; ciWaitAlertMin?: number } = {}): DeliveryWatcher {
+function watcher(opts: { nudgeConflicts?: boolean; ciWaitAlertMin?: number; git?: GitRunner; headFetchGit?: GitRunner } = {}): DeliveryWatcher {
   return new DeliveryWatcher({
     db,
     forge: () => forge,
     webUrl: () => WEB,
-    git,
+    git: opts.git ?? git,
+    headFetchGit: opts.headFetchGit,
     noMistakes: () => "no-mistakes",
     readNmStatus: async () => {
       const text = nm.text;
@@ -358,6 +359,28 @@ describe("pr_observation: the PR watcher", () => {
     expect(openItemKinds()).not.toContain("conflict_nudged");
     expect(db.query("SELECT COUNT(*) AS n FROM divergences WHERE run_id = 'r1'").get()).toEqual({ n: 0 });
     expect(staleEvents()).toEqual([{ transition: "pr_observation", changed: { delivered: { seen: `pr ${PR_URL} ${HEAD_A}`, current: `pr ${PR_URL} ${HEAD_B}` } } }]);
+  });
+
+  test("a moved head's PR-ref fetch goes through the short-deadline runner; its cut-off is ancestry unknown", async () => {
+    readyAtA();
+    github.pr = pr(HEAD_B);
+    const calls: { runner: string; verb: string }[] = [];
+    // This copy has the delivered head but not the moved one, so the check must fetch it.
+    const local: GitRunner = async (args, cwd) => {
+      calls.push({ runner: "git", verb: args[0]! });
+      if (args[0] === "cat-file") return { code: args[2] === `${HEAD_A}^{commit}` ? 0 : 1, stdout: "", stderr: "" };
+      return git(args, cwd);
+    };
+    const shortFetch: GitRunner = async (args) => {
+      calls.push({ runner: "fetch", verb: args[0]! });
+      return { code: 124, stdout: "", stderr: "timed out" };
+    };
+    await watcher({ git: local, headFetchGit: shortFetch }).pass();
+    expect(calls.filter((c) => c.verb === "fetch")).toEqual([{ runner: "fetch", verb: "fetch" }]);
+    expect(calls.filter((c) => c.runner === "fetch").map((c) => c.verb)).toEqual(["fetch"]);
+    const summaries = (db.query("SELECT summary FROM divergences WHERE run_id = 'r1'").all() as { summary: string }[]).map((r) => r.summary);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toContain("ancestry unknown");
   });
 
   test("control: a PR read merged lands the ready run", async () => {
