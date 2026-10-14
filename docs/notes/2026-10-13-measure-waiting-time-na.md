@@ -1,7 +1,6 @@
 # Measure waiting time, interventions and store growth
 
-- Status: partial
-- Open: the build (this file holds the design only so far)
+- Status: done
 
 `docs/next_steps.md` package 3 ("Done means": measure unresolved waiting time and unnecessary interventions before adding more autonomous behaviour) and "What not to build next" (measure database/log growth and query latency, then design retention). One read-only verb, `flowryn stats`, computed from what Flowryn already records. No new autonomous behaviour, no model, no schema change.
 
@@ -49,14 +48,14 @@ An intervention is a verb a person or the leader ran that changed a run, read fr
 | `answer` | `decision.answered` | payload `by` (`captain` → `you`, `leader`) and `via` |
 | `dismiss` | `item.dismissed` | payload `by`; a dismissed decision is counted here once, through its item |
 | `gate pass` | `gate.passed` of a review gate (payload has `channel`) | the approval channel (`claude-ask`, `claude-chat`, `cli-tty`, `board`, `pi-confirm`) |
-| `gate changes` | `gate.changes` | payload `by` |
+| `gate changes` | `gate.changes` with a `by` (a merge gate closed unpassed by a send-back records none: the decline or nudge is the action) | payload `by` |
 | `approve merge` | `approvals` rows with `action = 'merge'` created in the window, not `yolo` | the channel |
 | `decline` | `run.declined` | payload `by` |
 | `steer` | `steer.created` with no decision, whose next event (`seq + 1`) is not a `stage.started` or `run.policy_steered` naming the same steer: those are Flowryn's own stage-start and policy-follow steers, written in the same transaction. Answer and dismissal steers carry their decision and are left out | `-` (not recorded) |
 | `cancel` | `operation.requested` with payload `kind = cancel` | payload `by` |
 | `resume` | `run.resume_requested` | payload `by` |
 | `interrupt` | `run.interrupted` | `-` (not recorded; it includes an urgent steer's preemption) |
-| `divergence resolve` | `divergence.resolved` | payload `by` |
+| `divergence resolve` | `divergence.resolved` whose `by` is a caller role (`leader`, `human`); Flowryn resolves some itself and names the event (`run.delivered`) | payload `by` |
 | `capacity resume` | `sched.usage_resumed` with source `cli`, `sched.quota_override` | `you` |
 
 ### Unnecessary interventions: three rules
@@ -73,13 +72,13 @@ Rules only count. None of them changes behaviour; they show where an automatic d
 
 - **Database**: the file, `-wal` and `-shm` sizes (`stat`), `page_count × page_size` and the free pages (`freelist_count`). An in-memory database says so.
 - **Rows per table**: every table in `sqlite_master`, `COUNT(*)`, largest first. `events` uses `MAX(seq)`: it is append-only (triggers refuse UPDATE and DELETE) and its rowid has no gaps, so the maximum is the count without a full scan.
-- **Events per day** in the window (UTC days, since the window may cross a time zone change): count and payload bytes. **Largest event kinds** in the window: the top 10 by count, with bytes.
+- **Events per day** in the window (`events_per_day_utc`: UTC days, since the window may cross a time zone change): count and payload bytes. **Largest event kinds** in the window: the top 10 by count, with bytes.
 - **Latency**: the `fleet` and `brief` reads, each run three times on the same database through their own verb code, median in ms (as a human caller, so `brief` composes the whole briefing). Also `took`: each section of this report.
-- **State directory**: each top-level entry of `state_dir` (`logs`, `runs`, `backups`, `bin`, the database files, …), its bytes and file count, symlinks not followed. The walk stops at 20 000 entries in all and marks a capped entry `≥`.
+- **State directory**: each top-level entry of `state_dir` (`logs`, `runs`, `backups`, `bin`, the database files, …), its bytes and file count, symlinks not followed (a link counts as itself). The walk stops at 20 000 entries in all and marks a capped entry's bytes `≥`.
 
 ### Bounds
 
-- `events` has no time index. The window's first event is found by binary search on `seq` (`O(log n)` primary-key reads), assuming `ts` does not decrease as `seq` grows (the daemon appends with its own clock; a clock stepping back can move the edge by those few events). Every event query then reads only `seq >= that`, with `LIMIT 20 000` rows per query; a hit limit is a gap line (`capped`).
+- `events` has no time index. The window's first event is found by binary search on `seq` (`O(log n)` primary-key reads), assuming `ts` does not decrease as `seq` grows (the daemon appends with its own clock; a clock stepping back can move the edge by those few events). Every event query then reads only `seq >= that`: a query returning rows has `LIMIT 20 000`, and the two aggregates (events per day, largest kinds) read at most the window's first 1 000 000 events; either limit hit is a gap line.
 - `decisions`, `gates`, `items` and `explanations` have no time index either; they hold one row per wait or decision, orders of magnitude fewer than `events`. Each read takes the rows ending in the window or open, `LIMIT 5 000`; a hit limit is a gap line. `took` shows when this stops being cheap.
 - Per-steer and per-nudge lookups use `events_run (run_id, seq)`.
 
@@ -98,3 +97,14 @@ None of these needs a schema change to make the report useful now, so this chang
 ### Tests
 
 Unit tests on a migrated scratch database seeded with fixed clocks: each wait source and its window rule, the explanation chain join (same rule continues, different rule splits, chain head before the window), nearest-rank percentiles, each intervention row and its exclusions (stage-start and policy-follow steers, decision steers, merge-gate passes, yolo approvals), each U rule with a case that matches and one that does not, `--project` and `--since` parsing and errors, the events binary search (including an empty table), `MAX(seq)` equal to `COUNT(*)`, the caps producing gap lines, and the state directory walk with its cap. One CLI integration test runs `flowryn stats --json` against the read-only fallback.
+
+## Build
+
+- `src/attention/stats.ts`: the verb (`STATS_VERBS`, registered in `src/api/registry.ts`), the window, the five wait sources, interventions and the three rules. `src/attention/store-stats.ts`: the store section; it times `fleet` and `brief` by calling their own `read` from `LEADER_RUN_VERBS` and `ATTENTION_VERBS`, so the latency is of the code those verbs run, not a copy of their queries.
+- Durations print as strings (`12m`, `3.5h`) in both TOON and `--json`: the reply is the same data either way, as for every verb. A script that needs exact numbers reads the tables itself.
+- `--since YYYY-MM-DD` uses `isValidIsoDate` (`src/lifecycle/dates.ts`), so `2026-02-31` is refused rather than rolled over.
+- On a copy of the live database (12 425 events, 574 items, 138 gates) the whole report took about 60 ms: window search 8 ms, waits 13 ms, interventions 3 ms, store 33 ms (of which the `fleet` and `brief` timings, three runs each, are most). It showed the 7-day picture the rules are for: 30 of 33 dismissals were U1 (most `worker_report`), 9 of 10 answers to recommended questions took the recommendation (all asked of you), and merge gates waited a median 71 minutes.
+
+### Tests
+
+`test/unit/stats.test.ts` (25 cases on a migrated scratch database, fixed clock), each named after the assumption it checks: the `--since` forms and refusals; the binary search (empty table, equal timestamps, past the end); nearest-rank percentiles; the window rule (a wait begun before the window counts in full, one ended before it does not); each wait source with its exclusions (explanation chains joined across the window edge, a rule change splitting them, `resume.auto`, captain vs leader decisions and the undated-decision gap, an open gate of an ended run, info and decision items, nudges ended by delivery, by the run's end, or open from before the window); `--project`; the row-limit gap; every intervention row and every exclusion (merge-gate pass and changes, a scheduler launch, Flowryn's divergence resolution, a daemon-side usage resume, yolo approvals, stage-start, policy-follow and decision steers); each U rule matching and not; `MAX(seq)` equal to `COUNT(*)`; UTC day buckets and kinds; the latency rows; the database line on file and in memory; the state-directory walk with a symlink, its cap and a missing directory; and the verb's reply shape, `not_found` project and the retention gap. `test/integration/stats.test.ts` runs `flowryn stats` through the real CLI, served by the daemon (with a `bad_args` refusal) and by the read-only fallback with the daemon down.
