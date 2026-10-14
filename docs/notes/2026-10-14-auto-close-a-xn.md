@@ -1,9 +1,8 @@
 # Auto-close a report item once the leader has read it
 
-- Status: not built
-- Open: design under review; nothing built yet
+- Status: done
 
-`flowryn stats` (docs/notes/2026-10-13-measure-waiting-time-na.md, rule U1) showed 31 of 33 leader dismissals in a week had no follow-up, mostly `worker_report` (16) and `report_ready` (5): the leader runs `flowryn show <item>`, reads it, then has to `flowryn dismiss` it. Reading now closes it. Deterministic; no model; no schema change.
+`flowryn stats` (docs/notes/2026-10-13-measure-waiting-time-na.md, rule U1) showed 31 of 33 leader dismissals in a week had no follow-up, mostly `worker_report` (16) and `report_ready` (5): the leader runs `flowryn show <item>`, reads it, then has to `flowryn dismiss` it. Reading now closes it. Deterministic; no model; no schema change. The design was approved on its review page with the status list below (q70: `finding risk regression`).
 
 ## Design
 
@@ -59,3 +58,19 @@ On the live database every one of the 18 dismissed reports was `finding` (16) or
 - Through the gateway (fake daemon, real `show`): leader `show <item>` closes; reader and human `show` do not; a `report_ready` view that was cut does not, `--full` does; `show <task>` does not, `show <task> --full` closes each closable open report and leaves a `blocked` one open; the read-only fallback closes nothing.
 - `relayBatch` and the briefing skip a read-closed item.
 - `test/unit/stats.test.ts`: an `item.read` is neither a dismissal nor a U1 follow-up, and shows in U1's detail.
+
+## Build
+
+- `src/attention/read-close.ts`: the rule (`READ_CLOSES_STATUSES`, `closesOnRead`) and `closeReadItems`, which re-reads each item inside the transaction, so an item closed meanwhile, or one whose status needs action, gets no event.
+- `src/api/verbs.ts`: `VerbSpec.afterRead` and `HandlerResult.reportsRead` (the items a read printed whole). `src/api/gateway.ts` runs `afterRead` in its own `tx` right after `read` and builds the reply from `data` and `hints` only, so `reportsRead` never leaves the daemon; the read-only fallback (`src/cli/client.ts`) never calls it. A thrown `afterRead` rolls back, is logged, and the reply carries `read: not closed (<reason>)`.
+- `src/lifecycle/leader-verbs.ts`: `show`'s `afterRead` (leader only) closes them and adds `read: closed <ids>`, sets the item view's `state` to `resolved` and drops `flowryn dismiss` hints for closed items. New views: `scoutReportView` for a `report_ready` item (the report file from its `report` artifact, at most 1 MB as deliver accepts, its own `ShowText` so only the body's cut decides) and `fullReportsView` for `show <task|run> --full` (`reports` and, for a scout, `report_body`).
+- `src/lifecycle/worker.ts`: a new `report_ready` line points at `flowryn show <task> --full`. `src/attention/router.ts` relay footer and the leader skill (`src/bridges/skill.ts`) say that showing a report closes it unless it needs action.
+- `src/attention/stats.ts`: `readClosures` counts the window's `item.read` events by kind (same `--project` filter and row cap as the other event reads); U1's `detail` appends `; closed on read, not dismissed: <kind n, …>`.
+- Not a worker-path change, so no `CONTRACT_REVISIONS` bump.
+
+### Tests
+
+- `test/unit/read-close.test.ts`: the status table against `REPORT_EFFECT`; the leader's close writes state, `resolved_by` and one `item.read` event; `blocked`, `error` and an unknown word stay open; reader, human, worker, hook and anonymous close nothing; an already dismissed item and a second read get no event; through `show`'s read and `afterRead`: the item view closes a finding and drops the dismiss hint, a `blocked` one stays open, reader and human stay pure reads, `show <task>` closes nothing and `--full` closes the finding but not the `blocked`, a `report_ready` that fits closes, one cut by lines or by a long line does not and `--full` does, an unreadable report file closes nothing, `show <scout> --full` prints and closes; `relayBatch` and the briefing carry an open finding and drop it once read.
+- `test/unit/gateway.test.ts`: `afterRead` runs in a transaction and `reportsRead` is not in the reply; a throwing one rolls back and the read still answers.
+- `test/unit/stats.test.ts`: `item.read` is neither a dismissal nor a U1 follow-up, and U1's detail counts it, with `--project`.
+- `test/integration/worker-reports.test.ts`: the leader's `show <item>` through the real CLI closes a finding (`item.read` recorded, `dismiss` then refused as already resolved, fleet no longer says `report`); an unknown status stays open and `dismiss` closes it; a daemon-served show closes, the read-only fallback's leaves the next finding open.
