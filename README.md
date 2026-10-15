@@ -60,6 +60,7 @@ flowryn board                # live read-only view; `a` approves
 flowryn approve <task>       # your word for a merge (code from /dev/tty); --gate design passes a review gate
 flowryn merge <task>         # through the merge gate
 flowryn cleanup <task>       # remove a landed task's worktree through the cleanup guard
+flowryn drop <task|plan> --body-file -   # remove queued work that never started; the reason is kept
 flowryn help                 # every verb; `flowryn <verb> --help` for one
 ```
 

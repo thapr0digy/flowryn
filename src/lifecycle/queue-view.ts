@@ -81,7 +81,8 @@ function hasAnyRun(db: Db, taskId: string): boolean {
 }
 
 function isQueued(db: Db, task: BacklogTask): boolean {
-  return task.state === "queued" && task.kind !== "decision" && openRunForTask(db, task.id) === null;
+  // A dropped task leaves the queue at once, before the journal's rm reaches the backlog snapshot.
+  return task.state === "queued" && task.kind !== "decision" && openRunForTask(db, task.id) === null && db.query("SELECT 1 FROM drops WHERE task_id = ?1").get(task.id) === null;
 }
 
 /** One queued backlog task, described. */
