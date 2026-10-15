@@ -4,6 +4,7 @@ import { DEFAULT_TIMING, type Timing } from "../config/workers.ts";
 import { adapterFor } from "../harness/registry.ts";
 import type { HarnessId, Verified } from "../harness/types.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import { INCOMPLETE, runBounded, SPAWN_FAILED, TIMED_OUT } from "../runtime/bounded.ts";
 import { selfCommand } from "../service/launchd.ts";
 import { pinnedLink, unpinForScript } from "../daemon/caller-binary.ts";
 import { ensureDir } from "../util/fsx.ts";
@@ -78,9 +79,11 @@ export function workerBinary(stateDir: string, command: string[] = selfCommand()
   return path;
 }
 
-const versionCache = new Map<string, { mtime: number; version: string | null }>();
+/** Parsed versions only, by binary until its mtime changes: a failed, cut-off or unparsed probe is never cached, so the next dispatch asks again. */
+const versionCache = new Map<string, { mtime: number; version: string }>();
+const VERSION_PROBE_MS = 10_000;
 
-/** `<binary> --version`, parsed by the harness adapter and cached until the binary changes. */
+/** `<binary> --version`, parsed by the harness adapter; a parsed version is cached until the binary changes. */
 export async function harnessVersion(harness: HarnessId, binary: string): Promise<string | null> {
   let mtime = 0;
   try {
@@ -90,11 +93,9 @@ export async function harnessVersion(harness: HarnessId, binary: string): Promis
   }
   const cached = versionCache.get(binary);
   if (cached && cached.mtime === mtime) return cached.version;
-  const proc = Bun.spawn([binary, "--version"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => proc.kill("SIGKILL"), 10_000);
-  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  clearTimeout(timer);
-  const version = adapterFor(harness).parseVersion(`${out}\n${err}`);
-  versionCache.set(binary, { mtime, version });
+  const probe = await runBounded([binary, "--version"], { label: `${harness} --version`, timeoutMs: VERSION_PROBE_MS });
+  if (probe.code === TIMED_OUT || probe.code === INCOMPLETE || probe.code === SPAWN_FAILED) return null;
+  const version = adapterFor(harness).parseVersion(`${probe.stdout}\n${probe.stderr}`);
+  if (version !== null) versionCache.set(binary, { mtime, version });
   return version;
 }
