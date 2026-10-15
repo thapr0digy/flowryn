@@ -68,6 +68,8 @@ export const ERROR_CODES = {
   verify_busy: EXIT.policy,
   // a local verify at this head ran under another verify policy than today's (or none recorded)
   verify_stale: EXIT.policy,
+  // a project with verify steps merges only on a passing verify of exactly the head, and none has finished there
+  verify_required: EXIT.policy,
   fork_pr: EXIT.policy,
   // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
   observation_stale: EXIT.policy,

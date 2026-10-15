@@ -618,6 +618,15 @@ CREATE UNIQUE INDEX operations_one_open ON operations(run_id) WHERE phase IN ('r
 CREATE INDEX operations_run ON operations(run_id, created_at);
 `;
 
+/**
+ * Migration 26: the verify that let a merge through (docs/notes/2026-10-15-merge-gate-require-bf.md),
+ * in its own column so a waiver beside it or an unproven result's detail never hides it. Older rows
+ * keep it in detail ("local green v<n>") or have none.
+ */
+const MERGE_LOCAL_GREEN_SQL = /* sql */ `
+ALTER TABLE merges ADD COLUMN local_green TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -644,6 +653,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 23, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
   { version: 24, name: "verify-policy", sql: VERIFY_POLICY_SQL },
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
+  { version: 26, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

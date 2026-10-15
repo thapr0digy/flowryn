@@ -6,8 +6,9 @@ import { callServerVerb } from "../client.ts";
 import { renderReply } from "../render.ts";
 
 /**
- * `flowryn verify <task|pr>` (leader and human): test a PR head in a clean
- * worktree with the project's configured steps. The daemon runs the job
+ * `flowryn verify <task|pr>` (leader and human): test a PR head, or a
+ * local-only task's worktree head, in a clean worktree with the project's
+ * configured steps. The daemon runs the job
  * (outside every sandbox); this command starts it and then follows it, one
  * line per step as it ends. Ctrl-C stops following, never the job, which
  * still records its result. --detach returns at once with the id.
@@ -49,7 +50,7 @@ function finalReply(data: Record<string, unknown>): Reply {
 
 const verify: VerbSpec = {
   name: "verify",
-  summary: "Test a PR head locally in a clean worktree with the project's verify steps; a pass counts at the merge gate when CI never started",
+  summary: "Test a PR or local-only head in a clean worktree with the project's verify steps; a pass at the exact head is what the merge gate requires",
   positionals: [{ name: "target", required: true, help: "task, PR number or PR URL" }],
   flags: {
     project: { type: "string", help: "the project a PR number belongs to (default: the only project with a GitHub remote)", placeholder: "id" },

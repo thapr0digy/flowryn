@@ -44,10 +44,13 @@ import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification
  * PR: a fast-forward of the project's default branch, proven when the head
  * is on it.
  *
- * Red checks GitHub never started (its Actions billing or spending limit: the
- * check run fails with an annotation saying the job was not started) count
- * as green when a `flowryn verify` of exactly this head passed: local green.
- * A check that ran and failed is never covered by it.
+ * A project with verify steps merges only on local green: the newest
+ * finished `flowryn verify` of exactly this head, under today's verify
+ * policy, passed (docs/notes/2026-10-15-merge-gate-require-bf.md), whatever
+ * GitHub's checks say. Red checks GitHub never started (its Actions billing
+ * or spending limit: the check run fails with an annotation saying the job
+ * was not started) are covered by that same pass. A check that ran and
+ * failed is never covered by it; only a human's one-check waiver passes it.
  */
 
 export interface MergeContext {
@@ -75,13 +78,13 @@ export interface MergeFacts {
   primaryBranch: string | null;
   primaryDirty: boolean;
   fastForward: boolean;
-  /** Read only when every red check may be one GitHub never started. */
+  /** Read when the project has verify steps, or when every red check may be one GitHub never started; absent: no verify is required. */
   local?: LocalEvidence;
 }
 
-/** Red checks GitHub never ran, and the local verifications that may stand in for them. */
+/** The local verifications of this head the gate requires, and the red checks GitHub never ran that they cover. */
 export interface LocalEvidence {
-  /** The check run ids GitHub never started. */
+  /** The check run ids GitHub never started (empty when none). */
   notStarted: number[];
   /** Today's verify policy identity of the project, or null when it has no verify steps. */
   policy: string | null;
@@ -147,24 +150,18 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
         throw new FlowrynError("forge_unavailable", `cannot read the checks of ${delivered.ref} (${(error as Error).message})`, "try again later");
       }
     }
-    let local: LocalEvidence | undefined;
+    let notStarted: number[] = [];
     let annotationsUnread = false;
     if (checks && checks.state === "red") {
-      let notStarted: number[] = [];
       try {
         notStarted = await notStartedChecks(mc.forge, ref, checks);
       } catch (error) {
         noteMergeBlocked(mc, error);
         annotationsUnread = true;
       }
-      const url = canonicalPrUrl(ref, mc.github.web_url);
-      if (notStarted.length > 0) {
-        const policy = mc.verifyPolicy(project.id);
-        const atHead = policy === null ? null : finishedAtHead(mc.db, url, pr.headSha, policy);
-        local = { notStarted, policy, atHead, otherPolicyAtHead: atHead ? null : finishedAtHeadUnderOther(mc.db, url, pr.headSha, policy), lastPassed: lastPassed(mc.db, url) };
-      }
     }
     if (!annotationsUnread) tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
+    const local = localEvidence(mc, project.id, canonicalPrUrl(ref, mc.github.web_url), pr.headSha, notStarted);
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
     return { ...base, head: pr.headSha, pr, checks, remote, ...(local ? { local } : {}) };
   }
@@ -172,7 +169,20 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
   const primaryBranch = await out(mc.git, project.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const status = await out(mc.git, project.path, ["status", "--porcelain", "--untracked-files=no"]);
   const fastForward = head !== "" && (await mc.git(["merge-base", "--is-ancestor", `refs/heads/${project.default_branch}`, head], project.path)).code === 0;
-  return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward };
+  const local = localEvidence(mc, project.id, base.ref, head, []);
+  return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, ...(local ? { local } : {}) };
+}
+
+/**
+ * The local verifications of `ref` (a canonical PR URL, or local:<branch>) at
+ * `head`: read when the project has verify steps today (they are required),
+ * or when red checks GitHub never started want covering; otherwise none.
+ */
+function localEvidence(mc: MergeContext, projectId: string, ref: string, head: string, notStarted: number[]): LocalEvidence | null {
+  const policy = mc.verifyPolicy(projectId);
+  if (policy === null && notStarted.length === 0) return null;
+  const atHead = policy === null ? null : finishedAtHead(mc.db, ref, head, policy);
+  return { notStarted, policy, atHead, otherPolicyAtHead: atHead ? null : finishedAtHeadUnderOther(mc.db, ref, head, policy), lastPassed: lastPassed(mc.db, ref) };
 }
 
 export type ApprovalChoice =
@@ -275,20 +285,21 @@ function waiveHint(task: string, check: string): string {
 }
 
 /**
- * Local green: every red check is one GitHub never started, and a verify of
- * exactly this head passed under today's verify policy. Returns its id, or
- * throws why not: it failed at this head, it ran here under another policy
- * or none recorded (verify_stale), it passed at an older head (head_moved),
- * or there is none.
+ * Local green: the newest finished verify of exactly this head under today's
+ * verify policy passed. Returns its id, or throws why not: it failed at this
+ * head (verify_failed), it ran here under another policy or none recorded
+ * (verify_stale), it passed at an older head (head_moved), or there is none
+ * (verify_required). `ci` opens the message with what GitHub's checks say.
+ * With no verify steps today it is asked only to cover checks GitHub never
+ * started, and a missing verify stays red_checks.
  */
-function localGreenOf(facts: MergeFacts, red: string[]): string {
+function localGreenOf(facts: MergeFacts, ci: string): string {
   const task = facts.run.task_id;
   const local = facts.local!;
   const head = facts.head.slice(0, 8);
-  const ci = `merge refused: CI never started at ${head} (GitHub did not run ${red.map((name) => JSON.stringify(name)).join(", ")})`;
   const at = local.atHead;
   if (at?.state === "passed") return at.id;
-  if (at) throw new FlowrynError("red_checks", `${ci}, and the local verify ${at.id} at this head ${at.state}: ${at.detail ?? "no detail"}`, `flowryn verify show ${at.id}; once fixed: flowryn verify ${task}`);
+  if (at) throw new FlowrynError("verify_failed", `${ci}, and the local verify ${at.id} at this head ${at.state}: ${at.detail ?? "no detail"}`, `flowryn verify show ${at.id}; once fixed: flowryn verify ${task}`);
   const other = local.otherPolicyAtHead;
   if (other) {
     const project = facts.project.id;
@@ -305,9 +316,20 @@ function localGreenOf(facts: MergeFacts, red: string[]): string {
     );
   }
   if (local.lastPassed) {
-    throw new FlowrynError("head_moved", `${ci}; the local verify ${local.lastPassed.id} passed at ${local.lastPassed.head_sha.slice(0, 8)}, but the PR head is now ${head}`, `verify this head: flowryn verify ${task}`);
+    throw new FlowrynError("head_moved", `${ci}; the local verify ${local.lastPassed.id} passed at ${local.lastPassed.head_sha.slice(0, 8)}, but the head is now ${head}`, `verify this head: flowryn verify ${task}`);
   }
-  throw new FlowrynError("red_checks", `${ci}, and no local verify passed at this head`, `verify it locally, then merge again: flowryn verify ${task}`);
+  if (local.policy === null) throw new FlowrynError("red_checks", `${ci}, and no local verify passed at this head`, `verify it locally, then merge again: flowryn verify ${task}`);
+  throw new FlowrynError("verify_required", `${ci}, and no local verify of this head has finished`, `verify it locally, then merge again: flowryn verify ${task}`);
+}
+
+/** What GitHub's checks say, to open a local-green refusal. */
+function ciNote(facts: MergeFacts, notStarted: string[]): string {
+  const head = facts.head.slice(0, 8);
+  if (notStarted.length > 0) return `merge refused: CI never started at ${head} (GitHub did not run ${notStarted.map((name) => JSON.stringify(name)).join(", ")})`;
+  const required = `merge refused: project ${facts.project.id} merges only on a passing flowryn verify of exactly the head`;
+  if (!facts.pr) return `${required} (local-only work at ${head} has no CI)`;
+  const checks = facts.checks;
+  return `${required} (${!checks || checks.state === "none" ? "the PR has no checks" : `checks: ${checksLine(checks)}`} at ${head})`;
 }
 
 /** The gate, in the design's order; throws the first refusal. */
@@ -335,7 +357,7 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
       throw new FlowrynError("not_fast_forward", `${run.branch} is not a fast-forward of ${project.default_branch} (it has diverged)`, `steer the worker to rebase onto ${project.default_branch} and deliver again`);
     }
   }
-  // 3 · every check green, exactly one red check waived by a human, or local green for checks GitHub never started.
+  // 3 · every check green or exactly one red check waived by a human; local green when the project has verify steps (it also covers checks GitHub never started).
   let waived: string | null = null;
   let localGreen: string | null = null;
   const checks = facts.checks;
@@ -354,22 +376,24 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   if (asked !== null && !chosen.choice) {
     throw new FlowrynError("approval_required", `merge refused: ${chosen.why}`, `approve in your shell: flowryn approve ${task} --allow-red ${shellWord(asked)}`);
   }
-  if (checks && checks.state !== "green" && checks.state !== "none") {
-    const pending = checks.checks.filter((c) => c.state === "pending").map((c) => c.name);
+  // A red check is passed only by the one waiver or, if GitHub never started it, by local green; one that ran and failed never by local green.
+  let notStarted: string[] = [];
+  if (red.length > 0) {
     const waiver = waiverOf(chosen.choice);
-    if (red.length > 0) {
-      if (red.length === 1 && waiver === red[0]) waived = red[0]!;
-      else if (facts.local && redRuns.every((c) => c.id !== undefined && facts.local!.notStarted.includes(c.id))) localGreen = localGreenOf(facts, red);
-      else {
-        throw new FlowrynError(
-          "red_checks",
-          `merge refused: ${red.length} red check${red.length === 1 ? "" : "s"}: ${red.join(", ")}${waiver ? ` (your waiver names ${waiver}, and only one may be waived)` : ""}`,
-          red.length === 1 ? waiveHint(task, red[0]!) : "fix them; at most one check can be waived",
-        );
-      }
+    if (red.length === 1 && waiver === red[0]) waived = red[0]!;
+    else if (facts.local && redRuns.every((c) => c.id !== undefined && facts.local!.notStarted.includes(c.id))) notStarted = red;
+    else {
+      throw new FlowrynError(
+        "red_checks",
+        `merge refused: ${red.length} red check${red.length === 1 ? "" : "s"}: ${red.join(", ")}${waiver ? ` (your waiver names ${waiver}, and only one may be waived)` : ""}`,
+        red.length === 1 ? waiveHint(task, red[0]!) : "fix them; at most one check can be waived",
+      );
     }
-    if (pending.length > 0) throw new FlowrynError("checks_pending", `merge refused: checks still running: ${pending.join(", ")}`, `flowryn show ${task}`);
   }
+  // Local green: required whenever the project has verify steps; without them, only to cover checks GitHub never started.
+  if (facts.local && (facts.local.policy !== null || notStarted.length > 0)) localGreen = localGreenOf(facts, ciNote(facts, notStarted));
+  const pending = checks ? checks.checks.filter((c) => c.state === "pending").map((c) => c.name) : [];
+  if (pending.length > 0) throw new FlowrynError("checks_pending", `merge refused: checks still running: ${pending.join(", ")}`, `flowryn show ${task}`);
   // 4 · an approval record or yolo.
   if (!chosen.choice) {
     throw new FlowrynError("approval_required", `merge refused: ${chosen.why}`, `approve in your shell: flowryn approve ${task}`);
@@ -425,6 +449,8 @@ export interface MergeRow {
   method: string | null;
   detail: string | null;
   checked_at: number | null;
+  /** The passing verify that let it through (migration 26); null when none was required or on an older row. */
+  local_green: string | null;
 }
 
 export function latestMerge(db: Db, taskId: string): MergeRow | null {
@@ -437,9 +463,9 @@ export function recordMergeRequest(db: Db, facts: MergeFacts, approvalId: string
   setMeta(db, "next_merge_no", String(next + 1));
   const id = `mg${next}`;
   db.query(
-    `INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state, method, detail)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'requested', ?7, ?8)`,
-  ).run(id, facts.run.task_id, facts.ref, facts.head, approvalId, now, method, waived ? `waived ${waived}` : localGreen ? `local green ${localGreen}` : null);
+    `INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state, method, detail, local_green)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'requested', ?7, ?8, ?9)`,
+  ).run(id, facts.run.task_id, facts.ref, facts.head, approvalId, now, method, waived ? `waived ${waived}` : null, localGreen);
   db.query("UPDATE runs SET state = 'merging', updated_at = ?2 WHERE id = ?1").run(facts.run.id, now);
   appendEvent(db, {
     source: "cli",

@@ -16,7 +16,7 @@ import { findRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
-import { deliveredOf, prEvidence } from "./delivery.ts";
+import { approvalRef, deliveredOf, prEvidence } from "./delivery.ts";
 import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
@@ -310,12 +310,13 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
     view.checks = pr.checks?.line ?? "unknown";
     view.seen = `${age(ctx.now, pr.observed_at)} ago`;
   }
-  const verified = delivered?.kind === "pr" ? latestVerification(ctx.db, delivered.ref) : null;
+  const verified = delivered ? latestVerification(ctx.db, approvalRef(delivered)) : null;
   if (verified) view.verified = verificationLine(verified);
   const merge = latestMerge(ctx.db, run.task_id);
   if (merge) {
     const approval = ctx.db.query("SELECT channel, actor FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: string; actor: string } | null;
-    view.merge = `${merge.id} ${merge.state}${merge.merge_sha ? ` at ${merge.merge_sha.slice(0, 12)}` : ""} via ${approval?.channel ?? "?"}${merge.detail ? ` (${sanitizeLine(merge.detail, 100)})` : ""}`;
+    const green = merge.local_green ? `, local green ${merge.local_green}` : "";
+    view.merge = `${merge.id} ${merge.state}${merge.merge_sha ? ` at ${merge.merge_sha.slice(0, 12)}` : ""} via ${approval?.channel ?? "?"}${green}${merge.detail ? ` (${sanitizeLine(merge.detail, 100)})` : ""}`;
   }
   const standing = ctx.db.query("SELECT id, channel, head_sha, allow_red_check FROM approvals WHERE task_id = ?1 AND consumed_at IS NULL AND expires_at > ?2 ORDER BY created_at DESC LIMIT 1").get(run.task_id, ctx.now) as {
     id: string;

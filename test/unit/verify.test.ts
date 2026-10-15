@@ -598,14 +598,21 @@ describe("local green at the merge gate", () => {
     expect(r.help).toBe("verify this head: flowryn verify t");
   });
 
-  test("no verify, or one that failed at this head, is red_checks with the way forward", () => {
+  test("no verify is verify_required, and one that failed at this head is verify_failed, each with the way forward", () => {
     const none = refusal(() => checkGate(facts(), approved));
-    expect(none.code).toBe("red_checks");
+    expect(none.code).toBe("verify_required");
     expect(none.message).toContain("CI never started at h2");
     expect(none.help).toContain("flowryn verify t");
     const failed = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: verification("v5", "h2", "failed"), lastPassed: verification("v3", "h1", "passed") } }), approved));
-    expect(failed.code).toBe("red_checks");
+    expect(failed.code).toBe("verify_failed");
     expect(failed.message).toContain("v5 at this head failed");
+    expect(failed.help).toBe("flowryn verify show v5; once fixed: flowryn verify t");
+  });
+
+  test("a project with no verify steps: checks GitHub never started still want a pass, and none is red_checks as before", () => {
+    const none = refusal(() => checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: null, otherPolicyAtHead: null, atHead: null, lastPassed: null } }), approved));
+    expect(none.code).toBe("red_checks");
+    expect(none.message).toContain("CI never started at h2");
   });
 
   test("a check that ran and failed is never covered, nor is a pending one, nor a missing approval", () => {
@@ -630,6 +637,92 @@ describe("local green at the merge gate", () => {
   test("assumption: local green is evidence, not a waiver, so yolo may merge on it", () => {
     const passed = verification("v4", "h2", "passed");
     expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), { choice: { kind: "yolo" }, why: "" }).localGreen).toBe("v4");
+  });
+});
+
+describe("a project with verify steps merges only on a passing verify of exactly the head", () => {
+  const RAN: Check = { name: "lint", state: "red", detail: "failure", id: 8, app: "github-actions", annotations: 1 };
+  const GREEN: Check = { name: "ci", state: "green", detail: "success", id: 9, app: "github-actions" };
+  const OLD = verifyPolicyId({ steps: ["bun test"], binary: null });
+  const waiving = (check: string): ChoiceResult => ({ choice: { kind: "row", row: { id: "a2", allow_red_check: check, channel: "cli-tty" } as never }, why: "", allowRed: check });
+
+  /** GitHub's checks, the not-started ids among them, and the approval the merge brings. */
+  const CHECKS = {
+    none: { checks: summarize([]), notStarted: [] as number[], chosen: approved },
+    green: { checks: summarize([GREEN]), notStarted: [] as number[], chosen: approved },
+    "red, not started": { checks: summarize([NOT_STARTED]), notStarted: [NOT_STARTED.id!], chosen: approved },
+    "red, ran": { checks: summarize([RAN]), notStarted: [] as number[], chosen: approved },
+    "red, ran, waived": { checks: summarize([RAN]), notStarted: [] as number[], chosen: waiving("lint") },
+  } as const;
+
+  /** The local verify evidence at the head h2 (null: the project has no verify steps). */
+  const VERIFY = {
+    passed: { policy: TODAY, atHead: verification("v4", "h2", "passed"), otherPolicyAtHead: null, lastPassed: verification("v4", "h2", "passed") },
+    failed: { policy: TODAY, atHead: verification("v5", "h2", "failed"), otherPolicyAtHead: null, lastPassed: null },
+    stale: { policy: TODAY, atHead: null, otherPolicyAtHead: under(verification("v3", "h2", "passed"), OLD), lastPassed: under(verification("v3", "h2", "passed"), OLD) },
+    missing: { policy: TODAY, atHead: null, otherPolicyAtHead: null, lastPassed: null },
+    "older head": { policy: TODAY, atHead: null, otherPolicyAtHead: null, lastPassed: verification("v2", "h1", "passed") },
+    "no steps": null,
+  } as const;
+
+  const MERGE = "merge";
+  /** The design's matrix: what the gate does for each row of checks and column of verify evidence. */
+  const MATRIX: Record<keyof typeof CHECKS, Record<keyof typeof VERIFY, string>> = {
+    none: { passed: MERGE, failed: "verify_failed", stale: "verify_stale", missing: "verify_required", "older head": "head_moved", "no steps": MERGE },
+    green: { passed: MERGE, failed: "verify_failed", stale: "verify_stale", missing: "verify_required", "older head": "head_moved", "no steps": MERGE },
+    "red, not started": { passed: MERGE, failed: "verify_failed", stale: "verify_stale", missing: "verify_required", "older head": "head_moved", "no steps": "red_checks" },
+    "red, ran": { passed: "red_checks", failed: "red_checks", stale: "red_checks", missing: "red_checks", "older head": "red_checks", "no steps": "red_checks" },
+    "red, ran, waived": { passed: MERGE, failed: "verify_failed", stale: "verify_stale", missing: "verify_required", "older head": "head_moved", "no steps": MERGE },
+  };
+
+  for (const [checksName, c] of Object.entries(CHECKS) as [keyof typeof CHECKS, (typeof CHECKS)[keyof typeof CHECKS]][]) {
+    for (const [verifyName, v] of Object.entries(VERIFY) as [keyof typeof VERIFY, (typeof VERIFY)[keyof typeof VERIFY]][]) {
+      const expected = MATRIX[checksName][verifyName];
+      test(`checks ${checksName}, verify ${verifyName}: ${expected}`, () => {
+        // A project with no verify steps reads evidence only to cover checks GitHub never started (gatherFacts).
+        const notStarted = [...c.notStarted];
+        const local = v ? { notStarted, ...v } : notStarted.length > 0 ? { notStarted, policy: null, atHead: null, otherPolicyAtHead: null, lastPassed: null } : undefined;
+        const f = facts({ checks: c.checks, local });
+        if (expected === MERGE) {
+          const gate = checkGate(f, c.chosen);
+          expect(gate.localGreen).toBe(v ? "v4" : null);
+          expect(gate.waived).toBe(checksName === "red, ran, waived" ? "lint" : null);
+        } else expect(refusal(() => checkGate(f, c.chosen)).code).toBe(expected);
+      });
+    }
+  }
+
+  test("the refusal says what GitHub's checks are, and the help is flowryn verify", () => {
+    const none = refusal(() => checkGate(facts({ checks: summarize([]), local: { notStarted: [], ...VERIFY.missing } }), approved));
+    expect(none.message).toContain("project web merges only on a passing flowryn verify of exactly the head (the PR has no checks at h2)");
+    expect(none.help).toBe("verify it locally, then merge again: flowryn verify t");
+    const green = refusal(() => checkGate(facts({ checks: summarize([GREEN]), local: { notStarted: [], ...VERIFY.missing } }), approved));
+    expect(green.message).toContain("(checks: green (1) at h2)");
+  });
+
+  test("a waiver never stands in for a missing verify", () => {
+    expect(refusal(() => checkGate(facts({ checks: summarize([RAN]), local: { notStarted: [], ...VERIFY.missing } }), waiving("lint"))).code).toBe("verify_required");
+  });
+
+  test("yolo merges on a passing verify, never without one", () => {
+    const yolo: ChoiceResult = { choice: { kind: "yolo" }, why: "" };
+    expect(checkGate(facts({ checks: summarize([]), local: { notStarted: [], ...VERIFY.passed } }), yolo).localGreen).toBe("v4");
+    expect(refusal(() => checkGate(facts({ checks: summarize([]), local: { notStarted: [], ...VERIFY.missing } }), yolo)).code).toBe("verify_required");
+  });
+
+  test("local-only work: a passing verify of the worktree head merges; none is verify_required", () => {
+    const local = { pr: null, checks: null, remote: null, delivered: { kind: "local" as const, ref: "flowryn/t", head: "h2", at: 0 }, ref: "local:flowryn/t", primaryBranch: "main", fastForward: true };
+    expect(checkGate(facts({ ...local, local: { notStarted: [], ...VERIFY.passed } }), approved).localGreen).toBe("v4");
+    const r = refusal(() => checkGate(facts({ ...local, local: { notStarted: [], ...VERIFY.missing } }), approved));
+    expect(r.code).toBe("verify_required");
+    expect(r.message).toContain("(local-only work at h2 has no CI)");
+    expect(checkGate(facts({ ...local, local: undefined }), approved).localGreen).toBeNull();
+  });
+
+  test("checks still running wait for the verify first, then for the checks", () => {
+    const pending: Check = { name: "deploy", state: "pending", detail: "in_progress" };
+    expect(refusal(() => checkGate(facts({ checks: summarize([pending]), local: { notStarted: [], ...VERIFY.missing } }), approved)).code).toBe("verify_required");
+    expect(refusal(() => checkGate(facts({ checks: summarize([pending]), local: { notStarted: [], ...VERIFY.passed } }), approved)).code).toBe("checks_pending");
   });
 });
 

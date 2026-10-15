@@ -5,7 +5,7 @@ import { stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
 import { canonicalPrUrl, parsePrUrl, repoOf } from "../forge/github.ts";
 import { ForgeError, type PrRef, type PullRequest } from "../forge/types.ts";
-import { deliveredOf } from "../lifecycle/delivery.ts";
+import { approvalRef, deliveredOf } from "../lifecycle/delivery.ts";
 import { getProject, listProjects, type ProjectRow } from "../lifecycle/projects.ts";
 import { runAndProject } from "../policy/verbs.ts";
 import { isForgeOutage, noteForgeDown } from "../reconcile/forge-health.ts";
@@ -39,9 +39,13 @@ function verifyDeps(ctx: HandlerCtx): VerifyDeps {
 
 interface Target {
   project: ProjectRow;
-  ref: PrRef;
+  /** The PR, or null for a local-only task's branch. */
+  ref: PrRef | null;
+  /** The canonical PR URL, or local:<branch> (what the merge gate reads verifications by). */
   url: string;
   task: string | null;
+  /** A local-only task's worktree, whose HEAD is the head verified; null for a PR. */
+  worktree: string | null;
 }
 
 function sameRepo(a: { owner: string; repo: string }, b: { owner: string; repo: string }): boolean {
@@ -73,27 +77,34 @@ export function resolveTarget(db: Db, target: string, projectId: string | undefi
     else throw new FlowrynError("bad_args", `several projects have a GitHub remote (${candidates.map((c) => c.project.id).join(", ")}); name one with --project`);
     const ref = { ...found.repo, number: Number(number[1]) };
     const url = canonicalPrUrl(ref, webUrl);
-    return { project: found.project, ref, url, task: taskOfPr(db, url) };
+    return { project: found.project, ref, url, task: taskOfPr(db, url), worktree: null };
   }
   const parsed = parsePrUrl(target, webUrl);
   if (parsed) {
     const found = githubProjects(db, webUrl).find((c) => sameRepo(c.repo, parsed) && (!projectId || c.project.id === projectId));
     if (!found) throw new FlowrynError("not_found", `no project has the remote ${parsed.owner}/${parsed.repo}`, "flowryn project list");
     const url = canonicalPrUrl(parsed, webUrl);
-    return { project: found.project, ref: parsed, url, task: taskOfPr(db, url) };
+    return { project: found.project, ref: parsed, url, task: taskOfPr(db, url), worktree: null };
   }
   const { run, project } = runAndProject(db, target);
   const delivered = deliveredOf(db, run.task_id);
   if (!delivered) throw new FlowrynError("not_ready", `${run.task_id} has delivered no PR yet (the run is ${run.state})`, `flowryn show ${run.task_id}`);
-  if (delivered.kind !== "pr") throw new FlowrynError("not_ready", `${run.task_id} is local-only: it delivered a branch, not a PR`, `flowryn show ${run.task_id}`);
+  // Local-only work is verified at its worktree HEAD, the head its merge would land (docs/notes/2026-10-15-merge-gate-require-bf.md).
+  if (delivered.kind !== "pr") return { project, ref: null, url: approvalRef(delivered), task: run.task_id, worktree: run.worktree_path };
   const ref = parsePrUrl(delivered.ref, webUrl);
   if (!ref) throw new FlowrynError("not_ready", `the delivered PR ${delivered.ref} is not a pull request URL`);
-  return { project, ref, url: canonicalPrUrl(ref, webUrl), task: run.task_id };
+  return { project, ref, url: canonicalPrUrl(ref, webUrl), task: run.task_id, worktree: null };
+}
+
+/** The head a verify starts at: the PR's (with its branch), or a local-only worktree's. */
+interface HeadToVerify {
+  headSha: string;
+  headRef: string | null;
 }
 
 interface StartPrepared {
   target: Target;
-  pr: PullRequest;
+  pr: HeadToVerify;
   config: VerifyConfig;
   /** The identity of `config`, recorded with a new job and required of a running one to attach. */
   policy: string;
@@ -151,6 +162,12 @@ const verifyStart: VerbSpec = {
     if (!config) {
       throw new FlowrynError("not_configured", `project ${target.project.id} has no verify steps; add them to config.toml:\n${verifySnippet(target.project.id)}`, "then reload the config: flowryn daemon restart, or send flowrynd SIGHUP");
     }
+    // Local-only work: the worktree HEAD, the head its merge would land; there is no PR to read.
+    if (!target.ref) {
+      const head = await ctx.delivery.git(["rev-parse", "HEAD"], target.worktree!);
+      if (head.code !== 0) throw new FlowrynError("not_ready", `cannot read the head of ${target.url} in ${target.worktree} (${head.stderr.trim() || `exit ${head.code}`})`, `flowryn show ${target.task}`);
+      return { target, pr: { headSha: head.stdout.trim(), headRef: null }, config, policy: verifyPolicyId(config), host: await ctx.sched.host() };
+    }
     let pr: PullRequest;
     try {
       pr = await ctx.delivery.forge().pull(target.ref);
@@ -203,14 +220,14 @@ const verifyStart: VerbSpec = {
     });
     // Same transaction as the row: the slot is re-counted here, so a scheduler grant cannot take it meanwhile.
     grantJobLease(ctx.db, { kind: "verify", id: v.id, taskId: v.task_id }, VERIFY_POOL, caps, ctx.now());
-    return { data: { ...verificationView(v, ctx.now()), attached: false, pr_number: target.ref.number, head_ref: pr.headRef, binary_config: config.binary ?? "", timeout_ms: config.timeout_ms, env_path: stringArg(args, "path") ?? "" } };
+    return { data: { ...verificationView(v, ctx.now()), attached: false, pr_number: target.ref?.number ?? null, head_ref: pr.headRef, binary_config: config.binary ?? "", timeout_ms: config.timeout_ms, env_path: stringArg(args, "path") ?? "" } };
   },
   async settle(ctx, result) {
     const id = String(result.data.verification ?? "");
     const v = getVerification(ctx.db, id);
     // A replay of the call, or an attach to a running job, starts nothing.
     if (v && v.state === "running" && !isVerifying(id) && result.data.attached === false) {
-      const plan = { prNumber: Number(result.data.pr_number), headRef: String(result.data.head_ref), binary: String(result.data.binary_config) || null, timeoutMs: Number(result.data.timeout_ms), path: String(result.data.env_path ?? "") || null };
+      const plan = { prNumber: result.data.pr_number === null ? null : Number(result.data.pr_number), headRef: result.data.head_ref === null ? null : String(result.data.head_ref), binary: String(result.data.binary_config) || null, timeoutMs: Number(result.data.timeout_ms), path: String(result.data.env_path ?? "") || null };
       void runVerification(verifyDeps(ctx), v, plan).catch((error: unknown) => ctx.log(`verify ${id}: ${(error as Error).message}`));
     }
     const { pr_number: _n, head_ref: _r, binary_config: _b, timeout_ms: _t, env_path: _p, ...data } = result.data;
