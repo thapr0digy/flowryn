@@ -85,7 +85,8 @@ export function isDropped(db: Db, taskId: string): boolean {
 function dependentsOf(db: Db, dropped: Set<string>, backlog: BacklogTask[]): Dependent[] {
   const found = new Map<string, Dependent>();
   for (const task of backlog) {
-    if (dropped.has(task.id) || task.state === "done") continue;
+    // A task dropped earlier waits for nothing, though its rm may not have reached the snapshot yet.
+    if (dropped.has(task.id) || task.state === "done" || isDropped(db, task.id)) continue;
     const on = blockersOf(task).filter((b) => dropped.has(b));
     if (on.length > 0) found.set(task.id, { task: task.id, blockedBy: on, inBacklog: true });
   }

@@ -6,7 +6,7 @@ import { FlowrynError } from "../../src/api/errors.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { MIGRATIONS } from "../../src/db/schema.ts";
 import { readSnapshot } from "../../src/journal/snapshot.ts";
-import { applyDrop, planDrop } from "../../src/lifecycle/drop.ts";
+import { applyDrop, DROP_VERBS, planDrop } from "../../src/lifecycle/drop.ts";
 import { createRun } from "../../src/lifecycle/dispatch.ts";
 import { getPlan, recordPlan, takenIds } from "../../src/lifecycle/plans.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
@@ -135,6 +135,10 @@ describe("what drop takes", () => {
 });
 
 describe("what drop refuses", () => {
+  test("only the leader and you: a worker token is refused, like cancel", () => {
+    expect(DROP_VERBS[0]!.roles).toEqual(["leader", "human"]);
+  });
+
   test("a live or delivered run: task_started", async () => {
     setup();
     await queue("web-live-q1");
@@ -207,6 +211,17 @@ describe("tasks that wait for the dropped one", () => {
     expect(error.code).toBe("has_dependents");
     expect(error.message).toContain("web-next-q1 (blocked by web-base-q1)");
     expect(error.help).toContain("--unblock");
+  });
+
+  test("a dependent dropped first no longer counts, though its rm has not applied yet", async () => {
+    setup();
+    await queue("web-base-q5");
+    await queue("web-next-q5", ["web-base-q5"]);
+    drop("web-next-q5");
+    expect(drop("web-base-q5").dependents).toEqual([]);
+    await env.journal.drain();
+    expect(intents(env.db).every((i) => i.state === "applied")).toBe(true);
+    expect(backlogIds()).toEqual([]);
   });
 
   test("--unblock clears the edges before the rm, and the dependent is ready", async () => {
