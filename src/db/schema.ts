@@ -447,8 +447,8 @@ ALTER TABLE items ADD COLUMN full_line TEXT;
 
 /**
  * `flowryn verify`: one row per local run of a project's verify steps at a
- * PR head, in a clean worktree. A passing one at the current head counts as
- * local green for checks GitHub never started (src/policy/merge.ts).
+ * PR head, in a clean worktree. A project with verify steps merges only on a
+ * passing one at the merge head (src/policy/merge.ts).
  */
 const VERIFICATIONS_SQL = /* sql */ `
 CREATE TABLE verifications (

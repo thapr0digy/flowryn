@@ -24,7 +24,7 @@
    - a same-policy failure or error at this head: `red_checks`, as before;
    - otherwise a result at this head under another policy, or a legacy one: the new code **`verify_stale`** (exit 2, a policy refusal): "CI never started at h2; the local verify v4 at this head ran under another verify policy (the `[projects.web]` verify steps or `verify_binary` changed since) and does not cover today's", or "...ran before Flowryn recorded its verify policy", or "...and project web has no verify steps now"; help `re-verify this head under today's steps: flowryn verify <task>`;
    - otherwise a pass at an older head: `head_moved`, as before; else `red_checks` with `flowryn verify <task>`, as before.
-5. **The narrow exception stays narrow.** Nothing about which checks local green may cover changes: only red github-actions runs GitHub never started, every red one of them, and still no pending check and still an approval (sensitive work still a human one). A stale or legacy result covers nothing and can only add a refusal.
+5. **The narrow exception stays narrow.** Nothing about which checks local green may cover changes: only red github-actions runs GitHub never started, every red one of them, and still no pending check and still an approval (sensitive work still a human one). A stale or legacy result covers nothing and can only add a refusal. Since 2026-10-15 a project with verify steps needs the pass on every merge (docs/notes/2026-10-15-merge-gate-require-bf.md).
 
 **Kept.** Package 7's job lease, admission, release and recovery; `--detach` and following; `lastPassed` (any policy, only for the `head_moved` message); `show`'s verification line.
 
