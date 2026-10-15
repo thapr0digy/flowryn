@@ -82,6 +82,7 @@ export function fieldsSetBy(verb: AppliedPayload["verb"], args: IntentArgs): Tas
       return fields;
     }
     case "block":
+    case "unblock":
       return ["deps"];
     case "add":
     case "rm":

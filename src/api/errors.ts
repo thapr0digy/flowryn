@@ -71,6 +71,12 @@ export const ERROR_CODES = {
   fork_pr: EXIT.policy,
   // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
   observation_stale: EXIT.policy,
+  // flowryn drop: work that started, landed, keeps a worktree or still blocks others stays
+  task_started: EXIT.policy,
+  task_landed: EXIT.policy,
+  worktree_kept: EXIT.policy,
+  phase_started: EXIT.policy,
+  has_dependents: EXIT.policy,
   // validation
   bad_args: EXIT.validation,
   unknown_verb: EXIT.validation,

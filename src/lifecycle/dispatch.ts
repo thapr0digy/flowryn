@@ -25,6 +25,7 @@ import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitin
 import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { openRunForTask } from "./runs.ts";
+import { isDropped } from "./drop.ts";
 import { dismissEarlierRunsQuestions } from "./gate-questions.ts";
 
 /** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
@@ -172,6 +173,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   const worktree = join(workers.worktree_root, r.project.id, r.taskId);
   if (existsSync(worktree)) throw new FlowrynError("already_exists", `${worktree} already exists`);
   if (openRunForTask(db, r.taskId)) throw new FlowrynError("already_exists", `${r.taskId} already has a run`);
+  if (isDropped(db, r.taskId)) throw new FlowrynError("not_found", `${r.taskId} was dropped`, `flowryn show ${r.taskId}`);
   const model = r.harness === "claude" ? workers.claude.model : workers.pi.model;
   const effort = r.harness === "claude" ? workers.claude.effort : workers.pi.effort;
   db.query(
@@ -283,6 +285,7 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const override = modeOverride(args, project);
   const taskId = stringArg(args as never, "task");
   if (taskId) {
+    if (isDropped(ctx.db, taskId)) throw new FlowrynError("not_found", `${taskId} was dropped`, `flowryn show ${taskId}`);
     // A queued task that is not a plan phase (cutover C3: imported work): its blockers must have landed.
     const queued = queuedTaskOf(ctx.db, taskId);
     if (queued) {

@@ -9,6 +9,7 @@ import { SCHED_VERBS } from "../sched/verbs.ts";
 import { LEADER_RUN_VERBS } from "../lifecycle/leader-verbs.ts";
 import { DECISION_VERBS } from "../lifecycle/decision-verbs.ts";
 import { DIVERGENCE_VERBS } from "../lifecycle/divergences.ts";
+import { DROP_VERBS } from "../lifecycle/drop.ts";
 import { PROMOTE_VERBS } from "../lifecycle/promote.ts";
 import { CONTRACT_VERBS } from "../contracts/verbs.ts";
 import { systemVerbs } from "../daemon/system-verbs.ts";
@@ -31,6 +32,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...LEADER_RUN_VERBS,
   ...DECISION_VERBS,
   ...DIVERGENCE_VERBS,
+  ...DROP_VERBS,
   ...PROMOTE_VERBS,
   ...WORKER_VERBS,
   ...TODO_VERBS,

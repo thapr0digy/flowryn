@@ -618,6 +618,26 @@ CREATE UNIQUE INDEX operations_one_open ON operations(run_id) WHERE phase IN ('r
 CREATE INDEX operations_run ON operations(run_id, created_at);
 `;
 
+/**
+ * `flowryn drop` (docs/notes/2026-10-15-add-flowryn-drop-mv.md): a plan may be dropped, so plans
+ * is rebuilt with that state; drops keeps one row per task dropped (the backlog no longer holds it):
+ * its plan, title, the reason given, who dropped it, the tasks it unblocked and when.
+ */
+const DROPS_SQL = /* sql */ `
+CREATE TABLE plans_v26 (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','approved','discarded','dropped')),
+  source_task TEXT, gate_id TEXT, filed_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  approved_at INTEGER, approved_via TEXT);
+INSERT INTO plans_v26 (id, project_id, title, state, source_task, gate_id, filed_by, created_at, approved_at, approved_via)
+  SELECT id, project_id, title, state, source_task, gate_id, filed_by, created_at, approved_at, approved_via FROM plans;
+DROP TABLE plans;
+ALTER TABLE plans_v26 RENAME TO plans;
+CREATE TABLE drops (
+  task_id TEXT PRIMARY KEY, plan_id TEXT, title TEXT NOT NULL, reason TEXT NOT NULL,
+  dropped_by TEXT NOT NULL, unblocked TEXT NOT NULL DEFAULT '[]', dropped_at INTEGER NOT NULL);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -644,6 +664,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 23, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
   { version: 24, name: "verify-policy", sql: VERIFY_POLICY_SQL },
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
+  { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

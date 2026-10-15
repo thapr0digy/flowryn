@@ -15,7 +15,7 @@ import { classifyMutation, listTasks, taskFromJson, type BacklogTask, type Tasks
  * task being gone, so a replay confirms that with `show` and counts it applied.
  * `block` records a blocked-by edge and is idempotent per tasks-axi 0.2.5 help.
  */
-export const INTENT_VERBS = ["add", "start", "done", "hold", "unhold", "update", "reopen", "rm", "block"] as const;
+export const INTENT_VERBS = ["add", "start", "done", "hold", "unhold", "update", "reopen", "rm", "block", "unblock"] as const;
 export type IntentVerb = (typeof INTENT_VERBS)[number];
 
 export type FlagValue = string | true | string[];
