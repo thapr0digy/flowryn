@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { MIGRATIONS } from "../../src/db/schema.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
 import { summarize, type Annotation, type Check, type Forge, type PullRequest } from "../../src/forge/types.ts";
 import type { ProjectRow } from "../../src/lifecycle/projects.ts";
@@ -637,6 +638,25 @@ describe("local green at the merge gate", () => {
   test("assumption: local green is evidence, not a waiver, so yolo may merge on it", () => {
     const passed = verification("v4", "h2", "passed");
     expect(checkGate(facts({ local: { notStarted: [NOT_STARTED.id!], policy: TODAY, otherPolicyAtHead: null, atHead: passed, lastPassed: passed } }), { choice: { kind: "yolo" }, why: "" }).localGreen).toBe("v4");
+  });
+});
+
+describe("migration 27", () => {
+  test("merges keep their rows and gain an empty local_green", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fw-merge-green-"));
+    try {
+      const db = openDb(join(dir, "flowryn.db"));
+      migrate(db, MIGRATIONS.slice(0, 26));
+      // An older row, written with its foreign keys off as only this fixture needs.
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state, detail) VALUES ('mg1', 't', 'u', 'h', 'a1', 1, 'merged', 'local green v3')");
+      db.exec("PRAGMA foreign_keys = ON");
+      expect(migrate(db)).toEqual([27]);
+      expect(db.query("SELECT id, detail, local_green FROM merges").all()).toEqual([{ id: "mg1", detail: "local green v3", local_green: null }]);
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

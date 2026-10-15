@@ -355,7 +355,7 @@ describe("migration 26", () => {
       db.exec("INSERT INTO plans (id, project_id, title, state, filed_by, created_at) VALUES ('p1', 'p', 'Old', 'approved', 'leader', 1)");
       db.exec("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, blocked_by) VALUES ('p1', 1, 'old-a1', 'Old', 'b', 'fix', '[]')");
       expect(() => db.exec("UPDATE plans SET state = 'dropped' WHERE id = 'p1'")).toThrow();
-      expect(migrate(db)).toEqual([26]);
+      expect(migrate(db, MIGRATIONS.slice(0, 26))).toEqual([26]);
       expect(db.query("SELECT id, state FROM plans").all()).toEqual([{ id: "p1", state: "approved" }]);
       db.exec("UPDATE plans SET state = 'dropped' WHERE id = 'p1'");
       expect(() => db.exec("UPDATE plans SET state = 'gone' WHERE id = 'p1'")).toThrow();
