@@ -520,7 +520,7 @@ type Verified = { ok: boolean;
         <li><strong>Liveness</strong> is one of <code>starting</code>, <code>busy</code>, <code>idle</code>, <code>blocked_dialog</code>, <code>dead</code>, <code>orphaned</code>, <code>unknown</code>. The reconciler writes it; only the lifecycle engine changes <code>runs.state</code>, on the reconciler's request.</li>
         <li><strong>Reattach</strong> only when pane id, worktree path and a live harness process identity (pid plus start time plus executable) all match the <code>runs</code> row. Pane metadata (<code>flowryn:&lt;run&gt;</code>, written with no TTL) only finds candidates. A mismatch is <code>orphaned</code>; a run is never adopted by label.</li>
         <li><strong>Husks.</strong> A pane with no live harness process is <code>dead</code>. At startup, many husks at once mean the Herdr server restarted. The supported Herdr update path is <code>herdr update --handoff</code>, and <code>flowryn doctor</code> checks the Herdr version against the pinned minimum and protocol 17.</li>
-        <li><strong>Trust wedge.</strong> Process alive but no worker-start event within 30 s of launch → <code>blocked_dialog</code>, reported as a P1 pointer. No keystrokes.</li>
+        <li><strong>Trust wedge.</strong> Process alive but no worker hook (worker-start or any other) within 30 s of launch → <code>blocked_dialog</code>, reported as a P1 pointer. No keystrokes.</li>
       </ul>
     </div></div>
     <div class="card card-border"><div class="card-body py-4 space-y-2">
@@ -1387,7 +1387,7 @@ max_triggered_turns_per_hour = 3</code></pre>
       <tr><td>Herdr unreachable</td><td>Socket errors</td><td>Dispatch refused; liveness <code>unknown</code>; retry with backoff</td><td>P1 once</td></tr>
       <tr><td>A worker dies mid-turn</td><td>Process identity gone</td><td>Resume once</td><td>P0 on second death</td></tr>
       <tr><td>A worker never reports</td><td>Harness idle 15 min, no outcome</td><td>None (judgment)</td><td>P1 pointer</td></tr>
-      <tr><td>A worker wedged on a trust dialog</td><td>No worker-start within 30 s</td><td>None; never keystrokes</td><td>P1 pointer</td></tr>
+      <tr><td>A worker wedged on a trust dialog</td><td>No worker hook within 30 s</td><td>None; never keystrokes</td><td>P1 pointer</td></tr>
       <tr><td>Leader interrupted; busy stuck</td><td>Busy lease expiry (nothing fires after an interrupt)</td><td>Marked idle; carried items re-carried</td><td>Nothing</td></tr>
       <tr><td>Digest hook timed out</td><td>No turn end for that turn</td><td>Carried again, deduplicated</td><td>The item, once</td></tr>
       <tr><td>Leader context compacted</td><td><code>SessionStart</code> source <code>compact</code></td><td>Briefing re-lists open actionable items</td><td>The briefing</td></tr>

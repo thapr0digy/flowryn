@@ -362,7 +362,9 @@ export class Reconciler {
     const t = now();
     const tm = timing();
     const launchedAt = run.launched_at ?? run.started_at;
-    const started = run.worker_started_at !== null && run.worker_started_at >= launchedAt;
+    // Any worker hook since this launch, not only worker-start, proves no startup dialog holds it: Claude runs no hook
+    // before its trust dialog is answered (docs/notes/2026-10-14-resumed-worker-loses-ic.md).
+    const started = Math.max(run.worker_started_at ?? 0, run.last_hook_at ?? 0) >= launchedAt;
     let herdrStatus: string | null = null;
     try {
       herdrStatus = run.pane_id ? await runtime.agentStatus(run.pane_id) : null;
@@ -381,7 +383,7 @@ export class Reconciler {
         if (t - launchedAt >= tm.trust_wedge_ms) {
           setLiveness(db, run, "blocked_dialog", "reconciler", { since: launchedAt }, t);
           const event = appendEvent(db, { source: "reconciler", kind: "run.blocked_dialog", runId: run.id, taskId: run.task_id, payload: { waited_ms: t - launchedAt } });
-          openRunItemOnce(db, "trust_dialog", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} has not started ${Math.round((t - launchedAt) / 1000)}s after launch; a dialog may be blocking pane ${run.pane_id}`, t);
+          openRunItemOnce(db, "trust_dialog", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} has not started ${Math.round((t - launchedAt) / 1000)}s after launch; a dialog may be blocking pane ${run.pane_id}, or its hooks may not reach Flowryn`, t);
           explainTrust(db, run, launchedAt, tm.trust_wedge_ms, t);
         } else setLiveness(db, run, "starting", "reconciler", {}, t);
         return;
@@ -625,21 +627,21 @@ export class Reconciler {
 
 // --- wait explanations (docs/notes/2026-10-12-next-steps-md-wz.md) ---------------------------
 
-/** No worker-start hook after the launch: a dialog (trust, login) may hold the pane. */
+/** No worker hook after the launch: a dialog (trust, login) may hold the pane, or the worker's hooks cannot reach the daemon. */
 function explainTrust(db: Db, run: RunRow, launchedAt: number, wedgeMs: number, t: number): void {
   const pane = run.pane_id ?? "(none)";
   explain(db, {
     run,
     kind: "dialog",
     rule: "dialog.trust",
-    reason: `the worker has not started ${Math.round(wedgeMs / 1000)}s after its launch; a dialog may hold pane ${pane}`,
+    reason: `the worker has not started ${Math.round(wedgeMs / 1000)}s after its launch; a dialog may hold pane ${pane}, or its hooks may not reach Flowryn`,
     facts: [
       { name: "launched", value: new Date(launchedAt).toISOString(), at: launchedAt },
-      { name: "worker-start hook", value: "none since the launch", at: t },
+      { name: "worker hooks", value: "none since the launch", at: t },
     ],
     unblock: [
       { by: "captain", action: `accept or answer the dialog in pane ${pane}` },
-      { by: "flowryn", action: "clears it when the worker-start hook arrives" },
+      { by: "flowryn", action: "clears it when any hook of the worker arrives" },
     ],
     itemId: findOpenRunItem(db, "trust_dialog", run.id)?.id ?? null,
     source: "reconciler",

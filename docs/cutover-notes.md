@@ -116,7 +116,7 @@ From the steer latency investigation (the 2026-10-04 spec in the superpowers vau
 
 ## Worker workspaces
 
-- **One pane per worker workspace.** The launcher used to open a workspace and split its root shell to set the run's environment, which left a useless shell beside every worker. `workspace.create` takes `env` too (protocol 17 schema, confirmed live by spike `h06-workspace-env`: the root pane's shell saw the env, a blanked variable as set-but-empty, and the cwd), so the worker now runs in the root pane and nothing splits. `pane.split` left `ALLOWED_METHODS`. Liveness, resume (the same pane, reused while its shell is idle) and cleanup (`workspace.close` by `runs.workspace_id`) are unchanged.
+- **One pane per worker workspace.** The launcher used to open a workspace and split its root shell to set the run's environment, which left a useless shell beside every worker. `workspace.create` takes `env` too (protocol 17 schema, confirmed live by spike `h06-workspace-env`: the root pane's shell saw the env, a blanked variable as set-but-empty, and the cwd), so the worker now runs in the root pane and nothing splits. `pane.split` left `ALLOWED_METHODS`. Liveness, resume (a new workspace with the run's environment, the old one closed; a pane is never reused, since a Herdr restart restores panes without their env: docs/notes/2026-10-14-resumed-worker-loses-ic.md) and cleanup (`workspace.close` by `runs.workspace_id`) are unchanged.
 - **The workspace label is the task id alone** (`show-queued-work-m6`, the branch without `flowryn/`), not `flowryn <task>`, which Herdr's sidebar truncated to `flowryn show-…`. The pane's metadata title stays `flowryn <task>`.
 
 ## Leader-safe daemon restart

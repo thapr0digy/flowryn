@@ -100,6 +100,23 @@ describe("a worker stopped by a confirmation prompt", () => {
     expect(env.run(run).liveness).not.toBe("blocked_dialog");
   }, 20_000);
 
+  test("claude, resumed: the dialog-gone check releases a resumed worker's prompt hold as it does a first launch's", async () => {
+    const env = await makeFleetEnv({ timing: { prompt_suspect_ms: 60_000 } });
+    envs.push(env);
+    const { run } = await env.dispatch("Ship\nFAKE: sleep 3000\nFAKE: prompt Do you want to proceed?\nFAKE: sleep 60000", { kind: "ship" });
+    const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+    env.herdr.killHarness(busy.pane_id!, "SIGKILL");
+    const resumed = await env.waitRun(run, (r) => r.resume_count === 1 && r.proc_pid !== null && r.proc_pid !== busy.proc_pid && r.worker_started_at! >= r.launched_at!, "the resumed worker", 30_000);
+    env.herdr.setStatus(resumed.pane_id!, "blocked");
+    await env.waitRun(run, (r) => r.liveness === "blocked_dialog", "blocked_dialog", 15_000);
+    await Bun.sleep(500);
+    expect(env.run(run).liveness).toBe("blocked_dialog");
+    // Esc declines it: no hook fires, Herdr's status leaves "blocked".
+    env.herdr.setStatus(resumed.pane_id!, "idle");
+    await waitUntil(() => items(env, run).every((i) => i.kind !== "blocked_prompt" || i.state === "resolved"), 10_000, "resolved once the dialog is gone");
+    expect(env.run(run).liveness).not.toBe("blocked_dialog");
+  }, 60_000);
+
   test("claude: permission_prompt for a run idle by design (an unacked steer) still opens the item: a confirmed dialog is never idle by design", async () => {
     const env = await makeFleetEnv({ timing: { prompt_suspect_ms: 60_000 } });
     envs.push(env);

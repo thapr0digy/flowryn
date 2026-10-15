@@ -130,6 +130,18 @@ export class FakeHerdr {
     if (pane) this.killChild(pane, signal);
   }
 
+  /**
+   * A Herdr server restart (seen live 2026-10-14): every harness dies, and
+   * each pane comes back under its old id with a fresh shell that carries the
+   * server's environment only, not the env its workspace.create gave it.
+   */
+  restartServer(): void {
+    for (const pane of this.panes.values()) {
+      this.killChild(pane, "SIGKILL");
+      pane.env = {};
+    }
+  }
+
   /** Every pane with a harness in it. */
   livePanes(): string[] {
     return [...this.panes.values()].filter((p) => this.harnessPid(p.paneId) !== null).map((p) => p.paneId);
