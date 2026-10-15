@@ -37,8 +37,9 @@ export interface VerifyDeps {
 }
 
 export interface VerifyPlan {
-  prNumber: number;
-  headRef: string;
+  /** The PR, or null for local-only work (its head is a worker's commit, already in the repository). */
+  prNumber: number | null;
+  headRef: string | null;
   binary: string | null;
   timeoutMs: number;
   /** The PATH of whoever ran `flowryn verify` (launchd's is short: it has no ~/.bun/bin); the daemon's when none came. */
@@ -126,11 +127,12 @@ async function hasCommit(git: GitRunner, cwd: string, sha: string): Promise<bool
   return (await git(["cat-file", "-e", `${sha}^{commit}`], cwd)).code === 0;
 }
 
-/** Bring the head into the object store: already there (a worker's commit), the PR ref, or the head branch. Writes no ref. */
+/** Bring the head into the object store: already there (a worker's commit; always so for local-only work), the PR ref, or the head branch. Writes no ref. */
 async function ensureHead(deps: VerifyDeps, v: Verification, plan: VerifyPlan): Promise<string | null> {
   if (await hasCommit(deps.git, v.project_path, v.head_sha)) return null;
   const tried: string[] = [];
-  for (const ref of [`refs/pull/${plan.prNumber}/head`, `refs/heads/${plan.headRef}`]) {
+  const refs = [plan.prNumber === null ? null : `refs/pull/${plan.prNumber}/head`, plan.headRef === null ? null : `refs/heads/${plan.headRef}`].filter((ref): ref is string => ref !== null);
+  for (const ref of refs) {
     // An empty --refmap keeps the fetch from updating origin's remote-tracking branches as a side effect.
     const fetched = await deps.git(["fetch", "--no-tags", "--quiet", "--refmap=", "origin", ref], v.project_path);
     if (fetched.code !== 0) tried.push(`${ref}: ${fetched.stderr.trim().split("\n").at(-1) ?? `exit ${fetched.code}`}`);

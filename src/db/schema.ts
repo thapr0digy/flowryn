@@ -447,8 +447,8 @@ ALTER TABLE items ADD COLUMN full_line TEXT;
 
 /**
  * `flowryn verify`: one row per local run of a project's verify steps at a
- * PR head, in a clean worktree. A passing one at the current head counts as
- * local green for checks GitHub never started (src/policy/merge.ts).
+ * PR head, in a clean worktree. A project with verify steps merges only on a
+ * passing one at the merge head (src/policy/merge.ts).
  */
 const VERIFICATIONS_SQL = /* sql */ `
 CREATE TABLE verifications (
@@ -638,6 +638,15 @@ CREATE TABLE drops (
   dropped_by TEXT NOT NULL, unblocked TEXT NOT NULL DEFAULT '[]', dropped_at INTEGER NOT NULL);
 `;
 
+/**
+ * Migration 27: the verify that let a merge through (docs/notes/2026-10-15-merge-gate-require-bf.md),
+ * in its own column so a waiver beside it or an unproven result's detail never hides it. Older rows
+ * keep it in detail ("local green v<n>") or have none.
+ */
+const MERGE_LOCAL_GREEN_SQL = /* sql */ `
+ALTER TABLE merges ADD COLUMN local_green TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -665,6 +674,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 24, name: "verify-policy", sql: VERIFY_POLICY_SQL },
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
   { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
+  { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

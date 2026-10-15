@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
+import type { FakeCheck } from "../helpers/fake-github.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 
 /**
@@ -51,8 +52,8 @@ const STEPS = [
 
 const VERIFY_CONFIG = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\nverify_binary = "dist/flowryn"\n`;
 
-async function unstartedShip(e: ShipEnv, title: string): Promise<{ task: string; run: string }> {
-  e.github.repo("acme/web").defaultChecks = [{ name: CI, state: "red", notStarted: true }];
+async function unstartedShip(e: ShipEnv, title: string, checks: FakeCheck[] = [{ name: CI, state: "red", notStarted: true }]): Promise<{ task: string; run: string }> {
+  e.github.repo("acme/web").defaultChecks = checks;
   const steps = `FAKE: commit ${title}.txt ${title}\nFAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\nFAKE: deliver-pr\n`;
   const dispatched = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: `${title}\n${steps}FAKE: sleep 120000` });
   if (dispatched.code !== 0) throw new Error(`dispatch: ${JSON.stringify(dispatched.reply)}`);
@@ -98,7 +99,7 @@ describe("flowryn verify", () => {
 
       const before = await e.call("merge", { task });
       expect(before.ok).toBe(false);
-      expect(before.error).toMatchObject({ code: "red_checks" });
+      expect(before.error).toMatchObject({ code: "verify_required" });
       expect(before.error!.message).toContain(`CI never started at ${head.slice(0, 8)}`);
       expect(before.error!.help).toContain(`flowryn verify ${task}`);
 
@@ -127,7 +128,82 @@ describe("flowryn verify", () => {
       expect(merged.data).toMatchObject({ state: "merged", local_green: "v1", waived: "-" });
       const requested = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'merge.requested'").map((r) => JSON.parse(r.payload) as Record<string, unknown>);
       expect(requested.at(-1)).toMatchObject({ local_green: "v1", waived: null });
-      expect(query<{ detail: string }>(e, "SELECT detail FROM merges WHERE task_id = ?1", task)[0]!.detail).toContain("local green v1");
+      expect(query<{ local_green: string }>(e, "SELECT local_green FROM merges WHERE task_id = ?1", task)[0]!.local_green).toBe("v1");
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a PR with no checks at all: merge refuses verify_required until flowryn verify passes at its head, then merges and names the verify",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: VERIFY_CONFIG });
+      const e = env;
+      const { task } = await unstartedShip(e, "no-checks", []);
+      const head = e.github.pr("acme/web", 1).headSha;
+      expect((await e.approve(task)).ok).toBe(true);
+
+      const before = await e.call("merge", { task });
+      expect(before.ok).toBe(false);
+      expect(before.error).toMatchObject({ code: "verify_required" });
+      expect(before.error!.message).toContain(`the PR has no checks at ${head.slice(0, 8)}`);
+      expect(before.error!.help).toContain(`flowryn verify ${task}`);
+      expect(query(e, "SELECT id FROM merges WHERE task_id = ?1", task)).toHaveLength(0);
+
+      const verified = await e.fleet.cli(["verify", task]);
+      expect(verified.code).toBe(0);
+
+      const merged = await e.call("merge", { task });
+      expect(merged.ok).toBe(true);
+      expect(merged.data).toMatchObject({ state: "merged", local_green: "v1", waived: "-" });
+      const requested = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'merge.requested'").map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+      expect(requested.at(-1)).toMatchObject({ local_green: "v1", checks: "no checks", head });
+      expect(query<{ local_green: string }>(e, "SELECT local_green FROM merges WHERE task_id = ?1", task)[0]!.local_green).toBe("v1");
+      const shown = await e.fleet.json(["show", task]);
+      expect(JSON.stringify(shown.reply.data)).toContain("local green v1");
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "local-only work: merge refuses verify_required; flowryn verify takes the task and tests its worktree head; the merge then lands on it",
+    async () => {
+      env = await makeShipEnv({ mode: "local-only", extraConfig: VERIFY_CONFIG });
+      const e = env;
+      const steps = "FAKE: commit local.txt local\nFAKE: deliver-local\n";
+      const dispatched = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: `local\n${steps}FAKE: sleep 120000` });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      const ready = await e.fleet.waitRun(run, (r) => r.state === "ready", "local delivered");
+      const head = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ready.worktree_path }).stdout.toString().trim();
+      expect((await e.approve(task)).ok).toBe(true);
+
+      const before = await e.call("merge", { task });
+      expect(before.error).toMatchObject({ code: "verify_required" });
+      expect(before.error!.message).toContain(`local-only work at ${head.slice(0, 8)} has no CI`);
+
+      const verified = await e.fleet.cli(["verify", task]);
+      expect(verified.stderr).toBe("");
+      expect(verified.code).toBe(0);
+      expect(verified.stdout).toContain(`v1 · web local:${ready.branch} at ${head.slice(0, 8)}`);
+
+      const merged = await e.call("merge", { task });
+      expect(merged.ok).toBe(true);
+      expect(merged.data).toMatchObject({ state: "merged", local_green: "v1" });
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a project with no verify steps merges as before, and the merge says it ran no local verify",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR" });
+      const e = env;
+      const { task } = await unstartedShip(e, "unverified", [{ name: "ci/test", state: "green" }]);
+      expect((await e.approve(task)).ok).toBe(true);
+      const merged = await e.call("merge", { task });
+      expect(merged.ok).toBe(true);
+      expect(merged.data).toMatchObject({ state: "merged", local_green: "-", verify: "none configured" });
+      expect(merged.hints?.join("\n")).toContain("project web has no verify steps: this merge ran no local verify");
     },
     { timeout: 120_000 },
   );
@@ -163,7 +239,7 @@ describe("flowryn verify", () => {
   );
 
   test(
-    "annotations GitHub cannot serve: the merge is not blocked on them; red_checks without a waiver, and --allow-red still merges",
+    "annotations GitHub cannot serve: the merge is not blocked on them; red_checks without a waiver, and --allow-red merges once the head is verified",
     async () => {
       env = await makeShipEnv({ mode: "direct-PR", extraConfig: VERIFY_CONFIG });
       const e = env;
@@ -175,9 +251,13 @@ describe("flowryn verify", () => {
       expect(plain.error!.message).not.toContain("CI never started");
 
       expect((await e.approve(task, { allowRed: CI })).ok).toBe(true);
+      // The waiver passes the red check; it never stands in for the project's verify.
+      const unverified = await e.call("merge", { task });
+      expect(unverified.error).toMatchObject({ code: "verify_required" });
+      expect((await e.fleet.cli(["verify", task])).code).toBe(0);
       const waived = await e.call("merge", { task });
       expect(waived.ok).toBe(true);
-      expect(waived.data).toMatchObject({ state: "merged", waived: CI, local_green: "-" });
+      expect(waived.data).toMatchObject({ state: "merged", waived: CI, local_green: "v1" });
     },
     { timeout: 120_000 },
   );

@@ -15,6 +15,7 @@ import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stag
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
+import { verificationLine } from "../verify/store.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import {
@@ -82,7 +83,17 @@ export function mergeSummary(facts: MergeFacts): Record<string, unknown> {
     checks: checks ? checksLine(checks) : facts.delivered.kind === "local" ? "none (local-only)" : "unknown",
     red: checks ? checks.checks.filter((c) => c.state === "red").map((c) => c.name) : [],
     sensitive: facts.run.sensitive === 1,
+    verify: verifyLine(facts),
   };
+}
+
+/** The local verify the gate will ask for, as the approver sees it: "v4 passed at fc2f76d7", "required, none at this head", or "none configured". */
+export function verifyLine(facts: MergeFacts): string {
+  const local = facts.local;
+  if (!local || local.policy === null) return "none configured";
+  if (local.atHead) return verificationLine(local.atHead);
+  if (local.otherPolicyAtHead) return `required; ${local.otherPolicyAtHead.id} at this head ran under another verify policy`;
+  return `required; none at ${facts.head.slice(0, 8)}${local.lastPassed ? ` (${local.lastPassed.id} passed at ${local.lastPassed.head_sha.slice(0, 8)})` : ""}`;
 }
 
 // --- merge ----------------------------------------------------------------------------------
@@ -177,7 +188,11 @@ const merge: VerbSpec = {
     const mergeId = recordMergeRequest(ctx.db, facts, approval, channel, gate.waived, ctx.delivery.github().merge_method, now, gate.localGreen);
     // In flight from here: the watcher leaves a requested merge alone until this daemon has asked GitHub.
     ctx.delivery.inFlight.add(mergeId);
-    return { data: { task: run.task_id, run: run.id, merge: mergeId, head: facts.head, approval, channel, waived: gate.waived ?? "-", local_green: gate.localGreen ?? "-", state: "merging" } };
+    const noVerify = facts.local?.policy ? null : `project ${facts.project.id} has no verify steps: this merge ran no local verify (add [projects.${facts.project.id}] verify to config.toml to require one)`;
+    return {
+      data: { task: run.task_id, run: run.id, merge: mergeId, head: facts.head, approval, channel, waived: gate.waived ?? "-", local_green: gate.localGreen ?? "-", ...(noVerify ? { verify: "none configured" } : {}), state: "merging" },
+      ...(noVerify ? { hints: [noVerify] } : {}),
+    };
   },
   async settle(ctx, result) {
     const runId = String(result.data.run ?? "");
@@ -216,7 +231,7 @@ const merge: VerbSpec = {
     if (endedBefore) {
       return { data: { ...data, run_state: endedBefore.state, merged: "after_end", detail: `the PR was merged after the run was ${endedBefore.state}; the run is not revived and a divergence asks you` }, hints: [`flowryn show ${result.data.task}`] };
     }
-    return { data: { ...data, cleanup: "running" }, hints: [`flowryn show ${result.data.task}`] };
+    return { data: { ...data, cleanup: "running" }, hints: [...(result.hints ?? []), `flowryn show ${result.data.task}`] };
   },
 };
 
