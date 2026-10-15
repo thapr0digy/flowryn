@@ -619,7 +619,27 @@ CREATE INDEX operations_run ON operations(run_id, created_at);
 `;
 
 /**
- * Migration 26: the verify that let a merge through (docs/notes/2026-10-15-merge-gate-require-bf.md),
+ * `flowryn drop` (docs/notes/2026-10-15-add-flowryn-drop-mv.md): a plan may be dropped, so plans
+ * is rebuilt with that state; drops keeps one row per task dropped (the backlog no longer holds it):
+ * its plan, title, the reason given, who dropped it, the tasks it unblocked and when.
+ */
+const DROPS_SQL = /* sql */ `
+CREATE TABLE plans_v26 (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','approved','discarded','dropped')),
+  source_task TEXT, gate_id TEXT, filed_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  approved_at INTEGER, approved_via TEXT);
+INSERT INTO plans_v26 (id, project_id, title, state, source_task, gate_id, filed_by, created_at, approved_at, approved_via)
+  SELECT id, project_id, title, state, source_task, gate_id, filed_by, created_at, approved_at, approved_via FROM plans;
+DROP TABLE plans;
+ALTER TABLE plans_v26 RENAME TO plans;
+CREATE TABLE drops (
+  task_id TEXT PRIMARY KEY, plan_id TEXT, title TEXT NOT NULL, reason TEXT NOT NULL,
+  dropped_by TEXT NOT NULL, unblocked TEXT NOT NULL DEFAULT '[]', dropped_at INTEGER NOT NULL);
+`;
+
+/**
+ * Migration 27: the verify that let a merge through (docs/notes/2026-10-15-merge-gate-require-bf.md),
  * in its own column so a waiver beside it or an unproven result's detail never hides it. Older rows
  * keep it in detail ("local green v<n>") or have none.
  */
@@ -653,7 +673,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 23, name: "contract-revision", sql: CONTRACT_REVISION_SQL },
   { version: 24, name: "verify-policy", sql: VERIFY_POLICY_SQL },
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
-  { version: 26, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
+  { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
+  { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

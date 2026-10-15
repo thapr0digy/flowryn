@@ -449,7 +449,7 @@ export interface MergeRow {
   method: string | null;
   detail: string | null;
   checked_at: number | null;
-  /** The passing verify that let it through (migration 26); null when none was required or on an older row. */
+  /** The passing verify that let it through (migration 27); null when none was required or on an older row. */
   local_green: string | null;
 }
 

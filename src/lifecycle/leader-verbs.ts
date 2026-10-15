@@ -20,6 +20,7 @@ import { approvalRef, deliveredOf, prEvidence } from "./delivery.ts";
 import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
+import { dropRecord } from "./drop.ts";
 import { planView } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
@@ -467,6 +468,25 @@ function filedLine(ctx: ReadCtx, q: QueuedTask): string {
 }
 
 /** `show` for a Queued task no run has started: what it is, what it waits for, and what starts it. */
+/** A task `flowryn drop` removed: gone from the backlog, so its drop record says what it was and why. */
+function droppedView(ctx: ReadCtx, d: NonNullable<ReturnType<typeof dropRecord>>, text: ShowText): { data: Record<string, unknown>; hints: string[] } {
+  const runs = (ctx.db.query("SELECT id, state FROM runs WHERE task_id = ?1 ORDER BY started_at").all(d.task_id) as { id: string; state: string }[]).map((r) => `${r.id} ${r.state}`);
+  const unblocked = JSON.parse(d.unblocked) as string[];
+  return {
+    data: {
+      task: d.task_id,
+      title: text.line(d.title, 120),
+      state: "dropped",
+      dropped: `${age(ctx.now, d.dropped_at)} ago by ${d.dropped_by}`,
+      reason: text.full ? d.reason : text.line(d.reason, 200),
+      ...(d.plan_id ? { plan: d.plan_id } : {}),
+      ...(unblocked.length > 0 ? { unblocked } : {}),
+      runs,
+    },
+    hints: d.plan_id ? [`flowryn show ${d.plan_id}`] : ["flowryn fleet"],
+  };
+}
+
 function queuedView(ctx: ReadCtx, q: QueuedTask, text: ShowText): { data: Record<string, unknown>; hints: string[] } {
   const policy = q.policy;
   const runs = (ctx.db.query("SELECT id, state, started_at FROM runs WHERE task_id = ?1 ORDER BY started_at").all(q.id) as { id: string; state: string; started_at: number }[]).map(
@@ -720,6 +740,8 @@ const show: VerbSpec = {
     if (item?.kind === "worker_report") return workerReportView(ctx, target, item, text.full);
     if (item?.kind === "report_ready") return scoutReportView(ctx, target, item, text.full);
     if (item) target = item.run_id ?? item.task_id ?? target;
+    const dropped = item ? null : dropRecord(ctx.db, target);
+    if (dropped) return droppedView(ctx, dropped, text);
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
       if (item) return { data: { item: target, lane: item.lane, state: item.state, line: text.stored(item.line, item.full_line, Number.POSITIVE_INFINITY), ...text.pointer(asked) } };
