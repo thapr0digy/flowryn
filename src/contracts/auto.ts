@@ -32,7 +32,7 @@ import { MANIFEST_ENV, readManifest, recoverOwned, type CleanupOutcome } from ".
 import { CONTRACT_CLEANUP_BUDGET_MS, removeScratchHome } from "./runner.ts";
 import { reportFacts } from "./report.ts";
 import { contractRevision } from "./revision.ts";
-import { recordPass } from "./verbs.ts";
+import { openContractRecorded, recordPass } from "./verbs.ts";
 
 /**
  * The automatic contract check (spec 3, phase 2): under `[policy] mode =
@@ -553,7 +553,7 @@ export class AutoContractChecker {
         // reportProblem held the report to this daemon's revision, so the facts carry it.
         const facts = reportFacts(handed.report, harness, tested);
         const seq = recordPass(db, { harness, version: tested, report: handed.report, by: "daemon", build, session: null, source: "daemon", ...facts }, now);
-        openItem(db, { kind: "contract_recorded", eventSeq: seq, line: `${autoRecordLine(harness, tested, build)}; report ${handed.report}`, now });
+        openContractRecorded(db, harness, seq, `${autoRecordLine(harness, tested, build)}; report ${handed.report}`, now);
         saveAutoAttempt(db, harness, { version: tested, revision, state: "passed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, ...extra });
       });
       log(`contracts: ${harness} ${tested} passed its automatic check and is recorded; report ${handed.report}`);
