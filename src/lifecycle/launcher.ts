@@ -25,6 +25,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
+import { ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
 import { claimOperation, confirmOperation, escalatedStart, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
 /**
@@ -298,6 +299,8 @@ export class Launcher {
       // The daemon opens review pages in the user's browser (src/lavish/opener.ts); a worker's lavish-axi never tries.
       LAVISH_AXI_NO_OPEN: "1",
       PATH: `${this.shimDir(config, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      // The pane's shell, which reads no rc file the user's startup prompts could eat the typed launch in (pane-shell.ts).
+      SHELL: ensurePaneShell(config.state_dir),
     };
 
     const paneId = await this.ensurePane(runtime, run, worktree, env);
@@ -322,7 +325,7 @@ export class Launcher {
     if (!claimed) return false;
     await runtime.startAgent(paneId, { kind: plan.kind, name: agentName, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
-    if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms`);
+    if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms${paneEvidence(await this.paneScreen(runtime, paneId))}`);
     return this.recordWorker(run, mode, claimed, paneId, harness);
   }
 
@@ -369,6 +372,18 @@ export class Launcher {
       return false;
     }
     return true;
+  }
+
+  /**
+   * What a pane shows, for a launch failure: its recent lines (unwrapped, so
+   * a secret is redacted whole), null when it is gone, or the read's error.
+   */
+  private async paneScreen(runtime: HerdrRuntime, paneId: string): Promise<string | null | Error> {
+    try {
+      return await runtime.readPane(paneId, TAIL_READ_LINES);
+    } catch (error) {
+      return error as Error;
+    }
   }
 
   /**

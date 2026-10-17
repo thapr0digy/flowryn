@@ -31,7 +31,7 @@ import { autoRecordLine, reportProblem } from "./grant.ts";
 import { MANIFEST_ENV, readManifest, recoverOwned, type CleanupOutcome } from "./owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS, removeScratchHome } from "./runner.ts";
 import { reportFacts } from "./report.ts";
-import { contractRevision } from "./revision.ts";
+import { contractRevision, type RevisionMap } from "./revision.ts";
 import { recordPass } from "./verbs.ts";
 
 /**
@@ -179,6 +179,8 @@ export interface AutoCheckDeps {
   stopGraceMs?: number;
   /** After SIGTERM on a daemon stop, before the child is left to finish its own cleanup. */
   daemonStopWaitMs?: number;
+  /** The revisions this daemon checks at: this build's CONTRACT_REVISIONS, or a test's. */
+  revisions?: RevisionMap;
 }
 
 interface Current {
@@ -342,7 +344,7 @@ export class AutoContractChecker {
       for (const harness of HARNESS_IDS) {
         const flagged = unverifiedVersion(this.deps.db, harness);
         if (!flagged) continue;
-        const revision = contractRevision(harness);
+        const revision = contractRevision(harness, this.deps.revisions);
         const relaxedNow = relaxed(this.deps.config());
         if (settled(autoAttempt(this.deps.db, harness), flagged, revision, relaxedNow)) continue;
         const binary = this.pinnedBinary();
@@ -355,7 +357,7 @@ export class AutoContractChecker {
         this.current = { harness, version: flagged, startedAt: this.deps.now(), process: null };
         try {
           // The installed version now: a harness updated again since it was flagged is judged afresh (and a verified one settles).
-          const check = await gateHarness(this.deps.db, this.deps.config(), harness, this.deps.harnessVersion, "daemon", "auto-check", this.deps.now);
+          const check = await gateHarness(this.deps.db, this.deps.config(), harness, this.deps.harnessVersion, "daemon", "auto-check", this.deps.now, this.deps.revisions);
           if (this.stopping) return;
           if (check.state !== "unverified") continue;
           if (!relaxed(this.deps.config())) {
@@ -393,7 +395,7 @@ export class AutoContractChecker {
 
   private noteWaiting(harness: HarnessId, version: string, wait: string): void {
     const { db } = this.deps;
-    const revision = contractRevision(harness);
+    const revision = contractRevision(harness, this.deps.revisions);
     const attempt = autoAttempt(db, harness);
     if (attempt?.version === version && attemptRevision(attempt) === revision && attempt.state === "waiting" && attempt.wait === wait) return;
     const now = this.deps.now();
@@ -406,7 +408,7 @@ export class AutoContractChecker {
   /** Strict mode, or a daemon that cannot run the check: the P1 as the gate opens it, once per version and revision. */
   private ensureItem(harness: HarnessId, version: string): void {
     const { db } = this.deps;
-    const revision = contractRevision(harness);
+    const revision = contractRevision(harness, this.deps.revisions);
     if (unverifiedItemOpened(db, harness, version, revision)) return;
     const now = this.deps.now();
     tx(db, () => {
@@ -420,7 +422,7 @@ export class AutoContractChecker {
     const { db, log } = this.deps;
     const startedAt = this.deps.now();
     const build = this.deps.info().build!;
-    const revision = contractRevision(harness);
+    const revision = contractRevision(harness, this.deps.revisions);
     const dir = join(this.deps.config().data_dir, "contracts");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const stem = join(dir, `auto-${harness}-${version}-${new Date(startedAt).toISOString().replace(/[:.]/g, "-")}`);
@@ -537,7 +539,7 @@ export class AutoContractChecker {
     const now = this.deps.now();
     const handed = parseHandoff(outcome.stdout);
     const tested = handed.version ?? version;
-    const revision = contractRevision(harness);
+    const revision = contractRevision(harness, this.deps.revisions);
     const problem = outcome.timedOut
       ? `it did not finish within ${Math.round((this.deps.maxRunMs ?? AUTO_MAX_RUN_MS) / 60_000)} min`
       : !handed.report

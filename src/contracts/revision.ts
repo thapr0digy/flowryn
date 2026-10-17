@@ -12,7 +12,7 @@ import type { HarnessId } from "../harness/types.ts";
  * src/contracts/suite.ts. A docs, test or unrelated change never touches it,
  * so it never costs a new contract run. Never derive it from the build id.
  */
-export const CONTRACT_REVISIONS: RevisionMap = { claude: 1, pi: 1 };
+export const CONTRACT_REVISIONS: RevisionMap = { claude: 2, pi: 2 };
 
 export type RevisionMap = Readonly<Record<HarnessId, number>>;
 
