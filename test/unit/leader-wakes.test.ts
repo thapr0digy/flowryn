@@ -100,9 +100,8 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     open("user_acted", "acted");
     const p0 = open("failure_needs_you", "broken");
     expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "p0", items: [{ id: p0 }] });
-    const config = () => parseConfig("[notify]\nmax_triggered_turns_per_hour = 1\n", h.home);
     tx(db, () => carry(db, { itemId: p0, session: s.session_id, turn: s.turn_no + 1, path: "waiter", now: clock }));
-    expect(leaderPush({ ...pushCtx(), config, attention: inertAttention({ notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) }) }, s, clock).push).toBeNull();
+    expect(leaderPush({ ...pushCtx(), attention: inertAttention({ notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) }) }, s, clock).push).toBeNull();
   });
 
   test("assumption: only the user's own actions open one; the leader's never do", () => {
@@ -110,8 +109,8 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     expect(leader).toBeNull();
     const first = tx(db, () => openUserActed(db, "human", { action: "merge_approved", taskId: "t1", runId: null, line: "approved", now: clock }));
     const second = tx(db, () => openUserActed(db, "human", { action: "declined", taskId: "t1", runId: null, line: "declined", now: clock }));
-    const open = db.query("SELECT id FROM items WHERE kind = 'user_acted' AND state = 'open'").all() as { id: string }[];
-    expect(open.map((r) => r.id)).toEqual([second!]);
+    const stillOpen = db.query("SELECT id FROM items WHERE kind = 'user_acted' AND state = 'open'").all() as { id: string }[];
+    expect(stillOpen.map((r) => r.id)).toEqual([second!]);
     expect(first).not.toBe(second);
   });
 
