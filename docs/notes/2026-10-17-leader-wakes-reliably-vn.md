@@ -67,6 +67,7 @@ So the rewake reads the pane with its escape codes (`readPane(…, { ansi: true 
 - **test/unit/leader-wakes.test.ts**
   - A follow-up wakes an idle leader once, and tops the digest while you are active.
   - Batching at four, the P0 first, and the shared budget.
+  - The wake line counts each kind on its own: a review-page pass request reads "a review pass was requested", never "a merge landed".
   - Only human callers open `user_acted`.
   - A landing the leader's merge proved opens nothing; other proofs open one `landed` item.
   - The fixed line, and the composer read: the live bytes, drafts, and transcript quotes that are not the composer.
