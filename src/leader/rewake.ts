@@ -50,14 +50,39 @@ export interface RewakeDeps {
 
 const RULE = /^\s*[╭╰]?─{8,}[╮╯]?\s*$/;
 const PROMPT = /^\s*│?\s*[>❯](?:\s(.*))?$/;
+// oxlint-disable-next-line no-control-regex -- terminal escape sequences, read to be removed
+const ESCAPE = /\u001b\[([0-9;?]*)([A-Za-z])|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
 
 /**
- * What Claude's composer holds on this screen: the text between the prompt
- * mark (`>`) under a rule and the next rule, trimmed; "" when empty. Null
+ * A screen line as typed: escape codes removed, and with them any text drawn
+ * dim (SGR 2). Claude draws the empty composer's placeholder ("Try ...") dim
+ * and what you type plain (checked live, Claude Code 2.1.302).
+ */
+export function typedText(line: string): string {
+  let out = "";
+  let dim = false;
+  let at = 0;
+  for (const m of line.matchAll(ESCAPE)) {
+    if (!dim) out += line.slice(at, m.index);
+    at = m.index + m[0].length;
+    if (m[2] !== "m") continue;
+    for (const code of (m[1] || "0").split(";")) {
+      if (code === "" || code === "0" || code === "22") dim = false;
+      else if (code === "2") dim = true;
+    }
+  }
+  if (!dim) out += line.slice(at);
+  return out.replace(/\r$/, "");
+}
+
+/**
+ * What Claude's composer holds on this screen (read with its escape codes):
+ * the typed text between the prompt mark (`❯`, or `>`) under a rule and the
+ * next rule, trimmed; "" when empty or showing only its dim placeholder. Null
  * when no composer can be found, so the caller refuses rather than guesses.
  */
 export function composerText(screen: string): string | null {
-  const lines = screen.split("\n");
+  const lines = screen.split("\n").map(typedText);
   for (let i = lines.length - 1; i >= 1; i--) {
     if (!RULE.test(lines[i - 1]!)) continue;
     const prompt = PROMPT.exec(lines[i]!);
@@ -100,9 +125,9 @@ export async function paneBlocker(runtime: RewakeRuntime, s: LeaderSessionRow): 
   if (!info.processes.some((p) => p.pid === s.proc_pid)) return "the leader's pane does not run this leader's process; type to it";
   const status = await runtime.agentStatus(pane);
   if (!settledStatus(status)) return `Herdr reads the leader ${status ?? "unknown"}`;
-  const screen = await runtime.readPane(pane, SCREEN_LINES);
+  const screen = await runtime.readPane(pane, SCREEN_LINES, { ansi: true });
   if (screen === null) return "the leader's Herdr pane is gone; type to the leader";
-  if (DIALOG_QUESTION.test(screen)) return "a dialog is open in the leader's pane; answer it";
+  if (DIALOG_QUESTION.test(screen.replace(ESCAPE, ""))) return "a dialog is open in the leader's pane; answer it";
   const draft = composerText(screen);
   if (draft === null) return "cannot read the leader's composer; type to the leader";
   if (draft !== "") return "a draft is in the leader's composer; send or clear it";
