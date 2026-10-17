@@ -88,6 +88,13 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     expect(isWakePrompt(line) && isFollowUpWake(line)).toBe(true);
   });
 
+  test("a review-page pass request reads as one in the wake line, never as a landed merge", () => {
+    expect(followUpWakeLine([{ id: "i7", kind: "pass_requested" }])).toBe("Flowryn follow-up [i7]: a review pass was requested. Details: flowryn fleet");
+    expect(followUpWakeLine([{ id: "i7", kind: "pass_requested" }, { id: "i8", kind: "landed" }, { id: "i9", kind: "pass_requested" }])).toBe(
+      "Flowryn follow-up [i7,i8,i9]: a merge landed; 2 review passes were requested. Details: flowryn fleet",
+    );
+  });
+
   test("a P0 goes first; follow-ups use the P0 hourly budget, never a loop", () => {
     const s = holder();
     open("user_acted", "acted");
