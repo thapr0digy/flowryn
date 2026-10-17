@@ -1,6 +1,15 @@
 import { getMeta, setMeta, type Db } from "../db/db.ts";
 import { clockLabel } from "../attention/away.ts";
 
+/** The hourly budget a wake counts against: P0s and follow-ups, or worker question batches. */
+export type WakeBudget = "p0" | "questions";
+
+/** One typed rewake: when, and the budget of the push that caused it. */
+export interface TypedRewake {
+  at: number;
+  budget: WakeBudget;
+}
+
 /**
  * What the leader rewake (src/leader/rewake.ts) last did, kept in the meta
  * table so `leader status` and the briefing read it without the daemon, and
@@ -10,8 +19,8 @@ import { clockLabel } from "../attention/away.ts";
  */
 export interface RewakeState {
   session: string;
-  /** When the daemon typed the rewake line, newest last, within the last hour. */
-  typed: number[];
+  /** When the daemon typed the rewake line, and for which budget, newest last, within the last hour. */
+  typed: TypedRewake[];
   /** Why no rewake can reach the leader now, or null. */
   reason: string | null;
   /** Since when that reason holds. */
@@ -27,7 +36,7 @@ export function rewakeState(db: Db, session: string): RewakeState {
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as RewakeState;
-      if (parsed.session === session) return parsed;
+      if (parsed.session === session) return { ...parsed, typed: Array.isArray(parsed.typed) ? parsed.typed.filter((r) => typeof r?.at === "number") : [] };
     } catch {
       // A malformed row reads as empty: the next write replaces it.
     }
@@ -37,12 +46,17 @@ export function rewakeState(db: Db, session: string): RewakeState {
 
 /** Store the state, keeping only the last hour's rewakes. Call inside a transaction that appends an event. */
 export function saveRewakeState(db: Db, state: RewakeState, now: number): void {
-  setMeta(db, KEY, JSON.stringify({ ...state, typed: state.typed.filter((at) => at > now - HOUR_MS) }));
+  setMeta(db, KEY, JSON.stringify({ ...state, typed: state.typed.filter((r) => r.at > now - HOUR_MS) }));
 }
 
-/** Rewakes typed into `session`'s pane in the last hour: they count against the P0 wake budget. */
-export function rewakesLastHour(db: Db, session: string, now: number): number {
-  return rewakeState(db, session).typed.filter((at) => at > now - HOUR_MS).length;
+/** When the daemon last typed a rewake into `session`'s pane, or null. */
+export function lastRewakeAt(state: RewakeState): number | null {
+  return state.typed.at(-1)?.at ?? null;
+}
+
+/** Rewakes typed into `session`'s pane in the last hour for a push on `budget`: each counts against that hourly budget. */
+export function rewakesLastHour(db: Db, session: string, now: number, budget: WakeBudget): number {
+  return rewakeState(db, session).typed.filter((r) => r.budget === budget && r.at > now - HOUR_MS).length;
 }
 
 /** The one line `leader status`, `fleet` and the briefing carry while no wake can reach the lease holder, else null. */

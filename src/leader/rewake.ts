@@ -9,7 +9,7 @@ import { settledStatus } from "../lifecycle/idle-carry.ts";
 import { DIALOG_QUESTION } from "../lifecycle/prompt-wedge.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { leaderPush } from "./hooks.ts";
-import { rewakeState, saveRewakeState } from "./wake-state.ts";
+import { lastRewakeAt, rewakeState, saveRewakeState, type WakeBudget } from "./wake-state.ts";
 
 /**
  * The leader waiter fallback, the leader's counterpart of the workers'
@@ -125,6 +125,11 @@ export async function paneBlocker(runtime: RewakeRuntime, s: LeaderSessionRow): 
   if (!info.processes.some((p) => p.pid === s.proc_pid)) return "the leader's pane does not run this leader's process; type to it";
   const status = await runtime.agentStatus(pane);
   if (!settledStatus(status)) return `Herdr reads the leader ${status ?? "unknown"}`;
+  return screenBlocker(runtime, pane);
+}
+
+/** Why the screen forbids keys: no screen, a dialog question, no composer, or a draft in it; else null. */
+export async function screenBlocker(runtime: RewakeRuntime, pane: string): Promise<string | null> {
   const screen = await runtime.readPane(pane, SCREEN_LINES, { ansi: true });
   if (screen === null) return "the leader's Herdr pane is gone; type to the leader";
   if (DIALOG_QUESTION.test(screen.replace(ESCAPE, ""))) return "a dialog is open in the leader's pane; answer it";
@@ -154,7 +159,7 @@ export class LeaderRewake {
   }
 
   /** The lease holder and the wake due for it now (null when none is), or null when it has a waiter or none is due. */
-  private due(): { s: LeaderSessionRow; ids: string[] } | null {
+  private due(): { s: LeaderSessionRow; ids: string[]; budget: WakeBudget } | null {
     const { db, attention, now } = this.deps;
     const t = now();
     const holder = getLease(db).session_id;
@@ -165,7 +170,7 @@ export class LeaderRewake {
     if (t - seen < attention.timing().waiter_grace_ms) return null;
     const { push } = leaderPush({ db, attention, config: this.deps.config }, s, t);
     if (!push || (push.mode !== "waiter" && push.mode !== "trigger")) return null;
-    return { s, ids: push.items.map((i) => i.id) };
+    return { s, ids: push.items.map((i) => i.id), budget: push.kind === "questions" ? "questions" : "p0" };
   }
 
   private async check(): Promise<void> {
@@ -178,7 +183,7 @@ export class LeaderRewake {
     }
     const { s } = due;
     const state = rewakeState(db, s.session_id);
-    const lastTyped = state.typed.at(-1) ?? null;
+    const lastTyped = lastRewakeAt(state);
     const runtime = this.deps.runtime();
     const blocked = rewakeBlocker({ session: s, herdr: runtime !== null, lastTyped, now: now() });
     if (blocked) {
@@ -208,14 +213,20 @@ export class LeaderRewake {
       this.settle(s.session_id, `Herdr reads the leader ${status ?? "unknown"}`);
       return;
     }
+    // And the screen again: a draft typed since the first read must never get the line appended to it.
+    const late = await screenBlocker(runtime!, s.pane_id!).catch((error: unknown) => `cannot read the leader's pane from Herdr (${(error as Error).message})`);
+    if (late) {
+      this.settle(s.session_id, late);
+      return;
+    }
     const line = rewakeLine(still.ids);
     await runtime!.typeLine(s.pane_id!, line);
     this.dueTicks = 0;
     const t = now();
     tx(db, () => {
       const current = rewakeState(db, s.session_id);
-      saveRewakeState(db, { ...current, typed: [...current.typed, t], reason: null, since: null }, t);
-      appendEvent(db, { source: "daemon", kind: "leader.rewake_typed", payload: { session: s.session_id, pane: s.pane_id, items: still.ids }, ts: t });
+      saveRewakeState(db, { ...current, typed: [...current.typed, { at: t, budget: still.budget }], reason: null, since: null }, t);
+      appendEvent(db, { source: "daemon", kind: "leader.rewake_typed", payload: { session: s.session_id, pane: s.pane_id, items: still.ids, budget: still.budget }, ts: t });
     });
     this.deps.log(`rewake: no waiter for leader ${s.session_id}; typed the wake line for ${still.ids.join(",")} into pane ${s.pane_id}`);
   }

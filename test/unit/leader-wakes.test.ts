@@ -181,6 +181,9 @@ class StubRuntime implements RewakeRuntime {
   /** Statuses for the reads after the first, in order (the re-read right before the keys). */
   later: (string | null)[] = [];
   screen: string | null = EMPTY_SCREEN;
+  /** Screens for the reads after the first, in order (the re-read right before the keys). */
+  laterScreens: (string | null)[] = [];
+  private screens = 0;
   pids: number[] = [PID];
   gone = false;
   typed: { pane: string; line: string }[] = [];
@@ -194,7 +197,8 @@ class StubRuntime implements RewakeRuntime {
     return this.reads > 1 && this.later.length > 0 ? this.later.shift()! : this.status;
   }
   async readPane(): Promise<string | null> {
-    return this.screen;
+    this.screens += 1;
+    return this.screens > 1 && this.laterScreens.length > 0 ? this.laterScreens.shift()! : this.screen;
   }
   async typeLine(pane: string, line: string): Promise<void> {
     this.typed.push({ pane, line });
@@ -260,6 +264,33 @@ describe("rewake: a leader whose waiter is gone", () => {
     expect(runtime.typed).toHaveLength(1);
   });
 
+  test("rewakes for worker questions stop at [notify] max_question_wakes_per_hour while the waiter stays broken", async () => {
+    holder();
+    const runtime = new StubRuntime();
+    const attention = inertAttention({
+      timing: () => ({ ...DEFAULT_LEADER_TIMING, waiter_grace_ms: GRACE, question_batch_ms: 1 }),
+      notify: () => ({ ...inertAttention().notify(), max_question_wakes_per_hour: 2, max_triggered_turns_per_hour: 10 }),
+    });
+    const r = rewaker(runtime, { attention });
+    for (let n = 1; n <= 4; n++) {
+      // A new question arrives; the leader answered the last rewake (a hook event) and settled the old questions.
+      open("worker_question", `question ${n}`, { at: clock - 10 });
+      await ticks(r, 3);
+      tx(db, () => {
+        db.query("UPDATE leader_sessions SET last_event_at = ?1").run(clock + 1);
+        db.query("UPDATE items SET state = 'resolved' WHERE kind = 'worker_question'").run();
+      });
+      clock += GRACE * 2;
+    }
+    expect(runtime.typed).toHaveLength(2);
+    const budgets = db.query("SELECT payload FROM events WHERE kind = 'leader.rewake_typed'").all() as { payload: string }[];
+    expect(budgets.map((b) => (JSON.parse(b.payload) as { budget: string }).budget)).toEqual(["questions", "questions"]);
+    // The P0 budget is untouched by them: a P0 still gets its rewake.
+    open("failure_needs_you", "broken");
+    await ticks(r, 3);
+    expect(runtime.typed).toHaveLength(3);
+  });
+
   test("restart: the grace counts from daemon start, so a reconnecting waiter takes the push and no keys are typed", async () => {
     const s = holder();
     open("user_acted", "acted");
@@ -297,6 +328,7 @@ describe("rewake: a leader whose waiter is gone", () => {
     ["Herdr reads working", (rt) => (rt.status = "working"), "Herdr reads the leader working"],
     ["Herdr reads unknown", (rt) => (rt.status = null), "Herdr reads the leader unknown"],
     ["Herdr turns busy right before the keys", (rt) => (rt.later = ["working"]), "Herdr reads the leader working"],
+    ["a draft typed between the composer read and the keys", (rt) => (rt.laterScreens = [EMPTY_SCREEN.replace("> ", "> just typed")]), "a draft is in the leader's composer"],
     ["a draft in the composer", (rt) => (rt.screen = EMPTY_SCREEN.replace("> ", "> half typed")), "a draft is in the leader's composer"],
     ["no composer on the screen", (rt) => (rt.screen = "just output"), "cannot read the leader's composer"],
     ["a dialog question on the screen", (rt) => (rt.screen = `Do you want to proceed?\n${EMPTY_SCREEN}`), "a dialog is open"],

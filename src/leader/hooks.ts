@@ -201,7 +201,8 @@ export type PushCtx = Pick<HandlerCtx, "db" | "attention" | "config">;
  * While you are away, items only you can move count as P0s (p0Candidate) and
  * the P0 budget is [away] max_wakes_per_hour. Leader follow-ups (something you
  * did outside the session, a merge that landed) go after a P0, as one batch,
- * on the P0 budget; a rewake the daemon typed counts against it too.
+ * on the P0 budget. A rewake the daemon typed counts against the budget of
+ * the push that caused it (src/leader/rewake.ts).
  */
 export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): { push: Push | null; dueAt: number | null } {
   if (!isHolder(ctx.db, s.session_id)) return { push: null, dueAt: null };
@@ -210,7 +211,7 @@ export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): { pu
   const startsTurn = mode === "waiter" || mode === "trigger";
   const budgets = ctx.attention.notify();
   const p0Budget = away ? awayConfig(ctx.config()).max_wakes_per_hour : budgets.max_triggered_turns_per_hour;
-  if (mode && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") + rewakesLastHour(ctx.db, s.session_id, now) >= p0Budget)) {
+  if (mode && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") + rewakesLastHour(ctx.db, s.session_id, now, "p0") >= p0Budget)) {
     const item = p0Candidate(ctx.db, s.session_id, now, ctx.attention.timing().age_ms, away?.since ?? null);
     if (item) return { push: { items: [item], mode, kind: "p0", more: 0 }, dueAt: null };
     const follow = followUpBatch(ctx.db, s.session_id);
@@ -220,7 +221,7 @@ export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): { pu
   if (!batch) return { push: null, dueAt: null };
   if (!mode) return { push: null, dueAt: batch.dueAt };
   if (startsTurn && now < batch.dueAt) return { push: null, dueAt: batch.dueAt };
-  if (startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "questions") >= budgets.max_question_wakes_per_hour) return { push: null, dueAt: null };
+  if (startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "questions") + rewakesLastHour(ctx.db, s.session_id, now, "questions") >= budgets.max_question_wakes_per_hour) return { push: null, dueAt: null };
   return { push: { items: batch.items, mode, kind: "questions", more: batch.more }, dueAt: null };
 }
 

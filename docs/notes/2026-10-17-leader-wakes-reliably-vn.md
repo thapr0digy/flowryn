@@ -44,9 +44,9 @@ The checks, in order:
 3. Nothing in the database blocks it (`rewakeBlocker`). A block is any of these: the holder is a Pi leader (status only), it has no pane, Herdr is not set up, its process is not known, or an earlier rewake got no answer (no hook event since).
 4. The wake has been due for two ticks, and no rewake was typed in this grace window.
 5. Herdr: the pane exists and runs the session's own process (`proc_pid`). Herdr reads it `idle` or `done`. The screen shows no dialog question, and the composer reads empty (`paneBlocker`).
-6. Right before the keys: the wake is still due, and Herdr still reads the pane settled.
+6. Right before the keys: the wake is still due, Herdr still reads the pane settled, and the screen is read again (no dialog, composer still empty), so a draft typed since the first read never gets the line appended to it.
 
-Typed rewakes count against the P0 hourly budget (`rewakesLastHour`, src/leader/wake-state.ts).
+Each typed rewake counts against the hourly budget of the push that caused it (`rewakesLastHour`, src/leader/wake-state.ts): a P0 or follow-up push against `[notify] max_triggered_turns_per_hour` (or `[away] max_wakes_per_hour`), a worker-question batch against `[notify] max_question_wakes_per_hour`. So a broken waiter with questions that keep arriving stops at the question cap.
 
 **When the leader cannot be woken, Flowryn says so.** The reason is kept in the meta table, with one `leader.rewake_blocked` event per change, and cleared (`leader.rewake_clear`) once nothing is due. `flowryn leader status` (`wake`), `fleet` (`wake`) and the briefing show it as one line:
 
@@ -73,7 +73,7 @@ So the rewake reads the pane with its escape codes (`readPane(…, { ansi: true 
   - The fixed line, and the composer read: the live bytes, drafts, and transcript quotes that are not the composer.
   - The rewake types once after the grace and two ticks, then never again without an answer.
   - Each refusal: blocked, working or unknown status; a busy re-read; a draft; no composer; a dialog; a pid mismatch; a gone pane; no pane; Pi; no process; no Herdr; a live waiter.
-  - The budget, and a restart within the grace.
+  - The budgets: P0 rewakes on the P0 budget, question rewakes stopping at the question cap; a draft typed between the composer read and the keys; a restart within the grace.
   - The status line.
 - **test/integration/leader-wakes.test.ts**, through the real leader hooks and waiter:
   - A decline from your terminal wakes the idle, inactive leader once, and the woken turn gets the line in full.
