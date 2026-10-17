@@ -217,9 +217,15 @@ const FOLLOW_UP_WAKE = "Flowryn follow-up [";
 /** The one line a Claude waiter wakes the leader with for follow-ups; the woken turn's prompt hook adds each line in full. */
 export function followUpWakeLine(items: Pick<RankedItem, "id" | "kind">[]): string {
   const head = `${FOLLOW_UP_WAKE}${items.map((i) => i.id).join(",")}]: `;
-  const acted = items.filter((i) => i.kind === "user_acted").length;
-  const landed = items.length - acted;
-  const parts = [acted > 0 ? `the user acted outside this session (${acted})` : "", landed > 0 ? `${landed === 1 ? "a merge" : `${landed} merges`} landed` : ""].filter(Boolean);
+  const count = (kind: string) => items.filter((i) => i.kind === kind).length;
+  const acted = count("user_acted");
+  const landed = count("landed");
+  const passes = count("pass_requested");
+  const parts = [
+    acted > 0 ? `the user acted outside this session (${acted})` : "",
+    landed > 0 ? `${landed === 1 ? "a merge" : `${landed} merges`} landed` : "",
+    passes > 0 ? `${passes === 1 ? "a review pass was" : `${passes} review passes were`} requested` : "",
+  ].filter(Boolean);
   // At most FOLLOW_UP_BATCH_MAX ids, so the line stays well under P0_LINE_MAX.
   return `${head}${parts.join("; ")}. Details: flowryn fleet`;
 }
