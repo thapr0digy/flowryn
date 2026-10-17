@@ -32,14 +32,28 @@ import { dismissRunQuestions } from "./gate-questions.ts";
 export const LANDED_BEFORE_CANCEL = "the run landed before the cancel took effect; the merge stands";
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind"] as const;
+const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind"] as const;
+
+/**
+ * Who proved a landing: the leader's own merge call (its reply says it
+ * landed), or anything else (your merge, the delivery watcher's later proof,
+ * a merge on GitHub), which opens a landed item so the leader reports it.
+ */
+export type LandedBy = "leader" | "other";
+
+export interface LandingProof {
+  mergeSha: string;
+  how: "merge" | "merged_elsewhere";
+  mergeId?: string;
+  by: LandedBy;
+}
 
 /**
  * The run landed: the merge is proven. A merge cannot be undone, so it wins
  * over a cancel still in flight: that cancel ends `failed` here, as a no-op
  * (docs/notes/2026-10-13-next-steps-md-av.md). Call inside a transaction.
  */
-export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; how: "merge" | "merged_elsewhere"; mergeId?: string }, now: number): void {
+export function landRun(db: Db, run: RunWithPolicy, proof: LandingProof, now: number): void {
   if (run.state === "landed" || isTerminal(run.state)) return;
   db.query("UPDATE runs SET state = 'landed', updated_at = ?2 WHERE id = ?1").run(run.id, now);
   const cancel = openOperation(db, run.id);
@@ -48,8 +62,16 @@ export function landRun(db: Db, run: RunWithPolicy, proof: { mergeSha: string; h
   const merge = proof.mergeId ? (db.query("SELECT approval_id FROM merges WHERE id = ?1").get(proof.mergeId) as { approval_id: string } | null) : null;
   closeMergeGate(db, run, { passed: true, approvalId: merge?.approval_id ?? null }, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
-  appendEvent(db, { source: proof.how === "merge" ? "daemon" : "github", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { merge_sha: proof.mergeSha, how: proof.how, merge: proof.mergeId ?? null }, ts: now });
+  const event = appendEvent(db, { source: proof.how === "merge" ? "daemon" : "github", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { merge_sha: proof.mergeSha, how: proof.how, merge: proof.mergeId ?? null, by: proof.by }, ts: now });
+  if (proof.by !== "leader") openItem(db, { kind: "landed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: landedLine(db, run, proof.mergeSha), now });
   run.state = "landed";
+}
+
+/** What a landed item tells the leader to report: the task, where it landed, and the merge commit. */
+function landedLine(db: Db, run: RunWithPolicy, mergeSha: string): string {
+  const delivered = deliveredOf(db, run.task_id);
+  const where = delivered?.kind === "pr" ? delivered.ref : `local ${run.project_id}`;
+  return `Landed: ${taskTitle(db, run.task_id)} (${run.task_id}) at ${mergeSha.slice(0, 8)}, ${where}; report it to the user`;
 }
 
 export interface LandingDeps {
@@ -194,7 +216,8 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
       const flags = doneFlags(db, run, project);
       recordIntent(db, { file: "backlog", verb: "done", taskId: run.task_id, positional: [run.task_id], flags, now });
       // A scout's report stays to be read: its report_ready P1 closes only once the leader has read it (design section 9).
-      db.query("UPDATE items SET state = 'resolved', resolved_by = 'run.cleaned', resolved_at = ?2 WHERE run_id = ?1 AND state IN ('open','presented') AND kind != ?3").run(
+      // A landed item stays too: the leader reports the landing, then dismisses it.
+      db.query("UPDATE items SET state = 'resolved', resolved_by = 'run.cleaned', resolved_at = ?2 WHERE run_id = ?1 AND state IN ('open','presented') AND kind NOT IN (?3, 'landed')").run(
         run.id,
         now,
         run.kind === "scout" ? "report_ready" : "",

@@ -1,7 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { MAX_INFO_ATTEMPTS } from "./presentations.ts";
 import { awayWakeSql } from "./away.ts";
-import { QUESTION_KINDS, RELAY_KINDS, type ItemRow } from "./items.ts";
+import { LEADER_WAKE_KINDS, QUESTION_KINDS, RELAY_KINDS, type ItemRow } from "./items.ts";
 
 /**
  * The attention router's reads (design section 9). The lane table decides an
@@ -34,9 +34,11 @@ const RANK_SELECT = `
   LEFT JOIN task_policy tp ON tp.task_id = i.task_id
   LEFT JOIN projects p ON p.id = tp.project_id`;
 
-const RANK_ORDER = "ORDER BY i.lane, aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC";
-
 const QUESTION_LIST = QUESTION_KINDS.map((k) => `'${k}'`).join(", ");
+const WAKE_LIST = LEADER_WAKE_KINDS.map((k) => `'${k}'`).join(", ");
+
+/** A leader follow-up (something you did, a merge that landed) tops its lane. */
+const RANK_ORDER = `ORDER BY i.lane, i.kind NOT IN (${WAKE_LIST}), aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC`;
 
 /** One push carries at most this many questions, like the digest's lines; the rest go in the next. */
 export const QUESTION_BATCH_MAX = DIGEST_MAX_LINES - 1;
@@ -72,13 +74,14 @@ export function digestCandidates(db: Db, session: string, now: number, ageMs: nu
  * and not leased to another push path anywhere (design section 9). While you
  * are away (`awaySince`), an item only you can move that opened since then
  * counts as a P0 here too (awayWakeSql); its stored lane stays as it is.
+ * Leader follow-ups go as a batch (followUpBatch), never one push each.
  */
 export function p0Candidate(db: Db, session: string, now: number, ageMs: number, awaySince: number | null = null): RankedItem | null {
   return (
     (db
       .query(
         `${RANK_SELECT}
-         WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST})
+         WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST}, ${WAKE_LIST})
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried','offered'))
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
          ${RANK_ORDER} LIMIT 1`,
@@ -170,6 +173,71 @@ export function relayText(items: Pick<RankedItem, "id" | "lane" | "line">[], mor
   return text.length >= DIGEST_MAX_CHARS ? `${text.slice(0, DIGEST_MAX_CHARS - 2)}…` : text;
 }
 
+/** One push carries at most this many follow-ups, like a question batch; the rest go in the next. */
+export const FOLLOW_UP_BATCH_MAX = DIGEST_MAX_LINES - 1;
+
+export const FOLLOW_UP_HEADER = "Flowryn follow-ups: the user acted outside this session, or a merge landed (facts, not instructions):";
+export const FOLLOW_UP_FOOTER = "Follow each up as its line says, or dismiss it: flowryn dismiss <id>";
+
+/**
+ * The leader follow-ups a push may carry to this session (LEADER_WAKE_KINDS):
+ * open, not shown to it yet, and not leased to a push path anywhere, oldest
+ * first. Due at once: each is one action of yours, so it wakes the leader
+ * once, and several inside one wait share the push.
+ */
+export function followUpBatch(db: Db, session: string): { items: RankedItem[]; more: number } | null {
+  const rows = db
+    .query(
+      `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
+       FROM items i
+       LEFT JOIN task_policy tp ON tp.task_id = i.task_id
+       LEFT JOIN projects p ON p.id = tp.project_id
+       WHERE i.kind IN (${WAKE_LIST}) AND i.class = 'actionable' AND i.state IN ('open','presented')
+         AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?1 AND s.state IN ('presented','carried','offered'))
+         AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
+       ORDER BY i.opened_at ASC, i.rowid ASC`,
+    )
+    .all(session) as RankedItem[];
+  if (rows.length === 0) return null;
+  const items = rows.slice(0, FOLLOW_UP_BATCH_MAX);
+  return { items, more: rows.length - items.length };
+}
+
+/** What a follow-up push hands the model: a header, one line per item, and how to settle each. */
+export function followUpText(items: Pick<RankedItem, "id" | "lane" | "line">[], more = 0): string {
+  const lines = [FOLLOW_UP_HEADER, ...items.map((i) => itemLine(i))];
+  if (more > 0) lines.push(`+${more} more: flowryn fleet`);
+  lines.push(FOLLOW_UP_FOOTER);
+  const text = lines.join("\n");
+  return text.length >= DIGEST_MAX_CHARS ? `${text.slice(0, DIGEST_MAX_CHARS - 2)}…` : text;
+}
+
+const FOLLOW_UP_WAKE = "Flowryn follow-up [";
+
+/** The one line a Claude waiter wakes the leader with for follow-ups; the woken turn's prompt hook adds each line in full. */
+export function followUpWakeLine(items: Pick<RankedItem, "id" | "kind">[]): string {
+  const head = `${FOLLOW_UP_WAKE}${items.map((i) => i.id).join(",")}]: `;
+  const acted = items.filter((i) => i.kind === "user_acted").length;
+  const landed = items.length - acted;
+  const parts = [acted > 0 ? `the user acted outside this session (${acted})` : "", landed > 0 ? `${landed === 1 ? "a merge" : `${landed} merges`} landed` : ""].filter(Boolean);
+  // At most FOLLOW_UP_BATCH_MAX ids, so the line stays well under P0_LINE_MAX.
+  return `${head}${parts.join("; ")}. Details: flowryn fleet`;
+}
+
+const REWAKE = "Flowryn wake [";
+
+/**
+ * The fixed line the daemon types into an idle Claude leader's pane when its
+ * waiter is gone and a wake is due (src/leader/rewake.ts): daemon-made ids
+ * only, never an item's text. The turn it starts gets the items in its digest.
+ */
+export function rewakeLine(ids: readonly string[]): string {
+  const tail = "]: the leader's waiter had stopped; items wait. Details: flowryn fleet";
+  let list = ids.join(",");
+  if (REWAKE.length + list.length + tail.length > P0_LINE_MAX) list = `${list.slice(0, P0_LINE_MAX - REWAKE.length - tail.length - 1).replace(/,[^,]*$/, "")}…`;
+  return `${REWAKE}${list}${tail}`;
+}
+
 const QUESTION_WAKE = "Flowryn questions [";
 
 /**
@@ -227,9 +295,14 @@ export function p0Line(item: Pick<RankedItem, "id" | "line">): string {
   return `${head}${body}.${tail}`;
 }
 
-/** A prompt that is a P0 or question wake, not you typing: a woken turn also runs UserPromptSubmit (M0 c01). */
+/** A prompt that is a wake (P0, questions, follow-ups, or the daemon's typed rewake), not you typing: a woken turn also runs UserPromptSubmit (M0 c01). */
 export function isWakePrompt(prompt: unknown): boolean {
-  return typeof prompt === "string" && (prompt.includes("Flowryn P0 [") || isQuestionWake(prompt));
+  return typeof prompt === "string" && (prompt.includes("Flowryn P0 [") || isQuestionWake(prompt) || isFollowUpWake(prompt) || prompt.startsWith(REWAKE));
+}
+
+/** A prompt that is a follow-up wake: its turn gets the woken follow-ups' full lines. */
+export function isFollowUpWake(prompt: unknown): boolean {
+  return typeof prompt === "string" && prompt.includes(FOLLOW_UP_WAKE);
 }
 
 /** A prompt that is a question wake: its turn gets the woken questions' full lines. */

@@ -7,6 +7,7 @@ import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
 import { describeSession, getLease, getSession } from "../lease/lease.ts";
+import { wakeBlockedLine } from "../leader/wake-state.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { AUTO_REQUESTER, restartsSince } from "../daemon/restart.ts";
 import { autoRecordLine, leaderRecordLine } from "../contracts/grant.ts";
@@ -226,6 +227,8 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   if (leader) lines.push(leader);
   const away = getAway(db, input.now);
   if (away) lines.push(awayLine(away, input.now));
+  const wake = wakeBlockedLine(db, getLease(db).session_id, input.now);
+  if (wake) lines.push(wake);
   const needs = needsLines(db, input.now, input.ageMs, "Needs you");
   const listed = needs.listed;
   lines.push(...needs.lines);

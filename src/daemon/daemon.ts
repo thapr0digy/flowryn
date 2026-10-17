@@ -47,6 +47,7 @@ import { Operations } from "../lifecycle/operation-recovery.ts";
 import { adapterFor } from "../harness/registry.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import { LeaderRewake } from "../leader/rewake.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
 import { leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
@@ -721,6 +722,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     lavishPoller.kick();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
+    // The leader waiter fallback: a holder whose waiter is gone gets a fixed line typed when a wake is due.
+    const rewake = new LeaderRewake({ db: database, attention, config: () => config, runtime: () => runtime, now: Date.now, log, startedAt: Date.now() });
     const attentionTick = setInterval(() => {
       const latest = lastItemNo(database);
       if (latest !== seenItem) {
@@ -728,6 +731,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         attention.bus.notifyAll();
       }
       void notifyPump.tick();
+      void rewake.tick();
     }, ATTENTION_TICK_MS);
 
     buildWatch.start();

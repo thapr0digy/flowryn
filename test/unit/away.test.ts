@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { awaySuggestion, endAway, expireAway, getAway, lastAway, parseUntil, startAway, storedAway, takePendingBrief } from "../../src/attention/away.ts";
+import { AWAY_WAKE_KINDS, awaySuggestion, awayWakeSql, endAway, expireAway, getAway, lastAway, parseUntil, startAway, storedAway, takePendingBrief } from "../../src/attention/away.ts";
 import { composeBriefing, composeReturnBrief } from "../../src/attention/briefing.ts";
 import { openItem, type ItemKind } from "../../src/attention/items.ts";
-import { p0Candidate } from "../../src/attention/router.ts";
+import { followUpBatch, p0Candidate } from "../../src/attention/router.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { awayConfig, DEFAULT_AWAY } from "../../src/config/leader.ts";
 import { tx, type Db } from "../../src/db/db.ts";
@@ -172,15 +172,25 @@ describe("the wake rule while away", () => {
     expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
   });
 
-  test("gate_ready, pass_requested and checks_red wake; idle, progress and info kinds never do", () => {
+  test("gate_ready and checks_red wake; idle, progress and info kinds never do", () => {
     const now = Date.now();
     for (const kind of ["worker_idle", "phase_started", "steer_unacked", "capacity_wait"] as const) open(kind, now);
     expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
-    for (const kind of ["gate_ready", "pass_requested", "checks_red"] as const) {
+    for (const kind of ["gate_ready", "checks_red"] as const) {
       const id = open(kind, now);
       expect(p0Candidate(db, "L1", now, AGE, now - 1_000)?.id).toBe(id);
       db.query("UPDATE items SET state = 'resolved' WHERE id = ?1").run(id);
     }
+  });
+
+  test("the leader follow-ups (pass_requested, user_acted, landed) count as away wake kinds, but wake as one batch, not as a P0", () => {
+    const now = Date.now();
+    const ids = (["pass_requested", "user_acted", "landed"] as const).map((kind) => open(kind, now));
+    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
+    expect(followUpBatch(db, "L1")?.items.map((i) => i.id)).toEqual(ids);
+    const counted = db.query(`SELECT COUNT(*) AS n FROM items i WHERE ${awayWakeSql("?1")}`).get(now - 1_000) as { n: number };
+    expect(counted.n).toBe(3);
+    expect(AWAY_WAKE_KINDS).toEqual(expect.arrayContaining(["pass_requested", "user_acted", "landed"]));
   });
 
   test("assumption: a yolo PR merges without the user, so only a non-yolo pr_ready wakes", () => {

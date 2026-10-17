@@ -348,6 +348,8 @@ export class SteerBus {
   private readonly waiters = new Map<string, Set<Waiter>>();
   private readonly latest = new Map<string, string>();
   private readonly commands = new Map<string, string>();
+  /** When a waiter last registered, waited or stopped waiting, per run or leader session (lastSeen). */
+  private readonly seen = new Map<string, number>();
   /** Set at daemon shutdown: waiters answer "ask again" at once, and reconnect to the next daemon. */
   closed = false;
 
@@ -355,6 +357,7 @@ export class SteerBus {
   register(runId: string, waiterId: string): boolean {
     const current = this.latest.get(runId);
     if (current && current > waiterId) return false;
+    this.seen.set(runId, Date.now());
     if (current !== waiterId) {
       this.latest.set(runId, waiterId);
       for (const waiter of this.waiters.get(runId) ?? []) if (waiter.id !== waiterId) waiter.resolve("superseded");
@@ -376,11 +379,13 @@ export class SteerBus {
         resolve: (outcome) => {
           clearTimeout(timer);
           set.delete(waiter);
+          this.seen.set(runId, Date.now());
           resolve(outcome);
         },
       };
       const timer = setTimeout(() => waiter.resolve("timeout"), timeoutMs);
       set.add(waiter);
+      this.seen.set(runId, Date.now());
     });
   }
 
@@ -414,10 +419,20 @@ export class SteerBus {
     return (this.waiters.get(runId)?.size ?? 0) > 0;
   }
 
+  /**
+   * When a waiter last held this run or session, or null if none has since
+   * the daemon started. A waiter's client calls again at once after each
+   * wait, so between calls it counts as seen, not gone.
+   */
+  lastSeen(runId: string): number | null {
+    return this.seen.get(runId) ?? null;
+  }
+
   forget(runId: string): void {
     for (const waiter of this.waiters.get(runId) ?? []) waiter.resolve("superseded");
     this.waiters.delete(runId);
     this.latest.delete(runId);
     this.commands.delete(runId);
+    this.seen.delete(runId);
   }
 }

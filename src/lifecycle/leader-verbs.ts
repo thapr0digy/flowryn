@@ -10,6 +10,7 @@ import { MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts
 import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
 import { getGrant, grantLines, grantView } from "../policy/grants.ts";
 import { getLease, getSession } from "../lease/lease.ts";
+import { wakeBlockedLine } from "../leader/wake-state.ts";
 import { pinHistory } from "../lease/repin.ts";
 import { getDecision } from "./decisions.ts";
 import { findRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
@@ -417,6 +418,8 @@ const fleet: VerbSpec = {
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;
     const away = getAway(ctx.db, ctx.now);
     if (away) data.away = awayLine(away, ctx.now);
+    const wake = wakeBlockedLine(ctx.db, getLease(ctx.db).session_id, ctx.now);
+    if (wake) data.wake = wake;
     const queued = queuedWork(ctx.db);
     // Why each waiting run waits, from its recorded explanation (docs/notes/2026-10-13-next-steps-md-wq.md); detail is show --why.
     const held = waitingRuns(ctx.db);

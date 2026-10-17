@@ -158,7 +158,7 @@ export function applyPrObservation(
   if (run.state !== "ready") return { landed: false };
 
   if (pr.state === "merged" && pr.mergeSha) {
-    landRun(db, run, { mergeSha: pr.mergeSha, how: "merged_elsewhere" }, now);
+    landRun(db, run, { mergeSha: pr.mergeSha, how: "merged_elsewhere", by: "other" }, now);
     return { landed: true };
   }
   if (pr.state === "closed") {
