@@ -54,6 +54,9 @@ export type ItemClass = "actionable" | "info";
  * already told to merge (informational).
  * review_channel: a review page's Lavish poll has failed for a while, so answers
  * sent on the page are not reaching Flowryn (src/lavish/channel.ts).
+ * The leader follow-ups (src/attention/follow-up.ts): user_acted, something you
+ * did outside the leader session (an approval, a decline, a gate pass) that the
+ * leader follows up; landed, a merge proven outside the leader's own merge call.
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -96,6 +99,8 @@ export const LANE_TABLE = {
   build_refused: { lane: "P1", class: "actionable" },
   worker_report: { lane: "P1", class: "actionable" },
   build_failed: { lane: "P1", class: "actionable" },
+  user_acted: { lane: "P1", class: "actionable" },
+  landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
@@ -126,7 +131,15 @@ export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_q
  * worker's report, a dropped restart or a stuck validation is not left for
  * your next message.
  */
-export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "validation_stuck"];
+export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "validation_stuck", "user_acted", "landed", "pass_requested"];
+
+/**
+ * Items that wake an idle leader as a P0 would, though they are P1: what you
+ * did outside the leader session (user_acted, and a pass you asked for on a
+ * review page), and a merge that landed without the leader's own merge call.
+ * Each wakes it once (followUpBatch in router.ts).
+ */
+export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed"];
 
 export interface ItemRow {
   id: string;

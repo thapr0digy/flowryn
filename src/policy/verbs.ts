@@ -18,6 +18,8 @@ import { verifyPolicyId } from "../verify/policy.ts";
 import { verificationLine } from "../verify/store.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
+import { openUserActed } from "../attention/follow-up.ts";
+import { resolveItems } from "../attention/items.ts";
 import {
   channelOf,
   checkGate,
@@ -179,13 +181,15 @@ const merge: VerbSpec = {
     const run = getRunWithPolicy(ctx.db, facts.run.id)!;
     rememberFacts(ctx.db, facts, now);
     if (gate.alreadyMerged) {
-      landRun(ctx.db, run, { mergeSha: facts.pr!.mergeSha ?? facts.head, how: "merged_elsewhere" }, now);
+      landRun(ctx.db, run, { mergeSha: facts.pr!.mergeSha ?? facts.head, how: "merged_elsewhere", by: ctx.caller.role === "leader" ? "leader" : "other" }, now);
       return { data: { task: run.task_id, run: run.id, state: "landed", merged: "already", sha: facts.pr!.mergeSha ?? "-" }, hints: [`flowryn show ${run.task_id}`] };
     }
     if (run.state !== "ready" && run.state !== "merging") throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}`);
     const channel = channelOf(chosen.choice!);
     const approval = takeApproval(ctx.db, facts, chosen.choice!, "merge", now);
     const mergeId = recordMergeRequest(ctx.db, facts, approval, channel, gate.waived, ctx.delivery.github().merge_method, now, gate.localGreen);
+    // The merge you approved is requested: its follow-up is done.
+    resolveItems(ctx.db, "user_acted", run.task_id, `merge ${mergeId} requested`, now);
     // In flight from here: the watcher leaves a requested merge alone until this daemon has asked GitHub.
     ctx.delivery.inFlight.add(mergeId);
     const noVerify = facts.local?.policy ? null : `project ${facts.project.id} has no verify steps: this merge ran no local verify (add [projects.${facts.project.id}] verify to config.toml to require one)`;
@@ -213,7 +217,10 @@ const merge: VerbSpec = {
         tx(ctx.db, () => {
           const current = getRunWithPolicy(ctx.db, runId)!;
           if (isTerminal(current.state)) endedBefore = current;
-          recordMergeResult(ctx.db, current, mergeId, outcome, ctx.now());
+          recordMergeResult(ctx.db, current, mergeId, outcome, ctx.now(), ctx.caller.role === "leader" ? "leader" : "other");
+          if (outcome.state === "refused") {
+            openUserActed(ctx.db, ctx.caller.role, { action: "merge_refused", taskId: current.task_id, runId: current.id, line: `The user's merge of ${taskTitle(ctx.db, current.task_id)} (${current.task_id}) was refused: ${outcome.detail}; tell the user why`, now: ctx.now() });
+          }
         });
       } finally {
         executing.delete(mergeId);
@@ -257,6 +264,7 @@ const decline: VerbSpec = {
       { text, feedback: note || "declined", why: "the delivery was declined", event: { source: "cli", kind: "run.declined", payload: { by: ctx.caller.role } } },
       now,
     );
+    openUserActed(ctx.db, ctx.caller.role, { action: "declined", taskId: run.task_id, runId: run.id, line: `The user declined ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) outside this session; the worker got their words and delivers again`, now });
     return { data: { task: run.task_id, run: run.id, state: "running", stage } };
   },
   async settle(ctx, result) {
@@ -412,9 +420,17 @@ const approveConfirm: VerbSpec = {
       const { run, gate } = openReviewGate(ctx.db, taken.task);
       if (gateRef(gate) !== taken.ref) throw new FlowrynError("challenge_failed", `the review gate of ${taken.task} changed since you were shown it`, `flowryn approve ${taken.task} --gate ${gate.stage}`);
       const passed = recordGatePass(ctx.db, run, gate, { channel: taken.channel, actor, head: taken.head }, ctx.now());
+      openUserActed(ctx.db, ctx.caller.role, { action: "gate_passed", taskId: run.task_id, runId: run.id, line: `The user passed the ${gate.stage} review of ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) from ${taken.channel}; the ${passed.next} stage starts next; tell the user (flowryn show ${run.task_id})`, now: ctx.now() });
       return { data: { ...passed, passed: true }, hints: [`flowryn show ${passed.task}`] };
     }
     const row = insertApproval(ctx.db, { task: taken.task, ref: taken.ref, head: taken.head, channel: taken.channel, actor, action: taken.action, allowRed: taken.allowRed, now: ctx.now() });
+    const run = findRun(ctx.db, row.task_id);
+    const title = taskTitle(ctx.db, row.task_id);
+    const line =
+      row.action === "merge"
+        ? `The user approved merging ${title} (${row.task_id}) at ${row.head_sha.slice(0, 8)} from ${row.channel}${row.allow_red_check ? `, waiving ${row.allow_red_check}` : ""}; merge it: flowryn merge ${row.task_id}`
+        : `The user approved discarding the unlanded work of ${title} (${row.task_id}) from ${row.channel}; discard it: flowryn cleanup ${row.task_id} --discard`;
+    openUserActed(ctx.db, ctx.caller.role, { action: row.action === "merge" ? "merge_approved" : "discard_approved", taskId: row.task_id, runId: run?.id ?? null, line, now: ctx.now() });
     return {
       data: { approval: row.id, task: row.task_id, action: row.action, head: row.head_sha, channel: row.channel, waived: row.allow_red_check ?? "-", expires: new Date(row.expires_at).toISOString() },
       hints: row.action === "merge" ? [`flowryn merge ${row.task_id}`] : [`flowryn cleanup ${row.task_id} --discard`],

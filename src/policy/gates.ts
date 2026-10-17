@@ -5,6 +5,7 @@ import type { Db } from "../db/db.ts";
 import { getLease, getSession } from "../lease/lease.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { openUserActed } from "../attention/follow-up.ts";
 import { changesTarget, openGate, passReviewGate, positionOf, sendBack, type GateRow } from "../lifecycle/stages.ts";
 import { consumeApproval, findAttempt, insertApproval, matchAttempt, type Channel } from "./approvals.ts";
 import { grantActor, prepareCaptainGrant, takeGrant, voidItemGrants } from "./grants.ts";
@@ -186,6 +187,7 @@ const gateChanges: VerbSpec = {
       if (target < 0 || target > gateIndex) throw new FlowrynError("bad_args", `--to must name ${gate.stage} or a stage before it: ${pos.def.stages.slice(0, gateIndex + 1).map((s) => s.id).join(", ")}`);
     }
     const stage = sendBack(ctx.db, run, gate, words, target, used ? grantActor(used) : ctx.caller.role, ctx.now());
+    openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: run.id, line: `The user sent ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) back from its ${gate.stage} review to ${stage} outside this session; the worker got their words`, now: ctx.now() });
     return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "changes", to: stage, ...(used ? { grant: used.id } : {}) }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {

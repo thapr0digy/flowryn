@@ -269,8 +269,9 @@ describe("the follow-through pass", () => {
     mergeOnMain(".no-mistakes.yaml", "# settings\nno_ci: true\n");
     await follower().pass();
     tx(db, () => db.query("UPDATE runs SET state = 'ready' WHERE id = 'r1'").run());
-    tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: "f".repeat(40), how: "merged_elsewhere" }, now));
-    expect(openItemsOf("r1")).toEqual([]);
+    tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: "f".repeat(40), how: "merged_elsewhere", by: "other" }, now));
+    // Only the landing's own follow-up stays: the leader reports it (src/attention/follow-up.ts).
+    expect(openItemsOf("r1").map((i) => i.kind)).toEqual(["landed"]);
   });
 
   test("an empty follow_paths turns it off", async () => {

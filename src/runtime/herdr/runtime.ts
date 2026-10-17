@@ -240,10 +240,12 @@ export class HerdrRuntime {
    * source "recent_unwrapped" rather than "recent": a secret can fall
    * across a soft-wrapped terminal line, and redactSecrets only catches it
    * whole when the line arrives unwrapped. Null when the pane is gone.
+   * `ansi` keeps the escape codes, for a reader that needs the styling
+   * (the leader rewake tells Claude's dim placeholder from a typed draft).
    */
-  async readPane(paneId: string, lines: number): Promise<string | null> {
+  async readPane(paneId: string, lines: number, opts: { ansi?: boolean } = {}): Promise<string | null> {
     try {
-      const result = await this.transport.call("pane.read", { pane_id: paneId, source: "recent_unwrapped", lines, strip_ansi: true });
+      const result = await this.transport.call("pane.read", { pane_id: paneId, source: "recent_unwrapped", lines, strip_ansi: opts.ansi !== true });
       const read = result.read as Record<string, unknown> | undefined;
       return typeof read?.text === "string" ? read.text : null;
     } catch (error) {

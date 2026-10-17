@@ -27,6 +27,12 @@ export interface LeaderTiming {
   age_ms: number;
   /** Worker questions opened within this long of the first one wake an idle leader once, together. */
   question_batch_ms: number;
+  /**
+   * A Claude leader holding the lease with no waiter this long, while a wake
+   * is due, gets the daemon's fixed rewake line typed into its pane
+   * (src/leader/rewake.ts); at most once per this window.
+   */
+  waiter_grace_ms: number;
 }
 
 export const DEFAULT_LEADER_TIMING: LeaderTiming = {
@@ -36,6 +42,7 @@ export const DEFAULT_LEADER_TIMING: LeaderTiming = {
   digest_budget_ms: 2_000,
   age_ms: 24 * 60 * 60_000,
   question_batch_ms: 30_000,
+  waiter_grace_ms: 30_000,
 };
 
 export interface NotifyConfig {

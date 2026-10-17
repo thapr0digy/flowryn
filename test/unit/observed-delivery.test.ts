@@ -432,7 +432,7 @@ describe("a cancel a landing overtook", () => {
     services.fleet = {
       ...services.fleet,
       driveCancel: async (id) => {
-        tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: MERGED, how: "merged_elsewhere" }, now));
+        tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: MERGED, how: "merged_elsewhere", by: "other" }, now));
         const op = getOperation(db, id)!;
         return { ok: false, phase: op.phase, evidence: "process", detail: op.detail ?? op.phase };
       },
@@ -444,7 +444,7 @@ describe("a cancel a landing overtook", () => {
 
   test("a cancel of a run that already landed is refused: the run stays landed and no cancel is recorded", async () => {
     readyAtA();
-    tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: MERGED, how: "merged_elsewhere" }, now));
+    tx(db, () => landRun(db, getRunWithPolicy(db, "r1")!, { mergeSha: MERGED, how: "merged_elsewhere", by: "other" }, now));
     const reply = await call("cancel", { target: "t1" }, "human");
     expect(reply.error).toMatchObject({ code: "run_not_active", message: "t1 landed: its merge is proven and stands; nothing was cancelled" });
     expect(state()).toBe("landed");

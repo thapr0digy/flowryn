@@ -3,8 +3,25 @@ import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
 import { awaySuggestion, expireAway, getAway, takePendingBrief, type AwayPosture } from "../attention/away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
-import { QUESTION_KINDS } from "../attention/items.ts";
-import { composeDigest, digestCandidates, isQuestionWake, isWakePrompt, p0Candidate, p0Line, questionBatch, questionsText, questionWakeLine, relayBatch, relayText, type RankedItem } from "../attention/router.ts";
+import { LEADER_WAKE_KINDS, QUESTION_KINDS, type ItemKind } from "../attention/items.ts";
+import {
+  composeDigest,
+  digestCandidates,
+  followUpBatch,
+  followUpText,
+  followUpWakeLine,
+  isFollowUpWake,
+  isQuestionWake,
+  isWakePrompt,
+  p0Candidate,
+  p0Line,
+  questionBatch,
+  questionsText,
+  questionWakeLine,
+  relayBatch,
+  relayText,
+  type RankedItem,
+} from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
 import { awayConfig } from "../config/leader.ts";
 import { acceptedWithoutCi } from "../lifecycle/ci-wait.ts";
@@ -25,6 +42,7 @@ import { postAsk, preAsk, voidSessionGrants } from "../policy/grants.ts";
 import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { readShellWords } from "../util/shell-word.ts";
+import { rewakesLastHour } from "./wake-state.ts";
 
 /**
  * The leader side of the hook verbs (design sections 5, 9 and 10). The
@@ -157,14 +175,19 @@ function pushMode(s: LeaderSessionRow, now: number, away: AwayPosture | null): P
   return s.harness === "pi" ? "trigger" : "waiter";
 }
 
+/** What a push carries: one P0, a batch of leader follow-ups (LEADER_WAKE_KINDS), or a batch of worker questions. */
+export type PushKind = "p0" | "follow_up" | "questions";
+
 export interface Push {
-  /** What the push carries: one P0, or a batch of worker questions. */
   items: RankedItem[];
   mode: PushMode;
-  questions: boolean;
-  /** Questions left for the next push. */
+  kind: PushKind;
+  /** Follow-ups or questions left for the next push. */
   more: number;
 }
+
+/** What leaderPush reads: a handler's context, or the daemon's rewake. */
+export type PushCtx = Pick<HandlerCtx, "db" | "attention" | "config">;
 
 /**
  * Should something be pushed to this session now, and how (design section 9)?
@@ -176,45 +199,50 @@ export interface Push {
  * question_batch_ms (`dueAt` says when, so the waiter wakes then). Started
  * turns are capped per hour, P0s and question batches each on their own budget.
  * While you are away, items only you can move count as P0s (p0Candidate) and
- * the P0 budget is [away] max_wakes_per_hour.
+ * the P0 budget is [away] max_wakes_per_hour. Leader follow-ups (something you
+ * did outside the session, a merge that landed) go after a P0, as one batch,
+ * on the P0 budget. A rewake the daemon typed counts against the budget of
+ * the push that caused it (src/leader/rewake.ts).
  */
-export function leaderPush(ctx: HandlerCtx, s: LeaderSessionRow, now: number): { push: Push | null; dueAt: number | null } {
+export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): { push: Push | null; dueAt: number | null } {
   if (!isHolder(ctx.db, s.session_id)) return { push: null, dueAt: null };
   const away = getAway(ctx.db, now);
   const mode = pushMode(s, now, away);
   const startsTurn = mode === "waiter" || mode === "trigger";
   const budgets = ctx.attention.notify();
   const p0Budget = away ? awayConfig(ctx.config()).max_wakes_per_hour : budgets.max_triggered_turns_per_hour;
-  if (mode) {
-    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), away?.since ?? null);
-    if (item && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") >= p0Budget)) {
-      return { push: { items: [item], mode, questions: false, more: 0 }, dueAt: null };
-    }
+  if (mode && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") + rewakesLastHour(ctx.db, s.session_id, now, "p0") >= p0Budget)) {
+    const item = p0Candidate(ctx.db, s.session_id, now, ctx.attention.timing().age_ms, away?.since ?? null);
+    if (item) return { push: { items: [item], mode, kind: "p0", more: 0 }, dueAt: null };
+    const follow = followUpBatch(ctx.db, s.session_id);
+    if (follow) return { push: { items: follow.items, mode, kind: "follow_up", more: follow.more }, dueAt: null };
   }
   const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
   if (!batch) return { push: null, dueAt: null };
   if (!mode) return { push: null, dueAt: batch.dueAt };
   if (startsTurn && now < batch.dueAt) return { push: null, dueAt: batch.dueAt };
-  if (startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "questions") >= budgets.max_question_wakes_per_hour) return { push: null, dueAt: null };
-  return { push: { items: batch.items, mode, questions: true, more: batch.more }, dueAt: null };
+  if (startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "questions") + rewakesLastHour(ctx.db, s.session_id, now, "questions") >= budgets.max_question_wakes_per_hour) return { push: null, dueAt: null };
+  return { push: { items: batch.items, mode, kind: "questions", more: batch.more }, dueAt: null };
 }
 
 function pushTurn(s: LeaderSessionRow, mode: PushMode): number {
   return mode === "continuation" ? s.turn_no : s.turn_no + 1;
 }
 
-/** The text a push hands over: the P0 line, or for questions the wake line (Claude's waiter) or every question's line. */
+/** The text a push hands over: the P0 line; for a batch, the wake line (Claude's waiter) or every item's line. */
 function pushText(push: Push, items: RankedItem[], harness: string): string {
-  if (!push.questions) return p0Line(items[0]!);
-  return push.mode === "waiter" && harness === "claude" ? questionWakeLine(items) : questionsText(items, push.more);
+  const wakeLine = push.mode === "waiter" && harness === "claude";
+  if (push.kind === "p0") return p0Line(items[0]!);
+  if (push.kind === "follow_up") return wakeLine ? followUpWakeLine(items) : followUpText(items, push.more);
+  return wakeLine ? questionWakeLine(items) : questionsText(items, push.more);
 }
 
-/** The questions a question wake carried into `turn`, for that turn's prompt hook. */
-function wokenQuestions(db: Db, session: string, turn: number): RankedItem[] {
+/** The items of these kinds a wake carried into `turn`, for that turn's prompt hook. */
+function wokenItems(db: Db, session: string, turn: number, kinds: readonly ItemKind[]): RankedItem[] {
   return db
     .query(
       `SELECT i.* FROM presentations s JOIN items i ON i.id = s.item_id
-       WHERE s.session_id = ?1 AND s.turn_no = ?2 AND s.path = 'waiter' AND s.state = 'carried' AND i.kind IN (${QUESTION_KINDS.map((k) => `'${k}'`).join(", ")})
+       WHERE s.session_id = ?1 AND s.turn_no = ?2 AND s.path = 'waiter' AND s.state = 'carried' AND i.kind IN (${kinds.map((k) => `'${k}'`).join(", ")})
        ORDER BY i.opened_at, i.rowid`,
     )
     .all(session, turn) as RankedItem[];
@@ -340,10 +368,14 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
   if (isHolder(ctx.db, s.session_id)) {
     // Taken over mid-conversation: the full briefing first, then whatever it does not list.
     if (s.brief_pending === 1) lines.push(brief(ctx, s, turn, now).text);
-    // A question wake's line names the questions; the woken turn gets each one in full.
+    // A question or follow-up wake's line names the items; the woken turn gets each one in full.
     if (isQuestionWake(input.prompt)) {
-      const woken = wokenQuestions(ctx.db, s.session_id, turn);
+      const woken = wokenItems(ctx.db, s.session_id, turn, QUESTION_KINDS);
       if (woken.length > 0) lines.push(questionsText(woken));
+    }
+    if (isFollowUpWake(input.prompt)) {
+      const woken = wokenItems(ctx.db, s.session_id, turn, LEADER_WAKE_KINDS);
+      if (woken.length > 0) lines.push(followUpText(woken));
     }
     if (!isWakePrompt(input.prompt)) lines.push(...awayLines(ctx, s, now));
     const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx)));
@@ -841,7 +873,8 @@ export function takeP0(ctx: HandlerCtx, outcome: WaitOutcome): HandlerResult {
   });
   if (taken.length === 0) return { data: { wait: true } };
   const ids = taken.map((item) => item.id);
-  if (push.questions) appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: ids, path, turn }, ts: now });
+  if (push.kind === "questions") appendEvent(ctx.db, { source: "hook", kind: "leader.questions_pushed", payload: { session: s.session_id, items: ids, path, turn }, ts: now });
+  else if (push.kind === "follow_up") appendEvent(ctx.db, { source: "hook", kind: "leader.follow_ups_pushed", payload: { session: s.session_id, items: ids, path, turn }, ts: now });
   else appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: ids[0], path, turn }, ts: now });
   return { data: { fire: { id: ids[0], items: ids, line: pushText(push, taken, s.harness), mode: push.mode } } };
 }

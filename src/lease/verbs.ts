@@ -5,6 +5,7 @@ import { grantsConfig } from "../config/leader.ts";
 import { readIdentity } from "../runtime/proc.ts";
 import { applyRepin, planRepin, processCwd, type RepinPlan } from "./repin.ts";
 import { attachProcess, claim, closeSession, getLease, getSession, openSession, openSessions, type LeaderHarness } from "./lease.ts";
+import { wakeBlockedLine } from "../leader/wake-state.ts";
 
 /**
  * The lease verbs (design section 10). `lead.*` are internal: `flowryn lead`
@@ -115,6 +116,7 @@ const leaderStatus: VerbSpec = {
           ? { session: lease.session_id, harness: holder?.harness ?? lease.harness ?? "-", pane: holder?.pane_id ?? "-", epoch: lease.epoch, heartbeat: age(ctx.now, lease.heartbeat_at) }
           : { session: "vacant", epoch: lease.epoch },
         you: ctx.caller.session ?? ctx.caller.role,
+        wake: wakeBlockedLine(ctx.db, lease.session_id, ctx.now) ?? "-",
         sessions,
       },
       hints: ctx.caller.role === "reader" ? ["flowryn leader claim"] : [],

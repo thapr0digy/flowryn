@@ -10,7 +10,7 @@ import { canonicalPrUrl, parsePrUrl } from "../forge/github.ts";
 import { checksLine, ForgeError, type ChecksSummary, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
 import { getLease, getSession } from "../lease/lease.ts";
 import { approvalRef, deliveredOf, prEvidenceFrom, recordPrEvidence, remoteHead, type Delivered } from "../lifecycle/delivery.ts";
-import { landRun } from "../lifecycle/landing.ts";
+import { landRun, type LandedBy } from "../lifecycle/landing.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import { isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import {
@@ -547,7 +547,7 @@ export async function proveLocal(git: GitRunner, project: ProjectRow, head: stri
  * task is not landed, and a P1 says so. Refused: the run is ready again.
  * Call inside a transaction.
  */
-export function recordMergeResult(db: Db, run: RunWithPolicy, mergeId: string, result: MergeResultState, now: number): void {
+export function recordMergeResult(db: Db, run: RunWithPolicy, mergeId: string, result: MergeResultState, now: number, by: LandedBy = "other"): void {
   const merge = db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow | null;
   if (!merge || merge.state === "merged" || merge.state === "refused") return;
   const approval = db.query("SELECT channel FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: Channel } | null;
@@ -555,7 +555,7 @@ export function recordMergeResult(db: Db, run: RunWithPolicy, mergeId: string, r
     db.query("UPDATE merges SET state = 'merged', merge_sha = ?2, proven_at = ?3, checked_at = ?3, detail = COALESCE(detail || '; ', '') || ?4 WHERE id = ?1").run(mergeId, result.sha, now, result.detail);
     const delivered = isTerminal(run.state) ? deliveredOf(db, run.task_id) : null;
     if (delivered) noteMergedAfterEnd(db, run, delivered, { mergeSha: result.sha, source: merge.pr_url.startsWith("local:") ? "daemon" : "github" }, now);
-    else landRun(db, run, { mergeSha: result.sha, how: "merge", mergeId }, now);
+    else landRun(db, run, { mergeSha: result.sha, how: "merge", mergeId, by }, now);
     if (approval?.channel === "yolo") {
       const event = appendEvent(db, { source: "daemon", kind: "merge.yolo", runId: run.id, taskId: run.task_id, payload: { merge: mergeId, sha: result.sha }, ts: now });
       openItem(db, { kind: "yolo_merged", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: `Merged under yolo: ${taskTitle(db, run.task_id)} (${run.project_id})`, now });

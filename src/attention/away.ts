@@ -44,9 +44,11 @@ export interface AwayEnded {
  * The items that wake the leader while you are away, on top of the P0 lane
  * and the worker-question batch (which wake already once you are inactive):
  * what only you can move. A yolo, non-sensitive PR merges without you, and a
- * report waits on you only when it opened a decision reserved for you.
+ * report waits on you only when it opened a decision reserved for you. The
+ * leader follow-ups (LEADER_WAKE_KINDS) wake it whether you are away or only
+ * inactive; they are listed here so the away suggestion and brief count them.
  */
-export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready"];
+export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed"];
 
 /**
  * SQL for "item `i` wakes the leader while away", with `?<since>` the away
@@ -54,7 +56,7 @@ export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_request
  */
 export function awayWakeSql(sinceParam: string): string {
   return `(${sinceParam} IS NOT NULL AND i.opened_at >= ${sinceParam} AND (
-      i.kind IN ('gate_ready','pass_requested','checks_red')
+      i.kind IN ('gate_ready','pass_requested','checks_red','user_acted','landed')
       OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy ap WHERE ap.task_id = i.task_id AND ap.yolo = 0))
       OR (i.kind = 'report_ready' AND EXISTS (SELECT 1 FROM decisions ad WHERE ad.origin = i.task_id AND ad.state = 'open' AND ad.reserved_reason IS NOT NULL))))`;
 }
