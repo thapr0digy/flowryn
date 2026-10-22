@@ -438,7 +438,8 @@ describe("unneeded: three rules", () => {
 
 describe("store growth", () => {
   test("events' MAX(seq) is its row count: append-only, so no gaps", () => {
-    for (let i = 0; i < 25; i += 1) ev("x", NOW - i, null);
+    // More events than schema_migrations has rows (one per migration), so events is the largest table.
+    for (let i = 0; i < 50; i += 1) ev("x", NOW - i, null);
     const events = tableRows(db).find((t) => t.table === "events")!;
     expect(events.rows).toBe((db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n);
     expect(tableRows(db)[0]!.table).toBe("events");
