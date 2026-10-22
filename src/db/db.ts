@@ -126,6 +126,9 @@ export function migrate(db: Db, migrations: readonly Migration[] = MIGRATIONS, n
 function backfillMigrationNames(db: Db, migrations: readonly Migration[], appliedAt: ReadonlyMap<number, number>): void {
   if (!hasMigrationNames(db)) return;
   const current = schemaVersion(db);
+  const named = new Set((db.query("SELECT version FROM schema_migrations").all() as { version: number }[]).map((r) => r.version));
+  // A migrate() with nothing to name takes no write lock: other connections call it while the daemon writes.
+  if (migrations.every((m) => m.version > current || named.has(m.version))) return;
   tx(db, () => {
     const insert = db.query("INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)");
     for (const m of migrations) if (m.version <= current) insert.run(m.version, m.name, appliedAt.get(m.version) ?? null);

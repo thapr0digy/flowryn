@@ -77,6 +77,23 @@ describe("migrations", () => {
     db.close();
   });
 
+  test("re-running on an up-to-date database takes no write lock, so it works while another connection writes", () => {
+    const path = join(tempDir(), "flowryn.db");
+    const db = openDb(path);
+    migrate(db);
+    const writer = openDb(path);
+    writer.exec("PRAGMA busy_timeout = 0");
+    writer.exec("BEGIN IMMEDIATE");
+    db.exec("PRAGMA busy_timeout = 0");
+    try {
+      expect(migrate(db)).toEqual([]);
+    } finally {
+      writer.exec("ROLLBACK");
+      writer.close();
+      db.close();
+    }
+  });
+
   test("migration numbers run 1..N with unique names, so a merge that keeps two branches' migration N fails here", () => {
     expect(MIGRATIONS.map((m) => m.version)).toEqual(MIGRATIONS.map((_, i) => i + 1));
     expect(new Set(MIGRATIONS.map((m) => m.name)).size).toBe(MIGRATIONS.length);
