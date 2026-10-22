@@ -357,10 +357,33 @@ describe("automatic away", () => {
     expect(getAway(db, now)).not.toBeNull();
     tx(db, () => endAway(db, "back", now));
     tx(db, () => takePendingBrief(db, now));
-    auto(now + 1);
-    const mine = tx(db, () => startAway(db, { until: now + 2 * HOUR, words: "gone till 5", by: "human", now: now + 2 }));
-    expect(mine).toMatchObject({ extended: true, posture: { by: "human", since: now - 3 * HOUR } });
-    expect(tx(db, () => endAutoAway(db, now + 3))).toBeNull();
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?1").run(now + 1);
+    const later = now + 1 + AFTER;
+    expect(auto(later)?.by).toBe(AUTO_AWAY_BY);
+    const mine = tx(db, () => startAway(db, { until: later + 2 * HOUR, words: "gone till 5", by: "human", now: later + 1 }));
+    expect(mine).toMatchObject({ extended: true, posture: { by: "human", since: now + 1 } });
+    expect(tx(db, () => endAutoAway(db, later + 2))).toBeNull();
+  });
+
+  test("assumption: back sticks for the rest of the inactive spell; a new spell can start it again", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    auto(now);
+    tx(db, () => endAway(db, "back", now + HOUR));
+    expect(auto(now + HOUR + 1)).toBeNull();
+    expect(auto(now + 10 * HOUR)).toBeNull();
+    expect(getAway(db, now + 10 * HOUR)).toBeNull();
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?1").run(now + 11 * HOUR);
+    expect(auto(now + 11 * HOUR + AFTER)).toMatchObject({ by: AUTO_AWAY_BY, since: now + 11 * HOUR });
+  });
+
+  test("assumption: after an expired automatic away the user is still gone, so it starts again and folds the unshown brief in", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    auto(now);
+    const end = now + AWAY_MAX_MS;
+    expect(tx(db, () => expireAway(db, end))?.reason).toBe("expired");
+    expect(auto(end + 1)).toMatchObject({ by: AUTO_AWAY_BY, since: now - 3 * HOUR, brief_since: now - 3 * HOUR });
   });
 
   test("the user's return ends it with the return brief pending, which covers the whole absence", () => {

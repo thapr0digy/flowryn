@@ -146,12 +146,15 @@ const END_SOURCE: Record<AwayEndReason, "cli" | "daemon" | "hook"> = { back: "cl
  * is on. It starts when you went inactive, so what opened while you were
  * gone and still waits wakes the leader now, and the brief covers the whole
  * absence. It runs until your next own message (endAutoAway), `flowryn back`
- * or AWAY_MAX_MS. Null when it did not start. Call inside a transaction.
+ * or AWAY_MAX_MS. After `back` it stays off for the rest of that inactive
+ * spell. Null when it did not start. Call inside a transaction.
  */
 export function autoAway(db: Db, input: { afterMs: number; now: number }): AwayPosture | null {
   const inactiveSince = holderInactiveSince(db);
   if (input.afterMs <= 0 || inactiveSince === null || input.now - inactiveSince < input.afterMs) return null;
   if (getAway(db, input.now)) return null;
+  const last = lastAway(db);
+  if (last?.reason === "back" && last.ended_at >= inactiveSince) return null;
   return startAway(db, { until: input.now + AWAY_MAX_MS, words: null, by: AUTO_AWAY_BY, now: input.now, since: inactiveSince, source: "daemon" }).posture;
 }
 
