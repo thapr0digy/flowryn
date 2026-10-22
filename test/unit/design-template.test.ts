@@ -102,9 +102,14 @@ describe("the design page check", () => {
     const early = filled().replace(risks, "").replace("</body>", `${risks}</body>`);
     expect(designPageProblems(early)).toEqual(["the folded implementation detail must come after every other part"]);
     const trailing = filled().replace("</body>", "<p>Appendix in plain words.</p></body>");
-    expect(designPageProblems(trailing)).toEqual(["nothing may follow the folded implementation detail but scripts: move it into the detail or above it"]);
+    expect(designPageProblems(trailing)).toEqual(["nothing a reader sees may follow the folded implementation detail: move it into the detail or above it"]);
     const scripted = filled().replace("</body>", '<!-- a note --><script src="extra.js"></script>\n</body>');
     expect(designPageProblems(scripted)).toEqual([]);
+    const wrapped = filled().replace("<body>", "<body><main>").replace("</body>", "</main></body>");
+    expect(designPageProblems(wrapped)).toEqual([]);
+    expect(designPageProblems(filled().replace("</body>", ""))).toEqual([]);
+    expect(designPageProblems(filled().replace("</body>", "<div><p></p></div></body>"))).toEqual([]);
+    expect(designPageProblems(filled().replace("</body>", '<img src="extra.png"></body>'))).toEqual(["nothing a reader sees may follow the folded implementation detail: move it into the detail or above it"]);
     const unclosed = filled().replace("</details>", "");
     expect(designPageProblems(unclosed)).toEqual(["the implementation detail's <details> is never closed: end it with </details>"]);
   });

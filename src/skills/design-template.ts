@@ -164,11 +164,11 @@ function findDetail(html: string): { start: number; end: number | null; tag: str
   return open ? { start: open.index, end: elementEnd(html, "details", open.index), tag: open[0] } : null;
 }
 
-/** Anything a reader would see between `from` and `</body>`: comments and scripts aside. */
-function shownAfter(html: string, from: number): string {
-  const bodyClose = html.slice(from).search(/<\/body\s*>/i);
-  const tail = html.slice(from, bodyClose === -1 ? html.length : from + bodyClose);
-  return dropElements(tail.replace(/<!--[\s\S]*?-->/g, " "), "script").trim();
+/** Whether a reader would see anything after `from`: text or a content element, with comments, scripts, styles and closing tags aside. */
+function showsAfter(html: string, from: number): boolean {
+  let tail = html.slice(from).replace(/<!--[\s\S]*?-->/g, " ");
+  for (const tag of ["script", "style"]) tail = dropElements(tail, tag);
+  return /[\p{L}\p{N}]/u.test(textOf(tail)) || /<(?:img|svg|table|pre|figure|iframe|video|section|details|ul|ol)\b/i.test(tail);
 }
 
 /**
@@ -211,7 +211,7 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
     if (/\bopen\b/i.test(detail.tag.replace(/data-section\s*=\s*["'][^"']*["']/i, ""))) problems.push("the implementation detail must start folded: drop open from its <details>");
     if (last && detail.start < last.end) problems.push("the folded implementation detail must come after every other part");
     else if (detail.end === null) problems.push("the implementation detail's <details> is never closed: end it with </details>");
-    else if (shownAfter(html, detail.end) !== "") problems.push("nothing may follow the folded implementation detail but scripts: move it into the detail or above it");
+    else if (showsAfter(html, detail.end)) problems.push("nothing a reader sees may follow the folded implementation detail: move it into the detail or above it");
   }
 
   const visible = visibleMarkup(html);
