@@ -23,7 +23,7 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
   - starts the job at once when the queue is empty, a `validation` slot is free, the host check passes and no restart is parked;
   - otherwise queues the request and replies `queued` with the request id and its position ("2 of 3, behind v41 and vq7").
 - `verify_busy` goes away: the "another policy at the same head" case is queued like any other request.
-- The queue drains in the scheduler's pass, before stage grants (the "drain before fill" rule: a verify is the step closest to shipping). Order is rank, then `requested_at`. Each start takes a `validation` lease in the same transaction as its `verifications` row, so concurrency is the pool's cap (5 today), under the host check. While a restart is parked, no queued verify starts, and none starts once the daemon is shutting down. A queued request whose PR and head already have a running verification under today's policy follows that one (it is marked started with its id) instead of starting a second.
+- The queue drains in the scheduler's pass, before stage grants (the "drain before fill" rule: a verify is the step closest to shipping). Order is rank, then `requested_at`. Each start takes a `validation` lease in the same transaction as its `verifications` row, so concurrency is the pool's cap (5 today), under the host check. While a restart is parked, no queued verify starts, and none starts once the daemon is shutting down. A queued request whose PR and head already have a running verification under today's policy follows that one (it is marked started with its id) instead of starting a second, whether or not the pool is full.
 - `flowryn verify show` takes a `vq<n>` too: its position, or once started, its verification. The CLI follows a queued request through to its result. `--detach` returns the request id.
 - A queued request for a PR that has closed or moved to another head (a redelivery), or whose project no longer has verify steps, is `cancelled` with its reason (as built, below).
 - PATH: a request from the CLI keeps the caller's PATH, as today. A daemon-made request (phase 2) uses the PATH of the latest CLI verify of the project, kept in meta (`verify_path:<project>`), and otherwise the daemon's own PATH plus `~/.bun/bin`.
@@ -31,8 +31,8 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
 ### Restart
 
 - **Validations are carried across a restart, not waited on.** The `validation` guard leaves `restartGuards`, and the guard reply lists them as "carried: validation t1 (...)". This removes the only cause of every `restart_dropped` so far.
-- **Verifies are drained.** A parked restart (automatic or `--when-idle`) still waits on the `verifying` guard, and the scheduler starts no queued verify while it is parked. The wait is bounded by `verify_timeout_min` (45 min for flowryn).
-- **An interrupted verify is resumed.** Startup recovery still records the interrupted row as `error` (`the daemon stopped mid-run`), then queues the same PR, head and policy at the front (`source = recovered`), once per verification. A second interruption opens the usual item instead.
+- **Verifies are drained.** A parked restart (automatic or `--when-idle`) still waits on the `verifying` guard, and the scheduler starts no queued verify while it is parked, for at most 60 min (`RESTART_HOLDS_VERIFIES_MS`), so a restart stuck on another guard cannot hold verifies back forever.
+- **An interrupted verify is resumed.** Startup recovery still records the interrupted row as `error` (`the daemon stopped mid-run`), then queues the same PR, head and policy at the front (`source = recovered`), once per verification. A rerun interrupted again is not requeued: it records a `verify.not_requeued` event (no item in phase 1).
 
 ## Phase 2: yolo auto-merge (not built: plan p13)
 

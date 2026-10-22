@@ -128,6 +128,26 @@ export function launchVerification(deps: VerifyDeps, v: Verification, plan: Veri
   void runVerification(deps, v, plan, env).catch((error: unknown) => deps.log(`verify ${v.id}: ${(error as Error).message}`));
 }
 
+/** Today's verify policy for a project, or null when it has none or its config is invalid (the start's re-check reports which). */
+function todaysPolicy(config: FlowrynConfig, projectId: string): string | null {
+  try {
+    const verify = verifyConfig(config, projectId);
+    return verify ? verifyPolicyId(verify) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mark a queued request started on a running verification of its PR and head under the policy; it takes no slot. Call inside a transaction. */
+function followRunning(db: Db, requestId: string, policy: string | null, now: number): boolean {
+  const request = getRequest(db, requestId);
+  if (request?.state !== "queued" || !policy) return false;
+  const same = runningVerifications(db).find((r) => r.pr_url === request.pr_url && r.head_sha === request.head_sha && r.policy_id === policy);
+  if (!same) return false;
+  markStarted(db, request, same.id, now);
+  return true;
+}
+
 /**
  * Start queued requests while their turn comes and a slot is free: the first
  * request in line either starts, is cancelled (its PR closed, its head moved),
@@ -140,6 +160,7 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
   for (;;) {
     const first = queuedRequests(db)[0];
     if (!first) return started;
+    if (tx(db, () => followRunning(db, first.id, todaysPolicy(deps.config(), first.project_id), deps.now()))) continue;
     const caps = capacityConfig(deps.config()).pools;
     if (queueHold(db, caps, deps.now())) return started;
     if (!(await deps.host()).ok) return started;
@@ -156,14 +177,9 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
     let v: Verification | null;
     try {
       v = tx(db, () => {
+        if (followRunning(db, first.id, verifyPolicyId(wanted.start), deps.now())) return null;
         const fresh = getRequest(db, first.id);
         if (fresh?.state !== "queued") return null;
-        const policy = verifyPolicyId(wanted.start);
-        const same = runningVerifications(db).find((r) => r.pr_url === fresh.pr_url && r.head_sha === fresh.head_sha && r.policy_id === policy);
-        if (same) {
-          markStarted(db, fresh, same.id, deps.now());
-          return null;
-        }
         if (queueHold(db, caps, deps.now())) return null;
         return admitRequest(db, fresh, wanted.start, caps, deps.root, wanted.projectPath, deps.now());
       });
