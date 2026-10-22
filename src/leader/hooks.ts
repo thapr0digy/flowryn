@@ -38,7 +38,8 @@ import { openGate } from "../lifecycle/stages.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { gateQuestionsLine } from "../lifecycle/gate-questions.ts";
 import { isRoutineMerge, recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
-import { postAsk, preAsk, voidSessionGrants } from "../policy/grants.ts";
+import { holdSessionGrants, NEW_MESSAGE, postAsk, preAsk, voidSessionGrants } from "../policy/grants.ts";
+import { isNotificationPrompt } from "../policy/notifications.ts";
 import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { readShellWords } from "../util/shell-word.ts";
@@ -335,12 +336,15 @@ export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): 
 export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  const notice = isNotificationPrompt(input.prompt);
   // Fail-closed (design section 7): your next message also kills a declined attempt the Claude
   // leader is still holding, the same as the next Bash call does.
   if (s.harness === "claude") {
     voidPendingAttempts(ctx.db, s.session_id, now);
-    // A chat-answer grant lives only within the turn that asked: your next message ends it.
-    voidSessionGrants(ctx.db, s.session_id, "the user sent a new message", now);
+    // A chat-answer grant lives only within the turn that asked: your next message ends it. A
+    // background notice is not your message: the grant is held, and its use checks Claude's transcript.
+    if (notice) holdSessionGrants(ctx.db, s.session_id, now);
+    else voidSessionGrants(ctx.db, s.session_id, NEW_MESSAGE, now);
   }
   const late = deadline !== null && now > deadline;
   if (s.harness === "pi" && input.source === "run") {
@@ -350,7 +354,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
     return { data: {} };
   }
   const turn = startTurn(ctx, s, now, input.source ?? "prompt");
-  if (!isWakePrompt(input.prompt) && s.user_inactive_since !== null) {
+  if (!isWakePrompt(input.prompt) && !notice && s.user_inactive_since !== null) {
     setSession(ctx.db, s.session_id, { user_inactive_since: null });
     appendEvent(ctx.db, { source: "hook", kind: "leader.user_active", payload: { session: s.session_id }, ts: now });
   }
@@ -377,7 +381,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
       const woken = wokenItems(ctx.db, s.session_id, turn, LEADER_WAKE_KINDS);
       if (woken.length > 0) lines.push(followUpText(woken));
     }
-    if (!isWakePrompt(input.prompt)) lines.push(...awayLines(ctx, s, now));
+    if (!isWakePrompt(input.prompt) && !notice) lines.push(...awayLines(ctx, s, now));
     const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx)));
     if (digest) {
       for (const item of digest.shown) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "digest", now });

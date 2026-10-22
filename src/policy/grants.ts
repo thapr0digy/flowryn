@@ -8,6 +8,7 @@ import { findAttempt, type ApprovalAction } from "./approvals.ts";
 import { tx, getMeta, setMeta, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
+import { countSenders } from "./notifications.ts";
 import { bindingRef, chatForm, mapAnswer, normalizeQuestion, questionsHash, sameQuestion, type ChatForm, type ChatQuestion, type GrantAction } from "./chat-questions.ts";
 
 /**
@@ -17,7 +18,9 @@ import { bindingRef, chatForm, mapAnswer, normalizeQuestion, questionsHash, same
  * one: PreToolUse records the question (and denies one that brings its own answers), PostToolUse
  * reads your answer. The hook token is the leader's token too, so before a grant is used the
  * daemon also finds the question and your answer in Claude's own transcript, a file the leader
- * cannot write (src/policy/static.ts). Plain code: no model reads an answer.
+ * cannot write (src/policy/static.ts). Plain code: no model reads an answer. A background notice
+ * Claude injects as a user turn holds a grant rather than voiding it; the transcript must then show
+ * it as a notice, and nothing you typed, after your answer (docs/notes/2026-10-17-chat-answers-survive-es.md).
  */
 
 /** A grant lives until the turn ends, and at most this long (the user's choice, q43). */
@@ -28,6 +31,8 @@ export const TRANSCRIPT_TAIL_BYTES = 16 * 1024 * 1024;
 const SKEW_MS = 60_000;
 /** What a refusal that a repin fixes tells the leader to pass on (docs/notes/2026-10-11-flowryn-leader-repin-xv.md). */
 export const REPIN_FIX = "run flowryn leader repin in your terminal";
+/** Why your next message ends a grant, at the prompt hook and at use alike. */
+export const NEW_MESSAGE = "the user sent a new message";
 const REPIN_HELP = "the user runs: flowryn leader repin (in their own terminal, not the leader's)";
 
 /** When the session's directory was last repinned from your terminal; nothing from before it counts. */
@@ -55,6 +60,8 @@ export interface GrantRow {
   consumed_by: string | null;
   voided_at: number | null;
   void_reason: string | null;
+  /** Background notices that arrived after the answer; each must be one in Claude's transcript. */
+  held_prompts: number;
 }
 
 function nextGrantId(db: Db): string {
@@ -260,6 +267,20 @@ export function voidSessionGrants(db: Db, session: string, reason: string, now: 
   return voidRows(db, rows, reason, now);
 }
 
+/**
+ * A background notice arrived (the prompt hook saw only notice blocks): the session's live grants
+ * are held, not voided. Each counts one more notice its use must find in Claude's transcript, and
+ * must be checked again. Call inside a transaction.
+ */
+export function holdSessionGrants(db: Db, session: string, now: number): number {
+  const rows = db.query("SELECT id, task_id FROM captain_grants WHERE session_id = ?1 AND consumed_at IS NULL AND voided_at IS NULL AND expires_at > ?2").all(session, now) as { id: string; task_id: string | null }[];
+  for (const row of rows) {
+    db.query("UPDATE captain_grants SET held_prompts = held_prompts + 1, verified_at = NULL WHERE id = ?1").run(row.id);
+    appendEvent(db, { source: "hook", kind: "grant.held", taskId: row.task_id, payload: { grant: row.id, why: "a background notice arrived" }, ts: now });
+  }
+  return rows.length;
+}
+
 /** A confirmed prompt answered the same item: your later word wins, and the chat grant ends. */
 export function voidItemGrants(db: Db, item: string, reason: string, now: number): number {
   const rows = db.query("SELECT id, task_id FROM captain_grants WHERE item = ?1 AND consumed_at IS NULL AND voided_at IS NULL").all(item) as { id: string; task_id: string | null }[];
@@ -357,17 +378,44 @@ function within(dir: string, path: string): boolean {
   }
 }
 
+/** Why a grant cannot be used; `voids` when the grant must also end (you sent a new message). */
+export interface TranscriptProblem {
+  why: string;
+  voids: boolean;
+}
+
 /**
  * Claude's own record of the question and answer: the transcript the session started with,
  * directly in Claude's project folder for the directory `flowryn lead` opened the session in,
  * holding the AskUserQuestion tool use with the same questions and no answers of its own and,
- * after the question was recorded, its tool result with the same answer. Returns why it fails,
- * or null.
+ * after the question was recorded, its tool result with the same answer. After that answer's line
+ * it holds no message you sent (that voids the grant) and at least as many background notices as
+ * the prompt hook held the grant for (fewer: Claude has not written them yet, so a retry may pass).
+ * Returns why it fails, or null.
  */
 export function transcriptProblem(
   g: GrantRow,
   check: { sessionTranscript: string | null; projectsDir: string; cwd: string | null; askedAt: number; inputHash: string; pinnedAt?: number | null },
-): string | null {
+): TranscriptProblem | null {
+  const why = transcriptRecord(g, check);
+  return typeof why === "string" ? { why, voids: false } : laterMessages(g, why.lines.slice(why.answerLine + 1));
+}
+
+/** After your answer: nothing you typed, and every notice the grant was held for. */
+function laterMessages(g: GrantRow, after: readonly string[]): TranscriptProblem | null {
+  const later = countSenders(after);
+  if (later.you > 0) return { why: NEW_MESSAGE, voids: true };
+  if (later.notices < g.held_prompts) {
+    return { why: `Claude's transcript does not yet show ${g.held_prompts - later.notices} of the ${g.held_prompts} messages that arrived after the answer as background notices; retry in a moment`, voids: false };
+  }
+  return null;
+}
+
+/** The question and answer in Claude's transcript, with the lines and the answer's index; or why not. */
+function transcriptRecord(
+  g: GrantRow,
+  check: { sessionTranscript: string | null; projectsDir: string; cwd: string | null; askedAt: number; inputHash: string; pinnedAt?: number | null },
+): string | { lines: string[]; answerLine: number } {
   const pin = check.pinnedAt ?? null;
   if (!check.sessionTranscript || check.sessionTranscript !== g.transcript_path) return "the transcript is not the one this leader session started with";
   if (!within(check.projectsDir, g.transcript_path)) return `the transcript is not inside Claude's projects directory (${check.projectsDir})`;
@@ -385,8 +433,9 @@ export function transcriptProblem(
   }
   let asked = false;
   let prefilled = false;
-  let answered = false;
-  for (const line of lines) {
+  let answerLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
     if (!line.includes(g.tool_use_id)) continue;
     let entry: Record<string, unknown>;
     try {
@@ -408,14 +457,14 @@ export function transcriptProblem(
       }
       if (entry.type === "user" && p.type === "tool_result" && p.tool_use_id === g.tool_use_id) {
         const result = entry.toolUseResult as { answers?: Record<string, unknown> } | undefined;
-        if (result?.answers?.[g.question] === g.answer && Number.isFinite(at) && at >= answeredFrom) answered = true;
+        if (result?.answers?.[g.question] === g.answer && Number.isFinite(at) && at >= answeredFrom && answerLine < 0) answerLine = i;
       }
     }
   }
   if (prefilled) return "the question carried its own answers";
   if (!asked) return "Claude's transcript has no such question";
-  if (!answered) return "Claude's transcript has no such answer from the user";
-  return null;
+  if (answerLine < 0) return "Claude's transcript has no such answer from the user";
+  return { lines, answerLine };
 }
 
 /**
@@ -445,12 +494,19 @@ export function prepareGrant(ctx: { db: Db; now(): number }, ask: GrantAsk, proj
     const asked = ctx.db.query("SELECT created_at, input_hash FROM chat_questions WHERE tool_use_id = ?1").get(g.tool_use_id) as { created_at: number; input_hash: string } | null;
     const problem = asked
       ? transcriptProblem(g, { sessionTranscript: session?.transcript_path ?? null, projectsDir, cwd: session?.cwd ?? null, askedAt: asked.created_at, inputHash: asked.input_hash, pinnedAt: session?.pinned_at ?? null })
-      : "the question was never recorded";
-    if (problem) return refuse(new FlowrynError("approval_required", `grant ${g.id} cannot be used: ${problem}`, problem.endsWith(REPIN_FIX) ? REPIN_HELP : undefined), g.id);
-    tx(ctx.db, () => {
-      ctx.db.query("UPDATE captain_grants SET verified_at = ?2 WHERE id = ?1").run(g!.id, now);
-      appendEvent(ctx.db, { source: "cli", kind: "grant.verified", taskId: g!.task_id, payload: { grant: g!.id }, ts: now });
+      : { why: "the question was never recorded", voids: false };
+    if (problem?.voids) {
+      tx(ctx.db, () => voidRows(ctx.db, [g!], problem.why, now));
+      return refuse(new FlowrynError("approval_required", `grant ${g.id} was voided: ${problem.why}`, `ask the user again: flowryn chat-question ${g.item}`), g.id);
+    }
+    if (problem) return refuse(new FlowrynError("approval_required", `grant ${g.id} cannot be used: ${problem.why}`, problem.why.endsWith(REPIN_FIX) ? REPIN_HELP : undefined), g.id);
+    // A notice the prompt hook held the grant for since this check read the transcript is not checked: verify nothing.
+    const verified = tx(ctx.db, () => {
+      const changed = ctx.db.query("UPDATE captain_grants SET verified_at = ?2 WHERE id = ?1 AND held_prompts = ?3 AND voided_at IS NULL").run(g!.id, now, g!.held_prompts).changes;
+      if (changed > 0) appendEvent(ctx.db, { source: "cli", kind: "grant.verified", taskId: g!.task_id, payload: { grant: g!.id, held: g!.held_prompts }, ts: now });
+      return changed > 0;
     });
+    if (!verified) return refuse(new FlowrynError("approval_required", `grant ${g.id} cannot be used: a message arrived while its transcript was checked; retry in a moment`), g.id);
   }
   return g.id;
 }
@@ -500,6 +556,7 @@ export function grantView(g: GrantRow, now: number): Record<string, unknown> {
     created: new Date(g.created_at).toISOString(),
     expires: new Date(g.expires_at).toISOString(),
     verified: g.verified_at ? new Date(g.verified_at).toISOString() : "-",
+    held: g.held_prompts > 0 ? `across ${g.held_prompts} background notice${g.held_prompts === 1 ? "" : "s"}` : "-",
     state: g.consumed_at !== null ? `used by ${g.consumed_by ?? "?"}` : g.voided_at !== null ? `voided: ${g.void_reason ?? "?"}` : g.expires_at <= now ? "expired" : "live",
   };
 }
