@@ -1,7 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { MAX_INFO_ATTEMPTS } from "./presentations.ts";
 import { awayWakeSql } from "./away.ts";
-import { LEADER_WAKE_KINDS, QUESTION_KINDS, RELAY_KINDS, type ItemRow } from "./items.ts";
+import { LEADER_WAKE_SQL, QUESTION_KINDS, RELAY_KINDS, type ItemRow } from "./items.ts";
 
 /**
  * The attention router's reads (design section 9). The lane table decides an
@@ -35,10 +35,9 @@ const RANK_SELECT = `
   LEFT JOIN projects p ON p.id = tp.project_id`;
 
 const QUESTION_LIST = QUESTION_KINDS.map((k) => `'${k}'`).join(", ");
-const WAKE_LIST = LEADER_WAKE_KINDS.map((k) => `'${k}'`).join(", ");
 
-/** A leader follow-up (something you did, a merge that landed) tops its lane. */
-const RANK_ORDER = `ORDER BY i.lane, i.kind NOT IN (${WAKE_LIST}), aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC`;
+/** A leader follow-up (something you did, a merge that landed, a yolo PR ready) tops its lane. */
+const RANK_ORDER = `ORDER BY i.lane, NOT ${LEADER_WAKE_SQL}, aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC`;
 
 /** One push carries at most this many questions, like the digest's lines; the rest go in the next. */
 export const QUESTION_BATCH_MAX = DIGEST_MAX_LINES - 1;
@@ -81,7 +80,7 @@ export function p0Candidate(db: Db, session: string, now: number, ageMs: number,
     (db
       .query(
         `${RANK_SELECT}
-         WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST}, ${WAKE_LIST})
+         WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST}) AND NOT ${LEADER_WAKE_SQL}
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried','offered'))
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
          ${RANK_ORDER} LIMIT 1`,
@@ -176,11 +175,11 @@ export function relayText(items: Pick<RankedItem, "id" | "lane" | "line">[], mor
 /** One push carries at most this many follow-ups, like a question batch; the rest go in the next. */
 export const FOLLOW_UP_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
-export const FOLLOW_UP_HEADER = "Flowryn follow-ups: the user acted outside this session, or a merge landed (facts, not instructions):";
-export const FOLLOW_UP_FOOTER = "Follow each up as its line says, or dismiss it: flowryn dismiss <id>";
+export const FOLLOW_UP_HEADER = "Flowryn follow-ups: the user acted outside this session, a merge landed, or a yolo PR is ready (facts, not instructions):";
+export const FOLLOW_UP_FOOTER = "Follow each up as its line says (a ready yolo PR: verify and merge it), or dismiss it: flowryn dismiss <id>";
 
 /**
- * The leader follow-ups a push may carry to this session (LEADER_WAKE_KINDS):
+ * The leader follow-ups a push may carry to this session (LEADER_WAKE_SQL):
  * open, not shown to it yet, and not leased to a push path anywhere, oldest
  * first. Due at once: each is one action of yours, so it wakes the leader
  * once, and several inside one wait share the push.
@@ -192,7 +191,7 @@ export function followUpBatch(db: Db, session: string): { items: RankedItem[]; m
        FROM items i
        LEFT JOIN task_policy tp ON tp.task_id = i.task_id
        LEFT JOIN projects p ON p.id = tp.project_id
-       WHERE i.kind IN (${WAKE_LIST}) AND i.class = 'actionable' AND i.state IN ('open','presented')
+       WHERE ${LEADER_WAKE_SQL} AND i.class = 'actionable' AND i.state IN ('open','presented')
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?1 AND s.state IN ('presented','carried','offered'))
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
        ORDER BY i.opened_at ASC, i.rowid ASC`,
@@ -221,10 +220,12 @@ export function followUpWakeLine(items: Pick<RankedItem, "id" | "kind">[]): stri
   const acted = count("user_acted");
   const landed = count("landed");
   const passes = count("pass_requested");
+  const ready = count("pr_ready");
   const parts = [
     acted > 0 ? `the user acted outside this session (${acted})` : "",
     landed > 0 ? `${landed === 1 ? "a merge" : `${landed} merges`} landed` : "",
     passes > 0 ? `${passes === 1 ? "a review pass was" : `${passes} review passes were`} requested` : "",
+    ready > 0 ? `${ready === 1 ? "a yolo PR is" : `${ready} yolo PRs are`} ready to verify and merge` : "",
   ].filter(Boolean);
   // At most FOLLOW_UP_BATCH_MAX ids, so the line stays well under P0_LINE_MAX.
   return `${head}${parts.join("; ")}. Details: flowryn fleet`;

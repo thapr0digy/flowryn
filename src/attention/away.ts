@@ -1,6 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
+import { getLease, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import type { ItemKind } from "./items.ts";
 
@@ -9,7 +10,9 @@ import type { ItemKind } from "./items.ts";
  * expiry and your words in the meta table; `flowryn back` or the expiry ends
  * it. While away, every new item that needs you wakes the leader as a P0
  * would, so it reaches you in the remote-control chat. It changes delivery
- * only: no approval, gate, merge or decision rule reads it.
+ * only: no approval, gate, merge or decision rule reads it. After `[away]
+ * auto_after_min` with no input from you, the daemon starts it by itself
+ * (autoAway, `by: "auto"`), and your next own message ends that one.
  */
 
 const AWAY_KEY = "away";
@@ -24,19 +27,23 @@ export interface AwayPosture {
   since: number;
   until: number;
   words: string | null;
-  /** The role that ran `flowryn away`: human (your terminal) or leader (on your words in chat). */
+  /** The role that ran `flowryn away`: human (your terminal) or leader (on your words in chat); AUTO_AWAY_BY when the daemon started it. */
   by: string;
   /** The start of an expired away whose unshown brief this one folded in: the return brief starts here. */
   brief_since?: number;
 }
 
-export type AwayEndReason = "back" | "expired";
+/** back: `flowryn back`; expired: its expiry; returned: your own message ended an automatic away. */
+export type AwayEndReason = "back" | "expired" | "returned";
+
+/** The `by` of an away the daemon started after your inactivity (autoAway). */
+export const AUTO_AWAY_BY = "auto";
 
 export interface AwayEnded {
   since: number;
   ended_at: number;
   reason: AwayEndReason;
-  /** The return brief waits for your next message (an expiry); `back` prints it at once. */
+  /** The return brief waits for your next message (an expiry, or your return); `back` prints it at once. */
   brief_pending: boolean;
 }
 
@@ -86,16 +93,24 @@ export function lastAway(db: Db): AwayEnded | null {
   return parse<AwayEnded>(getMeta(db, LAST_KEY));
 }
 
-/** Start away, or extend it (a new expiry and words; the start stays). A start after an expiry whose brief was never shown carries that away's start for its brief. Call inside a transaction. */
-export function startAway(db: Db, input: { until: number; words: string | null; by: string; now: number }): { posture: AwayPosture; extended: boolean } {
+/**
+ * Start away, or extend it (a new expiry, words and `by`; the start stays). A
+ * start after an expiry whose brief was never shown carries that away's start
+ * for its brief. `since` backdates a new start (autoAway: when you went
+ * inactive). Call inside a transaction.
+ */
+export function startAway(
+  db: Db,
+  input: { until: number; words: string | null; by: string; now: number; since?: number; source?: "cli" | "daemon" },
+): { posture: AwayPosture; extended: boolean } {
   const current = getAway(db, input.now);
   const unshown = current ? null : foldPendingBrief(db, input.now);
   const words = input.words === null ? (current?.words ?? null) : sanitizeLine(input.words, AWAY_WORDS_MAX) || null;
   const briefSince = current ? current.brief_since : unshown?.since;
-  const posture: AwayPosture = { since: current?.since ?? input.now, until: input.until, words, by: input.by, ...(briefSince === undefined ? {} : { brief_since: briefSince }) };
+  const posture: AwayPosture = { since: current?.since ?? Math.min(input.since ?? input.now, input.now), until: input.until, words, by: input.by, ...(briefSince === undefined ? {} : { brief_since: briefSince }) };
   setMeta(db, AWAY_KEY, JSON.stringify(posture));
   const payload = { since: posture.since, until: posture.until, by: input.by, words, ...(unshown ? { folded: true } : {}) };
-  appendEvent(db, { source: "cli", kind: current ? "away.extended" : "away.started", payload, ts: input.now });
+  appendEvent(db, { source: input.source ?? "cli", kind: current ? "away.extended" : "away.started", payload, ts: input.now });
   return { posture, extended: current !== null };
 }
 
@@ -115,11 +130,41 @@ function foldPendingBrief(db: Db, now: number): AwayEnded | null {
 export function endAway(db: Db, reason: AwayEndReason, now: number): AwayEnded | null {
   const away = storedAway(db);
   if (!away) return null;
-  const ended: AwayEnded = { since: away.brief_since ?? away.since, ended_at: reason === "expired" ? Math.min(away.until, now) : now, reason, brief_pending: reason === "expired" };
+  const ended: AwayEnded = { since: away.brief_since ?? away.since, ended_at: reason === "expired" ? Math.min(away.until, now) : now, reason, brief_pending: reason !== "back" };
   setMeta(db, AWAY_KEY, "");
   setMeta(db, LAST_KEY, JSON.stringify(ended));
-  appendEvent(db, { source: reason === "expired" ? "daemon" : "cli", kind: "away.ended", payload: { since: ended.since, ended_at: ended.ended_at, reason }, ts: now });
+  appendEvent(db, { source: END_SOURCE[reason], kind: "away.ended", payload: { since: ended.since, ended_at: ended.ended_at, reason }, ts: now });
   return ended;
+}
+
+const END_SOURCE: Record<AwayEndReason, "cli" | "daemon" | "hook"> = { back: "cli", expired: "daemon", returned: "hook" };
+
+/**
+ * Start away by itself once you have been inactive `afterMs` (`[away]
+ * auto_after_min`; 0 never): the lease holder's `user_inactive_since`, set by
+ * Claude's idle_prompt or the Pi extension, is at least that old and no away
+ * is on. It starts when you went inactive, so what opened while you were
+ * gone and still waits wakes the leader now, and the brief covers the whole
+ * absence. It runs until your next own message (endAutoAway), `flowryn back`
+ * or AWAY_MAX_MS. Null when it did not start. Call inside a transaction.
+ */
+export function autoAway(db: Db, input: { afterMs: number; now: number }): AwayPosture | null {
+  const inactiveSince = holderInactiveSince(db);
+  if (input.afterMs <= 0 || inactiveSince === null || input.now - inactiveSince < input.afterMs) return null;
+  if (getAway(db, input.now)) return null;
+  return startAway(db, { until: input.now + AWAY_MAX_MS, words: null, by: AUTO_AWAY_BY, now: input.now, since: inactiveSince, source: "daemon" }).posture;
+}
+
+/** When you went inactive in the lease holder's session; null with no open holder (nobody could be woken) or while you are active. */
+function holderInactiveSince(db: Db): number | null {
+  const holder = getLease(db).session_id;
+  const session = holder ? getSession(db, holder) : null;
+  return session && session.ended_at === null ? session.user_inactive_since : null;
+}
+
+/** Your own message (or Pi's report that you are active) ends an automatic away; its brief rides your next message. A manual one stays. Call inside a transaction. */
+export function endAutoAway(db: Db, now: number): AwayEnded | null {
+  return getAway(db, now)?.by === AUTO_AWAY_BY ? endAway(db, "returned", now) : null;
 }
 
 /** End away if its expiry has passed (the daemon's pass, and any away verb). Call inside a transaction. */
@@ -175,6 +220,8 @@ export function clockLabel(ts: number, now: number): string {
 
 /** The one line the briefing and `fleet` carry while you are away. */
 export function awayLine(away: AwayPosture, now: number): string {
+  if (away.by === AUTO_AWAY_BY)
+    return `Away (automatic: no input from the user since ${clockLabel(away.since, now)}); the user's next message ends it. Items that need the user wake the leader; flowryn back ends it.`;
   const words = away.words ? `: "${sanitizeLine(away.words, 120)}"` : "";
   return `Away since ${clockLabel(away.since, now)} until ${clockLabel(away.until, now)}${words}. Items that need the user wake the leader; flowryn back ends it.`;
 }
