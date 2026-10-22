@@ -647,6 +647,17 @@ const MERGE_LOCAL_GREEN_SQL = /* sql */ `
 ALTER TABLE merges ADD COLUMN local_green TEXT;
 `;
 
+/**
+ * Migration 28: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
+ * dispatch because a resume must stay in the login that holds the session; a plan phase's `account:`
+ * line waits beside its harness. Rows from before name their harness's implicit account.
+ */
+const ACCOUNTS_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN account TEXT;
+UPDATE runs SET account = harness;
+ALTER TABLE plan_phases ADD COLUMN account TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -675,6 +686,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
   { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
+  { version: 28, name: "accounts", sql: ACCOUNTS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

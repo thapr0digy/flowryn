@@ -6,8 +6,10 @@ import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { findOpenItem, openItem } from "../attention/items.ts";
-import type { FlowrynConfig } from "../config/config.ts";
+import { resolveTool, type FlowrynConfig } from "../config/config.ts";
+import { resolveAccount, type Account } from "../config/accounts.ts";
 import { herdrConfig, workersConfig } from "../config/workers.ts";
+import { accountSignIn } from "../harness/sign-in.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
@@ -61,7 +63,17 @@ export interface StartDeps {
   harnessVersion(harness: HarnessId, binary: string): Promise<string | null>;
   /** `git -C <cwd> <args>`: stdout trimmed, or null on failure. */
   git(cwd: string, args: string[]): Promise<string | null>;
+  /** Null when the account's login is signed in, else why not; default: ask the harness (src/harness/sign-in.ts). */
+  signIn?(account: Account): Promise<string | null>;
   now(): number;
+}
+
+/** The sign-in check against the harness binary Flowryn resolved. */
+export async function signInOf(config: FlowrynConfig, account: Account): Promise<string | null> {
+  if (!account.declared) return null;
+  const binary = resolveTool(config, account.harness);
+  if (!binary) return `${account.harness} is not installed or not in [tools]`;
+  return accountSignIn(account, binary);
 }
 
 export function startDepsOf(ctx: HandlerCtx): StartDeps {
@@ -74,6 +86,7 @@ export function startDepsOf(ctx: HandlerCtx): StartDeps {
       const result = await ctx.runTool("git", ["-C", cwd, ...args]);
       return result.exitCode === 0 ? result.stdout.trim() : null;
     },
+    signIn: (account) => signInOf(ctx.config(), account),
     now: ctx.now,
   };
 }
@@ -112,11 +125,14 @@ function herdrRefusal(deps: StartDeps, message: string, detail: string): Flowryn
 }
 
 /**
- * Can a worker start on this project now? Herdr reachable, the harness
- * installed with a passing contract for its version, and the primary checkout
- * on its default branch (the base the worktree branches from).
+ * Can a worker start on this project now? Herdr reachable, the account's
+ * harness installed with a passing contract for its version, the account
+ * signed in, and the primary checkout on its default branch (the base the
+ * worktree branches from). The account was resolved for this project, so its
+ * scope already matched.
  */
-export async function checkStart(deps: StartDeps, project: ProjectRow, harness: HarnessId): Promise<{ version: string; base: string }> {
+export async function checkStart(deps: StartDeps, project: ProjectRow, account: Account): Promise<{ version: string; base: string }> {
+  const harness = account.harness;
   const runtime = deps.runtime();
   if (!runtime) throw herdrRefusal(deps, "Herdr is not configured or its socket was not found, so no worker can start", "no Herdr socket");
   try {
@@ -129,6 +145,8 @@ export async function checkStart(deps: StartDeps, project: ProjectRow, harness: 
   const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
   if (check.state !== "verified") throw harnessRefusal(check, deps.db, deps.config());
   const version = check.version;
+  const signedOut = await (deps.signIn ? deps.signIn(account) : signInOf(deps.config(), account));
+  if (signedOut !== null) throw new FlowrynError("account_signed_out", signedOut, "flowryn accounts");
   const branch = await deps.git(project.path, ["branch", "--show-current"]);
   if (branch !== project.default_branch) {
     recordTangle(deps, project, branch || null);
@@ -147,7 +165,7 @@ export interface NewRun {
   body: string;
   project: ProjectRow;
   kind: TaskKind;
-  harness: HarnessId;
+  account: Account;
   version: string;
   base: string;
   workflow: WorkflowDef;
@@ -174,8 +192,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   if (existsSync(worktree)) throw new FlowrynError("already_exists", `${worktree} already exists`);
   if (openRunForTask(db, r.taskId)) throw new FlowrynError("already_exists", `${r.taskId} already has a run`);
   if (isDropped(db, r.taskId)) throw new FlowrynError("not_found", `${r.taskId} was dropped`, `flowryn show ${r.taskId}`);
-  const model = r.harness === "claude" ? workers.claude.model : workers.pi.model;
-  const effort = r.harness === "claude" ? workers.claude.effort : workers.pi.effort;
+  const { harness, model, effort } = r.account;
   db.query(
     `INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, auto, created_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
@@ -186,9 +203,9 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, model, effort, state, liveness, workflow, stage,
        agent_session, worktree_path, branch, base_sha, token_hash, started_at, updated_at,
-       stage_state, waiting_since, pending_launch)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'launching', 'starting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'waiting', ?14, 'fresh')`,
-  ).run(runId, r.taskId, r.harness, r.version, model, effort, r.workflow.id, first.id, randomUUID(), worktree, `${workers.branch_prefix}${r.taskId}`, r.base, hashToken(mintToken("run")), r.now);
+       stage_state, waiting_since, pending_launch, account)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'launching', 'starting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'waiting', ?14, 'fresh', ?15)`,
+  ).run(runId, r.taskId, harness, r.version, model, effort, r.workflow.id, first.id, randomUUID(), worktree, `${workers.branch_prefix}${r.taskId}`, r.base, hashToken(mintToken("run")), r.now, r.account.id);
   const source: EventSource = r.by === "scheduler" ? "daemon" : "cli";
   dismissEarlierRunsQuestions(db, r.taskId, runId, r.now, source);
   const intent = r.existing
@@ -202,7 +219,9 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
     payload: {
       project: r.project.id,
       kind: r.kind,
-      harness: r.harness,
+      harness,
+      account: r.account.id,
+      scope: r.account.scope,
       version: r.version,
       title: r.title,
       body: r.body,
@@ -227,15 +246,29 @@ export interface ModeOverride {
 }
 
 type DispatchPlan =
-  | { mode: "now"; project: ProjectRow; harness: HarnessId; version: string; base: string; override: ModeOverride | null }
-  | { mode: "task"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string; override: ModeOverride | null }
-  | { mode: "queued"; project: ProjectRow; harness: HarnessId; version: string; base: string; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
-  | { mode: "queue"; project: ProjectRow; harness: HarnessId; blockedBy: string[]; override: ModeOverride | null };
+  | { mode: "now"; project: ProjectRow; account: Account; version: string; base: string; override: ModeOverride | null }
+  | { mode: "task"; project: ProjectRow; account: Account; version: string; base: string; taskId: string; override: ModeOverride | null }
+  | { mode: "queued"; project: ProjectRow; account: Account; version: string; base: string; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
+  | { mode: "queue"; project: ProjectRow; account: Account; blockedBy: string[]; override: ModeOverride | null };
 
-function harnessArg(args: Record<string, unknown>, fallback: HarnessId): HarnessId {
-  const harness = (stringArg(args as never, "harness") ?? fallback) as HarnessId;
+/** --harness when given: claude or pi. */
+export function harnessFlag(args: Record<string, unknown>): HarnessId | null {
+  const harness = stringArg(args as never, "harness");
+  if (harness === undefined) return null;
   if (!(HARNESS_IDS as readonly string[]).includes(harness)) throw new FlowrynError("bad_args", "--harness must be claude or pi");
-  return harness;
+  return harness as HarnessId;
+}
+
+/**
+ * The account a start uses (src/config/accounts.ts): --account, else what
+ * the task stored (a plan phase's account: and harness: lines; --harness
+ * replaces a stored account), else the project's account and its scope's
+ * default. An account outside the project's scope refuses.
+ */
+export function accountFor(config: FlowrynConfig, project: ProjectRow, args: Record<string, unknown>, stored: { account?: string | null; harness?: HarnessId | null } = {}): Account {
+  const harness = harnessFlag(args);
+  const account = stringArg(args as never, "account") ?? (harness ? null : (stored.account ?? null));
+  return resolveAccount(config, project, { account, harness: harness ?? stored.harness ?? null });
 }
 
 /** A per-task delivery mode (cutover C3): with a reason, never local-only on a project that pushes, and never a pushing mode on a project with no remote. */
@@ -292,8 +325,8 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
       if (queued.project_id !== project.id) throw new FlowrynError("not_found", `${taskId} belongs to project ${queued.project_id}`);
       const waiting = waitingOn(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, []);
       if (waiting.length > 0) throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${waiting.join(", ")} to land`);
-      const harness = harnessArg(args, project.harness);
-      return { mode: "queued", project, harness, taskId, kind: queued.kind, title: queued.title, body: queued.body, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+      const account = accountFor(ctx.config(), project, args);
+      return { mode: "queued", project, account, taskId, kind: queued.kind, title: queued.title, body: queued.body, override, ...(await checkStart(startDepsOf(ctx), project, account)) };
     }
     // Start a Queued task yourself (a plan phase, or a dispatch that waited): its blockers must have landed.
     const phase = phaseOfTask(ctx.db, taskId);
@@ -302,12 +335,12 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     if (openRunForTask(ctx.db, taskId)) throw new FlowrynError("already_exists", `${taskId} already has a run`, `flowryn show ${taskId}`);
     const waiting = waitingOn(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, JSON.parse(phase.blocked_by) as string[]);
     if (waiting.length > 0) throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${waiting.join(", ")} to land`, "a phase starts only after its blockers have landed, never on an open PR");
-    const harness = harnessArg(args, (phase.harness as HarnessId | null) ?? project.harness);
-    return { mode: "task", project, harness, taskId, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+    const account = accountFor(ctx.config(), project, args, { account: phase.account, harness: phase.harness as HarnessId | null });
+    return { mode: "task", project, account, taskId, override, ...(await checkStart(startDepsOf(ctx), project, account)) };
   }
   const kind = stringArg(args as never, "kind");
   if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship or scout");
-  const harness = harnessArg(args, project.harness);
+  const account = accountFor(ctx.config(), project, args);
   const blockedBy = (args["blocked-by"] as string[] | undefined) ?? [];
   if (blockedBy.length > 0) {
     if (kind !== "ship") throw new FlowrynError("bad_args", "a task that waits for others is a ship");
@@ -318,10 +351,10 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     if (unshipped.length > 0) {
       throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, "wait for the report yourself, then dispatch");
     }
-    return { mode: "queue", project, harness, blockedBy, override };
+    return { mode: "queue", project, account, blockedBy, override };
   }
   if (boolArg(args as never, "auto")) throw new FlowrynError("bad_args", "--auto goes with --blocked-by: a task that starts by itself once its blockers land");
-  return { mode: "now", project, harness, override, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+  return { mode: "now", project, account, override, ...(await checkStart(startDepsOf(ctx), project, account)) };
 }
 
 /**
@@ -341,6 +374,7 @@ export const dispatchVerb: VerbSpec = {
     "body-file": { type: "string", help: "the task, from a file or - for stdin", fileFor: "body" },
     title: { type: "string", help: "backlog title (default: the body's first line)", placeholder: "text" },
     harness: { type: "string", help: "claude or pi (default: the project's)", placeholder: "harness" },
+    account: { type: "string", help: "the account to run on, from [accounts] (default: the project's, else its scope's); never one outside the project's scope", placeholder: "id" },
     sensitive: { type: "boolean", help: "security-relevant: merges need a human record even under yolo" },
     workflow: { type: "string", help: "the workflow: feature, feature-ui (with visual QA), fix, or one from [workflows] (default: the project's; scouts: scout)", placeholder: "id" },
     "blocked-by": { type: "list", help: "file it Queued until these tasks land (repeatable)", placeholder: "task" },
@@ -359,15 +393,15 @@ export const dispatchVerb: VerbSpec = {
     if (plan.mode === "task") {
       const phase = phaseOfTask(ctx.db, plan.taskId)!;
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? phase.workflow, "ship");
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", account: plan.account, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
-      return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
+      return { data: { task: plan.taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
     }
     if (plan.mode === "queued") {
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? (plan.kind === "scout" ? "scout" : plan.project.workflow), plan.kind);
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: plan.title, body: plan.body, project: plan.project, kind: plan.kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: plan.title, body: plan.body, project: plan.project, kind: plan.kind, account: plan.account, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
-      return { data: { task: plan.taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`] };
+      return { data: { task: plan.taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, mode: plan.override?.mode ?? plan.project.delivery_mode, workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`] };
     }
     const kind = stringArg(args, "kind") as TaskKind;
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim();
@@ -379,11 +413,11 @@ export const dispatchVerb: VerbSpec = {
       const filed = recordPlan(ctx.db, {
         project: plan.project,
         title,
-        phases: [{ title, body, workflow: workflow.id, harness: plan.harness, after: null }],
+        phases: [{ title, body, workflow: workflow.id, harness: plan.account.harness, account: plan.account.id, after: null }],
         sourceTask: null,
         gateId: null,
         workflow: workflow.id,
-        harness: plan.harness,
+        harness: plan.account.harness,
         blockedBy: plan.blockedBy,
         override: plan.override,
         filedBy: ctx.caller.role,
@@ -401,10 +435,10 @@ export const dispatchVerb: VerbSpec = {
       };
     }
     const taskId = mintTaskId(title, takenIds(ctx.db));
-    const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, harness: plan.harness, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, override: plan.override, now });
+    const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, account: plan.account, version: plan.version, base: plan.base, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, override: plan.override, now });
     applyModeOverride(ctx.db, taskId, plan.override);
     return {
-      data: { task: taskId, run: runId, harness: `${plan.harness} ${plan.version}`, mode: plan.override?.mode ?? plan.project.delivery_mode, yolo: plan.project.yolo ? "on" : "off", workflow: workflow.id, state: "launching" },
+      data: { task: taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, mode: plan.override?.mode ?? plan.project.delivery_mode, yolo: plan.project.yolo ? "on" : "off", workflow: workflow.id, state: "launching" },
       hints: [`flowryn show ${taskId}`, "flowryn fleet"],
     };
   },
@@ -440,6 +474,7 @@ export const planVerb: VerbSpec = {
     title: { type: "string", help: "the plan's title (default: its # heading)", placeholder: "text" },
     workflow: { type: "string", help: "the phases' workflow (default: the project's; a phase's workflow: line wins)", placeholder: "id" },
     harness: { type: "string", help: "claude or pi (default: the project's; a phase's harness: line wins)", placeholder: "harness" },
+    account: { type: "string", help: "the phases' account (default: the project's, else its scope's; a phase's account: line wins)", placeholder: "id" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -450,12 +485,16 @@ export const planVerb: VerbSpec = {
     const parsed = parsePlan(stringArg(args, "body") ?? "");
     const config = ctx.config();
     const workflow = stringArg(args, "workflow") ?? project.workflow;
-    const harness = harnessArg(args, project.harness);
+    // Each phase's account is checked now, so a phase outside the project's scope refuses at filing, not when it would start.
+    const fallback = accountFor(config, project, args);
+    const account = stringArg(args, "account") ?? null;
+    for (const phase of parsed.phases) accountFor(config, project, {}, { account: phase.account ?? (phase.harness ? null : account), harness: phase.harness ?? fallback.harness });
+    const harness = fallback.harness;
     for (const phase of parsed.phases) workflowFor(config, phase.workflow ?? workflow, "ship");
     workflowFor(config, workflow, "ship");
     const now = ctx.now();
     const title = stringArg(args, "title") ?? parsed.title ?? parsed.phases[0]!.title;
-    const filed = recordPlan(ctx.db, { project, title, phases: parsed.phases, sourceTask: null, gateId: null, workflow, harness, filedBy: ctx.caller.role, state: "approved", now });
+    const filed = recordPlan(ctx.db, { project, title, phases: parsed.phases, sourceTask: null, gateId: null, workflow, harness, account, filedBy: ctx.caller.role, state: "approved", now });
     return {
       data: {
         plan: filed.id,

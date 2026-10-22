@@ -793,6 +793,8 @@ const show: VerbSpec = {
         project: policy.project_id,
         mode: policy.mode_reason ? `${policy.delivery_mode} (${policy.mode_reason})` : policy.delivery_mode,
         harness: `${run.harness} ${run.harness_version}`,
+        // Only a declared account: the implicit one is named after its harness, already shown.
+        ...(run.account && run.account !== run.harness ? { account: run.account } : {}),
         state: run.state,
         liveness: run.liveness,
         ...waitingView(ctx, run.id, boolArg(args, "why")),

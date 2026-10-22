@@ -185,6 +185,20 @@ describe("migrations", () => {
     db.close();
   });
 
+  test("a run gains its account: runs from before name their harness's implicit account; plan phases carry none", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 27));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('p', 'u', '/p', 'main', 'local-only')");
+    db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('t1', 'p', 'ship', 'local-only', 0, 'fix', 1)");
+    db.exec(`INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+             VALUES ('r1', 't1', 'pi', 'v', 'running', 'busy', 'fix', 'build', '/w', 'b', 's', 'h', 1, 1)`);
+    expect(migrate(db, MIGRATIONS.slice(0, 28))).toEqual([28]);
+    expect(db.query("SELECT id, account FROM runs").all()).toEqual([{ id: "r1", account: "pi" }]);
+    expect(db.query("SELECT name FROM pragma_table_info('plan_phases') WHERE name = 'account'").all()).toEqual([{ name: "account" }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 28))).toEqual([]);
+    db.close();
+  });
+
   test("an item gains a whole-line column; items opened before it carry none", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 14));
