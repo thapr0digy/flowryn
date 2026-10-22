@@ -1,4 +1,4 @@
-import { openItem } from "../attention/items.ts";
+import { openItem, resolveItems } from "../attention/items.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type Caller, type DaemonInfo, type VerbSpec } from "../api/verbs.ts";
 import type { FlowrynConfig } from "../config/config.ts";
@@ -6,7 +6,7 @@ import { policyMode } from "../config/policy.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
-import { noteContractPassed } from "../lifecycle/harness-gate.ts";
+import { harnessItemKey, noteContractPassed } from "../lifecycle/harness-gate.ts";
 import { checkLeaderReport, leaderRecordLine, recordGrant } from "./grant.ts";
 import { reportFacts, type ReportFacts } from "./report.ts";
 import { contractRevision } from "./revision.ts";
@@ -53,7 +53,14 @@ export function recordPass(db: Db, pass: PassRecord, now: number): number {
     ts: now,
   });
   noteContractPassed(db, pass.harness, pass.version, pass.revision, now);
+  // A newer record supersedes the harness's earlier contract_recorded item: one stays open per harness.
+  resolveItems(db, "contract_recorded", harnessItemKey(pass.harness), `superseded by ${pass.harness} ${pass.version}`, now);
   return event.seq;
+}
+
+/** Open the contract_recorded item for a record, keyed by its harness so the next record supersedes it (recordPass). Call inside the record's transaction. */
+export function openContractRecorded(db: Db, harness: HarnessId, eventSeq: number, line: string, now: number): string {
+  return openItem(db, { kind: "contract_recorded", eventSeq, taskId: harnessItemKey(harness), line, now });
 }
 
 const VERSION = /^\d+\.\d+\.\d+[\w.+-]*$/;
@@ -101,7 +108,7 @@ export const recordContract: VerbSpec = {
     const facts = reportFacts(report, harness, version);
     const now = ctx.now();
     const seq = recordPass(ctx.db, { harness: harness as HarnessId, version, report, by: ctx.caller.role, build, session: ctx.caller.session ?? null, source: "cli", ...facts }, now);
-    if (byLeader) openItem(ctx.db, { kind: "contract_recorded", eventSeq: seq, line: leaderRecordLine(harness, version, build), now });
+    if (byLeader) openContractRecorded(ctx.db, harness as HarnessId, seq, leaderRecordLine(harness, version, build), now);
     return { data: { harness, version, revision: facts.revision, current: facts.revision === required, required_revision: required, recorded: true, by: ctx.caller.role } };
   },
   async settle(ctx, result) {

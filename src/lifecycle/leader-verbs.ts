@@ -412,7 +412,8 @@ const fleet: VerbSpec = {
       steer: steerBrief(ctx.db, r.id, ctx.now),
       needs: needs(ctx, r),
     }));
-    const lanes = ctx.db.query("SELECT lane, COUNT(*) AS n FROM items WHERE state IN ('open','presented') GROUP BY lane").all() as { lane: string; n: number }[];
+    // Only what needs you counts, as in the briefing's "Needs you": informational items are on the board.
+    const lanes = ctx.db.query("SELECT lane, COUNT(*) AS n FROM items WHERE class = 'actionable' AND state IN ('open','presented') GROUP BY lane").all() as { lane: string; n: number }[];
     const count = (lane: string) => lanes.find((l) => l.lane === lane)?.n ?? 0;
     const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}`, capacity: capacityLine(ctx) };
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;

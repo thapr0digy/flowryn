@@ -54,7 +54,7 @@ An account is a harness choice too: `--account chatgpt --harness claude` refuses
 
 **A project's scope** is `[projects.<id>] scope`, else the one `[scopes.*]` whose `paths` (a directory prefix, compared by real path) or `remotes` (a prefix of the repository URL, normalized from `git@host:o/r.git`, `https://host/o/r` or `ssh://…` to `host/o/r`) match, else `[scopes] default`. An explicit scope that a rule contradicts refuses, and so does a project two scopes match: a mistyped tag must never quietly win.
 
-The run records its account (`runs.account`, migration 28). A resume or relaunch always uses it, because Claude keeps the session inside the account's own directory. If the account was removed from config, or moved out of the project's scope, the launch refuses.
+The run records its account (`runs.account`, migration 29). A resume or relaunch always uses it, because Claude keeps the session inside the account's own directory. If the account was removed from config, or moved out of the project's scope, the launch refuses.
 
 ## Without `[accounts]`
 
@@ -87,6 +87,6 @@ A signed-out account refuses the dispatch with `account_signed_out` (exit 69) an
 ## Tests
 
 - `test/unit/accounts.test.ts`: parsing and refusals, scope rules (path prefix, remote forms, contradiction, ambiguity), the resolution order, the scope guard with no override, resume on the recorded account, launch env per account, the shim unsetting names (the assumption that was wrong), the sign-in check ignoring an inherited key, Pi's fallback, and the `account:` plan line.
-- `test/unit/db.test.ts`: migration 28 backfills `runs.account` with the harness.
+- `test/unit/db.test.ts`: migration 29 backfills `runs.account` with the harness.
 - `test/integration/accounts.test.ts`: through the real CLI and daemon with a fake Herdr. A work project dispatches onto the work login with the credentials unset in its pane; `--account` and a plan phase onto the personal account refuse; a signed-out account refuses with its login command; `flowryn accounts` shows the project's scope and account.
 - Live, 2026-10-22: `doctor --contracts --verify-only` passed Claude 2.1.308 (revision 2, through the new shim) and Pi 0.87.1. The full `bun test` run under a load average of about 20 (parallel ships) had timing failures in files this change does not touch (external-ops, operations, capacity, drop, turn-end-guard). Run again on their own, they passed, apart from one 300 ms budget in external-ops, which then passed twice.
