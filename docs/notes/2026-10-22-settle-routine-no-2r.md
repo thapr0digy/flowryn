@@ -13,7 +13,7 @@ Plain code, no model: a table lookup over fields no-mistakes itself prints.
 1. The worker asks as today, with one new flag: `$FLOWRYN_BIN ask --nomistakes --options approve,fix,skip --blocks … --body-file -`.
 2. The ask's `prepare` (async, before the transaction) reads the facts itself, never from the worker's text:
    - `no-mistakes axi status` in the run's worktree (`readNmStatus`, `parseNmStatus`), which must be the worktree's own parked run (`ownParkedRun`): the gate step and the findings table `{id,severity,file,line,action,description}`;
-   - the branch's diff against `origin/<default branch>` at the run's `head_sha`: `git diff --name-status <base> <head>` and, for findings with a line, `git diff -U0 <base> <head> -- <file>` hunk ranges.
+   - the branch's diff from its merge base with `origin/<default branch>` to the parked run's head: `git diff --name-status -M <base> <head>` and the new-side hunk ranges of `git diff -U0 --src-prefix=a/ --dst-prefix=b/ <base> <head>` (prefixes pinned, so a user's `diff.noprefix` cannot hide them).
 3. Each `ask-user` finding gets a file class:
 
    | class | meaning |
