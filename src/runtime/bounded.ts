@@ -84,6 +84,26 @@ export function configureOwnedProcesses(config: OwnedConfig | null): void {
   owned = config;
 }
 
+/** A call whose deadline waits on a gate: what it is, and its leader's exit, so the gate can stop waiting once it is moot. */
+export interface GatedCall {
+  pid: number;
+  label: string;
+  exited: Promise<unknown>;
+}
+
+let deadlineGate: ((call: GatedCall) => Promise<void>) | null = null;
+
+/**
+ * Tests only: each call's deadline starts once the gate resolves (or rejects)
+ * rather than at its spawn, so a test's short deadline counts from the moment
+ * its fake tool is up and silent, not from an exec whose latency it does not
+ * control (a freshly written script's first exec on macOS waits on
+ * syspolicyd). Null restores the deadline from spawn.
+ */
+export function gateDeadlines(gate: ((call: GatedCall) => Promise<void>) | null): void {
+  deadlineGate = gate;
+}
+
 export function ownedLedgerDir(): string | null {
   return owned?.dir ?? null;
 }
@@ -210,15 +230,23 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
   const err = opts.outputFd === undefined && opts.stderr !== "ignore" ? collect(proc.stderr as ReadableStream<Uint8Array>, max) : null;
 
   let timedOut = false;
+  let exited = false;
   let killAt = Infinity;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    send(target, "SIGTERM");
-    killAt = Date.now() + graceMs;
-    graceTimer = setTimeout(() => send(target, "SIGKILL"), graceMs);
-  }, opts.timeoutMs);
+  const arm = (): void => {
+    if (exited) return;
+    timer = setTimeout(() => {
+      timedOut = true;
+      send(target, "SIGTERM");
+      killAt = Date.now() + graceMs;
+      graceTimer = setTimeout(() => send(target, "SIGKILL"), graceMs);
+    }, opts.timeoutMs);
+  };
+  if (deadlineGate) deadlineGate({ pid, label: opts.label, exited: proc.exited }).then(arm, arm);
+  else arm();
   await proc.exited;
+  exited = true;
   clearTimeout(timer);
 
   let leftover = false;
