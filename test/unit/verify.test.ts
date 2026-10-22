@@ -651,7 +651,7 @@ describe("migration 27", () => {
       db.exec("PRAGMA foreign_keys = OFF");
       db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state, detail) VALUES ('mg1', 't', 'u', 'h', 'a1', 1, 'merged', 'local green v3')");
       db.exec("PRAGMA foreign_keys = ON");
-      expect(migrate(db)).toEqual([27]);
+      expect(migrate(db, MIGRATIONS.slice(0, 27))).toEqual([27]);
       expect(db.query("SELECT id, detail, local_green FROM merges").all()).toEqual([{ id: "mg1", detail: "local green v3", local_green: null }]);
       db.close();
     } finally {
