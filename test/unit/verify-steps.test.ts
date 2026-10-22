@@ -9,7 +9,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { isAlive, readIdentity, terminate, type ProcIdentity } from "../../src/runtime/proc.ts";
 import { grantJobLease, liveCounts, recordJobProcess } from "../../src/sched/pools.ts";
-import { flatSteps, verifyConfig, type VerifyItem } from "../../src/verify/config.ts";
+import { verifyConfig, type VerifyItem } from "../../src/verify/config.ts";
 import { deadlineLine, STEP_DEADLINE_FLOOR_MS, stepDeadlines } from "../../src/verify/deadline.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { groupRows, initialSteps, recoverVerifications, retryLogName, runVerification, stepGroups, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
@@ -133,7 +133,7 @@ describe("verify groups and verify_step_timeout_min in config", () => {
     const read = verifyConfig(config('[projects.web]\nverify = [\n  "bun install",\n  ["bun run typecheck", "npx oxlint"],\n  ["bun test"],\n]\nverify_step_timeout_min = 4\n'), "web")!;
     expect(read.steps).toEqual(["bun install", ["bun run typecheck", "npx oxlint"], "bun test"]);
     expect(read.step_timeout_ms).toBe(240_000);
-    expect(flatSteps(read.steps)).toEqual(["bun install", "bun run typecheck", "npx oxlint", "bun test"]);
+    expect(initialSteps(read.steps).map((s) => s.name)).toEqual(["bun install", "bun run typecheck", "npx oxlint", "bun test"]);
     expect(verifyConfig(config('[projects.web]\nverify = ["true"]\n'), "web")!.step_timeout_ms).toBeNull();
   });
 

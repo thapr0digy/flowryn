@@ -457,7 +457,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       let result: StepResult = { exit: 127, timedOut: null, stopped: false };
       step.hangs = 0;
       for (let attempt = 1; attempt <= 2; attempt++) {
-        if (attempt > 1 && stoppedBy() !== null) {
+        if (stoppedBy() !== null) {
           result = { ...result, stopped: true };
           break;
         }
@@ -495,14 +495,23 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       if (job.aborted) return stopped();
       let failedBy: string | null = null;
       const handles: StepHandle[] = group.map(() => ({ stop() {} }));
-      await Promise.all(
+      const stopSiblings = (k: number) => handles.forEach((h, j) => j !== k && h.stop());
+      const settled = await Promise.allSettled(
         group.map(async (i, k) => {
-          await runOne(i, handles[k]!, () => failedBy);
+          try {
+            await runOne(i, handles[k]!, () => failedBy);
+          } catch (error) {
+            failedBy ??= steps[i]!.name;
+            stopSiblings(k);
+            throw error;
+          }
           if (steps[i]!.state !== "failed" || failedBy !== null) return;
           failedBy = steps[i]!.name;
-          handles.forEach((h, j) => j !== k && h.stop());
+          stopSiblings(k);
         }),
       );
+      const thrown = settled.find((r) => r.status === "rejected");
+      if (thrown) throw thrown.reason;
       if (job.aborted) return stopped();
       const failed = steps.find((s) => s.name === failedBy && s.state === "failed");
       if (failed) return finish({ state: "failed", detail: failed.detail ?? `${failed.name} exited ${failed.exit}`, binary: null });

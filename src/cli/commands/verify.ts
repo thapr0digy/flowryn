@@ -93,9 +93,8 @@ const verify: VerbSpec = {
               shown.add(i);
               io.stdout(stepLine(s));
             } else if (s.state === "running" && (!announced.has(i) || announced.get(i) !== s.attempts)) {
-              const retry = announced.has(i);
               announced.set(i, s.attempts);
-              io.stdout(`  … ${s.step}${retry ? " (hung; retrying)" : ""}\n`);
+              io.stdout(`  … ${s.step}${Number(s.attempts ?? 1) > 1 ? " (hung; retrying)" : ""}\n`);
             }
           });
         }

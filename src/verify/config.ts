@@ -76,8 +76,3 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
   return { steps, binary, timeout_ms, step_timeout_ms };
 }
-
-/** Every step, in order, groups flattened: what the job records one row per. */
-export function flatSteps(items: readonly VerifyItem[]): string[] {
-  return items.flatMap((item) => (typeof item === "string" ? [item] : item));
-}
