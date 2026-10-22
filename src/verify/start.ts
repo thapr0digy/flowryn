@@ -13,7 +13,7 @@ import { verifyConfig, type VerifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, getRequest, markStarted, positionOf, queuedRequests, type VerifyRequest } from "./queue.ts";
 import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
-import { insertVerification, type Verification } from "./store.ts";
+import { insertVerification, runningVerifications, type Verification } from "./store.ts";
 
 /**
  * Starting verifications (docs/notes/2026-10-22-daemon-run-verify-y3.md): a
@@ -83,6 +83,8 @@ export interface QueueDeps extends VerifyDeps {
   projectPath(projectId: string): string | null;
   /** The scheduler's host check, as a stage grant reads it. */
   host(): Promise<HostVerdict>;
+  /** True once the daemon shuts down: nothing more starts. */
+  stopped?(): boolean;
   /** The steps' base environment (tests); by default the daemon's. */
   env?: NodeJS.ProcessEnv;
 }
@@ -129,6 +131,7 @@ export function launchVerification(deps: VerifyDeps, v: Verification, plan: Veri
 /**
  * Start queued requests while their turn comes and a slot is free: the first
  * request in line either starts, is cancelled (its PR closed, its head moved),
+ * follows a running verification of its PR and head under today's policy,
  * or holds everything behind it (FIFO). Returns how many started.
  */
 export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
@@ -149,11 +152,19 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
       tx(db, () => cancelRequest(db, first, wanted.cancel, deps.now()));
       continue;
     }
+    if (deps.stopped?.()) return started;
     let v: Verification | null;
     try {
       v = tx(db, () => {
         const fresh = getRequest(db, first.id);
-        if (fresh?.state !== "queued" || queueHold(db, caps, deps.now())) return null;
+        if (fresh?.state !== "queued") return null;
+        const policy = verifyPolicyId(wanted.start);
+        const same = runningVerifications(db).find((r) => r.pr_url === fresh.pr_url && r.head_sha === fresh.head_sha && r.policy_id === policy);
+        if (same) {
+          markStarted(db, fresh, same.id, deps.now());
+          return null;
+        }
+        if (queueHold(db, caps, deps.now())) return null;
         return admitRequest(db, fresh, wanted.start, caps, deps.root, wanted.projectPath, deps.now());
       });
     } catch (error) {

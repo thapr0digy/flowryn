@@ -283,6 +283,33 @@ describe("draining the queue", () => {
     expect(getRequest(f.db, outage.id)).toMatchObject({ state: "cancelled", detail: "project web has no verify steps now" });
   });
 
+  test("once the daemon is stopping, nothing starts; the queue is left as it was", async () => {
+    const f = fixture();
+    const a = f.request(1);
+    let stopping = false;
+    f.deps.stopped = () => stopping;
+    stopping = true;
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(getRequest(f.db, a.id)!.state).toBe("queued");
+    expect(f.db.query("SELECT COUNT(*) AS n FROM verifications").get()).toEqual({ n: 0 });
+  });
+
+  test("a request queued under an older policy follows a running verification of its PR and head under today's: no second job, no slot", async () => {
+    const f = fixture(["sleep 0.3"]);
+    const old = f.request(1, { policy_id: "vp1:queued-under-old-steps" });
+    const fresh = f.request(1);
+    expect(await drainVerifyQueue(f.deps)).toBe(1);
+    expect(getRequest(f.db, old.id)).toMatchObject({ state: "started", verification_id: "v1" });
+    expect(getRequest(f.db, fresh.id)).toMatchObject({ state: "started", verification_id: "v1" });
+    expect(f.db.query("SELECT COUNT(*) AS n FROM verifications").get()).toEqual({ n: 1 });
+    expect(liveJobLeases(f.db).map((l) => l.job_id)).toEqual(["v1"]);
+    expect(events(f.db, "verify.dequeued").map((e) => [e.request, e.verification])).toEqual([
+      [old.id, "v1"],
+      [fresh.id, "v1"],
+    ]);
+    await settled(f.db, ["v1"]);
+  }, 20_000);
+
   test("a start runs today's verify steps, whatever policy the request was queued under", async () => {
     const f = fixture(["true"]);
     const queued = f.request(1, { policy_id: "vp1:queued-under-old-steps" });

@@ -82,9 +82,9 @@ export function findQueued(db: Db, prUrl: string, head: string, policy: string):
   return db.query(`SELECT * FROM verify_queue WHERE state = 'queued' AND pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 ORDER BY ${ORDER} LIMIT 1`).get(prUrl, head, policy) as VerifyRequest | null;
 }
 
-/** The request a verification was started from, if any (verifications from before migration 28 have none). */
+/** The request a verification was started from, not one that followed it later, if any (verifications from before migration 28 have none). */
 export function requestOf(db: Db, verificationId: string): VerifyRequest | null {
-  return db.query("SELECT * FROM verify_queue WHERE verification_id = ?1 AND state = 'started' LIMIT 1").get(verificationId) as VerifyRequest | null;
+  return db.query(`SELECT * FROM verify_queue WHERE verification_id = ?1 AND state = 'started' ORDER BY ended_at, ${ORDER} LIMIT 1`).get(verificationId) as VerifyRequest | null;
 }
 
 /** The request that runs an interrupted verification again, if one was made. */

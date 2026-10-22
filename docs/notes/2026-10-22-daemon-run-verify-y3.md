@@ -2,7 +2,6 @@
 
 - Status: partial
 - Open: phase 2 (yolo auto-merge, `[projects.<id>] auto_merge`) is plan p13's next phase; two flowryn suites at once on this Mac not yet run live
-- Config: `[projects.<id>] auto_merge`
 
 Scout findings 4, 6 and 16 (`~/.flowryn/data/scout-efficiency-and-fz/report.md`). All 15 merges so far were started by hand by the leader (`merge.requested` source `cli`, 15 of 15). `flowryn verify` refuses a second job (`verify_busy`), with no queue. The user decided on 2026-10-22 that yolo ships verify and merge with no leader turn, opt-in per project, never for sensitive work. It is turned on for fathom first, and for flowryn only once a daemon restart no longer drops a running validation or verify.
 
@@ -24,7 +23,7 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
   - starts the job at once when the queue is empty, a `validation` slot is free, the host check passes and no restart is parked;
   - otherwise queues the request and replies `queued` with the request id and its position ("2 of 3, behind v41 and vq7").
 - `verify_busy` goes away: the "another policy at the same head" case is queued like any other request.
-- The queue drains in the scheduler's pass, before stage grants (the "drain before fill" rule: a verify is the step closest to shipping). Order is rank, then `requested_at`. Each start takes a `validation` lease in the same transaction as its `verifications` row, so concurrency is the pool's cap (5 today), under the host check. While a restart is parked, no queued verify starts.
+- The queue drains in the scheduler's pass, before stage grants (the "drain before fill" rule: a verify is the step closest to shipping). Order is rank, then `requested_at`. Each start takes a `validation` lease in the same transaction as its `verifications` row, so concurrency is the pool's cap (5 today), under the host check. While a restart is parked, no queued verify starts, and none starts once the daemon is shutting down. A queued request whose PR and head already have a running verification under today's policy follows that one (it is marked started with its id) instead of starting a second.
 - `flowryn verify show` takes a `vq<n>` too: its position, or once started, its verification. The CLI follows a queued request through to its result. `--detach` returns the request id.
 - A queued request for a PR that has closed, whose run was cancelled or redelivered at another head, or whose task's run ended, is `cancelled` with its reason.
 - PATH: a request from the CLI keeps the caller's PATH, as today. A daemon-made request (phase 2) uses the PATH of the latest CLI verify of the project, kept in meta (`verify_path:<project>`), and otherwise the daemon's own PATH plus `~/.bun/bin`.

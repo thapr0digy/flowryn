@@ -520,8 +520,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       notify: (runId) => bus.notify(runId),
       startDeps,
       kickJournal: () => journal.kick(),
-      drainVerifies: () =>
+      drainVerifies: (stopped) =>
         drainVerifyQueue({
+          stopped,
           db: database,
           git: deliveryGit,
           now: Date.now,
@@ -798,6 +799,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     const reason = await stopped;
     log(`stopping: ${reason}`);
+    scheduler.stop();
     stopVerifications();
     clearInterval(pass);
     clearInterval(steady);
@@ -808,7 +810,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     policyFollow.stop();
     await autoCheck.stop();
     reconciler.stop();
-    scheduler.stop();
     lavishPoller.stop();
     reviewOpener.stop();
     deliveryWatcher.stop();
