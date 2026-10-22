@@ -137,7 +137,7 @@ export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropp
  * Items that wake an idle leader as a P0 would, though they are P1: what you
  * did outside the leader session (user_acted, and a pass you asked for on a
  * review page), a merge that landed without the leader's own merge call, and
- * a yolo task's PR ready for the leader to verify and merge (leaderWakeSql).
+ * a yolo task's PR ready for the leader to verify and merge (LEADER_WAKE_SQL).
  * Each wakes it once (followUpBatch in router.ts).
  */
 export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready"];
