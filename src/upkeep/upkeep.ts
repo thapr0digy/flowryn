@@ -1,5 +1,6 @@
 import type { UpkeepConfig } from "../config/upkeep.ts";
 import { pruneExplanations, type PruneReport } from "../attention/explanations.ts";
+import { closeSeenInfoItems, INFO_KEEP_MS } from "../attention/items.ts";
 import { tx, type Db } from "../db/db.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
@@ -14,8 +15,9 @@ import { recordSync, syncPrimary } from "./sync.ts";
  * (`build_after_merge`), then clean ended worktrees past their wait
  * (`clean_ended_hours`). Before all three, and even when the pass otherwise
  * waits, it prunes closed wait explanations past their retention
- * (`explanations_keep_days`, `explanations_keep_per_run`): one SQLite
- * transaction, no checkout. The fourth hook, the conflict nudge, rides the
+ * (`explanations_keep_days`, `explanations_keep_per_run`) and closes
+ * informational items presented over a day ago (closeSeenInfoItems): each one
+ * SQLite transaction, no checkout. The fourth hook, the conflict nudge, rides the
  * delivery watcher's PR reads (src/reconcile/delivery.ts).
  *
  * A pass runs every `interval_ms` and soon after a run lands (`kick`), never
@@ -44,6 +46,8 @@ export interface UpkeepDeps {
 export interface PassReport {
   waited?: string;
   pruned: PruneReport | null;
+  /** Informational items closed by their retention this pass. */
+  infoClosed: string[];
   synced: string[];
   build: BuildPass | null;
   swept: { run: string; outcome: string; reason: string }[];
@@ -97,7 +101,7 @@ export class Upkeep {
     this.running = this.passOnce()
       .catch((error: unknown) => {
         this.deps.log(`upkeep: ${(error as Error).stack ?? String(error)}`);
-        return { pruned: null, synced: [], build: null, swept: [] } satisfies PassReport;
+        return { pruned: null, infoClosed: [], synced: [], build: null, swept: [] } satisfies PassReport;
       })
       .finally(() => {
         this.running = null;
@@ -117,9 +121,21 @@ export class Upkeep {
     }
   }
 
+  private closeInfo(): string[] {
+    try {
+      const closed = closeSeenInfoItems(this.deps.db, this.deps.now());
+      if (closed.length > 0) this.deps.log(`upkeep: closed ${closed.length} informational items presented over ${INFO_KEEP_MS / 3_600_000} h ago`);
+      return closed;
+    } catch (error) {
+      // Like a failed prune, it must not stop the sync, build and sweep behind it.
+      this.deps.log(`upkeep: closing informational items failed: ${(error as Error).message}`);
+      return [];
+    }
+  }
+
   private async passOnce(): Promise<PassReport> {
     const config = this.deps.config();
-    const report: PassReport = { pruned: this.prune(config), synced: [], build: null, swept: [] };
+    const report: PassReport = { pruned: this.prune(config), infoClosed: this.closeInfo(), synced: [], build: null, swept: [] };
     const waiting = this.deps.busy();
     if (waiting) {
       report.waited = waiting;

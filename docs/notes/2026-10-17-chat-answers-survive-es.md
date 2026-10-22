@@ -31,7 +31,7 @@ The UserPromptSubmit hook input carries only `prompt` (with `session_id`, `trans
 
    The verify then sets `verified_at` only while `held_prompts` is still the count it checked. If a notice arrived during the check, the command is refused and a retry checks again.
 
-`flowryn show c<N>` shows `held: across N background notice(s)`. Migration 28 adds `captain_grants.held_prompts`.
+`flowryn show c<N>` shows `held: across N background notice(s)`. Migration 29 adds `captain_grants.held_prompts`.
 
 | After the answer… | Before | Now |
 |---|---|---|
