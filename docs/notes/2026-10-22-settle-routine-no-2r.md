@@ -50,7 +50,7 @@ The briefing gets a section "Settled by rule since the last briefing" listing ea
 - A settled gate ignores the question's wording: the text classes of `reservedReason` (destructive, credential, …) would reserve most review findings in this repo (they quote "token", "remove"), and the user's ruling names what stays theirs. The worker's own `--reserved` still keeps it for the user, and the floor checks each finding's description for the irreversible class. An unsettled `--nomistakes` ask gets a text class first, else `nomistakes: <why>`.
 - The undo works through every captain channel: your own terminal, Claude's prompt (its line reads "UNDO the rule's answer … and RECORD as the user's own answer"), a chat answer, and the Pi `flowryn_decide` tool. The leader alone is refused. After the user's answer the decision is no longer a rule's, so a second undo is refused as already answered.
 - `ask` waits up to 30 s for its reply (was 2 s) so the status read and three git calls never spool it; a spooled ask settles the same way on replay.
-- `flowryn stats` counts a rule's answer as `decision (rule)` waits; a `decision.answered` by `policy` is Flowryn's own doing, never an intervention.
+- `flowryn stats` counts a rule's answer as a `decision (rule)` wait that ends at the rule's answer, even when you undo it later; a `decision.answered` by `policy` is Flowryn's own doing, never an intervention.
 - Events: `decision.opened` carries `nomistakes: true`; `decision.settled_by_rule` (step, rules, answer, classified findings); `decision.overridden` (from, rule, choice).
 
 ## Tests
