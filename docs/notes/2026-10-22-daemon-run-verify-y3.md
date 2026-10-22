@@ -25,7 +25,7 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
 - `verify_busy` goes away: the "another policy at the same head" case is queued like any other request.
 - The queue drains in the scheduler's pass, before stage grants (the "drain before fill" rule: a verify is the step closest to shipping). Order is rank, then `requested_at`. Each start takes a `validation` lease in the same transaction as its `verifications` row, so concurrency is the pool's cap (5 today), under the host check. While a restart is parked, no queued verify starts, and none starts once the daemon is shutting down. A queued request whose PR and head already have a running verification under today's policy follows that one (it is marked started with its id) instead of starting a second.
 - `flowryn verify show` takes a `vq<n>` too: its position, or once started, its verification. The CLI follows a queued request through to its result. `--detach` returns the request id.
-- A queued request for a PR that has closed, whose run was cancelled or redelivered at another head, or whose task's run ended, is `cancelled` with its reason.
+- A queued request for a PR that has closed or moved to another head (a redelivery), or whose project no longer has verify steps, is `cancelled` with its reason (as built, below).
 - PATH: a request from the CLI keeps the caller's PATH, as today. A daemon-made request (phase 2) uses the PATH of the latest CLI verify of the project, kept in meta (`verify_path:<project>`), and otherwise the daemon's own PATH plus `~/.bun/bin`.
 
 ### Restart

@@ -520,9 +520,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       notify: (runId) => bus.notify(runId),
       startDeps,
       kickJournal: () => journal.kick(),
-      drainVerifies: (stopped) =>
+      drainVerifies: (isStopped) =>
         drainVerifyQueue({
-          stopped,
+          stopped: isStopped,
           db: database,
           git: deliveryGit,
           now: Date.now,
