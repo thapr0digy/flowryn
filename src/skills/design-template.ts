@@ -1,4 +1,4 @@
-import { codeElements, codeShapedTerms, definedTerms, nameSome, textOf, visibleMarkup, wordCount } from "./review-page.ts";
+import { codeElements, codeShapedTerms, definedTerms, dropElements, nameSome, textOf, visibleMarkup, wordCount } from "./review-page.ts";
 import { WIDGET_MOUNT } from "../lavish/widget.ts";
 
 /**
@@ -140,17 +140,35 @@ function sectionOpen(name: string): RegExp {
   return new RegExp(`<section\\b[^>]*\\bdata-section\\s*=\\s*["']${name}["'][^>]*>`, "i");
 }
 
-/** A `<section data-section=name>` from its opening tag to its `</section>`, or null. */
+/** Where the element whose opening tag starts at `from` ends, past its own matching close tag, or null if it never closes. */
+function elementEnd(html: string, tag: string, from: number): number | null {
+  const token = new RegExp(`<(/?)${tag}\\b[^>]*>`, "gi");
+  token.lastIndex = from;
+  let depth = 0;
+  for (let m = token.exec(html); m; m = token.exec(html)) {
+    if (m[1] !== "/") depth++;
+    else if (--depth === 0) return m.index + m[0].length;
+  }
+  return null;
+}
+
+/** A `<section data-section=name>` from its opening tag to its own `</section>`, or null. */
 function findSection(html: string, name: string): Part | null {
   const open = sectionOpen(name).exec(html);
   if (!open) return null;
-  const close = html.indexOf("</section>", open.index);
-  return { name, start: open.index, end: close === -1 ? html.length : close + "</section>".length };
+  return { name, start: open.index, end: elementEnd(html, "section", open.index) ?? html.length };
 }
 
-function findDetail(html: string): { start: number; tag: string } | null {
+function findDetail(html: string): { start: number; end: number | null; tag: string } | null {
   const open = new RegExp(`<details\\b[^>]*\\bdata-section\\s*=\\s*["']${DESIGN_DETAIL_SECTION}["'][^>]*>`, "i").exec(html);
-  return open ? { start: open.index, tag: open[0] } : null;
+  return open ? { start: open.index, end: elementEnd(html, "details", open.index), tag: open[0] } : null;
+}
+
+/** Anything a reader would see between `from` and `</body>`: comments and scripts aside. */
+function shownAfter(html: string, from: number): string {
+  const bodyClose = html.slice(from).search(/<\/body\s*>/i);
+  const tail = html.slice(from, bodyClose === -1 ? html.length : from + bodyClose);
+  return dropElements(tail.replace(/<!--[\s\S]*?-->/g, " "), "script").trim();
 }
 
 /**
@@ -192,6 +210,8 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
   } else {
     if (/\bopen\b/i.test(detail.tag.replace(/data-section\s*=\s*["'][^"']*["']/i, ""))) problems.push("the implementation detail must start folded: drop open from its <details>");
     if (last && detail.start < last.end) problems.push("the folded implementation detail must come after every other part");
+    else if (detail.end === null) problems.push("the implementation detail's <details> is never closed: end it with </details>");
+    else if (shownAfter(html, detail.end) !== "") problems.push("nothing may follow the folded implementation detail but scripts: move it into the detail or above it");
   }
 
   const visible = visibleMarkup(html);

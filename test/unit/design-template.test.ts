@@ -101,6 +101,12 @@ describe("the design page check", () => {
     const risks = /<section data-section="risks">[\s\S]*?<\/section>\n/.exec(filled())![0];
     const early = filled().replace(risks, "").replace("</body>", `${risks}</body>`);
     expect(designPageProblems(early)).toEqual(["the folded implementation detail must come after every other part"]);
+    const trailing = filled().replace("</body>", "<p>Appendix in plain words.</p></body>");
+    expect(designPageProblems(trailing)).toEqual(["nothing may follow the folded implementation detail but scripts: move it into the detail or above it"]);
+    const scripted = filled().replace("</body>", '<!-- a note --><script src="extra.js"></script>\n</body>');
+    expect(designPageProblems(scripted)).toEqual([]);
+    const unclosed = filled().replace("</details>", "");
+    expect(designPageProblems(unclosed)).toEqual(["the implementation detail's <details> is never closed: end it with </details>"]);
   });
 
   test("code names above the fold are named; a <dfn> term, <kbd> text and product names pass", () => {
@@ -121,8 +127,11 @@ describe("the design page check", () => {
 
   test("with questions, the widget must sit in What I need from you", () => {
     const widget = '<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>';
-    const below = filled().replace("</body>", `${widget}</body>`);
+    const below = filled({ "{{RISKS}}": `Said in plain words. ${widget}` });
     expect(designPageProblems(below, { widget: true })).toEqual(['the question widget (<section id="flowryn-questions">) belongs in "What I need from you"']);
     expect(designPageProblems(filled({ "{{ASK}}": `Answer the questions below. ${widget}` }), { widget: true })).toEqual([]);
+    const widgetFirst = filled().replace(/<h2>What I need from you<\/h2>\n\{\{ASK\}\}|<h2>What I need from you<\/h2>\n[^\n]*/, `<h2>What I need from you</h2>${widget}<p>Approve, or send changes; look at the retry choice.</p>`);
+    expect(widgetFirst).toContain(`${widget}<p>Approve`);
+    expect(designPageProblems(widgetFirst, { widget: true })).toEqual([]);
   });
 });

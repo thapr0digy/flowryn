@@ -28,7 +28,7 @@ The outline comes from Google design docs (context, goals and non-goals, alterna
 - the summary is over 80 words;
 - more than 500 words (`DESIGN_VISIBLE_WORDS_MAX`) show before anything is unfolded: text outside `<details>`, `<svg>`, `<style>`, `<script>` and comments;
 - "How it works" has no `<figure>`;
-- the detail is not a closed `<details data-section="detail">` after every part;
+- the detail is not a closed `<details data-section="detail">` after every part, with nothing but scripts and comments after it (each part runs to its own `</section>`, so a nested section such as the widget does not cut it short);
 - a code-shaped word shows above the fold (SVG labels included): an inner underscore, a lowercase start with a capital inside, a path with a file extension (or a bare file name with a code extension), a leading `--`, a trailing `()`. Product names such as macOS and iPhone are allowed (`MIXED_CASE_NAMES` in `src/skills/review-page.ts`), and so is any term the page defines with `<dfn>`; `<kbd>` marks what the user types and is not checked. Up to 10 are named;
 - a `<code>` or `<pre>` element shows above the fold outside the figure;
 - with `--questions-file`, the widget is not inside "What I need from you".
