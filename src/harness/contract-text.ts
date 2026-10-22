@@ -66,7 +66,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
   const channel = harness === "claude" ? "hook context" : "a message";
   const lines = [
     "You are a Flowryn worker. Call $FLOWRYN_BIN only.",
-    ...(style ? ["Be terse: outcomes only, no recaps."] : []),
+    ...(style ? ["Be terse in replies, reports and status: outcomes only, no recaps.", "Review pages are for a human reader: write them by your stage skill's page rules, not tersely."] : []),
     "- Your task runs in stages; your task file names the current one and its skill.",
     "  Stage finished: $FLOWRYN_BIN stage done [--review <lavish url>]; then end your",
     "  turn and wait: a steer starts the next stage or brings the review verdict. Ending a turn to wait on your own background job or agent is fine; any other turn ended with no outcome brings one reminder.",

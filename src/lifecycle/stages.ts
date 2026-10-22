@@ -12,6 +12,7 @@ import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines, type ContractDelivery } from "../harness/contract-text.ts";
 import { grantLeases, holdsLease, releaseLeases, runLeases } from "../sched/pools.ts";
+import { DESIGN_TEMPLATE_FILE, designPageProblems } from "../skills/design-template.ts";
 import { QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaPageProblems } from "../skills/qa-template.ts";
 import { skillPath } from "../skills/stages.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
@@ -569,6 +570,21 @@ export function checkQaPage(reportDir: string): string {
   }
 }
 
+const DESIGN_SKILL = "flowryn-design";
+
+/**
+ * A design stage's review page must follow the design outline, budget and
+ * plain-language rule (src/skills/design-template.ts). The page is the one
+ * the review names, already checked to be a regular .html file under the
+ * report directory; `widget`: it carries questions for the user.
+ */
+export function checkDesignPage(page: string, opts: { widget: boolean }): void {
+  const problems = designPageProblems(readFileSync(page, "utf8"), opts);
+  if (problems.length > 0) {
+    throw new FlowrynError("design_page_invalid", `${page}: ${problems.join("; ")}`, `start from ${DESIGN_TEMPLATE_FILE} beside the flowryn-design skill; fix the page, host it again, then run stage done`);
+  }
+}
+
 /**
  * `flowryn stage done [--review <url>] [--plan-file <path>] [--page <html>
  * [--questions-file <json>]]`: the worker finished its stage. A review gate
@@ -618,6 +634,7 @@ const stageDone: VerbSpec = {
       if (qaPage !== null && pagePath !== null && pagePath !== qaPage) throw new FlowrynError("bad_args", `the QA review page is ${qaPage}; --page names another`);
       const lavish = resolveTool(ctx.config(), "lavish_axi");
       const checked = checkReviewUrl(review, { page: qaPage ?? pagePath, reportDir, lavishInstalled: lavish !== null && existsSync(lavish) });
+      if (pos.stage.skill === DESIGN_SKILL) checkDesignPage(checked.page, { widget: questions !== null });
       gateReview = checked.url;
       listened = checked.page;
     }

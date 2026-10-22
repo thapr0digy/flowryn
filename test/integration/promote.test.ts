@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { listTasks, processRunner, type BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
+import { filledDesignPage } from "../helpers/design-page.ts";
 
 const envs: FleetEnv[] = [];
 async function fleet(options: Parameters<typeof makeFleetEnv>[0] = {}): Promise<FleetEnv> {
@@ -208,7 +209,7 @@ describe("a scout in a review with questions", () => {
   test(
     "is promoted: its open review questions close unanswered and its page is no longer polled",
     async () => {
-      const page = '<html><body><section id="flowryn-questions"></section><script src="flowryn-questions.js"></script></body></html>';
+      const page = filledDesignPage({ widget: true });
       const questions = JSON.stringify({ questions: [{ key: "store", kind: "single", question: "Where?", options: ["db", "file"], recommend: "db", blocks: "which store the cache writes to" }] });
       const env = await fleet({ extraConfig: ["[workflows.scout-review]", 'stages = [ { id = "design", gate = "review" }, { id = "investigate" } ]'].join("\n") });
       const dispatched = await env.json(["dispatch", "web", "--kind", "scout", "--workflow", "scout-review", "--body-file", "-"], {

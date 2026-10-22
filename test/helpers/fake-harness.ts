@@ -39,8 +39,8 @@
  *
  * In stage-done and verb arguments, lavish:<file> becomes lavish-axi's review URL for $FLOWRYN_REPORT_DIR/<file>
  * (http://127.0.0.1:4387/session/<its key>, src/lavish/session-key.ts), as a worker hosting the page gets it.
- * The page is written (a bare <html>) when missing, except a QA page (qa/evidence.html), which a test writes
- * with qa-page or leaves missing on purpose.
+ * The page is written when missing (a filled design page, test/helpers/design-page.ts, which a design stage's
+ * check accepts), except a QA page (qa/evidence.html), which a test writes with qa-page or leaves missing on purpose.
  *   FAKE: qa-page [verdict]          write $FLOWRYN_REPORT_DIR/qa/evidence.html: the QA template, every slot filled
  *                                    (verdict works unless named), as the visual QA skill asks
  *   FAKE: plan-phase <title...>      append a "## <title>" phase (workflow fix) to $FLOWRYN_REPORT_DIR/plan.md
@@ -80,6 +80,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, syml
 import { basename, dirname, join } from "node:path";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
 import { QA_PLACEHOLDERS, QA_TEMPLATE } from "../../src/skills/qa-template.ts";
+import { filledDesignPage } from "./design-page.ts";
 import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
@@ -92,7 +93,7 @@ function lavishArg(arg: string): string {
   const path = join(dir, file);
   if (!existsSync(path) && file !== "qa/evidence.html") {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, "<html><body>review</body></html>\n");
+    writeFileSync(path, `${filledDesignPage()}\n`);
   }
   mkdirSync(dirname(path), { recursive: true });
   return `http://127.0.0.1:4387/session/${lavishSessionKey(join(realpathSync(dirname(path)), basename(path)))}`;

@@ -91,6 +91,7 @@ export const ERROR_CODES = {
   run_not_active: EXIT.validation,
   invalid_report: EXIT.validation,
   qa_page_invalid: EXIT.validation,
+  design_page_invalid: EXIT.validation,
   // a review URL that is not lavish's page for the review page (Q3)
   review_invalid: EXIT.validation,
   // `flowryn back` with no away to end and no recent brief to reprint
