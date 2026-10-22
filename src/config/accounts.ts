@@ -102,15 +102,13 @@ function pathPrefix(value: string, home: string): string {
   return existsSync(absolute) ? realpathSync(absolute) : absolute;
 }
 
-/** `git@host:owner/repo.git`, `https://host/owner/repo` and `ssh://git@host/owner/repo` all become `host/owner/repo`. */
+/** `git@host:owner/repo.git`, `https://host/owner/repo` and `ssh://git@host/owner/repo` all become `host/owner/repo`, lowercased as GitHub compares them. */
 export function normalizeRemote(url: string): string {
   let rest = url.trim();
   const scp = /^[^@/]+@([^:/]+):(.*)$/.exec(rest);
   if (scp) rest = `${scp[1]}/${scp[2]}`;
   else rest = rest.replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "");
-  rest = rest.replace(/\.git$/, "").replace(/\/+$/, "");
-  const slash = rest.indexOf("/");
-  return slash === -1 ? rest.toLowerCase() : `${rest.slice(0, slash).toLowerCase()}${rest.slice(slash)}`;
+  return rest.replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
 }
 
 function remotePrefix(value: string): string {
@@ -317,12 +315,13 @@ export function resolveAccount(config: FlowrynConfig, project: ScopedProject, re
  * The account a run recorded at dispatch, as config has it now. A resume never
  * moves to another account, since the harness keeps the session in the
  * account's own store: a removed account, or one moved out of the project's
- * scope, refuses.
+ * scope, refuses. A run recorded on a harness's implicit account keeps its
+ * `[workers.<harness>]` login after accounts of that harness are declared.
  */
 export function runAccount(config: FlowrynConfig, project: ScopedProject, recorded: string | null, harness: HarnessId): Account {
   const accounts = accountsConfig(config);
   const accountId = recorded ?? harness;
-  const account = accounts.accounts[accountId];
+  const account = accounts.accounts[accountId] ?? (accountId === harness ? implicitAccount(harness, workersConfig(config), accounts.default_scope) : undefined);
   if (!account) throw new FlowrynError("not_found", `the run's account ${accountId} is no longer in config.toml`, "add it back, or cancel the run");
   if (account.harness !== harness) throw new FlowrynError("config_invalid", `the run's account ${accountId} is now a ${account.harness} account, but the run is on ${harness}`);
   guardScope(account, projectScope(config, accounts, project), project.id);

@@ -52,9 +52,9 @@ First match wins:
 
 An account is a harness choice too: `--account chatgpt --harness claude` refuses. A scope with no account for the harness refuses with `no_account`.
 
-**A project's scope** is `[projects.<id>] scope`, else the one `[scopes.*]` whose `paths` (a directory prefix, compared by real path) or `remotes` (a prefix of the repository URL, normalized from `git@host:o/r.git`, `https://host/o/r` or `ssh://…` to `host/o/r`) match, else `[scopes] default`. An explicit scope that a rule contradicts refuses, and so does a project two scopes match: a mistyped tag must never quietly win.
+**A project's scope** is `[projects.<id>] scope`, else the one `[scopes.*]` whose `paths` (a directory prefix, compared by real path) or `remotes` (a prefix of the repository URL, normalized from `git@host:o/r.git`, `https://host/o/r` or `ssh://…` to `host/o/r` and compared case-insensitively, owner and repository too, as GitHub does) match, else `[scopes] default`. An explicit scope that a rule contradicts refuses, and so does a project two scopes match: a mistyped tag must never quietly win.
 
-The run records its account (`runs.account`, migration 29). A resume or relaunch always uses it, because Claude keeps the session inside the account's own directory. If the account was removed from config, or moved out of the project's scope, the launch refuses.
+The run records its account (`runs.account`, migration 29). A resume or relaunch always uses it, because Claude keeps the session inside the account's own directory. If the account was removed from config, or moved out of the project's scope, the launch refuses. A run recorded on a harness's implicit account (`claude` or `pi`, which migration 29 backfilled for every older run) keeps its `[workers.<harness>]` login after the first `[accounts.*]` of that harness is declared: it resumes on that login in `[scopes] default`, still under the scope rule, and never moves to a declared account.
 
 ## Without `[accounts]`
 
@@ -81,7 +81,7 @@ A signed-out account refuses the dispatch with `account_signed_out` (exit 69) an
 
 - Contract runs keep using the implicit Claude account. The scratch config copies `[workers]` and not `[accounts]`, and a contract proves the harness, not a login. `doctor --contracts --account` is left for later.
 - A Pi account requires `provider` and a `<provider>/<id>` model, as the predecessor did. Flowryn never guesses a provider.
-- The `account:` line on a plan phase is stored in `plan_phases.account`. A phase without one is resolved when it starts, so a scope's default account can change before then.
+- The `account:` line on a plan phase is stored in `plan_phases.account`, and the phase takes that account's own harness unless it also has a `harness:` line. A phase without one is resolved when it starts, so a scope's default account can change before then. Every phase's account is checked when the plan is filed, by `flowryn plan` and for a worker's plan at its design's stage done.
 - `flowryn accounts` shows no sign-in state. That would run every harness on every read; dispatch checks the account it actually uses.
 
 ## Tests

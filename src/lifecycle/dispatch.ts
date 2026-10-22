@@ -23,7 +23,7 @@ import { ulid } from "../util/ulid.ts";
 import { reserveDecision } from "./decisions.ts";
 import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
-import { getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
+import { checkPhaseAccounts, getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
 import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { openRunForTask } from "./runs.ts";
@@ -485,11 +485,9 @@ export const planVerb: VerbSpec = {
     const parsed = parsePlan(stringArg(args, "body") ?? "");
     const config = ctx.config();
     const workflow = stringArg(args, "workflow") ?? project.workflow;
-    // Each phase's account is checked now, so a phase outside the project's scope refuses at filing, not when it would start.
-    const fallback = accountFor(config, project, args);
+    const harness = accountFor(config, project, args).harness;
     const account = stringArg(args, "account") ?? null;
-    for (const phase of parsed.phases) accountFor(config, project, {}, { account: phase.account ?? (phase.harness ? null : account), harness: phase.harness ?? fallback.harness });
-    const harness = fallback.harness;
+    checkPhaseAccounts(config, project, parsed.phases, { account, harness });
     for (const phase of parsed.phases) workflowFor(config, phase.workflow ?? workflow, "ship");
     workflowFor(config, workflow, "ship");
     const now = ctx.now();

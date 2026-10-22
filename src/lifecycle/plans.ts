@@ -1,4 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
+import { ID as ACCOUNT_ID, resolveAccount } from "../config/accounts.ts";
+import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -61,7 +63,6 @@ const MAX_PHASE_BODY = 64_000;
 const MAX_TITLE = 120;
 const DIRECTIVE = /^(workflow|harness|account|after):\s*(.+)$/i;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
-const ACCOUNT_ID = /^[a-z][a-z0-9-]{0,31}$/;
 
 function cleanTitle(heading: string): string {
   const title = heading.replace(/^phase\s+\d+\s*[:.\-–—]\s*/i, "").replace(/\s+/g, " ").trim();
@@ -166,6 +167,23 @@ export interface NewPlan {
   now: number;
 }
 
+/**
+ * What a phase starts on: its account: line takes that account's own harness,
+ * its harness: line that harness's account; otherwise the plan's account and
+ * harness.
+ */
+function phaseAccount(phase: PlanPhase, plan: { account?: string | null; harness?: "claude" | "pi" | null }): { account: string | null; harness: "claude" | "pi" | null } {
+  return {
+    account: phase.account ?? (phase.harness ? null : (plan.account ?? null)),
+    harness: phase.harness ?? (phase.account ? null : (plan.harness ?? null)),
+  };
+}
+
+/** Each phase's account is checked at filing, so a phase outside the project's scope refuses now, not when it would start. */
+export function checkPhaseAccounts(config: FlowrynConfig, project: ProjectRow, phases: PlanPhase[], plan: { account?: string | null; harness?: "claude" | "pi" | null } = {}): void {
+  for (const phase of phases) resolveAccount(config, project, phaseAccount(phase, plan));
+}
+
 /** Record a plan and its phases (task ids minted now, so a replay names the same tasks). Call inside a transaction. */
 export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[] } {
   const id = nextPlanId(db);
@@ -185,7 +203,8 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
     const taskId = mintTaskId(phase.title, (candidate) => taken(candidate) || minted.includes(candidate));
     minted.push(taskId);
     const deps = phase.after ? phase.after.map((n) => minted[n - 1]!) : i > 0 ? [minted[i - 1]!] : [...(p.sourceTask ? [p.sourceTask] : []), ...(p.blockedBy ?? [])];
-    const row: PhaseRow = { plan_id: id, phase_no: i + 1, task_id: taskId, title: phase.title, body: phase.body.length > 0 ? phase.body : phase.title, workflow: phase.workflow ?? p.workflow, harness: phase.harness ?? p.harness ?? null, account: phase.account ?? (phase.harness ? null : (p.account ?? null)), blocked_by: JSON.stringify(deps) };
+    const request = phaseAccount(phase, p);
+    const row: PhaseRow = { plan_id: id, phase_no: i + 1, task_id: taskId, title: phase.title, body: phase.body.length > 0 ? phase.body : phase.title, workflow: phase.workflow ?? p.workflow, harness: request.harness, account: request.account, blocked_by: JSON.stringify(deps) };
     db.query("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, harness, blocked_by, account) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)").run(
       row.plan_id,
       row.phase_no,
@@ -205,7 +224,8 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
 }
 
 /** A worker's plan, pending on its design's review gate. Call inside a transaction. */
-export function fileWorkerPlan(db: Db, p: { project: ProjectRow; sourceTask: string; gateId: string; phases: { title: string | null; phases: PlanPhase[] }; workflow: string; now: number }): string {
+export function fileWorkerPlan(db: Db, config: FlowrynConfig, p: { project: ProjectRow; sourceTask: string; gateId: string; phases: { title: string | null; phases: PlanPhase[] }; workflow: string; now: number }): string {
+  checkPhaseAccounts(config, p.project, p.phases.phases);
   // A new plan for the same gate replaces an earlier one (a worker that ran stage done twice).
   discardPlansOfGate(db, p.gateId, p.now);
   return recordPlan(db, {

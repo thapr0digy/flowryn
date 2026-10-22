@@ -11,7 +11,9 @@ import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts"
 import { accountSignIn } from "../../src/harness/sign-in.ts";
 import type { RunContext } from "../../src/harness/types.ts";
 import { shimScript } from "../../src/lifecycle/launcher.ts";
-import { parsePlan } from "../../src/lifecycle/plans.ts";
+import { migrate, openDb } from "../../src/db/db.ts";
+import { checkPhaseAccounts, fileWorkerPlan, parsePlan, phasesOf, recordPlan } from "../../src/lifecycle/plans.ts";
+import { insertProject, type ProjectRow } from "../../src/lifecycle/projects.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fl-accounts-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -137,6 +139,14 @@ describe("project scope", () => {
     expect(normalizeRemote("git@github.com:acme/tool.git")).toBe("github.com/acme/tool");
   });
 
+  test("remotes compare case-insensitively, owner and repo too, as GitHub does", () => {
+    for (const url of ["git@github.com:Acme/API.git", "https://GitHub.com/ACME/tool.GIT"]) {
+      expect(projectScope(c, a, project("tool", join(PERSONAL, "site"), url))).toBe("work");
+    }
+    const upper = config(TWO_SCOPES.replace(`remotes = ["github.com/acme/"]`, `remotes = ["GitHub.com/Acme/"]`));
+    expect(projectScope(upper, accountsConfig(upper), project("tool", join(PERSONAL, "site"), "git@github.com:acme/tool.git"))).toBe("work");
+  });
+
   test("an explicit scope the rules contradict refuses, and so does a project two scopes match", () => {
     const contradicted = config(`${TWO_SCOPES}\n[projects.api]\nscope = "personal"\n`);
     expect(refusal(() => projectScope(contradicted, accountsConfig(contradicted), project("api", join(WORK, "acme-api")))).message).toContain("puts it in work");
@@ -187,6 +197,14 @@ describe("choosing the account", () => {
     expect(refusal(() => runAccount(moved, api, "claude-work", "claude")).code).toBe("account_scope_mismatch");
     // Rows from before accounts name their harness's implicit account.
     expect(runAccount(config(""), site, null, "pi").id).toBe("pi");
+  });
+
+  test("a run on a harness's implicit account keeps its [workers] login once accounts of that harness are declared", () => {
+    const resumed = runAccount(c, site, "claude", "claude");
+    expect(resumed).toMatchObject({ id: "claude", declared: false, scope: "personal", model: "sonnet", config_dir: null });
+    expect(runAccount(c, site, null, "claude").id).toBe("claude");
+    // The scope rule still holds: the implicit account is in the default scope, not the work project's.
+    expect(refusal(() => runAccount(c, api, "claude", "claude")).code).toBe("account_scope_mismatch");
   });
 });
 
@@ -289,5 +307,37 @@ describe("plan phases", () => {
     const plan = parsePlan("## Phase 1: one\naccount: claude-work\nharness: claude\ndo it\n");
     expect(plan.phases[0]).toMatchObject({ account: "claude-work", harness: "claude", body: "do it" });
     expect(() => parsePlan("## Phase 1: one\naccount: Not An Id\n")).toThrow("is not an account id");
+  });
+});
+
+describe("plan phases' accounts", () => {
+  const c = config(TWO_SCOPES);
+  const dir = mkdtempSync(join(root, "plans-"));
+  const db = openDb(join(dir, "flowryn.db"));
+  migrate(db);
+  afterAll(() => db.close());
+  const site: ProjectRow = { ...project("site", join(PERSONAL, "site")), default_branch: "main", delivery_mode: "local-only", yolo: 0, priority: 2, workflow: "fix", autonomy: "manual" } as ProjectRow;
+  insertProject(db, site);
+  const file = (text: string, gateId: string) => fileWorkerPlan(db, c, { project: site, sourceTask: "site-design-a1", gateId, phases: parsePlan(text), workflow: "fix", now: 1 });
+
+  test("a phase's account: line takes that account's own harness, not the project's", () => {
+    const plan = file("## Phase 1: one\naccount: chatgpt\ndo it\n## Phase 2: two\ndo more\n", "g1");
+    expect(phasesOf(db, plan).map((p) => ({ account: p.account, harness: p.harness }))).toEqual([
+      { account: "chatgpt", harness: null },
+      { account: null, harness: null },
+    ]);
+    // flowryn plan passes the project's harness for the whole plan; the phase's own account still wins.
+    const phases = parsePlan("## Phase 1: one\naccount: chatgpt\ndo it\n## Phase 2: two\ndo more\n").phases;
+    expect(() => checkPhaseAccounts(c, site, phases, { harness: "claude" })).not.toThrow();
+    const filed = recordPlan(db, { project: site, title: "t", phases, sourceTask: null, gateId: null, workflow: "fix", harness: "claude", filedBy: "human", state: "pending", now: 1 });
+    expect(filed.phases.map((p) => ({ account: p.account, harness: p.harness }))).toEqual([
+      { account: "chatgpt", harness: null },
+      { account: null, harness: "claude" },
+    ]);
+  });
+
+  test("a worker's plan with a phase outside the project's scope refuses at filing", () => {
+    expect(refusal(() => file("## Phase 1: one\naccount: claude-work\ndo it\n", "g2")).code).toBe("account_scope_mismatch");
+    expect(refusal(() => file("## Phase 1: one\naccount: nobody\ndo it\n", "g3")).code).toBe("not_found");
   });
 });
