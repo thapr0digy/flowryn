@@ -6,6 +6,7 @@ import { FlowrynError } from "../../src/api/errors.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { grantsConfig } from "../../src/config/leader.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { MIGRATIONS } from "../../src/db/schema.ts";
 import { openSession } from "../../src/lease/lease.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { bindingRef, chatForm, mapAnswer, parseRef, questionsHash, sameQuestion } from "../../src/policy/chat-questions.ts";
@@ -342,6 +343,16 @@ describe("background notices hold a grant (docs/notes/2026-10-17-chat-answers-su
     writeEntry(w, "subagent-handback");
     expect(prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toBe(grant);
     expect(tx(w.db, () => takeGrant(w.db, grant, "decide", now))).toMatchObject({ consumed_by: "decide", held_prompts: 1 });
+  });
+
+  test("migration 28: grants keep their rows and start held across no notice", () => {
+    const dir = tempDir();
+    const db = openDb(join(dir, "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 27));
+    db.exec("INSERT INTO captain_grants (id, session_id, tool_use_id, item, action, choice, question, answer, transcript_path, created_at, expires_at) VALUES ('c1', 'L1', 'toolu_1', 'q1', 'decide', 'yes', 'q1 · ?', 'yes', '/t.jsonl', 1, 2)");
+    expect(migrate(db, MIGRATIONS.slice(0, 28))).toEqual([28]);
+    expect(db.query("SELECT id, choice, held_prompts FROM captain_grants").all()).toEqual([{ id: "c1", choice: "yes", held_prompts: 0 }]);
+    db.close();
   });
 
   test("a hold leaves used, voided and expired grants alone; the ten minutes and the turn's end still apply", () => {
