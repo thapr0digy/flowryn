@@ -647,6 +647,19 @@ const MERGE_LOCAL_GREEN_SQL = /* sql */ `
 ALTER TABLE merges ADD COLUMN local_green TEXT;
 `;
 
+/**
+ * Migration 28 (docs/notes/2026-10-22-verify-reliability-per-xe.md): every step process a job
+ * started (its process group leader), one row each, since the steps of a parallel group run at
+ * once and job_leases holds one. Startup recovery ends each by identity (a gone or reused pid is
+ * never signalled). Leases from before keep their one step in job_leases.proc_*.
+ */
+const JOB_PROCS_SQL = /* sql */ `
+CREATE TABLE job_procs (
+  id INTEGER PRIMARY KEY, lease_id INTEGER NOT NULL REFERENCES job_leases(id),
+  proc_pid INTEGER NOT NULL, proc_start INTEGER NOT NULL, proc_exe TEXT NOT NULL, recorded_at INTEGER NOT NULL);
+CREATE INDEX job_procs_lease ON job_procs(lease_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -675,6 +688,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
   { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
+  { version: 28, name: "job-procs", sql: JOB_PROCS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

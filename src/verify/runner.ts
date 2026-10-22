@@ -1,12 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import type { GitRunner } from "../policy/landed.ts";
+import { runBounded } from "../runtime/bounded.ts";
 import { readIdentity, terminate, type ProcIdentity, type PsRunner, type TerminateOptions, type TerminateResult } from "../runtime/proc.ts";
-import { liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
+import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
+import type { VerifyItem } from "./config.ts";
+import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { finishVerification, getVerification, recordSteps, runningVerifications, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
@@ -14,11 +17,14 @@ import { parseBunSummary, type TestCounts } from "./summary.ts";
  * One `flowryn verify` job, run by the daemon (outside every sandbox): make
  * sure the PR head is in the project's object store, add a detached worktree
  * at it, run the configured steps in order through /bin/sh with a scrubbed
- * environment, parse bun's test summary from each step's output, copy the
- * built binary out, record the outcome, and remove the worktree. One job per
- * daemon at a time (the verb refuses a second). The job holds a validation
- * slot (a job lease the verb took with the row), released only once its steps'
- * process groups are gone and its worktree removed.
+ * environment (the steps of a parallel group at once), parse bun's test
+ * summary from each step's output, copy the built binary out, record the
+ * outcome, and remove the worktree. Besides the run's deadline, each step has
+ * its own (src/verify/deadline.ts): at either, the step's process group is
+ * listed into its log and killed, and a step killed at its own deadline runs
+ * once more (docs/notes/2026-10-22-verify-reliability-per-xe.md). The job
+ * holds a validation slot (a job lease the verb took with the row), released
+ * only once its steps' process groups are gone and its worktree removed.
  */
 
 export interface VerifyDeps {
@@ -34,6 +40,8 @@ export interface VerifyDeps {
   ps?: PsRunner;
   /** End a step left by the last daemon (tests); by default `terminate` by identity, its whole group. */
   terminate?(proc: ProcIdentity, options: TerminateOptions): Promise<TerminateResult>;
+  /** A step's process group as ps lists it, for its log at a deadline (tests); by default ps through runBounded. */
+  groupTable?(pgid: number): Promise<string>;
 }
 
 export interface VerifyPlan {
@@ -42,6 +50,8 @@ export interface VerifyPlan {
   headRef: string | null;
   binary: string | null;
   timeoutMs: number;
+  /** Every step's own deadline (verify_step_timeout_min); null or absent: each step's comes from its history. */
+  stepTimeoutMs?: number | null;
   /** The PATH of whoever ran `flowryn verify` (launchd's is short: it has no ~/.bun/bin); the daemon's when none came. */
   path: string | null;
 }
@@ -53,10 +63,15 @@ const TAIL_BYTES = 256 * 1024;
 const KILL_GRACE_MS = 5_000;
 /** How long startup recovery waits for a step left by the last daemon to exit on SIGTERM before SIGKILL. */
 const RECOVER_GRACE_MS = 5_000;
+/** How long the ps of a step's group at a deadline may take. */
+const GROUP_TABLE_TIMEOUT_MS = 5_000;
+/** Opened for appending, so the process table written at a deadline is never overwritten by the step's own output. */
+const LOG_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_APPEND;
 
 interface Job {
   aborted: boolean;
-  child: ChildProcess | null;
+  /** Every step process running now: several while a parallel group runs. */
+  children: Set<ChildProcess>;
 }
 
 const active = new Map<string, Job>();
@@ -101,8 +116,47 @@ export function logName(index: number, step: string): string {
   return `${index + 1}-${slug}.log`;
 }
 
-export function initialSteps(steps: string[]): VerifyStep[] {
-  return steps.map((name, i) => ({ name, state: "waiting", exit: null, ms: null, log: logName(i, name), tests: null, detail: null }));
+
+/** One waiting row per step, groups flattened in order; `group` is the entry of `verify` it came from. */
+export function initialSteps(items: readonly VerifyItem[]): VerifyStep[] {
+  const steps: VerifyStep[] = [];
+  items.forEach((item, group) => {
+    for (const name of typeof item === "string" ? [item] : item) steps.push({ name, state: "waiting", exit: null, ms: null, log: logName(steps.length, name), tests: null, detail: null, group });
+  });
+  return steps;
+}
+
+/** "2-bun-run-typecheck.log" -> "2-bun-run-typecheck.retry.log". */
+export function retryLogName(log: string): string {
+  return log.replace(/\.log$/, ".retry.log");
+}
+
+/** Step indexes by group, groups in order; on a row from before groups each step is its own. */
+export function stepGroups(steps: readonly VerifyStep[]): number[][] {
+  const groups: number[][] = [];
+  let current: number | null = null;
+  steps.forEach((step, i) => {
+    const group = step.group ?? i;
+    if (groups.length === 0 || group !== current) groups.push([]);
+    current = group;
+    groups.at(-1)!.push(i);
+  });
+  return groups;
+}
+
+/** The header and the rows of a `ps -o pid,ppid,pgid,...` table whose process group is `pgid`. */
+export function groupRows(table: string, pgid: number): string {
+  const lines = table.split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) return "";
+  const rows = lines.slice(1).filter((line) => Number(line.trim().split(/\s+/)[2]) === pgid);
+  return [lines[0]!, ...rows].join("\n");
+}
+
+/** The step's process group as ps lists it, through runBounded; why not, when ps fails. */
+async function psGroupTable(pgid: number): Promise<string> {
+  const ps = await runBounded(["/bin/ps", "-A", "-o", "pid,ppid,pgid,stat,etime,time,rss,command"], { label: "verify ps", timeoutMs: GROUP_TABLE_TIMEOUT_MS });
+  if (ps.code !== 0) return `(ps failed: ${ps.stderr.trim() || `exit ${ps.code}`})`;
+  return groupRows(ps.stdout, pgid);
 }
 
 /** The last `bytes` of a file, or "" when it cannot be read. */
@@ -141,6 +195,7 @@ async function ensureHead(deps: VerifyDeps, v: Verification, plan: VerifyPlan): 
   return `the head ${v.head_sha.slice(0, 8)} is not in ${v.project_path} and fetching it from origin did not bring it${tried.length > 0 ? ` (${tried.join("; ")})` : ""}`;
 }
 
+
 function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   if (child.pid === undefined) return;
   try {
@@ -152,41 +207,85 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 
 interface StepResult {
   exit: number;
-  timedOut: boolean;
+  /** Which deadline killed it: the step's own, the run's, or none. */
+  timedOut: "step" | "run" | null;
+  /** Killed because another step of its group failed. */
+  stopped: boolean;
+}
+
+interface Attempt {
+  command: string;
+  cwd: string;
+  logPath: string;
+  env: Record<string, string>;
+  /** When the step's own deadline falls (epoch ms), or null when it has none. */
+  stepDeadline: number | null;
+  runDeadline: number;
+  /** What is appended to the log at a deadline, before the kill. */
+  atDeadline(pgid: number, which: "step" | "run"): Promise<string>;
+  /** Hears of the group leader's pid; the step resolves only after its promise settles too. */
+  spawned(pid: number): Promise<void>;
+}
+
+/** How a parallel group stops a running sibling once one of its steps failed. */
+interface StepHandle {
+  stop(): void;
 }
 
 /**
- * Run one step in its own process group, its output to its log; the whole group is killed at the deadline.
- * `spawned` hears of the group leader's pid; the step resolves only after its promise settles too.
+ * Run one step in its own process group, its output to its log. At the earlier of its own
+ * deadline and the run's, the group's process table is appended to the log, then the whole
+ * group is killed (SIGTERM, SIGKILL after a grace).
  */
-function runStep(job: Job, command: string, cwd: string, logPath: string, deadline: number, env: Record<string, string>, spawned: (pid: number) => Promise<void>): Promise<StepResult> {
+function runStep(job: Job, a: Attempt, handle: StepHandle): Promise<StepResult> {
   return new Promise((resolve) => {
-    const fd = openSync(logPath, "w", 0o600);
+    const fd = openSync(a.logPath, LOG_FLAGS, 0o600);
     let child: ChildProcess;
     try {
-      child = spawn("/bin/sh", ["-c", command], { cwd, env, stdio: ["ignore", fd, fd], detached: true });
+      child = spawn("/bin/sh", ["-c", a.command], { cwd: a.cwd, env: a.env, stdio: ["ignore", fd, fd], detached: true });
     } catch {
       closeSync(fd);
-      resolve({ exit: 127, timedOut: false });
+      resolve({ exit: 127, timedOut: null, stopped: false });
       return;
     }
-    job.child = child;
-    const noted = child.pid === undefined ? Promise.resolve() : spawned(child.pid);
-    let timedOut = false;
+    job.children.add(child);
+    const noted = child.pid === undefined ? Promise.resolve() : a.spawned(child.pid);
+    let timedOut: StepResult["timedOut"] = null;
+    let stopped = false;
+    let finished = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const which = a.stepDeadline !== null && a.stepDeadline < a.runDeadline ? "step" : "run";
+    const expire = async () => {
+      timedOut = which;
+      if (child.pid !== undefined) {
+        const text = await a.atDeadline(child.pid, which).catch((error: unknown) => `\n(listing the process group failed: ${(error as Error).message})\n`);
+        try {
+          appendFileSync(a.logPath, text);
+        } catch {
+          // the listing is diagnostics only; the kill goes ahead without it
+        }
+      }
+      // It exited while ps ran: its group is killed already, and a later signal could reach a reused group id.
+      if (finished) return;
       killGroup(child, "SIGTERM");
       grace = setTimeout(() => killGroup(child, "SIGKILL"), KILL_GRACE_MS);
-    }, Math.max(0, deadline - Date.now()));
+    };
+    const timer = setTimeout(() => void expire(), Math.max(0, (which === "step" ? a.stepDeadline! : a.runDeadline) - Date.now()));
+    handle.stop = () => {
+      if (finished || timedOut !== null) return;
+      stopped = true;
+      killGroup(child, "SIGKILL");
+    };
     const done = (exit: number) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       if (grace) clearTimeout(grace);
       // A step's leftovers (a server it started) go with it.
       killGroup(child, "SIGKILL");
       closeSync(fd);
-      job.child = null;
-      void noted.then(() => resolve({ exit, timedOut }));
+      job.children.delete(child);
+      void noted.then(() => resolve({ exit, timedOut, stopped }));
     };
     child.once("error", () => done(127));
     child.once("exit", (code, signal) => done(code ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0)));
@@ -295,12 +394,38 @@ async function noteStepProcess(deps: VerifyDeps, v: Verification, pid: number): 
   }
 }
 
+/** The block appended to a step's log at a deadline: why, and its process group as it stood. */
+async function deadlineBlock(deps: VerifyDeps, pgid: number, why: string): Promise<string> {
+  const table = await (deps.groupTable ?? psGroupTable)(pgid);
+  return `\n--- flowryn verify: killed at ${why}; its process group ${pgid} at that moment ---\n${table}\n---\n`;
+}
+
+/**
+ * Why a finished step ended as it did beyond its exit code, or null. `firstLog` is its first
+ * attempt's log; `step.log` its last.
+ */
+function stepDetail(step: VerifyStep, result: StepResult, deadline: StepDeadline | null, plan: VerifyPlan, firstLog: string, stoppedBy: string | null): string | null {
+  const runOut = `timed out: the run's ${duration(plan.timeoutMs)} were up`;
+  const hangs = step.hangs ?? 0;
+  const at = deadline ? deadlineLine(deadline) : "its deadline";
+  if (hangs === 2) return `hung twice: killed at ${at} both times; process groups in ${firstLog} and ${step.log}`;
+  const hung = hangs === 1 ? `hung once: killed at ${at}, process group in ${firstLog}` : null;
+  let outcome: string | null;
+  if (result.stopped) outcome = `stopped: ${stoppedBy ?? "another step of its group"} failed`;
+  else if (result.timedOut === "run") outcome = runOut;
+  else if (hung === null) outcome = null;
+  else if ((step.attempts ?? 1) === 1) outcome = "no time left in the run to retry it";
+  else outcome = result.exit === 0 ? "passed on its retry" : `its retry exited ${result.exit}`;
+  if (hung === null) return outcome;
+  return outcome === null ? hung : `${hung}; ${outcome}`;
+}
+
 /** Run a verification to its end. Never throws: whatever happens is recorded on its row. */
 export async function runVerification(deps: VerifyDeps, v: Verification, plan: VerifyPlan, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (active.has(v.id)) return;
-  const job: Job = { aborted: false, child: null };
+  const job: Job = { aborted: false, children: new Set() };
   active.set(v.id, job);
-  const deadline = Date.now() + plan.timeoutMs;
+  const runDeadline = Date.now() + plan.timeoutMs;
   const steps = v.steps.map((s) => ({ ...s }));
   const finish = (outcome: Omit<VerificationOutcome, "steps" | "tests">) => {
     try {
@@ -309,6 +434,8 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       deps.log(`verify ${v.id}: could not record the outcome: ${(error as Error).message}`);
     }
   };
+  const record = (changed: VerifyStep) => tx(deps.db, () => recordSteps(deps.db, v, steps, changed, deps.now()));
+  const stopped = () => finish({ state: "error", detail: "the daemon stopped mid-run", binary: null });
   let worktreeAdded = false;
   try {
     mkdirSync(v.dir, { recursive: true, mode: 0o700 });
@@ -318,20 +445,67 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     if (added.code !== 0) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
     worktreeAdded = true;
     const childEnv = stepEnv(env, plan.path);
-    for (const step of steps) {
-      if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null });
-      step.state = "running";
-      tx(deps.db, () => recordSteps(deps.db, v, steps, null, deps.now()));
+    const deadlines = stepDeadlines(deps.db, v.project_id, steps.map((s) => s.name), plan.stepTimeoutMs ?? null);
+    steps.forEach((s, i) => (s.deadline_ms = deadlines[i]?.ms ?? null));
+
+    /** One step to its end: run, and once more when its own deadline killed it and the run has time left. */
+    const runOne = async (i: number, handle: StepHandle, stoppedBy: () => string | null): Promise<void> => {
+      const step = steps[i]!;
+      const deadline = deadlines[i] ?? null;
+      const firstLog = step.log;
       const began = Date.now();
-      const result = await runStep(job, step.name, v.worktree_path, join(v.dir, step.log), deadline, childEnv, (pid) => noteStepProcess(deps, v, pid));
+      let result: StepResult = { exit: 127, timedOut: null, stopped: false };
+      step.hangs = 0;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        if (attempt > 1 && stoppedBy() !== null) {
+          result = { ...result, stopped: true };
+          break;
+        }
+        step.attempts = attempt;
+        step.log = attempt === 1 ? firstLog : retryLogName(firstLog);
+        step.state = "running";
+        record(step);
+        result = await runStep(
+          job,
+          {
+            command: step.name,
+            cwd: v.worktree_path,
+            logPath: join(v.dir, step.log),
+            env: childEnv,
+            stepDeadline: deadline ? Date.now() + deadline.ms : null,
+            runDeadline,
+            atDeadline: (pgid, which) => deadlineBlock(deps, pgid, which === "step" && deadline ? deadlineLine(deadline) : `the run's ${duration(plan.timeoutMs)} deadline`),
+            spawned: (pid) => noteStepProcess(deps, v, pid),
+          },
+          handle,
+        );
+        if (result.timedOut !== "step") break;
+        step.hangs++;
+        if (job.aborted || Date.now() >= runDeadline) break;
+      }
       step.ms = Date.now() - began;
       step.exit = result.exit;
       step.tests = parseBunSummary(readTail(join(v.dir, step.log)));
-      step.state = result.exit === 0 && !result.timedOut ? "passed" : "failed";
-      if (result.timedOut) step.detail = `timed out: the run's ${Math.round(plan.timeoutMs / 60_000)} min were up`;
-      tx(deps.db, () => recordSteps(deps.db, v, steps, step, deps.now()));
-      if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null });
-      if (step.state === "failed") return finish({ state: "failed", detail: step.detail ?? `${step.name} exited ${step.exit}`, binary: null });
+      step.state = result.stopped ? "stopped" : result.exit === 0 && result.timedOut === null ? "passed" : "failed";
+      step.detail = stepDetail(step, result, deadline, plan, firstLog, stoppedBy());
+      record(step);
+    };
+
+    for (const group of stepGroups(steps)) {
+      if (job.aborted) return stopped();
+      let failedBy: string | null = null;
+      const handles: StepHandle[] = group.map(() => ({ stop() {} }));
+      await Promise.all(
+        group.map(async (i, k) => {
+          await runOne(i, handles[k]!, () => failedBy);
+          if (steps[i]!.state !== "failed" || failedBy !== null) return;
+          failedBy = steps[i]!.name;
+          handles.forEach((h, j) => j !== k && h.stop());
+        }),
+      );
+      if (job.aborted) return stopped();
+      const failed = steps.find((s) => s.name === failedBy && s.state === "failed");
+      if (failed) return finish({ state: "failed", detail: failed.detail ?? `${failed.name} exited ${failed.exit}`, binary: null });
     }
     let binary: string | null = null;
     if (plan.binary) {
@@ -341,7 +515,9 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
         return finish({ state: "failed", detail: (error as Error).message, binary: null });
       }
     }
-    return finish({ state: "passed", detail: null, binary });
+    // A pass that needed a retry says so: the hang is worth knowing about even when it cleared.
+    const recovered = steps.filter((s) => (s.hangs ?? 0) > 0).map((s) => `${s.name}: ${s.detail}`);
+    return finish({ state: "passed", detail: recovered.length > 0 ? recovered.join("; ") : null, binary });
   } catch (error) {
     deps.log(`verify ${v.id}: ${(error as Error).stack ?? String(error)}`);
     finish({ state: "error", detail: `verify failed: ${(error as Error).message}`, binary: null });
@@ -363,7 +539,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
 export function stopVerifications(): void {
   for (const job of active.values()) {
     job.aborted = true;
-    if (job.child) killGroup(job.child, "SIGKILL");
+    for (const child of job.children) killGroup(child, "SIGKILL");
   }
 }
 
@@ -376,20 +552,25 @@ function killLeftovers(pgid: number): void {
   }
 }
 
+
 /** Recover one job; true when a running row was recorded as an error. */
 async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["terminate"]>, id: string, leases: ReturnType<typeof liveJobLeases>): Promise<boolean> {
   const v = getVerification(deps.db, id);
   const lease = leases.find((l) => l.job_id === id) ?? null;
-  let stepGone = true;
-  if (lease && lease.proc_pid !== null && lease.proc_start !== null && lease.proc_exe !== null) {
-    const ended = await end({ pid: lease.proc_pid, start: lease.proc_start, exe: lease.proc_exe }, { group: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
-    stepGone = ended.ok;
-    if (ended.ok && ended.evidence === "process") killLeftovers(lease.proc_pid);
-    if (!ended.ok) deps.log(`verify ${id}: the step left by the last daemon (pid ${lease.proc_pid}) did not exit (${ended.evidence}); its slot stays held`);
+  // Every step process the job recorded: several when a parallel group was running. One that is gone or reused is left alone.
+  const left: number[] = [];
+  for (const proc of lease ? leaseProcesses(deps.db, lease) : []) {
+    const ended = await end(proc, { group: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
+    if (ended.ok && ended.evidence === "process") killLeftovers(proc.pid);
+    if (!ended.ok) {
+      left.push(proc.pid);
+      deps.log(`verify ${id}: the step left by the last daemon (pid ${proc.pid}) did not exit (${ended.evidence}); its slot stays held`);
+    }
   }
+  const stepGone = left.length === 0;
   let recorded = false;
   if (v && v.state === "running") {
-    const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step (pid ${lease?.proc_pid}) did not exit`;
+    const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step${left.length > 1 ? "s" : ""} (pid ${left.join(", ")}) did not exit`;
     recorded = tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now()));
   }
   if (!stepGone) return recorded;
@@ -403,7 +584,7 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
 
 /**
  * Daemon startup: a verification still running, or a verify slot still held,
- * belongs to a daemon that is gone. Its recorded step is ended by identity
+ * belongs to a daemon that is gone. Its recorded steps are ended by identity
  * (its whole group; a reused pid is never signalled), a running row is
  * recorded as an error, its worktree removed, and then its slot released
  * (a member of the group that outlived its leader is SIGKILLed first). A

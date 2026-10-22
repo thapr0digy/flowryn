@@ -134,7 +134,17 @@ export function verificationView(v: Verification, now: number): Record<string, u
     head: v.head_sha,
     policy: v.policy_id ?? "-",
     state: v.state,
-    steps: v.steps.map((s) => ({ step: s.name, state: s.state, exit: s.exit ?? "-", ms: s.ms ?? "-", tests: s.tests ? countsLine(s.tests) : "-", detail: s.detail ?? "-" })),
+    steps: v.steps.map((s) => ({
+      step: s.name,
+      state: s.state,
+      exit: s.exit ?? "-",
+      ms: s.ms ?? "-",
+      tests: s.tests ? countsLine(s.tests) : "-",
+      detail: s.detail ?? "-",
+      group: s.group ?? "-",
+      deadline_ms: s.deadline_ms ?? "-",
+      attempts: s.attempts ?? "-",
+    })),
     tests: v.tests ? countsLine(v.tests) : "-",
     duration_ms: (v.finished_at ?? now) - v.started_at,
     binary: v.binary_path === null ? "-" : existsSync(v.binary_path) ? v.binary_path : `${v.binary_path} (removed)`,
@@ -220,17 +230,17 @@ const verifyStart: VerbSpec = {
     });
     // Same transaction as the row: the slot is re-counted here, so a scheduler grant cannot take it meanwhile.
     grantJobLease(ctx.db, { kind: "verify", id: v.id, taskId: v.task_id }, VERIFY_POOL, caps, ctx.now());
-    return { data: { ...verificationView(v, ctx.now()), attached: false, pr_number: target.ref?.number ?? null, head_ref: pr.headRef, binary_config: config.binary ?? "", timeout_ms: config.timeout_ms, env_path: stringArg(args, "path") ?? "" } };
+    return { data: { ...verificationView(v, ctx.now()), attached: false, pr_number: target.ref?.number ?? null, head_ref: pr.headRef, binary_config: config.binary ?? "", timeout_ms: config.timeout_ms, step_timeout_ms: config.step_timeout_ms ?? "", env_path: stringArg(args, "path") ?? "" } };
   },
   async settle(ctx, result) {
     const id = String(result.data.verification ?? "");
     const v = getVerification(ctx.db, id);
     // A replay of the call, or an attach to a running job, starts nothing.
     if (v && v.state === "running" && !isVerifying(id) && result.data.attached === false) {
-      const plan = { prNumber: result.data.pr_number === null ? null : Number(result.data.pr_number), headRef: result.data.head_ref === null ? null : String(result.data.head_ref), binary: String(result.data.binary_config) || null, timeoutMs: Number(result.data.timeout_ms), path: String(result.data.env_path ?? "") || null };
+      const plan = { prNumber: result.data.pr_number === null ? null : Number(result.data.pr_number), headRef: result.data.head_ref === null ? null : String(result.data.head_ref), binary: String(result.data.binary_config) || null, timeoutMs: Number(result.data.timeout_ms), stepTimeoutMs: result.data.step_timeout_ms ? Number(result.data.step_timeout_ms) : null, path: String(result.data.env_path ?? "") || null };
       void runVerification(verifyDeps(ctx), v, plan).catch((error: unknown) => ctx.log(`verify ${id}: ${(error as Error).message}`));
     }
-    const { pr_number: _n, head_ref: _r, binary_config: _b, timeout_ms: _t, env_path: _p, ...data } = result.data;
+    const { pr_number: _n, head_ref: _r, binary_config: _b, timeout_ms: _t, step_timeout_ms: _s, env_path: _p, ...data } = result.data;
     return { data, hints: [`flowryn verify show ${id}`] };
   },
 };

@@ -137,14 +137,26 @@ export function grantJobLease(db: Db, job: JobRef, pool: string, caps: Record<st
   appendEvent(db, { source: "daemon", kind: "pool.granted", taskId: job.taskId, payload: { job: job.id, kind: job.kind, pools: [pool] }, ts: now });
 }
 
-/** Record the job's running step (its process group leader) on its live leases. Call inside a transaction; whether a live lease took it. */
+/**
+ * Record a step process of the job (its process group leader) on its live leases: one row per
+ * process, as a parallel group runs several at once. Call inside a transaction; whether a live lease took it.
+ */
 export function recordJobProcess(db: Db, job: JobRef, proc: ProcIdentity, now: number): boolean {
-  const changed = db
-    .query("UPDATE job_leases SET proc_pid = ?3, proc_start = ?4, proc_exe = ?5 WHERE kind = ?1 AND job_id = ?2 AND released_at IS NULL")
-    .run(job.kind, job.id, proc.pid, proc.start, proc.exe).changes;
-  if (changed === 0) return false;
+  const leases = db.query("SELECT id FROM job_leases WHERE kind = ?1 AND job_id = ?2 AND released_at IS NULL").all(job.kind, job.id) as { id: number }[];
+  if (leases.length === 0) return false;
+  for (const lease of leases) {
+    db.query("INSERT INTO job_procs (lease_id, proc_pid, proc_start, proc_exe, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(lease.id, proc.pid, proc.start, proc.exe, now);
+  }
   appendEvent(db, { source: "daemon", kind: "pool.job_process", taskId: job.taskId, payload: { job: job.id, kind: job.kind, pid: proc.pid }, ts: now });
   return true;
+}
+
+/** Every step process recorded on the lease, oldest first: its job_procs rows, and the one a lease from before migration 28 holds. */
+export function leaseProcesses(db: Db, lease: JobLeaseRow): ProcIdentity[] {
+  const rows = db.query("SELECT proc_pid, proc_start, proc_exe FROM job_procs WHERE lease_id = ?1 ORDER BY id").all(lease.id) as { proc_pid: number; proc_start: number; proc_exe: string }[];
+  const procs = rows.map((r) => ({ pid: r.proc_pid, start: r.proc_start, exe: r.proc_exe }));
+  if (lease.proc_pid !== null && lease.proc_start !== null && lease.proc_exe !== null) procs.unshift({ pid: lease.proc_pid, start: lease.proc_start, exe: lease.proc_exe });
+  return procs;
 }
 
 /** Release the job's live leases, once: a second call finds none and records nothing. Call inside a transaction. Returns the pools released. */
