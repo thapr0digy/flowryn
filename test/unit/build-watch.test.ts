@@ -35,8 +35,8 @@ const RUNNING = "aaaaaaaaaaaa";
 const NEW = "bbbbbbbbbbbb";
 const MERGED = "c0ffee0000000000000000000000000000000000";
 
-function info(build: string | null = RUNNING): DaemonInfo {
-  return { pid: 4411, version: "0.9.0", proto: 6, instance: "i", startedAt: Date.now() - 90_000, execPath: "/d/flowryn", build, socket: "/s", stateDir: "/st" };
+function info(build: string | null = RUNNING, commit: string | null = null): DaemonInfo {
+  return { pid: 4411, version: "0.9.0", proto: 6, instance: "i", startedAt: Date.now() - 90_000, execPath: "/d/flowryn", build, commit, socket: "/s", stateDir: "/st" };
 }
 
 function target(overrides: Partial<SmokeResult> = {}): SmokeResult {
@@ -63,10 +63,13 @@ interface World {
   hashCalls: number;
   config: DaemonConfig;
   running: string | null;
+  /** The commit the running daemon was built from, and the commits git calls its ancestors. */
+  runningCommit: string | null;
+  ancestorsOfRunning: Set<string>;
 }
 
 function world(): World {
-  return { now: 1_000_000, key: "k1", build: NEW, smoke: target(), merged: new Set([MERGED]), fetchAdds: [], gitCalls: [], smokeCalls: 0, hashCalls: 0, config: { ...DEFAULT_DAEMON }, running: RUNNING };
+  return { now: 1_000_000, key: "k1", build: NEW, smoke: target(), merged: new Set([MERGED]), fetchAdds: [], gitCalls: [], smokeCalls: 0, hashCalls: 0, config: { ...DEFAULT_DAEMON }, running: RUNNING, runningCommit: null, ancestorsOfRunning: new Set() };
 }
 
 function watcher(w: World) {
@@ -75,7 +78,7 @@ function watcher(w: World) {
     env: {},
     now: () => w.now,
     log: () => {},
-    info: () => info(w.running),
+    info: () => info(w.running, w.runningCommit),
     work: () => ({ mergesInFlight: [], cleanups: [], launching: [], challenges: [] }),
     supervisor: () => supervisor,
     smoke: async () => target(),
@@ -87,6 +90,8 @@ function watcher(w: World) {
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     const commit = args[args.indexOf("--is-ancestor") + 1]!;
+    const of = args[args.indexOf("--is-ancestor") + 2]!;
+    if (of === w.runningCommit) return { exitCode: w.ancestorsOfRunning.has(commit) ? 0 : 1, stdout: "", stderr: "" };
     return { exitCode: w.merged.has(commit) ? 0 : 1, stdout: "", stderr: "" };
   };
   return new BuildWatcher({
@@ -95,7 +100,7 @@ function watcher(w: World) {
     now: () => w.now,
     log: () => {},
     config: () => w.config,
-    info: () => info(w.running),
+    info: () => info(w.running, w.runningCommit),
     supervisor: () => supervisor,
     restart,
     git,
@@ -246,6 +251,23 @@ describe("build watcher", () => {
       expect(openItems("build_refused")[0]).toContain(why);
     });
   }
+
+  test("a build of an older commit with the same version is refused as a downgrade, now that PRs do not bump the version", async () => {
+    const w = world();
+    w.runningCommit = "d00d000000000000000000000000000000000000";
+    w.ancestorsOfRunning.add(MERGED);
+    await settled(w, watcher(w));
+    expect(readPending(db)).toBeNull();
+    expect(openItems("build_refused")[0]).toContain(`its commit is an ancestor of d00d000`);
+    expect(readJudged(db)).toMatchObject({ verdict: "refused", reason: "downgrade" });
+  });
+
+  test("a build of a newer commit with the same version still applies", async () => {
+    const w = world();
+    w.runningCommit = "d00d000000000000000000000000000000000000";
+    await settled(w, watcher(w));
+    expect(readPending(db)).toMatchObject({ build: NEW });
+  });
 
   test("a higher protocol is the normal upgrade", async () => {
     const w = world();
