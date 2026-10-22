@@ -142,7 +142,7 @@ export async function readRuleFacts(deps: RuleFactDeps, worktree: string, defaul
   if (base.code !== 0 || base.stdout.trim() === "") return { ok: false, reason: `no merge base with origin/${defaultBranch}` };
   const range = [base.stdout.trim(), head];
   const names = await deps.git(["diff", "--no-ext-diff", "--no-textconv", "--name-status", "-M", ...range], worktree);
-  const hunks = await deps.git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U0", "-M", ...range], worktree);
+  const hunks = await deps.git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "-U0", "-M", ...range], worktree);
   if (names.code !== 0 || hunks.code !== 0) return { ok: false, reason: "the branch's diff does not read" };
   const files = parseNameStatus(names.stdout);
   const ranges = parseHunks(hunks.stdout);

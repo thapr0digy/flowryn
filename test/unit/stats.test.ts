@@ -321,6 +321,13 @@ describe("interventions", () => {
     expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(13);
   });
 
+  test("a rule's answer is Flowryn's own; your undo of it is yours", () => {
+    const t = NOW - HOUR;
+    ev("decision.answered", t, "r1", { decision: "q1", choice: "fix", by: "policy", via: "rule:lint-added-file" });
+    ev("decision.overridden", t + 1, "r1", { decision: "q1", from: "fix", rule: "rule:lint-added-file", choice: "approve", by: "captain", via: "cli-tty" });
+    expect(summarizeInterventions(interventions(db, scope(), []))).toEqual([{ action: "answer", by: "you via cli-tty", n: 1 }]);
+  });
+
   test("steers: the leader's and yours, not Flowryn's stage-start or policy-follow steers (matched by the id they name), nor an answer's", () => {
     const t = NOW - HOUR;
     ev("steer.created", t, "r1", { steer: "m1", decision: null });

@@ -233,6 +233,16 @@ describe("the facts, from a real git repository and a stand-in no-mistakes", () 
     expect(fileClass("src/old.ts", "5", facts.diff)).toBe("touched");
   });
 
+  test("the changed lines read the same with the user's diff.noprefix", async () => {
+    const r = await repo();
+    await run(r.wt, "config", "diff.noprefix", "true");
+    writeFileSync(r.statusFile, status(r.head, "review", ['r-1,warning,src/old.ts,3,ask-user,"tighten this"']));
+    const facts = await readRuleFacts({ noMistakes: r.nm, git, timeoutMs: 5_000 }, r.wt, "main");
+    if (!facts.ok) throw new Error(facts.reason);
+    expect(facts.diff.changed.get("src/old.ts")).toEqual([[3, 3]]);
+    expect(fileClass("src/old.ts", "3", facts.diff)).toBe("diff-line");
+  });
+
   test("another branch's run, a missing base and an unreadable status each say why", async () => {
     const r = await repo();
     writeFileSync(r.statusFile, status(r.head, "lint", ['lint-1,warning,test/new.test.ts,1,ask-user,"x"'], "someone/else"));

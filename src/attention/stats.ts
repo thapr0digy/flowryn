@@ -294,6 +294,7 @@ export interface Intervention {
 /** The events that are a person's or the leader's action (the design's table); steers are read apart. */
 const ACTION_EVENTS = [
   "decision.answered",
+  "decision.overridden",
   "item.dismissed",
   "gate.passed",
   "gate.changes",
@@ -341,7 +342,9 @@ function asIntervention(e: EventLite): Intervention | null {
   const p = parse(e.payload);
   const base = { ts: e.ts, seq: e.seq, task_id: e.task_id, run_id: e.run_id, payload: p };
   switch (e.kind) {
-    case "decision.answered": {
+    case "decision.answered":
+    case "decision.overridden": {
+      if (p.by === "policy") return null;
       const by = who(p.by);
       const via = typeof p.via === "string" && p.via !== p.by && p.via !== "leader" ? ` via ${p.via}` : "";
       return { ...base, action: "answer", by: `${by}${via}` };
