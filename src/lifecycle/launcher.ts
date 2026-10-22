@@ -25,7 +25,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
-import { ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
+import { ensureHarnessShim, ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
 import { claimOperation, confirmOperation, escalatedStart, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
 /**
@@ -298,7 +298,7 @@ export class Launcher {
       FLOWRYN_TASK_FILE: instructionsFile,
       // The daemon opens review pages in the user's browser (src/lavish/opener.ts); a worker's lavish-axi never tries.
       LAVISH_AXI_NO_OPEN: "1",
-      PATH: `${this.shimDir(config, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      PATH: `${ensureHarnessShim(config.state_dir, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       // The pane's shell, which reads no rc file the user's startup prompts could eat the typed launch in (pane-shell.ts).
       SHELL: ensurePaneShell(config.state_dir),
     };
@@ -437,21 +437,6 @@ export class Launcher {
       appendEvent(db, { source: "daemon", kind: "run.token_minted", runId: run.id, taskId: run.task_id, payload: {} });
     });
     return token;
-  }
-
-  /**
-   * Herdr's agent.start types the harness's canonical name (`claude`, `pi`)
-   * into the pane shell. A shim directory first on PATH maps that name to the
-   * binary Flowryn resolved, so the worker runs the version the contract gate
-   * checked even when the shell has no alias for it.
-   */
-  private shimDir(config: FlowrynConfig, harness: string, binary: string): string {
-    const dir = join(config.state_dir, "shims");
-    ensureDir(dir, 0o700);
-    const link = join(dir, harness);
-    const script = `#!/bin/sh\nexec ${JSON.stringify(binary)} "$@"\n`;
-    if (!existsSync(link) || readFileSync(link, "utf8") !== script) writeFileSync(link, script, { mode: 0o700 });
-    return dir;
   }
 
   /**

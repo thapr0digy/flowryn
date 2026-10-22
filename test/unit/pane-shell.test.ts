@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensurePaneShell, paneEvidence, paneShellScript, paneTail, TAIL_LINE_CHARS, TAIL_LINES } from "../../src/lifecycle/pane-shell.ts";
+import { ensureHarnessShim, ensurePaneShell, paneEvidence, paneShellScript, paneTail, TAIL_LINE_CHARS, TAIL_LINES } from "../../src/lifecycle/pane-shell.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -57,6 +57,38 @@ describe("the worker pane shell", () => {
     expect(statSync(path).mtimeMs).toBe(before);
     ensurePaneShell(dir, "/bin/bash");
     expect(readFileSync(path, "utf8")).toContain("SHELL='/bin/bash'");
+  });
+});
+
+describe("the harness shim", () => {
+  test("assumption: Herdr names the agent from argv0, so the process the typed name starts carries that name, not the binary's path", () => {
+    const dir = scratch();
+    const shims = ensureHarnessShim(dir, "claude", "/bin/sleep");
+    const child = Bun.spawn(["/bin/sh", "-c", "claude 30"], { env: { PATH: `${shims}:/usr/bin:/bin` } });
+    try {
+      let args = "";
+      for (let i = 0; i < 50 && !args.startsWith("claude"); i++) {
+        Bun.sleepSync(20);
+        args = Bun.spawnSync(["ps", "-o", "args=", "-p", String(child.pid)]).stdout.toString().trim();
+      }
+      expect(args).toBe("claude 30");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  test("points at the resolved binary, replacing an older script shim, and is left alone when it already does", () => {
+    const dir = scratch();
+    mkdirSync(join(dir, "shims"));
+    writeFileSync(join(dir, "shims", "pi"), '#!/bin/sh\nexec /old/pi "$@"\n');
+    const link = join(ensureHarnessShim(dir, "pi", "/bin/cat"), "pi");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe("/bin/cat");
+    const before = lstatSync(link).mtimeMs;
+    ensureHarnessShim(dir, "pi", "/bin/cat");
+    expect(lstatSync(link).mtimeMs).toBe(before);
+    ensureHarnessShim(dir, "pi", "/bin/echo");
+    expect(readlinkSync(link)).toBe("/bin/echo");
   });
 });
 

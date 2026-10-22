@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { ensureDir } from "../util/fsx.ts";
 import { redactSecrets } from "../util/redact.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
@@ -40,6 +40,42 @@ export function ensurePaneShell(stateDir: string, userShell: string | null = log
   const script = paneShellScript(userShell);
   if (!existsSync(path) || readFileSync(path, "utf8") !== script) writeFileSync(path, script, { mode: 0o700 });
   return path;
+}
+
+/**
+ * The harness shim: `<stateDir>/shims/<harness>`, first on the pane's PATH,
+ * so the name agent.start types runs the binary Flowryn resolved (the version
+ * the contract gate checked) whatever the shell would otherwise find. It is a
+ * symlink, not a script that execs the binary: Herdr names a pane's agent from
+ * its foreground process's argv0, and an exec'd binary carries its own path
+ * there (`2.1.308` for a Claude install), so Herdr found no agent and read the
+ * status "unknown", which refuses the interrupt an urgent steer's cut needs.
+ * Through a symlink the process keeps the typed name. Replaced atomically,
+ * and only when it points elsewhere; returns the shim directory.
+ */
+export function ensureHarnessShim(stateDir: string, harness: string, binary: string): string {
+  const dir = join(stateDir, "shims");
+  ensureDir(dir, 0o700);
+  const link = join(dir, harness);
+  const target = resolve(binary);
+  if (pointsAt(link, target)) return dir;
+  const temp = `${link}.${process.pid}.${Date.now()}`;
+  symlinkSync(target, temp);
+  try {
+    renameSync(temp, link);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+  return dir;
+}
+
+function pointsAt(link: string, target: string): boolean {
+  try {
+    return lstatSync(link).isSymbolicLink() && readlinkSync(link) === target;
+  } catch {
+    return false;
+  }
 }
 
 function shellQuoted(value: string): string {
