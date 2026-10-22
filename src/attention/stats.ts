@@ -169,7 +169,7 @@ export function explanationWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
 export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
   const rows = db
     .query(
-      `SELECT id, created_at, answered_at, state, reserved_reason, gate_id FROM decisions
+      `SELECT id, created_at, answered_at, state, reserved_reason, gate_id, answered_by FROM decisions
        WHERE (state = 'open' OR answered_at >= $since) AND ${inProject("task_id")}
        ORDER BY state = 'open' DESC, answered_at DESC LIMIT $limit`,
     )
@@ -180,6 +180,7 @@ export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
     state: string;
     reserved_reason: string | null;
     gate_id: string | null;
+    answered_by: string | null;
   }[];
   if (rows.length === MAX_WAIT_ROWS) gaps.push(`decisions: capped at ${MAX_WAIT_ROWS} rows`);
   const undated = rows.filter((r) => r.created_at === null).length;
@@ -187,7 +188,7 @@ export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
   return rows
     .filter((r) => r.created_at !== null)
     .map((r) => ({
-      reason: r.reserved_reason || r.gate_id ? "decision (captain)" : "decision (leader)",
+      reason: r.answered_by === "policy" ? "decision (rule)" : r.reserved_reason || r.gate_id ? "decision (captain)" : "decision (leader)",
       id: r.id,
       start: r.created_at!,
       end: r.state === "open" ? null : r.answered_at,

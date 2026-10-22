@@ -49,8 +49,8 @@ function parked(gate: string, rows: string[], header = "{id,severity,file,line,a
 describe("a parked conflict gate", () => {
   test("the findings table reads by column name, around a help list that is not strict TOON", () => {
     expect(parseFindings(parked("ci", [CONFLICT_ROW, 'ci-2,error,"",,auto-fix,"Check test failed, see log"']))).toEqual([
-      { id: "ci-1", action: "auto-fix", description: "PR has merge conflicts with the base branch", category: "" },
-      { id: "ci-2", action: "auto-fix", description: "Check test failed, see log", category: "" },
+      { id: "ci-1", action: "auto-fix", description: "PR has merge conflicts with the base branch", category: "", severity: "error", file: "", line: "" },
+      { id: "ci-2", action: "auto-fix", description: "Check test failed, see log", category: "", severity: "error", file: "", line: "" },
     ]);
     const nm = parseNmStatus(parked("ci", [CONFLICT_ROW]))!;
     expect(nm).toMatchObject({ gateStep: "ci", headSha: HEAD, head: HEAD.slice(0, 8), gate: true });
@@ -59,7 +59,7 @@ describe("a parked conflict gate", () => {
 
   test("the flat shape (a top-level `gate: <step>` and findings table) still reads", () => {
     const flat = parked("ci", [CONFLICT_ROW], undefined, undefined, "flat");
-    expect(parseFindings(flat)).toEqual([{ id: "ci-1", action: "auto-fix", description: "PR has merge conflicts with the base branch", category: "" }]);
+    expect(parseFindings(flat)).toEqual([{ id: "ci-1", action: "auto-fix", description: "PR has merge conflicts with the base branch", category: "", severity: "error", file: "", line: "" }]);
     expect(parseNmStatus(flat)).toMatchObject({ gateStep: "ci", gate: true });
     expect(isConflictGate(parseNmStatus(flat)!)).toBe(true);
     expect(isConflictGate(parseNmStatus(parked("review", [CONFLICT_ROW], undefined, undefined, "flat"))!)).toBe(false);
