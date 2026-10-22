@@ -1,5 +1,6 @@
 import type { Db } from "../db/db.ts";
-import { getMeta, setMeta } from "../db/db.ts";
+import { getMeta, setMeta, tx } from "../db/db.ts";
+import { appendEvent } from "../db/events.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { closeItemExplanations } from "./explanations.ts";
 
@@ -26,7 +27,9 @@ export type ItemClass = "actionable" | "info";
  * leader confirms it with them through a human channel.
  * contract_recorded: the leader, or the daemon's automatic check, recorded a
  * harness contract pass (relaxed policy, installed build); informational, so
- * you see every one.
+ * you see every one, until the harness's next record supersedes it (recordPass).
+ * Info items never count in a P1 total and close a day after they were
+ * presented (closeSeenInfoItems).
  * contract_leftover: the daemon's automatic contract check could not release
  * what a run created (a Herdr workspace, a process, a worktree, its scratch
  * home); the line and its event name each one and the run's manifest.
@@ -247,4 +250,39 @@ export function resolveRunItems(db: Db, runId: string, kinds: readonly ItemKind[
 
 export function openItems(db: Db): ItemRow[] {
   return db.query("SELECT * FROM items WHERE state IN ('open','presented') ORDER BY lane, opened_at").all() as ItemRow[];
+}
+
+/**
+ * How long an informational item stays open once a leader turn has shown it.
+ * A day, like the board's "UPDATES (last day)", which lists info items in any
+ * state, so closing one never hides it from the board early.
+ */
+export const INFO_KEEP_MS = 86_400_000;
+
+/** The resolved_by of an info item closed by its retention. */
+export const INFO_KEPT_REASON = "presented, kept 1 day";
+
+/**
+ * Retention for informational items: each one a leader turn presented over
+ * INFO_KEEP_MS ago (its newest confirmed presentation) is resolved, with one
+ * `items.info_closed` event when any closed. Actionable items are never
+ * touched, and an info item never presented stays for the digest (or drops
+ * after its carries, loseCarried). Runs in its own transaction (the upkeep pass).
+ */
+export function closeSeenInfoItems(db: Db, now: number): string[] {
+  return tx(db, () => {
+    const closed = db
+      .query(
+        `UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?1
+         WHERE class = 'info' AND state = 'presented'
+           AND (SELECT MAX(s.confirmed_at) FROM presentations s WHERE s.item_id = items.id AND s.state = 'presented') < ?1 - ?3
+         RETURNING id`,
+      )
+      .all(now, INFO_KEPT_REASON, INFO_KEEP_MS) as { id: string }[];
+    const ids = closed.map((r) => r.id);
+    if (ids.length === 0) return ids;
+    closeItemExplanations(db, ids, INFO_KEPT_REASON, now);
+    appendEvent(db, { source: "daemon", kind: "items.info_closed", payload: { items: ids, keep_ms: INFO_KEEP_MS }, ts: now });
+    return ids;
+  });
 }

@@ -135,13 +135,13 @@ async function settled(db: Db, ids: string[]): Promise<void> {
 
 const CAPS = { validation: 5 };
 
-describe("migration 28", () => {
-  test("applies forward on a database at 27 and leaves verifications alone", () => {
+describe("migration 29", () => {
+  test("applies forward on a database at 28 and leaves verifications alone", () => {
     const dir = tempDir();
     const db = openDb(join(dir, "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 27));
+    migrate(db, MIGRATIONS.slice(0, 28));
     db.exec("INSERT INTO verifications (id, project_id, pr_url, head_sha, state, steps, dir, worktree_path, project_path, started_at) VALUES ('v1', 'web', 'u', 'h', 'passed', '[]', '/d', '/d/wt', '/p', 1)");
-    expect(migrate(db)).toEqual([28]);
+    expect(migrate(db)).toEqual([29]);
     expect(db.query("SELECT id, state FROM verifications").all()).toEqual([{ id: "v1", state: "passed" }]);
     expect(db.query("SELECT COUNT(*) AS n FROM verify_queue").get()).toEqual({ n: 0 });
     expect(() => db.exec("INSERT INTO verify_queue (id, project_id, pr_url, head_sha, policy_id, source, state, requested_at) VALUES ('vq1', 'web', 'u', 'h', 'p', 'cli', 'running', 1)")).toThrow();

@@ -648,7 +648,25 @@ ALTER TABLE merges ADD COLUMN local_green TEXT;
 `;
 
 /**
- * Migration 28: the verify queue (docs/notes/2026-10-22-daemon-run-verify-y3.md). Every
+ * Migration 28 (docs/notes/2026-10-17-p1-lane-means-8v.md): the informational items left open before
+ * they closed by themselves. A contract_recorded item with a newer one for its harness (the line's
+ * first word) is superseded; the newest one per harness gets its key (task_id `harness:<id>`), so the
+ * next record supersedes it; then any info item opened over a day ago is resolved.
+ */
+const INFO_ITEMS_CLOSE_SQL = /* sql */ `
+UPDATE items SET state = 'resolved', resolved_by = 'superseded by a newer contract record', resolved_at = CAST(strftime('%s','now') AS INTEGER) * 1000
+WHERE kind = 'contract_recorded' AND state IN ('open','presented')
+  AND EXISTS (SELECT 1 FROM items n WHERE n.kind = 'contract_recorded'
+    AND substr(n.line, 1, instr(n.line, ' ') - 1) = substr(items.line, 1, instr(items.line, ' ') - 1)
+    AND (n.opened_at > items.opened_at OR (n.opened_at = items.opened_at AND n.rowid > items.rowid)));
+UPDATE items SET task_id = 'harness:' || substr(line, 1, instr(line, ' ') - 1)
+WHERE kind = 'contract_recorded' AND task_id IS NULL AND state IN ('open','presented') AND substr(line, 1, instr(line, ' ') - 1) IN ('claude','pi');
+UPDATE items SET state = 'resolved', resolved_by = 'informational, open over a day before items closed by themselves', resolved_at = CAST(strftime('%s','now') AS INTEGER) * 1000
+WHERE class = 'info' AND state IN ('open','presented') AND opened_at < CAST(strftime('%s','now') AS INTEGER) * 1000 - 86400000;
+`;
+
+/**
+ * Migration 29: the verify queue (docs/notes/2026-10-22-daemon-run-verify-y3.md). Every
  * `flowryn verify` is a request; it starts at once when a validation slot is free, or
  * waits here in rank and request order. The verifications table, which the merge gate
  * reads, only ever holds jobs that started.
@@ -695,7 +713,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 25, name: "operations", sql: OPERATIONS_SQL },
   { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
-  { version: 28, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
+  { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
+  { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
