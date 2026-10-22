@@ -21,6 +21,7 @@ import {
   VALIDATION_STATUS_FRESH_MS,
   guardLines,
   restartGuards,
+  carriedValidations,
   smokeCheck,
   type InMemoryWork,
   type ProcResult,
@@ -115,13 +116,14 @@ describe("restart guards", () => {
     expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
   });
 
-  test("validation: a live validation lease blocks; a released one or another pool does not", () => {
+  test("validation: a live validation lease is carried across, never a guard; a released one or another pool is not listed", () => {
     tx(db, () => {
       db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', 'r1', 'ship', ?1)").run(Date.now() - 60_000);
       db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at, released_at) VALUES ('validation', 'r2', 'ship', 1, 2)").run();
       db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('worker', 'r2', 'build', 1)").run();
     });
-    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => [g.kind, g.task])).toEqual([["validation", "t1"]]);
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    expect(carriedValidations(db, Date.now()).map((g) => [g.kind, g.task])).toEqual([["validation", "t1"]]);
   });
 
   test("in-memory work: a cleanup, a launch, an approval challenge and a repin challenge", () => {
@@ -207,7 +209,7 @@ describe("no-mistakes active steps", () => {
   });
 });
 
-describe("the validation guard and a CI wait", () => {
+describe("validations are carried across a restart, never waited on", () => {
   function validating(run: string, status: string | null, observedAgo = 5_000): void {
     tx(db, () => {
       db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', ?1, 'ship', ?2)").run(run, Date.now() - 34 * 60_000);
@@ -218,60 +220,53 @@ describe("the validation guard and a CI wait", () => {
     });
   }
 
-  test("a validation that only waits on external CI does not block", () => {
+  test("a validation that only waits on external CI is carried", () => {
     validating("r1", NM_CI_WAIT);
     expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    expect(carriedValidations(db, Date.now()).map((g) => g.task)).toEqual(["t1"]);
   });
 
-  test("a run parked at a merge conflict the conflict nudge covers does not block; an uncovered parked gate does", () => {
+  test("a run parked at a merge conflict, covered or not, is carried", () => {
     const parked = 'run:\n  id: "01NMC"\n  branch: b\n  status: awaiting_approval\n  awaiting_agent: parked 3m\n  head: abc\n  pr: ""\ngate: ci\n';
     tx(db, () => {
       db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', 'r1', 'ship', ?1)").run(Date.now() - 34 * 60_000);
       recordEvidence(db, "r1", "nomistakes", 1, { id: "01NMC", branch: "b", status: "awaiting_approval", outcome: "", head: "abc", pr: "", active_steps: null, conflict_gate: "conflict_nudged" }, Date.now() - 5_000);
     });
-    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
     validating("r2", parked);
-    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => [g.kind, g.task])).toEqual([["validation", "t2"]]);
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    expect(carriedValidations(db, Date.now()).map((g) => [g.kind, g.task])).toEqual([["validation", "t1"], ["validation", "t2"]]);
   });
 
-  test("a step with a local agent blocks, naming the oldest step and its agent", () => {
+  test("assumption: a step with a local agent runs in no-mistakes, so it is carried too, naming the oldest step and its agent", () => {
     validating("r1", NM_REVIEW);
-    const guards = restartGuards(db, NO_WORK, Date.now());
-    expect(guards.map((g) => [g.kind, g.task])).toEqual([["validation", "t1"]]);
-    expect(guards[0]!.detail).toBe("no-mistakes step review, running 42m, agent pid 81234; validating for 34 min");
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    const carried = carriedValidations(db, Date.now());
+    expect(carried.map((g) => [g.kind, g.task])).toEqual([["validation", "t1"]]);
+    expect(carried[0]!.detail).toBe("no-mistakes step review, running 42m, agent pid 81234; validating for 34 min");
   });
 
-  test("a status read too long ago blocks (fail closed)", () => {
+  test("a status read too long ago is carried, and its line says no read is recent", () => {
     validating("r1", NM_CI_WAIT, VALIDATION_STATUS_FRESH_MS + 60_000);
-    const guards = restartGuards(db, NO_WORK, Date.now());
-    expect(guards.map((g) => g.kind)).toEqual(["validation"]);
-    expect(guards[0]!.detail).toContain("no no-mistakes status read in the last 2 min");
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    expect(carriedValidations(db, Date.now()).map((g) => g.detail)).toEqual(["validating for 34 min; no no-mistakes status read in the last 2 min"]);
   });
 
-  test("no status at all, or another branch's run, blocks", () => {
+  test("no status at all, or another branch's run, is carried, and each line says why it names no step", () => {
     validating("r1", null);
     validating("r2", NM_CI_WAIT.replace("branch: b", "branch: other"));
-    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.task)).toEqual(["t1", "t2"]);
-  });
-
-  test("each blocking read says why: none recent, another branch's run, or no run", () => {
-    validating("r1", null);
-    validating("r2", NM_CI_WAIT.replace("branch: b", "branch: other"));
-    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.detail)).toEqual([
+    expect(restartGuards(db, NO_WORK, Date.now())).toEqual([]);
+    expect(carriedValidations(db, Date.now()).map((g) => g.detail)).toEqual([
       "validating for 34 min; no no-mistakes status read in the last 2 min",
       "validating for 34 min; the latest no-mistakes status is a run on branch other, not b",
     ]);
     tx(db, () => recordEvidence(db, "r2", "nomistakes", 1, { run: null }, Date.now() - 5_000));
-    expect(restartGuards(db, NO_WORK, Date.now()).map((g) => g.detail)).toEqual([
-      "validating for 34 min; no no-mistakes status read in the last 2 min",
-      "validating for 34 min; the latest no-mistakes status names no run",
-    ]);
+    expect(carriedValidations(db, Date.now())[1]!.detail).toBe("validating for 34 min; the latest no-mistakes status names no run");
   });
 
-  test("a guard line names the task's title when the backlog has one", () => {
+  test("a carried line names the task's title when the backlog has one", () => {
     tx(db, () => writeSnapshot(db, "backlog", "h", [{ id: "t1", title: "Leader Stop hook", links: [] } as unknown as BacklogTask]));
     validating("r1", NM_REVIEW);
-    expect(guardLines(restartGuards(db, NO_WORK, Date.now()))).toEqual(['validation: t1 "Leader Stop hook" (no-mistakes step review, running 42m, agent pid 81234; validating for 34 min)']);
+    expect(guardLines(carriedValidations(db, Date.now()))).toEqual(['validation: t1 "Leader Stop hook" (no-mistakes step review, running 42m, agent pid 81234; validating for 34 min)']);
   });
 });
 
