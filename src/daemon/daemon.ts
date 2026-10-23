@@ -244,13 +244,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       // A restart the old daemon asked for: record who asked, with the build before and after.
       return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
-    // The last restart's helper gave up and this daemon came up another way: one P1 says so.
-    const restartFailure = readRestartFailure(config.state_dir);
-    if (restartFailure) {
-      tx(database, () => recordRestartFailure(database, restartFailure, startedAt));
-      clearRestartFailure(config.state_dir);
-      log(`restart: ${failureLine(restartFailure)}`);
-    }
     // This daemon owns its external commands from here (process groups and the ledger); first, end what the last one left.
     // Before the reconciler's first pass, where launch/resume/cancel operations recover: a relaunch's
     // `git worktree add` then never races a git the last daemon left holding the worktree's locks.
@@ -748,6 +741,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log(`verify: startup recovery failed: ${(error as Error).message}`);
     }
     resolveReady();
+    // The last restart's helper gave up and this daemon came up another way: one P1 says so.
+    // Only once ready, so a helper probing after it writes the record always sees a daemon that missed it.
+    const restartFailure = readRestartFailure(config.state_dir);
+    if (restartFailure) {
+      tx(database, () => recordRestartFailure(database, restartFailure, Date.now()));
+      clearRestartFailure(config.state_dir);
+      log(`restart: ${failureLine(restartFailure)}`);
+    }
 
     // Design section 5: every harness in use, its installed version against the passing contract records, before any launch.
     try {

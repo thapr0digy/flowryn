@@ -29,10 +29,10 @@ export const RELAUNCH_POLL_MS = 250;
 export const RELAUNCH_BOOTSTRAP_BACKOFF_MS = [250, 500, 1_000, 2_000, 4_000];
 /**
  * The longest the helper runs before it leaves its failure record: the unload
- * wait, both answer waits, two bootstraps' backoffs, and a margin for its
+ * wait, three answer waits (the last only while a daemon is starting), two bootstraps' backoffs, and a margin for its
  * launchctl calls (each bounded at 10 s).
  */
-export const RELAUNCH_BOUND_MS = RELAUNCH_UNLOAD_TIMEOUT_MS + 2 * RELAUNCH_ANSWER_MS + 2 * RELAUNCH_BOOTSTRAP_BACKOFF_MS.reduce((a, b) => a + b, 0) + 30_000;
+export const RELAUNCH_BOUND_MS = RELAUNCH_UNLOAD_TIMEOUT_MS + 3 * RELAUNCH_ANSWER_MS + 2 * RELAUNCH_BOOTSTRAP_BACKOFF_MS.reduce((a, b) => a + b, 0) + 30_000;
 
 export interface RelaunchPlan {
   label: string;
@@ -50,6 +50,8 @@ export interface RelaunchDeps {
   notify(title: string, body: string): Promise<void>;
   recordFailure(failure: RestartFailure): void;
   clearFailure(): void;
+  /** Whether a daemon holds the state lock: one is starting up and does not answer yet. */
+  starting(): boolean;
   answerWaitMs: number;
   pollMs: number;
 }
@@ -123,6 +125,16 @@ export async function relaunch(plan: RelaunchPlan, deps: RelaunchDeps): Promise<
     return { ok: true, pid, via: "fallback", steps };
   }
   steps.push(`still no daemon after the fallback (${deps.answerWaitMs / 1000} s)`);
+  if (deps.starting()) {
+    steps.push("a daemon holds the state lock: waiting for it to finish starting");
+    deps.log(`relaunch: ${steps.at(-1)}`);
+    pid = await waitForNew(plan, deps);
+    if (pid !== null) {
+      deps.log(`relaunch: the new daemon answers after starting up (pid ${pid})`);
+      return { ok: true, pid, via: "fallback", steps };
+    }
+    steps.push(`it did not answer within another ${deps.answerWaitMs / 1000} s`);
+  }
 
   const after = await launchdState(plan.label, deps.launchd);
   const failure: RestartFailure = { at: deps.now(), label: plan.label, old_pid: plan.oldPid, steps, launchd: after.summary, run: RECOVERY_COMMAND };

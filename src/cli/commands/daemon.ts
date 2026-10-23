@@ -325,6 +325,10 @@ const relaunchVerb: VerbSpec = {
         notify,
         recordFailure: (failure) => writeRestartFailure(config.state_dir, failure),
         clearFailure: () => clearRestartFailure(config.state_dir),
+        starting: () => {
+          const lock = stateFiles(config.state_dir).lock;
+          return existsSync(lock) && isLockHeld(lock);
+        },
         answerWaitMs: RELAUNCH_ANSWER_MS,
         pollMs: RELAUNCH_POLL_MS,
       },

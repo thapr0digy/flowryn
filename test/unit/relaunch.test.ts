@@ -80,6 +80,7 @@ function scripted(opts: { bootoutStops?: boolean; bootstrapReplies?: LaunchctlRe
     },
     recordFailure: (failure) => failures.push(failure),
     clearFailure: () => failures.splice(0),
+    starting: () => false,
     answerWaitMs: 3_000,
     pollMs: 250,
   };
@@ -155,6 +156,31 @@ describe("the restart's relaunch helper", () => {
     expect(outcome).toMatchObject({ ok: true, pid: NEW_PID, via: "fallback" });
     expect(fake.failures).toEqual([]);
     expect(fake.notes).toEqual([]);
+  });
+
+  test("a daemon still starting up (it holds the state lock) gets one more answer window before any failure record", async () => {
+    const fake = scripted({ afterBootstrap: "spawn-scheduled" });
+    let waits = 0;
+    const outcome = await relaunch(plan, {
+      ...fake.deps,
+      starting: () => {
+        waits = fake.clock();
+        return true;
+      },
+      probe: async () => (waits > 0 && fake.clock() >= waits + 1_000 ? NEW_PID : fake.deps.probe()),
+    });
+    expect(outcome).toMatchObject({ ok: true, pid: NEW_PID, via: "fallback" });
+    expect(outcome.steps).toContain("a daemon holds the state lock: waiting for it to finish starting");
+    expect(fake.failures).toEqual([]);
+    expect(fake.notes).toEqual([]);
+  });
+
+  test("a daemon that holds the state lock but never answers still ends in the failure record and the notification", async () => {
+    const fake = scripted({ afterBootstrap: "spawn-scheduled" });
+    const outcome = await relaunch(plan, { ...fake.deps, starting: () => true });
+    expect(outcome).toMatchObject({ ok: false, oldStillUp: false });
+    expect(fake.failures).toHaveLength(1);
+    expect(fake.notes).toHaveLength(1);
   });
 
   test("a notifier or a record that fails never makes the helper throw", async () => {
