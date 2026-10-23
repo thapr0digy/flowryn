@@ -119,14 +119,17 @@ export interface AwayConfig {
   max_wakes_per_hour: number;
   /** How long away lasts when `flowryn away` names no --until. */
   default_hours: number;
-  /** Inactive this long, with an item that would have woken the leader, before your next message suggests `flowryn away`. */
+  /** Inactive this long, with an item that would have woken the leader, before your next message suggests `flowryn away` (only while auto_after_min is 0). */
   suggest_after_min: number;
+  /** No input from you this long and away starts by itself; your next message ends it. 0 turns it off. */
+  auto_after_min: number;
 }
 
 export const DEFAULT_AWAY: AwayConfig = {
   max_wakes_per_hour: 6,
   default_hours: 12,
   suggest_after_min: 60,
+  auto_after_min: 120,
 };
 
 export function awayConfig(config: FlowrynConfig): AwayConfig {
@@ -134,7 +137,13 @@ export function awayConfig(config: FlowrynConfig): AwayConfig {
   for (const key of Object.keys(raw)) {
     if (!(key in DEFAULT_AWAY)) throw new FlowrynError("config_invalid", `[away] ${key} is not a known setting`);
   }
-  return positiveInts(raw, DEFAULT_AWAY, "[away]", Object.keys(DEFAULT_AWAY) as (keyof AwayConfig)[]);
+  const out = positiveInts(raw, DEFAULT_AWAY, "[away]", ["max_wakes_per_hour", "default_hours", "suggest_after_min"]);
+  const auto = raw.auto_after_min;
+  if (auto !== undefined) {
+    if (typeof auto !== "number" || !Number.isInteger(auto) || auto < 0) throw new FlowrynError("config_invalid", "[away] auto_after_min must be a whole number of minutes (0 turns it off)");
+    out.auto_after_min = auto;
+  }
+  return out;
 }
 
 /** [grants]: chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md). */
