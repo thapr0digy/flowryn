@@ -169,7 +169,9 @@ export function explanationWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
 export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
   const rows = db
     .query(
-      `SELECT id, created_at, answered_at, state, reserved_reason, gate_id FROM decisions
+      `SELECT id, created_at, answered_at, state, reserved_reason, gate_id,
+         (SELECT MIN(e.ts) FROM events e WHERE e.run_id = decisions.run_id AND e.kind = 'decision.settled_by_rule' AND json_extract(e.payload, '$.decision') = decisions.id) AS ruled_at
+       FROM decisions
        WHERE (state = 'open' OR answered_at >= $since) AND ${inProject("task_id")}
        ORDER BY state = 'open' DESC, answered_at DESC LIMIT $limit`,
     )
@@ -180,6 +182,7 @@ export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
     state: string;
     reserved_reason: string | null;
     gate_id: string | null;
+    ruled_at: number | null;
   }[];
   if (rows.length === MAX_WAIT_ROWS) gaps.push(`decisions: capped at ${MAX_WAIT_ROWS} rows`);
   const undated = rows.filter((r) => r.created_at === null).length;
@@ -187,10 +190,10 @@ export function decisionWaits(db: Db, scope: Scope, gaps: string[]): Wait[] {
   return rows
     .filter((r) => r.created_at !== null)
     .map((r) => ({
-      reason: r.reserved_reason || r.gate_id ? "decision (captain)" : "decision (leader)",
+      reason: r.ruled_at !== null ? "decision (rule)" : r.reserved_reason || r.gate_id ? "decision (captain)" : "decision (leader)",
       id: r.id,
       start: r.created_at!,
-      end: r.state === "open" ? null : r.answered_at,
+      end: r.ruled_at ?? (r.state === "open" ? null : r.answered_at),
     }));
 }
 
@@ -293,6 +296,7 @@ export interface Intervention {
 /** The events that are a person's or the leader's action (the design's table); steers are read apart. */
 const ACTION_EVENTS = [
   "decision.answered",
+  "decision.overridden",
   "item.dismissed",
   "gate.passed",
   "gate.changes",
@@ -340,7 +344,9 @@ function asIntervention(e: EventLite): Intervention | null {
   const p = parse(e.payload);
   const base = { ts: e.ts, seq: e.seq, task_id: e.task_id, run_id: e.run_id, payload: p };
   switch (e.kind) {
-    case "decision.answered": {
+    case "decision.answered":
+    case "decision.overridden": {
+      if (p.by === "policy") return null;
       const by = who(p.by);
       const via = typeof p.via === "string" && p.via !== p.by && p.via !== "leader" ? ` via ${p.via}` : "";
       return { ...base, action: "answer", by: `${by}${via}` };
