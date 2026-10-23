@@ -12,6 +12,9 @@ const MIXED_CASE_NAMES = new Set(["macOS", "iOS", "iPadOS", "watchOS", "tvOS", "
 /** File extensions that mark a bare file name as code (".js" is left out: "Node.js" is a product). */
 const CODE_FILE = /^[\w.-]+\.(?:ts|tsx|mts|cts|mjs|cjs|jsx|py|go|rs|rb|sh|sql|toml|ya?ml|json|jsonl|md|html|css|lock)$/i;
 
+/** A web address: a word with a URL scheme, or a host with a top-level domain followed by a path with no file extension. */
+const WEB_ADDRESS = /^(?:[a-z][a-z\d+.-]*:\/\/\S+|(?:[\w-]+\.)+[a-z]{2,}(?:\/[^./]*)+)$/i;
+
 /** How many offending terms a problem line names before it says how many more. */
 const MAX_NAMED = 10;
 
@@ -91,7 +94,7 @@ function looksLikeCode(raw: string): boolean {
   if (/^\{\{\w+\}\}/.test(raw)) return false;
   if (/\w\(\)/.test(raw)) return true;
   const word = trimPunctuation(raw);
-  if (word.length < 2 || MIXED_CASE_NAMES.has(word)) return false;
+  if (word.length < 2 || MIXED_CASE_NAMES.has(word) || WEB_ADDRESS.test(word)) return false;
   return (
     /^--[a-z]/i.test(word) ||
     /[\p{L}\p{N}]_[\p{L}\p{N}]/u.test(word) ||

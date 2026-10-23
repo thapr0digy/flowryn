@@ -29,7 +29,7 @@ The outline comes from Google design docs (context, goals and non-goals, alterna
 - more than 500 words (`DESIGN_VISIBLE_WORDS_MAX`) show before anything is unfolded: text outside `<details>`, `<svg>`, `<style>`, `<script>` and comments;
 - "How it works" has no `<figure>`;
 - the detail is not a closed `<details data-section="detail">` after every part, with nothing a reader sees after it (text or a content element such as an image or table; scripts, styles, comments, closing tags and empty wrappers are fine);
-- a code-shaped word shows above the fold (SVG labels included): an inner underscore, a lowercase start with a capital inside, a path with a file extension (or a bare file name with a code extension), a leading `--`, a trailing `()`. Product names such as macOS and iPhone are allowed (`MIXED_CASE_NAMES` in `src/skills/review-page.ts`), and so is any term the page defines with `<dfn>`; `<kbd>` marks what the user types and is not checked. Up to 10 are named;
+- a code-shaped word shows above the fold (SVG labels included): an inner underscore, a lowercase start with a capital inside, a path with a file extension (or a bare file name with a code extension; a web address such as `https://example.com` or `github.com/org/repo` is not a path), a leading `--`, a trailing `()`. Product names such as macOS and iPhone are allowed (`MIXED_CASE_NAMES` in `src/skills/review-page.ts`), and so is any term the page defines with `<dfn>`; `<kbd>` marks what the user types and is not checked. Up to 10 are named;
 - a `<code>` or `<pre>` element shows above the fold outside the figure;
 - with `--questions-file`, the widget is not inside "What I need from you".
 

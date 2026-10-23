@@ -194,8 +194,11 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
 
   const first = found[0];
   if (first && first.name === "tldr") {
-    const bodyStart = Math.max(html.search(/<body\b/i), 0);
-    if (/<(?:section|details|table|pre|figure|img|ul|ol)\b/i.test(html.slice(bodyStart, first.start))) problems.push("only the title and one subtitle line may come before the summary (tldr)");
+    const before = html.slice(0, first.start).replace(/<!--[\s\S]*?-->/g, " ");
+    const bodyAt = before.search(/<body\b/i);
+    const headEnd = /<\/head\s*>/i.exec(before);
+    const start = bodyAt >= 0 ? bodyAt : headEnd ? headEnd.index + headEnd[0].length : 0;
+    if (/<(?:section|details|table|pre|figure|img|ul|ol)\b/i.test(before.slice(start))) problems.push("only the title and one subtitle line may come before the summary (tldr)");
     const words = wordCount(textOf(html.slice(first.start, first.end).replace(/<h2\b[\s\S]*?<\/h2>/i, "")));
     if (words > DESIGN_TLDR_WORDS_MAX) problems.push(`the summary (tldr) is ${words} words; keep it to ${DESIGN_TLDR_WORDS_MAX}`);
   }

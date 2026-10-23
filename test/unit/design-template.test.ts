@@ -75,6 +75,12 @@ describe("the design page check", () => {
   test("nothing but the title and a subtitle may come before the summary", () => {
     const leading = filled().replace('<p class="sub">', "<table><tr><td>File</td></tr></table><p class=\"sub\">");
     expect(designPageProblems(leading)).toEqual(["only the title and one subtitle line may come before the summary (tldr)"]);
+    const commented = filled().replace('<p class="sub">', "<!-- was a <table> --><p class=\"sub\">");
+    expect(designPageProblems(commented)).toEqual([]);
+    const bodiless = filled().replace(/<body\b[^>]*>/, "");
+    expect(bodiless).not.toMatch(/<body\b/);
+    expect(designPageProblems(bodiless)).toEqual([]);
+    expect(designPageProblems(bodiless.replace('<p class="sub">', "<table><tr><td>File</td></tr></table><p class=\"sub\">"))).toEqual(["only the title and one subtitle line may come before the summary (tldr)"]);
   });
 
   test("the summary and the visible part have word budgets; folded text and diagrams do not count", () => {
@@ -123,6 +129,8 @@ describe("the design page check", () => {
       "{{HOW}}": "A <dfn>pr_ready</dfn> item means a pull request is ready; each pr_ready item wakes the leader. Run <kbd>flowryn approve --gate design</kbd>. It works on macOS, with GitHub, JavaScript and Node.js, before/after, e.g. today.",
     });
     expect(designPageProblems(fine)).toEqual([]);
+    expect(designPageProblems(filled({ "{{HOW}}": "See https://example.com and github.com/org/repo for the docs." }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{HOW}}": "See src/x.ts and github.com/org/repo/notes.md." }))).toEqual([`code names above the fold: "src/x.ts", "github.com/org/repo/notes.md"; say it in words, move it into the folded detail, or define it with <dfn>`]);
   });
 
   test("<code> and <pre> above the fold are refused outside the figure", () => {
