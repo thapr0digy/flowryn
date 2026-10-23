@@ -58,7 +58,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   | From | Event | To |
   |---|---|---|
   | queued | its request started | verifying |
-  | queued | its request was cancelled (PR closed, head moved, no steps) | held (`verify_cancelled`) |
+  | queued | its request was cancelled (PR closed, no steps; a moved head only after 6 h with no redelivery) | held (`verify_cancelled`) |
   | verifying | passed | waiting_checks |
   | verifying | `error`, and startup recovery requeued it | queued, following the rerun |
   | verifying | a step exited non-zero, first time at this head | sent_back: the ship stage starts again with the step, its exit and its last 40 lines as the steer |

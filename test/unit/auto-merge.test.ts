@@ -25,6 +25,7 @@ import { autoMergeEnabled, verifyConfig } from "../../src/verify/config.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { getRequest, insertRequest, markStarted } from "../../src/verify/queue.ts";
 import { initialSteps } from "../../src/verify/runner.ts";
+import { headMovedCancelled } from "../../src/verify/start.ts";
 import { finishVerification, insertVerification, type Verification, type VerifyStep } from "../../src/verify/store.ts";
 
 /**
@@ -252,6 +253,20 @@ describe("the controller, without GitHub", () => {
     expect(getAutoMerge(other.db, r2.id)).toMatchObject({ state: "held", reason: "verify_cancelled" });
     const held = other.db.query("SELECT line FROM items WHERE kind = 'auto_merge_held'").get() as { line: string };
     expect(held.line).toContain("the PR is closed");
+  });
+
+  test("a request cancelled because the head moved waits for the redelivery, and holds after 6 h", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    const moved = `the PR head moved from ${HEAD.slice(0, 8)} to bbbbbbbb; verify the new head`;
+    expect(headMovedCancelled(moved)).toBe(true);
+    expect(headMovedCancelled("the PR is closed")).toBe(false);
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, moved));
+    await merger(f, cfg, 5_000 + 60_000).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("queued");
+    await merger(f, cfg, 5_000 + 6 * 3_600_000 + 1).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_cancelled" });
   });
 
   test("a non-zero step sends the ship back once per head, and the next failure there holds", async () => {

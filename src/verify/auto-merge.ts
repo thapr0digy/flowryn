@@ -16,6 +16,7 @@ import { autoMergeEnabled, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
 import { readTail } from "./runner.ts";
+import { headMovedCancelled } from "./start.ts";
 import { finishedAtHead, getVerification, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
 
 /**
@@ -412,7 +413,11 @@ export class AutoMerger {
   private fromQueued(row: AutoMergeRow, now: number): AutoMergeRow {
     const request = row.request_id ? getRequest(this.deps.db, row.request_id) : null;
     if (!request) return this.hold(row, "verify_cancelled", `its verify request ${row.request_id ?? "-"} is gone`, `flowryn verify ${row.task_id}, then flowryn merge ${row.task_id}`, now);
-    if (request.state === "cancelled") return this.hold(row, "verify_cancelled", `its verify request ${request.id} was cancelled: ${request.detail ?? "no reason"}`, `flowryn show ${row.task_id}`, now);
+    if (request.state === "cancelled") {
+      // The worker pushed past the delivered head before its verify started: its redelivery supersedes this row.
+      if (headMovedCancelled(request.detail) && now - row.state_since <= CHECKS_WAIT_MS) return row;
+      return this.hold(row, "verify_cancelled", `its verify request ${request.id} was cancelled: ${request.detail ?? "no reason"}`, `flowryn show ${row.task_id}`, now);
+    }
     if (request.state === "started" && request.verification_id) return move(this.deps.db, row, "verifying", { verification_id: request.verification_id }, now).row;
     // Still queued: its place in line may have moved.
     refreshReadyLine(this.deps.db, row);
