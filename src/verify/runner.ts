@@ -609,7 +609,7 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
   // Every step process the job recorded: several when a parallel group was running. One that is gone or reused is left alone.
   const left: number[] = [];
   for (const proc of lease ? leaseProcesses(deps.db, lease) : []) {
-    const ended = await end(proc, { group: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
+    const ended = await end(proc, { group: true, execs: true, graceMs: RECOVER_GRACE_MS, ps: deps.ps });
     if (ended.ok && ended.evidence === "process") killLeftovers(proc.pid);
     if (!ended.ok) {
       left.push(proc.pid);

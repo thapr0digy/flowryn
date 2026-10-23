@@ -54,7 +54,7 @@ Nothing infers dependencies, so group only steps that are independent. Here `doc
 
 ## Restart recovery with several live steps
 
-Migration 30 adds `job_procs` (main took 29 for the verify queue), with one row per step process a job started (its process group leader), because a parallel group runs several at once and `job_leases` holds one. `recordJobProcess` inserts there. Startup recovery ends every recorded process by identity (a process that is gone or whose pid was reused is left alone), and it still reads `job_leases.proc_*` on leases from before the migration. When several steps will not exit, the detail lists their pids (`its steps (pid a, b) did not exit`).
+Migration 30 adds `job_procs` (main took 29 for the verify queue), with one row per step process a job started (its process group leader), because a parallel group runs several at once and `job_leases` holds one. `recordJobProcess` inserts there. Startup recovery ends every recorded process by identity (a process that is gone or whose pid was reused is left alone), matching on pid and start time only, because a step that is one command (`bun test`, `sleep 300`) has its `sh -c` exec into that command after the leader was recorded as `sh`; and it still reads `job_leases.proc_*` on leases from before the migration. When several steps will not exit, the detail lists their pids (`its steps (pid a, b) did not exit`).
 
 ## The CLI
 

@@ -361,6 +361,28 @@ describe("parallel groups", () => {
     },
     20_000,
   );
+  test(
+    "startup recovery ends a single-command step whose sh exec'd into its command after the pid was recorded",
+    async () => {
+      const f = fixture();
+      const v = f.insert([["sleep 30", "sleep 31"]]);
+      const procs: ProcIdentity[] = [];
+      for (const command of ["sleep 30", "sleep 31"]) {
+        const child = spawn("/bin/sh", ["-c", command], { detached: true, stdio: "ignore" });
+        child.unref();
+        let proc: ProcIdentity | null = null;
+        await waitFor(async () => (proc = await readIdentity(child.pid!)) !== null && proc.exe === "sleep");
+        procs.push(proc!);
+        // What the runner reads just after the spawn, before sh exec's into the command.
+        tx(f.db, () => recordJobProcess(f.db, { kind: "verify", id: v.id, taskId: null }, { ...proc!, exe: "/bin/sh" }, Date.now()));
+      }
+      f.deps.terminate = (p, options) => terminate(p, { ...options, graceMs: 1_000 });
+      expect(await recoverVerifications(f.deps)).toBe(1);
+      for (const proc of procs) expect(await isAlive(proc)).toBe(false);
+      expect(liveCounts(f.db)).toEqual({});
+    },
+    20_000,
+  );
 });
 
 describe("the process table at a deadline", () => {
