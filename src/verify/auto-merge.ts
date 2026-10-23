@@ -11,7 +11,7 @@ import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../
 import { sendBack } from "../lifecycle/send-back.ts";
 import { DAEMON_CALLER, latestMerge, type MergeRow } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergeServices } from "../policy/merge-path.ts";
-import { sanitizeBlock } from "../util/sanitize.ts";
+import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { autoMergeEnabled, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
@@ -47,6 +47,8 @@ export const CHECKS_WAIT_MS = 6 * 60 * 60_000;
 export const AUTO_MERGE_TICK_MS = 60_000;
 /** Lines of a failed step's output a send-back carries. */
 const SEND_BACK_TAIL_LINES = 40;
+/** How much of a hold's reason its item line keeps, so the next command after it stays on the line (the row keeps it whole). */
+const HELD_DETAIL_CHARS = 120;
 /** What joins the pr_ready line and the auto-merge's progress. */
 const READY_SEPARATOR = "; auto-merge: ";
 
@@ -270,8 +272,12 @@ export function sendBackText(v: Verification, step: VerifyStep): string {
   ].join("\n");
 }
 
-/** Codes the merge gate refuses with that only mean "not yet": the next pass tries again. */
-const RETRY_CODES = new Set(["checks_pending", "forge_unavailable", "merge_in_flight", "not_ready"]);
+/**
+ * Codes the merge gate refuses with that only mean "not yet": the next pass
+ * tries again. A head that moved is a worker mid-redelivery; the watcher's
+ * next read of the PR makes fromWaitingChecks wait on it, bounded by CHECKS_WAIT_MS.
+ */
+const RETRY_CODES = new Set(["checks_pending", "forge_unavailable", "merge_in_flight", "not_ready", "head_moved"]);
 
 export interface AutoMergerDeps extends MergeServices {
   /** A sent-back ship's last stage waits for a grant: the scheduler looks now. */
@@ -398,7 +404,7 @@ export class AutoMerger {
     const { db } = this.deps;
     const held = move(db, row, "held", { reason, detail }, now);
     if (!findOpenRunItem(db, "auto_merge_held", row.run_id)) {
-      openItem(db, { kind: "auto_merge_held", eventSeq: held.seq, taskId: row.task_id, runId: row.run_id, line: `Auto-merge held: ${taskTitle(db, row.task_id)} (${row.task_id}): ${detail}; ${next}`, now });
+      openItem(db, { kind: "auto_merge_held", eventSeq: held.seq, taskId: row.task_id, runId: row.run_id, line: `Auto-merge held: ${taskTitle(db, row.task_id)} (${row.task_id}): ${sanitizeLine(detail, HELD_DETAIL_CHARS)}; ${next}`, now });
     }
     return held.row;
   }
@@ -449,9 +455,15 @@ export class AutoMerger {
     const delivered = deliveredOf(db, row.task_id);
     if (delivered?.kind === "pr") {
       const pr = prEvidence(db, row.run_id);
-      const pending = pr && pr.head === row.head_sha && pr.checks && (pr.checks.state === "pending" || pr.checks.pending.length > 0);
+      const waitedTooLong = now - row.state_since > CHECKS_WAIT_MS;
+      // The worker pushed past the delivered head: its redelivery supersedes this row.
+      if (pr && pr.head !== row.head_sha) {
+        if (!waitedTooLong) return row;
+        return tx(db, () => this.hold(row, "head_moved", `the PR head moved from ${row.head_sha.slice(0, 8)} (delivered) to ${pr.head.slice(0, 8)} over ${CHECKS_WAIT_MS / 3_600_000} h ago, and nothing was delivered since`, `flowryn steer ${row.task_id} --body-file -`, now));
+      }
+      const pending = pr && pr.checks && (pr.checks.state === "pending" || pr.checks.pending.length > 0);
       if (pending) {
-        if (now - row.state_since <= CHECKS_WAIT_MS) return row;
+        if (!waitedTooLong) return row;
         return tx(db, () => this.hold(row, "checks_timeout", `GitHub's checks have been pending for over ${CHECKS_WAIT_MS / 3_600_000} h (${pr.checks!.pending.join(", ") || pr.checks!.line})`, `flowryn show ${row.task_id}; once they finish: flowryn merge ${row.task_id}`, now));
       }
     }
@@ -479,7 +491,7 @@ export class AutoMerger {
         tx(db, () => appendEvent(db, event));
         return row;
       }
-      if (RETRY_CODES.has(error.code)) return row;
+      if (RETRY_CODES.has(error.code) && !(error.code === "head_moved" && this.deps.now() - row.state_since > CHECKS_WAIT_MS)) return row;
       return tx(db, () => {
         const fresh = getAutoMerge(db, row.id);
         if (fresh?.state !== "waiting_checks") return fresh ?? row;
