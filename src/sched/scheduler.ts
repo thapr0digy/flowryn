@@ -117,12 +117,14 @@ export class Scheduler {
     this.kick();
   }
 
-  stop(): void {
+  /** No new pass after this; resolves when the pass or grant under way, if any, has ended (the daemon closes the database after). */
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     if (this.steady) clearInterval(this.steady);
     this.timer = null;
     this.steady = null;
+    await this.chain;
   }
 
   /** Look again soon; calls within the debounce window coalesce. */
