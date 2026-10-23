@@ -49,12 +49,19 @@ export interface NmActiveStep {
   agentPid: string;
 }
 
-/** One row of a parked gate's `findings` table; `category` is empty when the status prints no such column (v1.84.0 does not). */
+/**
+ * One row of a parked gate's `findings` table; `category` is empty when the
+ * status prints no such column (v1.84.0 does not). `severity`, `file` and
+ * `line` are empty when the finding names none.
+ */
 export interface NmFinding {
   id: string;
   action: string;
   description: string;
   category: string;
+  severity: string;
+  file: string;
+  line: string;
 }
 
 function stripQuotes(value: string): string {
@@ -134,7 +141,15 @@ export function parseFindings(text: string): NmFinding[] | null {
   }
   const rows = (doc as { findings?: unknown } | null)?.findings;
   if (!Array.isArray(rows) || !rows.every((r) => r !== null && typeof r === "object")) return null;
-  return (rows as Record<string, unknown>[]).map((r) => ({ id: cell(r, "id"), action: cell(r, "action"), description: cell(r, "description"), category: cell(r, "category") }));
+  return (rows as Record<string, unknown>[]).map((r) => ({
+    id: cell(r, "id"),
+    action: cell(r, "action"),
+    description: cell(r, "description"),
+    category: cell(r, "category"),
+    severity: cell(r, "severity"),
+    file: cell(r, "file"),
+    line: cell(r, "line"),
+  }));
 }
 
 /** no-mistakes' own text for a PR that conflicts with its base (category `ci-merge-conflict`), the only way to tell it when the table has no category column. */

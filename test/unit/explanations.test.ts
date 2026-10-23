@@ -485,7 +485,7 @@ describe("resume: an automatic resume, deferred or refused", () => {
     const [why] = show("t1", { why: true }, clock).waiting as Record<string, unknown>[];
     expect(why!.unblock).toEqual(["flowryn: launches the resume once claude 1 passes its contract suite", "captain: flowryn doctor --contracts --harness claude"]);
 
-    db.query("INSERT INTO harness_contracts (harness, version, passed_at) VALUES ('claude', '1', 0)").run();
+    db.query("INSERT INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '1', ?1, 0)").run(contractRevision("claude"));
     clock += 1_000;
     const launches: string[] = [];
     const s = scheduler({ now: () => clock, launches });

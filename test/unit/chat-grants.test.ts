@@ -345,12 +345,12 @@ describe("background notices hold a grant (docs/notes/2026-10-17-chat-answers-su
     expect(tx(w.db, () => takeGrant(w.db, grant, "decide", now))).toMatchObject({ consumed_by: "decide", held_prompts: 1 });
   });
 
-  test("migration 30: grants keep their rows and start held across no notice", () => {
+  test("migration 31: grants keep their rows and start held across no notice", () => {
     const dir = tempDir();
     const db = openDb(join(dir, "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 29));
+    migrate(db, MIGRATIONS.slice(0, 30));
     db.exec("INSERT INTO captain_grants (id, session_id, tool_use_id, item, action, choice, question, answer, transcript_path, created_at, expires_at) VALUES ('c1', 'L1', 'toolu_1', 'q1', 'decide', 'yes', 'q1 · ?', 'yes', '/t.jsonl', 1, 2)");
-    expect(migrate(db, MIGRATIONS.slice(0, 30))).toEqual([30]);
+    expect(migrate(db, MIGRATIONS.slice(0, 31))).toEqual([31]);
     expect(db.query("SELECT id, choice, held_prompts FROM captain_grants").all()).toEqual([{ id: "c1", choice: "yes", held_prompts: 0 }]);
     db.close();
   });

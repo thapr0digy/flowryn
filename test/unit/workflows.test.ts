@@ -116,9 +116,9 @@ describe("plans", () => {
     const plan = parsePlan("# Checkout\n\n## Phase 1: Cart API\nworkflow: fix\nharness: pi\nBuild the cart endpoints.\n\n## Phase 2: Cart page\nThe page.\n\n## Docs\nafter: 1\nWrite docs.\n");
     expect(plan.title).toBe("Checkout");
     expect(plan.phases).toEqual([
-      { title: "Cart API", body: "Build the cart endpoints.", workflow: "fix", harness: "pi", after: null },
-      { title: "Cart page", body: "The page.", workflow: null, harness: null, after: null },
-      { title: "Docs", body: "Write docs.", workflow: null, harness: null, after: [1] },
+      { title: "Cart API", body: "Build the cart endpoints.", workflow: "fix", harness: "pi", account: null, after: null },
+      { title: "Cart page", body: "The page.", workflow: null, harness: null, account: null, after: null },
+      { title: "Docs", body: "Write docs.", workflow: null, harness: null, account: null, after: [1] },
     ]);
   });
 

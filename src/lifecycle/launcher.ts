@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { styleBlock } from "../config/workflows.ts";
+import { runAccount, workersFor } from "../config/accounts.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import type { Db } from "../db/db.ts";
@@ -74,6 +75,11 @@ export const BLANKED_ENV = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE
  * finding 11, reproduced live in M2); leave room for the shell's own quoting.
  */
 export const MAX_TYPED_COMMAND = 960;
+
+/** The harness shim: unset FLOWRYN_UNSET's names (variable names only), then exec the resolved binary. */
+export function shimScript(binary: string): string {
+  return `#!/bin/sh\nfor name in $FLOWRYN_UNSET; do\n  case "$name" in *[!A-Za-z0-9_]*|[0-9]*) ;; *) unset "$name" ;; esac\ndone\nunset FLOWRYN_UNSET\nexec ${JSON.stringify(binary)} "$@"\n`;
+}
 
 function shellQuoted(arg: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
@@ -219,7 +225,8 @@ export class Launcher {
     const project = getProject(db, run.project_id);
     if (!project) throw new Error(`project ${run.project_id} is gone`);
     const config = this.deps.config();
-    const workers = workersConfig(config);
+    // The account recorded at dispatch, checked against its project's scope again at every launch.
+    const workers = workersFor(workersConfig(config), runAccount(config, project, run.account, run.harness));
     const timing = timingConfig(config);
     const runtime = this.deps.runtime();
     if (!runtime) throw new TransientLaunchError("Herdr is not reachable");
@@ -428,13 +435,15 @@ export class Launcher {
    * Herdr's agent.start types the harness's canonical name (`claude`, `pi`)
    * into the pane shell. A shim directory first on PATH maps that name to the
    * binary Flowryn resolved, so the worker runs the version the contract gate
-   * checked even when the shell has no alias for it.
+   * checked even when the shell has no alias for it. A pane's environment can
+   * only set values, so the shim first unsets the names a launch lists in
+   * FLOWRYN_UNSET (an account's login, src/harness/claude/adapter.ts).
    */
   private shimDir(config: FlowrynConfig, harness: string, binary: string): string {
     const dir = join(config.state_dir, "shims");
     ensureDir(dir, 0o700);
     const link = join(dir, harness);
-    const script = `#!/bin/sh\nexec ${JSON.stringify(binary)} "$@"\n`;
+    const script = shimScript(binary);
     if (!existsSync(link) || readFileSync(link, "utf8") !== script) writeFileSync(link, script, { mode: 0o700 });
     return dir;
   }
