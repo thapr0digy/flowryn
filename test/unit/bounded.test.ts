@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, parseEtime, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
+import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, gateDeadlines, parseEtime, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
 import { psRunner, type PsRunner } from "../../src/runtime/proc.ts";
 
 /**
@@ -69,6 +69,7 @@ function own(): string {
 
 afterEach(() => {
   configureOwnedProcesses(null);
+  gateDeadlines(null);
   for (const pid of strays.splice(0)) {
     try {
       process.kill(pid, "SIGKILL");
@@ -78,6 +79,44 @@ afterEach(() => {
   }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   lines.length = 0;
+});
+
+describe("gateDeadlines (tests start a deadline once their fake is up)", () => {
+  test("the deadline counts from the gate's resolution, not the spawn", async () => {
+    gateDeadlines(() => Bun.sleep(500));
+    const began = Date.now();
+    const result = await runBounded(["/bin/sleep", "60"], { label: "gated", timeoutMs: 200, graceMs: 200, drainMs: 200 });
+    const elapsed = Date.now() - began;
+    expect(result.code).toBe(TIMED_OUT);
+    expect(result.stderr).toContain("gated did not finish within 200 ms");
+    expect(elapsed).toBeGreaterThanOrEqual(500 + 200 - 20);
+  });
+
+  test("a leader that exits while its gate still holds is never cut off, and the gate sees the exit", async () => {
+    let sawExit = false;
+    gateDeadlines(async ({ exited }) => {
+      await exited;
+      sawExit = true;
+    });
+    const result = await runBounded(["/bin/sh", "-c", "sleep 0.3; echo done"], { label: "held", timeoutMs: 50, graceMs: 50, drainMs: 200 });
+    expect(result).toMatchObject({ code: 0, stdout: "done\n", timedOut: false });
+    expect(sawExit).toBe(true);
+  });
+
+  test("a gate that rejects still arms the deadline", async () => {
+    gateDeadlines(() => Promise.reject(new Error("broken gate")));
+    const began = Date.now();
+    const result = await runBounded(["/bin/sleep", "60"], { label: "rejected", timeoutMs: 200, graceMs: 200, drainMs: 200 });
+    expect(result.code).toBe(TIMED_OUT);
+    expect(Date.now() - began).toBeLessThan(200 + 200 + 200 + 1_500);
+  });
+
+  test("null restores the deadline from the spawn", async () => {
+    gateDeadlines(() => new Promise<void>(() => undefined));
+    gateDeadlines(null);
+    const result = await runBounded(["/bin/sleep", "60"], { label: "ungated", timeoutMs: 200, graceMs: 200, drainMs: 200 });
+    expect(result.code).toBe(TIMED_OUT);
+  });
 });
 
 describe("runBounded in the daemon (own process group, ledger)", () => {
