@@ -103,7 +103,8 @@ export const ERROR_CODES = {
   task_started: EXIT.policy,
   tool_missing: EXIT.failure,
   unknown_verb: EXIT.validation,
-  verify_busy: EXIT.policy,
+  // a queued verify that never started: its PR closed, its head moved, its project lost its verify steps
+  verify_cancelled: EXIT.policy,
   verify_failed: EXIT.policy,
   // a project with verify steps merges only on a passing verify of exactly the head, and none has finished there
   verify_required: EXIT.policy,

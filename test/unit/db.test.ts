@@ -109,12 +109,12 @@ describe("migrations", () => {
 
   test("a database from before the name ledger gets its earlier migrations named from this binary, with no time", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 28));
-    expect(migrate(db, MIGRATIONS, () => 99)).toEqual([29]);
+    migrate(db, MIGRATIONS.slice(0, 29));
+    expect(migrate(db, MIGRATIONS, () => 99)).toEqual([30]);
     const rows = db.query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all() as { version: number; name: string; applied_at: number | null }[];
     expect(rows.map((r) => r.name)).toEqual(MIGRATIONS.map((m) => m.name));
-    expect(rows.filter((r) => r.applied_at === null).map((r) => r.version)).toEqual(MIGRATIONS.slice(0, 28).map((m) => m.version));
-    expect(rows.at(-1)).toEqual({ version: 29, name: "migration-names", applied_at: 99 });
+    expect(rows.filter((r) => r.applied_at === null).map((r) => r.version)).toEqual(MIGRATIONS.slice(0, 29).map((m) => m.version));
+    expect(rows.at(-1)).toEqual({ version: 30, name: "migration-names", applied_at: 99 });
     db.close();
   });
 

@@ -10,6 +10,8 @@ import { fullPools, liveCounts, liveJobLeases } from "./pools.ts";
 import { hostState } from "./scheduler.ts";
 import { overrideQuota, quotaHolds, quotaLine, quotaState } from "./quota.ts";
 import { clearUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "./usage.ts";
+import { queuedRequests } from "../verify/queue.ts";
+import { waitingOn } from "../verify/start.ts";
 
 const MAX_WAITING_ROWS = 20;
 
@@ -39,8 +41,9 @@ function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Rec
 /**
  * `flowryn capacity` (design section 11): each pool's live leases against its
  * cap (a run's and a job's, such as a verify), the jobs holding slots, the host
- * check, the Claude usage-limit pause, the Claude quota floor, and the runs
- * waiting for a grant in the order the scheduler grants them.
+ * check, the Claude usage-limit pause, the Claude quota floor, the verifies
+ * queued for a validation slot, and the runs waiting for a grant in the order
+ * the scheduler grants them.
  */
 const capacity: VerbSpec = {
   name: "capacity",
@@ -94,6 +97,9 @@ const capacity: VerbSpec = {
     };
     const jobs = liveJobLeases(ctx.db);
     if (jobs.length > 0) data.jobs = jobs.map((j) => ({ job: j.job_id, kind: j.kind, pool: j.pool, task: j.task_id ?? "-", held: age(ctx.now, j.granted_at) }));
+    // Verifies queued for a validation slot (src/verify/start.ts): granted before any stage, in this order.
+    const queued = queuedRequests(ctx.db);
+    if (queued.length > 0) data.verify_queue = queued.map((r) => ({ request: r.id, pr: r.pr_url, task: r.task_id ?? "-", waited: age(ctx.now, r.requested_at), why: waitingOn(ctx.db, r, cfg.pools, ctx.now) }));
     if (waiting.length > MAX_WAITING_ROWS) data.more = `${waiting.length - MAX_WAITING_ROWS} more waiting`;
     const hints = waiting.length > 0 ? ["flowryn show <task>"] : [`every run holds a ${WORKER_POOL} slot while its worker lives`];
     return { data, hints: pause || quotaHolds(ctx.db) ? [RESUME_COMMAND, ...hints] : hints };

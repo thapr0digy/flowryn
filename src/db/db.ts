@@ -69,7 +69,7 @@ function hasMigrationNames(db: Db): boolean {
   return db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get() !== null;
 }
 
-/** The applied migrations whose recorded name differs from `migrations`' name for that number; none before migration 28. */
+/** The applied migrations whose recorded name differs from `migrations`' name for that number; none before the name ledger existed. */
 export function divergedMigrations(db: Db, migrations: readonly Migration[] = MIGRATIONS): MigrationMismatch[] {
   if (!hasMigrationNames(db)) return [];
   const expected = new Map(migrations.map((m) => [m.version, m.name]));
