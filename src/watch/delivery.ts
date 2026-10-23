@@ -50,6 +50,8 @@ export interface DeliveryWatcherDeps {
   nudgeConflicts(): boolean;
   /** A nudged ship's last stage waits for a grant: the scheduler looks now. */
   kickScheduler(): void;
+  /** A pass finished: what it read may move a yolo auto-merge on (src/verify/auto-merge.ts). */
+  passed?(): void;
   log(line: string): void;
   now(): number;
 }
@@ -147,6 +149,7 @@ export class DeliveryWatcher {
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
+    this.deps.passed?.();
   }
 
   private runs(sql: string, ...params: (string | number)[]): RunWithPolicy[] {

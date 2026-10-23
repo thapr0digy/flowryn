@@ -1,7 +1,8 @@
 # Daemon-run verify queue and yolo auto-merge
 
-- Status: partial
-- Open: phase 2 (yolo auto-merge, `[projects.<id>] auto_merge`) is plan p13's next phase; two flowryn suites at once on this Mac not yet run live
+- Status: done
+- Open: two flowryn suites at once on this Mac not yet run live; auto-merge not yet turned on for any project (fathom first)
+- Config: `[projects.<id>] auto_merge`
 
 Scout findings 4, 6 and 16 (`~/.flowryn/data/scout-efficiency-and-fz/report.md`). All 15 merges so far were started by hand by the leader (`merge.requested` source `cli`, 15 of 15). `flowryn verify` refuses a second job (`verify_busy`), with no queue. The user decided on 2026-10-22 that yolo ships verify and merge with no leader turn, opt-in per project, never for sensitive work. It is turned on for fathom first, and for flowryn only once a daemon restart no longer drops a running validation or verify.
 
@@ -34,30 +35,70 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
 - **Verifies are drained.** A parked restart (automatic or `--when-idle`) still waits on the `verifying` guard, and the scheduler starts no queued verify while it is parked, for at most 60 min (`RESTART_HOLDS_VERIFIES_MS`), so a restart stuck on another guard cannot hold verifies back forever.
 - **An interrupted verify is resumed.** Startup recovery still records the interrupted row as `error` (`the daemon stopped mid-run`), then queues the same PR, head and policy at the front (`source = recovered`), once per verification. A rerun interrupted again is not requeued: it records a `verify.not_requeued` event (no item in phase 1).
 
-## Phase 2: yolo auto-merge (not built: plan p13)
+## Phase 2: yolo auto-merge (built)
 
 The user's answer in the design review (q78): a verify that fails because a step exited non-zero sends the ship back to its worker once per head, with the failing step and its tail. A timeout, an `error`, or a second failure at the same head opens `auto_merge_held` for the leader.
 
-- `[projects.<id>] auto_merge = true` (default false). It is refused (`config_invalid`) for a project with no `verify` steps, since without them the gate passes a PR that has no checks.
-- **Trigger.** In the `deliver` verb's transaction, when the project opts in, the task is yolo and not sensitive, and the delivery is a PR or a local-only branch: insert an `auto_merges` row (`queued`) and a `verify_queue` request (`source = auto`) for the delivered head. A redelivery at a new head supersedes the earlier row and its request.
-- **State machine** (`src/verify/auto-merge.ts`, one row per run and head), driven by `pr.verified`, the delivery watcher's observations and a 60 s timer:
+- **Config.** `[projects.<id>] auto_merge = true` (default false). It is refused (`config_invalid`) when it is not a boolean, or when the project has no `verify` steps, since without them the gate passes a PR that has no checks. `verifyConfig` checks it, so the daemon refuses such a config at start and on SIGHUP, and `flowryn config` shows `auto_merge: true` beside the steps. It is not part of the verify policy, so turning it on keeps earlier verifications valid.
+  ```toml
+  [projects.fathom]
+  verify = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"]
+  auto_merge = true
+  ```
+- **Trigger** (`startAutoMerge`, in the `deliver` verb's transaction, after `recordDelivery`). A live row of the run is superseded (`redelivered`). Then, if the task is a yolo ship, not sensitive, and its project opts in, a new `auto_merges` row starts. It follows the first of these that applies:
+  - a passed verify of this head under today's policy (`waiting_checks`);
+  - a running one (`verifying`);
+  - a queued request (`queued`);
+  - otherwise it inserts a `verify_queue` request with `source = auto`.
+
+  The deliver reply carries `auto_merge: am<n>`. A failed verify at the head does not count: the redelivery verifies again.
+- **PATH.** A CLI verify records its caller's PATH in meta (`verify_path:<project>`); an auto request uses it, else the daemon's PATH plus `~/.bun/bin` (`autoVerifyPath`).
+- **State machine** (`src/verify/auto-merge.ts`, `AutoMerger`, table `auto_merges`, migration 32, at most one live row per run). The controller is kicked after each scheduler drain of the verify queue (a verify started or finished), after each delivery-watcher pass, and every 60 s.
 
   | From | Event | To |
   |---|---|---|
-  | queued | verification started | verifying |
+  | queued | its request started | verifying |
+  | queued | its request was cancelled (PR closed, no steps; a moved head only after 6 h with no redelivery) | held (`verify_cancelled`) |
   | verifying | passed | waiting_checks |
-  | verifying | failed or error | held, which opens the item (see Q1) |
-  | waiting_checks | checks not pending | merging, through the merge path |
-  | waiting_checks | over 6 h pending | held |
-  | merging | merged | merged (existing `yolo_merged` and `landed` items) |
-  | merging | gate refused | held, with the gate's code and message |
+  | verifying | `error`, and startup recovery requeued it | queued, following the rerun |
+  | verifying | a step exited non-zero, first time at this head | sent_back: the ship stage starts again with the step, its exit and its last 40 lines as the steer |
+  | verifying | a timeout, an unrequeued `error`, a failure with no failing step, or a second failure at this head | held (`verify_timeout`, `verify_error`, `verify_failed`) |
+  | waiting_checks | the watcher's PR evidence shows no pending check at the head | the merge, through the merge path |
+  | waiting_checks | checks pending, or the PR head moved, for over 6 h | held (`checks_timeout`, `head_moved`) |
+  | merging | its merge is proven | merged |
+  | merging | its merge was refused | held (`merge_refused`) |
   | merging | unproven | stays; the existing `unproven_merge` P1 covers it |
-  | any | run not ready (sent back, cancelled, redelivered) | superseded |
+  | any live | run sent back, cancelled or failed; merged by hand; redelivered; auto_merge turned off | superseded |
 
-- **The merge** is the `merge` verb's prepare, apply and settle, factored into one function that both the verb and the controller call. The caller is the daemon, so `chooseApproval` finds no leader channel and picks the yolo posture: channel `yolo`. `checkGate` is not changed. The event source is `daemon`, and `merge.requested` carries `by: auto`.
-- **Items.** New `auto_merge_held` (P1, actionable, in `LEADER_WAKE_KINDS` and `AWAY_WAKE_KINDS`), whose line gives the reason and the next command. `pr_ready` still opens, and its line reads "auto-merge: verify queued (vq7, 2 of 3)", so the leader does not start a second verify (it would attach anyway).
+- **The merge** is the `merge` verb's own path, `src/policy/merge-path.ts`. `mergeable`, `applyMerge` and `settleMerge` are shared with the verb, and `prepareDaemonMerge` is the verb's prepare without a harness channel. The caller is `DAEMON_CALLER` (`{ role: "daemon" }`, a type only the daemon process constructs, not a `Role`), so `chooseApproval` finds no leader channel and uses a standing human approval (`flowryn approve`) if there is one, else the yolo posture: channel `yolo`. `checkGate` is unchanged. `merge.requested` has source `daemon` and `by: auto` (the verb's carry `by: leader` or `human`). Under channel `yolo` the run lands `by: auto` whoever proves the merge, its own settle or the watcher after a restart (`recordMergeResult` looks the merge up in `auto_merges`); one that used a standing human approval lands `by: other`, so a `landed` item reports it.
+- **Gate refusals.** `checks_pending`, `forge_unavailable`, `merge_in_flight`, `not_ready` and `head_moved` mean "not yet": the next pass tries again, and `head_moved` holds after 6 h. A stale read is recorded as the verb's is and tried again. Any other code holds with the gate's message and its help as the next command (`red_checks` names the `--allow-red` waiver).
+- **Items.**
+  - New `auto_merge_held` (P1, actionable, in `LEADER_WAKE_KINDS` and the away wake). Its line is `Auto-merge held: <title> (<task>): <reason>; <next command>`. A landing, a send-back and a redelivery resolve it.
+  - `pr_ready` still opens. Its line ends with the progress, kept current: `; auto-merge: verify queued (vq7, 2 of 3)`, `verifying (v41)`, `verify v41 passed, waiting on checks`, `merging (mg12)`, `held (red_checks)`. A queued row's place moving rewrites the line with an `auto_merge.queue_moved` event (its request, position and queue length); a steady queue writes nothing.
+  - `LEADER_WAKE_SQL` skips a yolo `pr_ready` while its run has a live auto-merge, so the leader takes no turn for it.
+  - A merge landed `by: auto` opens no `landed` item, only `yolo_merged` (info).
+- **`flowryn show <task>`** has `auto_merge: am3 verifying (v41)`, and the reason once held or superseded.
 - **Not swept.** A PR delivered before the project opted in is not picked up. `flowryn verify` and `flowryn merge` cover it as today.
 - **Turning it on** is the user's config edit: `[projects.fathom] auto_merge = true` first. Flowryn is only turned on after phase 1 has run through a few merges with no `restart_dropped`. This PR changes no one's config.
+
+### Choices phase 2 made
+
+- A redelivery always makes a new row, even at the same head. Rows are history, and "once per head" counts the earlier `sent_back` rows of the run at that head.
+- Checks are read from the watcher's stored PR evidence to decide when to try. That adds no GitHub calls, and the gate then re-reads everything.
+- A PR head that moved past the delivered one waits rather than holds. The design said every refusal holds, but a worker pushing before its redelivery is the normal path, and holding there woke the leader for nothing (the redelivery test caught it). The wait is bounded at 6 h.
+- The leader merging by hand while a row is live: the existing basis and `merge_in_flight` guards stop a double merge, and the row ends superseded.
+- No contract revision bump: the worker's deliver path is unchanged, apart from an extra reply field.
+
+### Phase 2 tests
+
+- `test/integration/auto-merge.test.ts` (fake forge, fake workers, no leader session):
+  - a yolo PR on an opted-in project lands: channel `yolo`, `merge.requested` from `daemon` with `by: auto`, local green from the daemon's own verify, no `landed` item;
+  - a sensitive delivery gets no row; a run made sensitive while it waits on checks is held by the gate (`approval_required`);
+  - a red check is held (`red_checks`);
+  - a failed verify is sent back with the step and its tail, then fails again at the same head and is held;
+  - a redelivery at a new head (pushed while the first waits on checks) supersedes the first row, and the second lands.
+- `test/unit/auto-merge.test.ts`: the config key and the daemon's config check; the policy unchanged by it; the trigger (opt-in, yolo, sensitive, PATH, following a passed, running or queued verify, superseding, one live row); the verify verdict and the send-back text; the controller's moves without GitHub. That includes the two restart cases: an `error` that recovery requeued is followed, and a merge the watcher proves after a restart lands `by: auto` with no `landed` wake. Also the supersede cases, the 6 h checks and moved-head bounds, and the wake rule.
+- `test/unit/policy.test.ts`: a daemon caller gets only yolo, never a waiver, never for a task that is not yolo, and sensitive work is refused.
 
 ## What phase 1 built
 

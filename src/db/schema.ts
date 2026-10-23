@@ -709,6 +709,23 @@ const SCHEMA_MIGRATIONS_SQL = /* sql */ `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER);
 `;
 
+/**
+ * Migration 32: yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2). One
+ * row per delivery of an opted-in yolo ship, driven from queued to merged, or held or superseded,
+ * by src/verify/auto-merge.ts. A run has at most one live row.
+ */
+const AUTO_MERGES_SQL = /* sql */ `
+CREATE TABLE auto_merges (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  ref TEXT NOT NULL, head_sha TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','verifying','waiting_checks','merging','merged','held','superseded','sent_back')),
+  request_id TEXT, verification_id TEXT, merge_id TEXT,
+  reason TEXT, detail TEXT,
+  created_at INTEGER NOT NULL, state_since INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX auto_merges_live ON auto_merges(run_id) WHERE state IN ('queued','verifying','waiting_checks','merging');
+CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -741,6 +758,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
   { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
+  { version: 32, name: "auto-merges", sql: AUTO_MERGES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
