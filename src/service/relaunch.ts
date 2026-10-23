@@ -27,6 +27,12 @@ export const RELAUNCH_ANSWER_MS = 30_000;
 export const RELAUNCH_POLL_MS = 250;
 /** The waits between bootstrap attempts while launchd finishes the bootout. */
 export const RELAUNCH_BOOTSTRAP_BACKOFF_MS = [250, 500, 1_000, 2_000, 4_000];
+/**
+ * The longest the helper runs before it leaves its failure record: the unload
+ * wait, both answer waits, two bootstraps' backoffs, and a margin for its
+ * launchctl calls (each bounded at 10 s).
+ */
+export const RELAUNCH_BOUND_MS = RELAUNCH_UNLOAD_TIMEOUT_MS + 2 * RELAUNCH_ANSWER_MS + 2 * RELAUNCH_BOOTSTRAP_BACKOFF_MS.reduce((a, b) => a + b, 0) + 30_000;
 
 export interface RelaunchPlan {
   label: string;

@@ -11,9 +11,9 @@ import { runDaemon } from "../../daemon/daemon.ts";
 import { PING_VERB, RESTART_VERB, STOP_VERB, systemVerbs } from "../../daemon/system-verbs.ts";
 import type { DaemonSnapshot } from "../../daemon/restart.ts";
 import { callServerVerb } from "../client.ts";
-import { LAUNCHD_DEPS, installService, isLoaded, kickstart, loadAgent, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
-import { RELAUNCH_ANSWER_MS, RELAUNCH_BOOTSTRAP_BACKOFF_MS, RELAUNCH_POLL_MS, RELAUNCH_UNLOAD_TIMEOUT_MS, relaunch } from "../../service/relaunch.ts";
-import { failureLine, readRestartFailure, writeRestartFailure } from "../../service/restart-failure.ts";
+import { LAUNCHD_DEPS, agentPid, installService, isLoaded, kickstart, loadAgent, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
+import { RELAUNCH_ANSWER_MS, RELAUNCH_BOOTSTRAP_BACKOFF_MS, RELAUNCH_BOUND_MS, RELAUNCH_POLL_MS, RELAUNCH_UNLOAD_TIMEOUT_MS, relaunch } from "../../service/relaunch.ts";
+import { RECOVERY_COMMAND, type RestartFailure, failureLine, readRestartFailure, writeRestartFailure } from "../../service/restart-failure.ts";
 import { fileLogger } from "../../daemon/logger.ts";
 import { notifyConfig, notificationsOff, recordingNotifierPath } from "../../config/leader.ts";
 import { osascriptNotify, recordingNotify } from "../../attention/notify.ts";
@@ -26,8 +26,8 @@ import { notHumanReason } from "../human.ts";
 import { exitCodeOf, renderReply } from "../render.ts";
 
 const START_WAIT_MS = 8_000;
-/** How long `daemon restart` waits for the new daemon to answer. */
-const RESTART_WAIT_MS = 60_000;
+/** How long `daemon restart` waits for the new daemon to answer: as long as its relaunch helper keeps trying. */
+const RESTART_WAIT_MS = RELAUNCH_BOUND_MS;
 const STOP_WAIT_MS = 15_000;
 
 function print(io: CliIo, reply: Reply): number {
@@ -125,8 +125,13 @@ const start: VerbSpec = {
       await kickstart(label);
       how = "launchd";
       // A kickstart launchd will not act on (the 2026-10-23 "spawn scheduled", exit 78): load the agent afresh, as install does.
-      if (!(await waitFor(async () => (await ping(io.env))?.ok === true, START_WAIT_MS))) {
-        await loadAgent(label, plistPath(label));
+      // A daemon launchd runs but that does not answer yet is still starting: wait for it rather than boot it out.
+      if (!(await waitFor(async () => (await ping(io.env))?.ok === true, START_WAIT_MS)) && (await agentPid(label)) === null) {
+        try {
+          await loadAgent(label, plistPath(label));
+        } catch (error) {
+          return print(io, errorReply({ code: "daemon_unavailable", message: `the kickstart did not start flowrynd, and loading the agent again failed: ${(error as Error).message}`, help: `see ${stateFiles(config.state_dir).logs}, then run ${RECOVERY_COMMAND}` }));
+        }
         how = "launchd (re-bootstrapped after the kickstart did not start it)";
       }
     } else {
@@ -182,6 +187,33 @@ function describe(d: { pid: number; version: string; proto: number; build: strin
   return parts.join(" · ");
 }
 
+export type RestartWait = { outcome: "fresh"; reply: Reply } | { outcome: "dropped"; reason: string } | { outcome: "failed"; failure: RestartFailure } | { outcome: "timeout" };
+
+/**
+ * Wait for what a restart asked at `started` comes to: a daemon with another
+ * pid answers, the old daemon withdraws its handoff (its supervisor refused),
+ * or the relaunch helper leaves a failure record newer than the request.
+ */
+export async function waitForRestart(
+  oldPid: number,
+  started: number,
+  deps: { ping(): Promise<Reply | null>; readFailure(): RestartFailure | null; timeoutMs: number; pollMs: number },
+): Promise<RestartWait> {
+  const deadline = started + deps.timeoutMs;
+  for (;;) {
+    const reply = await deps.ping();
+    if (reply?.ok) {
+      const data = reply.data as { pid?: number; restart_handoff?: boolean; restart_dropped?: { reason: string; ts: number } | null };
+      if (data.pid !== oldPid) return { outcome: "fresh", reply };
+      if (data.restart_handoff === false) return { outcome: "dropped", reason: data.restart_dropped && data.restart_dropped.ts >= started - 1_000 ? data.restart_dropped.reason : "the old daemon withdrew it" };
+    }
+    const failure = deps.readFailure();
+    if (failure && failure.at >= started) return { outcome: "failed", failure };
+    if (Date.now() >= deadline) return { outcome: "timeout" };
+    await Bun.sleep(deps.pollMs);
+  }
+}
+
 /**
  * The leader may restart the daemon, unlike stop and start: every rule is the
  * daemon's (src/daemon/restart.ts), which checks the caller's role from its
@@ -214,34 +246,25 @@ const restart: VerbSpec = {
     }
     const old = asked.data.old as DaemonSnapshot;
     const started = Date.now();
-    let fresh: Reply | null = null;
-    let dropped: { reason: string } | null = null;
-    const up = await waitFor(async () => {
-      const reply = await ping(io.env);
-      if (!reply?.ok) return false;
-      const data = reply.data as { pid?: number; restart_handoff?: boolean; restart_dropped?: { reason: string; ts: number } | null };
-      if (data.pid !== old.pid) fresh = reply;
-      // The old daemon still answers and withdrew its handoff: its supervisor refused, so no new daemon is coming.
-      else if (data.restart_handoff === false) dropped = { reason: data.restart_dropped && data.restart_dropped.ts >= started - 1_000 ? data.restart_dropped.reason : "the old daemon withdrew it" };
-      return fresh !== null || dropped !== null;
-    }, RESTART_WAIT_MS);
-    if (dropped) {
-      return print(io, errorReply({ code: "restart_dropped", message: `the restart was dropped and the old daemon (pid ${old.pid}) still runs: ${(dropped as { reason: string }).reason}`, help: "flowryn daemon status; tell the user" }));
+    const { config } = loadConfig(flowrynHome(io.env));
+    const waited = await waitForRestart(old.pid, started, { ping: () => ping(io.env), readFailure: () => readRestartFailure(config.state_dir), timeoutMs: RESTART_WAIT_MS, pollMs: 100 });
+    if (waited.outcome === "dropped") {
+      return print(io, errorReply({ code: "restart_dropped", message: `the restart was dropped and the old daemon (pid ${old.pid}) still runs: ${waited.reason}`, help: "flowryn daemon status; tell the user" }));
     }
-    if (!up || !fresh) {
-      const { config } = loadConfig(flowrynHome(io.env));
-      const failure = readRestartFailure(config.state_dir);
-      if (failure) return print(io, errorReply({ code: "daemon_unavailable", message: failureLine(failure), help: `tell the user to run ${failure.run} in their terminal` }));
+    if (waited.outcome === "failed") {
+      return print(io, errorReply({ code: "daemon_unavailable", message: failureLine(waited.failure), help: `tell the user to run ${waited.failure.run} in their terminal` }));
+    }
+    if (waited.outcome === "timeout") {
       return print(
         io,
         errorReply({
           code: "daemon_unavailable",
-          message: `the old daemon (pid ${old.pid}) was asked to restart, but no new daemon answered within ${RESTART_WAIT_MS / 1000} s`,
-          help: `its relaunch helper keeps trying for up to ${(RELAUNCH_UNLOAD_TIMEOUT_MS + 2 * RELAUNCH_ANSWER_MS) / 1000} s, then leaves a P1 and a notification; flowryn daemon status shows the outcome (logs: ${stateFiles(config.state_dir).logs})`,
+          message: `the old daemon (pid ${old.pid}) was asked to restart, but no new daemon answered within ${RESTART_WAIT_MS / 1000} s and its relaunch helper left no failure record`,
+          help: `flowryn daemon status shows the outcome; if it stays down, run ${RECOVERY_COMMAND} (logs: ${stateFiles(config.state_dir).logs})`,
         }),
       );
     }
-    const next = (fresh as Reply).data as { pid: number; version: string; proto: number; build: string | null; uptime_s: number | null };
+    const next = waited.reply.data as { pid: number; version: string; proto: number; build: string | null; uptime_s: number | null };
     return print(
       io,
       okReply(

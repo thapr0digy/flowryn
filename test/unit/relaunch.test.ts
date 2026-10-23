@@ -6,7 +6,9 @@ import { findOpenItem } from "../../src/attention/items.ts";
 import { recordRestartFailure } from "../../src/daemon/restart.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import { type LaunchctlResult, type LaunchdDeps, type PlistSpec, relaunchCommand } from "../../src/service/launchd.ts";
-import { type RelaunchDeps, launchdState, relaunch } from "../../src/service/relaunch.ts";
+import { waitForRestart } from "../../src/cli/commands/daemon.ts";
+import type { Reply } from "../../src/api/envelope.ts";
+import { RELAUNCH_ANSWER_MS, RELAUNCH_BOOTSTRAP_BACKOFF_MS, RELAUNCH_BOUND_MS, RELAUNCH_POLL_MS, RELAUNCH_UNLOAD_TIMEOUT_MS, type RelaunchDeps, launchdState, relaunch } from "../../src/service/relaunch.ts";
 import { RECOVERY_COMMAND, type RestartFailure, clearRestartFailure, failureLine, readRestartFailure, writeRestartFailure } from "../../src/service/restart-failure.ts";
 
 const LABEL = "dev.flowryn.flowrynd.test";
@@ -166,6 +168,50 @@ describe("the restart's relaunch helper", () => {
     const spec: PlistSpec = { label: LABEL, program: ["/d/flowryn", "daemon", "run"], env: {}, logDir: "/l", workingDir: "/w" };
     expect(relaunchCommand(spec, PLIST, 77)).toEqual(["/d/flowryn", "daemon", "relaunch", "--old-pid", "77"]);
     expect(relaunchCommand({ ...spec, program: ["/b/bun", "/s/main.ts", "daemon", "run"] }, PLIST, 77)).toEqual(["/b/bun", "/s/main.ts", "daemon", "relaunch", "--old-pid", "77"]);
+  });
+});
+
+describe("daemon restart's wait", () => {
+  function withRealBounds(fake: ReturnType<typeof scripted>): RelaunchDeps {
+    return { ...fake.deps, launchd: { ...fake.deps.launchd, unloadTimeoutMs: RELAUNCH_UNLOAD_TIMEOUT_MS, bootstrapBackoffMs: RELAUNCH_BOOTSTRAP_BACKOFF_MS }, answerWaitMs: RELAUNCH_ANSWER_MS, pollMs: RELAUNCH_POLL_MS };
+  }
+
+  test("outlasts the helper's slowest outcomes: a bootout that stopped nothing, and every bootstrap failing", async () => {
+    const stuck = scripted({ bootoutStops: false });
+    expect(await relaunch(plan, withRealBounds(stuck))).toMatchObject({ ok: false, oldStillUp: true });
+    expect(stuck.clock()).toBeLessThan(RELAUNCH_BOUND_MS);
+    const failing = scripted({ bootstrapReplies: Array.from({ length: 12 }, () => IO_ERROR) });
+    expect(await relaunch(plan, withRealBounds(failing))).toMatchObject({ ok: false, oldStillUp: false });
+    expect(failing.failures).toHaveLength(1);
+    expect(failing.clock()).toBeLessThan(RELAUNCH_BOUND_MS);
+  });
+
+  const answer = (data: Record<string, unknown>): Reply => ({ ok: true, data }) as unknown as Reply;
+  const failure = (at: number): RestartFailure => ({ at, label: LABEL, old_pid: OLD_PID, steps: ["still no daemon after the fallback (30 s)"], launchd: "not loaded", run: RECOVERY_COMMAND });
+
+  test("stops as soon as the helper leaves a failure record newer than the request", async () => {
+    const started = Date.now();
+    let record: RestartFailure | null = null;
+    setTimeout(() => (record = failure(Date.now())), 50);
+    const waited = await waitForRestart(OLD_PID, started, { ping: async () => null, readFailure: () => record, timeoutMs: 10_000, pollMs: 10 });
+    expect(waited).toMatchObject({ outcome: "failed", failure: { run: RECOVERY_COMMAND } });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("ignores a failure record from an earlier restart and reports a new daemon", async () => {
+    const started = Date.now();
+    let pid = OLD_PID;
+    setTimeout(() => (pid = NEW_PID), 50);
+    const waited = await waitForRestart(OLD_PID, started, { ping: async () => answer({ pid, restart_handoff: true }), readFailure: () => failure(started - 60_000), timeoutMs: 10_000, pollMs: 10 });
+    expect(waited.outcome).toBe("fresh");
+    expect(waited.outcome === "fresh" && (waited.reply.data as { pid: number }).pid).toBe(NEW_PID);
+  });
+
+  test("reports a dropped restart when the old daemon withdraws its handoff, and times out when nothing happens", async () => {
+    const started = Date.now();
+    const dropped = await waitForRestart(OLD_PID, started, { ping: async () => answer({ pid: OLD_PID, restart_handoff: false, restart_dropped: { reason: "the old daemon (pid 4100) still answers", ts: started } }), readFailure: () => null, timeoutMs: 10_000, pollMs: 10 });
+    expect(dropped).toEqual({ outcome: "dropped", reason: "the old daemon (pid 4100) still answers" });
+    expect(await waitForRestart(OLD_PID, Date.now(), { ping: async () => null, readFailure: () => null, timeoutMs: 100, pollMs: 10 })).toEqual({ outcome: "timeout" });
   });
 });
 
