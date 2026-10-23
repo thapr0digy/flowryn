@@ -696,6 +696,27 @@ UPDATE runs SET account = harness;
 ALTER TABLE plan_phases ADD COLUMN account TEXT;
 `;
 
+/**
+ * Migration 31 (docs/notes/2026-10-23-read-pr-reviews-fn.md): one row per review or comment the
+ * delivery watcher has read on a delivered PR (src/reconcile/reviews.ts), keyed per task by the
+ * forge's own id, so each steers its worker once and a tracked thread is raised again until it is
+ * answered. `pr_feedback_since` (ms) is when Flowryn started reading them: anything written before
+ * is a baseline, recorded and never sent, so the upgrade does not flood open PRs with old comments.
+ */
+const PR_FEEDBACK_SQL = /* sql */ `
+CREATE TABLE pr_feedback (
+  task_id TEXT NOT NULL, run_id TEXT NOT NULL, pr_url TEXT NOT NULL, key TEXT NOT NULL,
+  kind TEXT NOT NULL, author TEXT NOT NULL, url TEXT NOT NULL, written_at INTEGER NOT NULL,
+  tracked INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('baseline','ignored','held','sent','answered','escalated')),
+  sends INTEGER NOT NULL DEFAULT 0, first_sent_at INTEGER, last_sent_at INTEGER,
+  answered_at INTEGER, answered_how TEXT, seen_at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, key));
+CREATE INDEX pr_feedback_run ON pr_feedback(run_id, state);
+INSERT INTO meta (key, value) VALUES ('pr_feedback_since', CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+  ON CONFLICT(key) DO NOTHING;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -727,6 +748,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
   { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
+  { version: 31, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

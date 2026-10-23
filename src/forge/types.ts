@@ -37,6 +37,8 @@ export interface PullRequest {
    * PR that is not open).
    */
   mergeable: boolean | null;
+  /** The login that opened the PR; absent when the forge did not say. */
+  author?: string;
 }
 
 export type CheckState = "green" | "red" | "pending";
@@ -63,6 +65,62 @@ export interface ChecksSummary {
   /** red if any is red, else pending if any is pending, else green; none when the head has no checks. */
   state: CheckState | "none";
   checks: Check[];
+}
+
+/** Who wrote a review or a comment. */
+export interface FeedbackAuthor {
+  login: string;
+  /** A GitHub App or bot account (user.type Bot). */
+  bot: boolean;
+  /** GitHub's author_association: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE… */
+  association: string;
+}
+
+/** A submitted PR review. */
+export interface Review {
+  id: number;
+  author: FeedbackAuthor;
+  /** APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED or PENDING. */
+  state: string;
+  body: string;
+  /** submitted_at, ISO 8601. */
+  at: string;
+  url: string;
+}
+
+/** An inline review comment, on a line of the diff. */
+export interface ReviewComment {
+  id: number;
+  author: FeedbackAuthor;
+  body: string;
+  at: string;
+  url: string;
+  path: string;
+  line: number | null;
+  /** The comment this one replies to; null for the first comment of a thread. */
+  inReplyTo: number | null;
+}
+
+/** A comment on the PR's conversation tab. */
+export interface IssueComment {
+  id: number;
+  author: FeedbackAuthor;
+  body: string;
+  at: string;
+  url: string;
+}
+
+/** Everything reviewers wrote on a PR, as the three REST lists give it. */
+export interface PrFeedback {
+  reviews: Review[];
+  reviewComments: ReviewComment[];
+  issueComments: IssueComment[];
+}
+
+/** An inline review thread: whether it is resolved, named by its first comment. */
+export interface ReviewThread {
+  resolved: boolean;
+  rootCommentId: number | null;
 }
 
 export interface MergeResult {
@@ -98,6 +156,10 @@ export interface Forge {
   annotations(repo: RepoRef, checkRunId: number): Promise<Annotation[]>;
   /** Merge at exactly `sha`: the forge refuses when the head moved (design section 7: bound to the head). */
   merge(ref: PrRef, sha: string, method: string, title: string): Promise<MergeResult>;
+  /** A PR's reviews, inline review comments and conversation comments (src/forge/feedback.ts reads them). */
+  feedback(ref: PrRef): Promise<PrFeedback>;
+  /** A PR's inline review threads and whether each is resolved: only GitHub's GraphQL API says. */
+  reviewThreads(ref: PrRef): Promise<ReviewThread[]>;
 }
 
 /** Summarise checks: red if any is red, else pending if any is pending, else green, or none. */

@@ -489,6 +489,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       cleanup: (runId) =>
         void delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => log(`cleanup ${runId}: ${(error as Error).stack ?? String(error)}`)),
       nudgeConflicts: () => upkeepConfig(config).nudge_conflicts,
+      steerReviews: () => upkeepConfig(config).steer_reviews,
+      reviewReraiseMs: () => upkeepConfig(config).review_reraise_hours * 3_600_000,
+      notifySteer: (runId) => bus.notify(runId),
       kickScheduler: () => scheduler?.kick(),
       log,
       now: Date.now,
