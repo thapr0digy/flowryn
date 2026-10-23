@@ -126,7 +126,7 @@ export function noteUsageLimit(db: Db, account: string, who: string, detail: str
 }
 
 /** Usage on the account is available again. Call inside a transaction; true when this lifted the pause. */
-export function clearUsageLimit(db: Db, account: string, why: string, now: number, source: "hook" | "cli" = "hook"): boolean {
+export function clearUsageLimit(db: Db, account: string, why: string, now: number, source: "hook" | "cli" | "daemon" = "hook"): boolean {
   const pause = usagePause(db, account);
   if (!pause) return false;
   savePause(db, account, null);

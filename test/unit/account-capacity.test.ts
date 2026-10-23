@@ -9,9 +9,10 @@ import { contractRevision } from "../../src/contracts/revision.ts";
 import { getMeta, migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
 import type { HostVerdict } from "../../src/sched/host.ts";
 import { moveLegacyCapacity } from "../../src/sched/legacy.ts";
-import { parseQuota, probeQuota, quotaHolds, quotaState } from "../../src/sched/quota.ts";
+import { heldQuotaAccounts, parseQuota, probeQuota, quotaHolds, quotaState, recordQuota } from "../../src/sched/quota.ts";
 import { Scheduler } from "../../src/sched/scheduler.ts";
-import { noteUsageLimit, usageGate, usagePause } from "../../src/sched/usage.ts";
+import { noteSignedOut, signedOutAccounts } from "../../src/sched/signed-out.ts";
+import { noteUsageLimit, pausedAccounts, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { quotaJson } from "../helpers/harness.ts";
 
 /**
@@ -225,6 +226,33 @@ describe("a signed-out account", () => {
     expect(s.launches.toSorted()).toEqual(["r1:fresh", "r2:fresh"]);
     expect(item("account_signed_out", "account:work-a")!.state).toBe("resolved");
     expect(events("sched.account_signed_in")).toHaveLength(1);
+  });
+});
+
+describe("an account removed from config", () => {
+  test("holds nothing: at the next pass its pause, low quota and signed-out P1 end, each with an event", async () => {
+    tx(db, () => {
+      noteUsageLimit(db, "work-c", "r9", "rate_limit", 999_000, BACKOFF);
+      recordQuota(db, "work-c", { state: "known", percent: 1, window: null, resets_at: null }, 5, 999_000);
+      noteSignedOut(db, "work-c", "not signed in", "CLAUDE_CONFIG_DIR=/x/work-c claude", 999_000);
+      recordQuota(db, "work-b", { state: "known", percent: 1, window: null, resets_at: null }, 5, 999_000);
+    });
+    waiting("r1", "work-a");
+    const s = stand({ quota: { "work-b": 1 } });
+    await pass(s);
+    expect(s.launches).toEqual(["r1:fresh"]);
+    expect(usagePause(db, "work-c")).toBeNull();
+    expect(quotaState(db, "work-c")).toBeNull();
+    expect(pausedAccounts(db, 1_000_000)).toEqual([]);
+    expect(heldQuotaAccounts(db)).toEqual(["work-b"]);
+    expect(signedOutAccounts(db)).toEqual([]);
+    for (const kind of ["usage_limit", "quota_low", "account_signed_out"]) expect(item(kind, "account:work-c")!.state).toBe("resolved");
+    expect(item("quota_low", "account:work-b")!.state).toBe("open");
+    expect(events("sched.usage_resumed")).toEqual([expect.objectContaining({ account: "work-c", why: "the account is no longer in config" })]);
+    expect(events("sched.quota_forgotten")).toEqual([expect.objectContaining({ account: "work-c", state: "low" })]);
+    expect(events("sched.account_signed_out_forgotten")).toEqual([expect.objectContaining({ account: "work-c" })]);
+    await pass(s);
+    expect(events("sched.quota_forgotten")).toHaveLength(1);
   });
 });
 

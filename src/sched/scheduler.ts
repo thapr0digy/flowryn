@@ -19,10 +19,10 @@ import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../
 import { activateStage, neededPools, positionOf, type StagePos } from "../lifecycle/stages.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity } from "./pools.ts";
-import { heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
-import { claimProbe, pausedAccounts, usageGate } from "./usage.ts";
+import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
+import { claimProbe, clearUsageLimit, pausedAccounts, usageGate, usagePauses } from "./usage.ts";
 import { moveLegacyCapacity } from "./legacy.ts";
-import { noteSignedIn, noteSignedOut, signedOutAccounts } from "./signed-out.ts";
+import { forgetSignedOut, noteSignedIn, noteSignedOut, signedOutAccounts } from "./signed-out.ts";
 import { loginCommand } from "../harness/sign-in.ts";
 import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
 import { ensureLaunchOperation, getOperation, heldByEscalation, openOperation } from "../lifecycle/operations.ts";
@@ -345,6 +345,7 @@ export class Scheduler {
     const config = this.deps.config();
     tx(this.deps.db, () => sweepExplanations(this.deps.db, this.deps.now()));
     const pass = newPass();
+    this.forgetDroppedAccounts(config);
     // A low reading or a signed-out login is checked again while nothing waits on it, so a reset or a sign-in lifts it.
     for (const [id, state] of quotaStates(this.deps.db)) {
       const account = state.state === "low" ? capacityAccount(config, id, "claude") ?? capacityAccount(config, id, "pi") : null;
@@ -357,6 +358,22 @@ export class Scheduler {
     for (const c of this.candidates()) {
       if (this.stopped) return;
       await this.tryGrant(c, config, pass, true);
+    }
+  }
+
+  /** An account config no longer has holds nothing: its usage pause, quota state and signed-out episode end, each with an event. */
+  private forgetDroppedAccounts(config: FlowrynConfig): void {
+    const { db, now } = this.deps;
+    const recorded = new Set([...usagePauses(db).keys(), ...quotaStates(db).keys(), ...signedOutAccounts(db)]);
+    const why = "the account is no longer in config";
+    for (const id of recorded) {
+      if (capacityAccount(config, id, "claude") ?? capacityAccount(config, id, "pi")) continue;
+      tx(db, () => {
+        clearUsageLimit(db, id, why, now(), "daemon");
+        forgetQuota(db, id, why, now());
+        forgetSignedOut(db, id, why, now());
+      });
+      this.deps.log(`sched: account ${id} is no longer in config; its capacity state is released`);
     }
   }
 

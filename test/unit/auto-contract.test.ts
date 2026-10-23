@@ -17,7 +17,8 @@ import { appendEvent } from "../../src/db/events.ts";
 import { openItem, resolveItems } from "../../src/attention/items.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
 import { autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
-import { noteUsageLimit } from "../../src/sched/usage.ts";
+import { recordQuota } from "../../src/sched/quota.ts";
+import { clearUsageLimit, noteUsageLimit } from "../../src/sched/usage.ts";
 
 /**
  * The daemon's automatic contract check (src/contracts/auto.ts), against a
@@ -346,6 +347,36 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     await gate("pi");
     await auto.tick();
     expect(jobs.map((j) => j.harness)).toEqual(["pi"]);
+  });
+
+  test("with declared Claude accounts, waits while any of them is usage-paused or under the quota floor", async () => {
+    config = parseConfig(
+      `data_dir = ${JSON.stringify(join(dir, "data"))}\n[tools]\nclaude = "/x/claude"\npi = "/x/pi"\n[policy]\nmode = "relaxed"\n[accounts.personal]\nharness = "claude"\n[accounts.work]\nharness = "claude"\nconfig_dir = "/x/work"\n`,
+      dir,
+    );
+    const auto = checker();
+    auto.init();
+    await gate("claude");
+    tx(db, () => noteUsageLimit(db, "personal", "leader", "rate_limit", Date.now(), { usage_backoff_ms: 3_600_000, usage_backoff_max_ms: 7_200_000 }));
+    await auto.tick();
+    expect(jobs).toEqual([]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "the usage pause on account personal" });
+
+    tx(db, () => {
+      clearUsageLimit(db, "personal", "test", Date.now());
+      recordQuota(db, "work", { state: "known", percent: 1, window: null, resets_at: null }, 5, Date.now());
+      recordQuota(db, "personal", { state: "known", percent: 2, window: null, resets_at: null }, 5, Date.now());
+    });
+    await auto.tick();
+    expect(jobs).toEqual([]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "the quota floor on accounts personal, work" });
+
+    tx(db, () => {
+      recordQuota(db, "work", { state: "known", percent: 50, window: null, resets_at: null }, 5, Date.now());
+      recordQuota(db, "personal", { state: "known", percent: 50, window: null, resets_at: null }, 5, Date.now());
+    });
+    await auto.tick();
+    expect(jobs.map((j) => j.harness)).toEqual(["claude"]);
   });
 
   test("a check a stopping daemon cut off runs again at the next start", async () => {

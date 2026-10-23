@@ -21,10 +21,19 @@ export function noteSignedOut(db: Db, account: string, detail: string, login: st
 
 /** The account passed its sign-in check. Call inside a transaction; true when this closed an episode. */
 export function noteSignedIn(db: Db, account: string, now: number): boolean {
+  return closeSignedOut(db, account, "sched.account_signed_in", "signed in", now);
+}
+
+/** The account is gone from config: its signed-out episode ends. Call inside a transaction; true when this closed one. */
+export function forgetSignedOut(db: Db, account: string, why: string, now: number): boolean {
+  return closeSignedOut(db, account, "sched.account_signed_out_forgotten", why, now);
+}
+
+function closeSignedOut(db: Db, account: string, kind: string, why: string, now: number): boolean {
   const key = accountKey(account);
   if (!findOpenItem(db, "account_signed_out", key)) return false;
-  appendEvent(db, { source: "daemon", kind: "sched.account_signed_in", payload: { account }, ts: now });
-  resolveItems(db, "account_signed_out", key, "signed in", now);
+  appendEvent(db, { source: "daemon", kind, payload: { account, why }, ts: now });
+  resolveItems(db, "account_signed_out", key, why, now);
   return true;
 }
 

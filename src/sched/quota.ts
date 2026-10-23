@@ -268,3 +268,13 @@ export function overrideQuota(db: Db, account: string, now: number): boolean {
   resolveItems(db, "quota_low", accountKey(account), "started anyway (flowryn capacity resume)", now);
   return true;
 }
+
+/** The account is gone from config: its quota state holds nothing any more. Call inside a transaction; true when there was one. */
+export function forgetQuota(db: Db, account: string, why: string, now: number): boolean {
+  const state = quotaState(db, account);
+  if (!state) return false;
+  setMeta(db, `${PREFIX}${account}`, "");
+  appendEvent(db, { source: "daemon", kind: "sched.quota_forgotten", payload: { account, why, state: state.state }, ts: now });
+  resolveItems(db, "quota_low", accountKey(account), why, now);
+  return true;
+}
