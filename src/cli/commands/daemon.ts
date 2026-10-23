@@ -6,12 +6,17 @@ import { flowrynHome, socketPath, stateFiles } from "../../config/paths.ts";
 import { errorReply, okReply, type Reply } from "../../api/envelope.ts";
 import { EXIT } from "../../api/errors.ts";
 import type { CliIo, VerbSpec } from "../../api/verbs.ts";
-import { boolArg } from "../../api/verbs.ts";
+import { boolArg, intArg } from "../../api/verbs.ts";
 import { runDaemon } from "../../daemon/daemon.ts";
 import { PING_VERB, RESTART_VERB, STOP_VERB, systemVerbs } from "../../daemon/system-verbs.ts";
 import type { DaemonSnapshot } from "../../daemon/restart.ts";
 import { callServerVerb } from "../client.ts";
-import { installService, isLoaded, kickstart, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
+import { LAUNCHD_DEPS, installService, isLoaded, kickstart, loadAgent, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
+import { RELAUNCH_ANSWER_MS, RELAUNCH_BOOTSTRAP_BACKOFF_MS, RELAUNCH_POLL_MS, RELAUNCH_UNLOAD_TIMEOUT_MS, relaunch } from "../../service/relaunch.ts";
+import { failureLine, readRestartFailure, writeRestartFailure } from "../../service/restart-failure.ts";
+import { fileLogger } from "../../daemon/logger.ts";
+import { notifyConfig, notificationsOff, recordingNotifierPath } from "../../config/leader.ts";
+import { osascriptNotify, recordingNotify } from "../../attention/notify.ts";
 import { request } from "../../transport/unix.ts";
 import { ensureDir } from "../../util/fsx.ts";
 import { isLockHeld } from "../../util/flock.ts";
@@ -22,7 +27,7 @@ import { exitCodeOf, renderReply } from "../render.ts";
 
 const START_WAIT_MS = 8_000;
 /** How long `daemon restart` waits for the new daemon to answer. */
-const RESTART_WAIT_MS = 30_000;
+const RESTART_WAIT_MS = 60_000;
 const STOP_WAIT_MS = 15_000;
 
 function print(io: CliIo, reply: Reply): number {
@@ -90,6 +95,11 @@ const status: VerbSpec = {
       lock: existsSync(lock) && isLockHeld(lock) ? "held (a daemon is starting or wedged)" : "free",
       launchd: existsSync(plistPath(label)) ? ((await isLoaded(label)) ? "loaded" : "installed, not loaded") : "not installed",
     };
+    const failure = readRestartFailure(config.state_dir);
+    if (failure) {
+      io.stdout(renderReply(okReply({ ...data, last_restart: failureLine(failure) }, [failure.run]), { json: io.json }));
+      return EXIT.unavailable;
+    }
     io.stdout(renderReply(okReply(data, ["flowryn daemon start"]), { json: io.json }));
     return EXIT.unavailable;
   },
@@ -114,6 +124,11 @@ const start: VerbSpec = {
     if (process.platform === "darwin" && existsSync(plistPath(label)) && (await isLoaded(label))) {
       await kickstart(label);
       how = "launchd";
+      // A kickstart launchd will not act on (the 2026-10-23 "spawn scheduled", exit 78): load the agent afresh, as install does.
+      if (!(await waitFor(async () => (await ping(io.env))?.ok === true, START_WAIT_MS))) {
+        await loadAgent(label, plistPath(label));
+        how = "launchd (re-bootstrapped after the kickstart did not start it)";
+      }
     } else {
       const logs = stateFiles(config.state_dir).logs;
       ensureDir(config.state_dir, 0o700);
@@ -215,7 +230,16 @@ const restart: VerbSpec = {
     }
     if (!up || !fresh) {
       const { config } = loadConfig(flowrynHome(io.env));
-      return print(io, errorReply({ code: "daemon_unavailable", message: `the old daemon (pid ${old.pid}) was asked to restart, but no new daemon answered within ${RESTART_WAIT_MS / 1000} s`, help: `launchd keeps retrying it; see ${stateFiles(config.state_dir).logs}` }));
+      const failure = readRestartFailure(config.state_dir);
+      if (failure) return print(io, errorReply({ code: "daemon_unavailable", message: failureLine(failure), help: `tell the user to run ${failure.run} in their terminal` }));
+      return print(
+        io,
+        errorReply({
+          code: "daemon_unavailable",
+          message: `the old daemon (pid ${old.pid}) was asked to restart, but no new daemon answered within ${RESTART_WAIT_MS / 1000} s`,
+          help: `its relaunch helper keeps trying for up to ${(RELAUNCH_UNLOAD_TIMEOUT_MS + 2 * RELAUNCH_ANSWER_MS) / 1000} s, then leaves a P1 and a notification; flowryn daemon status shows the outcome (logs: ${stateFiles(config.state_dir).logs})`,
+        }),
+      );
     }
     const next = (fresh as Reply).data as { pid: number; version: string; proto: number; build: string | null; uptime_s: number | null };
     return print(
@@ -232,6 +256,54 @@ const restart: VerbSpec = {
         ["flowryn daemon status", "flowryn fleet"],
       ),
     );
+  },
+};
+
+/**
+ * What a launchd restart runs (src/service/relaunch.ts): the old daemon spawns
+ * it detached with its own pid, and it re-bootstraps this home's agent and
+ * waits for a new daemon. Exit 0 once one answers; on failure it leaves the
+ * failure record and a notification. Nothing else needs to run it.
+ */
+const relaunchVerb: VerbSpec = {
+  name: "daemon relaunch",
+  summary: "Re-bootstrap the launchd agent and wait for the new daemon (what a restart runs)",
+  positionals: [],
+  flags: { "old-pid": { type: "int", help: "the daemon being replaced", placeholder: "pid" } },
+  kind: "local",
+  roles: ["human"],
+  async local(args, io) {
+    const refused = refuseAgent(io, "daemon relaunch");
+    if (refused !== null) return refused;
+    const oldPid = intArg(args, "old-pid");
+    if (oldPid === undefined || oldPid <= 0) return print(io, errorReply({ code: "bad_args", message: "daemon relaunch needs --old-pid" }));
+    if (process.platform !== "darwin") return print(io, errorReply({ code: "not_supported", message: "daemon relaunch is launchd only (macOS)" }));
+    const home = flowrynHome(io.env);
+    const { config } = loadConfig(home);
+    const label = serviceLabel(home);
+    const recorder = recordingNotifierPath(io.env);
+    const notify = recorder ? recordingNotify(recorder) : notificationsOff(io.env) || !notifyConfig(config).macos ? async () => {} : osascriptNotify;
+    const outcome = await relaunch(
+      { label, plist: plistPath(label), oldPid },
+      {
+        launchd: { ...LAUNCHD_DEPS, unloadTimeoutMs: RELAUNCH_UNLOAD_TIMEOUT_MS, bootstrapBackoffMs: RELAUNCH_BOOTSTRAP_BACKOFF_MS },
+        probe: async () => {
+          const reply = await ping(io.env);
+          const pid = reply?.ok ? (reply.data as { pid?: unknown }).pid : null;
+          return typeof pid === "number" ? pid : null;
+        },
+        now: Date.now,
+        log: fileLogger(stateFiles(config.state_dir).logs, false),
+        notify,
+        recordFailure: (failure) => writeRestartFailure(config.state_dir, failure),
+        answerWaitMs: RELAUNCH_ANSWER_MS,
+        pollMs: RELAUNCH_POLL_MS,
+      },
+    );
+    if (outcome.ok) return EXIT.ok;
+    // Only the old daemon, still alive, reads this: it takes its handoff back with the reason. After the bootout nobody does.
+    if (outcome.oldStillUp) io.stderr(`${outcome.reason}\n`);
+    return EXIT.unavailable;
   },
 };
 
@@ -277,4 +349,4 @@ const uninstall: VerbSpec = {
   },
 };
 
-export const DAEMON_VERBS: VerbSpec[] = [run, start, stop, restart, status, install, uninstall];
+export const DAEMON_VERBS: VerbSpec[] = [run, start, stop, restart, relaunchVerb, status, install, uninstall];
