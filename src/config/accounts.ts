@@ -42,6 +42,11 @@ export interface Account {
   effort: string | null;
   /** From `[accounts.<id>]`; false for the implicit account built from `[workers.<harness>]`. */
   declared: boolean;
+  /**
+   * Accounts a fresh launch may move to while this one is held by its usage
+   * pause or quota floor, in order: same scope and harness, checked at load.
+   */
+  overflow: string[];
 }
 
 export interface ScopeRule {
@@ -75,7 +80,7 @@ export const CLAUDE_CREDENTIAL_ENV = [
   "ANTHROPIC_PROFILE",
 ] as const;
 
-const ACCOUNT_KEYS = new Set(["harness", "scope", "config_dir", "agent_dir", "provider", "model", "effort"]);
+const ACCOUNT_KEYS = new Set(["harness", "scope", "config_dir", "agent_dir", "provider", "model", "effort", "overflow"]);
 const SCOPE_KEYS = new Set(["paths", "remotes", "accounts"]);
 const PROVIDER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -147,6 +152,7 @@ function declaredAccount(key: string, raw: Record<string, unknown>, workers: Wor
     model: model ?? own.model,
     effort: optString(raw.effort, `${where} effort`) ?? own.effort,
     declared: true,
+    overflow: stringList(raw.overflow, `${where} overflow`),
   };
 }
 
@@ -162,7 +168,23 @@ function implicitAccount(harness: HarnessId, workers: WorkersConfig, scope: stri
     model: own.model,
     effort: own.effort,
     declared: false,
+    overflow: [],
   };
+}
+
+/** Overflow stays inside the account's scope and harness: a held work login never spills onto a personal one. */
+function checkOverflow(account: Account, accounts: Record<string, Account>): void {
+  const where = `[accounts.${account.id}] overflow`;
+  const seen = new Set<string>();
+  for (const ref of account.overflow) {
+    const target = accounts[ref];
+    if (!target) throw new FlowrynError("config_invalid", `${where}: no account ${ref}`);
+    if (ref === account.id) throw new FlowrynError("config_invalid", `${where}: an account cannot overflow to itself`);
+    if (seen.has(ref)) throw new FlowrynError("config_invalid", `${where}: ${ref} is listed twice`);
+    seen.add(ref);
+    if (target.scope !== account.scope) throw new FlowrynError("config_invalid", `${where}: ${ref} is in scope ${target.scope}, not ${account.scope}; overflow stays inside a scope`);
+    if (target.harness !== account.harness) throw new FlowrynError("config_invalid", `${where}: ${ref} is a ${target.harness} account, not ${account.harness}; overflow stays on one harness`);
+  }
 }
 
 export function accountsConfig(config: FlowrynConfig): AccountsConfig {
@@ -200,6 +222,7 @@ export function accountsConfig(config: FlowrynConfig): AccountsConfig {
   for (const account of Object.values(accounts)) {
     if (!scopes[account.scope]) throw new FlowrynError("config_invalid", `[accounts.${account.id}] scope ${account.scope} is not a scope; add [scopes.${account.scope}]`);
   }
+  for (const account of Object.values(accounts)) checkOverflow(account, accounts);
   for (const scope of Object.values(scopes)) {
     for (const ref of scope.accounts) {
       const account = accounts[ref];
@@ -215,6 +238,57 @@ export function accountById(config: FlowrynConfig, accountId: string): Account {
   const account = accountsConfig(config).accounts[accountId];
   if (!account) throw new FlowrynError("not_found", `no account ${accountId}`, "flowryn accounts");
   return account;
+}
+
+/**
+ * The account a run's capacity is kept under, by its recorded id (null: the
+ * harness's implicit account), with no scope check: the usage pause and the
+ * quota floor are per login. Null when config no longer has it.
+ */
+export function capacityAccount(config: FlowrynConfig, accountId: string | null, harness: HarnessId): Account | null {
+  const accounts = accountsConfig(config);
+  const wanted = accountId ?? harness;
+  return accounts.accounts[wanted] ?? (wanted === harness ? implicitAccount(harness, workersConfig(config), accounts.default_scope) : null);
+}
+
+/** The accounts of one harness in config order (its implicit account when none is declared). */
+export function harnessAccounts(config: FlowrynConfig, harness: HarnessId): Account[] {
+  return Object.values(accountsConfig(config).accounts).filter((a) => a.harness === harness);
+}
+
+/**
+ * The harness's default account: what a run of a project in `[scopes] default`
+ * starts on (that scope's first account of the harness), else the harness's
+ * first account in config order. Without `[accounts]` it is the implicit one.
+ */
+export function defaultAccount(config: FlowrynConfig, harness: HarnessId): Account {
+  const accounts = accountsConfig(config);
+  const rule = accounts.scopes[accounts.default_scope]!;
+  const ordered = [...rule.accounts, ...Object.keys(accounts.accounts).filter((a) => !rule.accounts.includes(a))].map((a) => accounts.accounts[a]!);
+  return ordered.find((a) => a.harness === harness && a.scope === accounts.default_scope) ?? ordered.find((a) => a.harness === harness) ?? implicitAccount(harness, workersConfig(config), accounts.default_scope);
+}
+
+/** The directory a Claude account keeps its login and transcripts in. */
+export function claudeConfigDir(account: Account, env: Record<string, string | undefined> = process.env): string {
+  if (account.config_dir) return account.config_dir;
+  // A declared account without config_dir is Claude's default login; the implicit one inherits the environment's.
+  if (!account.declared && env.CLAUDE_CONFIG_DIR) return env.CLAUDE_CONFIG_DIR;
+  return join(env.HOME ?? homedir(), ".claude");
+}
+
+function real(path: string): string {
+  return existsSync(path) ? realpathSync(path) : normalize(path);
+}
+
+/**
+ * The Claude account a session's transcript belongs to: Claude keeps
+ * transcripts in `<config dir>/projects/`. Null when no account's directory
+ * holds it (the caller decides the fallback).
+ */
+export function accountOfTranscript(config: FlowrynConfig, transcriptPath: string | null): Account | null {
+  if (!transcriptPath) return null;
+  const transcript = real(transcriptPath);
+  return harnessAccounts(config, "claude").find((a) => transcript.startsWith(`${real(join(claudeConfigDir(a), "projects"))}/`)) ?? null;
 }
 
 // --- a project's scope and a run's account ------------------------------------------------------
