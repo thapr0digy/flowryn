@@ -7,6 +7,8 @@ import { tx } from "../db/db.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { readIdentity, terminate, type ProcIdentity, type PsRunner, type TerminateOptions, type TerminateResult } from "../runtime/proc.ts";
 import { liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
+import { appendEvent } from "../db/events.ts";
+import { insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
 import { finishVerification, getVerification, recordSteps, runningVerifications, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
@@ -15,8 +17,8 @@ import { parseBunSummary, type TestCounts } from "./summary.ts";
  * sure the PR head is in the project's object store, add a detached worktree
  * at it, run the configured steps in order through /bin/sh with a scrubbed
  * environment, parse bun's test summary from each step's output, copy the
- * built binary out, record the outcome, and remove the worktree. One job per
- * daemon at a time (the verb refuses a second). The job holds a validation
+ * built binary out, record the outcome, and remove the worktree. As many jobs
+ * run at once as the validation pool allows (src/verify/start.ts). The job holds a validation
  * slot (a job lease the verb took with the row), released only once its steps'
  * process groups are gone and its worktree removed.
  */
@@ -133,8 +135,9 @@ async function ensureHead(deps: VerifyDeps, v: Verification, plan: VerifyPlan): 
   const tried: string[] = [];
   const refs = [plan.prNumber === null ? null : `refs/pull/${plan.prNumber}/head`, plan.headRef === null ? null : `refs/heads/${plan.headRef}`].filter((ref): ref is string => ref !== null);
   for (const ref of refs) {
-    // An empty --refmap keeps the fetch from updating origin's remote-tracking branches as a side effect.
-    const fetched = await deps.git(["fetch", "--no-tags", "--quiet", "--refmap=", "origin", ref], v.project_path);
+    // An empty --refmap keeps the fetch from updating origin's remote-tracking branches as a side effect, and
+    // --no-write-fetch-head leaves FETCH_HEAD alone, so two jobs in one repository can fetch at once.
+    const fetched = await deps.git(["fetch", "--no-tags", "--quiet", "--no-write-fetch-head", "--refmap=", "origin", ref], v.project_path);
     if (fetched.code !== 0) tried.push(`${ref}: ${fetched.stderr.trim().split("\n").at(-1) ?? `exit ${fetched.code}`}`);
     if (await hasCommit(deps.git, v.project_path, v.head_sha)) return null;
   }
@@ -302,24 +305,31 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
   active.set(v.id, job);
   const deadline = Date.now() + plan.timeoutMs;
   const steps = v.steps.map((s) => ({ ...s }));
-  const finish = (outcome: Omit<VerificationOutcome, "steps" | "tests">) => {
+  const finish = (outcome: Omit<VerificationOutcome, "steps" | "tests">, stopped = false) => {
     try {
-      tx(deps.db, () => finishVerification(deps.db, v, { ...outcome, steps, tests: lastTests(steps) }, deps.now()));
+      tx(deps.db, () => {
+        // Stopped with the daemon: it runs again from the front of the queue once the next daemon is up.
+        if (finishVerification(deps.db, v, { ...outcome, steps, tests: lastTests(steps) }, deps.now()) && stopped) requeueInterrupted(deps, v);
+      });
     } catch (error) {
       deps.log(`verify ${v.id}: could not record the outcome: ${(error as Error).message}`);
     }
   };
+  const stoppedMidRun = () => finish({ state: "error", detail: "the daemon stopped mid-run", binary: null }, true);
   let worktreeAdded = false;
   try {
     mkdirSync(v.dir, { recursive: true, mode: 0o700 });
     const missing = await ensureHead(deps, v, plan);
+    // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
+    if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
     const added = await deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path);
-    if (added.code !== 0) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
-    worktreeAdded = true;
+    worktreeAdded = added.code === 0;
+    if (job.aborted) return stoppedMidRun();
+    if (!worktreeAdded) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
     const childEnv = stepEnv(env, plan.path);
     for (const step of steps) {
-      if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null });
+      if (job.aborted) return stoppedMidRun();
       step.state = "running";
       tx(deps.db, () => recordSteps(deps.db, v, steps, null, deps.now()));
       const began = Date.now();
@@ -330,7 +340,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       step.state = result.exit === 0 && !result.timedOut ? "passed" : "failed";
       if (result.timedOut) step.detail = `timed out: the run's ${Math.round(plan.timeoutMs / 60_000)} min were up`;
       tx(deps.db, () => recordSteps(deps.db, v, steps, step, deps.now()));
-      if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null });
+      if (job.aborted) return stoppedMidRun();
       if (step.state === "failed") return finish({ state: "failed", detail: step.detail ?? `${step.name} exited ${step.exit}`, binary: null });
     }
     let binary: string | null = null;
@@ -376,6 +386,37 @@ function killLeftovers(pgid: number): void {
   }
 }
 
+/**
+ * An interrupted verification runs again from the front of the queue, once:
+ * one that was itself a rerun is left as an error (an event says why), and
+ * a verification started before the queue existed has no request to copy.
+ * Call inside a transaction.
+ */
+function requeueInterrupted(deps: VerifyDeps, v: Verification): void {
+  const request = requestOf(deps.db, v.id);
+  if (!request || requeuedFrom(deps.db, v.id)) return;
+  const now = deps.now();
+  if (request.source === "recovered") {
+    appendEvent(deps.db, { source: "daemon", kind: "verify.not_requeued", taskId: v.task_id, payload: { verification: v.id, request: request.id, reason: `${v.id} was already a rerun of ${request.recovered_from ?? "an interrupted verification"}` }, ts: now });
+    return;
+  }
+  insertRequest(deps.db, {
+    project_id: request.project_id,
+    pr_url: request.pr_url,
+    task_id: request.task_id,
+    head_sha: request.head_sha,
+    policy_id: request.policy_id,
+    pr_number: request.pr_number,
+    head_ref: request.head_ref,
+    worktree: request.worktree,
+    source: "recovered",
+    path: request.path,
+    rank: RECOVERED_RANK,
+    recovered_from: v.id,
+    now,
+  });
+}
+
 /** Recover one job; true when a running row was recorded as an error. */
 async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["terminate"]>, id: string, leases: ReturnType<typeof liveJobLeases>): Promise<boolean> {
   const v = getVerification(deps.db, id);
@@ -390,7 +431,11 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
   let recorded = false;
   if (v && v.state === "running") {
     const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step (pid ${lease?.proc_pid}) did not exit`;
-    recorded = tx(deps.db, () => finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now()));
+    recorded = tx(deps.db, () => {
+      const finished = finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now());
+      if (finished) requeueInterrupted(deps, v);
+      return finished;
+    });
   }
   if (!stepGone) return recorded;
   if (v) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
@@ -405,7 +450,8 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
  * Daemon startup: a verification still running, or a verify slot still held,
  * belongs to a daemon that is gone. Its recorded step is ended by identity
  * (its whole group; a reused pid is never signalled), a running row is
- * recorded as an error, its worktree removed, and then its slot released
+ * recorded as an error (and requeued once, at the front), its worktree
+ * removed, and then its slot released
  * (a member of the group that outlived its leader is SIGKILLed first). A
  * step that will not exit keeps its slot (the next startup tries again): the
  * slot is not free while its work still runs. Returns the rows recorded as errors.
