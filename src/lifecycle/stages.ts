@@ -654,7 +654,7 @@ const stageDone: VerbSpec = {
       if (planText !== undefined) {
         const project = getProject(ctx.db, run.project_id);
         if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
-        plan = fileWorkerPlan(ctx.db, { project, sourceTask: run.task_id, gateId, phases: parsePlan(planText), workflow: project.workflow, now });
+        plan = fileWorkerPlan(ctx.db, ctx.config(), { project, sourceTask: run.task_id, gateId, phases: parsePlan(planText), workflow: project.workflow, now });
       }
       const event = appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, gate: gateId, review: gateReview, plan, questions: asked, via: ctx.via }, ts: now });
       appendEvent(ctx.db, { source: "cli", kind: "gate.opened", runId: run.id, taskId: run.task_id, payload: { gate: gateId, stage: pos.stage.id, kind: "review", review: gateReview, browser: browser.state }, ts: now });

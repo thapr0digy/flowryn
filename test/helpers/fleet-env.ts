@@ -135,6 +135,8 @@ export interface FleetOptions {
   turnEndGuard?: boolean;
   /** The fake Herdr starts these scripts in place of the FAKE: worker, per harness kind. */
   harnessScripts?: FakeHerdrOptions["harnessScripts"];
+  /** The fake Herdr server's own shell shows this startup prompt and eats the first typed character (FakeHerdrOptions.serverShellPrompt). */
+  herdrShellPrompt?: string;
   /** Run the daemon from this command (a compiled binary's `daemon run`) rather than the source. */
   daemonProgram?: string[];
   /** More environment for the daemon. */
@@ -172,7 +174,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   mkdirSync(store, { recursive: true });
   const logDir = join(home, "harness-logs");
   mkdirSync(logDir, { recursive: true });
-  const herdrOptions = { env: h.env, logDir, harnessScripts: options.harnessScripts };
+  const herdrOptions = { env: h.env, logDir, harnessScripts: options.harnessScripts, serverShellPrompt: options.herdrShellPrompt };
   let herdr = await FakeHerdr.start(join(home, "herdr.sock"), herdrOptions);
   if (options.herdrSubscribe) herdr.subscribeReply = options.herdrSubscribe;
   let herdrUp = true;

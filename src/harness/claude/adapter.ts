@@ -1,4 +1,6 @@
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { CLAUDE_CREDENTIAL_ENV } from "../../config/accounts.ts";
 import type { WorkersConfig } from "../../config/workers.ts";
 import type { PaneProcess } from "../../runtime/herdr/runtime.ts";
 import { HOOK_SIGNALS, type HarnessAdapter, type HookName, type LaunchPlan, type RunContext, type Trust } from "../types.ts";
@@ -78,10 +80,23 @@ function sharedArgs(run: RunContext, config: WorkersConfig, settingsPath: string
   return args;
 }
 
+/**
+ * The login's environment. A pinned login unsets the credentials Claude ranks
+ * above it, and Claude's default login unsets CLAUDE_CONFIG_DIR: an empty
+ * value is not unset to Claude (2.1.x reads it as a relative config
+ * directory), and a pane can only be given values, so the worker pane shell
+ * unsets the names in FLOWRYN_UNSET before Claude is typed (src/lifecycle/pane-shell.ts).
+ */
+export function loginEnv(claude: WorkersConfig["claude"]): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (claude.config_dir) env.CLAUDE_CONFIG_DIR = claude.config_dir;
+  if (claude.pin_login) env.FLOWRYN_UNSET = [...CLAUDE_CREDENTIAL_ENV, ...(claude.config_dir ? [] : ["CLAUDE_CONFIG_DIR"])].join(" ");
+  return env;
+}
+
 function plan(run: RunContext, config: WorkersConfig, sessionArgs: string[], prompt: string): LaunchPlan {
   const settingsPath = join(run.runDir, "claude-settings.json");
-  const env: Record<string, string> = {};
-  if (config.claude.config_dir) env.CLAUDE_CONFIG_DIR = config.claude.config_dir;
+  const env = loginEnv(config.claude);
   return {
     kind: "claude",
     args: [...sessionArgs, ...sharedArgs(run, config, settingsPath), prompt],
@@ -110,7 +125,8 @@ export const claudeAdapter: HarnessAdapter = {
     return checkOrRegisterTrust({
       worktree: run.worktree,
       project: run.projectPath,
-      storeDir: config.claude.config_dir ?? claudeConfigDir(process.env),
+      // A pinned default login has CLAUDE_CONFIG_DIR unset, so Claude reads ~/.claude.json whatever the daemon's own environment says.
+      storeDir: config.claude.config_dir ?? (config.claude.pin_login ? homedir() : claudeConfigDir(process.env)),
       mode: config.claude.pretrust,
     });
   },

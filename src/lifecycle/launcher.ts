@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { styleBlock } from "../config/workflows.ts";
+import { runAccount, workersFor } from "../config/accounts.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import type { Db } from "../db/db.ts";
@@ -25,6 +26,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
+import { ensureHarnessShim, ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
 import { claimOperation, confirmOperation, escalatedStart, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
 /**
@@ -219,7 +221,8 @@ export class Launcher {
     const project = getProject(db, run.project_id);
     if (!project) throw new Error(`project ${run.project_id} is gone`);
     const config = this.deps.config();
-    const workers = workersConfig(config);
+    // The account recorded at dispatch, checked against its project's scope again at every launch.
+    const workers = workersFor(workersConfig(config), runAccount(config, project, run.account, run.harness));
     const timing = timingConfig(config);
     const runtime = this.deps.runtime();
     if (!runtime) throw new TransientLaunchError("Herdr is not reachable");
@@ -297,7 +300,9 @@ export class Launcher {
       FLOWRYN_TASK_FILE: instructionsFile,
       // The daemon opens review pages in the user's browser (src/lavish/opener.ts); a worker's lavish-axi never tries.
       LAVISH_AXI_NO_OPEN: "1",
-      PATH: `${this.shimDir(config, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      PATH: `${ensureHarnessShim(config.state_dir, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      // The pane's shell, which reads no rc file the user's startup prompts could eat the typed launch in (pane-shell.ts).
+      SHELL: ensurePaneShell(config.state_dir),
     };
 
     const paneId = await this.ensurePane(runtime, run, worktree, env);
@@ -322,7 +327,7 @@ export class Launcher {
     if (!claimed) return false;
     await runtime.startAgent(paneId, { kind: plan.kind, name: agentName, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
-    if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms`);
+    if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms${paneEvidence(await this.paneScreen(runtime, paneId))}`);
     return this.recordWorker(run, mode, claimed, paneId, harness);
   }
 
@@ -369,6 +374,18 @@ export class Launcher {
       return false;
     }
     return true;
+  }
+
+  /**
+   * What a pane shows, for a launch failure: its recent lines (unwrapped, so
+   * a secret is redacted whole), null when it is gone, or the read's error.
+   */
+  private async paneScreen(runtime: HerdrRuntime, paneId: string): Promise<string | null | Error> {
+    try {
+      return await runtime.readPane(paneId, TAIL_READ_LINES);
+    } catch (error) {
+      return error as Error;
+    }
   }
 
   /**
@@ -422,21 +439,6 @@ export class Launcher {
       appendEvent(db, { source: "daemon", kind: "run.token_minted", runId: run.id, taskId: run.task_id, payload: {} });
     });
     return token;
-  }
-
-  /**
-   * Herdr's agent.start types the harness's canonical name (`claude`, `pi`)
-   * into the pane shell. A shim directory first on PATH maps that name to the
-   * binary Flowryn resolved, so the worker runs the version the contract gate
-   * checked even when the shell has no alias for it.
-   */
-  private shimDir(config: FlowrynConfig, harness: string, binary: string): string {
-    const dir = join(config.state_dir, "shims");
-    ensureDir(dir, 0o700);
-    const link = join(dir, harness);
-    const script = `#!/bin/sh\nexec ${JSON.stringify(binary)} "$@"\n`;
-    if (!existsSync(link) || readFileSync(link, "utf8") !== script) writeFileSync(link, script, { mode: 0o700 });
-    return dir;
   }
 
   /**

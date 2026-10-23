@@ -8,7 +8,11 @@ import { decisionsConfig, reservedReason } from "../attention/decisions-policy.t
 import { recordIntent } from "../journal/journal.ts";
 import { capStoredText, MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
-import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, nextRunDecisionId } from "./decisions.ts";
+import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, getDecision, nextRunDecisionId } from "./decisions.ts";
+import { answerDecision } from "./decision-verbs.ts";
+import { resolveTool } from "../config/config.ts";
+import { cleanupConfig } from "../config/delivery.ts";
+import { matchRules, readRuleFacts, type RuleFacts, type RuleVerdict } from "../policy/nomistakes-rules.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
@@ -151,7 +155,11 @@ const report: VerbSpec = {
  * a question for you, only when the worker cannot proceed without it.
  * It never holds the call open (design section 12): it returns a decision id,
  * the worker ends its turn, and the answer arrives as a steer. A blocking
- * question is a P0 and puts a captain hold on the task.
+ * question is a P0 and puts a captain hold on the task. With --nomistakes it
+ * is a no-mistakes ask-user finding: the gate is read from no-mistakes and
+ * git, and `[decisions] nomistakes_rules` may settle it at once (answered_by
+ * policy, its steer sent, no item); otherwise it is reserved for the user
+ * (docs/notes/2026-10-22-settle-routine-no-2r.md).
  */
 const ask: VerbSpec = {
   name: "ask",
@@ -164,12 +172,24 @@ const ask: VerbSpec = {
     recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
     reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
     blocks: { type: "string", help: "required: the choice in your work that waits on the answer", placeholder: "text" },
+    nomistakes: { type: "boolean", help: "a no-mistakes ask-user finding: a rule may settle it ([decisions] nomistakes_rules), else only the user answers" },
     "body-file": { type: "string", help: "the question, from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  apply(ctx, args) {
+  // A --nomistakes ask reads no-mistakes' status and git first; give it time before it spools.
+  replyMs: 30_000,
+  async prepare(ctx, args): Promise<RuleFacts | null> {
+    if (!boolArg(args, "nomistakes")) return null;
+    const run = activeRun(ctx);
+    if (run.delivery_mode !== "no-mistakes") return { ok: false, reason: "not a no-mistakes ship" };
+    const project = getProject(ctx.db, run.project_id);
+    if (!project) return { ok: false, reason: `no project ${run.project_id}` };
+    const config = ctx.config();
+    return readRuleFacts({ noMistakes: resolveTool(config, "no_mistakes"), git: ctx.delivery.git, timeoutMs: cleanupConfig(config).nomistakes_timeout_ms }, run.worktree_path, project.default_branch);
+  },
+  apply(ctx, args, prepared) {
     const run = activeRun(ctx);
     const question = capStoredText(sanitizeBlock(stringArg(args, "body") ?? "").trim());
     if (question.length === 0) throw new FlowrynError("bad_args", "the question goes in --body-file -");
@@ -199,11 +219,26 @@ const ask: VerbSpec = {
       }
     }
     const id = nextRunDecisionId(ctx.db);
-    const reserved = reservedReason({ question, context: null, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: false }, decisionsConfig(ctx.config()));
+    const cfg = decisionsConfig(ctx.config());
+    const facts = prepared as RuleFacts | null;
+    const verdict: RuleVerdict | null = facts === null ? null : facts.ok ? matchRules({ ...facts, worktree: run.worktree_path, options, sensitive: run.sensitive === 1 }, cfg.nomistakes_rules) : { settled: false, reason: facts.reason };
+    const sourceReason = stringArg(args, "reserved") ?? null;
+    // A gate a rule settles is judged on no-mistakes' and git's facts, not on the question's wording
+    // (the user's ruling, 2026-10-22); only the worker's own --reserved still keeps it for the user.
+    // A no-mistakes ask no rule settles is the user's, with the reason no rule did.
+    const reserved = verdict?.settled && !sourceReason?.trim()
+      ? null
+      : (reservedReason({ question, context: null, sourceReason, blocksYoloOff: false }, cfg) ?? (verdict && !verdict.settled ? sanitizeLine(`nomistakes: ${verdict.reason}`, 200) : null));
     ctx.db
       .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at, blocks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12)")
       .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, now, blocks);
-    const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via } });
+    const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via, ...(verdict ? { nomistakes: true } : {}) } });
+    if (verdict?.settled && reserved === null) {
+      appendEvent(ctx.db, { source: "daemon", kind: "decision.settled_by_rule", runId: run.id, taskId: run.task_id, payload: { decision: id, step: facts!.ok ? facts!.step : "", rules: verdict.rules, answer: verdict.answer, findings: verdict.findings } });
+      // Never held, so nothing to unhold: answer it as a non-blocking question.
+      const done = answerDecision(ctx, { ...getDecision(ctx.db, id)!, blocking: 0 }, { choice: verdict.answer, words: verdict.words, by: "policy", via: `rule:${verdict.rules.join(",")}` });
+      return { data: { decision: id, blocking, options, answered: verdict.answer, rule: verdict.rules.join(","), steer: done.steer ?? "-" }, hints: [done.steer ? `settled by rule: act on steer ${done.steer} now, then $FLOWRYN_BIN ack ${done.steer}` : "settled by rule"] };
+    }
     const item = openItem(ctx.db, {
       kind: blocking ? "worker_question_blocking" : "worker_question",
       eventSeq: event.seq,
@@ -216,7 +251,11 @@ const ask: VerbSpec = {
     if (blocking) {
       recordIntent(ctx.db, { file: "backlog", verb: "hold", taskId: run.task_id, positional: [run.task_id], flags: { reason: holdReason(`question ${id}`), kind: "captain" }, now });
     }
-    return { data: { decision: id, blocking, options }, hints: ["end your turn; the answer arrives as a steer"] };
+    return { data: { decision: id, blocking, options, ...(reserved ? { reserved } : {}) }, hints: ["end your turn; the answer arrives as a steer"] };
+  },
+  async settle(ctx, result) {
+    if (result.data.answered !== undefined && ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
+    return result;
   },
 };
 

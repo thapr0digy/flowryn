@@ -1,3 +1,4 @@
+import { accountById } from "../../src/config/accounts.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -120,7 +121,7 @@ describe("what drop takes", () => {
     const config = defaultConfig(env.dir);
     const start = () =>
       tx(env.db, () =>
-        createRun(env.db, config, { taskId: "web-late-q1", title: "t", body: "b", project: getProject(env.db, "web")!, kind: "ship", harness: "claude", version: "1", base: "abc", workflow: workflowFor(config, "fix", "ship"), sensitive: false, existing: true, by: "leader", override: null, now: env.clock.now }),
+        createRun(env.db, config, { taskId: "web-late-q1", title: "t", body: "b", project: getProject(env.db, "web")!, kind: "ship", account: accountById(config, "claude"), version: "1", base: "abc", workflow: workflowFor(config, "fix", "ship"), sensitive: false, existing: true, by: "leader", override: null, now: env.clock.now }),
       );
     expect(start).toThrow("was dropped");
   });
