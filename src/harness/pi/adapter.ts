@@ -30,6 +30,8 @@ function plan(run: RunContext, config: WorkersConfig, prompt: string, includeTas
   if (pi.session_dir) args.push("--session-dir", pi.session_dir);
   args.push("-e", extensionPath);
   for (const extension of pi.extensions) args.push("-e", extension);
+  // A declared account names its provider, so Pi cannot resolve the model under another signed-in provider.
+  if (pi.provider) args.push("--provider", pi.provider);
   if (pi.model) args.push("--model", pi.model);
   if (pi.effort) args.push("--thinking", pi.effort);
   if (pi.no_extensions) args.push("--no-extensions");

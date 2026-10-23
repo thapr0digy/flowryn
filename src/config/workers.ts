@@ -36,6 +36,12 @@ export interface ClaudeWorkerConfig {
   pretrust: PretrustMode;
   /** Absolute path of Claude's config directory holding .claude.json (default: CLAUDE_CONFIG_DIR, else HOME). */
   config_dir: string | null;
+  /**
+   * The login is pinned (a config_dir, or a declared account on Claude's default login): the launch
+   * unsets the credential variables Claude ranks above a stored login, and CLAUDE_CONFIG_DIR itself
+   * when config_dir is null (src/config/accounts.ts).
+   */
+  pin_login: boolean;
   extra_args: string[];
 }
 
@@ -45,6 +51,8 @@ export interface PiWorkerConfig {
   effort: string | null;
   /** PI_CODING_AGENT_DIR for workers; null keeps Pi's own (~/.pi/agent). */
   agent_dir: string | null;
+  /** --provider: the provider a declared Pi account spends; null for the implicit account. */
+  provider: string | null;
   /** --session-dir for workers; null keeps Pi's default. */
   session_dir: string | null;
   /** Extra extensions loaded with -e (the offline scripted provider in tests). */
@@ -147,6 +155,7 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
   const raw = table(config.extra.workers, "[workers]");
   const claude = table(raw.claude, "[workers.claude]");
   const pi = table(raw.pi, "[workers.pi]");
+  const configDir = absPath(optString(claude.config_dir, "[workers.claude] config_dir"), config.home);
   return {
     worktree_root: absPath(optString(raw.worktree_root, "[workers] worktree_root"), config.home) ?? join(config.data_dir, "worktrees"),
     tmp_root: tmpRoot(config),
@@ -157,13 +166,15 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
       effort: optString(claude.effort, "[workers.claude] effort"),
       permission_mode: oneOf(claude.permission_mode, CLAUDE_PERMISSION_MODES, "[workers.claude] permission_mode", "bypassPermissions"),
       pretrust: oneOf(claude.pretrust, PRETRUST_MODES, "[workers.claude] pretrust", "register"),
-      config_dir: absPath(optString(claude.config_dir, "[workers.claude] config_dir"), config.home),
+      config_dir: configDir,
+      pin_login: configDir !== null,
       extra_args: stringList(claude.extra_args, "[workers.claude] extra_args"),
     },
     pi: {
       model: optString(pi.model, "[workers.pi] model"),
       effort: optString(pi.effort, "[workers.pi] effort"),
       agent_dir: absPath(optString(pi.agent_dir, "[workers.pi] agent_dir"), config.home),
+      provider: null,
       session_dir: absPath(optString(pi.session_dir, "[workers.pi] session_dir"), config.home),
       extensions: stringList(pi.extensions, "[workers.pi] extensions").map((p) => toAbsolute(p, config.home)),
       no_extensions: optBool(pi.no_extensions, "[workers.pi] no_extensions", false),

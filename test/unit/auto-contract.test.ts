@@ -782,7 +782,7 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
   test("a check that failed before revisions is at the baseline: final only at that revision, so once claude is past it the upgrade checks again", async () => {
     tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
     expect(attemptRevision(autoAttempt(db, "claude")!)).toBe(BASELINE_REVISION);
-    // Revision 2 (the worker's own TMPDIR, docs/notes/2026-10-22-give-every-worker-73.md) left the baseline behind.
+    // Claude left the baseline at revision 2 and has bumped since.
     expect(CLAUDE_REVISION).toBeGreaterThan(BASELINE_REVISION);
     const auto = checker();
     auto.init();

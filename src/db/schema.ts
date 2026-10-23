@@ -685,6 +685,17 @@ CREATE INDEX verify_queue_order ON verify_queue(state, rank, requested_at);
 CREATE INDEX verify_queue_verification ON verify_queue(verification_id);
 `;
 
+/**
+ * Migration 30: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
+ * dispatch because a resume must stay in the login that holds the session; a plan phase's `account:`
+ * line waits beside its harness. Rows from before name their harness's implicit account.
+ */
+const ACCOUNTS_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN account TEXT;
+UPDATE runs SET account = harness;
+ALTER TABLE plan_phases ADD COLUMN account TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -715,6 +726,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
   { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
+  { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

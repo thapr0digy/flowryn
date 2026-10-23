@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems } from "../attention/items.ts";
 import { existsSync } from "node:fs";
+import { resolveAccount, type Account } from "../config/accounts.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
@@ -486,15 +487,23 @@ export class Scheduler {
       // Not in the backlog yet (its add is still pending), held, parked or already started by hand: wait.
       if (!task || task.state !== "queued" || task.hold) continue;
       if (waitingOn(db, phase.task_id, backlog, JSON.parse(phase.blocked_by) as string[]).length > 0) continue;
-      const harness = (phase.harness as HarnessId | null) ?? project.harness;
+      let account: Account;
+      try {
+        account = resolveAccount(config, project, { account: phase.account, harness: phase.harness as HarnessId | null });
+      } catch (error) {
+        if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
+        else throw error;
+        continue;
+      }
+      const harness = account.harness;
       const usage = harness === "claude" ? usageGate(db, now(), null) : "open";
       if (usage === "paused") continue;
       if (harness === "claude" && (await this.quotaHeld())) continue;
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
-        const start = await checkStart(this.deps.startDeps, project, harness);
-        made = this.startPhase(phase, project, harness, start, workflow, usage === "probe", now());
+        const start = await checkStart(this.deps.startDeps, project, account);
+        made = this.startPhase(phase, project, account, start, workflow, usage === "probe", now());
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
         else this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} failed to start: ${(error as Error).stack ?? String(error)}`);
@@ -512,7 +521,7 @@ export class Scheduler {
   private startPhase(
     phase: PhaseRow & { plan_title: string; source_task: string | null; phases: number },
     project: ProjectRow,
-    harness: HarnessId,
+    account: Account,
     start: { version: string; base: string },
     workflow: WorkflowDef,
     probe: boolean,
@@ -522,7 +531,7 @@ export class Scheduler {
     const config = this.deps.config();
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
-      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", harness, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, runId, t);
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
       // A plan a design handed in holds the phases after the design's own task, which is phase 1.
