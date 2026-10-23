@@ -12,8 +12,9 @@ import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
-import type { Account } from "../config/accounts.ts";
-import { accountFor, checkStart, createRun, startDepsOf } from "./dispatch.ts";
+import { runAccount, type Account } from "../config/accounts.ts";
+import type { FlowrynConfig } from "../config/config.ts";
+import { accountFor, checkStart, createRun, harnessFlag, startDepsOf } from "./dispatch.ts";
 import { dispatchedTask, reportDirFor } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
@@ -152,6 +153,12 @@ function promoteTask(ctx: HandlerCtx, args: Record<string, unknown>, p: Extract<
   };
 }
 
+/** A scout whose run is over is promoted on its own recorded account, as a resume is; --harness asks for that harness's account in the project's scope. */
+export function promotedAccount(config: FlowrynConfig, project: ProjectRow, args: Record<string, unknown>, run: Pick<RunWithPolicy, "account" | "harness">): Account {
+  if (harnessFlag(args)) return accountFor(config, project, args);
+  return runAccount(config, project, run.account, run.harness);
+}
+
 const promote: VerbSpec = {
   name: "promote",
   summary: "Promote a scout to a ship in place: the same task, and while it works, the same worker and worktree",
@@ -179,8 +186,7 @@ const promote: VerbSpec = {
     if (existsSync(run.worktree_path)) {
       throw new FlowrynError("not_ready", `the scout's worktree ${run.worktree_path} is still there`, `flowryn cleanup ${run.task_id} (--discard needs your approval), then promote`);
     }
-    // The scout's account, unless --harness asks for another harness: then that harness's account in the project's scope.
-    const account = accountFor(ctx.config(), project, args, { account: run.account, harness: run.harness });
+    const account = promotedAccount(ctx.config(), project, args, run);
     return { mode: "task", taskId: run.task_id, account, ...(await checkStart(startDepsOf(ctx), project, account)) };
   },
   apply(ctx, args, prepared) {

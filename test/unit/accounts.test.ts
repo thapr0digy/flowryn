@@ -14,6 +14,7 @@ import { shimScript } from "../../src/lifecycle/launcher.ts";
 import { migrate, openDb } from "../../src/db/db.ts";
 import { checkPhaseAccounts, fileWorkerPlan, parsePlan, phasesOf, recordPlan } from "../../src/lifecycle/plans.ts";
 import { insertProject, type ProjectRow } from "../../src/lifecycle/projects.ts";
+import { promotedAccount } from "../../src/lifecycle/promote.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fl-accounts-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -205,6 +206,15 @@ describe("choosing the account", () => {
     expect(runAccount(c, site, null, "claude").id).toBe("claude");
     // The scope rule still holds: the implicit account is in the default scope, not the work project's.
     expect(refusal(() => runAccount(c, api, "claude", "claude")).code).toBe("account_scope_mismatch");
+  });
+
+  test("an ended scout on a harness's implicit account is promoted on that login, under the scope rule", () => {
+    const site = { ...project("site", join(PERSONAL, "site")) } as unknown as ProjectRow;
+    const api = { ...project("api", join(WORK, "acme-api")) } as unknown as ProjectRow;
+    expect(promotedAccount(c, site, {}, { account: "claude", harness: "claude" })).toMatchObject({ id: "claude", declared: false });
+    expect(promotedAccount(c, site, {}, { account: "claude-personal", harness: "claude" }).id).toBe("claude-personal");
+    expect(refusal(() => promotedAccount(c, api, {}, { account: "claude", harness: "claude" })).code).toBe("account_scope_mismatch");
+    expect(promotedAccount(c, site, { harness: "pi" }, { account: "claude", harness: "claude" }).id).toBe("chatgpt");
   });
 });
 
