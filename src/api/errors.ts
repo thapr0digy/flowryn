@@ -24,6 +24,9 @@ export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
  * land at different lines instead of all at the end of one group.
  */
 export const ERROR_CODES = {
+  // accounts (docs/notes/2026-10-22-multiple-ai-provider-u9.md): an account outside the project's scope, a signed-out login
+  account_scope_mismatch: EXIT.policy,
+  account_signed_out: EXIT.unavailable,
   already_exists: EXIT.validation,
   already_running: EXIT.failure,
   approval_required: EXIT.policy,
@@ -57,6 +60,8 @@ export const ERROR_CODES = {
   invalid_todo: EXIT.validation,
   merge_in_flight: EXIT.policy,
   merge_refused: EXIT.policy,
+  // a project's account scope with none for the harness (docs/notes/2026-10-22-multiple-ai-provider-u9.md)
+  no_account: EXIT.validation,
   // heavy work outside a run (a verify) refused: its pool is full or the host check fails
   no_capacity: EXIT.policy,
   no_change: EXIT.policy,

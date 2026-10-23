@@ -109,12 +109,12 @@ describe("migrations", () => {
 
   test("a database from before the name ledger gets its earlier migrations named from this binary, with no time", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 29));
-    expect(migrate(db, MIGRATIONS, () => 99)).toEqual([30]);
+    migrate(db, MIGRATIONS.slice(0, 30));
+    expect(migrate(db, MIGRATIONS, () => 99)).toEqual([31]);
     const rows = db.query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all() as { version: number; name: string; applied_at: number | null }[];
     expect(rows.map((r) => r.name)).toEqual(MIGRATIONS.map((m) => m.name));
-    expect(rows.filter((r) => r.applied_at === null).map((r) => r.version)).toEqual(MIGRATIONS.slice(0, 29).map((m) => m.version));
-    expect(rows.at(-1)).toEqual({ version: 30, name: "migration-names", applied_at: 99 });
+    expect(rows.filter((r) => r.applied_at === null).map((r) => r.version)).toEqual(MIGRATIONS.slice(0, 30).map((m) => m.version));
+    expect(rows.at(-1)).toEqual({ version: 31, name: "migration-names", applied_at: 99 });
     db.close();
   });
 
@@ -255,6 +255,20 @@ describe("migrations", () => {
     expect(migrate(db, MIGRATIONS.slice(0, 14))).toEqual([14]);
     expect(db.query("SELECT id, end_turn FROM messages").all()).toEqual([{ id: "m1", end_turn: 0 }]);
     expect(migrate(db, MIGRATIONS.slice(0, 14))).toEqual([]);
+    db.close();
+  });
+
+  test("a run gains its account: runs from before name their harness's implicit account; plan phases carry none", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 29));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('p', 'u', '/p', 'main', 'local-only')");
+    db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('t1', 'p', 'ship', 'local-only', 0, 'fix', 1)");
+    db.exec(`INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+             VALUES ('r1', 't1', 'pi', 'v', 'running', 'busy', 'fix', 'build', '/w', 'b', 's', 'h', 1, 1)`);
+    expect(migrate(db, MIGRATIONS.slice(0, 30))).toEqual([30]);
+    expect(db.query("SELECT id, account FROM runs").all()).toEqual([{ id: "r1", account: "pi" }]);
+    expect(db.query("SELECT name FROM pragma_table_info('plan_phases') WHERE name = 'account'").all()).toEqual([{ name: "account" }]);
+    expect(migrate(db, MIGRATIONS.slice(0, 30))).toEqual([]);
     db.close();
   });
 

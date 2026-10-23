@@ -1,4 +1,5 @@
 import { decisionsConfig } from "../attention/decisions-policy.ts";
+import { accountsConfig, accountsView } from "./accounts.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
@@ -71,6 +72,9 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   style: styleView,
   decisions: decisionsConfig,
   projects: projectsView,
+  accounts: accountsView,
+  // Its rules resolve with the accounts; both views come from one parse.
+  scopes: (c) => accountsConfig(c).scopes,
 };
 
 export interface EffectiveConfig {

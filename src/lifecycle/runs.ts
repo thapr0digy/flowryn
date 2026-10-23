@@ -24,6 +24,8 @@ export interface RunRow {
   task_id: string;
   harness: "claude" | "pi";
   harness_version: string;
+  /** The account the run started on (src/config/accounts.ts); its resumes stay on it. */
+  account: string | null;
   model: string | null;
   effort: string | null;
   state: RunState;

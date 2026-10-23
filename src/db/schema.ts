@@ -1,6 +1,6 @@
 /**
  * Numbered, forward-only migrations. Each one runs in its own transaction
- * together with the meta.schema_version bump and, from migration 30, its row
+ * together with the meta.schema_version bump and, from migration 31, its row
  * in schema_migrations. Never edit a released migration; add the next number
  * instead. Two branches that both add the same number collide: migrate()
  * refuses a database whose recorded name for a number differs from this
@@ -689,7 +689,18 @@ CREATE INDEX verify_queue_verification ON verify_queue(verification_id);
 `;
 
 /**
- * Migration 30: the name each applied migration had (docs/notes/2026-10-22-remove-conflict-hotspots-24.md),
+ * Migration 30: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
+ * dispatch because a resume must stay in the login that holds the session; a plan phase's `account:`
+ * line waits beside its harness. Rows from before name their harness's implicit account.
+ */
+const ACCOUNTS_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN account TEXT;
+UPDATE runs SET account = harness;
+ALTER TABLE plan_phases ADD COLUMN account TEXT;
+`;
+
+/**
+ * Migration 31: the name each applied migration had (docs/notes/2026-10-22-remove-conflict-hotspots-24.md),
  * so a database that ran another branch's migration under the same number is refused instead of
  * silently skipping this one. Rows for migrations applied before the table existed are backfilled by
  * migrate() from this binary's names, with no applied_at.
@@ -728,7 +739,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
   { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
-  { version: 30, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
+  { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
+  { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
