@@ -6,7 +6,7 @@ import { upkeepConfig } from "../config/upkeep.ts";
 import { MergeBuilder } from "../upkeep/build.ts";
 import { Upkeep } from "../upkeep/upkeep.ts";
 import { PolicyFollower } from "../upkeep/policy-follow.ts";
-import { listProjects } from "../lifecycle/projects.ts";
+import { getProject, listProjects } from "../lifecycle/projects.ts";
 import { pinCallerBinary, unpinForScript } from "./caller-binary.ts";
 import { BUILD_STAMP } from "../build-stamp.ts";
 import { join } from "node:path";
@@ -76,6 +76,7 @@ import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffP
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
+import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -519,6 +520,21 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       notify: (runId) => bus.notify(runId),
       startDeps,
       kickJournal: () => journal.kick(),
+      drainVerifies: (isStopped) =>
+        drainVerifyQueue({
+          stopped: isStopped,
+          db: database,
+          git: deliveryGit,
+          now: Date.now,
+          log,
+          root: verifyRoot(config),
+          released: () => scheduler?.kick(),
+          config: () => config,
+          forge,
+          webUrl: () => github().web_url,
+          projectPath: (projectId) => getProject(database, projectId)?.path ?? null,
+          host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
+        }),
     });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
@@ -711,10 +727,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         autoAwayFailing = true;
       }
     };
-    // A verification the last daemon was running when it stopped: recorded as an error, its worktree removed.
+    // A verification the last daemon was running when it stopped: recorded as an error and requeued once, its worktree removed.
     try {
       const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
-      if (recovered > 0) log(`verify: ${recovered} left running by the last daemon, recorded as errors`);
+      if (recovered > 0) log(`verify: ${recovered} left running by the last daemon, recorded as errors and requeued`);
     } catch (error) {
       log(`verify: startup recovery failed: ${(error as Error).message}`);
     }
@@ -799,6 +815,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     const reason = await stopped;
     log(`stopping: ${reason}`);
+    scheduler.stop();
     stopVerifications();
     clearInterval(pass);
     clearInterval(steady);
@@ -809,7 +826,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     policyFollow.stop();
     await autoCheck.stop();
     reconciler.stop();
-    scheduler.stop();
     lavishPoller.stop();
     reviewOpener.stop();
     deliveryWatcher.stop();
