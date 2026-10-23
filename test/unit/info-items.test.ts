@@ -192,7 +192,7 @@ describe("migration 28", () => {
     present(staleResume, old);
     const freshResume = open("auto_resumed", "t2 resumed by itself", now - HOUR);
     const pr = open("pr_ready", "t1 PR ready", old);
-    expect(migrate(db)).toEqual([28]);
+    expect(migrate(db, MIGRATIONS.slice(0, 28))).toEqual([28]);
     expect(state(claudeOld)).toEqual({ state: "resolved", resolved_by: "superseded by a newer contract record" });
     expect(state(staleResume).state).toBe("resolved");
     expect(state(claudeNew).state).toBe("open");

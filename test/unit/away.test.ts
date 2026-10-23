@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { AWAY_WAKE_KINDS, awaySuggestion, awayWakeSql, endAway, expireAway, getAway, lastAway, parseUntil, startAway, storedAway, takePendingBrief } from "../../src/attention/away.ts";
+import { AUTO_AWAY_BY, autoAway, AWAY_MAX_MS, AWAY_WAKE_KINDS, awayLine, awaySuggestion, awayWakeSql, endAutoAway, endAway, expireAway, getAway, lastAway, parseUntil, startAway, storedAway, takePendingBrief } from "../../src/attention/away.ts";
 import { composeBriefing, composeReturnBrief } from "../../src/attention/briefing.ts";
 import { openItem, type ItemKind } from "../../src/attention/items.ts";
 import { followUpBatch, p0Candidate } from "../../src/attention/router.ts";
@@ -7,6 +7,7 @@ import { parseConfig } from "../../src/config/config.ts";
 import { awayConfig, DEFAULT_AWAY } from "../../src/config/leader.ts";
 import { tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
+import { claim, closeSession, openSession } from "../../src/lease/lease.ts";
 import { makeHome, type TestHome } from "../helpers/harness.ts";
 
 /**
@@ -147,10 +148,14 @@ describe("the posture", () => {
     expect(tx(db, () => takePendingBrief(db, now))).toBeNull();
   });
 
-  test("[away] takes positive integers for its three known settings only", () => {
+  test("[away] takes positive integers for its known settings only; auto_after_min also takes 0 (off)", () => {
     expect(awayConfig(parseConfig("", h.home))).toEqual(DEFAULT_AWAY);
+    expect(DEFAULT_AWAY.auto_after_min).toBe(120);
     expect(awayConfig(parseConfig("[away]\nmax_wakes_per_hour = 2\n", h.home)).max_wakes_per_hour).toBe(2);
     expect(() => awayConfig(parseConfig("[away]\nmax_wakes_per_hour = 0\n", h.home))).toThrow("positive integer");
+    expect(awayConfig(parseConfig("[away]\nauto_after_min = 0\n", h.home)).auto_after_min).toBe(0);
+    expect(awayConfig(parseConfig("[away]\nauto_after_min = 45\n", h.home)).auto_after_min).toBe(45);
+    for (const bad of ["-1", "1.5", '"2h"']) expect(() => awayConfig(parseConfig(`[away]\nauto_after_min = ${bad}\n`, h.home))).toThrow("auto_after_min");
     expect(() => awayConfig(parseConfig("[away]\nstanding_grants = true\n", h.home))).toThrow("not a known setting");
   });
 });
@@ -193,10 +198,11 @@ describe("the wake rule while away", () => {
     expect(AWAY_WAKE_KINDS).toEqual(expect.arrayContaining(["pass_requested", "user_acted", "landed"]));
   });
 
-  test("assumption: a yolo PR merges without the user, so only a non-yolo pr_ready wakes", () => {
+  test("assumption: a yolo PR merges without the user, so only a non-yolo pr_ready wakes as a P0 (a yolo one is a leader follow-up)", () => {
     const now = Date.now();
-    open("pr_ready", now, task("web-yolo", 1));
+    const yolo = open("pr_ready", now, task("web-yolo", 1));
     expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
+    expect(followUpBatch(db, "L1")?.items.map((i) => i.id)).toEqual([yolo]);
     const manual = open("pr_ready", now, task("web-manual", 0));
     expect(p0Candidate(db, "L1", now, AGE, now - 1_000)?.id).toBe(manual);
   });
@@ -296,5 +302,127 @@ describe("the idle suggestion", () => {
     tx(db, () => endAway(db, "back", now));
     tx(db, () => awaySuggestion(db, { inactiveSince: now - 2 * HOUR, now, suggestAfterMs: HOUR, today }));
     expect(getAway(db, now)).toBeNull();
+  });
+});
+
+/** A lease-holding leader session; you went inactive at `inactiveSince` (null: active). */
+function awayHolder(inactiveSince: number | null, now: number): string {
+  return tx(db, () => {
+    const { session } = openSession(db, { harness: "claude", pane: "p1", cwd: "/x", now: now - DAY });
+    claim(db, session, "vacant", now - DAY);
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?2 WHERE session_id = ?1").run(session, inactiveSince);
+    return session;
+  });
+}
+
+
+describe("automatic away", () => {
+  const AFTER = 2 * HOUR;
+
+  const auto = (now: number, afterMs = AFTER) => tx(db, () => autoAway(db, { afterMs, now }));
+
+  test("starts once the holder's user has been inactive the threshold, not a minute before; it starts when they went inactive", () => {
+    const now = Date.now();
+    awayHolder(now - AFTER + 60_000, now);
+    expect(auto(now)).toBeNull();
+    const started = auto(now + 60_000)!;
+    expect(started).toMatchObject({ since: now - AFTER + 60_000, until: now + 60_000 + AWAY_MAX_MS, by: AUTO_AWAY_BY, words: null });
+    const events = db.query("SELECT source, payload FROM events WHERE kind = 'away.started'").all() as { source: string; payload: string }[];
+    expect(events.map((e) => e.source)).toEqual(["daemon"]);
+    expect(JSON.parse(events[0]!.payload)).toMatchObject({ by: AUTO_AWAY_BY });
+    // Already away: a later check starts nothing more.
+    expect(auto(now + HOUR)).toBeNull();
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind IN ('away.started','away.extended')").get()).toEqual({ n: 1 });
+  });
+
+  test("never with the user active, with no holder, with a closed holder, or with auto_after_min = 0", () => {
+    const now = Date.now();
+    expect(auto(now)).toBeNull();
+    const session = awayHolder(null, now);
+    expect(auto(now)).toBeNull();
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?1").run(now - 3 * HOUR);
+    expect(auto(now, 0)).toBeNull();
+    tx(db, () => closeSession(db, session, "test", now));
+    expect(auto(now)).toBeNull();
+    expect(getAway(db, now)).toBeNull();
+  });
+
+  test("assumption: an away the user set is left alone; running `away` over an automatic one makes it theirs", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    away(now - HOUR, now + HOUR, "at lunch");
+    expect(auto(now)).toBeNull();
+    expect(getAway(db, now)?.by).toBe("human");
+    expect(tx(db, () => endAutoAway(db, now))).toBeNull();
+    expect(getAway(db, now)).not.toBeNull();
+    tx(db, () => endAway(db, "back", now));
+    tx(db, () => takePendingBrief(db, now));
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?1").run(now + 1);
+    const later = now + 1 + AFTER;
+    expect(auto(later)?.by).toBe(AUTO_AWAY_BY);
+    const mine = tx(db, () => startAway(db, { until: later + 2 * HOUR, words: "gone till 5", by: "human", now: later + 1 }));
+    expect(mine).toMatchObject({ extended: true, posture: { by: "human", since: now + 1 } });
+    expect(tx(db, () => endAutoAway(db, later + 2))).toBeNull();
+  });
+
+  test("assumption: back sticks for the rest of the inactive spell; a new spell can start it again", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    auto(now);
+    tx(db, () => endAway(db, "back", now + HOUR));
+    expect(auto(now + HOUR + 1)).toBeNull();
+    expect(auto(now + 10 * HOUR)).toBeNull();
+    expect(getAway(db, now + 10 * HOUR)).toBeNull();
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?1").run(now + 11 * HOUR);
+    expect(auto(now + 11 * HOUR + AFTER)).toMatchObject({ by: AUTO_AWAY_BY, since: now + 11 * HOUR });
+  });
+
+  test("assumption: after an expired automatic away the user is still gone, so it starts again and folds the unshown brief in", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    auto(now);
+    const end = now + AWAY_MAX_MS;
+    expect(tx(db, () => expireAway(db, end))?.reason).toBe("expired");
+    expect(auto(end + 1)).toMatchObject({ by: AUTO_AWAY_BY, since: now - 3 * HOUR, brief_since: now - 3 * HOUR });
+  });
+
+  test("the user's return ends it with the return brief pending, which covers the whole absence", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    auto(now);
+    const ended = tx(db, () => endAutoAway(db, now + HOUR))!;
+    expect(ended).toMatchObject({ since: now - 3 * HOUR, ended_at: now + HOUR, reason: "returned", brief_pending: true });
+    const endedEvent = db.query("SELECT source, payload FROM events WHERE kind = 'away.ended'").get() as { source: string; payload: string };
+    expect(endedEvent.source).toBe("hook");
+    expect(JSON.parse(endedEvent.payload).reason).toBe("returned");
+    const pending = tx(db, () => takePendingBrief(db, now + HOUR))!;
+    const brief = composeReturnBrief(db, { since: pending.since, until: pending.ended_at, now: now + HOUR, ageMs: DAY, reason: pending.reason });
+    expect(brief.split("\n")[0]).toContain("automatic away, the user returned");
+  });
+
+  test("assumption: items that opened while the user was inactive, before it started, wake the leader once it starts", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    const gate = open("gate_ready", now - HOUR);
+    expect(p0Candidate(db, "L1", now, DAY, getAway(db, now)?.since ?? null)).toBeNull();
+    auto(now);
+    expect(p0Candidate(db, "L1", now, DAY, getAway(db, now)!.since)?.id).toBe(gate);
+  });
+
+  test("assumption: started after an away whose brief was never shown, it folds that brief in", () => {
+    const now = Date.now();
+    away(now - 5 * HOUR, now - HOUR);
+    awayHolder(now - 4 * HOUR, now);
+    auto(now);
+    expect(storedAway(db)).toMatchObject({ by: AUTO_AWAY_BY, brief_since: now - 5 * HOUR });
+    expect(tx(db, () => endAutoAway(db, now + 1))?.since).toBe(now - 5 * HOUR);
+  });
+
+  test("the briefing's away line says it is automatic and ends at the user's next message", () => {
+    const now = Date.now();
+    awayHolder(now - 3 * HOUR, now);
+    const posture = auto(now)!;
+    expect(awayLine(posture, now)).toContain("Away (automatic: no input from the user since");
+    expect(awayLine(posture, now)).toContain("the user's next message ends it");
   });
 });
