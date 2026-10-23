@@ -382,6 +382,25 @@ describe("a verification the daemon stopped runs again", () => {
     expect(requeuedFrom(f.db, id)).toMatchObject({ source: "recovered", state: "queued" });
   }, 20_000);
 
+  test("a job stopped during its setup (the worktree add killed) is requeued, not left as a plain error", async () => {
+    const f = fixture();
+    const git = f.deps.git;
+    // Shutdown's process sweep kills the in-flight git: the stop lands, then the command fails.
+    f.deps.git = async (args, cwd) => {
+      if (args[0] === "worktree" && args[1] === "add") {
+        stopVerifications();
+        return { code: 128, stdout: "", stderr: "Preparing worktree (detached HEAD)" };
+      }
+      return git(args, cwd);
+    };
+    const request = f.request(1);
+    expect(await drainVerifyQueue(f.deps)).toBe(1);
+    const id = getRequest(f.db, request.id)!.verification_id!;
+    await settled(f.db, [id]);
+    expect(getVerification(f.db, id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
+    expect(requeuedFrom(f.db, id)).toMatchObject({ source: "recovered", rank: RECOVERED_RANK, state: "queued" });
+  }, 20_000);
+
   test("a verification from before the queue (no request) is recorded as an error and not requeued", async () => {
     const f = fixture();
     const v = tx(f.db, () => {

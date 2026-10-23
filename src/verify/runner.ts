@@ -315,17 +315,21 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       deps.log(`verify ${v.id}: could not record the outcome: ${(error as Error).message}`);
     }
   };
+  const stoppedMidRun = () => finish({ state: "error", detail: "the daemon stopped mid-run", binary: null }, true);
   let worktreeAdded = false;
   try {
     mkdirSync(v.dir, { recursive: true, mode: 0o700 });
     const missing = await ensureHead(deps, v, plan);
+    // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
+    if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
     const added = await deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path);
-    if (added.code !== 0) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
-    worktreeAdded = true;
+    worktreeAdded = added.code === 0;
+    if (job.aborted) return stoppedMidRun();
+    if (!worktreeAdded) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
     const childEnv = stepEnv(env, plan.path);
     for (const step of steps) {
-      if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null }, true);
+      if (job.aborted) return stoppedMidRun();
       step.state = "running";
       tx(deps.db, () => recordSteps(deps.db, v, steps, null, deps.now()));
       const began = Date.now();
@@ -336,7 +340,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       step.state = result.exit === 0 && !result.timedOut ? "passed" : "failed";
       if (result.timedOut) step.detail = `timed out: the run's ${Math.round(plan.timeoutMs / 60_000)} min were up`;
       tx(deps.db, () => recordSteps(deps.db, v, steps, step, deps.now()));
-      if (job.aborted) return finish({ state: "error", detail: "the daemon stopped mid-run", binary: null }, true);
+      if (job.aborted) return stoppedMidRun();
       if (step.state === "failed") return finish({ state: "failed", detail: step.detail ?? `${step.name} exited ${step.exit}`, binary: null });
     }
     let binary: string | null = null;
