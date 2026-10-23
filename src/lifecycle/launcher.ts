@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
@@ -27,6 +27,7 @@ import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./run
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
 import { ensureRunTmp } from "./run-tmp.ts";
+import { ensureHarnessShim, ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
 import { claimOperation, confirmOperation, escalatedStart, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
 /**
@@ -76,11 +77,6 @@ export const BLANKED_ENV = ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE
  * finding 11, reproduced live in M2); leave room for the shell's own quoting.
  */
 export const MAX_TYPED_COMMAND = 960;
-
-/** The harness shim: unset FLOWRYN_UNSET's names (variable names only), then exec the resolved binary. */
-export function shimScript(binary: string): string {
-  return `#!/bin/sh\nfor name in $FLOWRYN_UNSET; do\n  case "$name" in *[!A-Za-z0-9_]*|[0-9]*) ;; *) unset "$name" ;; esac\ndone\nunset FLOWRYN_UNSET\nexec ${JSON.stringify(binary)} "$@"\n`;
-}
 
 function shellQuoted(arg: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
@@ -308,7 +304,9 @@ export class Launcher {
       FLOWRYN_TASK_FILE: instructionsFile,
       // The daemon opens review pages in the user's browser (src/lavish/opener.ts); a worker's lavish-axi never tries.
       LAVISH_AXI_NO_OPEN: "1",
-      PATH: `${this.shimDir(config, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      PATH: `${ensureHarnessShim(config.state_dir, run.harness, binary)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      // The pane's shell, which reads no rc file the user's startup prompts could eat the typed launch in (pane-shell.ts).
+      SHELL: ensurePaneShell(config.state_dir),
     };
 
     const paneId = await this.ensurePane(runtime, run, worktree, env);
@@ -333,7 +331,7 @@ export class Launcher {
     if (!claimed) return false;
     await runtime.startAgent(paneId, { kind: plan.kind, name: agentName, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
-    if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms`);
+    if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms${paneEvidence(await this.paneScreen(runtime, paneId))}`);
     return this.recordWorker(run, mode, claimed, paneId, harness);
   }
 
@@ -380,6 +378,18 @@ export class Launcher {
       return false;
     }
     return true;
+  }
+
+  /**
+   * What a pane shows, for a launch failure: its recent lines (unwrapped, so
+   * a secret is redacted whole), null when it is gone, or the read's error.
+   */
+  private async paneScreen(runtime: HerdrRuntime, paneId: string): Promise<string | null | Error> {
+    try {
+      return await runtime.readPane(paneId, TAIL_READ_LINES);
+    } catch (error) {
+      return error as Error;
+    }
   }
 
   /**
@@ -433,23 +443,6 @@ export class Launcher {
       appendEvent(db, { source: "daemon", kind: "run.token_minted", runId: run.id, taskId: run.task_id, payload: {} });
     });
     return token;
-  }
-
-  /**
-   * Herdr's agent.start types the harness's canonical name (`claude`, `pi`)
-   * into the pane shell. A shim directory first on PATH maps that name to the
-   * binary Flowryn resolved, so the worker runs the version the contract gate
-   * checked even when the shell has no alias for it. A pane's environment can
-   * only set values, so the shim first unsets the names a launch lists in
-   * FLOWRYN_UNSET (an account's login, src/harness/claude/adapter.ts).
-   */
-  private shimDir(config: FlowrynConfig, harness: string, binary: string): string {
-    const dir = join(config.state_dir, "shims");
-    ensureDir(dir, 0o700);
-    const link = join(dir, harness);
-    const script = shimScript(binary);
-    if (!existsSync(link) || readFileSync(link, "utf8") !== script) writeFileSync(link, script, { mode: 0o700 });
-    return dir;
   }
 
   /**

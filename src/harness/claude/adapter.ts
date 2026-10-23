@@ -85,8 +85,8 @@ function sharedArgs(run: RunContext, config: WorkersConfig, settingsPath: string
  * The login's environment. A pinned login unsets the credentials Claude ranks
  * above it, and Claude's default login unsets CLAUDE_CONFIG_DIR: an empty
  * value is not unset to Claude (2.1.x reads it as a relative config
- * directory), and a pane can only be given values, so the harness shim unsets
- * the names in FLOWRYN_UNSET before it execs Claude (src/lifecycle/launcher.ts).
+ * directory), and a pane can only be given values, so the worker pane shell
+ * unsets the names in FLOWRYN_UNSET before Claude is typed (src/lifecycle/pane-shell.ts).
  */
 export function loginEnv(claude: WorkersConfig["claude"]): Record<string, string> {
   const env: Record<string, string> = {};

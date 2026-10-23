@@ -10,7 +10,7 @@ import { claudeAdapter, loginEnv } from "../../src/harness/claude/adapter.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
 import { accountSignIn } from "../../src/harness/sign-in.ts";
 import type { RunContext } from "../../src/harness/types.ts";
-import { shimScript } from "../../src/lifecycle/launcher.ts";
+import { ensurePaneShell } from "../../src/lifecycle/pane-shell.ts";
 import { migrate, openDb } from "../../src/db/db.ts";
 import { checkPhaseAccounts, fileWorkerPlan, parsePlan, phasesOf, recordPlan } from "../../src/lifecycle/plans.ts";
 import { insertProject, type ProjectRow } from "../../src/lifecycle/projects.ts";
@@ -250,12 +250,10 @@ describe("launching on an account", () => {
 
   // Design assumption, found wrong in the build: Claude 2.1.x reads CLAUDE_CONFIG_DIR="" as a relative
   // config directory (projectsDirectory "projects"), not as unset. A pane can only be given values, so
-  // the shim must really unset it.
-  test("assumption: a blank variable is not unset, so the shim unsets FLOWRYN_UNSET's names", async () => {
-    const shim = join(root, "shim");
-    writeFileSync(shim, shimScript("/usr/bin/env"));
-    chmodSync(shim, 0o755);
-    const proc = Bun.spawn([shim], { env: { PATH: "/usr/bin:/bin", CLAUDE_CONFIG_DIR: "", ANTHROPIC_API_KEY: "sk-x", KEEP: "1", FLOWRYN_UNSET: "CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY $(touch\x20/tmp/x) 1BAD" }, stdout: "pipe" });
+  // the pane shell, which runs before the typed harness, must really unset it.
+  test("assumption: a blank variable is not unset, so the pane shell unsets FLOWRYN_UNSET's names", async () => {
+    const shell = ensurePaneShell(join(root, "pane-shell"), "/bin/zsh");
+    const proc = Bun.spawn([shell], { stdin: new TextEncoder().encode("/usr/bin/env\nexit\n"), env: { PATH: "/usr/bin:/bin", CLAUDE_CONFIG_DIR: "", ANTHROPIC_API_KEY: "sk-x", KEEP: "1", FLOWRYN_UNSET: "CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY $(touch\x20/tmp/x) 1BAD" }, stdout: "pipe" });
     const out = await new Response(proc.stdout).text();
     expect(await proc.exited).toBe(0);
     const names = out.split("\n").map((line) => line.split("=")[0]);

@@ -16,7 +16,7 @@ import { getMeta, migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.
 import { appendEvent } from "../../src/db/events.ts";
 import { openItem, resolveItems } from "../../src/attention/items.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
-import { attemptRevision, autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
+import { autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
 import { noteUsageLimit } from "../../src/sched/usage.ts";
 
 /**
@@ -125,7 +125,7 @@ function fakeRun(job: AutoJob): AutoProcess {
   };
 }
 
-function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopWaitMs?: number; onRecover?: (manifest: string) => void } = {}): AutoContractChecker {
+function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopWaitMs?: number; onRecover?: (manifest: string) => void; revisions?: RevisionMap } = {}): AutoContractChecker {
   const { onRecover, ...timing } = options;
   return new AutoContractChecker({
     ...timing,
@@ -710,6 +710,9 @@ function revisions(harness: HarnessId): number[] {
   return (db.query("SELECT revision FROM harness_contracts WHERE harness = ?1 ORDER BY revision").all(harness) as { revision: number }[]).map((r) => r.revision);
 }
 
+/** Every harness at the baseline revision: the build that introduced revisions, before any bump. */
+const AT_BASELINE: RevisionMap = { claude: BASELINE_REVISION, pi: BASELINE_REVISION };
+
 /** This build's revisions with one harness bumped, as the PR that changes its proven behaviour would. */
 function bumped(harness: HarnessId): RevisionMap {
   return { ...CONTRACT_REVISIONS, [harness]: CONTRACT_REVISIONS[harness] + 1 };
@@ -779,17 +782,15 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
   });
 
-  test("a check that failed before revisions is at the baseline: final only at that revision, so once claude is past it the upgrade checks again", async () => {
-    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
-    expect(attemptRevision(autoAttempt(db, "claude")!)).toBe(BASELINE_REVISION);
-    // Claude left the baseline at revision 2 and has bumped since.
-    expect(CLAUDE_REVISION).toBeGreaterThan(BASELINE_REVISION);
-    const auto = checker();
+  // Both harnesses are past the baseline revision now, so these pin the checker to it.
+  test("a check that failed before revisions is at the baseline: still final for that version, so an upgrade runs nothing again", async () => {
+    tx(db, () => saveAutoAttempt(db, "pi", { version: "0.90.0", state: "failed", ended_at: 1, detail: "an old failure" }));
+    // The build that introduced revisions, still at the baseline: a later bump makes the old failure stale, as it should.
+    const auto = checker({ revisions: AT_BASELINE });
     auto.init();
-    await gate("claude");
+    await gate("pi", AT_BASELINE);
     await auto.tick();
-    expect(jobs).toHaveLength(1);
-    expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.300", revision: CLAUDE_REVISION });
+    expect(jobs).toEqual([]);
   });
 
   test("a report that proves another revision is not recorded by the daemon", async () => {
@@ -802,25 +803,22 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")[0]).toMatchObject({ detail: `the report proves contract revision ${CLAUDE_REVISION + 1}, not this daemon's revision ${CLAUDE_REVISION}` });
   });
 
-  test("strict: a flag and P1 from before revisions are at the baseline: once claude is past it, the upgrade opens one P1 for its own revision", async () => {
+  test("strict: a flag and P1 from before revisions are at the baseline: the upgrade opens no second P1 for the same version", async () => {
     useConfig("strict");
     // What the gate left before revisions: a plain-version flag and a P1 whose event names no revision, dismissed since.
     tx(db, () => {
-      setMeta(db, "harness_flagged:claude", "2.1.300");
-      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "claude", version: "2.1.300", where: "startup" } });
-      openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:claude", line: "old", now: 1 });
-      resolveItems(db, "harness_unverified", "harness:claude", "dismissed before revisions", 2);
+      setMeta(db, "harness_flagged:pi", "0.90.0");
+      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "pi", version: "0.90.0", where: "startup" } });
+      openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:pi", line: "old", now: 1 });
+      resolveItems(db, "harness_unverified", "harness:pi", "dismissed before revisions", 2);
     });
-    const auto = checker();
+    const auto = checker({ revisions: AT_BASELINE });
     auto.init();
-    await gate("claude");
+    await gate("pi", AT_BASELINE);
     await auto.tick();
     expect(jobs).toEqual([]);
-    const unverified = events("harness.unverified");
-    expect(unverified).toHaveLength(2);
-    expect(unverified[0]!.revision).toBeUndefined();
-    expect(unverified[1]).toMatchObject({ harness: "claude", version: "2.1.300", revision: CLAUDE_REVISION });
-    expect(items("harness_unverified").filter((i) => i.state === "open")).toHaveLength(1);
+    expect(events("harness.unverified")).toHaveLength(1);
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
   });
 
   test("strict: only a pass at the daemon's revision settles the P1; one at another revision does not", async () => {
