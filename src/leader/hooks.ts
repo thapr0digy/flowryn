@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
-import { awaySuggestion, expireAway, getAway, takePendingBrief, type AwayPosture } from "../attention/away.ts";
+import { awaySuggestion, endAutoAway, expireAway, getAway, takePendingBrief, type AwayPosture } from "../attention/away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
 import { LEADER_WAKE_KINDS, QUESTION_KINDS, type ItemKind } from "../attention/items.ts";
@@ -354,9 +354,13 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
     return { data: {} };
   }
   const turn = startTurn(ctx, s, now, input.source ?? "prompt");
-  if (!isWakePrompt(input.prompt) && !notice && s.user_inactive_since !== null) {
-    setSession(ctx.db, s.session_id, { user_inactive_since: null });
-    appendEvent(ctx.db, { source: "hook", kind: "leader.user_active", payload: { session: s.session_id }, ts: now });
+  if (!isWakePrompt(input.prompt) && !notice) {
+    if (s.user_inactive_since !== null) {
+      setSession(ctx.db, s.session_id, { user_inactive_since: null });
+      appendEvent(ctx.db, { source: "hook", kind: "leader.user_active", payload: { session: s.session_id }, ts: now });
+    }
+    // You are back: an automatic away ends, and its return brief rides this message (awayLines).
+    endAutoAway(ctx.db, now);
   }
   if (s.harness === "claude" && s.transcript_path) ctx.attention.turnOffsets.set(s.session_id, transcriptSize(s.transcript_path));
   heartbeat(ctx.db, s.session_id, now);
@@ -393,19 +397,22 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
 }
 
 /**
- * What your own message carries about away mode: an expired away's return
- * brief, once, or the idle suggestion. Your messages never end away (you
+ * What your own message carries about away mode: the return brief of an away
+ * that expired or that your return ended, once, or the idle suggestion (only
+ * with automatic away off). Your messages never end an away you set (you
  * answer from the remote-control chat while away): only `flowryn back` and
- * the expiry do. Inside a transaction.
+ * the expiry do; they end an automatic one (prompt). Inside a transaction.
  */
 function awayLines(ctx: HandlerCtx, s: LeaderSessionRow, now: number): string[] {
   expireAway(ctx.db, now);
   const ended = takePendingBrief(ctx.db, now);
   if (ended) return [composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: ageMs(ctx), reason: ended.reason })];
+  const cfg = awayConfig(ctx.config());
+  if (cfg.auto_after_min > 0) return [];
   const suggestion = awaySuggestion(ctx.db, {
     inactiveSince: s.user_inactive_since,
     now,
-    suggestAfterMs: awayConfig(ctx.config()).suggest_after_min * 60_000,
+    suggestAfterMs: cfg.suggest_after_min * 60_000,
     today: localDate(new Date(now)),
   });
   return suggestion ? [suggestion] : [];
@@ -799,6 +806,8 @@ export function notify(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
   } else if (inactive === false && s.harness === "pi" && s.user_inactive_since !== null) {
     setSession(ctx.db, s.session_id, { user_inactive_since: null });
     appendEvent(ctx.db, { source: "hook", kind: "leader.user_active", payload: { session: s.session_id }, ts: now });
+    // Typing in Pi is your return: an automatic away ends; its brief rides your next message.
+    endAutoAway(ctx.db, now);
   }
   heartbeat(ctx.db, s.session_id, now);
   return { data: {} };

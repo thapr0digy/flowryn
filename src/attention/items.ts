@@ -139,10 +139,22 @@ export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropp
 /**
  * Items that wake an idle leader as a P0 would, though they are P1: what you
  * did outside the leader session (user_acted, and a pass you asked for on a
- * review page), and a merge that landed without the leader's own merge call.
+ * review page), a merge that landed without the leader's own merge call, and
+ * a yolo task's PR ready for the leader to verify and merge (LEADER_WAKE_SQL).
  * Each wakes it once (followUpBatch in router.ts).
  */
-export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed"];
+export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready"];
+
+/**
+ * SQL for "item `i` is a leader follow-up": a LEADER_WAKE_KINDS item, where a
+ * pr_ready counts only when its task is yolo (the leader merges it with no
+ * prompt). A pr_ready that waits on you is not one: it wakes only while you
+ * are away (awayWakeSql in away.ts). A pr_ready is never sensitive work,
+ * which opens sensitive_action_waiting instead.
+ */
+export const LEADER_WAKE_SQL = `(i.kind IN (${LEADER_WAKE_KINDS.filter((k) => k !== "pr_ready")
+  .map((k) => `'${k}'`)
+  .join(", ")}) OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1)))`;
 
 export interface ItemRow {
   id: string;
