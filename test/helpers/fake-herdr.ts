@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, openSync, closeSync, readFileSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, constants, existsSync, openSync, closeSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { join, resolve } from "node:path";
 
@@ -51,6 +51,13 @@ export interface FakeHerdrOptions {
   logDir: string;
   /** A fake harness script per kind in place of FAKE_HARNESS (the contract tests' instruction-following workers). */
   harnessScripts?: Partial<Record<string, string>>;
+  /**
+   * The server's own shell (a pane's shell when its workspace env names no
+   * SHELL) shows this startup prompt and eats the first character typed at it,
+   * as oh-my-zsh's update prompt did (seen 2026-10-17): agent.start's typed
+   * command then runs without it, and no harness starts.
+   */
+  serverShellPrompt?: string;
 }
 
 export class FakeHerdr {
@@ -82,6 +89,8 @@ export class FakeHerdr {
    * the pane's shell takes the terminal back: the pane does not read idle.
    */
   exitLagMs = 0;
+  /** While set, agent.start answers but no harness starts, and the pane shows this text: a launch the pane's shell broke. */
+  startFailure: string | null = null;
   /** While set, agent.start answers but its harness waits for `releaseStarts()`: a launch caught mid-way. */
   holdStarts = false;
   /** The focused workspace. Herdr's list order is `workspaces`' insertion order. */
@@ -340,6 +349,28 @@ export class FakeHerdr {
     this.emit("pane_updated", { pane: this.paneView(pane) });
   }
 
+  /**
+   * What the pane shows when the typed launch never reaches a harness, or
+   * null when it starts. Herdr 0.7.5 starts a pane's shell from the SHELL its
+   * workspace env names, else the server's own (spike h08).
+   */
+  private typedLaunchFailure(pane: FakePane, kind: string, args: string[]): string | null {
+    if (this.startFailure !== null) return this.startFailure;
+    const shell = pane.env.SHELL;
+    if (shell) {
+      try {
+        accessSync(shell, constants.X_OK);
+        return null;
+      } catch {
+        return `herdr: cannot start the pane shell ${shell}`;
+      }
+    }
+    const prompt = this.options.serverShellPrompt;
+    if (prompt === undefined) return null;
+    const typed = [kind, ...args].join(" ");
+    return `${prompt}\nzsh: command not found: ${typed.slice(1).split(" ")[0]}`;
+  }
+
   private handle(method: string, params: Record<string, unknown>): Record<string, unknown> {
     switch (method) {
       case "ping":
@@ -373,6 +404,11 @@ export class FakeHerdr {
         const args = (params.args as string[]) ?? [];
         // oxlint-disable-next-line no-control-regex -- Herdr refuses control characters in agent arguments
         if (args.some((a) => /[\u0000-\u001f]/.test(a))) throw Object.assign(new Error("agent arguments cannot be encoded safely"), { code: "invalid_agent_argument" });
+        const broken = this.typedLaunchFailure(pane, String(params.kind), args);
+        if (broken !== null) {
+          this.screens.set(pane.paneId, broken);
+          return { type: "agent_started", agent: { pane_id: pane.paneId, launch_pending: true } };
+        }
         pane.handoff = this.handoffReads;
         if (this.holdStarts) this.heldStarts.push({ pane, kind: String(params.kind), args });
         else this.startHarness(pane, String(params.kind), args);
