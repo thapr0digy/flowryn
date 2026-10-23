@@ -6,11 +6,13 @@ import { FlowrynError } from "../../src/api/errors.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { grantsConfig } from "../../src/config/leader.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { MIGRATIONS } from "../../src/db/schema.ts";
 import { openSession } from "../../src/lease/lease.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { bindingRef, chatForm, mapAnswer, parseRef, questionsHash, sameQuestion } from "../../src/policy/chat-questions.ts";
-import { claudeProjectSlug, findGrant, getGrant, GRANT_TTL_MS, postAsk, preAsk, prepareGrant, takeGrant, voidSessionGrants } from "../../src/policy/grants.ts";
+import { claudeProjectSlug, findGrant, getGrant, GRANT_TTL_MS, holdSessionGrants, NEW_MESSAGE, postAsk, preAsk, prepareGrant, takeGrant, voidSessionGrants } from "../../src/policy/grants.ts";
 import { staticLayers, leaderStaticLayers } from "../../src/policy/static.ts";
+import { NOTICE_FIXTURES, TYPED_FIXTURES, transcriptFixture, type TranscriptFixture } from "../helpers/transcript-fixtures.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -267,6 +269,105 @@ describe("grant lifecycle", () => {
     });
     expect(() => prepareGrant({ db: w.db, now: () => now }, { session: w.session, item: "merge:T1", choice: "merge", grantId: null, head: "bbbbbbbb2222" }, w.projects)).toThrow("was for head aaaaaaaa; the head is now bbbbbbbb");
     expect(prepareGrant({ db: w.db, now: () => now }, { session: w.session, item: "merge:T1", choice: "merge", grantId: null, head: "aaaaaaaa1111" }, w.projects)).toBe("c9");
+  });
+});
+
+/** A transcript fixture's line in this world's transcript, as Claude writes it after the answer. */
+function writeEntry(w: World, name: TranscriptFixture): void {
+  appendFileSync(w.transcript, JSON.stringify({ ...transcriptFixture(name), sessionId: w.claudeSession }) + "\n");
+}
+
+describe("background notices hold a grant (docs/notes/2026-10-17-chat-answers-survive-es.md)", () => {
+  for (const name of NOTICE_FIXTURES) {
+    test(`${name} after the answer: the held grant is used`, () => {
+      const w = world();
+      const now = Date.now();
+      const grant = grantIn(askAndAnswer(w, `toolu_n_${name.replaceAll("-", "_")}`, "no", now));
+      expect(tx(w.db, () => holdSessionGrants(w.db, w.session, now))).toBe(1);
+      writeEntry(w, name);
+      expect(prepareGrant({ db: w.db, now: () => now }, { session: w.session, item: w.decision, choice: "no", grantId: grant }, w.projects)).toBe(grant);
+      expect(getGrant(w.db, grant)).toMatchObject({ held_prompts: 1, voided_at: null });
+    });
+  }
+
+  for (const name of TYPED_FIXTURES) {
+    test(`${name} after the answer: the grant is voided at use, even when the hook took it for a notice`, () => {
+      const w = world();
+      const now = Date.now();
+      const grant = grantIn(askAndAnswer(w, `toolu_t_${name.replaceAll("-", "_")}`, "no", now));
+      tx(w.db, () => holdSessionGrants(w.db, w.session, now));
+      writeEntry(w, "monitor-event");
+      writeEntry(w, name);
+      const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+      expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow(`grant ${grant} was voided: ${NEW_MESSAGE}`);
+      expect(getGrant(w.db, grant)).toMatchObject({ void_reason: NEW_MESSAGE });
+      expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("was voided");
+    });
+  }
+
+  test("assumption: Claude writes an absorbed notice after the answer's line; one written before it does not count", () => {
+    const w = world();
+    const now = Date.now();
+    writeEntry(w, "monitor-event");
+    const grant = grantIn(askAndAnswer(w, "toolu_order", "no", now));
+    tx(w.db, () => holdSessionGrants(w.db, w.session, now));
+    const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+    expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("does not yet show 1 of the 1");
+    // Refused, not voided: once Claude writes the line, a retry passes.
+    writeEntry(w, "monitor-event");
+    expect(prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toBe(grant);
+  });
+
+  test("assumption: each notice fires the prompt hook at most once; more holds than notices refuses", () => {
+    const w = world();
+    const now = Date.now();
+    const grant = grantIn(askAndAnswer(w, "toolu_twice", "no", now));
+    tx(w.db, () => holdSessionGrants(w.db, w.session, now));
+    tx(w.db, () => holdSessionGrants(w.db, w.session, now));
+    writeEntry(w, "background-task-done");
+    const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+    expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("does not yet show 1 of the 2");
+    expect(getGrant(w.db, grant)!.voided_at).toBeNull();
+  });
+
+  test("a hold after the grant was verified checks the transcript again", () => {
+    const w = world();
+    const now = Date.now();
+    const grant = grantIn(askAndAnswer(w, "toolu_reverify", "no", now));
+    const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+    expect(prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toBe(grant);
+    expect(getGrant(w.db, grant)!.verified_at).not.toBeNull();
+    tx(w.db, () => holdSessionGrants(w.db, w.session, now));
+    expect(getGrant(w.db, grant)!.verified_at).toBeNull();
+    expect(() => tx(w.db, () => takeGrant(w.db, grant, "decide", now))).toThrow("is not verified");
+    writeEntry(w, "subagent-handback");
+    expect(prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toBe(grant);
+    expect(tx(w.db, () => takeGrant(w.db, grant, "decide", now))).toMatchObject({ consumed_by: "decide", held_prompts: 1 });
+  });
+
+  test("migration 32: grants keep their rows and start held across no notice", () => {
+    const dir = tempDir();
+    const db = openDb(join(dir, "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 31));
+    db.exec("INSERT INTO captain_grants (id, session_id, tool_use_id, item, action, choice, question, answer, transcript_path, created_at, expires_at) VALUES ('c1', 'L1', 'toolu_1', 'q1', 'decide', 'yes', 'q1 · ?', 'yes', '/t.jsonl', 1, 2)");
+    expect(migrate(db, MIGRATIONS.slice(0, 32))).toEqual([32]);
+    expect(db.query("SELECT id, choice, held_prompts FROM captain_grants").all()).toEqual([{ id: "c1", choice: "yes", held_prompts: 0 }]);
+    db.close();
+  });
+
+  test("a hold leaves used, voided and expired grants alone; the ten minutes and the turn's end still apply", () => {
+    const w = world();
+    const now = Date.now();
+    const grant = grantIn(askAndAnswer(w, "toolu_limits", "no", now));
+    expect(tx(w.db, () => holdSessionGrants(w.db, w.session, now + GRANT_TTL_MS))).toBe(0);
+    writeEntry(w, "monitor-event");
+    tx(w.db, () => holdSessionGrants(w.db, w.session, now));
+    const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+    expect(() => findGrant(w.db, ask, now + GRANT_TTL_MS)).toThrow("expired");
+    expect(tx(w.db, () => voidSessionGrants(w.db, w.session, "the turn ended", now))).toBe(1);
+    expect(tx(w.db, () => holdSessionGrants(w.db, w.session, now))).toBe(0);
+    expect(() => prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toThrow("voided: the turn ended");
+    expect(w.db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'grant.held'").get()).toEqual({ n: 1 });
   });
 });
 

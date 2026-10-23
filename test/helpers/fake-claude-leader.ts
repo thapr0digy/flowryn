@@ -345,6 +345,22 @@ export class FakeClaudeLeader implements BridgeDriver {
     return { denied: false, reason: "", contexts, toolUseId };
   }
 
+  /**
+   * Claude takes a message queued while it was busy into the running turn (seen live 2026-10-17, q72):
+   * UserPromptSubmit runs with its text, and the transcript then gets its `queued_command` line.
+   * `entry` is a transcript fixture (test/helpers/transcript-fixtures.ts); `prompt` overrides the
+   * text the hook sees. `write: false` leaves the line for `write()`, as when Claude has not yet
+   * written it.
+   */
+  async absorb(entry: Record<string, unknown>, opts: { prompt?: string; write?: boolean } = {}): Promise<{ contexts: string[]; write(): void }> {
+    const attachment = entry.attachment as { prompt?: unknown } | undefined;
+    const prompt = opts.prompt ?? (typeof attachment?.prompt === "string" ? attachment.prompt : "");
+    const contexts = await this.fire("UserPromptSubmit", { prompt });
+    const write = () => appendFileSync(this.transcript, JSON.stringify({ ...entry, sessionId: this.sessionId, session_id: this.sessionId, cwd: this.cwd }) + "\n");
+    if (opts.write !== false) write();
+    return { contexts, write };
+  }
+
   /** Run a hook event directly, for race tests that need a precise order. */
   async hook(event: string, extra: Record<string, unknown> = {}, matcher?: string): Promise<string[]> {
     return this.fire(event, extra, matcher);

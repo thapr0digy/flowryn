@@ -709,6 +709,15 @@ const SCHEMA_MIGRATIONS_SQL = /* sql */ `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER);
 `;
 
+/**
+ * Migration 32: how many background notices a chat-answer grant was held across
+ * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
+ * as a notice before the grant is used.
+ */
+const GRANT_HELD_SQL = /* sql */ `
+ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -741,6 +750,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
   { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
+  { version: 32, name: "grant-held", sql: GRANT_HELD_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
