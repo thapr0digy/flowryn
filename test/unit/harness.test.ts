@@ -61,6 +61,7 @@ function context(overrides: Partial<RunContext> = {}): RunContext {
     flowrynBin: "/opt/flowryn/bin/flowryn",
     binary: "/usr/local/bin/claude",
     daemonSocket: "/h/run/flowrynd.sock",
+    tmpDir: "/tmp/fw-501/0000000000r01X",
     writable: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"],
     readOnly: [],
     permissionsDeny: [],
@@ -85,6 +86,14 @@ describe("claude adapter", () => {
       network: { allowUnixSockets: ["/h/run/flowrynd.sock"] },
       filesystem: { allowWrite: ["/h/data/spool/r01X", "/h/data/scout-auth-k2"], denyWrite: [] },
     });
+  });
+
+  test("the worker's TMPDIR is Claude's per-uid dir under its CLAUDE_CODE_TMPDIR, the run's own, in and out of the sandbox", () => {
+    const uid = process.getuid?.() ?? 0;
+    for (const plan of [claudeAdapter.launch(context(), workers), claudeAdapter.resume(context(), workers)]) {
+      expect(plan.env.CLAUDE_CODE_TMPDIR).toBe("/tmp/fw-501/0000000000r01X");
+      expect(plan.env.TMPDIR).toBe(`/tmp/fw-501/0000000000r01X/claude-${uid}`);
+    }
   });
 
   test("resume: claude --resume <session> with a continue prompt", () => {
@@ -123,6 +132,9 @@ describe("pi adapter", () => {
     expect(args.at(-1)).toBe(context().promptLine);
     expect(args.at(-2)).toBe("@/state/runs/r01X/task.md");
     expect(plan.env.PI_CODING_AGENT_DIR).toBe("/scratch/agent");
+    // Pi has no sandbox: its bash tool inherits the run's own temp dir as it is.
+    expect(plan.env.TMPDIR).toBe("/tmp/fw-501/0000000000r01X");
+    expect(plan.env.CLAUDE_CODE_TMPDIR).toBeUndefined();
     expect(plan.files[0]!.content).toContain("project_trust");
   });
 
@@ -160,6 +172,9 @@ describe("worker contract text", () => {
     expect(text).toContain("- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.");
     expect(text).toContain("  To take main: new commits, git merge origin/main, a plain git push.");
     expect(text).toContain('- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.');
+    for (const harness of ["claude", "pi"] as const) {
+      expect(workerContract(harness, null)).toContain("- Keep scratch files in $TMPDIR: your run's own, the same path in and out of the sandbox.");
+    }
     expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.");
   });
 

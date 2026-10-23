@@ -3,6 +3,7 @@ import type { WorkersConfig } from "../../config/workers.ts";
 import type { PaneProcess } from "../../runtime/herdr/runtime.ts";
 import { HOOK_SIGNALS, type HarnessAdapter, type HookName, type LaunchPlan, type RunContext, type Trust } from "../types.ts";
 import { RESUME_PROMPT } from "../claude/adapter.ts";
+import { workerTmpEnv } from "../../lifecycle/run-tmp.ts";
 // Embedded by `bun build --compile` (a $bunfs path there); the source path in development.
 import extensionAsset from "./extension/flowryn-worker.ts" with { type: "file" };
 
@@ -40,7 +41,7 @@ function plan(run: RunContext, config: WorkersConfig, prompt: string, includeTas
   // `@file` attaches the task file's text to the first message (Pi 0.87.1: "Include files in initial message").
   if (includeTask) args.push(`@${run.instructionsFile}`);
   args.push(prompt);
-  const env: Record<string, string> = { ...pi.env };
+  const env: Record<string, string> = { ...pi.env, ...workerTmpEnv("pi", run.tmpDir) };
   if (pi.agent_dir) env.PI_CODING_AGENT_DIR = pi.agent_dir;
   return { kind: "pi", args, env, files: [{ path: extensionPath, content: extensionSourceSync(), mode: 0o600 }] };
 }

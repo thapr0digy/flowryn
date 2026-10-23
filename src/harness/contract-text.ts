@@ -78,6 +78,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     "- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.",
     "  To take main: new commits, git merge origin/main, a plain git push.",
     '- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.',
+    "- Keep scratch files in $TMPDIR: your run's own, the same path in and out of the sandbox.",
     "- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.",
     "- When told a steer is waiting: $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack <id>.",
     `- A steer can also arrive mid-turn as ${channel} starting "${STEER_PREFIX} [<id>]:".`,

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { FlowrynConfig } from "./config.ts";
 import { toAbsolute } from "./paths.ts";
+import { defaultTmpRoot } from "../lifecycle/run-tmp.ts";
 
 /**
  * Typed views of the config sections M2 owns: [herdr] and [workers.*]. M1 keeps
@@ -59,6 +60,8 @@ export interface PiWorkerConfig {
 
 export interface WorkersConfig {
   worktree_root: string;
+  /** Each run's private temp directory (its TMPDIR) is made under it (src/lifecycle/run-tmp.ts); short, for Claude's 44-byte limit. */
+  tmp_root: string;
   /** Run branches are `<branch_prefix><task>`; contract and lab runs set a unique prefix so they can clean up by name. */
   branch_prefix: string;
   /** The turn-end guard's reminder on an outcome-less turn end; contract runs turn it off, since their turns end on purpose. */
@@ -134,12 +137,19 @@ export function herdrConfig(config: FlowrynConfig): HerdrConfig {
   };
 }
 
+/** `[workers] tmp_root`, absolute; alone, for a caller holding only part of a config (a contract's scratch config). */
+export function tmpRoot(config: Pick<FlowrynConfig, "extra" | "home">): string {
+  const raw = table(config.extra.workers, "[workers]");
+  return absPath(optString(raw.tmp_root, "[workers] tmp_root"), config.home) ?? defaultTmpRoot();
+}
+
 export function workersConfig(config: FlowrynConfig): WorkersConfig {
   const raw = table(config.extra.workers, "[workers]");
   const claude = table(raw.claude, "[workers.claude]");
   const pi = table(raw.pi, "[workers.pi]");
   return {
     worktree_root: absPath(optString(raw.worktree_root, "[workers] worktree_root"), config.home) ?? join(config.data_dir, "worktrees"),
+    tmp_root: tmpRoot(config),
     branch_prefix: branchPrefix(optString(raw.branch_prefix, "[workers] branch_prefix") ?? "flowryn/"),
     turn_end_guard: optBool(raw.turn_end_guard, "[workers] turn_end_guard", true),
     claude: {

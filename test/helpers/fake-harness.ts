@@ -13,6 +13,7 @@
  *   FAKE: deliver-decisions <file> <k:q:opts:rec:reserved ; ...>  write a report with an ## Open decisions
  *                                    section (- for no recommendation or reason), then deliver --report
  *   FAKE: symlink <name> <target>    make $FLOWRYN_REPORT_DIR/<name> a symlink to <target>
+ *   FAKE: tmpdir <file>              write the $TMPDIR it was started with to $FLOWRYN_REPORT_DIR/<file>, and a file in it
  *   FAKE: write <file> <text...>     write $FLOWRYN_REPORT_DIR/<file> (literal \n tokens become newlines): a review
  *                                    page, a questions file
  *   FAKE: verb <args...>             run flowryn <args> --json ($FLOWRYN_REPORT_DIR and lavish:<file> expand, as in
@@ -326,6 +327,14 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       const path = join(env.FLOWRYN_REPORT_DIR ?? ".", file);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, `${words.join(" ").replaceAll("\\n", "\n")}\n`);
+      return "continue";
+    }
+    case "tmpdir": {
+      const [file = "tmpdir.txt"] = rest;
+      const dir = env.FLOWRYN_REPORT_DIR ?? ".";
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, file), `${env.TMPDIR ?? ""}\n`);
+      writeFileSync(join(env.TMPDIR ?? "/nonexistent", "intent.txt"), `${env.FLOWRYN_RUN ?? ""}\n`);
       return "continue";
     }
     case "symlink": {

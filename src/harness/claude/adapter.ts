@@ -2,6 +2,7 @@ import { basename, join } from "node:path";
 import type { WorkersConfig } from "../../config/workers.ts";
 import type { PaneProcess } from "../../runtime/herdr/runtime.ts";
 import { HOOK_SIGNALS, type HarnessAdapter, type HookName, type LaunchPlan, type RunContext, type Trust } from "../types.ts";
+import { workerTmpEnv } from "../../lifecycle/run-tmp.ts";
 import { claudeConfigDir, checkOrRegisterTrust } from "./trust.ts";
 
 /** Claude's Notification types about a claude.ai usage limit ending (Claude Code 2.1.234 and later). */
@@ -80,7 +81,8 @@ function sharedArgs(run: RunContext, config: WorkersConfig, settingsPath: string
 
 function plan(run: RunContext, config: WorkersConfig, sessionArgs: string[], prompt: string): LaunchPlan {
   const settingsPath = join(run.runDir, "claude-settings.json");
-  const env: Record<string, string> = {};
+  // Claude's sandbox sets TMPDIR from CLAUDE_CODE_TMPDIR, so both name the run's own directory (src/lifecycle/run-tmp.ts).
+  const env: Record<string, string> = workerTmpEnv("claude", run.tmpDir);
   if (config.claude.config_dir) env.CLAUDE_CONFIG_DIR = config.claude.config_dir;
   return {
     kind: "claude",
