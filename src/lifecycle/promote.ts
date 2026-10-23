@@ -7,12 +7,13 @@ import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines } from "../harness/contract-text.ts";
-import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
-import { checkStart, createRun, startDepsOf } from "./dispatch.ts";
+import { runAccount, type Account } from "../config/accounts.ts";
+import type { FlowrynConfig } from "../config/config.ts";
+import { accountFor, checkStart, createRun, harnessFlag, startDepsOf } from "./dispatch.ts";
 import { dispatchedTask, reportDirFor } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
@@ -41,7 +42,7 @@ import { flowLine, openGate, requestStage } from "./stages.ts";
  * the cleanup (`flowryn cleanup`), since its worker is being stopped.
  */
 
-type Promotion = { mode: "live"; runId: string } | { mode: "task"; taskId: string; harness: HarnessId; version: string; base: string };
+type Promotion = { mode: "live"; runId: string } | { mode: "task"; taskId: string; account: Account; version: string; base: string };
 
 function scoutRun(db: Db, target: string): RunWithPolicy {
   const found = findRun(db, target);
@@ -55,12 +56,6 @@ function projectOf(db: Db, run: RunWithPolicy): ProjectRow {
   const project = getProject(db, run.project_id);
   if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
   return project;
-}
-
-function harnessArg(args: Record<string, unknown>, fallback: HarnessId): HarnessId {
-  const harness = (stringArg(args as never, "harness") ?? fallback) as HarnessId;
-  if (!(HARNESS_IDS as readonly string[]).includes(harness)) throw new FlowrynError("bad_args", "--harness must be claude or pi");
-  return harness;
 }
 
 /** What the promoted worker is told: the task is a ship now, what that asks of its branch, and how it delivers. */
@@ -148,13 +143,19 @@ function promoteTask(ctx: HandlerCtx, args: Record<string, unknown>, p: Extract<
     "",
     scout?.body ?? title,
   ].join("\n");
-  const runId = createRun(db, config, { taskId: p.taskId, title, body, project, kind: "ship", harness: p.harness, version: p.version, base: p.base, workflow, sensitive: boolArg(args as never, "sensitive"), existing: true, by: ctx.caller.role, override: null, now });
+  const runId = createRun(db, config, { taskId: p.taskId, title, body, project, kind: "ship", account: p.account, version: p.version, base: p.base, workflow, sensitive: boolArg(args as never, "sensitive"), existing: true, by: ctx.caller.role, override: null, now });
   resolveRunItems(db, last.id, ["report_ready"], "run.promoted", now);
   appendEvent(db, { source: "cli", kind: "run.promoted", runId, taskId: p.taskId, payload: { from: "scout", scout_run: last.id, workflow: workflow.id, mode: project.delivery_mode, in_place: "task", report: reportPath, by: ctx.caller.role }, ts: now });
   return {
     data: { task: p.taskId, run: runId, kind: "ship", workflow: workflow.id, mode: project.delivery_mode, promoted: "in place: same task, a new run", report: reportPath ?? "-", state: "launching" },
     hints: [`flowryn show ${p.taskId}`],
   };
+}
+
+/** A scout whose run is over is promoted on its own recorded account, as a resume is; --harness asks for that harness's account in the project's scope. */
+export function promotedAccount(config: FlowrynConfig, project: ProjectRow, args: Record<string, unknown>, run: Pick<RunWithPolicy, "account" | "harness">): Account {
+  if (harnessFlag(args)) return accountFor(config, project, args);
+  return runAccount(config, project, run.account, run.harness);
 }
 
 const promote: VerbSpec = {
@@ -184,8 +185,8 @@ const promote: VerbSpec = {
     if (existsSync(run.worktree_path)) {
       throw new FlowrynError("not_ready", `the scout's worktree ${run.worktree_path} is still there`, `flowryn cleanup ${run.task_id} (--discard needs your approval), then promote`);
     }
-    const harness = harnessArg(args, run.harness);
-    return { mode: "task", taskId: run.task_id, harness, ...(await checkStart(startDepsOf(ctx), project, harness)) };
+    const account = promotedAccount(ctx.config(), project, args, run);
+    return { mode: "task", taskId: run.task_id, account, ...(await checkStart(startDepsOf(ctx), project, account)) };
   },
   apply(ctx, args, prepared) {
     const promotion = prepared as Promotion;
