@@ -97,6 +97,16 @@ describe("versionMixProblems", () => {
     expect(versionMixProblems(repo, "origin/main")).toHaveLength(1);
   });
 
+  test("a feature commit that bumps the version, followed by a commit that reverts the bump, passes", () => {
+    const repo = scratchRepo();
+    write(repo, { "src/version.ts": source("1.3.0"), "package.json": pkg("1.3.0"), "src/feature.ts": "export {};\n" });
+    commit(repo, "Add a feature");
+    expect(versionMixProblems(repo, "origin/main")).toHaveLength(1);
+    write(repo, { "src/version.ts": source("1.2.0"), "package.json": pkg("1.2.0") });
+    commit(repo, "Revert the version bump");
+    expect(versionMixProblems(repo, "origin/main")).toEqual([]);
+  });
+
   test("feature commits that leave the version alone pass, a PROTO bump and a dependency change included", () => {
     const repo = scratchRepo();
     write(repo, { "src/version.ts": source("1.2.0", 7), "package.json": pkg("1.2.0", ',\n  "dependencies": {}'), "src/feature.ts": "export {};\n" });

@@ -102,17 +102,23 @@ function judge(label: string, before: Snapshot, after: Snapshot, files: readonly
   const others = files.filter((f) => !RELEASE_FILES.includes(f));
   if (others.length === 0) return null;
   const shown = others.slice(0, 5).join(", ") + (others.length > 5 ? `, and ${others.length - 5} more` : "");
-  return `${label}: the version changes (${before.version ?? "none"} → ${after.version ?? "none"}) together with ${shown}; a feature PR never changes the version: revert those lines (a release is its own PR, bun run release <major|minor|patch>)`;
+  return `${label}: the version changes (${before.version ?? "none"} → ${after.version ?? "none"}) together with ${shown}; a feature PR never changes the version: revert those lines, in this commit or a later one (a release is its own PR, bun run release <major|minor|patch>)`;
 }
 
 /**
- * Every commit in `base..HEAD` (merges excepted: they bring main's own commits, each judged on main)
- * that changes the version alongside other files, and the same for the uncommitted tracked changes.
- * A release commit on main passes by construction, so a stale `base` never fails a feature branch.
+ * When the version at HEAD differs from the merge-base with `base`: every commit in `base..HEAD`
+ * (merges excepted: they bring main's own commits, each judged on main) that changes the version
+ * alongside other files. A bump a later commit reverts leaves the net version alone, so it passes.
+ * The uncommitted tracked changes are judged the same way either way. A release commit on main
+ * passes by construction, so a stale `base` never fails a feature branch.
  */
 export function versionMixProblems(repo: string, base: string): string[] {
   const problems: string[] = [];
-  const commits = gitOk(repo, ["rev-list", "--no-merges", "--reverse", `${base}..HEAD`]).split("\n").filter(Boolean);
+  const mergeBase = gitOk(repo, ["merge-base", base, "HEAD"]).trim();
+  const before = snapshotAt(repo, mergeBase);
+  const head = snapshotAt(repo, "HEAD");
+  const netChanged = before.version !== head.version || before.pkg !== head.pkg;
+  const commits = netChanged ? gitOk(repo, ["rev-list", "--no-merges", "--reverse", `${base}..HEAD`]).split("\n").filter(Boolean) : [];
   for (const commit of commits) {
     const files = gitOk(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit]).split("\n").filter(Boolean);
     if (!files.some((f) => RELEASE_FILES.includes(f))) continue;
