@@ -34,7 +34,7 @@ From flowryn's own history (v3–v10): install and typecheck get 2 min, the doct
 
 ## Parallel steps
 
-An entry of `verify` that is itself a list is a group, and its steps run at the same time. Groups run in order. Each step keeps its own process group, log (still numbered in order), deadline and retry. When a step in a group fails, its running siblings are killed and recorded as `stopped` (`stopped: <step> failed`), and the next group never starts. A group of one is read as a plain step.
+An entry of `verify` that is itself a list is a group, and its steps run at the same time. Groups run in order. Each step keeps its own process group, log (still numbered in order), deadline and retry. When a step in a group fails, its running siblings are killed and recorded as `stopped` (`stopped: <step> failed`), and the next group never starts. If recording a step throws (a database error, say), its siblings are stopped the same way and the run ends as an error only once all of them have settled, so no step outlives the run's slot. A group of one is read as a plain step.
 
 ```toml
 [projects.flowryn]
