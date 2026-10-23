@@ -67,6 +67,8 @@ describe("the design page check", () => {
     expect(designPageProblems(missing)).toEqual(['the page is missing <section data-section="alternatives">; every part of design-template.html is required']);
     const empty = filled({ "{{RISKS}}": "<ul><li> </li></ul>" });
     expect(designPageProblems(empty)).toEqual(['the "risks" part is empty; say it in words']);
+    const unlabelled = filled({ "{{BEFORE_AFTER}}": "", "{{GOALS}}": "", "{{NON_GOALS}}": "" });
+    expect(designPageProblems(unlabelled)).toEqual(['the "change" part is empty; say it in words', 'the "goals" part is empty; say it in words']);
     const goals = /<section data-section="goals">[\s\S]*?<\/section>\n/.exec(filled())![0];
     const swapped = filled().replace(goals, "").replace('<section data-section="ask">', `${goals}<section data-section="ask">`);
     expect(designPageProblems(swapped)).toEqual([`the parts must come in this order: ${DESIGN_SECTIONS.join(", ")}`]);
@@ -131,6 +133,18 @@ describe("the design page check", () => {
     expect(designPageProblems(fine)).toEqual([]);
     expect(designPageProblems(filled({ "{{HOW}}": "See https://example.com and github.com/org/repo for the docs." }))).toEqual([]);
     expect(designPageProblems(filled({ "{{HOW}}": "See src/x.ts and github.com/org/repo/notes.md." }))).toEqual([`code names above the fold: "src/x.ts", "github.com/org/repo/notes.md"; say it in words, move it into the folded detail, or define it with <dfn>`]);
+  });
+
+  test("an open <details> above the fold is checked like the rest of the page, and a folded one's summary is too", () => {
+    const shown = filled({ "{{HOW}}": "<details open><summary>Files</summary><p>It reads pr_ready and runs <code>stage done</code>.</p></details>" });
+    expect(designPageProblems(shown)).toEqual([
+      'code names above the fold: "pr_ready"; say it in words, move it into the folded detail, or define it with <dfn>',
+      '<code> or <pre> above the fold: "stage done"; move it into the folded detail',
+    ]);
+    expect(designPageProblems(filled({ "{{HOW}}": `<details open><summary>More</summary>${words(DESIGN_VISIBLE_WORDS_MAX)}</details>` }))[0]).toMatch(/^the page shows \d+ words before anything is unfolded/);
+    expect(designPageProblems(filled({ "{{HOW}}": "<details><summary>About pr_ready</summary><p>It reads pr_ready.</p></details>" }))).toEqual([
+      'code names above the fold: "pr_ready"; say it in words, move it into the folded detail, or define it with <dfn>',
+    ]);
   });
 
   test("<code> and <pre> above the fold are refused outside the figure", () => {

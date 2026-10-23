@@ -2,9 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { codeElements, codeShapedTerms, definedTerms, dropElements, nameSome, textOf, visibleMarkup, wordCount } from "../../src/skills/review-page.ts";
 
 describe("what a review page shows before anything is unfolded", () => {
-  test("folded sections, nested ones included, styles, scripts and comments are dropped", () => {
-    const html = "<p>one</p><details><summary>s</summary>two<details>three</details>four</details><p>five</p><style>p{}</style><script>x()</script><!-- six -->";
-    expect(textOf(visibleMarkup(html)).split(/\s+/)).toEqual(["one", "five"]);
+  test("folded sections, nested ones included, styles, scripts and comments are dropped; a folded section's summary stays", () => {
+    const html = "<p>one</p><details><summary>s</summary>two<details><summary>t</summary>three</details>four</details><p>five</p><style>p{}</style><script>x()</script><!-- six -->";
+    expect(textOf(visibleMarkup(html)).split(/\s+/)).toEqual(["one", "s", "five"]);
+  });
+
+  test("an open <details> shows its contents, but not its own folded sections", () => {
+    const html = '<details open><summary>s</summary>two<details><summary>t</summary>three</details>four</details><details data-x="open">five</details>';
+    expect(textOf(visibleMarkup(html)).split(/\s+/)).toEqual(["s", "two", "t", "four"]);
   });
 
   test("diagrams stay for the code-name check and leave the word count", () => {

@@ -59,15 +59,51 @@ export function dropElements(html: string, tag: string): string {
   return depth > 0 ? out : out + html.slice(from);
 }
 
+/** Whether a `<details …>` opening tag has the `open` attribute, so the element shows unfolded. */
+export function opensUnfolded(tag: string): boolean {
+  return /\sopen(?=[\s=/>])/i.test(tag.replace(/(["'])[\s\S]*?\1/g, ""));
+}
+
+/** A closed `<details>` shows only its own `<summary>`; an open one shows everything but its own closed `<details>`. */
+function foldDetails(html: string): string {
+  const token = /<(\/?)details\b[^>]*>/gi;
+  let out = "";
+  let depth = 0;
+  let from = 0;
+  let open: RegExpExecArray | null = null;
+  for (const m of html.matchAll(token)) {
+    if (m[1] !== "/") {
+      if (depth++ === 0) {
+        out += html.slice(from, m.index);
+        open = m;
+      }
+    } else if (depth > 0 && --depth === 0) {
+      out += shownOf(open!, html.slice(open!.index + open![0].length, m.index));
+      from = m.index + m[0].length;
+    }
+  }
+  if (depth > 0) return out + shownOf(open!, html.slice(open!.index + open![0].length));
+  return out + html.slice(from);
+}
+
+function shownOf(open: RegExpExecArray, inner: string): string {
+  if (opensUnfolded(open[0])) return `${open[0]}${foldDetails(inner)}</details>`;
+  const summary = /<summary\b[^>]*>[\s\S]*?<\/summary>/i.exec(inner);
+  const nested = inner.search(/<details\b/i);
+  return summary && (nested === -1 || summary.index < nested) ? summary[0] : "";
+}
+
 /**
- * The markup a reader sees before unfolding anything: comments, `<style>`,
- * `<script>` and every `<details>` removed. `<svg>` stays (its labels are
- * read); `withoutDiagrams` drops it for the word count, since a diagram does
- * not count toward the budget.
+ * The markup a reader sees before unfolding anything: comments, `<style>` and
+ * `<script>` removed, and every closed `<details>` cut to its `<summary>` (an
+ * `open` one shows its contents). `<svg>` stays (its labels are read);
+ * `withoutDiagrams` drops it for the word count, since a diagram does not
+ * count toward the budget.
  */
 export function visibleMarkup(html: string, opts: { withoutDiagrams?: boolean } = {}): string {
   let out = html.replace(/<!--[\s\S]*?-->/g, " ");
-  for (const tag of ["style", "script", "details"]) out = dropElements(out, tag);
+  for (const tag of ["style", "script"]) out = dropElements(out, tag);
+  out = foldDetails(out);
   if (opts.withoutDiagrams) out = dropElements(out, "svg");
   return out;
 }

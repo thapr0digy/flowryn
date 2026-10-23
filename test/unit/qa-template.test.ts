@@ -74,6 +74,7 @@ describe("the QA page's plain-language card", () => {
     expect(qaPageProblems(filled("works", { "{{WHAT_CHECKED}}": "Ran <code>bun test</code>." }))).toEqual(['<code> or <pre> in the card: "bun test"; move it into a folded section below']);
     expect(qaPageProblems(filled("works", { "{{WHAT_CHANGED}}": "A <dfn>checks_red</dfn> alert (failing checks) now opens; each checks_red alert links its run." }))).toEqual([]);
     expect(qaPageProblems(filled("works", { "{{RAW_OUTPUT}}": "<pre>src/x.ts: checks_red</pre>" }))).toEqual([]);
+    expect(qaPageProblems(filled("works", { "{{WHAT_CHANGED}}": "<details open><summary>More</summary>The checks_red item opens.</details>" }))).toEqual(['code names in the card: "checks_red"; say it in words, or move it into a folded section below']);
   });
 
   test("the card has a word budget; the folded sections do not count", () => {

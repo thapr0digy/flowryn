@@ -1,4 +1,4 @@
-import { codeElements, codeShapedTerms, definedTerms, dropElements, nameSome, textOf, visibleMarkup, wordCount } from "./review-page.ts";
+import { codeElements, codeShapedTerms, definedTerms, dropElements, nameSome, opensUnfolded, textOf, visibleMarkup, wordCount } from "./review-page.ts";
 import { WIDGET_MOUNT } from "../lavish/widget.ts";
 
 /**
@@ -171,6 +171,11 @@ function showsAfter(html: string, from: number): boolean {
   return /[\p{L}\p{N}]/u.test(textOf(tail)) || /<(?:img|svg|table|pre|figure|iframe|video|section|details|ul|ol)\b/i.test(tail);
 }
 
+/** A part's own words: its heading and the template's fixed labels (header cells, bold lead-ins) aside. */
+function withoutLabels(part: string): string {
+  return part.replace(/<(h2|th|strong)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+}
+
 /**
  * What is wrong with a design page, as one line per problem the worker can
  * fix; empty when the page passes. `widget`: the page carries questions for
@@ -189,7 +194,7 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
   const inOrder = found.every((p, i) => i === 0 || p.start > found[i - 1]!.start);
   if (!inOrder) problems.push(`the parts must come in this order: ${DESIGN_SECTIONS.join(", ")}`);
   for (const part of found) {
-    if (!/\p{L}/u.test(textOf(html.slice(part.start, part.end).replace(/<h2\b[\s\S]*?<\/h2>/i, "")))) problems.push(`the "${part.name}" part is empty; say it in words`);
+    if (!/\p{L}/u.test(textOf(withoutLabels(html.slice(part.start, part.end))))) problems.push(`the "${part.name}" part is empty; say it in words`);
   }
 
   const first = found[0];
@@ -211,7 +216,7 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
   if (!detail) {
     if (found.length > 0) problems.push(`the implementation detail must be folded, last: <details data-section="${DESIGN_DETAIL_SECTION}">`);
   } else {
-    if (/\bopen\b/i.test(detail.tag.replace(/data-section\s*=\s*["'][^"']*["']/i, ""))) problems.push("the implementation detail must start folded: drop open from its <details>");
+    if (opensUnfolded(detail.tag)) problems.push("the implementation detail must start folded: drop open from its <details>");
     if (last && detail.start < last.end) problems.push("the folded implementation detail must come after every other part");
     else if (detail.end === null) problems.push("the implementation detail's <details> is never closed: end it with </details>");
     else if (showsAfter(html, detail.end)) problems.push("nothing a reader sees may follow the folded implementation detail: move it into the detail or above it");
