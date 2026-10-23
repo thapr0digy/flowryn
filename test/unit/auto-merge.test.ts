@@ -336,6 +336,23 @@ describe("the controller, without GitHub", () => {
     expect(JSON.parse(landed.payload)).toMatchObject({ by: "auto" });
   });
 
+  test("an auto-merge that used your standing approval (flowryn approve) lands by: other, so a landed item reports it", () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    tx(f.db, () => {
+      const approval = insertApproval(f.db, { task: "t1", ref: PR_URL, head: HEAD, channel: "cli-tty", actor: "you", action: "merge", now: 6_000 });
+      f.db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state, method) VALUES ('mg1', 't1', ?1, ?2, ?3, 6000, 'requested', 'squash')").run(PR_URL, HEAD, approval.id);
+      f.db.query("UPDATE runs SET state = 'merging' WHERE id = 'r1'").run();
+      f.db.query("UPDATE auto_merges SET state = 'merging', merge_id = 'mg1' WHERE id = ?1").run(row.id);
+    });
+    tx(f.db, () => recordMergeResult(f.db, f.run(), "mg1", { state: "merged", sha: "m".repeat(40), detail: "merged" }, 7_000, "auto"));
+    expect(f.db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'landed'").get()).toEqual({ n: 1 });
+    expect(f.db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'yolo_merged'").get()).toEqual({ n: 0 });
+    const landed = f.db.query("SELECT payload FROM events WHERE kind = 'run.landed'").get() as { payload: string };
+    expect(JSON.parse(landed.payload)).toMatchObject({ by: "other" });
+  });
+
   test("a run sent back, cancelled, merged by hand or opted out supersedes the live row", async () => {
     const cases: [string, (f: Fixture) => void, FlowrynConfig | null, string][] = [
       ["sent back", (f) => f.db.query("UPDATE runs SET state = 'running' WHERE id = 'r1'").run(), null, "the run is running (sent back)"],

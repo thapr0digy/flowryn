@@ -575,14 +575,16 @@ export async function proveLocal(git: GitRunner, project: ProjectRow, head: stri
  * follows, outside this transaction), or, if it already ended, is kept as a
  * divergence (noteMergedAfterEnd). Unproven: the run stays merging, the
  * task is not landed, and a P1 says so. Refused: the run is ready again.
- * A merge the auto-merge asked for lands `by: auto` whoever proves it (its
- * own settle, or the watcher after a restart). Call inside a transaction.
+ * A merge the auto-merge asked for under yolo lands `by: auto` whoever proves
+ * it (its own settle, or the watcher after a restart); its yolo_merged item
+ * reports it. One that used a standing human approval lands `by: other`, so a
+ * landed item reports it instead. Call inside a transaction.
  */
 export function recordMergeResult(db: Db, run: RunWithPolicy, mergeId: string, result: MergeResultState, now: number, by: LandedBy = "other"): void {
   const merge = db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow | null;
   if (!merge || merge.state === "merged" || merge.state === "refused") return;
-  if (db.query("SELECT 1 FROM auto_merges WHERE merge_id = ?1").get(mergeId)) by = "auto";
   const approval = db.query("SELECT channel FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: Channel } | null;
+  if (db.query("SELECT 1 FROM auto_merges WHERE merge_id = ?1").get(mergeId)) by = approval?.channel === "yolo" ? "auto" : "other";
   if (result.state === "merged") {
     db.query("UPDATE merges SET state = 'merged', merge_sha = ?2, proven_at = ?3, checked_at = ?3, detail = COALESCE(detail || '; ', '') || ?4 WHERE id = ?1").run(mergeId, result.sha, now, result.detail);
     const delivered = isTerminal(run.state) ? deliveredOf(db, run.task_id) : null;

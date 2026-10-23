@@ -2,13 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getMeta, integrityProblems, LATEST_SCHEMA_VERSION, migrate, openDb, schemaVersion, SchemaTooNewError, setMeta, tx } from "../../src/db/db.ts";
+import { divergedMigrations, getMeta, integrityProblems, LATEST_SCHEMA_VERSION, migrate, openDb, SchemaDivergedError, schemaVersion, SchemaTooNewError, setMeta, tx } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { backupIfDue, listBackups, BACKUPS_KEPT } from "../../src/db/backup.ts";
 import { MIGRATIONS, type Migration } from "../../src/db/schema.ts";
 import { openItem, resolveItems, findOpenItem, openItems } from "../../src/attention/items.ts";
 import { positionOf, runWorkflow } from "../../src/lifecycle/stages.ts";
-import { parseConfig } from "../../src/config/config.ts";
+import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
+import { stateFiles } from "../../src/config/paths.ts";
+import { databaseChecks } from "../../src/doctor/doctor.ts";
 import { BASELINE_REVISION } from "../../src/contracts/revision.ts";
 import { checkHarness } from "../../src/lifecycle/harness-gate.ts";
 
@@ -73,6 +75,77 @@ describe("migrations", () => {
     migrate(db);
     expect(migrate(db)).toEqual([]);
     db.close();
+  });
+
+  test("re-running on an up-to-date database takes no write lock, so it works while another connection writes", () => {
+    const path = join(tempDir(), "flowryn.db");
+    const db = openDb(path);
+    migrate(db);
+    const writer = openDb(path);
+    writer.exec("PRAGMA busy_timeout = 0");
+    writer.exec("BEGIN IMMEDIATE");
+    db.exec("PRAGMA busy_timeout = 0");
+    try {
+      expect(migrate(db)).toEqual([]);
+    } finally {
+      writer.exec("ROLLBACK");
+      writer.close();
+      db.close();
+    }
+  });
+
+  test("migration numbers run 1..N with unique names, so a merge that keeps two branches' migration N fails here", () => {
+    expect(MIGRATIONS.map((m) => m.version)).toEqual(MIGRATIONS.map((_, i) => i + 1));
+    expect(new Set(MIGRATIONS.map((m) => m.name)).size).toBe(MIGRATIONS.length);
+  });
+
+  test("a fresh database records the name and time of every migration it ran", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS, () => 1234);
+    const rows = db.query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all();
+    expect(rows).toEqual(MIGRATIONS.map((m) => ({ version: m.version, name: m.name, applied_at: 1234 })));
+    db.close();
+  });
+
+  test("a database from before the name ledger gets its earlier migrations named from this binary, with no time", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 30));
+    expect(migrate(db, MIGRATIONS, () => 99)).toEqual(MIGRATIONS.slice(30).map((m) => m.version));
+    const rows = db.query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all() as { version: number; name: string; applied_at: number | null }[];
+    expect(rows.map((r) => r.name)).toEqual(MIGRATIONS.map((m) => m.name));
+    expect(rows.filter((r) => r.applied_at === null).map((r) => r.version)).toEqual(MIGRATIONS.slice(0, 30).map((m) => m.version));
+    expect(rows[30]).toEqual({ version: 31, name: "migration-names", applied_at: 99 });
+    db.close();
+  });
+
+  test("a database that ran another branch's migration under the same number is refused, not silently skipped", () => {
+    const next = LATEST_SCHEMA_VERSION + 1;
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, [...MIGRATIONS, { version: next, name: "branch-a", sql: "CREATE TABLE branch_a (a);" }]);
+    const mainBinary: Migration[] = [...MIGRATIONS, { version: next, name: "branch-b", sql: "CREATE TABLE branch_b (b);" }];
+    let error: unknown;
+    try {
+      migrate(db, mainBinary);
+    } catch (thrown) {
+      error = thrown;
+    }
+    expect(error).toBeInstanceOf(SchemaDivergedError);
+    expect((error as SchemaDivergedError).mismatches).toEqual([{ version: next, recorded: "branch-a", expected: "branch-b" }]);
+    expect((error as Error).message).toContain(`${next} ran as "branch-a", this binary's is "branch-b"`);
+    expect(divergedMigrations(db, mainBinary)).toHaveLength(1);
+    expect(db.query("SELECT name FROM sqlite_master WHERE name = 'branch_b'").get()).toBeNull();
+    db.close();
+  });
+
+  test("doctor fails its schema check on a database whose migration names differ from this binary's", () => {
+    const stateDir = tempDir();
+    const db = openDb(stateFiles(stateDir).db);
+    migrate(db);
+    db.query("UPDATE schema_migrations SET name = 'branch-a' WHERE version = ?1").run(LATEST_SCHEMA_VERSION);
+    db.close();
+    const schema = databaseChecks({ state_dir: stateDir } as FlowrynConfig).find((c) => c.check === "schema");
+    expect(schema).toMatchObject({ status: "fail" });
+    expect(schema!.detail).toContain(`${LATEST_SCHEMA_VERSION} ran as "branch-a"`);
   });
 
   test("forward-only: a newer database is refused", () => {

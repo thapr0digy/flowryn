@@ -146,6 +146,11 @@ describe("output", () => {
     expect(exitCodeFor("never-heard-of-it")).toBe(1);
     expect(exitCodeOf(okReply({}))).toBe(0);
   });
+
+  test("error codes stay in alphabetical order, so parallel PRs add them at different lines", () => {
+    const codes = Object.keys(ERROR_CODES);
+    expect(codes).toEqual(codes.toSorted());
+  });
 });
 
 test("VERSION matches package.json", () => {
