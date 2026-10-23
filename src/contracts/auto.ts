@@ -386,8 +386,9 @@ export class AutoContractChecker {
     if (this.deps.restartBusy()) return "a daemon restart";
     const herdr = this.deps.herdrDown();
     if (herdr) return `Herdr (${herdr})`;
-    if (harness === "claude" && usageGate(this.deps.db, this.deps.now(), null) === "paused") return "the Claude usage pause";
-    if (harness === "claude" && quotaHolds(this.deps.db)) return "the Claude quota floor";
+    // A contract run uses the harness's implicit login ([workers.<harness>]), so it waits on that account's pause and floor.
+    if (usageGate(this.deps.db, this.deps.now(), harness, null) === "paused") return `the usage pause on account ${harness}`;
+    if (quotaHolds(this.deps.db, harness)) return `the quota floor on account ${harness}`;
     return null;
   }
 

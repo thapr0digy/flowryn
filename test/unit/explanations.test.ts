@@ -20,7 +20,7 @@ import type { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
 import type { HostVerdict } from "../../src/sched/host.ts";
 import { grantLeases, releaseLeases } from "../../src/sched/pools.ts";
 import { Scheduler } from "../../src/sched/scheduler.ts";
-import { noteUsageLimit, RESUME_COMMAND } from "../../src/sched/usage.ts";
+import { noteUsageLimit, resumeCommand } from "../../src/sched/usage.ts";
 
 /**
  * Wait explanations (docs/notes/2026-10-12-next-steps-md-wz.md): each decision
@@ -314,15 +314,15 @@ describe("capacity: a scheduler wait", () => {
   test("the Claude usage pause: the captain's command is the way past it now; the host check: Flowryn grants once it passes", async () => {
     let clock = 2_000_000;
     waitForGpu(null, clock);
-    tx(db, () => noteUsageLimit(db, "worker t1", "rate_limit", clock, { usage_backoff_ms: 60_000, usage_backoff_max_ms: 120_000 }));
+    tx(db, () => noteUsageLimit(db, "claude", "worker t1", "rate_limit", clock, { usage_backoff_ms: 60_000, usage_backoff_max_ms: 120_000 }));
     const s = scheduler({ now: () => clock });
     await s.passNow();
     s.stop();
     reopen();
     const [usage] = show("t2", { why: true }, clock).waiting as Record<string, unknown>[];
     expect(usage).toMatchObject({ rule: "capacity.usage_limit" });
-    expect(usage!.reason).toMatch(/^the Claude usage limit pauses Claude starts until \d\d:\d\d$/);
-    expect(usage!.unblock).toEqual([expect.stringMatching(/^flowryn: lets one Claude run probe it after \d\d:\d\d$/), `captain: ${RESUME_COMMAND}`]);
+    expect(usage!.reason).toMatch(/^the usage limit on account claude pauses its starts until \d\d:\d\d$/);
+    expect(usage!.unblock).toEqual([expect.stringMatching(/^flowryn: lets one run on claude probe it after \d\d:\d\d$/), `captain: ${resumeCommand("claude")}`]);
 
     db.query("UPDATE runs SET harness = 'pi' WHERE id = 'r2'").run();
     clock += 1_000;
@@ -393,11 +393,11 @@ describe("capacity: the quota floor and the harness gate, across passes", () => 
       clock += 5_000;
     }
     s.stop();
-    expect(rows("r2").map((r) => [r.rule, r.reason, r.closed_at])).toEqual([["capacity.quota_floor", "the Claude quota is 2%, under the 5% floor", null]]);
+    expect(rows("r2").map((r) => [r.rule, r.reason, r.closed_at])).toEqual([["capacity.quota_floor", "the quota of account claude is 2%, under the 5% floor", null]]);
     reopen();
     const [why] = show("t2", { why: true }, clock).waiting as Record<string, unknown>[];
-    expect(why!.facts).toEqual([expect.stringMatching(/^quota remaining: 2% \(five_hour\) \(observed /), expect.stringMatching(/^floor: 5% \(observed /)]);
-    expect(why!.unblock).toEqual(["flowryn: starts it once a quota reading is at or over the floor", `captain: ${RESUME_COMMAND}`]);
+    expect(why!.facts).toEqual([expect.stringMatching(/^account: claude \(observed /), expect.stringMatching(/^quota remaining: 2% \(five_hour\) \(observed /), expect.stringMatching(/^floor: 5% \(observed /)]);
+    expect(why!.unblock).toEqual(["flowryn: starts it once a quota reading is at or over the floor", `captain: ${resumeCommand("claude")}`]);
   });
 
   test("an untested harness version holds a launch: one explanation over several passes, with the contract command", async () => {

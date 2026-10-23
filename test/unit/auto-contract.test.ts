@@ -336,9 +336,9 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "Herdr (connect ENOENT)" });
 
     herdr = null;
-    tx(db, () => noteUsageLimit(db, "r1", "rate_limit", Date.now(), { usage_backoff_ms: 3_600_000, usage_backoff_max_ms: 7_200_000 }));
+    tx(db, () => noteUsageLimit(db, "claude", "r1", "rate_limit", Date.now(), { usage_backoff_ms: 3_600_000, usage_backoff_max_ms: 7_200_000 }));
     await auto.tick();
-    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "the Claude usage pause" });
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "the usage pause on account claude" });
     expect(jobs).toEqual([]);
     expect(items("harness_unverified")).toEqual([]);
 
