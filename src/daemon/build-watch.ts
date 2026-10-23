@@ -225,6 +225,16 @@ export class BuildWatcher {
       this.record({ build, commit: target.commit, verdict: "held", reason: "dirty" }, `Installed build ${build} (${short(target.commit)}) was built from a tree with uncommitted changes, so it is not applied by itself; flowryn daemon restart applies it`);
       return;
     }
+    // Feature PRs no longer bump the version, so two merged builds usually share one: an older
+    // commit is told apart by git instead (docs/notes/2026-10-22-remove-conflict-hotspots-24.md).
+    const runningCommit = info.commit ?? null;
+    if (runningCommit && runningCommit !== target.commit && (await this.isAncestor(target.source, target.commit, runningCommit))) {
+      this.record(
+        { build, commit: target.commit, verdict: "refused", reason: "downgrade" },
+        `Installed build ${build} (${short(target.commit)}) is older than the running daemon: its commit is an ancestor of ${short(runningCommit)}. Not applied; rebuild from the default branch`,
+      );
+      return;
+    }
     const branch = this.defaultBranch(target.source);
     if (!(await this.onBranch(target.source, target.commit, branch))) {
       this.record(
@@ -241,6 +251,11 @@ export class BuildWatcher {
     const want = real(source);
     const projects = this.deps.db.query("SELECT path, default_branch FROM projects").all() as { path: string; default_branch: string }[];
     return projects.find((p) => real(p.path) === want)?.default_branch ?? "main";
+  }
+
+  /** Is `older` a strict ancestor of `newer` in the source checkout? An unknown commit (git's 128) is not. */
+  private async isAncestor(source: string, older: string, newer: string): Promise<boolean> {
+    return (await this.deps.git(["-C", source, "merge-base", "--is-ancestor", older, newer], source)).exitCode === 0;
   }
 
   /** Is the commit on the remote's default branch? One fetch of that branch when the local ref does not have it yet. */
