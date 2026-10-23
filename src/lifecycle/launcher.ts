@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { styleBlock } from "../config/workflows.ts";
+import { runAccount, workersFor } from "../config/accounts.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import type { Db } from "../db/db.ts";
@@ -220,7 +221,8 @@ export class Launcher {
     const project = getProject(db, run.project_id);
     if (!project) throw new Error(`project ${run.project_id} is gone`);
     const config = this.deps.config();
-    const workers = workersConfig(config);
+    // The account recorded at dispatch, checked against its project's scope again at every launch.
+    const workers = workersFor(workersConfig(config), runAccount(config, project, run.account, run.harness));
     const timing = timingConfig(config);
     const runtime = this.deps.runtime();
     if (!runtime) throw new TransientLaunchError("Herdr is not reachable");

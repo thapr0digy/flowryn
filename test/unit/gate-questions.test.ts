@@ -1,3 +1,4 @@
+import { accountById } from "../../src/config/accounts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -782,7 +783,7 @@ describe("a gate's questions as decisions", () => {
     open();
     tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
     const newRun = tx(db, () =>
-      createRun(db, defaultConfig(h.home), { taskId, title: taskId, body: "again", project: getProject(db, "web")!, kind: "ship", harness: "claude", version: "2.1.281", base: "abc123", workflow: DEFAULT_WORKFLOWS.feature!, sensitive: false, existing: true, by: "leader", override: null, now: NOW }),
+      createRun(db, defaultConfig(h.home), { taskId, title: taskId, body: "again", project: getProject(db, "web")!, kind: "ship", account: accountById(defaultConfig(h.home), "claude"), version: "2.1.281", base: "abc123", workflow: DEFAULT_WORKFLOWS.feature!, sensitive: false, existing: true, by: "leader", override: null, now: NOW }),
     );
     expect(newRun).not.toBe(runId);
     expect(["q1", "q2", "q3"].map((id) => [getDecision(db, id)!.state, getDecision(db, id)!.answered_via])).toEqual([

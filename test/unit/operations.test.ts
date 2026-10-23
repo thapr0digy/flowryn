@@ -9,8 +9,8 @@ import type { DaemonServices } from "../../src/api/verbs.ts";
 import { explain } from "../../src/attention/explanations.ts";
 import { inertAttention } from "../../src/attention/services.ts";
 import { defaultConfig, parseConfig } from "../../src/config/config.ts";
+import { CONTRACT_REVISIONS } from "../../src/contracts/revision.ts";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
-import { contractRevision } from "../../src/contracts/revision.ts";
 import { inertRestart } from "../../src/daemon/restart.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { Verified } from "../../src/harness/types.ts";
@@ -164,7 +164,7 @@ function daemon(options: DaemonOptions = {}): Daemon {
   });
   reconcilers.push(reconciler);
   const config = options.verifiedHarness ? parseConfig('[tools]\nclaude = "/x/claude"\n', dir) : defaultConfig(dir);
-  if (options.verifiedHarness) tx(db, () => db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '1', ?1, 1)").run(contractRevision("claude")));
+  if (options.verifiedHarness) tx(db, () => db.query("INSERT OR IGNORE INTO harness_contracts (harness, version, revision, passed_at) VALUES ('claude', '1', ?1, 1)").run(CONTRACT_REVISIONS.claude));
   const files = () => ({ backlog: join(dir, "b.md"), todos: join(dir, "t.md") });
   const journal = new Journal({ db, files, runner: () => null });
   const info = () => ({ pid: 1, version: "t", proto: PROTO, instance: "i", startedAt: 0, execPath: "/bin/flowryn", socket: "/s", stateDir: dir });

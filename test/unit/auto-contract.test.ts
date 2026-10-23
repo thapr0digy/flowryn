@@ -782,12 +782,13 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
   });
 
+  // Both harnesses are past the baseline revision now, so these pin the checker to it.
   test("a check that failed before revisions is at the baseline: still final for that version, so an upgrade runs nothing again", async () => {
-    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
+    tx(db, () => saveAutoAttempt(db, "pi", { version: "0.90.0", state: "failed", ended_at: 1, detail: "an old failure" }));
     // The build that introduced revisions, still at the baseline: a later bump makes the old failure stale, as it should.
     const auto = checker({ revisions: AT_BASELINE });
     auto.init();
-    await gate("claude", AT_BASELINE);
+    await gate("pi", AT_BASELINE);
     await auto.tick();
     expect(jobs).toEqual([]);
   });
@@ -806,14 +807,14 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     useConfig("strict");
     // What the gate left before revisions: a plain-version flag and a P1 whose event names no revision, dismissed since.
     tx(db, () => {
-      setMeta(db, "harness_flagged:claude", "2.1.300");
-      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "claude", version: "2.1.300", where: "startup" } });
-      openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:claude", line: "old", now: 1 });
-      resolveItems(db, "harness_unverified", "harness:claude", "dismissed before revisions", 2);
+      setMeta(db, "harness_flagged:pi", "0.90.0");
+      const event = appendEvent(db, { source: "daemon", kind: "harness.unverified", payload: { harness: "pi", version: "0.90.0", where: "startup" } });
+      openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:pi", line: "old", now: 1 });
+      resolveItems(db, "harness_unverified", "harness:pi", "dismissed before revisions", 2);
     });
     const auto = checker({ revisions: AT_BASELINE });
     auto.init();
-    await gate("claude", AT_BASELINE);
+    await gate("pi", AT_BASELINE);
     await auto.tick();
     expect(jobs).toEqual([]);
     expect(events("harness.unverified")).toHaveLength(1);

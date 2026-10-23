@@ -16,11 +16,15 @@ import { sanitizeLine } from "../util/sanitize.ts";
  * user's login shell back in `SHELL` for the harness (Claude's Bash tool
  * reads it), drops `ENV` and `BASH_ENV`, and becomes an interactive `/bin/sh`,
  * which as a non-login shell reads no startup file. The environment Flowryn
- * builds (PATH included) reaches it, and the harness, unchanged.
+ * builds (PATH included) reaches it, and the harness, unchanged, except the
+ * names a launch lists in FLOWRYN_UNSET (variable names only): a pane's
+ * environment can only set values, and an account's login needs some unset
+ * outright (src/harness/claude/adapter.ts loginEnv).
  */
 export function paneShellScript(userShell: string | null): string {
   const restore = userShell ? `SHELL=${shellQuoted(userShell)}\nexport SHELL\n` : "unset SHELL\n";
-  return `#!/bin/sh\n# Flowryn's worker pane shell: no rc files, so nothing reads the terminal before Herdr types the launch.\n${restore}unset ENV BASH_ENV\nexec /bin/sh -i\n`;
+  const unsetListed = `for name in $FLOWRYN_UNSET; do\n  case "$name" in *[!A-Za-z0-9_]*|[0-9]*) ;; *) unset "$name" ;; esac\ndone\nunset FLOWRYN_UNSET\n`;
+  return `#!/bin/sh\n# Flowryn's worker pane shell: no rc files, so nothing reads the terminal before Herdr types the launch.\n${restore}${unsetListed}unset ENV BASH_ENV\nexec /bin/sh -i\n`;
 }
 
 /** The user's login shell: the daemon's SHELL, else the account's. */
@@ -50,8 +54,10 @@ export function ensurePaneShell(stateDir: string, userShell: string | null = log
  * its foreground process's argv0, and an exec'd binary carries its own path
  * there (`2.1.308` for a Claude install), so Herdr found no agent and read the
  * status "unknown", which refuses the interrupt an urgent steer's cut needs.
- * Through a symlink the process keeps the typed name. Replaced atomically,
- * and only when it points elsewhere; returns the shim directory.
+ * Through a symlink the process keeps the typed name. A symlink runs nothing
+ * of its own, so FLOWRYN_UNSET is the pane shell's job (paneShellScript).
+ * Replaced atomically, and only when it points elsewhere; returns the shim
+ * directory.
  */
 export function ensureHarnessShim(stateDir: string, harness: string, binary: string): string {
   const dir = join(stateDir, "shims");

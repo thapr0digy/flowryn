@@ -1,3 +1,4 @@
+import { accountById } from "../../src/config/accounts.ts";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,16 +50,16 @@ describe("Herdr outage episode", () => {
     };
     const project = { id: "web", path: dir, default_branch: "main" } as ProjectRow;
 
-    await expect(checkStart(deps, project, "claude")).rejects.toMatchObject({ code: "herdr_unavailable" });
+    await expect(checkStart(deps, project, accountById(defaultConfig(dir), "claude"))).rejects.toMatchObject({ code: "herdr_unavailable" });
     expect(herdrEpisode(db)).toEqual({ since: 1_000, detail: "connect ENOENT" });
 
     reachable = true;
     clock = 5_000;
-    await expect(checkStart(deps, project, "claude")).rejects.not.toMatchObject({ code: "herdr_unavailable" });
+    await expect(checkStart(deps, project, accountById(defaultConfig(dir), "claude"))).rejects.not.toMatchObject({ code: "herdr_unavailable" });
     expect(herdrEpisode(db)).toBeNull();
     expect(eventCount(db, "herdr.reachable")).toBe(1);
 
-    await expect(checkStart(deps, project, "claude")).rejects.not.toMatchObject({ code: "herdr_unavailable" });
+    await expect(checkStart(deps, project, accountById(defaultConfig(dir), "claude"))).rejects.not.toMatchObject({ code: "herdr_unavailable" });
     expect(eventCount(db, "herdr.reachable")).toBe(1);
   });
 });
