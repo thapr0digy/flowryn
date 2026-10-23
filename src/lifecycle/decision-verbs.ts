@@ -13,7 +13,7 @@ import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { createStandaloneDecision, DECISION_OPTION, getDecision, type DecisionRow } from "./decisions.ts";
+import { createStandaloneDecision, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject } from "./projects.ts";
@@ -66,7 +66,7 @@ function blockTargetExists(ctx: HandlerCtx, id: string): boolean {
  * question is held instead while its gate is open: the verdict steer carries
  * every answer at once (gate-questions.ts).
  */
-export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
+export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader" | "policy"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
   const now = ctx.now();
   ctx.db
     .query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = ?5, rationale = ?6 WHERE id = ?1")
@@ -84,6 +84,25 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
     if (text !== null) steer = createSteer(ctx.db, run, text, now, d.id).id;
   }
   return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [], held };
+}
+
+/**
+ * The user's undo of a rule's answer (docs/notes/2026-10-22-settle-routine-no-2r.md): a decision
+ * answered by policy is answered again, by the user, while its run is live. The worker is steered
+ * to the new choice and to revert, with new commits, any fix the rule's answer already made. Call
+ * inside the verb's transaction, after the captain channel was checked.
+ */
+export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; via: string }): ReturnType<typeof answerDecision> {
+  const run = d.run_id ? getRun(ctx.db, d.run_id) : null;
+  if (!run || isTerminal(run.state)) throw new FlowrynError("run_not_active", `${d.id} was settled by ${d.answered_via}, and its run is over`, "file the change as a follow-up task");
+  const now = ctx.now();
+  const before = `${d.answer} (${d.answered_via})`;
+  ctx.db
+    .query("UPDATE decisions SET answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = 'captain', rationale = ?5 WHERE id = ?1")
+    .run(d.id, a.choice, a.via, now, [`(undid ${before})`, a.words].filter((w): w is string => !!w).join("\n"));
+  appendEvent(ctx.db, { source: "cli", kind: "decision.overridden", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, from: d.answer, rule: d.answered_via, choice: a.choice, by: "captain", via: a.via }, ts: now });
+  const text = `The user changed the answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}") from ${before} to ${a.choice}.${a.words ? ` ${a.words}` : ""} Act on ${a.choice} instead: if the rule's fix is already committed, undo it with git revert (new commits, never a rewrite), then respond to the gate or run the pipeline again.`;
+  return { steer: createSteer(ctx.db, run, text, now, d.id).id, run: run.id, dependents: [], held: false };
 }
 
 /**
@@ -220,7 +239,9 @@ const decide: VerbSpec = {
     const typed = stringArg(args, "choice")!;
     const d = getDecision(ctx.db, id);
     if (!d) throw new FlowrynError("not_found", `no decision ${id}`, "flowryn decision list");
-    if (d.state !== "open") throw new FlowrynError("bad_args", `decision ${id} is already ${d.state}`);
+    // A rule's answer is the one settled decision that may be answered again: by the user, as an undo.
+    const undo = isRuleAnswer(d);
+    if (d.state !== "open" && !undo) throw new FlowrynError("bad_args", `decision ${id} is already ${d.state}`);
     const opts = JSON.parse(d.options) as string[];
     const words = sanitizeBlock(stringArg(args, "body") ?? stringArg(args, "words") ?? "").trim() || null;
     const rationale = sanitizeBlock(stringArg(args, "rationale") ?? "").trim() || null;
@@ -233,13 +254,15 @@ const decide: VerbSpec = {
     if (opts.length === 0 && gateKind !== "text" && !OPTION.test(choice)) throw new FlowrynError("bad_args", "the choice must be short; put the rest in --body-file -");
     const asCaptain = stringArg(args, "by") === "captain" || ctx.caller.role === "human";
     if (stringArg(args, "by") !== undefined && stringArg(args, "by") !== "captain") throw new FlowrynError("bad_args", "--by takes only captain");
+    if (undo && !asCaptain) throw new FlowrynError("reserved_decision", `${id} was settled by ${d.answered_via}; only the user may change it`, `ask the user, then: flowryn decide ${id} <choice> --by captain --body-file -`);
+    const answer = (text: string | null, via: string) => (undo ? overrideRuleAnswer(ctx, d, { choice, words: text, via }) : answerDecision(ctx, d, { choice, words: text, by: "captain", via }));
     const grantId = (prepared as { grant: string | null } | undefined)?.grant ?? null;
     if (asCaptain && grantId) {
       const grant = takeGrant(ctx.db, grantId, `decide ${d.id}`, ctx.now());
       // The user's own words: their answer and any note on it; the leader's text after, marked.
       const theirs = [grant.answer, grant.words].filter((w): w is string => !!w).join("\n");
       const leaderText = words ?? rationale;
-      const done = answerDecision(ctx, d, { choice, words: leaderText ? `${theirs}\n(leader) ${leaderText}` : theirs, by: "captain", via: "claude-chat" });
+      const done = answer(leaderText ? `${theirs}\n(leader) ${leaderText}` : theirs, "claude-chat");
       const out = reply(ctx, d, choice, "captain", done);
       return { ...out, data: { ...out.data, grant: grant.id } };
     }
@@ -255,7 +278,7 @@ const decide: VerbSpec = {
     // A human may pass their words as --rationale (the natural flag to reach for) instead of
     // --body-file/--words; --rationale is used only as a fallback, so it is never silently dropped
     // when --body-file/--words was not also given.
-    const done = answerDecision(ctx, d, { choice, words: words ?? rationale, by: "captain", via });
+    const done = answer(words ?? rationale, via);
     return reply(ctx, d, choice, "captain", done);
   },
   async settle(ctx, result) {
