@@ -7,7 +7,6 @@ import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines } from "../harness/contract-text.ts";
-import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { releaseLeases } from "../sched/pools.ts";
