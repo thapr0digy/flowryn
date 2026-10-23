@@ -666,7 +666,27 @@ WHERE class = 'info' AND state IN ('open','presented') AND opened_at < CAST(strf
 `;
 
 /**
- * Migration 29: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
+ * Migration 29: the verify queue (docs/notes/2026-10-22-daemon-run-verify-y3.md). Every
+ * `flowryn verify` is a request; it starts at once when a validation slot is free, or
+ * waits here in rank and request order. The verifications table, which the merge gate
+ * reads, only ever holds jobs that started.
+ */
+const VERIFY_QUEUE_SQL = /* sql */ `
+CREATE TABLE verify_queue (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, pr_url TEXT NOT NULL, task_id TEXT,
+  head_sha TEXT NOT NULL, policy_id TEXT NOT NULL,
+  pr_number INTEGER, head_ref TEXT, worktree TEXT,
+  source TEXT NOT NULL CHECK (source IN ('cli','auto','recovered')),
+  path TEXT, rank INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK (state IN ('queued','started','cancelled')),
+  verification_id TEXT, recovered_from TEXT, detail TEXT,
+  requested_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX verify_queue_order ON verify_queue(state, rank, requested_at);
+CREATE INDEX verify_queue_verification ON verify_queue(verification_id);
+`;
+
+/**
+ * Migration 30: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
  * dispatch because a resume must stay in the login that holds the session; a plan phase's `account:`
  * line waits beside its harness. Rows from before name their harness's implicit account.
  */
@@ -705,7 +725,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 26, name: "drops", sql: DROPS_SQL, rebuildsReferencedTable: true },
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
   { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
-  { version: 29, name: "accounts", sql: ACCOUNTS_SQL },
+  { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
+  { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

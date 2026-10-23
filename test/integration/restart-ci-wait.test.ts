@@ -12,9 +12,10 @@ import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
  * leader-stop-hook-yq), end to end: a no-mistakes ship through the real CLI,
  * the fake Herdr and worker, the fake GitHub, the test homes' no-mistakes
  * stand-in (it prints $FLOWRYN_HOME/nm-status) and the script supervisor
- * standing in for launchd. A CI wait does not block the restart, and the new
- * daemon picks the validation up where the old one left it; a step with a
- * local agent blocks, and a dropped `--when-idle` names it to the leader.
+ * standing in for launchd. No validation blocks the restart (the pipeline
+ * runs in no-mistakes: docs/notes/2026-10-22-daemon-run-verify-y3.md), and
+ * the new daemon picks it up where the old one left it; a guard that still
+ * holds a restart (a requested merge) reaches the leader when it drops.
  */
 
 let ship: ShipEnv | null = null;
@@ -125,19 +126,59 @@ describe("a restart and a validation waiting on CI", () => {
   );
 
   test(
-    "a step with a local agent blocks, naming the task, the step and its agent; a dropped --when-idle reaches the leader's Stop with that line",
+    "assumption: a step with a local agent runs in no-mistakes, so the restart carries it: it goes ahead, names it as carried, and the new daemon keeps the slot until the delivery",
     async () => {
       ship = await makeShipEnv({ mode: "no-mistakes", supervised: true });
       const e = ship;
       const f = e.fleet;
-      const { task } = await validatingShip(e, [REVIEW, 'ci,running,3m,"","",starting']);
+      const { task, run, branch } = await validatingShip(e, [REVIEW, 'ci,running,3m,"","",starting']);
+
+      const restarted = await f.json(["daemon", "restart"]);
+      expect(restarted.code).toBe(0);
+      const carried = (restarted.reply.data as { carried: string[] }).carried;
+      expect(carried).toHaveLength(1);
+      expect(carried[0]).toContain(`validation: ${task}`);
+      expect(carried[0]).toContain("no-mistakes step review, running 42m, agent pid 81234");
+      await waitUntil(() => eventTs(f, "daemon.restarted").length === 1, 30_000, "the new daemon to record the restart");
+      const requested = rows<{ payload: string }>(f, "SELECT payload FROM events WHERE kind = 'daemon.restart_requested'").map((r) => JSON.parse(r.payload) as { carried: string[] });
+      expect(requested.at(-1)!.carried).toEqual(carried);
+
+      expect(liveValidation(f)).toEqual([run]);
+      expect(f.run(run)).toMatchObject({ state: "validating", stage: "ship", stage_state: "active" });
+      writeFileSync(join(f.h.home, "nm-status"), `run:\n  id: "01NMCI"\n  branch: ${branch}\n  status: completed\n  head: abc\n  pr: ""\noutcome: passed\n`);
+      await f.waitRun(run, (r) => r.state === "running", "running again", 15_000);
+      writeFileSync(join(f.h.dataDir, task, "go"), "");
+      await f.waitRun(run, (r) => r.state === "ready" && r.stage_state === "done", "the delivery", 30_000);
+      expect(liveValidation(f)).toEqual([]);
+      expect(rows(f, "SELECT 1 FROM items WHERE kind = 'restart_dropped'")).toEqual([]);
+    },
+    T,
+  );
+
+  test(
+    "a restart still waits on a guard (a merge requested of GitHub), never on the validation beside it; a dropped --when-idle reaches the leader's Stop naming that guard",
+    async () => {
+      ship = await makeShipEnv({ mode: "no-mistakes", supervised: true });
+      const e = ship;
+      const f = e.fleet;
+      const { task } = await validatingShip(e, [REVIEW]);
+      const db = f.h.db();
+      try {
+        // A merge row left requested (the run validates, so the delivery watcher leaves it alone): the "merging" guard.
+        tx(db, () => {
+          db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a-guard', ?1, 'u', 'h', 'cli-tty', 'you', 1, 2)").run(task);
+          db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('mg-guard', ?1, 'u', 'h', 'a-guard', ?2, 'requested')").run(task, Date.now());
+        });
+      } finally {
+        db.close();
+      }
 
       const blocked = await f.json(["daemon", "restart"]);
       expect(blocked.code).toBe(2);
       expect(blocked.reply.error).toMatchObject({ code: "restart_blocked" });
       const message = (blocked.reply.error as { message: string }).message;
-      expect(message).toContain(`validation: ${task}`);
-      expect(message).toContain("no-mistakes step review, running 42m, agent pid 81234");
+      expect(message).toContain(`merging: ${task}`);
+      expect(message).not.toContain("validation:");
 
       // A leader mid-turn; its session start's briefing came before the drop.
       const lead = await e.claude();
@@ -146,27 +187,26 @@ describe("a restart and a validation waiting on CI", () => {
 
       // Park it, then let its deadline pass: the daemon drops it with the same line, as a P1 to relay.
       expect((await f.json(["daemon", "restart", "--when-idle"], { env: { FLOWRYN_TOKEN: e.leaderToken() } })).reply.data).toMatchObject({ restart: "pending" });
-      const db = f.h.db();
+      const edit = f.h.db();
       try {
-        tx(db, () => {
-          const row = db.query("SELECT value FROM meta WHERE key = 'restart_pending'").get() as { value: string };
-          db.query("UPDATE meta SET value = ?1 WHERE key = 'restart_pending'").run(JSON.stringify({ ...JSON.parse(row.value), expires_at: Date.now() - 1 }));
+        tx(edit, () => {
+          const row = edit.query("SELECT value FROM meta WHERE key = 'restart_pending'").get() as { value: string };
+          edit.query("UPDATE meta SET value = ?1 WHERE key = 'restart_pending'").run(JSON.stringify({ ...JSON.parse(row.value), expires_at: Date.now() - 1 }));
         });
       } finally {
-        db.close();
+        edit.close();
       }
       await waitUntil(() => rows(f, "SELECT 1 FROM items WHERE kind = 'restart_dropped' AND state = 'open'").length === 1, 20_000, "the dropped restart's item");
       const line = rows<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'restart_dropped'")[0]!.line;
-      expect(line).toStartWith(`Daemon restart dropped: still waiting on validation: ${task}`);
-      expect(line).toContain("no-mistakes step review, running 42m, agent pid 81234");
+      expect(line).toStartWith(`Daemon restart dropped: still waiting on merging: ${task}`);
 
       // The leader's turn end carries it, once.
       await lead.finishBusy();
       const relayed = lead.seen.filter((s) => s.via === "Stop" && s.text.includes(RELAY_HEADER));
       expect(relayed).toHaveLength(1);
-      expect(relayed[0]!.text).toContain("no-mistakes step review, running 42m, agent pid 81234");
+      expect(relayed[0]!.text).toContain(`merging: ${task}`);
       await lead.prompt("next");
-      expect(lead.seen.filter((s) => s.text.includes("agent pid 81234"))).toHaveLength(1);
+      expect(lead.seen.filter((s) => s.text.includes(`still waiting on merging: ${task}`))).toHaveLength(1);
     },
     T,
   );

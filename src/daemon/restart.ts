@@ -9,7 +9,7 @@ import { findOpenItem, openItem, resolveItems } from "../attention/items.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
 import { runBounded } from "../runtime/bounded.ts";
 import type { OpenChallenge } from "../policy/approvals.ts";
-import { oldestStep, waitsOnlyOnCi, type NmActiveStep } from "../policy/nomistakes.ts";
+import { oldestStep, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
 
 /**
@@ -36,9 +36,9 @@ const HANDOFF_KEY = "restart_handoff";
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
 /**
- * A validation that only waits on external CI does not block a restart, read
- * from a no-mistakes status at most this old: twice the watcher's default
- * poll, and the controller asks for a fresh read before it decides.
+ * A carried validation's line names its no-mistakes step from a status at
+ * most this old: twice the watcher's default poll; the restart verb asks for
+ * a fresh read before it answers.
  */
 export const VALIDATION_STATUS_FRESH_MS = 2 * 60_000;
 
@@ -77,7 +77,8 @@ function ago(ms: number): string {
 /**
  * Everything a restart now would break, in a fixed order. Empty means a
  * restart is safe. Pending intents are not a guard: they replay at startup,
- * and the shutdown path already waits for the journal.
+ * and the shutdown path already waits for the journal. A validation is not
+ * one either: it is carried across (carriedValidations).
  */
 export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] {
   const guards: Guard[] = [];
@@ -106,19 +107,6 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
     prompted.add(p.id);
     guards.push({ kind: "blocked_prompt", task: p.task_id, detail: p.item ? `${p.item}: ${p.line ?? "a confirmation prompt"}` : "the worker shows a confirmation dialog" });
   }
-  const validating = db
-    .query(
-      `SELECT r.task_id, r.branch, l.granted_at, e.value AS status, e.observed_at FROM pool_leases l JOIN runs r ON r.id = l.run_id
-       LEFT JOIN run_evidence e ON e.run_id = r.id AND e.source = 'nomistakes'
-       WHERE l.pool = ?1 AND l.released_at IS NULL ORDER BY l.granted_at`,
-    )
-    .all(VALIDATION_POOL) as ValidationRow[];
-  for (const v of validating) {
-    const read = freshStatus(v, now);
-    // A CI-only wait, or a run parked at a merge conflict the conflict nudge covers, is no local work to protect.
-    if ("status" in read && (waitsOnlyOnCi(read.status) || read.status.conflictGate)) continue;
-    guards.push({ kind: "validation", task: v.task_id, detail: validationDetail(v, read, now) });
-  }
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
   for (const c of work.challenges) guards.push({ kind: "approval", task: c.task, detail: c.action === "repin" ? "flowryn leader repin is waiting for its code" : "flowryn approve is waiting for its code" });
@@ -131,6 +119,27 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   }
   for (const b of work.builds ?? []) guards.push({ kind: "build", task: null, detail: `building ${b.commit.slice(0, 8)} after a merge for ${ago(now - b.startedAt)}` });
   return guards;
+}
+
+/**
+ * The validations a restart carries across rather than waits on
+ * (docs/notes/2026-10-22-daemon-run-verify-y3.md): the no-mistakes pipeline
+ * runs in no-mistakes' own daemon, which a flowrynd restart does not stop;
+ * the slot, `validating` and the stage are rows, and the next daemon reads
+ * the status again. Listed so the restart's reply and event say what it carried.
+ */
+export function carriedValidations(db: Db, now: number): Guard[] {
+  const validating = db
+    .query(
+      `SELECT r.task_id, r.branch, l.granted_at, e.value AS status, e.observed_at FROM pool_leases l JOIN runs r ON r.id = l.run_id
+       LEFT JOIN run_evidence e ON e.run_id = r.id AND e.source = 'nomistakes'
+       WHERE l.pool = ?1 AND l.released_at IS NULL ORDER BY l.granted_at`,
+    )
+    .all(VALIDATION_POOL) as ValidationRow[];
+  return validating.map((v) => {
+    const title = taskTitle(db, v.task_id);
+    return { kind: "validation" as const, task: v.task_id, ...(title && title !== v.task_id ? { title } : {}), detail: validationDetail(v, freshStatus(v, now), now) };
+  });
 }
 
 interface ValidationRow {
@@ -395,6 +404,24 @@ export function handoffPending(db: Db): boolean {
   return getMeta(db, HANDOFF_KEY) !== null;
 }
 
+/**
+ * How long a restart that was asked for holds queued verifies back
+ * (src/verify/start.ts): long enough for the running ones to end (a
+ * project's verify_timeout_min), never so long that a restart waiting on
+ * something else (a confirmation dialog) stops every verify.
+ */
+export const RESTART_HOLDS_VERIFIES_MS = 60 * 60_000;
+
+/** A restart asked for and not yet done (a parked request, or a handoff under way): since when, while it still holds queued verifies back. */
+export function restartHoldingVerifies(db: Db, now: number): { since: number; by: string } | null {
+  const pending = readPending(db);
+  const raw = getMeta(db, HANDOFF_KEY);
+  const handoff = raw ? (JSON.parse(raw) as Handoff) : null;
+  const asked = pending ?? handoff;
+  if (!asked || now - asked.requested_at >= RESTART_HOLDS_VERIFIES_MS) return null;
+  return { since: asked.requested_at, by: asked.by };
+}
+
 /** The newest restart that will not happen: why, and when. */
 export function lastDropped(db: Db): { reason: string; ts: number } | null {
   const row = db.query("SELECT ts, payload FROM events WHERE kind IN ('daemon.restart_dropped','daemon.restart_expired') ORDER BY seq DESC LIMIT 1").get() as { ts: number; payload: string } | null;
@@ -457,7 +484,7 @@ export interface RestartDeps {
   work(): InMemoryWork;
   supervisor(): Supervisor;
   smoke?: (command: readonly string[], env: NodeJS.ProcessEnv) => Promise<SmokeResult>;
-  /** Read every validating run's no-mistakes status now (the delivery watcher), so the validation guard decides on a fresh read. */
+  /** Read every validating run's no-mistakes status now (the delivery watcher), so the carried validations' lines are fresh. */
   readValidations?: () => Promise<void>;
 }
 
@@ -467,8 +494,8 @@ export interface Preflight {
 }
 
 export type RequestOutcome =
-  | { restart: "restarting"; supervisor: string; old: DaemonSnapshot; target: Preflight["target"] }
-  | { restart: "pending"; waiting_on: string[]; expires_at: number; expires: string; kept?: string }
+  | { restart: "restarting"; supervisor: string; old: DaemonSnapshot; target: Preflight["target"]; carried: string[] }
+  | { restart: "pending"; waiting_on: string[]; carried: string[]; expires_at: number; expires: string; kept?: string }
   | { restart: "cancelled"; had_pending: boolean };
 
 /**
@@ -493,7 +520,7 @@ export class RestartController {
     return restartGuards(this.deps.db, this.deps.work(), this.deps.now());
   }
 
-  /** Fresh no-mistakes reads for the validation guard, when anything validates; call before deciding. */
+  /** Fresh no-mistakes reads for the carried validations' lines, when anything validates; call before answering. */
   async refreshValidations(): Promise<void> {
     const live = this.deps.db.query("SELECT 1 FROM pool_leases WHERE pool = ?1 AND released_at IS NULL LIMIT 1").get(VALIDATION_POOL);
     if (live && this.deps.readValidations) await this.deps.readValidations();
@@ -546,7 +573,7 @@ export class RestartController {
       const pending: PendingRestart = { ...who, requested_at: earlier ? earlier.requested_at : now, expires_at: expires, force: opts.force };
       setMeta(db, PENDING_KEY, JSON.stringify(pending));
       appendEvent(db, { source: "daemon", kind: "daemon.restart_requested", payload: { ...who, when_idle: true, waiting_on: guardLines(guards), expires_at: expires }, ts: now });
-      const outcome = { restart: "pending" as const, waiting_on: guardLines(guards), expires_at: expires, expires: localStamp(expires) };
+      const outcome = { restart: "pending" as const, waiting_on: guardLines(guards), carried: guardLines(carriedValidations(db, now)), expires_at: expires, expires: localStamp(expires) };
       if (!earlier) return outcome;
       return { ...outcome, kept: `the earlier request's deadline (${localStamp(expires)})${opts.waitMin === undefined ? "" : "; --wait-min was ignored"}` };
     }
@@ -592,14 +619,15 @@ export class RestartController {
     const now = this.deps.now();
     const old = snapshotOf(this.deps.info(), now);
     const handoff: Handoff = { ...who, requested_at: now, old };
+    const carried = guardLines(carriedValidations(db, now));
     setMeta(db, HANDOFF_KEY, JSON.stringify(handoff));
     appendEvent(db, {
       source: "daemon",
       kind: "daemon.restart_requested",
-      payload: { ...who, when_idle: whenIdle, supervisor: preflight.supervisor, old, target: { version: preflight.target.version, proto: preflight.target.proto, build: preflight.target.build } },
+      payload: { ...who, when_idle: whenIdle, supervisor: preflight.supervisor, old, target: { version: preflight.target.version, proto: preflight.target.proto, build: preflight.target.build }, carried },
       ts: now,
     });
-    return { restart: "restarting", supervisor: preflight.supervisor, old, target: preflight.target };
+    return { restart: "restarting", supervisor: preflight.supervisor, old, target: preflight.target, carried };
   }
 
   /**
@@ -669,7 +697,6 @@ export class RestartController {
         });
         return;
       }
-      await this.refreshValidations();
       if (this.guards().length > 0) return;
       const auto = pending.by === AUTO_REQUESTER;
       let preflight: Preflight;

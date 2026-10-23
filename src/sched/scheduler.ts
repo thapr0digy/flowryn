@@ -56,6 +56,8 @@ export interface SchedulerDeps {
   host?(cfg: HostCheckConfig): Promise<HostVerdict>;
   /** One quota-axi reading (tests); by default the configured quota-axi runs. */
   quota?(): Promise<QuotaReading>;
+  /** Start queued verifies while slots are free (src/verify/start.ts): first in each grant, since a verify is the step closest to shipping. */
+  drainVerifies?(stopped: () => boolean): Promise<number>;
 }
 
 interface Candidate {
@@ -269,6 +271,8 @@ export class Scheduler {
   }
 
   private async grant(): Promise<void> {
+    // Drain before fill: a queued verify is nearer shipping than any stage, so it takes a free validation slot first.
+    if (this.deps.drainVerifies && !this.stopped) await this.step("verify-queue", async () => void (await this.deps.drainVerifies!(() => this.stopped)));
     const config = this.deps.config();
     tx(this.deps.db, () => sweepExplanations(this.deps.db, this.deps.now()));
     const host = { verdict: null as HostVerdict | null };

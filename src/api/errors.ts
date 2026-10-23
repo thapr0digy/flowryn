@@ -69,7 +69,8 @@ export const ERROR_CODES = {
   interrupt_refused: EXIT.policy,
   // flowryn verify
   verify_failed: EXIT.policy,
-  verify_busy: EXIT.policy,
+  // a queued verify that never started: its PR closed, its head moved, its project lost its verify steps
+  verify_cancelled: EXIT.policy,
   // a local verify at this head ran under another verify policy than today's (or none recorded)
   verify_stale: EXIT.policy,
   // a project with verify steps merges only on a passing verify of exactly the head, and none has finished there
