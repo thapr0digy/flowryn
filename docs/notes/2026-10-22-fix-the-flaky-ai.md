@@ -23,7 +23,7 @@ No model is involved: a promise gate and a file poll.
 
 ## Tests
 
-- `test/unit/bounded.test.ts` "gateDeadlines": the deadline counts from the gate's resolution and the gate is told which call it holds; a leader that exits while its gate holds is never cut off; a rejecting gate still arms the deadline; `null` restores the deadline from spawn.
+- `test/unit/bounded.test.ts` "gateDeadlines": the deadline counts from the gate's resolution, not the spawn; a leader that exits while its gate holds is never cut off; a rejecting gate still arms the deadline; `null` restores the deadline from spawn.
 - `test/unit/external-ops.test.ts` "fromReady": a tool that never writes its pid file fails the case rather than passing without its sleeper.
 - Proof: 20 consecutive runs of the file, all passing, while the full `bun test` ran in parallel (results in the PR).
 

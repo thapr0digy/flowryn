@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, gateDeadlines, type GatedCall, parseEtime, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
+import { INCOMPLETE, TIMED_OUT, configureOwnedProcesses, gateDeadlines, parseEtime, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../../src/runtime/bounded.ts";
 import { psRunner, type PsRunner } from "../../src/runtime/proc.ts";
 
 /**
@@ -82,20 +82,14 @@ afterEach(() => {
 });
 
 describe("gateDeadlines (tests start a deadline once their fake is up)", () => {
-  test("the deadline counts from the gate's resolution, not the spawn, and the gate is told which call it holds", async () => {
-    const calls: GatedCall[] = [];
-    gateDeadlines(async (call) => {
-      calls.push(call);
-      await Bun.sleep(500);
-    });
+  test("the deadline counts from the gate's resolution, not the spawn", async () => {
+    gateDeadlines(() => Bun.sleep(500));
     const began = Date.now();
     const result = await runBounded(["/bin/sleep", "60"], { label: "gated", timeoutMs: 200, graceMs: 200, drainMs: 200 });
     const elapsed = Date.now() - began;
     expect(result.code).toBe(TIMED_OUT);
     expect(result.stderr).toContain("gated did not finish within 200 ms");
     expect(elapsed).toBeGreaterThanOrEqual(500 + 200 - 20);
-    expect(calls.map((c) => c.label)).toEqual(["gated"]);
-    expect(calls[0]!.pid).toBeGreaterThan(0);
   });
 
   test("a leader that exits while its gate still holds is never cut off, and the gate sees the exit", async () => {

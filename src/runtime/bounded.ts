@@ -84,10 +84,8 @@ export function configureOwnedProcesses(config: OwnedConfig | null): void {
   owned = config;
 }
 
-/** A call whose deadline waits on a gate: what it is, and its leader's exit, so the gate can stop waiting once it is moot. */
+/** A call whose deadline waits on a gate: its leader's exit, so the gate can stop waiting once it is moot. */
 export interface GatedCall {
-  pid: number;
-  label: string;
   exited: Promise<unknown>;
 }
 
@@ -243,7 +241,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
       graceTimer = setTimeout(() => send(target, "SIGKILL"), graceMs);
     }, opts.timeoutMs);
   };
-  if (deadlineGate) deadlineGate({ pid, label: opts.label, exited: proc.exited }).then(arm, arm);
+  if (deadlineGate) deadlineGate({ exited: proc.exited }).then(arm, arm);
   else arm();
   await proc.exited;
   exited = true;
