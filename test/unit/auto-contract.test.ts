@@ -9,14 +9,14 @@ import { AUTO_STOP_GRACE_MS, AutoContractChecker, autoFailureLine, autoLeftoverL
 import { writeManifest, type CleanupOutcome, type OwnedResources } from "../../src/contracts/owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS } from "../../src/contracts/runner.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
-import { CONTRACT_REVISIONS, contractRevision, type RevisionMap } from "../../src/contracts/revision.ts";
+import { BASELINE_REVISION, CONTRACT_REVISIONS, contractRevision, type RevisionMap } from "../../src/contracts/revision.ts";
 import { recordPass } from "../../src/contracts/verbs.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
 import { getMeta, migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { openItem, resolveItems } from "../../src/attention/items.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
-import { autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
+import { attemptRevision, autoAttempt, gateHarness, harnessRefusal, saveAutoAttempt, unverifiedVersion, type HarnessCheck } from "../../src/lifecycle/harness-gate.ts";
 import { noteUsageLimit } from "../../src/sched/usage.ts";
 
 /**
@@ -779,13 +779,17 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
   });
 
-  test("a check that failed before revisions is at the baseline: still final for that version, so an upgrade runs nothing again", async () => {
+  test("a check that failed before revisions is at the baseline: final only at that revision, so once claude is past it the upgrade checks again", async () => {
     tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", state: "failed", ended_at: 1, detail: "an old failure" }));
+    expect(attemptRevision(autoAttempt(db, "claude")!)).toBe(BASELINE_REVISION);
+    // Revision 2 (the worker's own TMPDIR, docs/notes/2026-10-22-give-every-worker-73.md) left the baseline behind.
+    expect(CLAUDE_REVISION).toBeGreaterThan(BASELINE_REVISION);
     const auto = checker();
     auto.init();
     await gate("claude");
     await auto.tick();
-    expect(jobs).toEqual([]);
+    expect(jobs).toHaveLength(1);
+    expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.300", revision: CLAUDE_REVISION });
   });
 
   test("a report that proves another revision is not recorded by the daemon", async () => {
@@ -798,7 +802,7 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")[0]).toMatchObject({ detail: `the report proves contract revision ${CLAUDE_REVISION + 1}, not this daemon's revision ${CLAUDE_REVISION}` });
   });
 
-  test("strict: a flag and P1 from before revisions are at the baseline: the upgrade opens no second P1 for the same version", async () => {
+  test("strict: a flag and P1 from before revisions are at the baseline: once claude is past it, the upgrade opens one P1 for its own revision", async () => {
     useConfig("strict");
     // What the gate left before revisions: a plain-version flag and a P1 whose event names no revision, dismissed since.
     tx(db, () => {
@@ -812,8 +816,11 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     await gate("claude");
     await auto.tick();
     expect(jobs).toEqual([]);
-    expect(events("harness.unverified")).toHaveLength(1);
-    expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
+    const unverified = events("harness.unverified");
+    expect(unverified).toHaveLength(2);
+    expect(unverified[0]!.revision).toBeUndefined();
+    expect(unverified[1]).toMatchObject({ harness: "claude", version: "2.1.300", revision: CLAUDE_REVISION });
+    expect(items("harness_unverified").filter((i) => i.state === "open")).toHaveLength(1);
   });
 
   test("strict: only a pass at the daemon's revision settles the P1; one at another revision does not", async () => {
