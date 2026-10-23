@@ -66,7 +66,7 @@ Each harness with no declared account gets an implicit account named after the h
 - **A declared Claude account without `config_dir`** is Claude's default login. `CLAUDE_CONFIG_DIR` is unset as well, so a Herdr server started from inside a work session cannot pass its login on.
 - **Unset, not blank.** The design guessed that Claude treats an empty `CLAUDE_CONFIG_DIR` as unset. The build showed it does not: Claude 2.1.x reports `configDirectory ""` and `projectsDirectory "projects"` (a relative path). Herdr's `workspace.create` can only set values, so the launch puts the names in `FLOWRYN_UNSET`. The worker pane shell (`<state_dir>/pane-shell`, docs/notes/2026-10-17-workers-launch-reliably-5a.md) unsets them before Herdr types the harness. It skips anything that is not a variable name. (This was first done in the harness shim, which is now a symlink so Herdr can detect the agent.)
 - **Pi**: the pane gets the account's `PI_CODING_AGENT_DIR` (Pi's own `~/.pi/agent` made explicit), and Pi gets `--provider <provider> --model <provider>/<id>`. An agent directory can hold several providers' logins, so the account names the one it spends.
-- Claude's contract revision is now 2, because the launch environment and the shim changed. Pi's revision is unchanged: its launch differs only for a declared account, and its suite runs the scripted provider, never a provider login.
+- Claude's contract revision is now 2, because the launch environment and the shim changed. Pi's revision is unchanged: its launch differs only for a declared account, and its suite runs the scripted provider, never a provider login. (docs/notes/2026-10-17-workers-launch-reliably-5a.md later took them to Claude 3 and Pi 2.)
 
 ## Sign-in check
 

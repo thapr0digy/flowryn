@@ -1,7 +1,7 @@
 # Workers launch reliably whatever the user's shell prints at startup
 
 - Status: done
-- Open: none. `flowryn doctor --contracts --verify-only` passed for Claude 2.1.308 (12/12) and Pi 0.87.1 on this build, 2026-10-22
+- Open: none. `flowryn doctor --contracts --verify-only` passed for Claude 2.1.309 (12/12) and Pi 0.87.1 on the build merged with main's accounts change
 
 Workers now start in a pane whose shell runs none of the user's startup files. When a launch still fails, the failure quotes what the pane shows. Everything here is plain code: a fixed shell script, an env entry and a text formatter. No model is used.
 
@@ -33,7 +33,7 @@ The environment Flowryn builds reaches the pane and the harness unchanged: the r
 
 **A launch failure names the cause.** When the harness process does not appear within `launch_timeout_ms`, the launcher reads the pane's last 40 lines (`recent_unwrapped`, so a secret is redacted whole). Secrets are redacted, control characters and ANSI codes dropped, each line cut to 200 characters, and the last 6 non-empty lines joined with ` | `. They go into the failure: "the claude process did not appear in pane w1:p1 within 30000 ms; the pane's last lines: [oh-my-zsh] Would you like to update? [Y/n] | zsh: no such file or directory: Users/…/claude". A blank pane says "the pane showed nothing", a gone one "its pane is gone", and a failed read says why. The reason is the run's `run.failed` payload, its `failure_needs_you` item and (cut to 150) the parked hold. It is also the contract suite's `launch` step detail, which prints that payload. Only `recent_unwrapped` is read, not the `visible` fallback h08 showed: a soft-wrapped screen line could split a secret past the redactor.
 
-`CONTRACT_REVISIONS` goes up one for both harnesses (Claude 3, Pi 2, after main's accounts change took Claude to 2), because how a worker launches is what the suite's `launch` step proves. Older passes are stale until `flowryn doctor --contracts` passes again on this build. This is the first bump. Five tests had assumed this build is at the baseline: two fixtures (three of the tests) seeded a pass with no revision and now seed it at this build's, and two auto-check tests about rows stored before revisions now pin the baseline through a new `revisions` dependency of `AutoContractChecker` (the gate already took one).
+`CONTRACT_REVISIONS` goes up one for both harnesses (Claude 3, Pi 2, after main's accounts change took Claude to 2), because how a worker launches is what the suite's `launch` step proves. Older passes are stale until `flowryn doctor --contracts` passes again on this build. This is Pi's first bump. Five tests had assumed this build is at the baseline: two fixtures (three of the tests) seeded a pass with no revision and now seed it at this build's, and two auto-check tests about rows stored before revisions now pin the baseline through a new `revisions` dependency of `AutoContractChecker` (the gate already took one).
 
 ## Tests
 
