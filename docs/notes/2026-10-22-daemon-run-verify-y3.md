@@ -74,7 +74,7 @@ The user's answer in the design review (q78): a verify that fails because a step
 - **Gate refusals.** `checks_pending`, `forge_unavailable`, `merge_in_flight`, `not_ready` and `head_moved` mean "not yet": the next pass tries again, and `head_moved` holds after 6 h. A stale read is recorded as the verb's is and tried again. Any other code holds with the gate's message and its help as the next command (`red_checks` names the `--allow-red` waiver).
 - **Items.**
   - New `auto_merge_held` (P1, actionable, in `LEADER_WAKE_KINDS` and the away wake). Its line is `Auto-merge held: <title> (<task>): <reason>; <next command>`. A landing, a send-back and a redelivery resolve it.
-  - `pr_ready` still opens. Its line ends with the progress, kept current: `; auto-merge: verify queued (vq7, 2 of 3)`, `verifying (v41)`, `verify v41 passed, waiting on checks`, `merging (mg12)`, `held (red_checks)`.
+  - `pr_ready` still opens. Its line ends with the progress, kept current: `; auto-merge: verify queued (vq7, 2 of 3)`, `verifying (v41)`, `verify v41 passed, waiting on checks`, `merging (mg12)`, `held (red_checks)`. A queued row's place moving rewrites the line with an `auto_merge.queue_moved` event (its request, position and queue length); a steady queue writes nothing.
   - `LEADER_WAKE_SQL` skips a yolo `pr_ready` while its run has a live auto-merge, so the leader takes no turn for it.
   - A merge landed `by: auto` opens no `landed` item, only `yolo_merged` (info).
 - **`flowryn show <task>`** has `auto_merge: am3 verifying (v41)`, and the reason once held or superseded.

@@ -119,15 +119,16 @@ function progressOf(db: Db, row: AutoMergeRow): string | null {
   }
 }
 
-/** Keep the run's open pr_ready line ending in the auto-merge's progress. Call inside a transaction. */
-function refreshReadyLine(db: Db, row: AutoMergeRow): void {
+/** Keep the run's open pr_ready line ending in the auto-merge's progress; true when it changed. Call inside a transaction. */
+function refreshReadyLine(db: Db, row: AutoMergeRow): boolean {
   const item = findOpenRunItem(db, "pr_ready", row.run_id);
-  if (!item) return;
+  if (!item) return false;
   const base = (item.full_line ?? item.line).split(READY_SEPARATOR)[0]!;
   const progress = progressOf(db, row);
   const lines = itemLines(progress ? `${base}${READY_SEPARATOR}${progress}` : base);
-  if (lines.line === item.line && lines.full_line === item.full_line) return;
+  if (lines.line === item.line && lines.full_line === item.full_line) return false;
   db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(item.id, lines.line, lines.full_line);
+  return true;
 }
 
 interface MoveFields {
@@ -420,7 +421,17 @@ export class AutoMerger {
     }
     if (request.state === "started" && request.verification_id) return move(this.deps.db, row, "verifying", { verification_id: request.verification_id }, now).row;
     // Still queued: its place in line may have moved.
-    refreshReadyLine(this.deps.db, row);
+    if (refreshReadyLine(this.deps.db, row)) {
+      const place = positionOf(this.deps.db, request.id);
+      appendEvent(this.deps.db, {
+        source: "daemon",
+        kind: "auto_merge.queue_moved",
+        runId: row.run_id,
+        taskId: row.task_id,
+        payload: { auto_merge: row.id, request: request.id, position: place?.position ?? null, of: place?.of ?? null },
+        ts: now,
+      });
+    }
     return row;
   }
 

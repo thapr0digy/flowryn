@@ -255,6 +255,26 @@ describe("the controller, without GitHub", () => {
     expect(held.line).toContain("the PR is closed");
   });
 
+  test("a queued row's place moving rewrites the pr_ready line with an auto_merge.queue_moved event; a steady queue writes nothing", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const ahead = tx(f.db, () => insertRequest(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/6", task_id: "t0", head_sha: "c".repeat(40), policy_id: POLICY, pr_number: 6, head_ref: "flowryn/t0", worktree: null, source: "cli", path: null, now: 4_000 }));
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    expect(readyLine(f.db)).toEndWith(`auto-merge: verify queued (${row.request_id}, 2 of 2)`);
+    const moves = () => f.db.query("SELECT payload FROM events WHERE kind = 'auto_merge.queue_moved'").all() as { payload: string }[];
+
+    await merger(f, cfg).auto.pass();
+    expect(moves()).toEqual([]);
+
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = 'the PR is closed' WHERE id = ?1").run(ahead.id));
+    await merger(f, cfg).auto.pass();
+    expect(readyLine(f.db)).toEndWith(`auto-merge: verify queued (${row.request_id}, 1 of 1)`);
+    expect(moves().map((m) => JSON.parse(m.payload))).toEqual([{ auto_merge: row.id, request: row.request_id, position: 1, of: 1 }]);
+
+    await merger(f, cfg).auto.pass();
+    expect(moves()).toHaveLength(1);
+  });
+
   test("a request cancelled because the head moved waits for the redelivery, and holds after 6 h", async () => {
     const f = fixture();
     const cfg = config(OPTED_IN);
