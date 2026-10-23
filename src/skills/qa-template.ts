@@ -5,10 +5,17 @@
  * detail sit below it in folded sections. The worker copies the template and
  * fills its {{SLOTS}}; `stage done` in the QA stage refuses a page whose card
  * is missing, unfilled, not first, or has a verdict outside the three.
+ * The card follows the design page's plain-language rule (review-page.ts):
+ * no code-shaped words unless defined, and at most QA_CARD_WORDS_MAX words.
  * Plain code: the check proves the card was filled, your review judges how well.
  */
 
+import { codeElements, codeShapedTerms, definedTerms, nameSome, textOf, wordCount } from "./review-page.ts";
+
 export const QA_TEMPLATE_FILE = "evidence-template.html";
+
+/** The card's words: a minute of reading. */
+export const QA_CARD_WORDS_MAX = 200;
 
 /** The verdict words a card may carry, in `data-verdict`. */
 export const QA_VERDICTS = ["works", "works-with-caveats", "broken"] as const;
@@ -24,7 +31,9 @@ export const QA_TEMPLATE = `<!doctype html>
 <title>QA: {{TITLE}}</title>
 <!--
   Fill every {{SLOT}}; stage done refuses the page while one is left.
-  The card is for someone who has not read the code: plain words, no commands, no jargon.
+  The card is for someone who has not read the code: plain words, no commands, no jargon, at most ${QA_CARD_WORDS_MAX} words.
+  No code names in it (an underscore, a lowercase start with a capital inside, a file path, a --flag, a call()) and no
+  <code>: define a term you need with <dfn>term</dfn>; <kbd> marks what the user types.
   WHAT_CHANGED   one or two sentences on what a person would notice; "Nothing visible." is a fine answer.
   WHAT_CHECKED   what was tried, in words: "All 792 tests pass; every combination of the new rules was tried."
   VERDICT        exactly one of: works | works-with-caveats | broken (the label is drawn from it).
@@ -82,14 +91,6 @@ export const QA_PAGE_MAX_BYTES = 5 * 1024 * 1024;
 /** Markup that belongs below the card; any of it above the card means the card is not first. */
 const DETAIL_MARKUP = /<(?:details|table|pre|img|figure|iframe)\b/i;
 
-function textOf(html: string): string {
-  return html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;|&#160;/gi, " ")
-    .trim();
-}
-
 /** The markup of one card slot: from its opening tag to the next <dt> or the end of the list. */
 function slotBody(card: string, slot: string): { tag: string; body: string } | null {
   const open = new RegExp(`<dd\\b[^>]*\\bdata-slot\\s*=\\s*["']${slot}["'][^>]*>`, "i").exec(card);
@@ -122,5 +123,12 @@ export function qaPageProblems(html: string): string[] {
       if (!verdict || !(QA_VERDICTS as readonly string[]).includes(verdict)) problems.push(`the verdict must be data-verdict="${QA_VERDICTS.join('" | "')}"`);
     }
   }
+  const defined = definedTerms(html);
+  const terms = codeShapedTerms(card, defined);
+  if (terms.length > 0) problems.push(`code names in the card: ${nameSome(terms)}; say it in words, or move it into a folded section below`);
+  const code = codeElements(card, defined);
+  if (code.length > 0) problems.push(`<code> or <pre> in the card: ${nameSome(code)}; move it into a folded section below`);
+  const words = wordCount(textOf(card));
+  if (words > QA_CARD_WORDS_MAX) problems.push(`the card is ${words} words; keep it to ${QA_CARD_WORDS_MAX} and fold the rest below it`);
   return problems;
 }

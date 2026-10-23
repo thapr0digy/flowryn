@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseConfig } from "../../src/config/config.ts";
 import { workflowsConfig } from "../../src/config/workflows.ts";
 import { checkQaPage, flowLine } from "../../src/lifecycle/stages.ts";
-import { QA_CARD_SLOTS, QA_PLACEHOLDERS, QA_TEMPLATE, QA_TEMPLATE_FILE, qaPageProblems } from "../../src/skills/qa-template.ts";
+import { QA_CARD_SLOTS, QA_CARD_WORDS_MAX, QA_PLACEHOLDERS, QA_TEMPLATE, QA_TEMPLATE_FILE, qaPageProblems } from "../../src/skills/qa-template.ts";
 import { STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
 const dirs: string[] = [];
@@ -66,6 +66,22 @@ describe("the QA page's plain-language card", () => {
     expect(qaPageProblems(after)).toEqual([]);
     const inside = filled("works", { "{{DECISIONS}}": `Answer the questions here. ${widget}` });
     expect(qaPageProblems(inside)).toEqual([]);
+  });
+
+  test("the card follows the plain-language rule: code names and <code> are named; a <dfn> term passes", () => {
+    const coded = filled("works", { "{{WHAT_CHANGED}}": "The checks_red item now opens in src/attention/items.ts." });
+    expect(qaPageProblems(coded)).toEqual(['code names in the card: "checks_red", "src/attention/items.ts"; say it in words, or move it into a folded section below']);
+    expect(qaPageProblems(filled("works", { "{{WHAT_CHECKED}}": "Ran <code>bun test</code>." }))).toEqual(['<code> or <pre> in the card: "bun test"; move it into a folded section below']);
+    expect(qaPageProblems(filled("works", { "{{WHAT_CHANGED}}": "A <dfn>checks_red</dfn> alert (failing checks) now opens; each checks_red alert links its run." }))).toEqual([]);
+    expect(qaPageProblems(filled("works", { "{{RAW_OUTPUT}}": "<pre>src/x.ts: checks_red</pre>" }))).toEqual([]);
+  });
+
+  test("the card has a word budget; the folded sections do not count", () => {
+    const long = Array.from({ length: QA_CARD_WORDS_MAX }, () => "word").join(" ");
+    const problems = qaPageProblems(filled("works", { "{{WHAT_CHECKED}}": long }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(new RegExp(`^the card is \\d+ words; keep it to ${QA_CARD_WORDS_MAX}`));
+    expect(qaPageProblems(filled("works", { "{{HOW_CHECKED}}": long + long }))).toEqual([]);
   });
 
   test("a card missing a slot names it", () => {

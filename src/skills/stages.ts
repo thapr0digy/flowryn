@@ -2,13 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { VERSION } from "../version.ts";
-import { QA_TEMPLATE, QA_TEMPLATE_FILE } from "./qa-template.ts";
+import { DESIGN_TEMPLATE, DESIGN_TEMPLATE_FILE, DESIGN_TLDR_WORDS_MAX, DESIGN_VISIBLE_WORDS_MAX } from "./design-template.ts";
+import { QA_CARD_WORDS_MAX, QA_TEMPLATE, QA_TEMPLATE_FILE } from "./qa-template.ts";
 
 /**
  * The three stage skills (design section 11): Flowryn owns when and whether
  * a stage runs; these hold how. Each has a description of at most 60 tokens
  * (always loaded) and a body of at most 1.5k tokens (read on demand), plus
- * any files it names (the QA page's template), written next to it. The
+ * any files it names (the design and QA pages' templates), written next to it. The
  * launcher writes them under `<state_dir>/skills/`, loads them into a Claude
  * worker as a plugin, and every stage start names the SKILL.md path, so a Pi
  * worker (or any harness) reads the same file.
@@ -18,7 +19,7 @@ export interface StageSkill {
   name: string;
   description: string;
   body: string;
-  /** Files written next to its SKILL.md, by name (the QA page's template). */
+  /** Files written next to its SKILL.md, by name (a review page's template). */
   files?: Record<string, string>;
 }
 
@@ -27,14 +28,15 @@ const DESIGN_BODY = `# Flowryn design stage
 Goal: a design the user reviews and approves in Lavish, and a phase plan when the feature is bigger than one change. No product code in this stage.
 
 1. Read the task file and the project: its AGENTS.md or CLAUDE.md, the README, and the code the task touches. Note the constraints you find.
-2. Write the design as one HTML page in \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree, so the branch stays clean): the problem, the approach and why, what changes (files, APIs, data, screens), the assumptions the build must test, the risks, and every choice you made yourself with why. Show, don't tell: diagrams, tables, before and after.
+2. Write the design for an engineer who has not read the code and must judge it in about two minutes. Copy \`${DESIGN_TEMPLATE_FILE}\` (next to this SKILL.md) to \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree, so the branch stays clean) and fill every {{SLOT}}. Its parts, in order: In short (the problem and the change, at most ${DESIGN_TLDR_WORDS_MAX} words); What I need from you (approve or send changes, and the two or three calls worth a look); What changes for you (before and after, as the user would notice it); Goals and non-goals; How it works (a diagram, then a few steps in words); Other ways we could do it (doing nothing included); Risks, and how we'd know it's wrong. Then, folded and last: the files, APIs, data and identifiers, the assumptions the build must test, every choice you made and why, sources, and what you could not check.
+   Plain words above the fold: no code names (an underscore, a lowercase start with a capital inside, a file path, a --flag, a call()), no \`<code>\` or \`<pre>\`, and no internal term the reader would not know; define a term you need with \`<dfn>\` on first use, and mark what the user types with \`<kbd>\`. At most ${DESIGN_VISIBLE_WORDS_MAX} words above the fold; diagrams do not count. These are the review page's rules, not the terse reply style. \`stage done\` refuses a page that breaks them and lists each problem.
 3. Questions for the user: only what you truly cannot proceed without (a real decision that changes what you build); decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/design/questions.json\`:
 
    {"questions": [{"key": "token-store", "kind": "single", "question": "Where do cached tokens live?",
      "options": ["db", "file"], "recommend": "db", "blocks": "which store TokenCache writes to", "why": "..."}],
     "decided": [{"choice": "poller home", "picked": "src/lavish/poller.ts", "why": "..."}]}
 
-   kind is single, multi (recommend is a list) or text (recommend is your default answer, no options); at most 5 questions, 2 to 8 short options each (never "other": every choice already offers Other, with the user's words), and blocks names what waits on the answer. Mount the form in the page: \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` with \`data-lavish-live-reload-root\` on \`<html>\`. Flowryn writes that script: clickable options with your recommendation preselected, a note and an "anything else" box, and one Send for every answer. It opens each question as a decision reserved for the user and reads the answers back. The widget is the only place a question appears: never list questions on the page as text ("A (recommended): …"), never write your own question form, never run \`lavish-axi poll\`.
+   kind is single, multi (recommend is a list) or text (recommend is your default answer, no options); at most 5 questions, 2 to 8 short options each (never "other": every choice already offers Other, with the user's words), and blocks names what waits on the answer. Mount the form in What I need from you: \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` (the template already has \`data-lavish-live-reload-root\` on \`<html>\`). Flowryn writes that script: clickable options with your recommendation preselected, a note and an "anything else" box, and one Send for every answer. It opens each question as a decision reserved for the user and reads the answers back. The widget is the only place a question appears: never list questions on the page as text ("A (recommended): …"), never write your own question form, never run \`lavish-axi poll\`.
 4. Host it for review: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL; pass that URL as it is (Flowryn checks it is lavish's URL for this page). Only without lavish-axi, use the page's file:// URL. Flowryn opens the page in the user's browser once it listens on it; lavish-axi's \`status: opened\` is its session, not a browser tab, so never say the page is open in their browser.
 5. A phased feature: this task is phase 1. Write \`$FLOWRYN_REPORT_DIR/plan.md\` with one section per later phase:
 
@@ -80,7 +82,7 @@ Goal: evidence, reviewed in Lavish, that the change works in the running app, on
    - single container: \`docker run -d --label flowryn.run=$FLOWRYN_RUN ...\`.
    One environment (one compose project) per slot. More than your slot allows is flagged.
 2. Walk each flow the design names with chrome-devtools-axi, in your own session: \`export CHROME_DEVTOOLS_AXI_SESSION=flowryn-$FLOWRYN_RUN\`, then \`chrome-devtools-axi open <url>\`, \`snapshot\`, \`click @<uid>\`, \`fill @<uid> <text>\`, and \`chrome-devtools-axi screenshot $FLOWRYN_REPORT_DIR/qa/<step>.png\` after each step. Keep \`console\` and \`network\` errors.
-3. Copy \`${QA_TEMPLATE_FILE}\` (next to this SKILL.md) to \`$FLOWRYN_REPORT_DIR/qa/evidence.html\` and fill every {{SLOT}}. The card at the top is for someone who has not read the code, in plain words: what changed that they would notice ("Nothing visible." is fine), what was checked, the verdict (works, works-with-caveats or broken, each caveat spelled out), and each decision as a question with your recommendation (or "Nothing to decide."). Commands, tables, screenshots (relative paths, next to the page) and logs go in the folded sections below it. \`stage done\` refuses a page whose card is missing, blank or not first. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/qa/evidence.html\` prints its URL (\`stage done\` checks that the URL is this page's). Flowryn opens it in the user's browser; lavish-axi's \`status: opened\` is not a browser tab.
+3. Copy \`${QA_TEMPLATE_FILE}\` (next to this SKILL.md) to \`$FLOWRYN_REPORT_DIR/qa/evidence.html\` and fill every {{SLOT}}. The card at the top is for someone who has not read the code, in plain words (the design page's rule: no code names or \`<code>\` in it, \`<dfn>\` for a term you need, at most ${QA_CARD_WORDS_MAX} words): what changed that they would notice ("Nothing visible." is fine), what was checked, the verdict (works, works-with-caveats or broken, each caveat spelled out), and each decision as a question with your recommendation (or "Nothing to decide."). Commands, tables, screenshots (relative paths, next to the page) and logs go in the folded sections below it. \`stage done\` refuses a page whose card is missing, blank or not first. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/qa/evidence.html\` prints its URL (\`stage done\` checks that the URL is this page's). Flowryn opens it in the user's browser; lavish-axi's \`status: opened\` is not a browser tab.
 4. Stop everything you started: \`docker compose -p flowryn-$FLOWRYN_RUN down\` (or \`docker rm -f\`), and \`chrome-devtools-axi stop\`. A labelled container still running after the stage is flagged to the user.
 5. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/qa/evidence.html\` (Flowryn listens on the page for the user's feedback; do not hold a \`lavish-axi poll\` open), end your turn. A steer brings the verdict: approved (shipping starts), or changes with the user's words (back to build).
 
@@ -95,6 +97,7 @@ export const STAGE_SKILLS: readonly StageSkill[] = [
     name: "flowryn-design",
     description: "Flowryn design stage: turn the task into a design page reviewed in Lavish and, for a phased feature, a phase plan. Use when your Flowryn stage is design.",
     body: DESIGN_BODY,
+    files: { [DESIGN_TEMPLATE_FILE]: DESIGN_TEMPLATE },
   },
   {
     name: "flowryn-build-test",
