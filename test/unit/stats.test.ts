@@ -189,6 +189,14 @@ describe("waits by reason", () => {
     expect(gaps).toContain("decisions: 1 without created_at (before migration 6) left out of waits");
   });
 
+  test("decisions: one a rule settled waits until the rule's answer, even when you undo it later", () => {
+    decision("q1", "r1", NOW - 6 * HOUR, NOW - HOUR);
+    ev("decision.settled_by_rule", NOW - 6 * HOUR + MIN, "r1", { decision: "q1", rules: ["review-warning-diff"], answer: "fix" }, "daemon");
+    const rows = byReason(allWaits(db, scope(), []));
+    expect(rows["decision (rule)"]).toMatchObject({ n: 1, median: "60s", open: 0 });
+    expect(rows["decision (leader)"]).toBeUndefined();
+  });
+
   test("gates: an open gate of a run that ended waits for nothing", () => {
     gate("g1", "r3", "merge", NOW - HOUR, null);
     gate("g2", "r1", "merge", NOW - 2 * HOUR, NOW - HOUR);
@@ -319,6 +327,13 @@ describe("interventions", () => {
       ]),
     );
     expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(13);
+  });
+
+  test("a rule's answer is Flowryn's own; your undo of it is yours", () => {
+    const t = NOW - HOUR;
+    ev("decision.answered", t, "r1", { decision: "q1", choice: "fix", by: "policy", via: "rule:lint-added-file" });
+    ev("decision.overridden", t + 1, "r1", { decision: "q1", from: "fix", rule: "rule:lint-added-file", choice: "approve", by: "captain", via: "cli-tty" });
+    expect(summarizeInterventions(interventions(db, scope(), []))).toEqual([{ action: "answer", by: "you via cli-tty", n: 1 }]);
   });
 
   test("steers: the leader's and yours, not Flowryn's stage-start or policy-follow steers (matched by the id they name), nor an answer's", () => {

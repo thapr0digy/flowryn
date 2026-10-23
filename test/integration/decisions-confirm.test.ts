@@ -33,6 +33,25 @@ describe("a captain answer needs the user's word", () => {
     expect(shown.reply.data).toMatchObject({ by: "captain", via: "claude-ask", rationale: "yes, delete it" });
   });
 
+  test("Claude: undoing a rule's answer is prompted as an undo, and recorded as the user's (docs/notes/2026-10-22-settle-routine-no-2r.md)", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const f = ship.fleet;
+    const { task, run } = await f.dispatch("Build\nFAKE: sleep 60000");
+    const db = f.h.db();
+    db.query(
+      `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, answer, answered_via, answered_at, answered_by, rationale, created_at)
+       VALUES ('q900', ?1, ?2, 'lint-1 in test/new.test.ts', '["approve","fix","skip"]', 0, 'answered', 'fix', 'rule:lint-warning-added', 1, 'policy', 'Settled by rule lint-warning-added', 1)`,
+    ).run(task, run);
+    db.close();
+    const leader = await ship.claude();
+    await leader.start();
+    const yes = await leader.runBash("flowryn decide q900 approve --by captain --body-file - --json <<'EOF'\nkeep the import\nEOF", { approve: true });
+    expect(leader.prompts.at(-1)).toContain("UNDO the rule's answer fix (rule:lint-warning-added) to q900");
+    expect(yes).toMatchObject({ prompted: true, ran: true, code: 0 });
+    const shown = await f.json(["show", "q900"], { env: { FLOWRYN_TOKEN: ship.leaderToken() } });
+    expect(shown.reply.data).toMatchObject({ by: "captain", via: "claude-ask", answer: "approve" });
+  });
+
   test("without a prompt (bypassPermissions, or a plain call) a captain answer is refused", async () => {
     ship = await makeShipEnv({ mode: "local-only" });
     const f = ship.fleet;

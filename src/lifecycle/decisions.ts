@@ -37,7 +37,8 @@ export interface DecisionRow {
   recommendation: string | null;
   reserved_reason: string | null;
   defer_until: string | null;
-  answered_by: "captain" | "leader" | null;
+  /** policy: a `[decisions] nomistakes_rules` rule settled it (answered_via names the rule). */
+  answered_by: "captain" | "leader" | "policy" | null;
   rationale: string | null;
   created_at: number | null;
   /** single (NULL), multi or text: a review gate's question may take more than one choice, or free text. */
@@ -48,6 +49,16 @@ export interface DecisionRow {
   note: string | null;
   /** The choice in the worker's work that waits on the answer. */
   blocks: string | null;
+}
+
+/** A rule's answer the user may still undo (decide --by captain on an answered_by policy decision). */
+export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by">): boolean {
+  return d.state === "answered" && d.answered_by === "policy";
+}
+
+/** The user may answer it: open, or a rule's answer to undo. */
+export function captainAnswerable(d: Pick<DecisionRow, "state" | "answered_by">): boolean {
+  return d.state === "open" || isRuleAnswer(d);
 }
 
 export function getDecision(db: Db, id: string): DecisionRow | null {
