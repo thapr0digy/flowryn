@@ -79,6 +79,7 @@ function scripted(opts: { bootoutStops?: boolean; bootstrapReplies?: LaunchctlRe
       notes.push(`${title}: ${body}`);
     },
     recordFailure: (failure) => failures.push(failure),
+    clearFailure: () => failures.splice(0),
     answerWaitMs: 3_000,
     pollMs: 250,
   };
@@ -140,6 +141,22 @@ describe("the restart's relaunch helper", () => {
     expect(fake.state()).toBe("running-old");
   });
 
+  test("a daemon that comes up just after the failure record is written clears it: no notification, the restart succeeded", async () => {
+    const fake = scripted({ afterBootstrap: "spawn-scheduled" });
+    let late = false;
+    const outcome = await relaunch(plan, {
+      ...fake.deps,
+      recordFailure: (failure) => {
+        fake.deps.recordFailure(failure);
+        late = true;
+      },
+      probe: async () => (late ? NEW_PID : fake.deps.probe()),
+    });
+    expect(outcome).toMatchObject({ ok: true, pid: NEW_PID, via: "fallback" });
+    expect(fake.failures).toEqual([]);
+    expect(fake.notes).toEqual([]);
+  });
+
   test("a notifier or a record that fails never makes the helper throw", async () => {
     const fake = scripted({ afterBootstrap: "spawn-scheduled" });
     const outcome = await relaunch(plan, {
@@ -196,6 +213,13 @@ describe("daemon restart's wait", () => {
     const waited = await waitForRestart(OLD_PID, started, { ping: async () => null, readFailure: () => record, timeoutMs: 10_000, pollMs: 10 });
     expect(waited).toMatchObject({ outcome: "failed", failure: { run: RECOVERY_COMMAND } });
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("reports the new daemon when one answers just as the failure record appears", async () => {
+    const started = Date.now();
+    let pings = 0;
+    const waited = await waitForRestart(OLD_PID, started, { ping: async () => (++pings > 1 ? answer({ pid: NEW_PID }) : null), readFailure: () => failure(Date.now()), timeoutMs: 10_000, pollMs: 10 });
+    expect(waited.outcome).toBe("fresh");
   });
 
   test("ignores a failure record from an earlier restart and reports a new daemon", async () => {

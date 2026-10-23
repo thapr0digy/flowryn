@@ -49,6 +49,7 @@ export interface RelaunchDeps {
   log(line: string): void;
   notify(title: string, body: string): Promise<void>;
   recordFailure(failure: RestartFailure): void;
+  clearFailure(): void;
   answerWaitMs: number;
   pollMs: number;
 }
@@ -131,6 +132,13 @@ export async function relaunch(plan: RelaunchPlan, deps: RelaunchDeps): Promise<
     deps.recordFailure(failure);
   } catch (error) {
     deps.log(`relaunch: could not write the failure record: ${(error as Error).message}`);
+  }
+  const late = await deps.probe();
+  if (late !== null && late !== plan.oldPid) {
+    deps.clearFailure();
+    steps.push(`a new daemon answered after the failure record was written (pid ${late})`);
+    deps.log(`relaunch: ${steps.at(-1)}; record removed`);
+    return { ok: true, pid: late, via: "fallback", steps };
   }
   try {
     await deps.notify("Flowryn daemon is down", `A restart did not bring it back. Run ${RECOVERY_COMMAND} in your terminal.`);

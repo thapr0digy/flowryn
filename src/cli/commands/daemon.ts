@@ -13,7 +13,7 @@ import type { DaemonSnapshot } from "../../daemon/restart.ts";
 import { callServerVerb } from "../client.ts";
 import { LAUNCHD_DEPS, agentPid, installService, isLoaded, kickstart, loadAgent, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
 import { RELAUNCH_ANSWER_MS, RELAUNCH_BOOTSTRAP_BACKOFF_MS, RELAUNCH_BOUND_MS, RELAUNCH_POLL_MS, RELAUNCH_UNLOAD_TIMEOUT_MS, relaunch } from "../../service/relaunch.ts";
-import { RECOVERY_COMMAND, type RestartFailure, failureLine, readRestartFailure, writeRestartFailure } from "../../service/restart-failure.ts";
+import { RECOVERY_COMMAND, type RestartFailure, clearRestartFailure, failureLine, readRestartFailure, writeRestartFailure } from "../../service/restart-failure.ts";
 import { fileLogger } from "../../daemon/logger.ts";
 import { notifyConfig, notificationsOff, recordingNotifierPath } from "../../config/leader.ts";
 import { osascriptNotify, recordingNotify } from "../../attention/notify.ts";
@@ -208,7 +208,12 @@ export async function waitForRestart(
       if (data.restart_handoff === false) return { outcome: "dropped", reason: data.restart_dropped && data.restart_dropped.ts >= started - 1_000 ? data.restart_dropped.reason : "the old daemon withdrew it" };
     }
     const failure = deps.readFailure();
-    if (failure && failure.at >= started) return { outcome: "failed", failure };
+    if (failure && failure.at >= started) {
+      const late = await deps.ping();
+      const pid = late?.ok ? (late.data as { pid?: number }).pid : undefined;
+      if (late && pid !== undefined && pid !== oldPid) return { outcome: "fresh", reply: late };
+      return { outcome: "failed", failure };
+    }
     if (Date.now() >= deadline) return { outcome: "timeout" };
     await Bun.sleep(deps.pollMs);
   }
@@ -319,6 +324,7 @@ const relaunchVerb: VerbSpec = {
         log: fileLogger(stateFiles(config.state_dir).logs, false),
         notify,
         recordFailure: (failure) => writeRestartFailure(config.state_dir, failure),
+        clearFailure: () => clearRestartFailure(config.state_dir),
         answerWaitMs: RELAUNCH_ANSWER_MS,
         pollMs: RELAUNCH_POLL_MS,
       },
