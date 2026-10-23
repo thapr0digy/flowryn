@@ -123,9 +123,9 @@ export function versionMixProblems(repo: string, base: string): string[] {
     const files = gitOk(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit]).split("\n").filter(Boolean);
     if (!files.some((f) => RELEASE_FILES.includes(f))) continue;
     const parent = git(repo, ["rev-parse", "--verify", "--quiet", `${commit}^`]);
-    const before = parent.code === 0 ? snapshotAt(repo, parent.out.trim()) : { version: null, pkg: null };
+    const atParent = parent.code === 0 ? snapshotAt(repo, parent.out.trim()) : { version: null, pkg: null };
     const subject = gitOk(repo, ["log", "-1", "--format=%s", commit]).trim();
-    const problem = judge(`commit ${commit.slice(0, 8)} ("${subject}")`, before, snapshotAt(repo, commit), files);
+    const problem = judge(`commit ${commit.slice(0, 8)} ("${subject}")`, atParent, snapshotAt(repo, commit), files);
     if (problem) problems.push(problem);
   }
   const dirty = gitOk(repo, ["diff", "--name-only", "HEAD"]).split("\n").filter(Boolean);
