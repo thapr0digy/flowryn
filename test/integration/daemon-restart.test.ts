@@ -49,12 +49,13 @@ function events(h: TestHome, kind: string): Record<string, unknown>[] {
  * unreachable the reconciler reads the run as unknown and leaves its lease,
  * where a run with no pane and no process is dead and its lease released.
  */
-function seedValidation(h: TestHome, runId: string): void {
+/** A merge left requested of GitHub: the "merging" guard (a validation is carried across a restart, never a guard). */
+function seedMerging(h: TestHome, taskId: string): void {
   const db = h.db();
   try {
     tx(db, () => {
-      db.query("UPDATE runs SET pane_id = 'w1:p1' WHERE id = ?1").run(runId);
-      db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('validation', ?1, 'ship', ?2)").run(runId, Date.now());
+      db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a-guard', ?1, 'u', 'h', 'cli-tty', 'you', 1, 2)").run(taskId);
+      db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('mg-guard', ?1, 'u', 'h', 'a-guard', ?2, 'requested')").run(taskId, Date.now());
     });
   } finally {
     db.close();
@@ -95,18 +96,18 @@ describe("flowryn daemon restart", () => {
     expect(d.pid).toBeGreaterThan(0);
   }, 60_000);
 
-  test("a validation in progress blocks it; --when-idle parks it and the daemon restarts once it ends", async () => {
+  test("a merge in flight blocks it; --when-idle parks it and the daemon restarts once it ends", async () => {
     const { h, env } = supervisedHome();
     const token = seedLeader(h);
     const run = seedRun(h);
-    seedValidation(h, run.runId);
+    seedMerging(h, run.taskId);
     const old = await daemon(h, env);
     const asLeader = { env: { ...env, FLOWRYN_TOKEN: token } };
 
     const blocked = await cliJson(h, ["daemon", "restart"], asLeader);
     expect(blocked.code).toBe(2);
     expect(blocked.reply.error).toMatchObject({ code: "restart_blocked" });
-    expect((blocked.reply.error as { message: string }).message).toContain(`validation: ${run.taskId}`);
+    expect((blocked.reply.error as { message: string }).message).toContain(`merging: ${run.taskId}`);
 
     const parked = await cliJson(h, ["daemon", "restart", "--when-idle"], asLeader);
     expect(parked.code).toBe(0);
@@ -115,7 +116,7 @@ describe("flowryn daemon restart", () => {
     expect(status.reply.data).toMatchObject({ restart_pending: { by: "leader" } });
 
     const db = h.db();
-    tx(db, () => db.query("UPDATE pool_leases SET released_at = ?1, released_by = 'test' WHERE run_id = ?2").run(Date.now(), run.runId));
+    tx(db, () => db.query("UPDATE merges SET state = 'refused', checked_at = ?1 WHERE id = 'mg-guard'").run(Date.now()));
     db.close();
     expect(await old.exited).toBe(0);
     await waitUntil(() => events(h, "daemon.restarted").length === 1, 20_000, "the new daemon to record the restart");
@@ -126,7 +127,7 @@ describe("flowryn daemon restart", () => {
     const { h, env } = supervisedHome();
     const token = seedLeader(h);
     const run = seedRun(h);
-    seedValidation(h, run.runId);
+    seedMerging(h, run.taskId);
     await daemon(h, env);
     const asLeader = { env: { ...env, FLOWRYN_TOKEN: token } };
     expect((await cliJson(h, ["daemon", "restart", "--when-idle"], asLeader)).reply.data).toMatchObject({ restart: "pending" });

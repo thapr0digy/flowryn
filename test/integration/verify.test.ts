@@ -263,34 +263,88 @@ describe("flowryn verify", () => {
   );
 
   test(
-    "one verification runs at a time: the same PR and head attaches to it, another PR is verify_busy",
+    "assumption: two verifies in one repository run at once, up to the validation pool: the same PR and head attaches to the running job, another PR starts beside it, and both pass",
     async () => {
       const slow = `[projects.web]\nverify = ${JSON.stringify(["sleep 3", ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
       env = await makeShipEnv({ mode: "direct-PR", extraConfig: slow });
       const e = env;
-      await unstartedShip(e, "one-at-a-time");
+      await unstartedShip(e, "side-by-side");
       e.github.addPr("acme/web", { number: 51, headRef: "main" });
 
       const first = await e.fleet.json(["verify", "1", "--detach"]);
       expect(first.code).toBe(0);
-      expect(first.reply.data).toMatchObject({ verification: "v1", attached: false });
+      expect(first.reply.data).toMatchObject({ verification: "v1", request: "vq1", attached: false });
 
       const again = await e.fleet.json(["verify", "1", "--detach"]);
       expect(again.code).toBe(0);
       expect(again.reply.data).toMatchObject({ verification: "v1", attached: true });
 
-      const other = await e.fleet.json(["verify", "51"]);
-      expect(other.code).toBe(2);
-      expect(other.reply.error).toMatchObject({ code: "verify_busy" });
+      const other = await e.fleet.json(["verify", "51", "--detach"]);
+      expect(other.code).toBe(0);
+      expect(other.reply.data).toMatchObject({ verification: "v2", request: "vq2", attached: false });
+      expect(query(e, "SELECT job_id FROM job_leases WHERE released_at IS NULL ORDER BY job_id")).toEqual([{ job_id: "v1" }, { job_id: "v2" }]);
 
-      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE id = 'v1'")[0]?.state === "passed", 30_000, "v1 passed");
-      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE state = 'passed'").length === 2, 30_000, "both passed");
+      expect(query(e, "SELECT id, state FROM verifications ORDER BY id")).toEqual([
+        { id: "v1", state: "passed" },
+        { id: "v2", state: "passed" },
+      ]);
+      expect(query(e, "SELECT id, state, verification_id FROM verify_queue ORDER BY id")).toEqual([
+        { id: "vq1", state: "started", verification_id: "v1" },
+        { id: "vq2", state: "started", verification_id: "v2" },
+      ]);
     },
     { timeout: 120_000 },
   );
 
   test(
-    "a verify takes a validation slot: host pressure refuses it and writes nothing; an attach takes nothing more; the slot is freed once when it ends",
+    "with the validation pool full a verify is queued: the CLI follows it from its place in line to its result; a queued request whose PR closes is cancelled, and the CLI says so",
+    async () => {
+      const go = join(scratch(), "go");
+      const gate = `while [ ! -f ${go} ]; do sleep 0.05; done`;
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS])}\nverify_binary = "dist/flowryn"\n[capacity]\nvalidation = 1\n` });
+      const e = env;
+      await unstartedShip(e, "in-line");
+      e.github.addPr("acme/web", { number: 51, headRef: "main" });
+      e.github.addPr("acme/web", { number: 52, headRef: "main" });
+
+      expect((await e.fleet.json(["verify", "1", "--detach"])).reply.data).toMatchObject({ verification: "v1", attached: false });
+      const second = e.fleet.cli(["verify", "51"]);
+      await waitUntil(() => query(e, "SELECT 1 FROM verify_queue WHERE id = 'vq2' AND state = 'queued'").length === 1, 10_000, "vq2 queued");
+      const third = await e.fleet.json(["verify", "52", "--detach"]);
+      expect(third.reply.data).toMatchObject({ request: "vq3", queued: true, position: "2 of 2", waiting: "behind vq2" });
+      const reads = e.github.count("GET", "/pulls/52");
+      const following = e.fleet.cli(["verify", "52"]);
+      // Close it once the follower has read it open (and joined vq3).
+      await waitUntil(() => e.github.count("GET", "/pulls/52") > reads, 10_000, "the follower's read of PR 52");
+      await Bun.sleep(300);
+      e.github.pr("acme/web", 52).state = "closed";
+
+      writeFileSync(go, "");
+      const followed = await second;
+      expect(followed.code).toBe(0);
+      expect(followed.stdout).toContain("vq2 · web https://github.com/acme/web/pull/51");
+      expect(followed.stdout).toContain("vq2 queued · 1 of 1 · the validation pool is full (1/1: v1 (verify))");
+      expect(followed.stdout).toContain("v2 · web https://github.com/acme/web/pull/51");
+      for (const step of STEPS) expect(followed.stdout).toContain(`✓ ${step}`);
+
+      const cancelled = await following;
+      expect(cancelled.code).toBe(2);
+      expect(cancelled.stdout).toContain("vq3 · web https://github.com/acme/web/pull/52 at");
+      expect(cancelled.stdout).toContain("(already queued; following it)");
+      expect(cancelled.stdout).toContain("verify_cancelled");
+      expect(cancelled.stdout).toContain("https://github.com/acme/web/pull/52 is closed");
+      expect((await e.fleet.json(["verify", "show", "vq3"])).reply.data).toMatchObject({ request: "vq3", state: "cancelled", detail: "https://github.com/acme/web/pull/52 is closed" });
+      expect(query(e, "SELECT id, state FROM verifications ORDER BY id")).toEqual([
+        { id: "v1", state: "passed" },
+        { id: "v2", state: "passed" },
+      ]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a verify takes a validation slot: under host pressure it is queued and takes nothing, and starts once the host recovers; an attach takes nothing more; the slot is freed once when it ends",
     async () => {
       const go = join(scratch(), "go");
       const host = hostProbe();
@@ -302,20 +356,22 @@ describe("flowryn verify", () => {
       const e = env;
       const { task } = await unstartedShip(e, "admitted");
 
-      // The host check fails: a new verify is refused, says why, and records nothing.
+      // The host check fails: a new verify is queued, says why, and takes nothing yet.
       host.set(2);
-      const refused = await e.fleet.json(["verify", "1", "--detach"]);
-      expect(refused.code).toBe(2);
-      expect(refused.reply.error).toMatchObject({ code: "no_capacity" });
-      expect(JSON.stringify(refused.reply.error)).toContain("host check fails (2.0 GB available, under 8 GB)");
+      const queued = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(queued.code).toBe(0);
+      expect(queued.reply.data).toMatchObject({ request: "vq1", queued: true, position: "1 of 1", attached: false });
+      expect(JSON.stringify(queued.reply.data)).toContain("host check fails (2.0 GB available, under 8 GB)");
       expect(query(e, "SELECT id FROM verifications")).toEqual([]);
       expect(query(e, "SELECT id FROM job_leases")).toEqual([]);
+      // Asking again joins the queued request.
+      const joined = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(joined.reply.data).toMatchObject({ request: "vq1", queued: true, attached: true });
 
-      // The host recovers: the verify starts and holds the one validation slot.
+      // The host recovers: the scheduler starts it, and it holds the one validation slot.
       host.set(64);
-      const first = await e.fleet.json(["verify", "1", "--detach"]);
-      expect(first.code).toBe(0);
-      expect(first.reply.data).toMatchObject({ verification: "v1", attached: false });
+      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verify_queue WHERE id = 'vq1'")[0]?.state === "started", 15_000, "vq1 started");
+      expect((await e.fleet.json(["verify", "show", "vq1"])).reply.data).toMatchObject({ request: "vq1", state: "started", verification: "v1" });
       const capacity = await e.fleet.json(["capacity"]);
       expect(capacity.reply.data).toMatchObject({ pools: expect.arrayContaining([{ pool: "validation", used: 1, cap: 1 }]), jobs: [{ job: "v1", kind: "verify", pool: "validation", task }] });
 
@@ -396,7 +452,7 @@ describe("flowryn verify", () => {
   );
 
   test(
-    "a running job attaches only under the same policy: after the steps change, a second verify of the same head is refused verify_busy and takes nothing; with them restored it attaches",
+    "a running job attaches only under the same policy: after the steps change, a second verify of the same head starts its own job under today's steps; with them restored it attaches",
     async () => {
       const go = join(scratch(), "go");
       const gate = `while [ ! -f ${go} ]; do sleep 0.05; done`;
@@ -411,13 +467,11 @@ describe("flowryn verify", () => {
 
       const strengthened = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS, "true"])}\nverify_binary = "dist/flowryn"\n`;
       await reloadVerify(e, gated, strengthened);
-      const refused = await e.fleet.json(["verify", "1", "--detach"]);
-      expect(refused.code).toBe(2);
-      expect(refused.reply.error).toMatchObject({ code: "verify_busy" });
-      expect(JSON.stringify(refused.reply.error)).toContain("is running under another verify policy");
-      expect(JSON.stringify(refused.reply.error)).toContain("flowryn verify show v1");
-      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
-      expect(query(e, "SELECT job_id FROM job_leases")).toEqual([{ job_id: "v1" }]);
+      const other = await e.fleet.json(["verify", "1", "--detach"]);
+      expect(other.code).toBe(0);
+      expect(other.reply.data).toMatchObject({ verification: "v2", attached: false });
+      expect(query(e, "SELECT id, policy_id <> (SELECT policy_id FROM verifications WHERE id = 'v1') AS other FROM verifications WHERE id = 'v2'")).toEqual([{ id: "v2", other: 1 }]);
+      expect(query(e, "SELECT job_id FROM job_leases ORDER BY job_id")).toEqual([{ job_id: "v1" }, { job_id: "v2" }]);
 
       await reloadVerify(e, strengthened, gated);
       const again = await e.fleet.json(["verify", "1", "--detach"]);
@@ -425,8 +479,8 @@ describe("flowryn verify", () => {
       expect(again.reply.data).toMatchObject({ verification: "v1", attached: true });
 
       writeFileSync(go, "");
-      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE id = 'v1'")[0]?.state === "passed", 30_000, "v1 passed");
-      expect(query(e, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
+      await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verifications WHERE state = 'passed'").length === 2, 30_000, "v1 and v2 passed");
+      expect(query(e, "SELECT id FROM verifications ORDER BY id")).toEqual([{ id: "v1" }, { id: "v2" }]);
     },
     { timeout: 120_000 },
   );

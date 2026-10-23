@@ -222,7 +222,7 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
   );
 
   test(
-    "a verify and a ship share the validation budget: neither oversubscribes it, the freed slot goes to the waiting ship, and a full pool refuses a verify",
+    "a verify and a ship share the validation budget: neither oversubscribes it, the freed slot goes to the waiting ship, and a full pool queues a verify",
     async () => {
       const gateDir = mkdtempSync(join(tmpdir(), "fw-verify-go-"));
       dirs.push(gateDir);
@@ -261,11 +261,12 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       expect(query<{ state: string }>(f, "SELECT state FROM verifications WHERE id = 'v1'")[0]!.state).toBe("passed");
       expect(query<{ run_id: string }>(f, "SELECT run_id FROM pool_leases WHERE pool = 'validation' AND released_at IS NULL")).toEqual([{ run_id: run }]);
 
-      // Now the ship holds the one slot: a new verify is refused, naming who holds it, and records nothing.
-      const refused = await f.json(["verify", "1", "--detach"]);
-      expect(refused.code).toBe(2);
-      expect(refused.reply.error).toMatchObject({ code: "no_capacity" });
-      expect(JSON.stringify(refused.reply.error)).toContain(`validation pool is full (1/1: ${task} (ship))`);
+      // Now the ship holds the one slot: a new verify is queued, naming who holds it, and starts nothing.
+      const queued = await f.json(["verify", "1", "--detach"]);
+      expect(queued.code).toBe(0);
+      expect(queued.reply.data).toMatchObject({ request: "vq2", queued: true, position: "1 of 1" });
+      expect(JSON.stringify(queued.reply.data)).toContain(`validation pool is full (1/1: ${task} (ship))`);
+      expect((await f.json(["capacity"])).reply.data).toMatchObject({ verify_queue: [{ request: "vq2", pr: "https://github.com/acme/web/pull/1", why: `the validation pool is full (1/1: ${task} (ship))` }] });
       expect(query(f, "SELECT id FROM verifications")).toEqual([{ id: "v1" }]);
 
       const seen = await watch.stop();

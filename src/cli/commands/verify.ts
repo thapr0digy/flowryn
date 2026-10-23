@@ -10,8 +10,11 @@ import { renderReply } from "../render.ts";
  * local-only task's worktree head, in a clean worktree with the project's
  * configured steps. The daemon runs the job
  * (outside every sandbox); this command starts it and then follows it, one
- * line per step as it ends. Ctrl-C stops following, never the job, which
- * still records its result. --detach returns at once with the id.
+ * line per step as it ends. With no free validation slot it is queued
+ * (docs/notes/2026-10-22-daemon-run-verify-y3.md): the command says where it
+ * stands and follows it once it starts. Ctrl-C stops following, never the
+ * job, which still records its result. --detach returns at once with the id
+ * (the request's, vq<n>, when it was queued).
  */
 
 const POLL_MS = 1_000;
@@ -48,6 +51,41 @@ function finalReply(data: Record<string, unknown>): Reply {
   return errorReply({ code: "verify_failed", message: `${String(data.verification)} ${String(data.state)}: ${String(data.detail)}`, help: `flowryn verify show ${String(data.verification)}; logs in ${String(data.logs)}` });
 }
 
+/** "vq3 queued · 2 of 3 · behind vq2": where a queued request stands. */
+function queuedLine(data: Record<string, unknown>): string {
+  return `${String(data.request)} queued · ${String(data.position)} · ${String(data.waiting)}\n`;
+}
+
+/**
+ * Wait for a queued request to start, printing where it stands when that
+ * changes; then its verification is followed as one started at once. A
+ * cancelled request ends the command with verify_cancelled.
+ */
+async function followQueued(first: Record<string, unknown>, io: CliIo): Promise<{ data: Record<string, unknown> } | { exit: number }> {
+  const request = String(first.request);
+  if (!io.json) io.stdout(`${request} · ${String(first.project)} ${String(first.pr)} at ${String(first.head).slice(0, 8)}${first.attached ? " (already queued; following it)" : ""}\n`);
+  let last = "";
+  let lastAnswer = Date.now();
+  for (;;) {
+    const reply = await callServerVerb(serverVerb("verify show")!, { id: request }, io);
+    if (!reply.ok) {
+      if (reply.error?.code !== "daemon_unavailable" || Date.now() - lastAnswer > UNREACHABLE_MS) {
+        io.stdout(renderReply(errorReply(reply.error ?? { code: "internal", message: "cannot read the verify request" }), { json: io.json }));
+        return { exit: reply.exitCode };
+      }
+    } else {
+      lastAnswer = Date.now();
+      const data = reply.data;
+      if (data.state === "started") return { data: { ...data, verification: data.verification, attached: false } };
+      if (data.state === "cancelled") return { exit: print(io, errorReply({ code: "verify_cancelled", message: `${request} was cancelled before it started: ${String(data.detail)}`, help: `flowryn verify show ${request}` })) };
+      const line = queuedLine(data);
+      if (!io.json && line !== last) io.stdout(line);
+      last = line;
+    }
+    await Bun.sleep(POLL_MS);
+  }
+}
+
 const verify: VerbSpec = {
   name: "verify",
   summary: "Test a PR or local-only head in a clean worktree with the project's verify steps; a pass at the exact head is what the merge gate requires",
@@ -64,9 +102,12 @@ const verify: VerbSpec = {
       io.stdout(renderReply(errorReply(started.error ?? { code: "internal", message: "verify did not start" }), { json: io.json }));
       return started.exitCode;
     }
-    const id = String(started.data.verification);
+    if (started.data.queued === true && boolArg(args, "detach")) return print(io, okReply(started.data, [`flowryn verify show ${String(started.data.request)}`]));
+    const followed = started.data.queued === true ? await followQueued(started.data, io) : { data: started.data };
+    if ("exit" in followed) return followed.exit;
+    const id = String(followed.data.verification);
     if (boolArg(args, "detach")) return print(io, okReply(started.data, [`flowryn verify show ${id}`]));
-    if (!io.json) io.stdout(`${id} · ${String(started.data.project)} ${String(started.data.pr)} at ${String(started.data.head).slice(0, 8)}${started.data.attached ? " (already running; following it)" : ""}\n`);
+    if (!io.json) io.stdout(`${id} · ${String(started.data.project)} ${String(started.data.pr)} at ${String(started.data.head).slice(0, 8)}${started.data.attached && started.data.queued !== true ? " (already running; following it)" : ""}\n`);
     const shown = new Set<number>();
     let running = -1;
     let lastAnswer = Date.now();
