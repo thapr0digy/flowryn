@@ -116,9 +116,9 @@ describe("plans", () => {
     const plan = parsePlan("# Checkout\n\n## Phase 1: Cart API\nworkflow: fix\nharness: pi\nBuild the cart endpoints.\n\n## Phase 2: Cart page\nThe page.\n\n## Docs\nafter: 1\nWrite docs.\n");
     expect(plan.title).toBe("Checkout");
     expect(plan.phases).toEqual([
-      { title: "Cart API", body: "Build the cart endpoints.", workflow: "fix", harness: "pi", after: null },
-      { title: "Cart page", body: "The page.", workflow: null, harness: null, after: null },
-      { title: "Docs", body: "Write docs.", workflow: null, harness: null, after: [1] },
+      { title: "Cart API", body: "Build the cart endpoints.", workflow: "fix", harness: "pi", account: null, after: null },
+      { title: "Cart page", body: "The page.", workflow: null, harness: null, account: null, after: null },
+      { title: "Docs", body: "Write docs.", workflow: null, harness: null, account: null, after: [1] },
     ]);
   });
 
@@ -246,7 +246,7 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
     tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
     const proc = { pid: 4242, start: 1_000, exe: "/bin/sh" };
     expect(tx(db, () => recordJobProcess(db, v1, proc, 2))).toBe(true);
-    // A parallel group's steps run at once: each is a row of its own (migration 30).
+    // A parallel group's steps run at once: each is a row of its own (migration 31).
     expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4243 }, 2))).toBe(true);
     expect(leaseProcesses(db, liveJobLeases(db)[0]!)).toEqual([proc, { ...proc, pid: 4243 }]);
     tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 3));
@@ -258,7 +258,7 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
     db.close();
   });
 
-  test("assumption: a lease from before migration 30 keeps its one step in job_leases, and recovery still reads it", () => {
+  test("assumption: a lease from before migration 31 keeps its one step in job_leases, and recovery still reads it", () => {
     const db = scratchDb();
     tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
     db.exec("UPDATE job_leases SET proc_pid = 4000, proc_start = 900, proc_exe = '/bin/sh'");

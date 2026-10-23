@@ -686,7 +686,18 @@ CREATE INDEX verify_queue_verification ON verify_queue(verification_id);
 `;
 
 /**
- * Migration 30 (docs/notes/2026-10-22-verify-reliability-per-xe.md): every step process a job
+ * Migration 30: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
+ * dispatch because a resume must stay in the login that holds the session; a plan phase's `account:`
+ * line waits beside its harness. Rows from before name their harness's implicit account.
+ */
+const ACCOUNTS_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN account TEXT;
+UPDATE runs SET account = harness;
+ALTER TABLE plan_phases ADD COLUMN account TEXT;
+`;
+
+/**
+ * Migration 31 (docs/notes/2026-10-22-verify-reliability-per-xe.md): every step process a job
  * started (its process group leader), one row each, since the steps of a parallel group run at
  * once and job_leases holds one. Startup recovery ends each by identity (a gone or reused pid is
  * never signalled). Leases from before keep their one step in job_leases.proc_*.
@@ -728,7 +739,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
   { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
-  { version: 30, name: "job-procs", sql: JOB_PROCS_SQL },
+  { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
+  { version: 31, name: "job-procs", sql: JOB_PROCS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

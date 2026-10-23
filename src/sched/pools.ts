@@ -151,7 +151,7 @@ export function recordJobProcess(db: Db, job: JobRef, proc: ProcIdentity, now: n
   return true;
 }
 
-/** Every step process recorded on the lease, oldest first: its job_procs rows, and the one a lease from before migration 30 holds. */
+/** Every step process recorded on the lease, oldest first: its job_procs rows, and the one a lease from before migration 31 holds. */
 export function leaseProcesses(db: Db, lease: JobLeaseRow): ProcIdentity[] {
   const rows = db.query("SELECT proc_pid, proc_start, proc_exe FROM job_procs WHERE lease_id = ?1 ORDER BY id").all(lease.id) as { proc_pid: number; proc_start: number; proc_exe: string }[];
   const procs = rows.map((r) => ({ pid: r.proc_pid, start: r.proc_start, exe: r.proc_exe }));
