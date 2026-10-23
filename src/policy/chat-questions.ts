@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { Db } from "../db/db.ts";
-import { getDecision } from "../lifecycle/decisions.ts";
+import { captainAnswerable, getDecision } from "../lifecycle/decisions.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
@@ -79,7 +79,7 @@ function option(label: string, description: string): ChatOption {
 function decisionForm(db: Db, id: string): ChatForm {
   const d = getDecision(db, id);
   if (!d) throw new FlowrynError("not_found", `no decision ${id}`, "flowryn decision list");
-  if (d.state !== "open") throw new FlowrynError("not_ready", `decision ${id} is already ${d.state}`);
+  if (!captainAnswerable(d)) throw new FlowrynError("not_ready", `decision ${id} is already ${d.state}`);
   const opts = JSON.parse(d.options) as string[];
   if ((d.kind ?? "single") === "text" || opts.length < MIN_OPTIONS || opts.length > MAX_OPTIONS) {
     throw new FlowrynError("not_ready", `decision ${id} has ${opts.length} options; a chat question takes ${MIN_OPTIONS} to ${MAX_OPTIONS}`, `ask it as before: flowryn decide ${id} <choice> --by captain (Claude prompts the user)`);

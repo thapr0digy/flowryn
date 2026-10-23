@@ -126,6 +126,21 @@ function decidedLines(db: Db, since: number, until: number, heading: string): st
   return lines;
 }
 
+/**
+ * What a `[decisions] nomistakes_rules` rule settled after `since` (and up to `until`), with the
+ * undo the user may still take while the run is live (docs/notes/2026-10-22-settle-routine-no-2r.md).
+ */
+function ruleLines(db: Db, since: number, until: number, heading: string): string[] {
+  const settled = db
+    .query("SELECT id, question, answer, answered_via FROM decisions WHERE answered_by = 'policy' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at")
+    .all(since, until) as { id: string; question: string; answer: string; answered_via: string | null }[];
+  if (settled.length === 0) return [];
+  const lines = [`${heading} (${settled.length}; undo: flowryn decide <id> <choice> --by captain):`];
+  for (const d of settled.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (${d.answered_via ?? "rule"})`);
+  if (settled.length > MAX_DECISION_LINES) lines.push(`+${settled.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
+  return lines;
+}
+
 /** Every open actionable item, P0 first, at most MAX_NEEDS_LINES, under `heading`. */
 function needsLines(db: Db, now: number, ageMs: number, heading: string): { lines: string[]; listed: RankedItem[] } {
   const needs = openActionable(db, now, ageMs);
@@ -158,6 +173,7 @@ function decisionLines(db: Db, now: number, mark: boolean): string[] {
   if (openForLeader.length > 0) lines.push(`Open decisions to decide: ${openForLeader.length} (flowryn decision list)`);
   const since = Number(getMeta(db, "last_briefing_at") ?? "0");
   lines.push(...decidedLines(db, since, Number.MAX_SAFE_INTEGER, "Decided for you since the last briefing"));
+  lines.push(...ruleLines(db, since, Number.MAX_SAFE_INTEGER, "Settled by rule since the last briefing"));
   if (getMeta(db, "import_triage") === "1") {
     const open = (db.query("SELECT COUNT(*) AS n FROM decisions WHERE state = 'open' AND import_source IS NOT NULL AND reserved_reason IS NULL").get() as { n: number }).n;
     if (open > 0) lines.push(`Imported earlier: ${plural(open, "open decision")}. Decide each one you may with flowryn decide <id> <choice> --rationale <why>; leave reserved ones for the user.`);
@@ -314,6 +330,7 @@ export function composeReturnBrief(db: Db, input: ReturnBriefInput): string {
   lines.push(...reservedLines(db, input.now));
   const decided = decidedLines(db, since, until, "Decided for you");
   lines.push(...(decided.length > 0 ? decided : ["Decided for you: nothing."]));
+  lines.push(...ruleLines(db, since, until, "Settled by rule"));
   const landed = windowEvents(db, ["run.landed"], since, until);
   lines.push(landed.length > 0 ? `Landed (${landed.length}): ${taskNames(db, landed, () => "")}` : "Landed: nothing.");
   const failed = windowEvents(db, ["run.failed", "run.cancelled"], since, until);
