@@ -49,11 +49,11 @@ The worker posts its replies from your account, so you and it share a login. The
 
 ### Upgrade baseline
 
-Migration 31 records `meta.pr_feedback_since` (whole seconds, in ms). Feedback written before that is recorded as `baseline` and never sent, so the first poll after the upgrade does not flood open PRs with old comments.
+Migration 32 records `meta.pr_feedback_since` (whole seconds, in ms). Feedback written before that is recorded as `baseline` and never sent, so the first poll after the upgrade does not flood open PRs with old comments.
 
 ## Data
 
-`pr_feedback` (migration 31) has one row per item per task, keyed by the forge's id (`comment:<id>`, `review:<id>`, `issue-comment:<id>`). Each row holds the kind, author, url, written time, tracked flag, state (`baseline`, `ignored`, `held`, `sent`, `answered`, `escalated`), the number of sends, the first and last send, and when and how it was answered. Events: `pr.feedback_seen`, `run.review_steered` (`via` `send_back` or `steer`, with the delivered head, which the per-head cap counts), `pr.feedback_answered`, `pr.feedback_escalated` and `pr.feedback_capped`.
+`pr_feedback` (migration 32) has one row per item per task, keyed by the forge's id (`comment:<id>`, `review:<id>`, `issue-comment:<id>`). Each row holds the kind, author, url, written time, tracked flag, state (`baseline`, `ignored`, `held`, `sent`, `answered`, `escalated`), the number of sends, the first and last send, and when and how it was answered. Events: `pr.feedback_seen`, `run.review_steered` (`via` `send_back` or `steer`, with the delivered head, which the per-head cap counts), `pr.feedback_answered`, `pr.feedback_escalated` and `pr.feedback_capped`.
 
 ## Choices
 
