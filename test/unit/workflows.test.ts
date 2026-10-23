@@ -246,7 +246,7 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
     tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
     const proc = { pid: 4242, start: 1_000, exe: "/bin/sh" };
     expect(tx(db, () => recordJobProcess(db, v1, proc, 2))).toBe(true);
-    // A parallel group's steps run at once: each is a row of its own (migration 29).
+    // A parallel group's steps run at once: each is a row of its own (migration 30).
     expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4243 }, 2))).toBe(true);
     expect(leaseProcesses(db, liveJobLeases(db)[0]!)).toEqual([proc, { ...proc, pid: 4243 }]);
     tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 3));
@@ -258,7 +258,7 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
     db.close();
   });
 
-  test("assumption: a lease from before migration 29 keeps its one step in job_leases, and recovery still reads it", () => {
+  test("assumption: a lease from before migration 30 keeps its one step in job_leases, and recovery still reads it", () => {
     const db = scratchDb();
     tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
     db.exec("UPDATE job_leases SET proc_pid = 4000, proc_start = 900, proc_exe = '/bin/sh'");

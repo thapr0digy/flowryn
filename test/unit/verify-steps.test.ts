@@ -12,7 +12,9 @@ import { grantJobLease, liveCounts, recordJobProcess } from "../../src/sched/poo
 import { verifyConfig, type VerifyItem } from "../../src/verify/config.ts";
 import { deadlineLine, STEP_DEADLINE_FLOOR_MS, stepDeadlines } from "../../src/verify/deadline.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
+import { insertRequest } from "../../src/verify/queue.ts";
 import { groupRows, initialSteps, recoverVerifications, retryLogName, runVerification, stepGroups, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
+import { admitRequest, planOf } from "../../src/verify/start.ts";
 import { finishVerification, getVerification, insertVerification, type Verification, type VerifyStep } from "../../src/verify/store.ts";
 
 /**
@@ -135,6 +137,20 @@ describe("verify groups and verify_step_timeout_min in config", () => {
     expect(read.step_timeout_ms).toBe(240_000);
     expect(initialSteps(read.steps).map((s) => s.name)).toEqual(["bun install", "bun run typecheck", "npx oxlint", "bun test"]);
     expect(verifyConfig(config('[projects.web]\nverify = ["true"]\n'), "web")!.step_timeout_ms).toBeNull();
+  });
+
+  test("a queued request starts with the step timeout and the groups of today's config", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db);
+    const read = verifyConfig(config('[projects.web]\nverify = [\n  "bun install",\n  ["bun run typecheck", "npx oxlint"],\n]\nverify_step_timeout_min = 4\n'), "web")!;
+    const request = tx(db, () => insertRequest(db, { project_id: "web", pr_url: "u", task_id: null, head_sha: "h", policy_id: verifyPolicyId(read), pr_number: 1, head_ref: "b", worktree: null, source: "cli", path: null, now: 1 }));
+    expect(planOf(request, read).stepTimeoutMs).toBe(240_000);
+    const v = tx(db, () => admitRequest(db, request, read, { validation: 1 }, tempDir(), "/p", 1));
+    expect(v.steps.map((s) => [s.name, s.group])).toEqual([
+      ["bun install", 0],
+      ["bun run typecheck", 1],
+      ["npx oxlint", 1],
+    ]);
   });
 
   test("assumption: Bun's TOML reads a group in a one-line list only when the list does not end in ]] (docs note: break the lines)", () => {

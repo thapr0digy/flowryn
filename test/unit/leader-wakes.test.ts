@@ -126,6 +126,70 @@ describe("leader follow-ups: your own actions wake the leader", () => {
   });
 });
 
+function policy(taskId: string, yolo: 0 | 1): string {
+  tx(db, () => {
+    db.query("INSERT OR IGNORE INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('web', 'https://example.test/web.git', '/tmp/web', 'main', 'no-mistakes')").run();
+    db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, 'web', 'ship', 'no-mistakes', ?2, 'fix', 0)").run(taskId, yolo);
+  });
+  return taskId;
+}
+
+describe("ready work wakes the idle leader (docs/notes/2026-10-22-wake-the-idle-us.md)", () => {
+  test("a yolo task's pr_ready wakes an idle leader with the user inactive, as a follow-up, once", () => {
+    const s = holder();
+    const id = open("pr_ready", "PR ready: web (t-yolo) #12", { task: policy("t-yolo", 1) });
+    const { push } = leaderPush(pushCtx(), s, clock);
+    expect(push).toMatchObject({ kind: "follow_up", mode: "waiter", items: [{ id }] });
+    expect(followUpWakeLine(push!.items)).toBe(`Flowryn follow-up [${id}]: a yolo PR is ready to verify and merge. Details: flowryn fleet`);
+    tx(db, () => carry(db, { itemId: id, session: s.session_id, turn: s.turn_no + 1, path: "waiter", now: clock }));
+    expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
+  });
+
+  test("assumption: a pr_ready that waits on the user (not yolo, or no policy) does not wake a leader that is only inactive", () => {
+    const s = holder();
+    open("pr_ready", "PR ready: web (t-manual)", { task: policy("t-manual", 0) });
+    open("pr_ready", "PR ready: no policy");
+    expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
+    expect(followUpBatch(db, s.session_id)).toBeNull();
+  });
+
+  test("assumption: a ready-PR wake counts on the P0 budget ([notify] max_triggered_turns_per_hour): the next PR in the hour waits", () => {
+    const s = holder();
+    const first = open("pr_ready", "PR ready: one", { task: policy("t-one", 1) });
+    tx(db, () => carry(db, { itemId: first, session: s.session_id, turn: s.turn_no + 1, path: "waiter", now: clock }));
+    open("pr_ready", "PR ready: two", { task: policy("t-two", 1) });
+    const capped = { ...pushCtx(), attention: inertAttention({ notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) }) };
+    expect(leaderPush(capped, s, clock).push).toBeNull();
+    expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "follow_up" });
+  });
+
+  test("assumption: a worker's non-blocking question already wakes an inactive idle leader, on the question budget, so it is not a follow-up", () => {
+    const s = holder();
+    const id = open("worker_question", "web asks: which color?", { at: clock - DEFAULT_LEADER_TIMING.question_batch_ms });
+    expect(followUpBatch(db, s.session_id)).toBeNull();
+    expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "questions", mode: "waiter", items: [{ id }] });
+  });
+
+  test("a yolo pr_ready tops its lane in the digest, after nothing the user did", () => {
+    const s = holder({ user_inactive_since: null });
+    open("gate_ready", "a gate waits", { at: clock - 60_000 });
+    const ready = open("pr_ready", "PR ready: yolo", { task: policy("t-top", 1), at: clock });
+    const digest = composeDigest(digestCandidates(db, s.session_id, clock, DEFAULT_LEADER_TIMING.age_ms))!;
+    expect(digest.shown[0]!.id).toBe(ready);
+  });
+
+  test("the wake line of a full batch of every follow-up kind stays within one P0 line", () => {
+    const line = followUpWakeLine([
+      { id: "i99991", kind: "user_acted" },
+      { id: "i99992", kind: "landed" },
+      { id: "i99993", kind: "pass_requested" },
+      { id: "i99994", kind: "pr_ready" },
+    ]);
+    expect(line.length).toBeLessThanOrEqual(P0_LINE_MAX);
+    expect(line).toContain("a yolo PR is ready to verify and merge");
+  });
+});
+
 describe("the rewake line and Claude's composer", () => {
   test("the typed line is fixed: daemon-made ids only, a wake prompt, within the P0 line limit", () => {
     const line = rewakeLine(["i12", "i14"]);

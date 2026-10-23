@@ -54,7 +54,7 @@ Nothing infers dependencies, so group only steps that are independent. Here `doc
 
 ## Restart recovery with several live steps
 
-Migration 29 adds `job_procs`, with one row per step process a job started (its process group leader), because a parallel group runs several at once and `job_leases` holds one. `recordJobProcess` inserts there. Startup recovery ends every recorded process by identity (a process that is gone or whose pid was reused is left alone), and it still reads `job_leases.proc_*` on leases from before the migration. When several steps will not exit, the detail lists their pids (`its steps (pid a, b) did not exit`).
+Migration 30 adds `job_procs` (main took 29 for the verify queue), with one row per step process a job started (its process group leader), because a parallel group runs several at once and `job_leases` holds one. `recordJobProcess` inserts there. Startup recovery ends every recorded process by identity (a process that is gone or whose pid was reused is left alone), and it still reads `job_leases.proc_*` on leases from before the migration. When several steps will not exit, the detail lists their pids (`its steps (pid a, b) did not exit`).
 
 ## The CLI
 
@@ -62,4 +62,4 @@ Migration 29 adds `job_procs`, with one row per step process a job started (its 
 
 ## Tests
 
-`test/unit/verify-steps.test.ts`: the config groups and key, the Bun TOML edge, the policy identity (flat list unchanged against the live vector, grouped list different), history deadlines (none without a clean pass, 3× the slowest of the last 5, the 2 min floor, exclusions, the config override, the deadline recorded by the job), a hang that passes on its retry with the `ps` rows in its log, a double hang, the run deadline without a retry, a failing `ps`, two steps that really overlap, a failure that stops a sibling, ordering of old rows, recovery of two live groups, and the `ps` row filter. `test/unit/verify.test.ts` was updated for `job_procs` and migration 29.
+`test/unit/verify-steps.test.ts`: the config groups and key, the Bun TOML edge, the policy identity (flat list unchanged against the live vector, grouped list different), history deadlines (none without a clean pass, 3× the slowest of the last 5, the 2 min floor, exclusions, the config override, the deadline recorded by the job), a hang that passes on its retry with the `ps` rows in its log, a double hang, the run deadline without a retry, a failing `ps`, two steps that really overlap, a failure that stops a sibling, ordering of old rows, recovery of two live groups, and the `ps` row filter. `test/unit/verify.test.ts` was updated for `job_procs` and migration 30.

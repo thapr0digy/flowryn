@@ -11,27 +11,28 @@ import { runAndProject } from "../policy/verbs.ts";
 import { isForgeOutage, noteForgeDown } from "../reconcile/forge-health.ts";
 import { capacityConfig } from "../config/workflows.ts";
 import type { HostVerdict } from "../sched/host.ts";
-import { fullPools, grantJobLease, liveCounts, poolHolders } from "../sched/pools.ts";
 import { tx } from "../db/db.ts";
 import { verifyConfig, verifySnippet, type VerifyConfig } from "./config.ts";
-import { shortPolicy, verifyPolicyId } from "./policy.ts";
-import { initialSteps, isVerifying, readTail, runVerification, type VerifyDeps } from "./runner.ts";
-import { getVerification, insertVerification, runningVerifications, type Verification } from "./store.ts";
+import { verifyPolicyId } from "./policy.ts";
+import { findQueued, getRequest, insertRequest, positionOf, queuedRequests, requeuedFrom, type VerifyRequest } from "./queue.ts";
+import { isVerifying, readTail, type VerifyDeps } from "./runner.ts";
+import { admitRequest, launchVerification, planOf, queueHold, verifyRoot as rootOf, VERIFY_POOL, waitingOn } from "./start.ts";
+import { getVerification, runningVerifications, type Verification } from "./store.ts";
 import { countsLine } from "./summary.ts";
 
 /**
  * The daemon side of `flowryn verify` (the CLI verb is src/cli/commands/verify.ts):
  * `verify.start` resolves the PR head through the forge and starts the job,
- * `verify show` reads where a verification stands. Leader and human only: a
- * passing verification counts at the merge gate.
+ * or queues it behind the others for a validation slot (src/verify/start.ts);
+ * `verify show` reads where a verification, or a queued request, stands.
+ * Leader and human only: a passing verification counts at the merge gate.
  */
 
 export function verifyRoot(ctx: Pick<HandlerCtx, "config">): string {
-  return join(ctx.config().state_dir, "verify");
+  return rootOf(ctx.config());
 }
 
-/** The pool a verify takes a slot of: the ship stage's no-mistakes pipeline's. */
-export const VERIFY_POOL = "validation";
+export { VERIFY_POOL };
 
 function verifyDeps(ctx: HandlerCtx): VerifyDeps {
   return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx), released: () => ctx.sched.kick() };
@@ -111,21 +112,11 @@ interface StartPrepared {
   host: HostVerdict;
 }
 
-/**
- * Admission for a new verify (docs/notes/2026-10-12-next-steps-md-64.md): the
- * scheduler's host verdict and a free slot of the validation pool, or a
- * no_capacity refusal saying why. There is no queue: the caller runs it again.
- */
-function admissionRefusal(db: Db, caps: Record<string, number>, host: HostVerdict): FlowrynError | null {
-  if (!host.ok) return new FlowrynError("no_capacity", `the host check fails (${host.reason}); a verify starts only when a new ${VERIFY_POOL} slot could be granted`, "flowryn capacity; run flowryn verify again later");
-  if (fullPools(db, caps, [VERIFY_POOL]).length === 0) return null;
-  const used = liveCounts(db)[VERIFY_POOL] ?? 0;
-  return new FlowrynError("no_capacity", `the ${VERIFY_POOL} pool is full (${used}/${caps[VERIFY_POOL] ?? 0}: ${poolHolders(db, VERIFY_POOL) || "nothing listed"}); a verify takes one slot`, "flowryn capacity; run flowryn verify again when a slot is free");
-}
-
 /** What the CLI and `verify show` print: the steps so far, and the tail of a failed step's output. */
-export function verificationView(v: Verification, now: number): Record<string, unknown> {
+export function verificationView(v: Verification, now: number, db?: Db): Record<string, unknown> {
   const failed = v.steps.find((s) => s.state === "failed");
+  // A verification the last daemon was running when it stopped runs again from the front of the queue.
+  const requeued = db && v.state === "error" ? requeuedFrom(db, v.id) : null;
   return {
     verification: v.id,
     project: v.project_id,
@@ -151,6 +142,7 @@ export function verificationView(v: Verification, now: number): Record<string, u
     detail: v.detail ?? "-",
     logs: v.dir,
     tail: failed ? readTail(join(v.dir, failed.log), 16 * 1024).split("\n").slice(-31).join("\n").trimEnd() : "-",
+    ...(requeued ? { requeued: requeued.id } : {}),
   };
 }
 
@@ -196,67 +188,90 @@ const verifyStart: VerbSpec = {
   },
   apply(ctx, args, prepared) {
     const { target, pr, config, policy, host } = prepared as StartPrepared;
+    const now = ctx.now();
     const running = runningVerifications(ctx.db);
-    const same = running.find((v) => v.pr_url === target.url && v.head_sha === pr.headSha);
-    if (same?.policy_id === policy) return { data: { ...verificationView(same, ctx.now()), attached: true } };
-    if (same) {
-      // One job at a time: a second cannot start beside it, and attaching would report a run of other steps as today's.
-      throw new FlowrynError(
-        "verify_busy",
-        `verification ${same.id} of ${same.pr_url} at ${same.head_sha.slice(0, 8)} is running under another verify policy (${shortPolicy(same.policy_id)}, today's is ${shortPolicy(policy)}: the [projects.${target.project.id}] verify steps or verify_binary changed since it started), so it would not cover today's steps; one runs at a time`,
-        `wait for it: flowryn verify show ${same.id}; then run flowryn verify again`,
-      );
-    }
-    if (running.length > 0) {
-      const busy = running[0]!;
-      throw new FlowrynError("verify_busy", `verification ${busy.id} of ${busy.pr_url} at ${busy.head_sha.slice(0, 8)} is running; one runs at a time`, `flowryn verify show ${busy.id}`);
-    }
+    const same = running.find((v) => v.pr_url === target.url && v.head_sha === pr.headSha && v.policy_id === policy);
+    if (same) return { data: { ...verificationView(same, now), attached: true } };
     const caps = capacityConfig(ctx.config()).pools;
-    const refused = admissionRefusal(ctx.db, caps, host);
-    if (refused) throw refused;
-    const root = verifyRoot(ctx);
-    const v = insertVerification(ctx.db, {
+    const joined = findQueued(ctx.db, target.url, pr.headSha, policy);
+    if (joined) return { data: { ...requestView(ctx.db, joined, caps, now), attached: true } };
+    const ahead = queuedRequests(ctx.db).length > 0;
+    const request = insertRequest(ctx.db, {
       project_id: target.project.id,
       pr_url: target.url,
       task_id: target.task,
       head_sha: pr.headSha,
-      steps: initialSteps(config.steps),
       policy_id: policy,
-      dir: (id) => join(root, id),
-      worktree: (id) => join(root, id, "wt"),
-      project_path: target.project.path,
+      pr_number: target.ref?.number ?? null,
+      head_ref: pr.headRef,
+      worktree: target.worktree,
       source: "cli",
-      now: ctx.now(),
+      path: stringArg(args, "path") ?? null,
+      now,
     });
-    // Same transaction as the row: the slot is re-counted here, so a scheduler grant cannot take it meanwhile.
-    grantJobLease(ctx.db, { kind: "verify", id: v.id, taskId: v.task_id }, VERIFY_POOL, caps, ctx.now());
-    return { data: { ...verificationView(v, ctx.now()), attached: false, pr_number: target.ref?.number ?? null, head_ref: pr.headRef, binary_config: config.binary ?? "", timeout_ms: config.timeout_ms, step_timeout_ms: config.step_timeout_ms ?? "", env_path: stringArg(args, "path") ?? "" } };
+    // It starts now only when nothing waits ahead of it, no restart holds verifies back, a slot is free and the host check passes; else it waits its turn.
+    if (ahead || !host.ok || queueHold(ctx.db, caps, now)) return { data: { ...requestView(ctx.db, request, caps, now, host), attached: false } };
+    const v = admitRequest(ctx.db, request, config, caps, verifyRoot(ctx), target.project.path, now);
+    return { data: { ...verificationView(v, now), request: request.id, attached: false, started: true } };
   },
   async settle(ctx, result) {
+    if (result.data.queued === true) {
+      ctx.sched.kick();
+      return { data: result.data, hints: [`flowryn verify show ${String(result.data.request)}`] };
+    }
     const id = String(result.data.verification ?? "");
     const v = getVerification(ctx.db, id);
+    const request = result.data.started === true ? getRequest(ctx.db, String(result.data.request)) : null;
     // A replay of the call, or an attach to a running job, starts nothing.
-    if (v && v.state === "running" && !isVerifying(id) && result.data.attached === false) {
-      const plan = { prNumber: result.data.pr_number === null ? null : Number(result.data.pr_number), headRef: result.data.head_ref === null ? null : String(result.data.head_ref), binary: String(result.data.binary_config) || null, timeoutMs: Number(result.data.timeout_ms), stepTimeoutMs: result.data.step_timeout_ms ? Number(result.data.step_timeout_ms) : null, path: String(result.data.env_path ?? "") || null };
-      void runVerification(verifyDeps(ctx), v, plan).catch((error: unknown) => ctx.log(`verify ${id}: ${(error as Error).message}`));
+    if (v && request && v.state === "running" && !isVerifying(id)) {
+      const config = verifyConfig(ctx.config(), v.project_id);
+      if (config) launchVerification(verifyDeps(ctx), v, planOf(request, config));
     }
-    const { pr_number: _n, head_ref: _r, binary_config: _b, timeout_ms: _t, step_timeout_ms: _s, env_path: _p, ...data } = result.data;
+    const { started: _s, ...data } = result.data;
     return { data, hints: [`flowryn verify show ${id}`] };
   },
 };
 
+/** A request as `verify start` and `verify show` print it: where it stands in the queue and what it waits on, or the verification it started. */
+export function requestView(db: Db, request: VerifyRequest, caps: Record<string, number>, now: number, host?: HostVerdict): Record<string, unknown> {
+  const place = positionOf(db, request.id);
+  let waiting = request.state === "queued" ? waitingOn(db, request, caps, now) : "-";
+  if (host && !host.ok && waiting === "starting") waiting = `the host check fails (${host.reason})`;
+  return {
+    request: request.id,
+    queued: request.state === "queued",
+    state: request.state,
+    project: request.project_id,
+    pr: request.pr_url,
+    task: request.task_id ?? "-",
+    head: request.head_sha,
+    policy: request.policy_id,
+    source: request.source,
+    position: place ? `${place.position} of ${place.of}` : "-",
+    waiting,
+    waited_ms: (request.ended_at ?? now) - request.requested_at,
+    verification: request.verification_id ?? "-",
+    detail: request.detail ?? "-",
+  };
+}
+
 const verifyShow: VerbSpec = {
   name: "verify show",
   summary: "Where a verification stands: each step, the test counts, the kept binary",
-  positionals: [{ name: "id", required: true, help: "verification id (v<n>)" }],
+  positionals: [{ name: "id", required: true, help: "verification id (v<n>) or queued request (vq<n>)" }],
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
   read(ctx, args) {
     const id = stringArg(args, "id")!;
+    if (/^vq\d+$/.test(id)) {
+      const request = getRequest(ctx.db, id);
+      if (!request) throw new FlowrynError("not_found", `no verify request ${id}`);
+      return { data: requestView(ctx.db, request, capacityConfig(ctx.config).pools, ctx.now), hints: request.verification_id ? [`flowryn verify show ${request.verification_id}`] : [] };
+    }
     const v = getVerification(ctx.db, id);
     if (!v) throw new FlowrynError("not_found", `no verification ${id}`);
-    return { data: verificationView(v, ctx.now), hints: v.task_id ? [`flowryn show ${v.task_id}`] : [] };
+    return { data: verificationView(v, ctx.now, ctx.db), hints: v.task_id ? [`flowryn show ${v.task_id}`] : [] };
   },
 };
 
