@@ -2,7 +2,7 @@ import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync }
 import { basename, dirname } from "node:path";
 import { configProblems, loadConfig, resolveTool, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
-import { integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
+import { divergedMigrations, integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
 import { listTasks, processRunner, tasksAxiVersion } from "../journal/tasks-axi.ts";
 import { isLoaded, plistPath, selfCommand, serviceLabel } from "../service/launchd.ts";
@@ -191,7 +191,7 @@ async function tasksChecks(config: FlowrynConfig): Promise<Check[]> {
   return checks;
 }
 
-function databaseChecks(config: FlowrynConfig): Check[] {
+export function databaseChecks(config: FlowrynConfig): Check[] {
   const { db: dbPath } = stateFiles(config.state_dir);
   if (!existsSync(dbPath)) return [{ check: "database", status: "info", detail: `${dbPath} does not exist yet; the daemon creates it` }];
   const checks: Check[] = [];
@@ -200,8 +200,12 @@ function databaseChecks(config: FlowrynConfig): Check[] {
     const problems = integrityProblems(db);
     checks.push(problems.length === 0 ? { check: "database", status: "ok", detail: `${dbPath} passes quick_check` } : { check: "database", status: "fail", detail: `quick_check: ${problems.slice(0, 3).join("; ")} (flowryn doctor --restore)` });
     const version = schemaVersion(db);
+    const diverged = divergedMigrations(db);
     if (version > LATEST_SCHEMA_VERSION) checks.push({ check: "schema", status: "fail", detail: `schema ${version} is newer than this binary (${LATEST_SCHEMA_VERSION})` });
-    else if (version < LATEST_SCHEMA_VERSION) checks.push({ check: "schema", status: "warn", detail: `schema ${version}; the daemon migrates to ${LATEST_SCHEMA_VERSION} on start` });
+    else if (diverged.length > 0) {
+      const list = diverged.map((m) => `${m.version} ran as "${m.recorded}", this binary's is "${m.expected}"`).join("; ");
+      checks.push({ check: "schema", status: "fail", detail: `migrations from another branch: ${list}; the daemon refuses to start (flowryn doctor --restore)` });
+    } else if (version < LATEST_SCHEMA_VERSION) checks.push({ check: "schema", status: "warn", detail: `schema ${version}; the daemon migrates to ${LATEST_SCHEMA_VERSION} on start` });
     else checks.push({ check: "schema", status: "ok", detail: `version ${version}` });
     if (version >= 1) {
       const pending = db.query("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM intents WHERE state = 'pending'").get() as { n: number; oldest: number | null };

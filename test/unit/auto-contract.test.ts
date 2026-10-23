@@ -9,7 +9,7 @@ import { AUTO_STOP_GRACE_MS, AutoContractChecker, autoFailureLine, autoLeftoverL
 import { writeManifest, type CleanupOutcome, type OwnedResources } from "../../src/contracts/owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS } from "../../src/contracts/runner.ts";
 import { dataDirReport } from "../../src/contracts/report.ts";
-import { CONTRACT_REVISIONS, contractRevision, type RevisionMap } from "../../src/contracts/revision.ts";
+import { BASELINE_REVISION, CONTRACT_REVISIONS, contractRevision, type RevisionMap } from "../../src/contracts/revision.ts";
 import { recordPass } from "../../src/contracts/verbs.ts";
 import { restartGuards } from "../../src/daemon/restart.ts";
 import { getMeta, migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
@@ -126,7 +126,7 @@ function fakeRun(job: AutoJob): AutoProcess {
   };
 }
 
-function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopWaitMs?: number; onRecover?: (manifest: string) => void } = {}): AutoContractChecker {
+function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopWaitMs?: number; onRecover?: (manifest: string) => void; revisions?: RevisionMap } = {}): AutoContractChecker {
   const { onRecover, ...timing } = options;
   return new AutoContractChecker({
     ...timing,
@@ -741,6 +741,9 @@ function revisions(harness: HarnessId): number[] {
   return (db.query("SELECT revision FROM harness_contracts WHERE harness = ?1 ORDER BY revision").all(harness) as { revision: number }[]).map((r) => r.revision);
 }
 
+/** Every harness at the baseline revision: the build that introduced revisions, before any bump. */
+const AT_BASELINE: RevisionMap = { claude: BASELINE_REVISION, pi: BASELINE_REVISION };
+
 /** This build's revisions with one harness bumped, as the PR that changes its proven behaviour would. */
 function bumped(harness: HarnessId): RevisionMap {
   return { ...CONTRACT_REVISIONS, [harness]: CONTRACT_REVISIONS[harness] + 1 };
@@ -810,12 +813,13 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
   });
 
-  // Pi is still at the baseline revision (1); Claude is past it, so its pre-revision records are stale.
+  // Both harnesses are past the baseline revision now, so these pin the checker to it.
   test("a check that failed before revisions is at the baseline: still final for that version, so an upgrade runs nothing again", async () => {
     tx(db, () => saveAutoAttempt(db, "pi", { version: "0.90.0", state: "failed", ended_at: 1, detail: "an old failure" }));
-    const auto = checker();
+    // The build that introduced revisions, still at the baseline: a later bump makes the old failure stale, as it should.
+    const auto = checker({ revisions: AT_BASELINE });
     auto.init();
-    await gate("pi");
+    await gate("pi", AT_BASELINE);
     await auto.tick();
     expect(jobs).toEqual([]);
   });
@@ -839,9 +843,9 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
       openItem(db, { kind: "harness_unverified", eventSeq: event.seq, taskId: "harness:pi", line: "old", now: 1 });
       resolveItems(db, "harness_unverified", "harness:pi", "dismissed before revisions", 2);
     });
-    const auto = checker();
+    const auto = checker({ revisions: AT_BASELINE });
     auto.init();
-    await gate("pi");
+    await gate("pi", AT_BASELINE);
     await auto.tick();
     expect(jobs).toEqual([]);
     expect(events("harness.unverified")).toHaveLength(1);
