@@ -24,7 +24,7 @@ The outline comes from Google design docs (context, goals and non-goals, alterna
 `stage done` on a review-gated stage whose skill is `flowryn-design` reads the page the review names (`checkDesignPage` in `src/lifecycle/stages.ts`, after the review URL check has resolved it to a regular `.html` file under the report directory) and refuses with `design_page_invalid` (exit 3), one fixable line per problem (`designPageProblems`):
 
 - a template slot is left;
-- a part is missing, empty (its heading and the template's fixed labels, the table's header cells and the bold lead-ins, aside) or out of order, or anything but the title and a subtitle comes before the summary (each part runs to its own `</section>`, so a nested section such as the widget does not cut it short);
+- a part is missing, empty (its heading and the template's own fixed labels, the Before/After header row and the "Goals."/"Not goals." lead-ins, aside; a worker's own bold text or header cells count) or out of order, or anything but the title and a subtitle comes before the summary (each part runs to its own `</section>`, so a nested section such as the widget does not cut it short);
 - the summary is over 80 words;
 - more than 500 words (`DESIGN_VISIBLE_WORDS_MAX`) show before anything is unfolded: text outside a closed `<details>` (whose `<summary>` still shows; an `open` one shows everything), `<svg>`, `<style>`, `<script>` and comments. The code-name and `<code>`/`<pre>` checks below read the same visible part;
 - "How it works" has no `<figure>`;

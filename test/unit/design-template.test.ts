@@ -67,8 +67,12 @@ describe("the design page check", () => {
     expect(designPageProblems(missing)).toEqual(['the page is missing <section data-section="alternatives">; every part of design-template.html is required']);
     const empty = filled({ "{{RISKS}}": "<ul><li> </li></ul>" });
     expect(designPageProblems(empty)).toEqual(['the "risks" part is empty; say it in words']);
-    const unlabelled = filled({ "{{BEFORE_AFTER}}": "", "{{GOALS}}": "", "{{NON_GOALS}}": "" });
-    expect(designPageProblems(unlabelled)).toEqual(['the "change" part is empty; say it in words', 'the "goals" part is empty; say it in words']);
+    expect(designPageProblems(filled({ "{{BEFORE_AFTER}}": "" }))).toEqual(['the "change" part is empty; say it in words']);
+    expect(designPageProblems(filled({ "{{GOALS}}": "", "{{NON_GOALS}}": "" }))).toEqual(['the "goals" part is empty; say it in words']);
+    expect(designPageProblems(filled({ "{{GOALS}}": "" }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{NON_GOALS}}": "" }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{ASK}}": "<p><strong>Approve, or send changes.</strong></p>" }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{BEFORE_AFTER}}": "<tr><th>The cart</th><th>No page</th><th>A page</th></tr>" }))).toEqual([]);
     const goals = /<section data-section="goals">[\s\S]*?<\/section>\n/.exec(filled())![0];
     const swapped = filled().replace(goals, "").replace('<section data-section="ask">', `${goals}<section data-section="ask">`);
     expect(designPageProblems(swapped)).toEqual([`the parts must come in this order: ${DESIGN_SECTIONS.join(", ")}`]);

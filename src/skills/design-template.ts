@@ -42,6 +42,11 @@ export const DESIGN_PLACEHOLDERS = [
   "{{DETAIL}}",
 ] as const;
 
+/** The fixed labels the template writes inside its parts; a part with nothing but these is empty. */
+const CHANGE_HEADER = "<tr><th></th><th>Before</th><th>After</th></tr>";
+const GOALS_LABEL = "<strong>Goals.</strong>";
+const NON_GOALS_LABEL = "<strong>Not goals.</strong>";
+
 export const DESIGN_TEMPLATE = `<!doctype html>
 <html lang="en" data-lavish-live-reload-root><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{TITLE}}</title>
@@ -101,14 +106,14 @@ code{padding:1px 5px}pre{padding:10px;overflow-x:auto}
 <section data-section="change">
 <h2>What changes for you</h2>
 <div class="wrap"><table>
-<tr><th></th><th>Before</th><th>After</th></tr>
+${CHANGE_HEADER}
 {{BEFORE_AFTER}}
 </table></div>
 </section>
 <section data-section="goals">
 <h2>Goals and non-goals</h2>
-<p><strong>Goals.</strong> {{GOALS}}</p>
-<p><strong>Not goals.</strong> {{NON_GOALS}}</p>
+<p>${GOALS_LABEL} {{GOALS}}</p>
+<p>${NON_GOALS_LABEL} {{NON_GOALS}}</p>
 </section>
 <section data-section="how">
 <h2>How it works</h2>
@@ -171,9 +176,11 @@ function showsAfter(html: string, from: number): boolean {
   return /[\p{L}\p{N}]/u.test(textOf(tail)) || /<(?:img|svg|table|pre|figure|iframe|video|section|details|ul|ol)\b/i.test(tail);
 }
 
-/** A part's own words: its heading and the template's fixed labels (header cells, bold lead-ins) aside. */
+/** A part's own words: its heading and the template's fixed labels aside. */
 function withoutLabels(part: string): string {
-  return part.replace(/<(h2|th|strong)\b[^>]*>[\s\S]*?<\/\1>/gi, " ");
+  let out = part.replace(/<h2\b[\s\S]*?<\/h2>/i, " ");
+  for (const label of [CHANGE_HEADER, GOALS_LABEL, NON_GOALS_LABEL]) out = out.replace(label, " ");
+  return out;
 }
 
 /**
