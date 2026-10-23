@@ -72,8 +72,10 @@ describe("each run's own TMPDIR", () => {
       expect(env.events(a.run)).not.toContain("run.tmp_remove_failed");
 
       // A daemon restart keeps a live run's directory (the startup sweep only takes what no run wants).
+      await env.daemon.stop();
       await env.restartDaemon();
       expect(existsSync(tmpB)).toBe(true);
+      expect(existsSync(tmpP)).toBe(true);
     },
     120_000,
   );
