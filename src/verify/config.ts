@@ -19,7 +19,7 @@ export interface VerifyConfig {
 
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min"]);
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "auto_merge"]);
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
@@ -36,7 +36,12 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const where = `[projects.${projectId}]`;
   const raw = projectTable(config, projectId);
   for (const key of Object.keys(raw)) if (!KNOWN.has(key)) throw new FlowrynError("config_invalid", `${where} ${key} is not a known setting (${[...KNOWN].join(", ")})`);
-  if (raw.verify === undefined) return null;
+  if (raw.auto_merge !== undefined && typeof raw.auto_merge !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_merge must be true or false`);
+  if (raw.verify === undefined) {
+    // Without verify steps the merge gate passes a PR that has no checks: auto-merge would land anything.
+    if (raw.auto_merge === true) throw new FlowrynError("config_invalid", `${where} auto_merge needs verify steps: without them the merge gate passes a PR that has no checks`);
+    return null;
+  }
   const steps = raw.verify;
   if (!Array.isArray(steps) || steps.length === 0 || !steps.every((s) => typeof s === "string" && s.trim().length > 0)) {
     throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands`);
@@ -52,4 +57,15 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const minutes = raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN;
   if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes <= 0) throw new FlowrynError("config_invalid", `${where} verify_timeout_min must be a positive integer`);
   return { steps: steps as string[], binary, timeout_ms: minutes * 60_000 };
+}
+
+/**
+ * `[projects.<id>] auto_merge` (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2):
+ * the daemon verifies and merges the project's yolo deliveries itself. False
+ * unless set; throws config_invalid like verifyConfig (it is refused without
+ * verify steps).
+ */
+export function autoMergeEnabled(config: FlowrynConfig, projectId: string): boolean {
+  if (!verifyConfig(config, projectId)) return false;
+  return projectTable(config, projectId).auto_merge === true;
 }

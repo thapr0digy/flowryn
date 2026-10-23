@@ -25,7 +25,7 @@ export function sendBack(
 ): { stage: string; seq: number } {
   db.query("UPDATE runs SET state = 'running', updated_at = ?2 WHERE id = ?1").run(run.id, now);
   voidApprovals(db, run.task_id, now, send.why);
-  resolveRunItems(db, run.id, ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed"], send.event.kind, now);
+  resolveRunItems(db, run.id, ["pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "auto_merge_held"], send.event.kind, now);
   const delivered = deliveredOf(db, run.task_id);
   const { seq } = appendEvent(db, { source: send.event.source, kind: send.event.kind, runId: run.id, taskId: run.task_id, payload: { ref: delivered?.ref ?? null, head: delivered?.head ?? null, ...send.event.payload }, ts: now });
   closeMergeGate(db, run, { passed: false, feedback: send.feedback }, now);
