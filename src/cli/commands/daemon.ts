@@ -220,7 +220,17 @@ const restart: VerbSpec = {
     const next = (fresh as Reply).data as { pid: number; version: string; proto: number; build: string | null; uptime_s: number | null };
     return print(
       io,
-      okReply({ restarted: String(asked.data.supervisor), old: describe(old), new: describe(next), waited: `${((Date.now() - started) / 1000).toFixed(1)} s` }, ["flowryn daemon status", "flowryn fleet"]),
+      okReply(
+        {
+          restarted: String(asked.data.supervisor),
+          old: describe(old),
+          new: describe(next),
+          waited: `${((Date.now() - started) / 1000).toFixed(1)} s`,
+          // Validations run in no-mistakes and go on across a restart: say which it carried.
+          ...(Array.isArray(asked.data.carried) && asked.data.carried.length > 0 ? { carried: asked.data.carried } : {}),
+        },
+        ["flowryn daemon status", "flowryn fleet"],
+      ),
     );
   },
 };
