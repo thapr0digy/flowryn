@@ -27,6 +27,10 @@ export const ERROR_CODES = {
   not_landed: EXIT.policy,
   contract_unverified: EXIT.policy,
   primary_checkout_tangle: EXIT.policy,
+  // accounts (docs/notes/2026-10-22-multiple-ai-provider-u9.md): an account outside the project's scope, a scope with none for the harness, a signed-out login
+  account_scope_mismatch: EXIT.policy,
+  no_account: EXIT.validation,
+  account_signed_out: EXIT.unavailable,
   // M4: delivery, the merge gate and cleanup
   delivery_refused: EXIT.policy,
   head_moved: EXIT.policy,

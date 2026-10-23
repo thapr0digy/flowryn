@@ -686,7 +686,18 @@ CREATE INDEX verify_queue_verification ON verify_queue(verification_id);
 `;
 
 /**
- * Migration 30: yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2). One
+ * Migration 30: the account a run starts on (docs/notes/2026-10-22-multiple-ai-provider-u9.md), fixed at
+ * dispatch because a resume must stay in the login that holds the session; a plan phase's `account:`
+ * line waits beside its harness. Rows from before name their harness's implicit account.
+ */
+const ACCOUNTS_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN account TEXT;
+UPDATE runs SET account = harness;
+ALTER TABLE plan_phases ADD COLUMN account TEXT;
+`;
+
+/**
+ * Migration 31: yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2). One
  * row per delivery of an opted-in yolo ship, driven from queued to merged, or held or superseded,
  * by src/verify/auto-merge.ts. A run has at most one live row.
  */
@@ -732,7 +743,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 27, name: "merge-local-green", sql: MERGE_LOCAL_GREEN_SQL },
   { version: 28, name: "info-items-close", sql: INFO_ITEMS_CLOSE_SQL },
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
-  { version: 30, name: "auto-merges", sql: AUTO_MERGES_SQL },
+  { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
+  { version: 31, name: "auto-merges", sql: AUTO_MERGES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
