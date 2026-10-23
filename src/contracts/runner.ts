@@ -211,6 +211,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     herdr_socket: options.herdrSocket,
     branch_prefix: prefix,
     project: null,
+    tmp_root: tmpRoot(options.config),
     daemon: null,
     workspaces: [],
     harnesses: [],

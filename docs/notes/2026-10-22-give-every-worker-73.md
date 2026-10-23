@@ -1,7 +1,6 @@
 # Every worker's own temp directory
 
 - Status: done
-- Open: the contract's `temp dir` step has not run against a live Claude yet (assumption A1 below); the next `flowryn doctor --contracts` runs it
 - Config: `[workers] tmp_root`
 
 On 2026-10-22 (decision q80), a worker ran its no-mistakes pipeline outside the Claude sandbox with `--intent "$(cat $TMPDIR/intent.txt)"`. Outside the sandbox, `$TMPDIR` is the user's shared `/var/folders/…/T/`. Another worker had written its own `intent.txt` there, so PR #98 was reviewed against the wrong task. Inside the sandbox it is no better: Claude sets `TMPDIR` to `/tmp/claude-<uid>`, which every sandboxed Claude on the machine shares. Now each run has a private directory, and its worker's `TMPDIR` names it both in and out of the sandbox. Everything here is plain code (paths, file modes, a sweep). No model is used.
@@ -28,11 +27,13 @@ Read in the Claude Code 2.1.309 binary: a sandboxed Bash command gets `TMPDIR=$C
 
 The suite has a new `temp dir` step, after the toolkit step for Claude and before the exit for both harnesses. A steer has the worker run `echo "$TMPDIR" > "$FLOWRYN_REPORT_DIR/tmpdir.txt"` with its own shell tool, and the step checks that the file names the run's own TMPDIR (the same directory by realpath). The suite now tests this, so `CONTRACT_REVISIONS` is claude 2, pi 2, and older passes are stale. The offline fake Claude (`test/helpers/fake-contract-claude.ts`) runs each Bash call with the TMPDIR Claude's sandbox would give it. Checked by mutation: without `CLAUDE_CODE_TMPDIR` the offline suite fails at this step with `TMPDIR /tmp/claude-501`. The scripted Pi model's script acknowledges the new steer (m7) and runs the command.
 
+Live, 2026-10-23, `doctor --contracts --verify-only` with the user's Claude Bash sandbox enabled: Claude 2.1.309 passed with `TMPDIR /tmp/fw-501/7E57RVCD29QQ/claude-501`, and Pi 0.87.1 (scripted) passed with `TMPDIR /tmp/fw-501/40Q8P27J6FMH`. The first live pass left the Pi run's directory behind, because the scratch daemon stopped before its own cleanup reached it. The runner's teardown (`releaseOwned`, `src/contracts/owned.ts`) now also sweeps the scratch home's run dirs under `tmp_root`, which the manifest records. The root was empty after the second pass.
+
 ## Assumptions and their tests
 
 | # | Assumption | Test |
 |---|---|---|
-| A1 | Sandboxed Bash gets `$CLAUDE_CODE_TMPDIR/claude-<uid>` when ≤ 44 bytes | contract step `temp dir` (live: not yet run); `test/unit/run-tmp.test.ts` "A1" |
+| A1 | Sandboxed Bash gets `$CLAUDE_CODE_TMPDIR/claude-<uid>` when ≤ 44 bytes | contract step `temp dir` (passed live on 2.1.309, sandbox on); `test/unit/run-tmp.test.ts` "A1" |
 | A2 | Unsandboxed Bash inherits the session's `TMPDIR` | `test/unit/harness.test.ts` (pane env); `test/integration/run-tmp.test.ts` (the worker process sees it) |
 | A3 | The sandbox lets the worker write there | `allowWrite` asserted in the integration test; the live step writes the file |
 | A4 | Pi's bash tool inherits the process env | `test/unit/run-tmp.test.ts` "A4"; the Pi contract step |
@@ -42,5 +43,6 @@ The suite has a new `temp dir` step, after the toolkit step for Claude and befor
 ## Risks
 
 - macOS may delete `/tmp` files that have not been accessed for 3 days (a guess: `periodic`'s `clean-tmps`). A worker parked that long could lose scratch files. The directory itself is made again on the next launch.
+- Bumping the revision means every installed version needs a new contract pass at revision 2 before the harness gate lets a run start, as for any bump.
 - A later Claude may change the 44-byte rule or the `claude-<uid>` suffix. The live `temp dir` step then fails, which is what it is for.
 - The leader is unchanged: this task covers workers.
