@@ -50,8 +50,8 @@ import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { LeaderRewake } from "../leader/rewake.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
-import { leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
-import { expireAway } from "../attention/away.ts";
+import { awayConfig, leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
+import { autoAway, expireAway } from "../attention/away.ts";
 import type { AttentionServices } from "../attention/services.ts";
 import { lsofPath } from "../policy/locks.ts";
 import { NotifyPump, recordingNotify } from "../attention/notify.ts";
@@ -712,6 +712,21 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }
     };
     expireAwayIfDue();
+    // Automatic away, checked on every attention tick: the user has given the leader no input for
+    // [away] auto_after_min; idle waiters look again at once. A failing check logs once until it recovers.
+    let autoAwayFailing = false;
+    const autoAwayIfDue = () => {
+      try {
+        const started = tx(database, () => autoAway(database, { afterMs: awayConfig(config).auto_after_min * 60_000, now: Date.now() }));
+        autoAwayFailing = false;
+        if (!started) return;
+        log("away: started automatically after the user's inactivity");
+        attention.bus.notifyAll();
+      } catch (error) {
+        if (!autoAwayFailing) log(`away: automatic start check failed: ${(error as Error).message}`);
+        autoAwayFailing = true;
+      }
+    };
     // A verification the last daemon was running when it stopped: recorded as an error and requeued once, its worktree removed.
     try {
       const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
@@ -746,6 +761,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         seenItem = latest;
         attention.bus.notifyAll();
       }
+      autoAwayIfDue();
       void notifyPump.tick();
       void rewake.tick();
     }, ATTENTION_TICK_MS);

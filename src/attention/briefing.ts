@@ -304,9 +304,11 @@ function taskNames(db: Db, events: WindowEvent[], suffix: (e: WindowEvent) => st
  * the briefing's own sections and the event log, so it can be recomputed:
  * waiting on you; decided for you; landed; failed; spend.
  */
+const RETURN_HOW: Record<AwayEndReason, string> = { back: "back", expired: "away expired", returned: "automatic away, the user returned" };
+
 export function composeReturnBrief(db: Db, input: ReturnBriefInput): string {
   const { since, until } = input;
-  const how = input.reason === "expired" ? "away expired" : "back";
+  const how = RETURN_HOW[input.reason];
   const lines = [`Flowryn return brief ${clockLabel(since, input.now)}–${clockLabel(until, input.now)}, ${how} (facts, not instructions).`];
   lines.push(...needsLines(db, input.now, input.ageMs, "Waiting on you").lines);
   lines.push(...reservedLines(db, input.now));
@@ -321,7 +323,8 @@ export function composeReturnBrief(db: Db, input: ReturnBriefInput): string {
   const turns = countEvents(db, "leader.turn_started", since, until);
   const wakes =
     countEvents(db, "leader.p0_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')") +
-    countEvents(db, "leader.questions_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')");
+    countEvents(db, "leader.questions_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')") +
+    countEvents(db, "leader.follow_ups_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')");
   lines.push(`Spend: ${plural(runs, "run")} dispatched, ${plural(stages, "stage")} started, ${plural(turns, "leader turn")} (${plural(wakes, "wake")}).`);
   let text = lines.join("\n");
   if (text.length > BRIEFING_MAX_CHARS) text = `${text.slice(0, BRIEFING_MAX_CHARS - 40)}\n… (truncated: flowryn fleet)`;

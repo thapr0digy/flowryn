@@ -10,7 +10,7 @@ An idle leader now wakes on what you do outside its session, and after its waite
 
 Before this change, an approval, gate pass, merge or decline you made in your own terminal or on the board opened no item that could wake the leader. A merge you approved then sat until you next typed to the leader.
 
-Three item kinds are now *leader follow-ups* (`LEADER_WAKE_KINDS`, src/attention/items.ts). They are all P1 actionable. They are pushed like a P0: through the Claude waiter, or as a Pi trigger, when the leader is idle and you are inactive or away. They go after any P0, as one batch of at most four (`followUpBatch`, src/attention/router.ts). The waiter's line is `Flowryn follow-up [i31,i32]: …`, and the woken turn gets each line in full. While you are active, nothing is pushed: the follow-ups top the next digest's P1 lines. They are also relay kinds, so a busy Claude leader's turn end carries them.
+Three item kinds are now *leader follow-ups* (`LEADER_WAKE_KINDS`, src/attention/items.ts; a yolo task's `pr_ready` joined them later, docs/notes/2026-10-22-wake-the-idle-us.md). They are all P1 actionable. They are pushed like a P0: through the Claude waiter, or as a Pi trigger, when the leader is idle and you are inactive or away. They go after any P0, as one batch of at most four (`followUpBatch`, src/attention/router.ts). The waiter's line is `Flowryn follow-up [i31,i32]: …`, and the woken turn gets each line in full. While you are active, nothing is pushed: the follow-ups top the next digest's P1 lines. They are also relay kinds, so a busy Claude leader's turn end carries them.
 
 | Your action (human role only) | Item | Leader's follow-up | Closes when |
 | --- | --- | --- | --- |
