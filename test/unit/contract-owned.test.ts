@@ -6,6 +6,7 @@ import { stateFiles } from "../../src/config/paths.ts";
 import { removeScratchHome } from "../../src/contracts/runner.ts";
 import { SCRATCH_CONFIG_HEADER, createdWorkspaces, gitWithin, readManifest, recoverOwned, removableHome, writeManifest, type OwnedResources, type RecoverDeps } from "../../src/contracts/owned.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
+import { ensureRunTmp } from "../../src/lifecycle/run-tmp.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
 import { isAlive, readIdentity, type ProcIdentity } from "../../src/runtime/proc.ts";
@@ -203,6 +204,28 @@ describe("releasing what a killed contract run owned", () => {
       expect(outcome).toMatchObject({ ok: false, problems: [expect.stringContaining("scratch home left alone")] });
       expect(existsSync(home)).toBe(true);
     }
+  });
+
+  test("the run's temp directory, outside the home under tmp_root, goes with it; another live home's stays", async () => {
+    const root = tempDir();
+    const home = realpathSync(mkdtempSync(join(root, "fwc-")));
+    writeFileSync(join(home, "config.toml"), `# ${SCRATCH_CONFIG_HEADER}\n`);
+    mkdirSync(join(home, "state"), { recursive: true });
+    const db = openDb(stateFiles(join(home, "state")).db);
+    migrate(db);
+    db.close();
+    const tmpRoot = mkdtempSync("/tmp/fwo-");
+    dirs.push(tmpRoot);
+    const own = ensureRunTmp({ root: tmpRoot, runId: "r0000000000000000000000OWN01", stateDir: join(home, "state"), harness: "pi" });
+    const other = ensureRunTmp({ root: tmpRoot, runId: "r0000000000000000000000OTH01", stateDir: root, harness: "pi" });
+    const manifest = join(root, "auto.owned.json");
+    writeManifest(manifest, { runner: null, home, herdr_socket: "/s", branch_prefix: "flowryn/contract-00000000-", project: null, tmp_root: tmpRoot, daemon: null, workspaces: [], harnesses: [], cleanup: null });
+    expect(readManifest(manifest).owned?.tmp_root).toBe(tmpRoot);
+    const outcome = await recoverOwned(manifest, deps());
+    expect(outcome).toMatchObject({ ok: true, problems: [] });
+    expect(existsSync(own.dir)).toBe(false);
+    expect(existsSync(other.dir)).toBe(true);
+    expect(existsSync(home)).toBe(false);
   });
 
   test("assumption: a scratch database that cannot be read keeps the scratch home, the only record of the run's ids, and says so", async () => {

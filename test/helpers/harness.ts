@@ -114,6 +114,8 @@ export interface TestHome {
   dataDir: string;
   backlog: string;
   todos: string;
+  /** `[workers] tmp_root`: a short private directory under /tmp, so no test touches the real one. */
+  tmpRoot: string;
   env: Record<string, string>;
   db(): Db;
   cleanup(): void;
@@ -200,6 +202,14 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   // home has no Herdr by design, so its "Herdr unreachable" P1 (design section 16) is kept out of its items.
   // Nor this machine's Claude transcripts: a chat-answer grant is checked against the fake leader's transcript in the home.
   if (!extraConfig.includes("[grants]")) lines.push("[grants]", `claude_projects_dir = ${JSON.stringify(join(home, "claude-projects"))}`);
+  // Nor the real run temp root (/tmp/fw-<uid>): a short one of the home's own, as Claude's 44-byte limit needs.
+  const tmpRoot = mkdtempSync("/tmp/fwt-");
+  if (!/^tmp_root\s*=/m.test(extraConfig)) {
+    const root = `tmp_root = ${JSON.stringify(tmpRoot)}`;
+    const at = lines.findIndex((line) => /^\[workers\]\s*$/m.test(line));
+    if (at >= 0) lines[at] = lines[at]!.replace(/^\[workers\]\s*$/m, `[workers]\n${root}`);
+    else lines.push("[workers]", root);
+  }
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`, "unreachable_alert_ms = 86400000");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
@@ -217,6 +227,7 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     dataDir,
     backlog,
     todos,
+    tmpRoot,
     env,
     db() {
       mkdirSync(stateDir, { recursive: true, mode: 0o700 });
@@ -226,6 +237,7 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     },
     cleanup() {
       rmSync(home, { recursive: true, force: true });
+      rmSync(tmpRoot, { recursive: true, force: true });
     },
   };
 }

@@ -18,6 +18,10 @@
  *   - the interrupt key (the fake Herdr's Escape is SIGINT) ends the running
  *     tool and the turn, fires no hook, and writes the marker to the
  *     transcript (c04);
+ *   - each Bash call runs as in Claude's sandbox: TMPDIR is
+ *     `$CLAUDE_CODE_TMPDIR/claude-<uid>` while that is at most 44 bytes, else
+ *     the shared `/tmp/claude-<uid>`, whatever TMPDIR the session inherited
+ *     (read in Claude 2.1.309, docs/notes/2026-10-22-give-every-worker-73.md);
  *   - at startup it records the deferred tools it was offered as a
  *     `deferred_tools_delta` transcript attachment (Claude 2.1.295), leaving
  *     out every MCP server the settings' `permissions.deny` names bare, as
@@ -135,6 +139,8 @@ function workOf(text: string): string[] {
   if (sleep) commands.push(sleep[0]);
   const once = /run exactly this command once: (gh --version)/.exec(text);
   if (once) commands.push(once[1]!);
+  const tmp = /run exactly this command with your shell tool: (echo "\$TMPDIR" > "\$FLOWRYN_REPORT_DIR\/tmpdir\.txt")/.exec(text);
+  if (tmp) commands.push(tmp[1]!);
   const report = /Write one line, "([^"]*)", to (\S+), then run (\$FLOWRYN_BIN deliver --report \S+)/.exec(text);
   if (report) commands.push(`mkdir -p "$(dirname ${report[2]})" && printf '%s\\n' '${report[1]}' > ${report[2]}`, report[3]!);
   return commands;
@@ -151,6 +157,13 @@ async function plan(text: string): Promise<string[]> {
     commands.push(...(/acknowledge/i.test(steer.body) ? [ack, ...steerWork] : [...steerWork, ack]));
   }
   return commands;
+}
+
+/** The environment of a Bash call inside Claude's sandbox: its own per-uid TMPDIR. */
+function sandboxed(): Record<string, string | undefined> {
+  const uid = process.getuid?.() ?? 0;
+  const own = join(env.CLAUDE_CODE_TMPDIR || "/tmp", `claude-${uid}`);
+  return { ...env, TMPDIR: Buffer.byteLength(own) <= 44 ? own : `/tmp/claude-${uid}` };
 }
 
 // ---- the session ----
@@ -195,7 +208,7 @@ async function work(queue: string[]): Promise<boolean> {
     }
     log(`bash ${command}`);
     current = new ToolCall();
-    const code = await current.run(command, env, cwd);
+    const code = await current.run(command, sandboxed(), cwd);
     current = null;
     if (interrupted) return false;
     const context = contextOf(await runHooks(code === 0 ? "PostToolUse" : "PostToolUseFailure", { ...tool, tool_response: { exit_code: code } }));

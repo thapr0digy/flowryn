@@ -33,6 +33,7 @@ import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
+import { removeRunTmp, sweepRunTmp } from "../lifecycle/run-tmp.ts";
 import { configSectionProblems, type ConfigStatus } from "../config/effective.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
 import { UrgentPreempter } from "../lifecycle/urgent.ts";
@@ -443,6 +444,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         const run = getRun(database, runId);
         if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id);
       },
+      removeRunTmp: (runId) => removeRunTmp({ root: workersConfig(config).tmp_root, runId, stateDir: config.state_dir }),
       kickJournal: () => journal.kick(),
       log,
       now: Date.now,
@@ -733,6 +735,18 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       if (recovered > 0) log(`verify: ${recovered} left running by the last daemon, recorded as errors and requeued`);
     } catch (error) {
       log(`verify: startup recovery failed: ${(error as Error).message}`);
+    }
+    // Run temp dirs whose run is gone or cleaned up (a cleanup that failed to remove one, a crash), and a deleted home's.
+    try {
+      const keep = (runId: string) => {
+        const row = database.query("SELECT cleanup FROM runs WHERE id = ?1").get(runId) as { cleanup: string | null } | null;
+        return row !== null && row.cleanup !== "done";
+      };
+      const swept = sweepRunTmp({ root: workersConfig(config).tmp_root, stateDir: config.state_dir, keep });
+      if (swept.removed.length > 0) log(`run tmp: removed ${swept.removed.length} left over: ${swept.removed.join(", ")}`);
+      for (const failed of swept.failed) log(`run tmp: ${failed.dir} was not removed: ${failed.error}`);
+    } catch (error) {
+      log(`run tmp: the startup sweep failed: ${(error as Error).message}`);
     }
     resolveReady();
 
