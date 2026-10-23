@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runProc } from "../../src/daemon/restart.ts";
@@ -9,7 +9,7 @@ import { processRunner } from "../../src/journal/tasks-axi.ts";
 import { gitLabel, gitRunner } from "../../src/policy/git.ts";
 import { concludeParkedRun, readNmStatus } from "../../src/policy/nomistakes.ts";
 import { listLabelled } from "../../src/reconcile/docker.ts";
-import { DEFAULT_DRAIN_MS, DEFAULT_GRACE_MS, TIMED_OUT, configureOwnedProcesses } from "../../src/runtime/bounded.ts";
+import { DEFAULT_DRAIN_MS, DEFAULT_GRACE_MS, TIMED_OUT, configureOwnedProcesses, gateDeadlines } from "../../src/runtime/bounded.ts";
 import { probeQuota } from "../../src/sched/quota.ts";
 import { runStep } from "../../src/upkeep/build.ts";
 import { FakeGitHub } from "../helpers/fake-github.ts";
@@ -21,11 +21,19 @@ import { FAKE_NO_MISTAKES } from "../helpers/harness.ts";
  * never answers (docs/notes/2026-10-13-next-steps-md-xm.md): it fails within
  * its budget, the descendants it started are gone, its ledger entry is
  * settled, and an unrelated process and worktree are untouched.
+ *
+ * Each case's deadline and budget count from the moment the tool is up and
+ * silent (its sleeper's pid written), not from its spawn: a freshly written
+ * script's first exec on macOS waits on syspolicyd for longer than the
+ * deadline, which would cut the tool off before it started what the case
+ * checks is gone (docs/notes/2026-10-22-fix-the-flaky-ai.md).
  */
 
 const TIMEOUT_MS = 300;
 /** Deadline, grace, drain, the group's confirmation and scheduling slack. */
 const BUDGET_MS = TIMEOUT_MS + DEFAULT_GRACE_MS + DEFAULT_DRAIN_MS + 1_000 + 1_000;
+/** How long a tool gets to start its sleeper before the deadline starts anyway (and the case fails on it). */
+const READY_CAP_MS = 20_000;
 
 let dir = "";
 let ledger = "";
@@ -65,10 +73,30 @@ function silentTool(name: string): string {
   return path;
 }
 
-async function timed<T>(work: () => Promise<T>): Promise<{ value: T; ms: number }> {
-  const began = Date.now();
+function pidWritten(path: string): boolean {
+  try {
+    return /^\d+\n$/.test(readFileSync(path, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run `work` with each call's deadline started once the tool has written
+ * `pidFile` (gateDeadlines), and time it from that write. Throws when the
+ * tool never got that far, so a case never passes without the sleeper it
+ * checks.
+ */
+async function fromReady<T>(pidFile: string, work: () => Promise<T>, capMs = READY_CAP_MS): Promise<{ value: T; ms: number }> {
+  gateDeadlines(async ({ exited }) => {
+    const leader = { exited: false };
+    void exited.then(() => (leader.exited = true));
+    const cap = Date.now() + capMs;
+    while (!leader.exited && !pidWritten(pidFile) && Date.now() < cap) await Bun.sleep(5);
+  });
   const value = await work();
-  return { value, ms: Date.now() - began };
+  if (!pidWritten(pidFile)) throw new Error(`the tool never wrote ${pidFile} before its call ended`);
+  return { value, ms: Date.now() - statSync(pidFile).mtimeMs };
 }
 
 /** The checks every case ends with: the descendant gone, nothing left in the ledger, the unrelated process alive. */
@@ -114,6 +142,7 @@ beforeEach(() => {
 
 afterEach(() => {
   configureOwnedProcesses(null);
+  gateDeadlines(null);
   if (savedHome === undefined) delete process.env.FLOWRYN_HOME;
   else process.env.FLOWRYN_HOME = savedHome;
   for (const pid of strays.splice(0)) {
@@ -135,10 +164,23 @@ function silentNoMistakes(): string {
   return path;
 }
 
+describe("fromReady (each case's readiness signal)", () => {
+  test("a tool that never writes its pid file fails the case, after the cap, rather than passing without its sleeper", async () => {
+    const tool = join(dir, "mute");
+    writeFileSync(tool, "#!/bin/sh\nexec sleep 600\n");
+    chmodSync(tool, 0o755);
+    const began = Date.now();
+    const error = await fromReady(join(dir, "mute.pid"), () => processRunner(tool, null).run(["list"], TIMEOUT_MS), 300).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("never wrote");
+    expect(Date.now() - began).toBeGreaterThanOrEqual(300 + TIMEOUT_MS - 20);
+  });
+});
+
 describe("no-mistakes (the extended fake, silent)", () => {
   test("axi status fails within its budget (a failed read, never a status) and its forked helper is gone", async () => {
     const nm = silentNoMistakes();
-    const { value, ms } = await timed(() => readNmStatus(nm, dir, TIMEOUT_MS));
+    const { value, ms } = await fromReady(join(dir, "nm-silent.pid"), () => readNmStatus(nm, dir, TIMEOUT_MS));
     expect(value.code).toBe(TIMED_OUT);
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "nm-silent.pid"));
@@ -146,7 +188,7 @@ describe("no-mistakes (the extended fake, silent)", () => {
 
   test("cleanup's parked-run check does not hang on it", async () => {
     const nm = silentNoMistakes();
-    const { value, ms } = await timed(() => concludeParkedRun({ noMistakes: nm, git: gitRunner("git"), timeoutMs: TIMEOUT_MS, log: () => undefined }, dir));
+    const { value, ms } = await fromReady(join(dir, "nm-silent.pid"), () => concludeParkedRun({ noMistakes: nm, git: gitRunner("git"), timeoutMs: TIMEOUT_MS, log: () => undefined }, dir));
     expect(value).toEqual({ ok: true, aborted: null });
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "nm-silent.pid"));
@@ -159,7 +201,7 @@ describe("docker ps (the extended fake, silent)", () => {
     mkdirSync(bin);
     const docker = dockerScript(bin, dir);
     writeFileSync(join(dir, "docker-silent"), "");
-    const { value, ms } = await timed(() => listLabelled(docker, TIMEOUT_MS));
+    const { value, ms } = await fromReady(join(dir, "docker-silent.pid"), () => listLabelled(docker, TIMEOUT_MS));
     expect(value).toBeNull();
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "docker-silent.pid"));
@@ -171,7 +213,7 @@ describe("docker ps (the extended fake, silent)", () => {
     const docker = dockerScript(bin, dir);
     writeFileSync(join(dir, "docker-helper"), "");
     writeFileSync(join(dir, "docker-ps.txt"), "c1\tweb-1\tr01\tproj\n");
-    const { value, ms } = await timed(() => listLabelled(docker, 5_000));
+    const { value, ms } = await fromReady(join(dir, "docker-helper.pid"), () => listLabelled(docker, 5_000));
     expect(value).toEqual([{ id: "c1", name: "web-1", run: "r01", project: "proj" }]);
     expect(ms).toBeLessThan(DEFAULT_DRAIN_MS + 2_000);
     // A normal exit is left alone: the helper still runs.
@@ -193,7 +235,7 @@ describe("git (gitRunner and runTool)", () => {
     git(repo, ["remote", "add", "origin", "ssh://silent.invalid/r.git"]);
     const before = git(repo, ["for-each-ref"]);
     const ssh = silentTool("ssh");
-    const { value, ms } = await timed(() => gitRunner("git", TIMEOUT_MS)(["-c", `core.sshCommand=${ssh}`, "fetch", "origin"], repo));
+    const { value, ms } = await fromReady(join(dir, "ssh.pid"), () => gitRunner("git", TIMEOUT_MS)(["-c", `core.sshCommand=${ssh}`, "fetch", "origin"], repo));
     expect(value.code).toBe(TIMED_OUT);
     expect(value.stderr).toContain("git fetch did not finish");
     expect(ms).toBeLessThan(BUDGET_MS);
@@ -210,7 +252,7 @@ describe("git (gitRunner and runTool)", () => {
     writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\nsleep 600 &\necho $! > ${JSON.stringify(join(dir, "hook.pid"))}\nwait\n`);
     chmodSync(join(hooks, "post-checkout"), 0o755);
     const target = join(dir, "run-wt");
-    const { value, ms } = await timed(() => gitRunner("git", TIMEOUT_MS)(["-c", `core.hooksPath=${hooks}`, "worktree", "add", "-b", "flowryn/run", target], repo));
+    const { value, ms } = await fromReady(join(dir, "hook.pid"), () => gitRunner("git", TIMEOUT_MS)(["-c", `core.hooksPath=${hooks}`, "worktree", "add", "-b", "flowryn/run", target], repo));
     expect(value.code).toBe(TIMED_OUT);
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "hook.pid"));
@@ -225,7 +267,7 @@ describe("git (gitRunner and runTool)", () => {
 describe("the axi tools and the other helpers, silent", () => {
   test("tasks-axi times out within its budget (a transient failure)", async () => {
     const tool = silentTool("tasks-axi");
-    const { value, ms } = await timed(() => processRunner(tool, null).run(["list"], TIMEOUT_MS));
+    const { value, ms } = await fromReady(join(dir, "tasks-axi.pid"), () => processRunner(tool, null).run(["list"], TIMEOUT_MS));
     expect(value.timedOut).toBe(true);
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "tasks-axi.pid"));
@@ -233,7 +275,7 @@ describe("the axi tools and the other helpers, silent", () => {
 
   test("quota-axi reads unknown within its budget", async () => {
     const tool = silentTool("quota-axi");
-    const { value, ms } = await timed(() => probeQuota(tool, null, TIMEOUT_MS));
+    const { value, ms } = await fromReady(join(dir, "quota-axi.pid"), () => probeQuota(tool, null, TIMEOUT_MS));
     expect(value).toEqual({ state: "unknown", detail: "quota-axi took over 0.3 s" });
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "quota-axi.pid"));
@@ -242,7 +284,7 @@ describe("the axi tools and the other helpers, silent", () => {
   test("gh auth token gives no token within its budget", async () => {
     const gh = silentTool("gh");
     const token = tokenSource({}, [], gh, "https://api.github.com", "https://github.com", TIMEOUT_MS);
-    const { value, ms } = await timed(() => token());
+    const { value, ms } = await fromReady(join(dir, "gh.pid"), () => token());
     expect(value).toBeNull();
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "gh.pid"));
@@ -259,7 +301,7 @@ describe("the axi tools and the other helpers, silent", () => {
 
   test("the restart's smoke and launchd reads (runProc) time out within their budget", async () => {
     const tool = silentTool("smoke");
-    const { value, ms } = await timed(() => runProc([tool], process.env, TIMEOUT_MS));
+    const { value, ms } = await fromReady(join(dir, "smoke.pid"), () => runProc([tool], process.env, TIMEOUT_MS));
     expect(value.timedOut).toBe(true);
     expect(value.exitCode).toBe(TIMED_OUT);
     expect(ms).toBeLessThan(BUDGET_MS);
@@ -269,7 +311,7 @@ describe("the axi tools and the other helpers, silent", () => {
   test("an upkeep build step whose compiler hangs is stopped with everything it started; its log says what ran", async () => {
     const script = silentTool("build.sh");
     const logPath = join(dir, "build.log");
-    const { value, ms } = await timed(() => runStep(["/bin/sh", script], { cwd: dir, env: process.env, logPath, timeoutMs: TIMEOUT_MS }));
+    const { value, ms } = await fromReady(join(dir, "build.sh.pid"), () => runStep(["/bin/sh", script], { cwd: dir, env: process.env, logPath, timeoutMs: TIMEOUT_MS }));
     expect(value.timedOut).toBe(true);
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "build.sh.pid"));
