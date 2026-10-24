@@ -703,7 +703,7 @@ type Verified = { ok: boolean;
     </div></div>
     <div class="card card-border"><div class="card-body py-4 text-sm space-y-2">
       <h3 class="card-title text-base">Informational items: at least once</h3>
-      <p class="opacity-85">Outcomes you should know but need not act on, like a yolo merge or an automatic resume. Stable ids. An item is <em>carried</em> when a hook returns it and <em>presented</em> only when the same session's next turn end follows (Claude <code>Stop</code>, Pi <code>agent_settled</code>). A turn with no turn end (interrupt, hook timeout, API error) means the item is carried again next turn, deduplicated by id. After 3 attempts it drops to the board.</p>
+      <p class="opacity-85">Outcomes you should know but need not act on, like a yolo merge or an automatic resume. Stable ids. An item is <em>carried</em> when a hook returns it and <em>presented</em> only when the same session's next turn end follows (Claude <code>Stop</code>, Pi <code>agent_settled</code>). A turn with no turn end (interrupt, hook timeout, API error) means the item is carried again next turn, deduplicated by id. A message Claude takes into a running turn (a background notice, a message typed while busy) is part of that turn, not a new one. After 3 attempts it drops to the board.</p>
     </div></div>
   </div>
 
