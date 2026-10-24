@@ -8,8 +8,11 @@ import { neededPools, positionOf } from "../lifecycle/stages.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { fullPools, liveCounts, liveJobLeases } from "./pools.ts";
 import { hostState } from "./scheduler.ts";
-import { overrideQuota, quotaHolds, quotaLine, quotaState } from "./quota.ts";
-import { clearUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "./usage.ts";
+import { overrideQuota, quotaHolds, quotaLine, quotaState, quotaStates, type QuotaState } from "./quota.ts";
+import { clearUsageLimit, resumeCommand, usageGate, usagePause, usagePauses, type UsagePause } from "./usage.ts";
+import { signedOutAccounts } from "./signed-out.ts";
+import { accountsConfig, harnessAccounts } from "../config/accounts.ts";
+import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { queuedRequests } from "../verify/queue.ts";
 import { waitingOn } from "../verify/start.ts";
 
@@ -23,11 +26,13 @@ function age(now: number, since: number): string {
 }
 
 /** Why a waiting run has no grant yet, as the scheduler would see it now. */
-function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Record<string, number>, hostOk: boolean): string {
-  if (run.harness === "claude" && usageGate(ctx.db, ctx.now, run.id) === "paused") return "Claude usage limit";
-  if (run.harness === "claude" && run.pending_launch === "fresh" && quotaHolds(ctx.db)) {
-    const quota = quotaState(ctx.db)!;
-    return `Claude quota ${quota.percent}% under floor ${quota.floor}%`;
+function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Record<string, number>, hostOk: boolean, signedOut: string[]): string {
+  const account = run.account ?? run.harness;
+  if (run.pending_launch && signedOut.includes(account)) return `${account} signed out`;
+  if (usageGate(ctx.db, ctx.now, account, run.id) === "paused") return `${account} usage limit`;
+  if (run.pending_launch === "fresh" && quotaHolds(ctx.db, account)) {
+    const quota = quotaState(ctx.db, account)!;
+    return `${account} quota ${quota.percent}% under floor ${quota.floor}%`;
   }
   const untested = run.pending_launch ? unverifiedVersion(ctx.db, run.harness) : null;
   if (untested) return `${run.harness} ${untested} has no passing contract`;
@@ -41,7 +46,7 @@ function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Rec
 /**
  * `flowryn capacity` (design section 11): each pool's live leases against its
  * cap (a run's and a job's, such as a verify), the jobs holding slots, the host
- * check, the Claude usage-limit pause, the Claude quota floor, the verifies
+ * check, each account's usage-limit pause and quota floor, the verifies
  * queued for a validation slot, and the runs waiting for a grant in the order
  * the scheduler grants them.
  */
@@ -56,8 +61,9 @@ const capacity: VerbSpec = {
     const cfg = capacityConfig(ctx.config);
     const counts = liveCounts(ctx.db);
     const host = hostState(ctx.db);
-    const pause = usagePause(ctx.db);
-    const quota = quotaState(ctx.db);
+    const pauses = usagePauses(ctx.db);
+    const quotas = quotaStates(ctx.db);
+    const signedOut = signedOutAccounts(ctx.db);
     const rows = ctx.db
       .query(
         `SELECT r.*, tp.project_id, tp.kind, tp.delivery_mode, tp.sensitive, COALESCE(p.priority, 2) AS priority
@@ -77,7 +83,7 @@ const capacity: VerbSpec = {
         stage: w.pos.stage.id,
         needs: w.needs.join(" ") || "-",
         waited: w.run.waiting_since ? age(ctx.now, w.run.waiting_since) : "-",
-        why: waitReason(ctx, w.run, w.needs, cfg.pools, host?.ok !== false),
+        why: waitReason(ctx, w.run, w.needs, cfg.pools, host?.ok !== false, signedOut),
         title: sanitizeLine(taskTitle(ctx.db, w.run.task_id), 60),
       }));
     const data: Record<string, unknown> = {
@@ -85,13 +91,14 @@ const capacity: VerbSpec = {
       host: host
         ? `${host.ok ? "ok" : `blocked: ${host.reason}`} (since ${age(ctx.now, host.since)} ago; needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`
         : `not checked yet (needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`,
-      usage_limit: pause ? usageLine(ctx.now, pause) : "-",
+      usage_limit: pauses.size > 0 ? [...pauses].map(([account, pause]) => ({ account, state: usageLine(ctx.now, pause) })) : "-",
       quota:
         cfg.quota.floor <= 0
           ? "off ([capacity.quota] floor = 0)"
-          : quota
-            ? `${quotaLine(quota)} (since ${age(ctx.now, quota.since)} ago)`
-            : `not read yet (floor ${cfg.quota.floor}%; read before a new Claude run starts)`,
+          : quotas.size > 0
+            ? [...quotas].map(([account, quota]) => ({ account, state: `${quotaLine(quota)} (since ${age(ctx.now, quota.since)} ago)` }))
+            : `not read yet (floor ${cfg.quota.floor}%; read for an account before a new run starts on it)`,
+      ...(signedOut.length > 0 ? { signed_out: signedOut } : {}),
       waiting: waiting.slice(0, MAX_WAITING_ROWS),
       unresolved: unresolvedLine(ctx.db, ctx.now),
     };
@@ -102,38 +109,74 @@ const capacity: VerbSpec = {
     if (queued.length > 0) data.verify_queue = queued.map((r) => ({ request: r.id, pr: r.pr_url, task: r.task_id ?? "-", waited: age(ctx.now, r.requested_at), why: waitingOn(ctx.db, r, cfg.pools, ctx.now) }));
     if (waiting.length > MAX_WAITING_ROWS) data.more = `${waiting.length - MAX_WAITING_ROWS} more waiting`;
     const hints = waiting.length > 0 ? ["flowryn show <task>"] : [`every run holds a ${WORKER_POOL} slot while its worker lives`];
-    return { data, hints: pause || quotaHolds(ctx.db) ? [RESUME_COMMAND, ...hints] : hints };
+    const held = [...new Set([...pauses.keys(), ...[...quotas].filter(([a]) => quotaHolds(ctx.db, a)).map(([a]) => a)])];
+    return { data, hints: [...held.map(resumeCommand), ...hints] };
   },
 };
 
-function usageLine(now: number, pause: NonNullable<ReturnType<typeof usagePause>>): string {
-  const since = `Claude paused since ${age(now, pause.since)} ago`;
+export function usageLine(now: number, pause: UsagePause): string {
+  const since = `paused since ${age(now, pause.since)} ago`;
   if (now < pause.until) return `${since}; expires in ${age(pause.until, now)}, then one run probes it`;
-  return pause.probe ? `${since}; expired, ${pause.probe.run} probes it` : `${since}; expired, the next Claude start probes it`;
+  return pause.probe ? `${since}; expired, ${pause.probe.run} probes it` : `${since}; expired, the next start probes it`;
+}
+
+/** One account's quota for `flowryn accounts`: the verdict with the reading it flipped on, and when. */
+export function quotaCell(state: QuotaState | null, floor: number, unreadable: string | null = null): string {
+  if (floor <= 0) return "off";
+  if (!state) return unreadable ? `unknown (${unreadable})` : "not read yet";
+  const at = new Date(state.since).toTimeString().slice(0, 5);
+  if (state.state === "unknown") return `unknown (${state.detail ?? "no reading"})`;
+  if (state.state === "ok") return `ok ${state.percent}% at ${at}`;
+  return `low ${state.percent}% (floor ${state.floor}%)${state.override ? ", started anyway" : ""}`;
+}
+
+/** One account's usage pause for `flowryn accounts`. */
+export function usageCell(now: number, pause: UsagePause | null): string {
+  if (!pause) return "-";
+  return now < pause.until ? `paused until ${new Date(pause.until).toTimeString().slice(0, 5)}` : pause.probe ? `probing (${pause.probe.run})` : "expired; the next start probes it";
 }
 
 /**
- * `flowryn capacity resume --harness claude`: you lift the Claude usage-limit
+ * `flowryn capacity resume --account <id>`: you lift the account's usage-limit
  * pause now, in your own terminal (a leader or worker cannot), with an event,
- * resolving its P1. It also starts new Claude runs under the quota floor,
- * until the next reading that is not low.
+ * resolving its P1. It also starts new runs on the account under the quota
+ * floor, until its next reading that is not low. `--harness <h>` does it for
+ * every account of the harness.
  */
 const capacityResume: VerbSpec = {
   name: "capacity resume",
-  summary: "Lift the Claude usage-limit pause and the quota floor's hold now, in your own terminal",
+  summary: "Lift an account's usage-limit pause and its quota floor's hold now, in your own terminal",
   positionals: [],
-  flags: { harness: { type: "string", help: "the harness whose pause to lift: claude", placeholder: "harness" } },
+  flags: {
+    account: { type: "string", help: "the account whose pause to lift (flowryn accounts)", placeholder: "id" },
+    harness: { type: "string", help: "every account of this harness: claude or pi", placeholder: "harness" },
+  },
   kind: "mutation",
   roles: ["human"],
   apply(ctx, args) {
+    const accountId = stringArg(args, "account");
     const harness = stringArg(args, "harness");
-    if (harness !== "claude") throw new FlowrynError("bad_args", "--harness claude is required: only Claude work pauses on a usage limit");
-    const lifted = clearUsageLimit(ctx.db, "lifted by you (flowryn capacity resume)", ctx.now(), "cli");
-    const quota = overrideQuota(ctx.db, ctx.now());
-    return { data: { harness, usage: lifted ? "resumed" : "not paused", quota: quota ? "started anyway" : "not held" }, hints: ["flowryn capacity"] };
+    if ((accountId === undefined) === (harness === undefined)) throw new FlowrynError("bad_args", "name one of --account <id> or --harness <claude|pi>", "flowryn accounts");
+    let ids: string[];
+    if (accountId !== undefined) {
+      const known = Object.keys(accountsConfig(ctx.config()).accounts);
+      // An account config dropped can still hold a recorded pause: it can be lifted too.
+      if (!known.includes(accountId) && !usagePause(ctx.db, accountId) && !quotaState(ctx.db, accountId)) throw new FlowrynError("not_found", `no account ${accountId}`, "flowryn accounts");
+      ids = [accountId];
+    } else {
+      if (!(HARNESS_IDS as readonly string[]).includes(harness!)) throw new FlowrynError("bad_args", "--harness must be claude or pi");
+      ids = harnessAccounts(ctx.config(), harness as HarnessId).map((a) => a.id);
+    }
+    const accounts = ids.map((id) => {
+      const lifted = clearUsageLimit(ctx.db, id, "lifted by you (flowryn capacity resume)", ctx.now(), "cli");
+      const quota = overrideQuota(ctx.db, id, ctx.now());
+      return { account: id, usage: lifted ? "resumed" : "not paused", quota: quota ? "started anyway" : "not held" };
+    });
+    return { data: { accounts }, hints: ["flowryn capacity"] };
   },
   async settle(ctx, result) {
-    if (result.data.usage === "resumed" || result.data.quota === "started anyway") ctx.sched.kick();
+    const accounts = result.data.accounts as { usage: string; quota: string }[];
+    if (accounts.some((a) => a.usage === "resumed" || a.quota === "started anyway")) ctx.sched.kick();
     return result;
   },
 };

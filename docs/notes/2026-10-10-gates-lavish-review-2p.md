@@ -22,6 +22,8 @@ Ship 3 of the toolkit report (§6). It adds the two gates that have no raw comma
 
 ## The quota floor (Q4)
 
+The floor is now per account (meta `quota:<account>`, `capacity resume --account <id>`): docs/notes/2026-10-22-multiple-ai-provider-u9.md "Capacity per account (phase 2)" owns the current behaviour; this section records the home-wide original.
+
 `src/sched/quota.ts`. Before a new Claude run starts, the scheduler reads `quota-axi --provider claude --json --no-credential-refresh`. The argv is fixed, has no shell and a 10 s timeout, and puts node's directory first on PATH, because quota-axi is a node script. The binary is `[tools] quota_axi` or the one on PATH.
 
 - **The reading** (`parseQuota`, quota-axi 0.1.37, `schemaVersion` 5): `providers[claude].quotaSemantics.effectiveAvailability[scope = all_models]`, its `effectivePercentRemaining`, and its first `limitingWindowIds` with that window's `resetsAt`. quota-axi already takes the minimum over the session and weekly windows. The model scopes (`model:fable`) are left out, because mapping Flowryn's model config onto quota-axi's names would be a guess. Anything else is `unknown`: another schema, no claude provider, a status other than `known`, a non-number, a non-zero exit, a timeout, or quota-axi missing. `test/fixtures/quota-axi-0.1.37-claude.json` is a real output from this Mac.
