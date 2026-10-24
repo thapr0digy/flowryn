@@ -183,14 +183,14 @@ function withoutLabels(part: string): string {
   return out;
 }
 
-/** The template's goals labels whose own line has no words after the label. */
+/** The template's goals labels with no words between them and the next label (or the end of the part). */
 function blankGoalLabels(part: string): string[] {
   const blank: string[] = [];
-  for (const label of [GOALS_LABEL, NON_GOALS_LABEL]) {
+  for (const [label, next] of [[GOALS_LABEL, NON_GOALS_LABEL], [NON_GOALS_LABEL, GOALS_LABEL]] as const) {
     const at = part.indexOf(label);
     if (at === -1) continue;
     const rest = part.slice(at + label.length);
-    const end = rest.search(/<\/p\s*>|<p\b|<strong>(?:Not g|G)oals\.<\/strong>/i);
+    const end = rest.indexOf(next);
     if (!/\p{L}/u.test(textOf(end === -1 ? rest : rest.slice(0, end)))) blank.push(textOf(label));
   }
   return blank;

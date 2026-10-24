@@ -72,6 +72,8 @@ describe("the design page check", () => {
     expect(designPageProblems(filled({ "{{GOALS}}": "" }))).toEqual(['the "Goals." line in the "goals" part is empty; say it in words']);
     expect(designPageProblems(filled({ "{{NON_GOALS}}": "" }))).toEqual(['the "Not goals." line in the "goals" part is empty; say it in words']);
     expect(designPageProblems(filled({ "{{GOALS}}": "<strong>A cart page that loads.</strong>" }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{GOALS}}": "<ul><li><p>The cart page loads.</p></li></ul>" }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{GOALS}}": "</p><ul><li>The cart page loads.</li></ul><p>", "{{NON_GOALS}}": "</p><ul><li>Checkout.</li></ul><p>" }))).toEqual([]);
     expect(designPageProblems(filled({ "{{ASK}}": "<p><strong>Approve, or send changes.</strong></p>" }))).toEqual([]);
     expect(designPageProblems(filled({ "{{BEFORE_AFTER}}": "<tr><th>The cart</th><th>No page</th><th>A page</th></tr>" }))).toEqual([]);
     const goals = /<section data-section="goals">[\s\S]*?<\/section>\n/.exec(filled())![0];
