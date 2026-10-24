@@ -361,14 +361,20 @@ export class Scheduler {
     }
   }
 
-  /** An account config no longer has holds nothing: its usage pause, quota state and signed-out episode end, each with an event. */
+  /**
+   * An account config no longer has holds nothing once no live run records it:
+   * its usage pause, quota state and signed-out episode end, each with an event.
+   */
   private forgetDroppedAccounts(config: FlowrynConfig): void {
     const { db, now } = this.deps;
     const recorded = new Set([...usagePauses(db).keys(), ...quotaStates(db).keys(), ...signedOutAccounts(db)]);
     const why = "the account is no longer in config";
     const configured = accountsConfig(config).accounts;
+    const inUse = db.query(
+      `SELECT 1 FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (account = ?1 OR (account IS NULL AND harness = ?1)) LIMIT 1`,
+    );
     for (const id of recorded) {
-      if (configured[id]) continue;
+      if (configured[id] || inUse.get(id)) continue;
       tx(db, () => {
         clearUsageLimit(db, id, why, now(), "daemon");
         forgetQuota(db, id, why, now());

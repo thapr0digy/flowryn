@@ -270,6 +270,22 @@ describe("an account removed from config", () => {
     for (const kind of ["usage_limit", "quota_low", "account_signed_out"]) expect(item(kind, "account:claude")!.state).toBe("resolved");
     expect(events("sched.usage_resumed")).toEqual([expect.objectContaining({ account: "claude", why: "the account is no longer in config" })]);
   });
+  test("a live run on the implicit claude account keeps its pause and P1; once the run ends, the next pass releases them", async () => {
+    tx(db, () => noteUsageLimit(db, "claude", "worker t5", "rate_limit", 1_000_000, BACKOFF));
+    waiting("r5", "claude", "resume");
+    const s = stand();
+    await pass(s);
+    await pass(s);
+    expect(s.launches).toEqual([]);
+    expect(usagePause(db, "claude")).not.toBeNull();
+    expect(item("usage_limit", "account:claude")!.state).toBe("open");
+    expect(events("sched.usage_resumed")).toEqual([]);
+    db.query("UPDATE runs SET state = 'cancelled' WHERE id = 'r5'").run();
+    await pass(s);
+    expect(usagePause(db, "claude")).toBeNull();
+    expect(item("usage_limit", "account:claude")!.state).toBe("resolved");
+    expect(events("sched.usage_resumed")).toEqual([expect.objectContaining({ account: "claude", why: "the account is no longer in config" })]);
+  });
 });
 
 describe("the state from before accounts", () => {
