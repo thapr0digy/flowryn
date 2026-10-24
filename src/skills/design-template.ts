@@ -183,6 +183,19 @@ function withoutLabels(part: string): string {
   return out;
 }
 
+/** The template's goals labels whose own line has no words after the label. */
+function blankGoalLabels(part: string): string[] {
+  const blank: string[] = [];
+  for (const label of [GOALS_LABEL, NON_GOALS_LABEL]) {
+    const at = part.indexOf(label);
+    if (at === -1) continue;
+    const rest = part.slice(at + label.length);
+    const end = rest.search(/<\/p\s*>|<p\b|<strong>(?:Not g|G)oals\.<\/strong>/i);
+    if (!/\p{L}/u.test(textOf(end === -1 ? rest : rest.slice(0, end)))) blank.push(textOf(label));
+  }
+  return blank;
+}
+
 /**
  * What is wrong with a design page, as one line per problem the worker can
  * fix; empty when the page passes. `widget`: the page carries questions for
@@ -201,7 +214,9 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
   const inOrder = found.every((p, i) => i === 0 || p.start > found[i - 1]!.start);
   if (!inOrder) problems.push(`the parts must come in this order: ${DESIGN_SECTIONS.join(", ")}`);
   for (const part of found) {
-    if (!/\p{L}/u.test(textOf(withoutLabels(html.slice(part.start, part.end))))) problems.push(`the "${part.name}" part is empty; say it in words`);
+    const body = html.slice(part.start, part.end);
+    if (!/\p{L}/u.test(textOf(withoutLabels(body)))) problems.push(`the "${part.name}" part is empty; say it in words`);
+    else if (part.name === "goals") for (const label of blankGoalLabels(body)) problems.push(`the "${label}" line in the "goals" part is empty; say it in words`);
   }
 
   const first = found[0];
