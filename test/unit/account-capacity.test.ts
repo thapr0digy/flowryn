@@ -254,6 +254,22 @@ describe("an account removed from config", () => {
     await pass(s);
     expect(events("sched.quota_forgotten")).toHaveLength(1);
   });
+  test("the implicit claude account's state ends once [accounts] declares a Claude account", async () => {
+    tx(db, () => {
+      noteUsageLimit(db, "claude", "r9", "rate_limit", 999_000, BACKOFF);
+      recordQuota(db, "claude", { state: "known", percent: 1, window: null, resets_at: null }, 5, 999_000);
+      noteSignedOut(db, "claude", "not signed in", "claude", 999_000);
+    });
+    waiting("r1", "work-a");
+    const s = stand({});
+    await pass(s);
+    expect(s.launches).toEqual(["r1:fresh"]);
+    expect(usagePause(db, "claude")).toBeNull();
+    expect(quotaState(db, "claude")).toBeNull();
+    expect(signedOutAccounts(db)).toEqual([]);
+    for (const kind of ["usage_limit", "quota_low", "account_signed_out"]) expect(item(kind, "account:claude")!.state).toBe("resolved");
+    expect(events("sched.usage_resumed")).toEqual([expect.objectContaining({ account: "claude", why: "the account is no longer in config" })]);
+  });
 });
 
 describe("the state from before accounts", () => {

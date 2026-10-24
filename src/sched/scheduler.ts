@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems } from "../attention/items.ts";
 import { existsSync } from "node:fs";
-import { capacityAccount, resolveAccount, type Account } from "../config/accounts.ts";
+import { accountsConfig, capacityAccount, resolveAccount, type Account } from "../config/accounts.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
@@ -366,8 +366,9 @@ export class Scheduler {
     const { db, now } = this.deps;
     const recorded = new Set([...usagePauses(db).keys(), ...quotaStates(db).keys(), ...signedOutAccounts(db)]);
     const why = "the account is no longer in config";
+    const configured = accountsConfig(config).accounts;
     for (const id of recorded) {
-      if (capacityAccount(config, id, "claude") ?? capacityAccount(config, id, "pi")) continue;
+      if (configured[id]) continue;
       tx(db, () => {
         clearUsageLimit(db, id, why, now(), "daemon");
         forgetQuota(db, id, why, now());
