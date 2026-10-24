@@ -63,7 +63,7 @@ export interface StartDeps {
   harnessVersion(harness: HarnessId, binary: string): Promise<string | null>;
   /** `git -C <cwd> <args>`: stdout trimmed, or null on failure. */
   git(cwd: string, args: string[]): Promise<string | null>;
-  /** Null when the account's login is signed in, else why not; default: ask the harness (src/harness/sign-in.ts). */
+  /** Null when the account's login is signed in, else why not; default: ask the harness (src/harness/sign-in.ts). The scheduler asks it at each launch grant. */
   signIn?(account: Account): Promise<string | null>;
   now(): number;
 }
@@ -126,10 +126,11 @@ function herdrRefusal(deps: StartDeps, message: string, detail: string): Flowryn
 
 /**
  * Can a worker start on this project now? Herdr reachable, the account's
- * harness installed with a passing contract for its version, the account
- * signed in, and the primary checkout on its default branch (the base the
- * worktree branches from). The account was resolved for this project, so its
- * scope already matched.
+ * harness installed with a passing contract for its version, and the primary
+ * checkout on its default branch (the base the worktree branches from). The
+ * account was resolved for this project, so its scope already matched. Its
+ * sign-in is checked at each launch grant instead (the scheduler): a
+ * signed-out account's runs wait, with a P1 saying how to sign it in.
  */
 export async function checkStart(deps: StartDeps, project: ProjectRow, account: Account): Promise<{ version: string; base: string }> {
   const harness = account.harness;
@@ -145,8 +146,6 @@ export async function checkStart(deps: StartDeps, project: ProjectRow, account: 
   const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
   if (check.state !== "verified") throw harnessRefusal(check, deps.db, deps.config());
   const version = check.version;
-  const signedOut = await (deps.signIn ? deps.signIn(account) : signInOf(deps.config(), account));
-  if (signedOut !== null) throw new FlowrynError("account_signed_out", signedOut, "flowryn accounts");
   const branch = await deps.git(project.path, ["branch", "--show-current"]);
   if (branch !== project.default_branch) {
     recordTangle(deps, project, branch || null);

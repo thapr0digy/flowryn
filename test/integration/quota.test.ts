@@ -54,12 +54,12 @@ describe("the Claude quota floor", () => {
       setQuota(f, 3);
       const b = await f.dispatch("Waits on the quota\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
       await waitUntil(() => lowItem(f)?.state === "open", 15_000, "the quota P1");
-      expect(lowItem(f)!.line).toBe("Claude quota 3% (seven_day), under the 5% floor; new Claude runs wait until it resets at 04:00; flowryn capacity resume --harness claude starts them anyway");
+      expect(lowItem(f)!.line).toBe("Account claude: quota 3% (seven_day), under the 5% floor; new runs on claude wait until it resets at 04:00; flowryn capacity resume --account claude starts them anyway");
       const capacity = await f.json(["capacity"]);
       const view = JSON.stringify(capacity.reply.data);
-      expect(view).toContain("Claude quota 3% under floor 5%");
-      expect(view).toContain("claude 3% (floor 5%) low; new Claude runs wait");
-      expect(capacity.reply.hints).toContain("flowryn capacity resume --harness claude");
+      expect(view).toContain("claude quota 3% under floor 5%");
+      expect(view).toContain("3% (floor 5%) low; new runs on it wait");
+      expect(capacity.reply.hints).toContain("flowryn capacity resume --account claude");
       const pi = await f.dispatch("Pi goes on\nFAKE: sleep 120000", { kind: "scout", harness: "pi" });
       await f.waitRun(pi.run, (r) => r.proc_pid !== null, "the Pi worker");
       expect(f.run(b.run).proc_pid).toBeNull();
@@ -118,7 +118,7 @@ describe("the Claude quota floor", () => {
       await f.waitRun(b.run, (r) => r.proc_pid !== null, "the held Claude worker", 20_000);
       expect(lowItem(f)).toMatchObject({ state: "resolved", resolved_by: "started anyway (flowryn capacity resume)" });
       expect(quotaEvents(f)).toEqual(["sched.quota_ok", "sched.quota_low", "sched.quota_override"]);
-      expect(JSON.stringify((await f.json(["capacity"])).reply.data)).toContain("you started Claude work anyway");
+      expect(JSON.stringify((await f.json(["capacity"])).reply.data)).toContain("you started work on it anyway");
     },
     { timeout: 90_000 },
   );

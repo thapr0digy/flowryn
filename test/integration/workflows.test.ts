@@ -469,7 +469,7 @@ describe("autonomy and the usage limit", () => {
       expect((b.reply.data as { state: string }).state).toBe("waiting for capacity");
       const bRun = String((b.reply.data as { run: string }).run);
       const capacity = await f.json(["capacity"]);
-      expect(JSON.stringify(capacity.reply.data)).toContain("Claude usage limit");
+      expect(JSON.stringify(capacity.reply.data)).toContain("claude usage limit");
       const c = await f.dispatch("Pi goes on\nFAKE: sleep 120000", { kind: "scout", harness: "pi" });
       await f.waitRun(c.run, (r) => r.proc_pid !== null, "the Pi worker");
       expect(f.run(bRun).proc_pid).toBeNull();
@@ -500,7 +500,7 @@ describe("autonomy and the usage limit", () => {
       expect(limits().map((l) => [l.backoff_ms, l.rearmed])).toEqual([[2000, false], [4000, true]]);
       const items = rows<{ state: string; line: string }>(f, "SELECT state, line FROM items WHERE kind = 'usage_limit'");
       expect(items.length).toBe(1);
-      expect(items[0]!.line).toContain("flowryn capacity resume --harness claude");
+      expect(items[0]!.line).toContain("flowryn capacity resume --account claude");
       expect(f.run(c.run).proc_pid).toBeNull();
       expect((await f.json(["cancel", b.task])).code).toBe(0);
       // After the longer backoff exactly one more probe starts, the oldest waiting; the other keeps waiting.
@@ -527,7 +527,7 @@ describe("autonomy and the usage limit", () => {
       await limitedAndGone(f);
       const b = await f.dispatch("Waits\nFAKE: sleep 120000", { kind: "scout", harness: "claude" });
       const view = await f.json(["capacity"]);
-      expect(view.reply.hints).toContain("flowryn capacity resume --harness claude");
+      expect(view.reply.hints).toContain("flowryn capacity resume --account claude");
       expect(JSON.stringify(view.reply.data)).toContain("then one run probes it");
       const refused = await f.json(["capacity", "resume", "--harness", "claude"]);
       expect((refused.reply.error as { code: string }).code).toBe("human_only");

@@ -80,10 +80,10 @@ export function sameProcess(a: ProcIdentity, b: ProcIdentity): boolean {
   return a.pid === b.pid && Math.abs(a.start - b.start) < 1_000 && a.exe === b.exe;
 }
 
-/** Is the recorded process still the one running under its pid? */
-export async function isAlive(identity: ProcIdentity, ps: PsRunner = psRunner): Promise<boolean> {
+/** Is the recorded process still the one running under its pid? `execs`: it may have exec'd since, so its executable is not compared. */
+export async function isAlive(identity: ProcIdentity, ps: PsRunner = psRunner, execs = false): Promise<boolean> {
   const now = await readIdentity(identity.pid, ps);
-  return now !== null && sameProcess(now, identity);
+  return now !== null && sameProcess(now, execs ? { ...identity, exe: now.exe } : identity);
 }
 
 export interface TerminateResult {
@@ -104,6 +104,12 @@ export interface TerminateOptions {
    * pid is the group id; the identity check still guards against reuse.
    */
   group?: boolean;
+  /**
+   * The recorded process is a `sh -c` that may since have exec'd its command
+   * (one simple command does), so its executable is not compared; the pid
+   * and start time, which an exec keeps, still guard against reuse.
+   */
+  execs?: boolean;
 }
 
 /**
@@ -115,7 +121,7 @@ export async function terminate(identity: ProcIdentity, options: TerminateOption
   const kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
   const graceMs = options.graceMs ?? 10_000;
   const pollMs = options.pollMs ?? 100;
-  if (!(await isAlive(identity, ps))) return { ok: true, evidence: "absent", signal: "none" };
+  if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "absent", signal: "none" };
   const target = options.group ? -identity.pid : identity.pid;
   const send = (signal: NodeJS.Signals) => {
     try {
@@ -128,14 +134,14 @@ export async function terminate(identity: ProcIdentity, options: TerminateOption
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline) {
     await Bun.sleep(pollMs);
-    if (!(await isAlive(identity, ps))) return { ok: true, evidence: "process", signal: "SIGTERM" };
+    if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "process", signal: "SIGTERM" };
   }
   // Re-check right before escalating, so SIGKILL never reaches a pid that exited and was reused.
-  if (!(await isAlive(identity, ps))) return { ok: true, evidence: "process", signal: "SIGTERM" };
+  if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "process", signal: "SIGTERM" };
   send("SIGKILL");
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(pollMs);
-    if (!(await isAlive(identity, ps))) return { ok: true, evidence: "process", signal: "SIGKILL" };
+    if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "process", signal: "SIGKILL" };
   }
   return { ok: false, evidence: "timeout", signal: "SIGKILL" };
 }

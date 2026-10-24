@@ -88,13 +88,15 @@ export function quotaJson(percent: number, status = "known"): string {
 }
 
 /**
- * The test homes' quota-axi: every call is logged to $FLOWRYN_HOME/quota-calls.log; it prints
- * $FLOWRYN_HOME/quota.json when a test wrote one (quotaJson), else Claude at 80%, and exits 1 while
- * $FLOWRYN_HOME/quota.fail exists. Nothing reaches the network or the keychain.
+ * The test homes' quota-axi: every call is logged to $FLOWRYN_HOME/quota-calls.log with the login it
+ * was pointed at; it prints $FLOWRYN_HOME/quota-<login dir name>.json for a CLAUDE_CONFIG_DIR login
+ * when a test wrote one, else $FLOWRYN_HOME/quota.json when a test wrote one (quotaJson), else Claude
+ * at 80%, and exits 1 while $FLOWRYN_HOME/quota.fail exists. Nothing reaches the network or the keychain.
  */
 const FAKE_QUOTA = `#!/bin/sh
-echo "$*" >> "$FLOWRYN_HOME/quota-calls.log"
+echo "$* dir=\${CLAUDE_CONFIG_DIR-unset}" >> "$FLOWRYN_HOME/quota-calls.log"
 if [ -f "$FLOWRYN_HOME/quota.fail" ]; then echo "quota-axi: claude: network unreachable" >&2; exit 1; fi
+if [ -n "$CLAUDE_CONFIG_DIR" ] && [ -f "$FLOWRYN_HOME/quota-$(basename "$CLAUDE_CONFIG_DIR").json" ]; then cat "$FLOWRYN_HOME/quota-$(basename "$CLAUDE_CONFIG_DIR").json"; exit 0; fi
 if [ -f "$FLOWRYN_HOME/quota.json" ]; then cat "$FLOWRYN_HOME/quota.json"; exit 0; fi
 cat <<'JSON'
 ${quotaJson(80)}

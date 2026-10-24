@@ -53,7 +53,7 @@ export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfi
 }
 
 export function planOf(request: VerifyRequest, config: VerifyConfig): VerifyPlan {
-  return { prNumber: request.pr_number, headRef: request.head_ref, binary: config.binary, timeoutMs: config.timeout_ms, path: request.path };
+  return { prNumber: request.pr_number, headRef: request.head_ref, binary: config.binary, timeoutMs: config.timeout_ms, stepTimeoutMs: config.step_timeout_ms, path: request.path };
 }
 
 /** Why the queue's first request cannot start now, or null when it may (the host check aside: it is read when a start is tried). */

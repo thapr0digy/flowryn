@@ -282,7 +282,7 @@ describe("sign-in check", () => {
     "pi",
     `case "$*" in\n  *"auth check --provider ready"*) echo '{"status":"ready","provider":"ready"}' ;;\n  *"auth check --provider ext"*) echo '{"status":"not_ready","provider":"ext","reason":"provider_not_found"}' ;;\n  *"--list-models ext"*) printf 'provider model\\next m1\\n' ;;\n  *) echo '{"status":"not_ready","reason":"credentials_not_configured"}' ;;\nesac`,
   );
-  const account = (over: Record<string, unknown>) => ({ id: "a", harness: "claude" as const, scope: "s", config_dir: null, agent_dir: null, provider: null, model: null, effort: null, declared: true, ...over });
+  const account = (over: Record<string, unknown>) => ({ id: "a", harness: "claude" as const, scope: "s", config_dir: null, agent_dir: null, provider: null, model: null, effort: null, declared: true, overflow: [], ...over });
 
   test("assumption: an inherited credential cannot answer for a login that is not signed in", async () => {
     const saved = process.env.ANTHROPIC_API_KEY;

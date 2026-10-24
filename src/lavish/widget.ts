@@ -95,10 +95,11 @@ const RENDERER = String.raw`
   var form = el("form", { "class": "fq", "data-lavish-question": "flowryn-" + S.gate });
   var openCount = S.questions.filter(function (q) { return q.state === "open"; }).length;
   var asking = openCount > 0 && S.gateState === "open";
-  form.appendChild(el("h3", { text: (S.gateState !== "open" ? "Questions, review closed" : openCount > 0 ? "Open questions" : "Questions, all answered") + " (" + S.stage + " review, gate " + S.gate + ")" }));
-  form.appendChild(el("div", { "class": "fq-meta", text: "Each is a Flowryn decision reserved for you. Pick an answer and press Send once for all of them, or tell your leader (flowryn decide <id> <choice> --by captain); the first answer counts." }));
+  form.appendChild(el("h3", { text: S.gateState !== "open" ? "Questions, review closed" : openCount > 0 ? "Questions for you" : "Questions, all answered" }));
+  form.appendChild(el("div", { "class": "fq-meta", text: "Only you can answer these. The recommended answer is picked already: change any you disagree with, then press Send once for all of them. You can also answer in chat with your leader; the first answer counts." }));
+  form.appendChild(el("div", { "class": "fq-meta", text: "The " + S.stage + " review, gate " + S.gate + "." }));
   if (S.decided.length) {
-    form.appendChild(el("div", { "class": "fq-meta", text: "Decided by the worker (send the review back if you disagree):" }));
+    form.appendChild(el("div", { "class": "fq-meta", text: "Already decided by the worker (send the review back if you disagree):" }));
     form.appendChild(el("ul", {}, S.decided.map(function (d) {
       return el("li", { text: d.choice + ": " + d.picked + " (" + d.why + ")" });
     })));

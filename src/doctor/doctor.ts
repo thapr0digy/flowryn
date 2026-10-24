@@ -22,7 +22,9 @@ import { loadExtensionSource } from "../harness/pi/adapter.ts";
 import { capacityConfig, workflowsConfig } from "../config/workflows.ts";
 import { INSTALL_HINTS } from "../init/install.ts";
 import { checkHost } from "../sched/host.ts";
-import { judgeQuota, probeQuota, type QuotaReading } from "../sched/quota.ts";
+import { judgeQuota, probeQuota, quotaTarget, type QuotaReading } from "../sched/quota.ts";
+import { resumeCommand } from "../sched/usage.ts";
+import { accountsConfig, type Account } from "../config/accounts.ts";
 import { nmAutoFixChecks } from "./nomistakes.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -375,8 +377,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const policy = policyCheck(config);
   if (policy) checks.push(policy);
   checks.push(await hostCheckNow(config));
-  const quota = await quotaCheck(config);
-  if (quota) checks.push(quota);
+  checks.push(...(await quotaChecks(config)));
   return checks;
 }
 
@@ -406,25 +407,34 @@ async function hostCheckNow(config: FlowrynConfig): Promise<Check> {
 }
 
 /**
- * The quota floor's probe, run now as the scheduler runs it: the reading
- * against the floor. Nothing when the floor is off or quota-axi is missing
- * (its tool line says so).
+ * The quota floor's probe, run now for each account as the scheduler runs it:
+ * the reading against the floor, one row per account quota-axi can read.
+ * Nothing when the floor is off or quota-axi is missing (its tool line says
+ * so).
  */
-export async function quotaCheck(config: FlowrynConfig, probe: (tool: string, node: string | null) => Promise<QuotaReading> = probeQuota): Promise<Check | null> {
+export async function quotaChecks(config: FlowrynConfig, probe: (tool: string, node: string | null, account: Account) => Promise<QuotaReading> = probeQuota): Promise<Check[]> {
   let floor: number;
+  let accounts: Account[];
   try {
     floor = capacityConfig(config).quota.floor;
+    accounts = Object.values(accountsConfig(config).accounts).filter((a) => !("none" in quotaTarget(a)));
   } catch {
-    return null;
+    return [];
   }
-  if (floor <= 0) return null;
+  if (floor <= 0) return [];
   const tool = resolveTool(config, "quota_axi");
-  if (!tool || !existsSync(tool)) return null;
-  const reading = await probe(tool, resolveTool(config, "node"));
-  if (reading.state === "unknown") return { check: "quota probe", status: "warn", detail: `${reading.detail}; new Claude runs never wait on the quota while it fails` };
-  const window = reading.window ? ` (${reading.window})` : "";
-  if (judgeQuota(reading, floor) === "low") return { check: "quota probe", status: "warn", detail: `claude ${reading.percent}%${window}, under the ${floor}% floor: new Claude runs wait (flowryn capacity resume --harness claude starts them anyway)` };
-  return { check: "quota probe", status: "ok", detail: `claude ${reading.percent}%${window} effective, floor ${floor}%` };
+  if (!tool || !existsSync(tool)) return [];
+  const node = resolveTool(config, "node");
+  return Promise.all(
+    accounts.map(async (account): Promise<Check> => {
+      const check = `quota probe ${account.id}`;
+      const reading = await probe(tool, node, account);
+      if (reading.state === "unknown") return { check, status: "warn", detail: `${reading.detail}; new runs on ${account.id} never wait on the quota while it fails` };
+      const window = reading.window ? ` (${reading.window})` : "";
+      if (judgeQuota(reading, floor) === "low") return { check, status: "warn", detail: `${reading.percent}%${window}, under the ${floor}% floor: new runs on ${account.id} wait (${resumeCommand(account.id)} starts them anyway)` };
+      return { check, status: "ok", detail: `${reading.percent}%${window} effective, floor ${floor}%` };
+    }),
+  );
 }
 
 export interface RestoreResult {
