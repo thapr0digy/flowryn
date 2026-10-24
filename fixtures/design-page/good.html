@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en" data-lavish-live-reload-root><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Readable design pages</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#1d1d1b;--mut:#66635c;--card:#fff;--line:#e3e0d8;--acc:#2f6f5e;--code:#f1efe8}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161614;--fg:#ecebe6;--mut:#a29f97;--card:#1f1f1c;--line:#34332f;--acc:#7cc4ad;--code:#262624}}
+:root[data-theme="dark"]{--bg:#161614;--fg:#ecebe6;--mut:#a29f97;--card:#1f1f1c;--line:#34332f;--acc:#7cc4ad;--code:#262624}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:820px;margin:0 auto;padding:28px 16px 64px}
+h1{font-size:1.5rem;margin:0 0 4px}h2{font-size:1.1rem;margin:30px 0 8px}
+.sub{color:var(--mut);margin:0 0 20px}
+section[data-section="tldr"]{font-size:1.06rem}
+section[data-section="ask"]{border:2px solid var(--acc);border-radius:10px;padding:4px 18px 10px;background:var(--card)}
+section[data-section="ask"] h2{color:var(--acc);margin-top:12px}
+table{border-collapse:collapse;width:100%;font-size:.95em}
+th,td{border-bottom:1px solid var(--line);text-align:left;padding:7px 8px;vertical-align:top}
+th{color:var(--mut);font-weight:600}
+.wrap{overflow-x:auto}
+figure{margin:12px 0;overflow-x:auto}
+figcaption{color:var(--mut);font-size:.9em}
+svg text{fill:var(--fg);font:13px system-ui,sans-serif}
+svg .box{fill:var(--card);stroke:var(--line);stroke-width:1.5}
+svg .ok{fill:var(--card);stroke:var(--acc);stroke-width:2}
+svg .arr{stroke:var(--mut);stroke-width:1.5;fill:none;marker-end:url(#ah)}
+svg .lbl{fill:var(--mut);font-size:12px}
+details{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:24px 0 0;background:var(--card)}
+details summary{cursor:pointer;font-weight:600}
+details h3{font-size:1rem;margin:20px 0 6px}
+code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:.88em}
+pre{background:var(--code);padding:10px;border-radius:6px;overflow-x:auto;font-size:.85em}
+</style></head><body>
+<h1>Design pages you can judge in two minutes</h1>
+<p class="sub">Design for the task “design review pages” · plain rules in code, no model grades the writing.</p>
+
+<section data-section="tldr">
+<h2>In short</h2>
+<p>Design pages open with code names and file lists today, so you rebuild the idea yourself. Every design page will now follow one fixed outline in plain words, readable in about two minutes, with files and code names folded at the bottom. Flowryn checks the outline, length and code names before the page reaches you, and sends a failing page back to the worker with the reasons. QA summary cards get the same check.</p>
+</section>
+
+<section data-section="ask">
+<h2>What I need from you</h2>
+<p>Approve, or send changes. No questions; the rest is decided (folded section). Worth a look:</p>
+<ul>
+<li><strong>500 visible words at most</strong>, about two minutes. Diagrams don’t count.</li>
+<li><strong>Code names are caught by shape</strong>: underscores, mixed case, file paths, flags. Plain-English jargon has no shape, so the instructions forbid it and you judge it.</li>
+<li><strong>Designs in progress are checked too</strong>: their next hand-in is refused once, naming the template.</li>
+</ul>
+</section>
+
+<section data-section="change">
+<h2>What changes for you</h2>
+<div class="wrap"><table>
+<tr><th></th><th>Before</th><th>After</th></tr>
+<tr><td>Top of page</td><td>Code names, counts, a file table</td><td>A summary, then what is needed from you</td></tr>
+<tr><td>Shape</td><td>Different every time</td><td>Same seven parts, same order</td></tr>
+<tr><td>Length</td><td>550–900 visible words</td><td>At most 500; the rest folded</td></tr>
+<tr><td>A page breaking the rules</td><td>Reaches you</td><td>Goes back with each problem listed</td></tr>
+</table></div>
+</section>
+
+<section data-section="goals">
+<h2>Goals and non-goals</h2>
+<p><strong>Goals.</strong> The page alone tells you what changes, why, and what could go wrong. Every page has the same shape. The check is plain code with one answer.</p>
+<p><strong>Not goals.</strong> Grading the writing: that stays with you. Chat replies and status reports, which stay terse.</p>
+</section>
+
+<section data-section="how">
+<h2>How it works</h2>
+<figure>
+<svg viewBox="0 0 760 210" width="760" height="210" role="img" aria-label="The worker fills the template and hands it in; Flowryn checks it; a failing page goes back with a list of fixes; a passing page opens your review.">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0L10,5L0,10z" fill="currentColor" style="fill:var(--mut)"/></marker></defs>
+<rect class="box" x="10" y="20" width="170" height="64" rx="8"/><text x="95" y="47" text-anchor="middle">Worker fills in</text><text x="95" y="67" text-anchor="middle">the page template</text>
+<rect class="box" x="290" y="20" width="190" height="64" rx="8"/><text x="385" y="47" text-anchor="middle">Flowryn checks the page</text><text x="385" y="67" text-anchor="middle" class="lbl">parts · order · length · names</text>
+<rect class="ok" x="590" y="20" width="160" height="64" rx="8"/><text x="670" y="47" text-anchor="middle">Your review</text><text x="670" y="67" text-anchor="middle" class="lbl">opens in Lavish</text>
+<path class="arr" d="M180,52 L288,52"/><text x="234" y="42" text-anchor="middle" class="lbl">hand in</text>
+<path class="arr" d="M480,52 L588,52"/><text x="534" y="42" text-anchor="middle" class="lbl">passes</text>
+<path class="arr" d="M385,84 L385,150 L95,150 L95,86"/><text x="240" y="170" text-anchor="middle" class="lbl">fails: list of fixes,</text><text x="240" y="186" text-anchor="middle" class="lbl">worker revises and hands in again</text>
+</svg>
+<figcaption>Only a page that passes reaches you.</figcaption>
+</figure>
+<ol>
+<li>The design instructions ship a page template with the seven parts marked. The outline borrows from Google design docs, Rust RFCs, Oxide RFDs and decision records (sources folded below).</li>
+<li>At hand-in Flowryn checks: every part present and in order, a short summary, the visible budget, a diagram here, no code names above the fold, the detail folded last.</li>
+<li>Failures go back as a list of fixes. The worker’s “be terse” rule now covers replies and reports, not review pages.</li>
+</ol>
+</section>
+
+<section data-section="alternatives">
+<h2>Other ways we could do it</h2>
+<ul>
+<li><strong>New instructions, no check.</strong> Cheapest, but the old ones asked for clear pages and drifted anyway.</li>
+<li><strong>A model grades readability.</strong> Catches jargon, but varies between runs, costs money, and the task rules it out.</li>
+<li><strong>Flowryn generates the page from data.</strong> Tightest shape, but loses free-form diagrams and tables.</li>
+<li><strong>Do nothing.</strong> Pages stay hard to judge.</li>
+</ul>
+</section>
+
+<section data-section="risks">
+<h2>Risks, and how we’d know it’s wrong</h2>
+<ul>
+<li><strong>Pages pass the check but still read badly.</strong> You send changes; the rules tighten.</li>
+<li><strong>500 words is too tight for a big design.</strong> Repeated length refusals. Change one number, or split into phases.</li>
+<li><strong>Product names trip the code-name rule</strong> (like macOS). A refusal names it; a short allow-list covers common ones, and a page can define any term.</li>
+</ul>
+</section>
+
+<details data-section="detail">
+<summary>Implementation detail: files, rules, tests, sources</summary>
+
+<h3>Files</h3>
+<div class="wrap"><table>
+<tr><th>File</th><th>Change</th></tr>
+<tr><td><code>src/skills/design-template.ts</code> (new)</td><td><code>DESIGN_TEMPLATE</code>, <code>DESIGN_TEMPLATE_FILE = "design-template.html"</code>, <code>DESIGN_SECTIONS</code>, <code>DESIGN_PLACEHOLDERS</code>, <code>designPageProblems(html)</code>: one fixable line per problem, empty when the page passes. Mirrors <code>qa-template.ts</code>.</td></tr>
+<tr><td><code>src/skills/review-page.ts</code> (new)</td><td>Shared by both checks: <code>textOf</code> (moved from qa-template), <code>visibleText(html)</code> (drops <code>&lt;details&gt;</code>, <code>&lt;style&gt;</code>, <code>&lt;script&gt;</code>, comments; <code>&lt;svg&gt;</code> only from the word count), <code>wordCount</code>, <code>codeShapedTerms(html)</code>, <code>definedTerms(html)</code> (from <code>&lt;dfn&gt;</code>).</td></tr>
+<tr><td><code>src/skills/stages.ts</code></td><td><code>DESIGN_BODY</code> step 2 rewritten: copy the template, fill every slot, the plain-language rule, the budget, what goes in the folded detail (files, APIs, data, assumptions the build tests, every choice and why, sources). Skill ships <code>files: { [DESIGN_TEMPLATE_FILE]: DESIGN_TEMPLATE }</code>. <code>QA_BODY</code> step 3 gains the same plain-language rule and the card budget.</td></tr>
+<tr><td><code>src/skills/qa-template.ts</code></td><td><code>qaPageProblems</code> adds: code-shaped terms in the card (unless defined), card over <code>QA_CARD_WORDS_MAX = 200</code>. Template comment says so.</td></tr>
+<tr><td><code>src/lifecycle/stages.ts</code></td><td><code>checkDesignPage(reportDir)</code> beside <code>checkQaPage</code>: page fixed at <code>$FLOWRYN_REPORT_DIR/design/design.html</code>, lstat (no symlink), ≤ 5 MB, <code>designPageProblems</code>, then <code>checkReviewPage</code>. In <code>stageDone</code>: when <code>pos.stage.skill === "flowryn-design"</code> it runs; <code>--page</code>, if given, must be that page. Error code <code>design_page_invalid</code>, help: “fix the page, host it again, then run stage done”. With <code>--questions-file</code>, the widget mount must sit inside the <code>ask</code> section.</td></tr>
+<tr><td><code>src/harness/contract-text.ts</code></td><td>With style on, “Be terse: outcomes only, no recaps.” becomes “Be terse in replies, reports and status: outcomes only, no recaps. Review pages are for a human reader: write them by your stage skill’s page standard.” <code>STYLE_BLOCK</code> itself is unchanged (it leads the leader prompt too, and caching holds).</td></tr>
+<tr><td><code>src/lavish/widget.ts</code></td><td>Plainer copy: heading “Questions for you” (gate id moves to small print), meta line drops “reserved decision” and the <code>--by captain</code> hint, which stays in the leader skill.</td></tr>
+<tr><td><code>src/bridges/skill.ts</code></td><td>One line of leader text: a page it writes for the user to review leads with the ask, plain words, detail folded. Text only, no rule (bridges decide nothing).</td></tr>
+<tr><td><code>docs/notes/2026-10-22-design-review-pages-zh.md</code></td><td>The feature note: the standard, the rules, the budgets.</td></tr>
+</table></div>
+<p>No migration, no config key, no new verb or flag. <code>CONTRACT_REVISIONS</code> is not bumped: <code>src/contracts/suite.ts</code> has no step about style or review pages. The build confirms that through the offline contract test and bumps it if a step does prove the changed text.</p>
+
+<h3>The rules the check applies</h3>
+<div class="wrap"><table>
+<tr><th>Rule</th><th>How it is checked</th></tr>
+<tr><td>Template filled</td><td>No <code>{{SLOT}}</code> placeholder left.</td></tr>
+<tr><td>Seven parts, in order, then the detail</td><td><code>&lt;section data-section=…&gt;</code> for <code>tldr, ask, change, goals, how, alternatives, risks</code>, each with words, in that order; then <code>&lt;details data-section="detail"&gt;</code>, not <code>open</code>, after the last section. Nothing but the title and one subtitle line before <code>tldr</code>.</td></tr>
+<tr><td>Short summary</td><td><code>tldr</code> ≤ 80 words.</td></tr>
+<tr><td>Visible budget</td><td>Words outside <code>&lt;details&gt;</code>, <code>&lt;svg&gt;</code>, <code>&lt;style&gt;</code>, <code>&lt;script&gt;</code> and comments ≤ 500. The message gives the count and says to fold detail.</td></tr>
+<tr><td>A diagram</td><td>The <code>how</code> section holds a <code>&lt;figure&gt;</code> (inline SVG, an image or a drawn <code>&lt;pre&gt;</code>).</td></tr>
+<tr><td>No code names above the fold</td><td>In visible text (SVG labels included): words with an inner underscore, lower-then-upper case (allow-list: macOS, iOS, iPadOS, iPhone, iPad), a slash plus a file extension, a leading <code>--</code>, a trailing <code>()</code>; and any <code>&lt;code&gt;</code> or <code>&lt;pre&gt;</code> element outside the figure. A term the page defines with <code>&lt;dfn&gt;</code> is allowed everywhere. <code>&lt;kbd&gt;</code> marks what the user types and is allowed. Each offending term is named, up to 10.</td></tr>
+</table></div>
+<p>Plain-English jargon (“digest”, “follow-up batch”) cannot be caught by shape. The skill forbids undefined internal terms; the reviewer judges. No model is used anywhere.</p>
+
+<h3>Tests</h3>
+<ul>
+<li><code>test/unit/design-template.test.ts</code>: the bare template fails (placeholders); this page, copied to <code>fixtures/design-page/good.html</code>, passes; each rule fails on its own crafted page with its own message; a page shaped like the old ones (file table first, <code>LEADER_WAKE_KINDS</code> above the fold, 660 words) fails on order, budget and code names.</li>
+<li><code>test/unit/qa-template.test.ts</code>: card code-name and card-budget cases.</li>
+<li><code>test/unit/review-page.test.ts</code>: <code>visibleText</code> drops folded parts and nested tags; the shape rules on a word list, including the allow-list and <code>&lt;dfn&gt;</code>.</li>
+<li>Integration (<code>test/integration/workflows.test.ts</code> or a new file): design-stage <code>stage done</code> refuses a bad page with every problem listed, accepts the good one, refuses a <code>--page</code> that names another file, refuses a symlink.</li>
+<li>Every existing test that hands in a design page gets the good fixture through the fake harness’s page helper.</li>
+</ul>
+
+<h3>Assumptions the build tests</h3>
+<ul>
+<li>Existing tests hand in design pages through few enough places that swapping in a valid page is small (guess; not counted yet).</li>
+<li>Lavish serves the page as written, so <code>&lt;details&gt;</code> stays folded (true for QA pages today).</li>
+<li>The question widget still mounts and works inside the <code>ask</code> section.</li>
+<li>The offline contract fakes do not match on the “Be terse” line (if they do, the build updates them and decides the bump).</li>
+</ul>
+
+<h3>Choices made, and why</h3>
+<ul>
+<li><strong>“What I need from you” is second</strong>, right after the summary: decision-first is the user’s standing preference for review pages, and Squarespace puts the approver’s ask up front.</li>
+<li><strong>500 visible words</strong>: about two minutes at 250 words a minute; existing pages run 544 to 899. Google allows a 1–3 page “mini design doc” for incremental work; 500 words is the short end of that.</li>
+<li><strong>A fixed path</strong> (<code>design/design.html</code>): the skill already names it, and the QA check works the same way.</li>
+<li><strong>A fill-in template, not generated HTML</strong>: keeps free-form diagrams and tables.</li>
+<li><strong>A diagram is required</strong>: the task asks for it; any <code>&lt;figure&gt;</code> counts, so a tiny design can draw a two-box sketch.</li>
+<li><strong>Code names by shape, not a word list</strong>: deterministic and project-independent; <code>&lt;dfn&gt;</code> is the escape hatch, as plain-language guidance says to define terms on first use.</li>
+<li><strong>In-flight design runs are checked</strong>: their error names the template, which the daemon writes beside the skill at start, so one revision fixes it.</li>
+<li><strong>Leader pages get guidance, not a check</strong>: there is no hand-in point to check them at.</li>
+<li><strong>QA keeps its card</strong>, already plain-language, and gains only the code-name rule and a 200-word card budget.</li>
+<li><strong>No phase plan</strong>: one change.</li>
+<li><strong>No scout finding</strong>: the scout report has none for this; the evidence is the user’s complaint and the pages under <code>~/.flowryn/data/*/design/</code> (measured above).</li>
+</ul>
+
+<h3>Where the outline comes from</h3>
+<div class="wrap"><table>
+<tr><th>Part</th><th>Source</th></tr>
+<tr><td>In short</td><td>Rust RFC “Summary: one paragraph”; Amazon narrative memos open with the conclusion.</td></tr>
+<tr><td>What I need from you</td><td>Squarespace RFC status line tells reviewers what feedback is wanted; approvers answer “yes”, “not yet” or “yes, if”.</td></tr>
+<tr><td>What changes for you</td><td>Rust RFC “guide-level explanation”: describe it as if it already existed, by its effect on the user.</td></tr>
+<tr><td>Goals and non-goals</td><td>Google design docs: a non-goal is something that could reasonably be a goal but is chosen not to be.</td></tr>
+<tr><td>How it works, with a diagram</td><td>Google: overview first, system-context diagram, then detail.</td></tr>
+<tr><td>Other ways</td><td>Google “alternatives considered” (“one of the most important”); Rust “rationale and alternatives” incl. the cost of doing nothing; PEP “rejected ideas”.</td></tr>
+<tr><td>Risks and how we’d know</td><td>Rust “drawbacks”; Nygard ADR “consequences”, negative ones included; Monzo’s required risks section (via Orosz).</td></tr>
+<tr><td>Detail folded, last</td><td>Google: no pasted code or schemas, “focus on the parts relevant to the design and its trade-offs”; Diátaxis: keep reference apart from explanation; Rust “reference-level explanation” comes after the guide-level one.</td></tr>
+<tr><td>Plain words, defined terms</td><td>US Federal Plain Language Guidelines: short sentences, main idea first, define terms, one term per thing.</td></tr>
+<tr><td>Keep it short and minimal</td><td>Will Larson: “start from the problem”, prefer minimal templates; Oxide RFD 1: timely over polished.</td></tr>
+</table></div>
+
+<h3>Sources</h3>
+<ul>
+<li>Malte Ubl, <a href="https://www.industrialempathy.com/posts/design-docs-at-google/">Design Docs at Google</a></li>
+<li>rust-lang, <a href="https://github.com/rust-lang/rfcs/blob/master/0000-template.md">RFC template</a></li>
+<li>Python, <a href="https://peps.python.org/pep-0012/">PEP 12, sample template</a> (rejected ideas, open issues)</li>
+<li>Oxide, <a href="https://rfd.shared.oxide.computer/rfd/1">RFD 1: Requests for Discussion</a></li>
+<li>Squarespace Engineering, <a href="https://engineering.squarespace.com/blog/2019/the-power-of-yes-if">The power of “Yes, if”</a></li>
+<li>Gergely Orosz, <a href="https://blog.pragmaticengineer.com/rfcs-and-design-docs/">Companies using RFCs or design docs</a> and <a href="https://blog.pragmaticengineer.com/scaling-engineering-teams-via-writing-things-down-rfcs/">Scaling engineering teams via RFCs</a> (Uber)</li>
+<li>Will Larson, <a href="https://lethain.com/good-engineering-strategy-is-boring/">Write five, then synthesize</a></li>
+<li>Michael Nygard’s ADR format, summarised by <a href="https://docs.arc42.org/tips/9-5/">arc42</a></li>
+<li><a href="https://diataxis.fr/explanation/">Diátaxis: explanation</a></li>
+<li><a href="https://www.plainlanguage.gov/guidelines/">Federal Plain Language Guidelines</a></li>
+<li>Amazon six-page narratives, via <a href="https://www.anecdote.com/2018/05/amazons-six-page-narrative-structure/">Anecdote</a></li>
+</ul>
+
+<h3>What I could not check</h3>
+<ul>
+<li>Uber’s actual RFC template (Orosz’s longer piece is paywalled); Monzo’s structure is from Orosz’s summary of a tweet.</li>
+<li>No Will Larson post on design review itself turned up; the post above is about writing design docs.</li>
+<li>The plain-language guidelines were read from archived 2011 copies; the live site may have changed.</li>
+<li>How many existing tests hand in a design page (counted in the build).</li>
+</ul>
+</details>
+</body></html>

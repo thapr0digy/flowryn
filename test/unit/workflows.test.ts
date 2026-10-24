@@ -14,9 +14,9 @@ import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
 import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.ts";
-import { fullPools, grantJobLease, grantLeases, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
+import { fullPools, grantJobLease, grantLeases, leaseProcesses, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
 import { EXIT_BACKOFF_MAX_MS, Scheduler } from "../../src/sched/scheduler.ts";
-import { claimProbe, clearUsageLimit, noteUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "../../src/sched/usage.ts";
+import { claimProbe, clearUsageLimit, noteUsageLimit, resumeCommand, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
 const HOME = "/tmp/fw-m5";
@@ -246,10 +246,24 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
     tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
     const proc = { pid: 4242, start: 1_000, exe: "/bin/sh" };
     expect(tx(db, () => recordJobProcess(db, v1, proc, 2))).toBe(true);
-    expect(liveJobLeases(db)[0]).toMatchObject({ proc_pid: 4242, proc_start: 1_000, proc_exe: "/bin/sh" });
+    // A parallel group's steps run at once: each is a row of its own (migration 32).
+    expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4243 }, 2))).toBe(true);
+    expect(leaseProcesses(db, liveJobLeases(db)[0]!)).toEqual([proc, { ...proc, pid: 4243 }]);
     tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 3));
     expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4343 }, 4))).toBe(false);
-    expect(events(db, "pool.job_process")).toEqual([{ job: "v1", kind: "verify", pid: 4242 }]);
+    expect(events(db, "pool.job_process")).toEqual([
+      { job: "v1", kind: "verify", pid: 4242 },
+      { job: "v1", kind: "verify", pid: 4243 },
+    ]);
+    db.close();
+  });
+
+  test("assumption: a lease from before migration 32 keeps its one step in job_leases, and recovery still reads it", () => {
+    const db = scratchDb();
+    tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
+    db.exec("UPDATE job_leases SET proc_pid = 4000, proc_start = 900, proc_exe = '/bin/sh'");
+    tx(db, () => recordJobProcess(db, v1, { pid: 4242, start: 1_000, exe: "/bin/sh" }, 2));
+    expect(leaseProcesses(db, liveJobLeases(db)[0]!).map((p) => p.pid)).toEqual([4000, 4242]);
     db.close();
   });
 });
@@ -321,53 +335,53 @@ describe("the Claude usage-limit pause (design section 16)", () => {
     const M = 60_000;
     const minutes = { usage_backoff_ms: 15 * M, usage_backoff_max_ms: 60 * M };
     const t0 = new Date(2026, 8, 24, 10, 0).getTime();
-    expect(usageGate(db, t0, "r1")).toBe("open");
-    expect(tx(db, () => noteUsageLimit(db, "r1", "429", t0, minutes))).toBe(true);
-    expect(tx(db, () => noteUsageLimit(db, "r2", "429", t0 + M, minutes))).toBe(false);
-    expect(usagePause(db)).toMatchObject({ since: t0, until: t0 + 15 * M, backoff_ms: 15 * M, probe: null });
+    expect(usageGate(db, t0, "claude", "r1")).toBe("open");
+    expect(tx(db, () => noteUsageLimit(db, "claude", "r1", "429", t0, minutes))).toBe(true);
+    expect(tx(db, () => noteUsageLimit(db, "claude", "r2", "429", t0 + M, minutes))).toBe(false);
+    expect(usagePause(db, "claude")).toMatchObject({ since: t0, until: t0 + 15 * M, backoff_ms: 15 * M, probe: null });
     expect(usageItem(db).line).toContain("until 10:15");
-    expect(usageItem(db).line).toContain(RESUME_COMMAND);
-    expect(usageGate(db, t0 + 15 * M - 1, "r1")).toBe("paused");
-    expect(usageGate(db, t0 + 15 * M, "r1")).toBe("probe");
-    tx(db, () => claimProbe(db, "r1", t0 + 15 * M));
-    expect(usageGate(db, t0 + 16 * M, "r1")).toBe("open");
-    expect(usageGate(db, t0 + 16 * M, "r2")).toBe("paused");
-    expect(usageGate(db, t0 + 16 * M, null)).toBe("paused");
+    expect(usageItem(db).line).toContain(resumeCommand("claude"));
+    expect(usageGate(db, t0 + 15 * M - 1, "claude", "r1")).toBe("paused");
+    expect(usageGate(db, t0 + 15 * M, "claude", "r1")).toBe("probe");
+    tx(db, () => claimProbe(db, "claude", "r1", t0 + 15 * M));
+    expect(usageGate(db, t0 + 16 * M, "claude", "r1")).toBe("open");
+    expect(usageGate(db, t0 + 16 * M, "claude", "r2")).toBe("paused");
+    expect(usageGate(db, t0 + 16 * M, "claude", null)).toBe("paused");
     // The probe hits the limit again: the next backoff, the same P1 with the new expiry.
-    expect(tx(db, () => noteUsageLimit(db, "r1", "429", t0 + 20 * M, minutes))).toBe(true);
-    expect(usagePause(db)).toMatchObject({ since: t0, until: t0 + 50 * M, backoff_ms: 30 * M, probe: null });
+    expect(tx(db, () => noteUsageLimit(db, "claude", "r1", "429", t0 + 20 * M, minutes))).toBe(true);
+    expect(usagePause(db, "claude")).toMatchObject({ since: t0, until: t0 + 50 * M, backoff_ms: 30 * M, probe: null });
     expect(usageItem(db)).toMatchObject({ state: "open" });
     expect(usageItem(db).line).toContain("until 10:50");
-    expect(usageGate(db, t0 + 49 * M, "r1")).toBe("paused");
-    tx(db, () => noteUsageLimit(db, "r1", "429", t0 + 50 * M, minutes));
-    expect(usagePause(db)!.backoff_ms).toBe(60 * M);
-    tx(db, () => noteUsageLimit(db, "r1", "429", t0 + 110 * M, minutes));
-    expect(usagePause(db)!.backoff_ms).toBe(60 * M);
+    expect(usageGate(db, t0 + 49 * M, "claude", "r1")).toBe("paused");
+    tx(db, () => noteUsageLimit(db, "claude", "r1", "429", t0 + 50 * M, minutes));
+    expect(usagePause(db, "claude")!.backoff_ms).toBe(60 * M);
+    tx(db, () => noteUsageLimit(db, "claude", "r1", "429", t0 + 110 * M, minutes));
+    expect(usagePause(db, "claude")!.backoff_ms).toBe(60 * M);
     expect((db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'usage_limit'").get() as { n: number }).n).toBe(1);
     db.close();
   });
 
   test("a probe that died, or outlived the backoff, frees the probe for another run", () => {
     const db = scratchDb();
-    tx(db, () => noteUsageLimit(db, "r1", "429", 0, BACKOFF));
-    tx(db, () => claimProbe(db, "r1", 1_000));
-    expect(usageGate(db, 1_500, "r2")).toBe("paused");
-    expect(usageGate(db, 2_000, "r2")).toBe("probe");
+    tx(db, () => noteUsageLimit(db, "claude", "r1", "429", 0, BACKOFF));
+    tx(db, () => claimProbe(db, "claude", "r1", 1_000));
+    expect(usageGate(db, 1_500, "claude", "r2")).toBe("paused");
+    expect(usageGate(db, 2_000, "claude", "r2")).toBe("probe");
     db.query("UPDATE runs SET liveness = 'dead' WHERE id = 'r1'").run();
-    expect(usageGate(db, 1_500, "r2")).toBe("probe");
+    expect(usageGate(db, 1_500, "claude", "r2")).toBe("probe");
     db.close();
   });
 
   test("a normal Stop after the probe, or you, lifts it: the P1 resolves and the event says who", () => {
     const db = scratchDb();
-    tx(db, () => noteUsageLimit(db, "r1", "429", 0, BACKOFF));
-    expect(tx(db, () => clearUsageLimit(db, "a turn of r1 ended normally", 2_000))).toBe(true);
-    expect(usagePause(db)).toBeNull();
-    expect(usageGate(db, 2_000, "r2")).toBe("open");
-    tx(db, () => noteUsageLimit(db, "r2", "429", 3_000, BACKOFF));
-    expect(usagePause(db)).toMatchObject({ since: 3_000, backoff_ms: 1_000 });
-    expect(tx(db, () => clearUsageLimit(db, "lifted by you", 3_100, "cli"))).toBe(true);
-    expect(tx(db, () => clearUsageLimit(db, "again", 3_200, "cli"))).toBe(false);
+    tx(db, () => noteUsageLimit(db, "claude", "r1", "429", 0, BACKOFF));
+    expect(tx(db, () => clearUsageLimit(db, "claude", "a turn of r1 ended normally", 2_000))).toBe(true);
+    expect(usagePause(db, "claude")).toBeNull();
+    expect(usageGate(db, 2_000, "claude", "r2")).toBe("open");
+    tx(db, () => noteUsageLimit(db, "claude", "r2", "429", 3_000, BACKOFF));
+    expect(usagePause(db, "claude")).toMatchObject({ since: 3_000, backoff_ms: 1_000 });
+    expect(tx(db, () => clearUsageLimit(db, "claude", "lifted by you", 3_100, "cli"))).toBe(true);
+    expect(tx(db, () => clearUsageLimit(db, "claude", "again", 3_200, "cli"))).toBe(false);
     expect(usageEvents(db)).toEqual(["sched.usage_limit", "sched.usage_resumed", "sched.usage_limit", "sched.usage_resumed"]);
     expect((db.query("SELECT source FROM events WHERE kind = 'sched.usage_resumed' ORDER BY seq DESC LIMIT 1").get() as { source: string }).source).toBe("cli");
     expect(usageItem(db)).toMatchObject({ state: "resolved" });

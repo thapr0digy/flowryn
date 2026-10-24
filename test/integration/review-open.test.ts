@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { filledDesignPage } from "../helpers/design-page.ts";
 
 /**
  * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md), end to
@@ -20,7 +21,7 @@ afterEach(async () => {
   ship = null;
 });
 
-const PAGE = "<html data-lavish-live-reload-root><body><h1>Design</h1></body></html>";
+const PAGE = filledDesignPage();
 
 const STEPS = ["Feature open", `FAKE: write design/design.html ${PAGE}`, "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html", "FAKE: sleep 120000"].join("\n");
 

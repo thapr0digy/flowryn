@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems } from "../attention/items.ts";
 import { existsSync } from "node:fs";
-import { resolveAccount, type Account } from "../config/accounts.ts";
+import { accountsConfig, capacityAccount, resolveAccount, type Account } from "../config/accounts.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
 import { tx, type Db } from "../db/db.ts";
@@ -10,7 +10,7 @@ import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
-import { checkStart, createRun, type StartDeps } from "../lifecycle/dispatch.ts";
+import { checkStart, createRun, signInOf, type StartDeps } from "../lifecycle/dispatch.ts";
 import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
@@ -19,11 +19,14 @@ import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../
 import { activateStage, neededPools, positionOf, type StagePos } from "../lifecycle/stages.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity } from "./pools.ts";
-import { probeQuota, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaReading } from "./quota.ts";
-import { claimProbe, usageGate, usageLimitSince } from "./usage.ts";
+import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
+import { claimProbe, clearUsageLimit, pausedAccounts, usageGate, usagePauses } from "./usage.ts";
+import { moveLegacyCapacity } from "./legacy.ts";
+import { forgetSignedOut, noteSignedIn, noteSignedOut, signedOutAccounts } from "./signed-out.ts";
+import { loginCommand } from "../harness/sign-in.ts";
 import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
 import { ensureLaunchOperation, getOperation, heldByEscalation, openOperation } from "../lifecycle/operations.ts";
-import { harnessRefusalOf, hostRefusal, operationModeRefusal, poolsRefusal, quotaRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
+import { harnessRefusalOf, hostRefusal, operationModeRefusal, poolsRefusal, quotaRefusal, signedOutRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
 
 /**
  * The scheduler (design sections 4 and 11): it grants stage starts against the
@@ -54,8 +57,8 @@ export interface SchedulerDeps {
   startDeps: StartDeps;
   kickJournal(): void;
   host?(cfg: HostCheckConfig): Promise<HostVerdict>;
-  /** One quota-axi reading (tests); by default the configured quota-axi runs. */
-  quota?(): Promise<QuotaReading>;
+  /** One quota-axi reading for an account (tests); by default the configured quota-axi runs for its login. */
+  quota?(account: Account): Promise<QuotaReading>;
   /** Start queued verifies while slots are free (src/verify/start.ts): first in each grant, since a verify is the step closest to shipping. */
   drainVerifies?(stopped: () => boolean): Promise<number>;
 }
@@ -99,7 +102,8 @@ export class Scheduler {
   private queued: Promise<void> | null = null;
   private stopped = false;
   private hostCache: { at: number; verdict: HostVerdict } | null = null;
-  private quotaCache: { at: number; reading: QuotaReading } | null = null;
+  /** The last quota-axi reading per account. */
+  private readonly quotaCache = new Map<string, { at: number; reading: QuotaReading }>();
   private readonly relaunching = new Set<string>();
   /**
    * Refused fresh-stage exits per run since its last verified exit, and when the
@@ -113,6 +117,13 @@ export class Scheduler {
   }
 
   start(): void {
+    const { db, now } = this.deps;
+    try {
+      const moved = tx(db, () => moveLegacyCapacity(db, this.deps.config(), now()));
+      if (moved) this.deps.log(`sched: the Claude quota and usage pause moved to account ${moved}`);
+    } catch (error) {
+      this.deps.log(`sched: moving the Claude capacity state failed: ${(error as Error).message}`);
+    }
     this.steady = setInterval(() => this.kick(), schedTiming(this.deps.config()).pass_ms);
     this.kick();
   }
@@ -167,7 +178,7 @@ export class Scheduler {
       const mine = candidates[at]!;
       if (candidates.slice(0, at).some((c) => c.needs.some((pool) => mine.needs.includes(pool)))) return false;
       const config = this.deps.config();
-      return this.tryGrant(mine, config, { verdict: null }, false);
+      return this.tryGrant(mine, config, newPass(), false);
     });
   }
 
@@ -216,35 +227,93 @@ export class Scheduler {
     this.deps.log(`sched: host check ${verdict.ok ? "passes" : `fails: ${verdict.reason}`}`);
   }
 
-  private async readQuota(): Promise<QuotaReading> {
-    if (this.deps.quota) return this.deps.quota();
+  private async readQuota(account: Account): Promise<QuotaReading> {
+    if (this.deps.quota) return this.deps.quota(account);
     const config = this.deps.config();
     const tool = resolveTool(config, "quota_axi");
-    return probeQuota(tool && existsSync(tool) ? tool : null, resolveTool(config, "node"));
+    return probeQuota(tool && existsSync(tool) ? tool : null, resolveTool(config, "node"), account);
   }
 
   /**
-   * Whether new Claude runs wait on the quota floor now: quota-axi is read at
-   * most every quota_cache_ms, and only when a new Claude run could start.
-   * A floor of 0 reads nothing and lifts a low state recorded under an older floor.
+   * Whether new runs on this account wait on the quota floor now: quota-axi
+   * is read for the account at most every quota_cache_ms, and only when a new
+   * run on it could start. A floor of 0 reads nothing and lifts a low state
+   * recorded under an older floor.
    */
-  private async quotaHeld(): Promise<boolean> {
+  private async quotaHeld(account: Account): Promise<boolean> {
     const { db, now } = this.deps;
     const config = this.deps.config();
     const { floor } = capacityConfig(config).quota;
-    const previous = quotaState(db);
+    const previous = quotaState(db, account.id);
+    // A login quota-axi cannot read is never probed nor recorded: its quota is unknown and holds nothing.
+    if ("none" in quotaTarget(account) && previous?.state !== "low") return false;
     let reading: QuotaReading;
     if (floor <= 0) {
       if (!previous || previous.state !== "low") return false;
       reading = { state: "known", percent: previous.percent ?? 0, window: previous.window, resets_at: previous.resets_at };
     } else {
       const ttl = schedTiming(config).quota_cache_ms;
-      if (!this.quotaCache || now() - this.quotaCache.at >= ttl) this.quotaCache = { at: now(), reading: await this.readQuota() };
-      reading = this.quotaCache.reading;
+      const cached = this.quotaCache.get(account.id);
+      if (!cached || now() - cached.at >= ttl) this.quotaCache.set(account.id, { at: now(), reading: await this.readQuota(account) });
+      reading = this.quotaCache.get(account.id)!.reading;
     }
-    const state = tx(db, () => recordQuota(db, reading, floor, now()));
-    if (state.state !== previous?.state) this.deps.log(`sched: Claude quota ${quotaLine(state)}`);
-    return quotaHolds(db);
+    const state = tx(db, () => recordQuota(db, account.id, reading, floor, now()));
+    if (state.state !== previous?.state) this.deps.log(`sched: quota of account ${account.id}: ${quotaLine(state)}`);
+    return quotaHolds(db, account.id);
+  }
+
+  /**
+   * Is the account signed in? Asked once per pass (a pass is remembered
+   * longer by the check itself); a failure opens the account's P1 and a pass
+   * closes it. Null when it may launch, else the refusal.
+   */
+  private async signedOut(account: Account, pass: GrantPass): Promise<Refusal | null> {
+    if (!account.declared) return null;
+    const { db, now } = this.deps;
+    let check = pass.signIns.get(account.id);
+    if (!check) {
+      check = this.deps.startDeps.signIn ? this.deps.startDeps.signIn(account) : signInOf(this.deps.config(), account);
+      pass.signIns.set(account.id, check);
+    }
+    let detail: string | null;
+    try {
+      detail = await check;
+    } catch (error) {
+      detail = `account ${account.id}: the sign-in check failed (${(error as Error).message})`;
+    }
+    if (detail === null) {
+      if (tx(db, () => noteSignedIn(db, account.id, now()))) this.deps.log(`sched: account ${account.id} is signed in again`);
+      return null;
+    }
+    const since = tx(db, () => noteSignedOut(db, account.id, detail, loginCommand(account), now()));
+    return signedOutRefusal(account.id, detail, loginCommand(account), since);
+  }
+
+  /** Why new runs on the account wait (its usage pause, its quota floor), or null when it may take one now. */
+  private async accountHold(account: Account, runId: string | null, fresh: boolean): Promise<{ usage: "open" | "probe"; refusal: null } | { usage: null; refusal: (overflow: string | null) => Refusal }> {
+    const { db, now } = this.deps;
+    const usage = usageGate(db, now(), account.id, runId);
+    if (usage === "paused") return { usage: null, refusal: (overflow) => usageRefusal(db, account.id, now(), overflow) };
+    // Under the quota floor a new run waits; a live run's next stage, a resume or a relaunch drains.
+    if (fresh && (await this.quotaHeld(account))) return { usage: null, refusal: (overflow) => quotaRefusal(db, account.id, overflow) };
+    return { usage, refusal: null };
+  }
+
+  /**
+   * The account a held fresh launch overflows to: the first of the account's
+   * `overflow` list that is not paused at all, whose quota is not low and
+   * that is signed in. One level: a target's own list is not followed.
+   */
+  private async overflowTarget(account: Account, config: FlowrynConfig, pass: GrantPass): Promise<Account | null> {
+    for (const id of account.overflow) {
+      const target = capacityAccount(config, id, account.harness);
+      if (!target) continue;
+      if (usageGate(this.deps.db, this.deps.now(), target.id, null) !== "open") continue;
+      if (await this.quotaHeld(target)) continue;
+      if (await this.signedOut(target, pass)) continue;
+      return target;
+    }
+    return null;
   }
 
   private candidates(): Candidate[] {
@@ -275,30 +344,81 @@ export class Scheduler {
     if (this.deps.drainVerifies && !this.stopped) await this.step("verify-queue", async () => void (await this.deps.drainVerifies!(() => this.stopped)));
     const config = this.deps.config();
     tx(this.deps.db, () => sweepExplanations(this.deps.db, this.deps.now()));
-    const host = { verdict: null as HostVerdict | null };
-    if (quotaState(this.deps.db)?.state === "low") await this.quotaHeld();
+    const pass = newPass();
+    this.forgetDroppedAccounts(config);
+    // A low reading or a signed-out login is checked again while nothing waits on it, so a reset or a sign-in lifts it.
+    for (const [id, state] of quotaStates(this.deps.db)) {
+      const account = state.state === "low" ? capacityAccount(config, id, "claude") ?? capacityAccount(config, id, "pi") : null;
+      if (account) await this.quotaHeld(account);
+    }
+    for (const id of signedOutAccounts(this.deps.db)) {
+      const account = capacityAccount(config, id, "claude") ?? capacityAccount(config, id, "pi");
+      if (account) await this.signedOut(account, pass);
+    }
     for (const c of this.candidates()) {
       if (this.stopped) return;
-      await this.tryGrant(c, config, host, true);
+      await this.tryGrant(c, config, pass, true);
     }
   }
 
-  /** One grant: the usage pause (or its one probe), the host check (once per pass) and the pools, then the stage start. Whether it started. */
-  private async tryGrant(c: Candidate, config: FlowrynConfig, host: { verdict: HostVerdict | null }, steer: boolean): Promise<boolean> {
+  /**
+   * An account config no longer has holds nothing once no live run records it:
+   * its usage pause, quota state and signed-out episode end, each with an event.
+   */
+  private forgetDroppedAccounts(config: FlowrynConfig): void {
+    const { db, now } = this.deps;
+    const recorded = new Set([...usagePauses(db).keys(), ...quotaStates(db).keys(), ...signedOutAccounts(db)]);
+    const why = "the account is no longer in config";
+    const configured = accountsConfig(config).accounts;
+    const inUse = db.query(
+      `SELECT 1 FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (account = ?1 OR (account IS NULL AND harness = ?1)) LIMIT 1`,
+    );
+    for (const id of recorded) {
+      if (configured[id] || inUse.get(id)) continue;
+      tx(db, () => {
+        clearUsageLimit(db, id, why, now(), "daemon");
+        forgetQuota(db, id, why, now());
+        forgetSignedOut(db, id, why, now());
+      });
+      this.deps.log(`sched: account ${id} is no longer in config; its capacity state is released`);
+    }
+  }
+
+  /**
+   * One grant: the account's sign-in, its usage pause (or its one probe) and
+   * quota floor, with overflow for a held fresh launch, the host check (once
+   * per pass) and the pools, then the stage start. Whether it started.
+   */
+  private async tryGrant(c: Candidate, config: FlowrynConfig, pass: GrantPass, steer: boolean): Promise<boolean> {
     const { db, now } = this.deps;
     const capacity = capacityConfig(config);
-    const usage = c.run.harness === "claude" ? usageGate(db, now(), c.run.id) : "open";
-    if (usage === "paused") return this.refuse(c, usageRefusal(db, now()));
-    // Under the quota floor a new Claude run waits; a live run's next stage, a resume or a relaunch drains.
-    if (c.run.harness === "claude" && c.run.pending_launch === "fresh" && (await this.quotaHeld())) return this.refuse(c, quotaRefusal(db));
+    const firstLaunch = c.run.pending_launch === "fresh";
+    let account = capacityAccount(config, c.run.account, c.run.harness);
+    // An account config no longer has: the launch refuses it with why, so nothing is held here.
+    let usage: "open" | "probe" = "open";
+    let moved: { from: string; why: string } | null = null;
+    if (account) {
+      if (c.run.pending_launch) {
+        const out = await this.signedOut(account, pass);
+        if (out) return this.refuse(c, out);
+      }
+      const hold = await this.accountHold(account, c.run.id, firstLaunch);
+      if (hold.refusal) {
+        // Overflow moves only a run's first launch: a resume, a relaunch or a fresh stage keeps its account's session store.
+        const target = firstLaunch && account.overflow.length > 0 ? await this.overflowTarget(account, config, pass) : null;
+        if (!target) return this.refuse(c, hold.refusal(firstLaunch && account.overflow.length > 0 ? `no overflow account is free (${account.overflow.join(", ")})` : null));
+        moved = { from: account.id, why: hold.refusal(null).rule };
+        account = target;
+      } else usage = hold.usage;
+    }
     // A grant that launches a worker checks the installed harness version first (design section 5).
     if (c.run.pending_launch) {
       const check = await this.harnessCheck(c.run.harness, config);
       if (check.state !== "verified") return this.refuse(c, harnessRefusalOf(check, activeAutoAttempt(db, config, c.run.harness), now()));
     }
     if (c.needs.length > 0) {
-      host.verdict ??= await this.hostVerdict(capacity.host);
-      if (!host.verdict.ok) return this.refuse(c, hostRefusal(hostState(db), capacity.host, host.verdict.reason, now()));
+      pass.host ??= await this.hostVerdict(capacity.host);
+      if (!pass.host.ok) return this.refuse(c, hostRefusal(hostState(db), capacity.host, pass.host.reason, now()));
       const full = fullPools(db, capacity.pools, c.needs);
       if (full.length > 0) return this.refuse(c, poolsRefusal(db, capacity.pools, full, now()));
     }
@@ -312,8 +432,14 @@ export class Scheduler {
         if (open && (open.kind === "cancel" || open.phase !== "requested")) return null;
         if (heldByEscalation(db, fresh.id)) return null;
         if (open && fresh.pending_launch && open.mode !== fresh.pending_launch) return { refusal: operationModeRefusal(open, fresh.pending_launch) };
-        const started = activateStage(db, config, fresh, now(), { steer });
-        if (started && usage === "probe") claimProbe(db, c.run.id, now());
+        if (moved && account) {
+          // Re-read in the transaction: the run must still be on its first launch, on the account that was held.
+          if (fresh.pending_launch !== "fresh" || (fresh.account ?? fresh.harness) !== moved.from) return null;
+          overflowRun(db, fresh, moved.from, account, moved.why, now());
+        }
+        const row = moved ? getRunWithPolicy(db, fresh.id)! : fresh;
+        const started = activateStage(db, config, row, now(), { steer });
+        if (started && usage === "probe" && account) claimProbe(db, account.id, c.run.id, now());
         if (started) closeExplanations(db, c.run.id, ["capacity", "resume"], "granted", now());
         // The grant's launch is an operation from here: a daemon that stops before the launcher claims it recovers it.
         const operation = started?.launch ? (ensureLaunchOperation(db, fresh, started.launch, "scheduler", "daemon", now())?.id ?? null) : null;
@@ -478,6 +604,7 @@ export class Scheduler {
       )
       .all() as (PhaseRow & { plan_title: string; project_id: string; source_task: string | null; phases: number })[];
     if (phases.length === 0) return 0;
+    const pass = newPass();
     const backlog = readSnapshot(db, "backlog")?.tasks ?? null;
     let started = 0;
     for (const phase of phases) {
@@ -495,15 +622,21 @@ export class Scheduler {
         else throw error;
         continue;
       }
-      const harness = account.harness;
-      const usage = harness === "claude" ? usageGate(db, now(), null) : "open";
-      if (usage === "paused") continue;
-      if (harness === "claude" && (await this.quotaHeld())) continue;
+      // A phase's run is a fresh launch: a held account overflows if it can, else the phase waits unstarted.
+      const hold = await this.accountHold(account, null, true);
+      let usage: "open" | "probe" = "open";
+      let moved: { from: string; why: string } | null = null;
+      if (hold.refusal) {
+        const target = account.overflow.length > 0 ? await this.overflowTarget(account, config, pass) : null;
+        if (!target) continue;
+        moved = { from: account.id, why: hold.refusal(null).rule };
+        account = target;
+      } else usage = hold.usage;
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
         const start = await checkStart(this.deps.startDeps, project, account);
-        made = this.startPhase(phase, project, account, start, workflow, usage === "probe", now());
+        made = this.startPhase(phase, project, account, start, workflow, usage === "probe", moved, now());
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
         else this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} failed to start: ${(error as Error).stack ?? String(error)}`);
@@ -525,6 +658,7 @@ export class Scheduler {
     start: { version: string; base: string },
     workflow: WorkflowDef,
     probe: boolean,
+    moved: { from: string; why: string } | null,
     t: number,
   ): string | null {
     const { db } = this.deps;
@@ -532,7 +666,8 @@ export class Scheduler {
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
       const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
-      if (probe) claimProbe(db, runId, t);
+      if (probe) claimProbe(db, account.id, runId, t);
+      if (moved) appendEvent(db, { source: "daemon", kind: "sched.overflow", runId, taskId: phase.task_id, payload: { from: moved.from, to: account.id, why: moved.why, at: "phase start" }, ts: t });
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
       // A plan a design handed in holds the phases after the design's own task, which is phase 1.
       const offset = phase.source_task ? 1 : 0;
@@ -572,16 +707,21 @@ export class Scheduler {
       const count = (db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead') AND waiting_since <= ?1").get(t - threshold) as { n: number }).n;
       const host = hostState(db);
       const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
+      const paused = pausedAccounts(db, t);
+      const low = heldQuotaAccounts(db);
+      const signedOut = signedOutAccounts(db);
       const why =
         host && !host.ok
           ? `host check: ${host.reason}`
-          : usageLimitSince(db) !== null
-            ? "the Claude usage limit"
-            : quotaHolds(db)
-              ? "the Claude quota floor"
-              : untested
-              ? `${untested[0]} ${untested[1]} has no passing contract, or full capacity pools`
-              : "full capacity pools";
+          : paused.length > 0
+            ? `the usage limit on ${paused.join(", ")}`
+            : low.length > 0
+              ? `the quota floor on ${low.join(", ")}`
+              : signedOut.length > 0
+                ? `${signedOut.join(", ")} signed out`
+                : untested
+                  ? `${untested[0]} ${untested[1]} has no passing contract, or full capacity pools`
+                  : "full capacity pools";
       tx(db, () => {
         const event = appendEvent(db, { source: "daemon", kind: "sched.waiting", taskId: oldest.task_id, payload: { runs: count, oldest_ms: t - oldest.waiting_since, why }, ts: t });
         openItem(db, { kind: "capacity_wait", eventSeq: event.seq, line: `${count} run(s) waiting over ${Math.round(threshold / 60_000)}m for capacity (${why}); oldest ${taskTitle(db, oldest.task_id)}; flowryn capacity`, now: t });
@@ -593,4 +733,23 @@ export class Scheduler {
       });
     }
   }
+}
+
+/** What one grant pass reads once: the host check and each account's sign-in. */
+interface GrantPass {
+  host: HostVerdict | null;
+  signIns: Map<string, Promise<string | null>>;
+}
+
+function newPass(): GrantPass {
+  return { host: null, signIns: new Map() };
+}
+
+/**
+ * A held fresh launch moves to an overflow account: the run's account, and
+ * the model and effort that came with it. Call inside the grant's transaction.
+ */
+function overflowRun(db: Db, run: RunWithPolicy, from: string, to: Account, why: string, now: number): void {
+  db.query("UPDATE runs SET account = ?2, model = ?3, effort = ?4, updated_at = ?5 WHERE id = ?1").run(run.id, to.id, to.model, to.effort, now);
+  appendEvent(db, { source: "daemon", kind: "sched.overflow", runId: run.id, taskId: run.task_id, payload: { from, to: to.id, why, at: "grant" }, ts: now });
 }

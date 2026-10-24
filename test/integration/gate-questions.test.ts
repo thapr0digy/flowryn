@@ -6,6 +6,7 @@ import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { ANSWER_MARK, encodeAnswer, encodeSend } from "../../src/lavish/poll-output.ts";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
+import { filledDesignPage } from "../helpers/design-page.ts";
 
 /**
  * A review gate's questions, end to end on the fake fleet (design: "A
@@ -23,7 +24,7 @@ afterEach(async () => {
   ship = null;
 });
 
-const PAGE = '<html data-lavish-live-reload-root><body><h1>Design</h1><section id="flowryn-questions"></section><script src="flowryn-questions.js"></script></body></html>';
+const PAGE = filledDesignPage({ widget: true });
 const QUESTIONS = JSON.stringify({
   questions: [
     { key: "token-store", kind: "single", question: "Where do cached tokens live?", options: ["db", "file"], recommend: "db", blocks: "which store TokenCache writes to" },
@@ -312,7 +313,7 @@ describe("the daemon listens on every review page", () => {
       await leader.start();
       await leader.prompt("first");
       await leader.goInactive();
-      const plain = "<html><body><h1>Design</h1></body></html>";
+      const plain = filledDesignPage();
       const body = [
         "Feature listen",
         `FAKE: write design/design.html ${plain}`,
@@ -359,7 +360,7 @@ describe("the daemon listens on every review page", () => {
       expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
       const handIns = [
         "Feature review urls",
-        "FAKE: write design/design.html <html></html>",
+        `FAKE: write design/design.html ${filledDesignPage()}`,
         "FAKE: verb stage done --review https://example.com/review",
         "FAKE: verb stage done --review http://127.0.0.1:4387/session/0123456789abcdef",
         "FAKE: verb stage done --review lavish:other.html --page $FLOWRYN_REPORT_DIR/design/design.html",
@@ -389,6 +390,35 @@ describe("the daemon listens on every review page", () => {
     },
     { timeout: 90_000 },
   );
+  test(
+    "a design page that breaks the design outline is refused with every problem listed; the filled template opens the review",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const old = "<html><body><h1>Wake the leader</h1><table><tr><td>src/attention/items.ts</td><td>LEADER_WAKE_KINDS gains pr_ready</td></tr></table></body></html>";
+      const handIns = [
+        "Feature design page",
+        `FAKE: write design/design.html ${old}`,
+        "FAKE: verb stage done --review lavish:design/design.html",
+        `FAKE: write design/design.html ${filledDesignPage()}`,
+        "FAKE: stage-done --review lavish:design/design.html",
+        "FAKE: sleep 120000",
+      ];
+      const { task, run } = await f.dispatch(handIns.join("\n"), { kind: "ship" });
+      await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
+      const refused = (await e.replies(task, 2))[0]!;
+      expect(refused.code).toBe(3);
+      const error = refused.reply.error as { code: string; message: string; help: string };
+      expect(error.code).toBe("design_page_invalid");
+      expect(error.message).toContain("does not follow the design outline");
+      expect(error.message).toContain('code names above the fold: "src/attention/items.ts", "LEADER_WAKE_KINDS", "pr_ready"');
+      expect(error.help).toContain("design-template.html");
+      expect(one<{ page_path: string }>(f, "SELECT page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!.page_path).toEndWith("design/design.html");
+    },
+    { timeout: 90_000 },
+  );
 });
 
 describe("a file:// review while lavish-axi is not installed", () => {
@@ -406,7 +436,7 @@ describe("a file:// review while lavish-axi is not installed", () => {
       expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
       const handIns = [
         "Feature file",
-        "FAKE: write design/design.html <html></html>",
+        `FAKE: write design/design.html ${filledDesignPage()}`,
         "FAKE: verb stage done --review file:///etc/hosts.html",
         "FAKE: stage-done --review file://$FLOWRYN_REPORT_DIR/design/design.html",
         "FAKE: sleep 120000",
