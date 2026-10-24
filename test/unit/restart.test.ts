@@ -710,7 +710,7 @@ describe("launchd supervisor", () => {
   });
 
   test("assumption: a detached helper outlives a SIGTERM to its parent's process group", async () => {
-    // kickstart -k stops the daemon (and launchd may signal its process group); the helper runs in its own group.
+    // The relaunch helper's bootout stops the daemon (and launchd may signal its process group); the helper runs in its own group.
     const marker = join(dir, "helper-done");
     const helper = join(dir, "helper.sh");
     const spawned = join(dir, "helper-spawned");
@@ -722,7 +722,7 @@ describe("launchd supervisor", () => {
       stdio: "ignore",
     });
     const exited = new Promise((resolve) => parent.on("exit", resolve));
-    // Signal only once the helper is running: launchd stops the daemon only after launchctl has asked.
+    // Signal only once the helper is running: launchd stops the daemon only after the helper has asked.
     const deadline = Date.now() + 10_000;
     while (!existsSync(spawned) && Date.now() < deadline) await Bun.sleep(20);
     expect(existsSync(spawned)).toBe(true);
