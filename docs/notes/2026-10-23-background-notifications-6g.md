@@ -7,13 +7,13 @@ Finding i622 from chat-answers-survive-es (docs/notes/2026-10-17-chat-answers-su
 
 ## The rule
 
-`prompt` in `src/leader/hooks.ts`, Claude leaders only: when `takenMidTurn` holds, the prompt joins the running turn (`continueTurn`) instead of starting one. `takenMidTurn` holds when the session's busy lease is live (`busyNow`) and no interrupt marker has been written to the transcript since the turn started (`interruptedByTranscript`).
+`prompt` in `src/leader/hooks.ts`, Claude leaders only: when `takenMidTurn` holds, the prompt joins the running turn (`continueTurn`) instead of starting one. `takenMidTurn` holds when the session's busy lease is live (`busyNow`), the daemon knows where the turn started in the transcript (the offset it keeps in memory for a turn it started) and no interrupt marker has been written there since. With no offset (the daemon restarted mid-turn) or no transcript path, the turn's state is unknown, so the prompt starts a new turn as before.
 
 - The turn number stays the same, and nothing is lost. The busy lease and `last_event_at` are refreshed, and one `leader.prompt_taken` event is appended (`{session, turn, source}`). There is no `leader.turn_started` event, so the return brief's "leader turns" counts real turns only.
 - The digest, a takeover briefing and a wake's lines are carried for the running turn, so that turn's Stop presents them.
 - The transcript offset for the interrupt check is kept, not reset, so an interrupt earlier in the same turn still shows.
 - Everything else about the prompt is unchanged. In particular, deciding whether it came from the user (`leader.user_active`, the away suggestion, the end of an automatic away) is not touched here. A typed message mid-turn still marks the user active. Keeping a notice from doing so is chat-answers-survive-es's `isNotificationPrompt`, which this rule does not need.
-- Still a new turn: any prompt after Stop or StopFailure (idle), after an interrupt marker, or after the busy lease expired (`busy_lease_ms`, 10 minutes since the last hook).
+- Still a new turn: any prompt after Stop or StopFailure (idle), after an interrupt marker, after the busy lease expired (`busy_lease_ms`, 10 minutes since the last hook), or when the turn's state is unknown (the daemon restarted mid-turn).
 - Pi is unchanged: `agent_start` was already idempotent while busy, and Pi has no background notices.
 
 | Prompt arrives… | Before | Now |
@@ -23,6 +23,7 @@ Finding i622 from chat-answers-survive-es (docs/notes/2026-10-17-chat-answers-su
 | After Stop (idle), a notice or typed | new turn | new turn |
 | After an interrupt marker | new turn; carries lost | unchanged |
 | After the busy lease expired | new turn | unchanged |
+| Busy, but the daemon restarted mid-turn (turn state unknown) | new turn; carries lost | unchanged |
 | A Stop hook that never reached the daemon, then a prompt within the busy lease | new turn; carries lost, shown again | same turn; carries presented at the next Stop (they were shown) |
 
 ## Choices
@@ -41,4 +42,5 @@ Finding i622 from chat-answers-survive-es (docs/notes/2026-10-17-chat-answers-su
 - A notice after Stop starts a new turn.
 - After an interrupt marker, a prompt starts a new turn, and the old carry is lost and carried again.
 - After the busy lease expired, a prompt starts a new turn.
+- After the daemon restarts mid-turn (the busy lease still live), a prompt starts a new turn, and the old carry is lost and carried again.
 - The design's assumption: a question dialog left open past the busy lease is refreshed by the answer's PostToolUse, so the notice that follows still joins the turn.

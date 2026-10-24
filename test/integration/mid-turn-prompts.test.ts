@@ -148,6 +148,27 @@ describe("prompts taken into a running turn", () => {
   );
 
   test(
+    "after the daemon restarts mid-turn the turn's state is unknown, so a prompt while busy starts a new turn",
+    async () => {
+      env = await makeLeaderEnv();
+      const s = await claudeSession(env);
+      const item = env.openPlainP1("FLOWRYN-MARK-M6 merge it?");
+      await hook(env, s.token, "prompt", { prompt: "hi" });
+      const turn = turnNo(env, s.session);
+      await env.restartDaemon();
+      env.withDb((db) => db.query("UPDATE leader_sessions SET busy_until = ?2 WHERE session_id = ?1").run(s.session, Date.now() + 60_000));
+      // Esc after the restart: the marker is in the transcript, but the new daemon has no offset to read it from.
+      appendFileSync(s.transcript, JSON.stringify({ type: "user", message: { content: "[Request interrupted by user for tool use]" } }) + "\n");
+      const after = await hook(env, s.token, "prompt", { prompt: "do this instead" });
+      expect(turnNo(env, s.session)).toBe(turn + 1);
+      expect(states(env, item)).toEqual(["lost", "carried"]);
+      expect(String(after.context)).toContain("FLOWRYN-MARK-M6");
+      expect(events(env, "leader.prompt_taken")).toEqual([]);
+    },
+    T,
+  );
+
+  test(
     "assumption: the answered question's PostToolUse comes before the notice, so a dialog open past the busy lease still keeps the notice in the turn",
     async () => {
       env = await makeLeaderEnv();

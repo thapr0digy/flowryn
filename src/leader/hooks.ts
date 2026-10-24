@@ -132,10 +132,13 @@ function startTurn(ctx: HandlerCtx, s: LeaderSessionRow, now: number, source: st
  * Claude takes a message that arrives during a turn (a background task or Monitor notice, a
  * subagent hand-back, a message typed while busy) into that same turn: UserPromptSubmit runs for
  * it, and no Stop came before it (M0 c01, spike c16). Busy with no interrupt marker since the turn
- * started means the turn still runs (docs/notes/2026-10-23-background-notifications-6g.md).
+ * started means the turn still runs; a turn this daemon did not start (no offset) is unknown, so
+ * it starts a new one (docs/notes/2026-10-23-background-notifications-6g.md).
  */
 function takenMidTurn(ctx: HandlerCtx, s: LeaderSessionRow, now: number): boolean {
-  return s.harness === "claude" && busyNow(s, now) && !interruptedByTranscript(ctx, s);
+  if (s.harness !== "claude" || !busyNow(s, now) || !s.transcript_path) return false;
+  const offset = ctx.attention.turnOffsets.get(s.session_id);
+  return offset !== undefined && !transcriptShowsInterrupt(s.transcript_path, offset);
 }
 
 /** A prompt taken into the running turn: same turn number, nothing it carried is lost. Inside a transaction. */
