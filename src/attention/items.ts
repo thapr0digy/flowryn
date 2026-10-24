@@ -22,6 +22,8 @@ export type ItemClass = "actionable" | "info";
  * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
  * restart_dropped: a `flowryn daemon restart` that will not happen (its binary
  * failed the check, its supervisor refused, or `--when-idle` expired).
+ * restart_failed: a launchd restart that left flowrynd down until something
+ * else brought it back (src/service/relaunch.ts); opened by the next daemon.
  * review_feedback: what you sent from a review page the daemon polls.
  * pass_requested: the user asked on a review page to pass its gate; the
  * leader confirms it with them through a human channel.
@@ -104,6 +106,7 @@ export const LANE_TABLE = {
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
+  restart_failed: { lane: "P1", class: "actionable" },
   build_refused: { lane: "P1", class: "actionable" },
   worker_report: { lane: "P1", class: "actionable" },
   build_failed: { lane: "P1", class: "actionable" },
@@ -141,7 +144,7 @@ export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_q
  * worker's report, a dropped restart or a stuck validation is not left for
  * your next message.
  */
-export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "validation_stuck", "user_acted", "landed", "pass_requested"];
+export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "restart_failed", "validation_stuck", "user_acted", "landed", "pass_requested"];
 
 /**
  * Items that wake an idle leader as a P0 would, though they are P1: what you

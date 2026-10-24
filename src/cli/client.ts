@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { failureLine, readRestartFailure, type RestartFailure } from "../service/restart-failure.ts";
 import { loadConfig } from "../config/config.ts";
 import { flowrynHome, socketPath, spoolDir, stateFiles } from "../config/paths.ts";
 import { openDb } from "../db/db.ts";
@@ -67,6 +68,15 @@ function readOfflineReply(spec: VerbSpec, envelope: Envelope, io: CliIo): { repl
   }
 }
 
+/** The failure record a restart's helper left, or null (also when the configuration cannot be read). */
+function lastRestartFailure(env: NodeJS.ProcessEnv): RestartFailure | null {
+  try {
+    return readRestartFailure(loadConfig(flowrynHome(env)).config.state_dir);
+  } catch {
+    return null;
+  }
+}
+
 type Outcome = { reply: Reply; banner?: string } | { spooled: string };
 
 /** Write the call to the spool, for worker verbs when the daemon cannot take it. */
@@ -104,6 +114,9 @@ async function sendServerVerb(spec: VerbSpec, args: Record<string, unknown>, io:
       }
     }
     const message = error.kind === "timeout" ? `the daemon did not answer in time (${error.message}); the change may still apply` : `the daemon is not running (${error.message})`;
+    // A restart that left it down says what to run (src/service/relaunch.ts).
+    const failure = error.kind === "unavailable" ? lastRestartFailure(io.env) : null;
+    if (failure) return { reply: errorReply({ code: "daemon_unavailable", message: `${message}: ${failureLine(failure)}`, help: `tell the user to run ${failure.run} in their terminal` }) };
     return { reply: errorReply({ code: "daemon_unavailable", message, help: "flowryn daemon status" }) };
   }
   if (!reply || typeof reply !== "object" || typeof reply.ok !== "boolean") {

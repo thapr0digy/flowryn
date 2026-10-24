@@ -70,12 +70,14 @@ export class Upkeep {
     this.arm();
   }
 
-  stop(): void {
+  /** No new pass after this; resolves when the pass under way, if any, has ended (the daemon closes the database after). */
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     if (this.kickTimer) clearTimeout(this.kickTimer);
     this.timer = null;
     this.kickTimer = null;
+    await this.running;
   }
 
   /** A run landed: look soon rather than at the next tick. */

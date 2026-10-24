@@ -72,7 +72,9 @@ import type { SchedServices } from "../sched/services.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
 import { checkHarnessesAtStartup, gateHarness } from "../lifecycle/harness-gate.ts";
 import { alertHerdrIfDue, herdrEpisode, noteHerdrDown, noteHerdrUp } from "../reconcile/herdr-health.ts";
-import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestarted, scriptSupervisor } from "./restart.ts";
+import { clearRestartFailure, failureLine, readRestartFailure } from "../service/restart-failure.ts";
+import { InFlight, settleWithin, type Draining } from "./inflight.ts";
+import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestartFailure, recordRestarted, scriptSupervisor } from "./restart.ts";
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
@@ -201,6 +203,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   let boundSocket = false;
   let removeSignals: (() => void) | null = null;
   let ownsProcesses = false;
+  // Work outlived the shutdown grace: it may still query, so the database is left for the exit to close.
+  let keepDbOpen = false;
   const sock = socketPath(home, env);
 
   try {
@@ -394,6 +398,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     // M3: leader waiters, the leader clocks and notifications (design sections 9 and 10).
     const recorder = recordingNotifierPath(env);
+    // Work started from a timer; shutdown lets it end before it closes the database (src/daemon/inflight.ts).
+    const inflight = new InFlight();
     const notifyPump = new NotifyPump({
       db: database,
       config: () => config,
@@ -409,7 +415,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       bus: new SteerBus(),
       timing: () => leaderTiming(config),
       notify: () => notifyConfig(config),
-      kick: () => void notifyPump.tick(),
+      kick: () => void inflight.track(notifyPump.tick()),
       lsof: lsofPath,
       turnOffsets: new Map(),
     };
@@ -738,6 +744,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log(`verify: startup recovery failed: ${(error as Error).message}`);
     }
     resolveReady();
+    // The last restart's helper gave up and this daemon came up another way: one P1 says so.
+    // Only once ready, so a helper probing after it writes the record always sees a daemon that missed it.
+    const restartFailure = readRestartFailure(config.state_dir);
+    if (restartFailure) {
+      tx(database, () => recordRestartFailure(database, restartFailure, Date.now()));
+      clearRestartFailure(config.state_dir);
+      log(`restart: ${failureLine(restartFailure)}`);
+    }
 
     // Design section 5: every harness in use, its installed version against the passing contract records, before any launch.
     try {
@@ -765,21 +779,21 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         attention.bus.notifyAll();
       }
       autoAwayIfDue();
-      void notifyPump.tick();
-      void rewake.tick();
+      void inflight.track(notifyPump.tick());
+      void inflight.track(rewake.tick());
     }, ATTENTION_TICK_MS);
 
     buildWatch.start();
     autoCheck.start();
     upkeep.start();
     policyFollow.start();
-    const pendingRestart = setInterval(() => void restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`)), PENDING_POLL_MS);
+    const pendingRestart = setInterval(() => void inflight.track(restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`))), PENDING_POLL_MS);
 
     let passing = false;
     const pass = setInterval(() => {
       if (passing) return;
       passing = true;
-      void (async () => {
+      void inflight.track((async () => {
         try {
           await ingestSpool(spool, gateway, isIngested, log);
           syncTodos();
@@ -793,7 +807,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         } finally {
           passing = false;
         }
-      })();
+      })());
     }, options.passMs ?? DEFAULT_PASS_MS);
 
     const onHup = () => {
@@ -818,20 +832,19 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     const reason = await stopped;
     log(`stopping: ${reason}`);
-    scheduler.stop();
+    // Every timer first, then wait for what is under way: the database closes only after its last use.
+    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }];
     stopVerifications();
     clearInterval(pass);
     clearInterval(steady);
     clearInterval(attentionTick);
     clearInterval(pendingRestart);
-    buildWatch.stop();
-    upkeep.stop();
-    policyFollow.stop();
+    draining.push({ name: "build watcher", done: buildWatch.stop() }, { name: "upkeep", done: upkeep.stop() }, { name: "policy follow-through", done: policyFollow.stop() });
     await autoCheck.stop();
-    reconciler.stop();
+    draining.push({ name: "reconciler", done: reconciler.stop() });
     lavishPoller.stop();
     reviewOpener.stop();
-    deliveryWatcher.stop();
+    draining.push({ name: "delivery watcher", done: deliveryWatcher.stop() });
     herdrWatcher.stop();
     bus.close();
     urgent.close();
@@ -839,9 +852,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     removeSignals?.();
     process.off("SIGHUP", onHup);
     watcher.stop();
-    const closing = listener.close();
+    draining.push({ name: "listener", done: listener.close() }, { name: "journal", done: journal.stop() }, { name: "timer work", done: inflight.settled() });
     listener = null;
-    await Promise.race([Promise.all([closing, journal.stop()]), Bun.sleep(SHUTDOWN_GRACE_MS)]);
+    const stillRunning = await settleWithin(draining, SHUTDOWN_GRACE_MS);
+    if (stillRunning.length > 0) {
+      keepDbOpen = true;
+      log(`stopping: still running after ${SHUTDOWN_GRACE_MS / 1000} s: ${stillRunning.join(", ")}; the database stays open until the process exits`);
+    }
     // After the journal settles or the shutdown grace runs out: what still runs goes. A tasks-axi
     // mutation cut here is one the grace did not cover; its intent replays on the next start.
     const owned = await stopOwnedProcesses(OWNED_STOP_GRACE_MS);
@@ -859,7 +876,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     removeSignals?.();
     if (ownsProcesses) configureOwnedProcesses(null);
     if (listener) await Promise.race([listener.close(), Bun.sleep(1_000)]);
-    if (db) db.close();
+    if (db && !keepDbOpen) db.close();
     if (boundSocket) {
       try {
         if (existsSync(sock)) unlinkSync(sock);
