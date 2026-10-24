@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { VerifyConfig } from "./config.ts";
+import type { VerifyConfig, VerifyItem } from "./config.ts";
 
 /**
  * A verify policy's identity (docs/notes/2026-10-13-next-steps-md-y4.md): a
@@ -7,7 +7,8 @@ import type { VerifyConfig } from "./config.ts";
  * verification, so a result counts only for the policy it ran under.
  * Formatting noise in a step does not change it; a changed, added, removed
  * or reordered step, or a changed artifact, does. The time limit is not part
- * of it: it does not change what a pass proved.
+ * of it: it does not change what a pass proved. A parallel group is hashed as
+ * a nested list, so a flat list hashes exactly as it did before groups existed.
  */
 
 const TAG = "flowryn-verify-policy";
@@ -45,9 +46,11 @@ export function normalizeStep(step: string): string {
   return out;
 }
 
+const normalizeItem = (item: VerifyItem): VerifyItem => (typeof item === "string" ? normalizeStep(item) : item.map(normalizeStep));
+
 /** "vp1:<sha256 hex>" of the normalized steps, in order, and the artifact. */
 export function verifyPolicyId(config: Pick<VerifyConfig, "steps" | "binary">): string {
-  const canonical = JSON.stringify([TAG, ENCODING, config.steps.map(normalizeStep), config.binary]);
+  const canonical = JSON.stringify([TAG, ENCODING, config.steps.map(normalizeItem), config.binary]);
   return `vp${ENCODING}:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 

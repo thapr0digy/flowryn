@@ -18,109 +18,108 @@ export const EXIT = {
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
 
-/** Stable machine codes. Adding one is fine; renaming one breaks callers. */
+/**
+ * Stable machine codes. Adding one is fine; renaming one breaks callers. Kept
+ * in alphabetical order (a unit test checks), so codes added by parallel PRs
+ * land at different lines instead of all at the end of one group.
+ */
 export const ERROR_CODES = {
-  // policy refusals
-  approval_required: EXIT.policy,
-  reserved_decision: EXIT.policy,
-  red_checks: EXIT.policy,
-  not_landed: EXIT.policy,
-  contract_unverified: EXIT.policy,
-  primary_checkout_tangle: EXIT.policy,
-  // accounts (docs/notes/2026-10-22-multiple-ai-provider-u9.md): an account outside the project's scope, a scope with none for the harness, a signed-out login
+  // accounts (docs/notes/2026-10-22-multiple-ai-provider-u9.md): an account outside the project's scope, a signed-out login
   account_scope_mismatch: EXIT.policy,
-  no_account: EXIT.validation,
   account_signed_out: EXIT.unavailable,
-  // M4: delivery, the merge gate and cleanup
-  delivery_refused: EXIT.policy,
-  head_moved: EXIT.policy,
-  head_mismatch: EXIT.policy,
-  checks_pending: EXIT.policy,
-  pr_draft: EXIT.policy,
-  pr_closed: EXIT.policy,
-  head_not_on_remote: EXIT.policy,
-  not_fast_forward: EXIT.policy,
-  merge_refused: EXIT.policy,
-  merge_in_flight: EXIT.policy,
-  cleanup_refused: EXIT.policy,
-  not_ready: EXIT.policy,
-  // daemon restart (leader-safe restart)
-  restart_blocked: EXIT.policy,
-  restart_cooldown: EXIT.policy,
-  restart_in_progress: EXIT.policy,
-  no_change: EXIT.policy,
-  plist_drift: EXIT.policy,
-  not_supervised: EXIT.policy,
+  already_exists: EXIT.validation,
+  already_running: EXIT.failure,
+  approval_required: EXIT.policy,
+  bad_args: EXIT.validation,
+  bad_envelope: EXIT.validation,
+  bad_token: EXIT.role,
   binary_broken: EXIT.policy,
-  restart_dropped: EXIT.policy,
-  // a leader contract record from a build the daemon does not run
-  not_installed_build: EXIT.policy,
-  // M5: workflows and autonomy
-  wrong_stage: EXIT.policy,
   blockers_not_landed: EXIT.policy,
-  stage_waiting: EXIT.policy,
-  // heavy work outside a run (a verify) refused: its pool is full or the host check fails
-  no_capacity: EXIT.policy,
-  // a review gate whose own questions are still open
-  questions_open: EXIT.policy,
+  challenge_failed: EXIT.validation,
+  checks_pending: EXIT.policy,
+  cleanup_refused: EXIT.policy,
+  config_invalid: EXIT.failure,
+  contract_unverified: EXIT.policy,
+  daemon_unavailable: EXIT.unavailable,
+  delivery_refused: EXIT.policy,
+  design_page_invalid: EXIT.validation,
+  forge_unavailable: EXIT.failure,
+  fork_pr: EXIT.policy,
   // a chat-answer grant names another item or choice than the command
   grant_mismatch: EXIT.policy,
-  // steers and interrupts
-  interrupt_refused: EXIT.policy,
-  // flowryn verify
-  verify_failed: EXIT.policy,
-  // a queued verify that never started: its PR closed, its head moved, its project lost its verify steps
-  verify_cancelled: EXIT.policy,
-  // a local verify at this head ran under another verify policy than today's (or none recorded)
-  verify_stale: EXIT.policy,
-  // a project with verify steps merges only on a passing verify of exactly the head, and none has finished there
-  verify_required: EXIT.policy,
-  fork_pr: EXIT.policy,
-  // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
-  observation_stale: EXIT.policy,
-  // flowryn drop: work that started, landed, keeps a worktree or still blocks others stays
-  task_started: EXIT.policy,
-  task_landed: EXIT.policy,
-  worktree_kept: EXIT.policy,
-  phase_started: EXIT.policy,
+  // flowryn drop: the task still blocks others
   has_dependents: EXIT.policy,
-  // validation
-  bad_args: EXIT.validation,
-  unknown_verb: EXIT.validation,
-  bad_envelope: EXIT.validation,
+  head_mismatch: EXIT.policy,
+  head_moved: EXIT.policy,
+  head_not_on_remote: EXIT.policy,
+  herdr_unavailable: EXIT.failure,
+  human_only: EXIT.role,
+  internal: EXIT.failure,
+  interrupt_refused: EXIT.policy,
   invalid_project: EXIT.validation,
-  invalid_todo: EXIT.validation,
-  already_exists: EXIT.validation,
-  rejected_by_tasks_axi: EXIT.validation,
-  not_supported: EXIT.validation,
-  run_not_active: EXIT.validation,
   invalid_report: EXIT.validation,
-  qa_page_invalid: EXIT.validation,
-  // a review URL that is not lavish's page for the review page (Q3)
-  review_invalid: EXIT.validation,
+  invalid_todo: EXIT.validation,
+  merge_in_flight: EXIT.policy,
+  merge_refused: EXIT.policy,
+  // a project's account scope with none for the harness (docs/notes/2026-10-22-multiple-ai-provider-u9.md)
+  no_account: EXIT.validation,
+  // heavy work outside a run (a verify) refused: its pool is full or the host check fails
+  no_capacity: EXIT.policy,
+  no_change: EXIT.policy,
   // `flowryn back` with no away to end and no recent brief to reprint
   not_away: EXIT.validation,
   // a project with no [projects.<id>] verify steps
   not_configured: EXIT.validation,
-  // not found
+  not_fast_forward: EXIT.policy,
   not_found: EXIT.notFound,
-  // transport
-  daemon_unavailable: EXIT.unavailable,
-  protocol_mismatch: EXIT.protocol,
-  // roles
+  // a leader contract record from a build the daemon does not run
+  not_installed_build: EXIT.policy,
+  not_landed: EXIT.policy,
   not_leader: EXIT.role,
-  worker_token: EXIT.role,
-  human_only: EXIT.role,
-  bad_token: EXIT.role,
+  not_ready: EXIT.policy,
+  not_supervised: EXIT.policy,
+  not_supported: EXIT.validation,
+  // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
+  observation_stale: EXIT.policy,
+  // flowryn drop: a phase of the plan has started
+  phase_started: EXIT.policy,
+  plist_drift: EXIT.policy,
+  pr_closed: EXIT.policy,
+  pr_draft: EXIT.policy,
+  primary_checkout_tangle: EXIT.policy,
+  protocol_mismatch: EXIT.protocol,
+  qa_page_invalid: EXIT.validation,
+  // a review gate whose own questions are still open
+  questions_open: EXIT.policy,
+  red_checks: EXIT.policy,
+  rejected_by_tasks_axi: EXIT.validation,
+  reserved_decision: EXIT.policy,
+  restart_blocked: EXIT.policy,
+  restart_cooldown: EXIT.policy,
+  restart_dropped: EXIT.policy,
+  restart_in_progress: EXIT.policy,
+  // a review URL that is not lavish's page for the review page (Q3)
+  review_invalid: EXIT.validation,
   role_refused: EXIT.role,
-  // everything else
-  internal: EXIT.failure,
-  config_invalid: EXIT.failure,
-  already_running: EXIT.failure,
+  run_not_active: EXIT.validation,
+  stage_waiting: EXIT.policy,
+  // flowryn drop: the task has landed
+  task_landed: EXIT.policy,
+  // flowryn drop: the task has started
+  task_started: EXIT.policy,
   tool_missing: EXIT.failure,
-  herdr_unavailable: EXIT.failure,
-  forge_unavailable: EXIT.failure,
-  challenge_failed: EXIT.validation,
+  unknown_verb: EXIT.validation,
+  // a queued verify that never started: its PR closed, its head moved, its project lost its verify steps
+  verify_cancelled: EXIT.policy,
+  verify_failed: EXIT.policy,
+  // a project with verify steps merges only on a passing verify of exactly the head, and none has finished there
+  verify_required: EXIT.policy,
+  // a local verify at this head ran under another verify policy than today's (or none recorded)
+  verify_stale: EXIT.policy,
+  worker_token: EXIT.role,
+  // flowryn drop: the task keeps a worktree
+  worktree_kept: EXIT.policy,
+  wrong_stage: EXIT.policy,
 } as const satisfies Record<string, ExitCode>;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

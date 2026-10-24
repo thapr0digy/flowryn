@@ -28,6 +28,7 @@ interface StepView {
   exit: number | string;
   tests: string;
   detail: string;
+  attempts?: number | string;
 }
 
 function print(io: CliIo, reply: Reply): number {
@@ -40,9 +41,13 @@ function seconds(ms: number | string): string {
   return ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}s`;
 }
 
+const MARKS: Record<string, string> = { passed: "✓", failed: "✗", stopped: "·" };
+
+/** A step that ended: its mark, time and counts, and why (a failure, or a hang it recovered from). */
 function stepLine(s: StepView): string {
-  const mark = s.state === "passed" ? "✓" : "✗";
-  const extra = [s.tests !== "-" ? s.tests : "", s.state === "failed" ? (s.detail !== "-" ? s.detail : `exit ${s.exit}`) : ""].filter(Boolean).join("  ");
+  const mark = MARKS[s.state] ?? "?";
+  const why = s.detail !== "-" ? s.detail : s.state === "failed" ? `exit ${s.exit}` : "";
+  const extra = [s.tests !== "-" ? s.tests : "", why].filter(Boolean).join("  ");
   return `  ${mark} ${s.step}  ${seconds(s.ms)}${extra ? `  ${extra}` : ""}\n`;
 }
 
@@ -109,7 +114,8 @@ const verify: VerbSpec = {
     if (boolArg(args, "detach")) return print(io, okReply(started.data, [`flowryn verify show ${id}`]));
     if (!io.json) io.stdout(`${id} · ${String(started.data.project)} ${String(started.data.pr)} at ${String(started.data.head).slice(0, 8)}${started.data.attached && started.data.queued !== true ? " (already running; following it)" : ""}\n`);
     const shown = new Set<number>();
-    let running = -1;
+    // Several steps run at once in a parallel group; a retried step is announced again.
+    const announced = new Map<number, number | string | undefined>();
     let lastAnswer = Date.now();
     for (;;) {
       const reply = await callServerVerb(serverVerb("verify show")!, { id }, io);
@@ -124,12 +130,12 @@ const verify: VerbSpec = {
         const steps = (data.steps as StepView[]) ?? [];
         if (!io.json) {
           steps.forEach((s, i) => {
-            if ((s.state === "passed" || s.state === "failed") && !shown.has(i)) {
+            if (s.state in MARKS && !shown.has(i)) {
               shown.add(i);
               io.stdout(stepLine(s));
-            } else if (s.state === "running" && running !== i) {
-              running = i;
-              io.stdout(`  … ${s.step}\n`);
+            } else if (s.state === "running" && (!announced.has(i) || announced.get(i) !== s.attempts)) {
+              announced.set(i, s.attempts);
+              io.stdout(`  … ${s.step}${Number(s.attempts ?? 1) > 1 ? " (hung; retrying)" : ""}\n`);
             }
           });
         }
