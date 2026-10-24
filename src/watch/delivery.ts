@@ -102,10 +102,12 @@ export class DeliveryWatcher {
     this.schedule(0);
   }
 
-  stop(): void {
+  /** No new pass after this; resolves when the pass under way, if any, has ended (the daemon closes the database after). */
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    await this.running;
   }
 
   /**

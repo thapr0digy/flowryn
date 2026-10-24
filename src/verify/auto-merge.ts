@@ -304,10 +304,12 @@ export class AutoMerger {
     this.kick();
   }
 
-  stop(): void {
+  /** Stop the timer and kicks; resolves once a pass under way has ended (the daemon closes the database after). */
+  stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    return this.running ?? Promise.resolve();
   }
 
   /** Advance every live row now; a pass in progress is followed by another. */

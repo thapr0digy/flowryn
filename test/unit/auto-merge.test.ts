@@ -427,3 +427,29 @@ describe("waking the leader", () => {
     expect(wakes(f.db)).toEqual(["auto_merge_held", "pr_ready"]);
   });
 });
+
+describe("shutdown", () => {
+  test("stop ends the kicks and resolves only once a pass under way has ended, so the database closes after it", async () => {
+    const f = fixture();
+    let release!: () => void;
+    let passes = 0;
+    class Held extends AutoMerger {
+      override pass(): Promise<void> {
+        passes++;
+        return new Promise((resolve) => (release = resolve));
+      }
+    }
+    const auto = new Held({ db: f.db, config: () => config(OPTED_IN), delivery: inertDelivery(), now: () => 0, log: () => {}, kickScheduler: () => {} });
+    auto.kick();
+    auto.kick(); // a pass is running: this one would follow it
+    let stopped = false;
+    const done = auto.stop().then(() => (stopped = true));
+    await Bun.sleep(5);
+    expect(stopped).toBe(false);
+    release();
+    await done;
+    expect(stopped).toBe(true);
+    auto.kick();
+    expect(passes).toBe(1);
+  });
+});
