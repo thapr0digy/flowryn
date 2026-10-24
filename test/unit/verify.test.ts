@@ -12,7 +12,7 @@ import type { ProjectRow } from "../../src/lifecycle/projects.ts";
 import type { RunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { checkGate, NOT_STARTED_ANNOTATION, notStartedChecks, type ChoiceResult, type MergeFacts } from "../../src/policy/merge.ts";
-import { verifyConfig } from "../../src/verify/config.ts";
+import { verifyConfig, type VerifyItem } from "../../src/verify/config.ts";
 import { normalizeStep, verifyPolicyId } from "../../src/verify/policy.ts";
 import { absolutePath, initialSteps, keepBinary, logName, pruneDirs, recoverVerifications, runVerification, stepEnv, type VerifyDeps, type VerifyPlan } from "../../src/verify/runner.ts";
 import { finishedAtHead, finishedAtHeadUnderOther, finishVerification, getVerification, insertVerification, type Verification } from "../../src/verify/store.ts";
@@ -77,7 +77,7 @@ describe("[projects.<id>] verify", () => {
   test("a project without verify steps has none; a full table reads", () => {
     expect(verifyConfig(config(""), "web")).toBeNull();
     expect(verifyConfig(config("[projects.other]\nverify = [\"true\"]\n"), "web")).toBeNull();
-    expect(verifyConfig(config('[projects.web]\nverify = ["bun install", "bun test"]\nverify_binary = "dist/flowryn"\nverify_timeout_min = 5\n'), "web")).toEqual({ steps: ["bun install", "bun test"], binary: "dist/flowryn", timeout_ms: 300_000 });
+    expect(verifyConfig(config('[projects.web]\nverify = ["bun install", "bun test"]\nverify_binary = "dist/flowryn"\nverify_timeout_min = 5\n'), "web")).toEqual({ steps: ["bun install", "bun test"], binary: "dist/flowryn", timeout_ms: 300_000, step_timeout_ms: null });
     expect(verifyConfig(config('[projects.web]\nverify = ["true"]\n'), "web")!.timeout_ms).toBe(30 * 60_000);
   });
 
@@ -159,7 +159,7 @@ interface Fixture {
   repo: string;
   head: string;
   root: string;
-  start(steps: string[], over?: Partial<VerifyPlan>, head?: string, startedAt?: number): Promise<Verification>;
+  start(steps: VerifyItem[], over?: Partial<VerifyPlan>, head?: string, startedAt?: number): Promise<Verification>;
 }
 
 /** A project repository with one commit, a migrated database and a verify root. */
@@ -357,9 +357,9 @@ describe("a verification job", () => {
     const v = await f.start(["sleep 1"]);
     expect(v.state).toBe("passed");
     expect(reads).toBeGreaterThanOrEqual(2);
-    const lease = f.db.query("SELECT proc_exe FROM job_leases WHERE job_id = ?1").get(v.id) as { proc_exe: string | null };
-    expect(lease.proc_exe).not.toBeNull();
-    expect(lease.proc_exe).not.toBe("(sh)");
+    const procs = f.db.query("SELECT p.proc_exe FROM job_procs p JOIN job_leases l ON l.id = p.lease_id WHERE l.job_id = ?1").all(v.id) as { proc_exe: string }[];
+    expect(procs).toHaveLength(1);
+    expect(procs[0]!.proc_exe).not.toBe("(sh)");
   }, 20_000);
 
   test("a verification a dead daemon left running is recorded as an error at startup, its worktree removed", async () => {

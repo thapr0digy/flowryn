@@ -14,7 +14,7 @@ import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
 import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
 import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.ts";
-import { fullPools, grantJobLease, grantLeases, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
+import { fullPools, grantJobLease, grantLeases, leaseProcesses, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
 import { EXIT_BACKOFF_MAX_MS, Scheduler } from "../../src/sched/scheduler.ts";
 import { claimProbe, clearUsageLimit, noteUsageLimit, RESUME_COMMAND, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
@@ -246,10 +246,24 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
     tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
     const proc = { pid: 4242, start: 1_000, exe: "/bin/sh" };
     expect(tx(db, () => recordJobProcess(db, v1, proc, 2))).toBe(true);
-    expect(liveJobLeases(db)[0]).toMatchObject({ proc_pid: 4242, proc_start: 1_000, proc_exe: "/bin/sh" });
+    // A parallel group's steps run at once: each is a row of its own (migration 32).
+    expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4243 }, 2))).toBe(true);
+    expect(leaseProcesses(db, liveJobLeases(db)[0]!)).toEqual([proc, { ...proc, pid: 4243 }]);
     tx(db, () => releaseJobLeases(db, v1, "verification v1 ended", 3));
     expect(tx(db, () => recordJobProcess(db, v1, { ...proc, pid: 4343 }, 4))).toBe(false);
-    expect(events(db, "pool.job_process")).toEqual([{ job: "v1", kind: "verify", pid: 4242 }]);
+    expect(events(db, "pool.job_process")).toEqual([
+      { job: "v1", kind: "verify", pid: 4242 },
+      { job: "v1", kind: "verify", pid: 4243 },
+    ]);
+    db.close();
+  });
+
+  test("assumption: a lease from before migration 32 keeps its one step in job_leases, and recovery still reads it", () => {
+    const db = scratchDb();
+    tx(db, () => grantJobLease(db, v1, "validation", { validation: 1 }, 1));
+    db.exec("UPDATE job_leases SET proc_pid = 4000, proc_start = 900, proc_exe = '/bin/sh'");
+    tx(db, () => recordJobProcess(db, v1, { pid: 4242, start: 1_000, exe: "/bin/sh" }, 2));
+    expect(leaseProcesses(db, liveJobLeases(db)[0]!).map((p) => p.pid)).toEqual([4000, 4242]);
     db.close();
   });
 });
