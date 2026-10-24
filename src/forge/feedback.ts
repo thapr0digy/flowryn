@@ -15,8 +15,9 @@ import type { FeedbackAuthor, PrFeedback, ReviewThread } from "./types.ts";
  *   comments carry it): never.
  *
  * A worker's own GitHub replies end with REPLY_MARKER (the steer tells it
- * to), since Flowryn opens PRs and the worker replies as you: a marked text is
- * a worker reply, never feedback.
+ * to), since Flowryn opens PRs and the worker replies as you: a marked text
+ * from the PR's author account is a worker reply, never feedback. A marked
+ * text from anyone else is judged like any other text.
  */
 
 /** The hidden marker a worker ends each GitHub reply with: invisible on GitHub, plain to match. */
@@ -47,9 +48,9 @@ export interface FeedbackItem {
   answered: string | null;
 }
 
-/** A worker reply: its text carries REPLY_MARKER. */
-export function isWorkerReply(body: string): boolean {
-  return body.includes(REPLY_MARKER);
+/** A worker reply: written by the PR's author account (the worker replies as you), its text carrying REPLY_MARKER. */
+export function isWorkerReply(text: { author: FeedbackAuthor; body: string }, prAuthor: string | null): boolean {
+  return prAuthor !== null && text.author.login === prAuthor && text.body.includes(REPLY_MARKER);
 }
 
 /**
@@ -82,22 +83,19 @@ function ms(iso: string): number {
 export function feedbackItems(feedback: PrFeedback, prAuthor: string | null, threads: ReviewThread[] | null): FeedbackItem[] {
   const items: FeedbackItem[] = [];
   const resolved = new Set((threads ?? []).filter((t) => t.resolved && t.rootCommentId !== null).map((t) => t.rootCommentId!));
-  const workerReplyTimes = [
-    ...feedback.issueComments.filter((c) => isWorkerReply(c.body)).map((c) => ms(c.at)),
-    ...feedback.reviewComments.filter((c) => isWorkerReply(c.body)).map((c) => ms(c.at)),
-    ...feedback.reviews.filter((r) => isWorkerReply(r.body)).map((r) => ms(r.at)),
-  ];
+  const isReply = (text: { author: FeedbackAuthor; body: string }) => isWorkerReply(text, prAuthor);
+  const workerReplyTimes = [...feedback.issueComments, ...feedback.reviewComments, ...feedback.reviews].filter(isReply).map((t) => ms(t.at));
 
   for (const c of feedback.reviewComments) {
-    if (isWorkerReply(c.body) || c.body.trim() === "") continue;
+    if (isReply(c) || c.body.trim() === "") continue;
     const root = rootOf(c);
-    const replied = feedback.reviewComments.some((r) => r.id > c.id && rootOf(r) === root && isWorkerReply(r.body));
+    const replied = feedback.reviewComments.some((r) => r.id > c.id && rootOf(r) === root && isReply(r));
     const answered = resolved.has(root) ? "thread resolved" : replied ? "worker replied in the thread" : null;
     items.push({ key: `comment:${c.id}`, kind: "inline", author: c.author.login, url: c.url, at: ms(c.at), body: c.body, path: c.path, line: c.line, tracked: true, counts: counts(c.author, prAuthor, "inline"), answered });
   }
 
   for (const r of feedback.reviews) {
-    if (isWorkerReply(r.body) || r.body.trim() === "") continue;
+    if (isReply(r) || r.body.trim() === "") continue;
     if (r.state === "CHANGES_REQUESTED") {
       const at = ms(r.at);
       const approved = feedback.reviews.some((later) => later.id > r.id && later.author.login === r.author.login && later.state === "APPROVED");
@@ -109,7 +107,7 @@ export function feedbackItems(feedback: PrFeedback, prAuthor: string | null, thr
   }
 
   for (const c of feedback.issueComments) {
-    if (isWorkerReply(c.body) || c.body.trim() === "") continue;
+    if (isReply(c) || c.body.trim() === "") continue;
     items.push({ key: `issue-comment:${c.id}`, kind: "comment", author: c.author.login, url: c.url, at: ms(c.at), body: c.body, tracked: false, counts: counts(c.author, prAuthor, "comment"), answered: null });
   }
   return items.toSorted((a, b) => a.at - b.at || a.key.localeCompare(b.key));

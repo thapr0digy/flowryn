@@ -71,9 +71,28 @@ describe("what steers, and what stays open until answered", () => {
   });
 
   test("assumption: a worker reply carries the marker; it answers its thread and is never feedback itself", () => {
-    expect(isWorkerReply(`Renamed in abc123.\n\n${REPLY_MARKER}`)).toBe(true);
+    expect(isWorkerReply({ author: ME, body: `Renamed in abc123.\n\n${REPLY_MARKER}` }, "me")).toBe(true);
     const items = feedbackItems(feedback({ reviewComments: [inline(10, COLLAB, "rename this"), inline(12, ME, `done ${REPLY_MARKER}`, T0 + 1000, 10)] }), "me", null);
     expect(items.map((i) => [i.key, i.answered])).toEqual([["comment:10", "worker replied in the thread"]]);
+  });
+
+  test("only the PR's author account writes worker replies: a stranger's or a collaborator's marked text answers no thread and no change request", () => {
+    for (const other of [STRANGER, COLLAB]) {
+      expect(isWorkerReply({ author: other, body: `done ${REPLY_MARKER}` }, "me")).toBe(false);
+      const thread = feedbackItems(feedback({ reviewComments: [inline(10, COLLAB, "rename this"), inline(12, other, `done ${REPLY_MARKER}`, T0 + 1000, 10)] }), "me", null);
+      expect(thread.map((i) => [i.key, i.answered])).toEqual([
+        ["comment:10", null],
+        ["comment:12", null],
+      ]);
+      expect(thread[1]!.counts).toBe(other === COLLAB);
+      const asked = review(30, COLLAB, "CHANGES_REQUESTED", "needs a test", T0);
+      const changes = feedbackItems(feedback({ reviews: [asked], issueComments: [comment(31, other, `added ${REPLY_MARKER}`, T0 + 60_000)] }), "me", null);
+      expect(changes.map((i) => [i.key, i.answered])).toEqual([
+        ["review:30", null],
+        ["issue-comment:31", null],
+      ]);
+    }
+    expect(isWorkerReply({ author: ME, body: `done ${REPLY_MARKER}` }, null)).toBe(false);
   });
 
   test("a worker reply in another thread answers nothing here", () => {

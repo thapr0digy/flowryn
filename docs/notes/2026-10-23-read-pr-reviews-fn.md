@@ -30,7 +30,7 @@ On each delivery-watcher poll (`[github] poll_ms`), for every open PR delivered 
 | A bot (`user.type` Bot) | its reviews and inline comments; not its conversation comments (coverage, deploy previews) |
 | Anyone else | no; recorded once as `ignored`, and its text never reaches a worker |
 
-The worker posts its replies from your account, so you and it share a login. The steer therefore asks the worker to end every GitHub reply with the hidden marker `<!-- flowryn:reply -->` (`REPLY_MARKER`). A text with the marker is a worker reply. It answers a thread and is never feedback itself.
+The worker posts its replies from your account, so you and it share a login. The steer therefore asks the worker to end every GitHub reply with the hidden marker `<!-- flowryn:reply -->` (`REPLY_MARKER`). A text with the marker is a worker reply only when the PR's author account wrote it. It answers a thread and is never feedback itself. A marked text from anyone else (a collaborator, a bot, a stranger) is not a worker reply: it answers nothing and is judged like any other text by the table above.
 
 ### Sending
 
