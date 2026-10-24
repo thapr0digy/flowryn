@@ -7,10 +7,12 @@ import { canonicalPrUrl, parsePrUrl, repoOf } from "../forge/github.ts";
 import { checksLine, ForgeError, type ChecksSummary, type Forge, type PullRequest, type RepoRef } from "../forge/types.ts";
 import { recordIntent } from "../journal/journal.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { voidApprovals } from "../policy/approvals.ts";
+import { isRoutineMerge, voidApprovals } from "../policy/approvals.ts";
+import type { CleanMergeStep } from "../policy/clean-merge.ts";
 import { closeDivergence, openDivergence, type DivergenceRow } from "../reconcile/divergence.ts";
 import type { ProjectRow } from "./projects.ts";
 import { recordEvidence, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { queueCarriedVerify } from "../verify/queue.ts";
 
 /**
  * Delivery (design sections 8, 9 and 14, lifecycle/deliver). A ship ends in a
@@ -34,6 +36,8 @@ export interface Delivered {
   ref: string;
   head: string;
   at: number;
+  /** The delivered head this one carries its standing from: it is that head plus only clean merges of main. */
+  carriedFrom?: string;
 }
 
 /** The ref approvals bind to: the canonical PR URL, or `local:<branch>` for local-only work. */
@@ -44,10 +48,10 @@ export function approvalRef(d: Delivered): string {
 /** The task's latest delivery, if any. */
 export function deliveredOf(db: Db, taskId: string): Delivered | null {
   const row = db
-    .query("SELECT kind, ref, head_sha, created_at FROM artifacts WHERE task_id = ?1 AND kind IN ('pr','local') ORDER BY created_at DESC, rowid DESC LIMIT 1")
-    .get(taskId) as { kind: "pr" | "local"; ref: string; head_sha: string | null; created_at: number } | null;
+    .query("SELECT kind, ref, head_sha, created_at, carried_from FROM artifacts WHERE task_id = ?1 AND kind IN ('pr','local') ORDER BY created_at DESC, rowid DESC LIMIT 1")
+    .get(taskId) as { kind: "pr" | "local"; ref: string; head_sha: string | null; created_at: number; carried_from: string | null } | null;
   if (!row || !row.head_sha) return null;
-  return { kind: row.kind, ref: row.ref, head: row.head_sha, at: row.created_at };
+  return { kind: row.kind, ref: row.ref, head: row.head_sha, at: row.created_at, ...(row.carried_from ? { carriedFrom: row.carried_from } : {}) };
 }
 
 /** What the forge last said about a run's PR (run_evidence, source github, rank 1). */
@@ -222,23 +226,97 @@ function openReadyItem(db: Db, run: RunWithPolicy, eventSeq: number, line: strin
   openItem(db, { kind, eventSeq, taskId: run.task_id, runId: run.id, line, now });
 }
 
-/** Record a verified delivery: the artifact, run ready, the backlog link, the item. Call inside a transaction. */
-export function recordDelivery(db: Db, run: RunWithPolicy, verified: VerifiedPr | VerifiedLocal, via: string, now: number): Record<string, unknown> {
+/**
+ * A new head proven to be the delivered head plus only clean merges of main
+ * (src/policy/clean-merge.ts, docs/notes/2026-10-23-a-clean-merge-fm.md).
+ */
+export interface Carry {
+  /** The delivered head the proof starts from. */
+  from: string;
+  steps: CleanMergeStep[];
+  /** Today's verify policy of the project, or null when it has no verify steps (nothing to queue). */
+  verifyPolicy: string | null;
+}
+
+/** A proof applies to routine work (yolo, not sensitive) delivered as a PR, from exactly the delivered head of the same PR. */
+function carryApplies(db: Db, run: RunWithPolicy, previous: Delivered | null, ref: string, carry: Carry | null): carry is Carry {
+  return carry !== null && previous !== null && previous.kind === "pr" && previous.ref === ref && previous.head === carry.from && isRoutineMerge(db, run.task_id);
+}
+
+/**
+ * The carry's event, and the verify the new head still needs queued (re-verify
+ * is never skipped: the merge gate wants a pass at exactly this head). Returns
+ * what the ready line adds and the queued request, if one was made.
+ */
+function noteCarried(
+  db: Db,
+  run: RunWithPolicy,
+  q: { ref: string; pr: PullRequest; carry: Carry; source: "cli" | "github"; via: string },
+  now: number,
+): { request: string | null; note: string; seq: number } {
+  const to = q.pr.headSha;
+  const request = q.carry.verifyPolicy
+    ? queueCarriedVerify(db, { project_id: run.project_id, pr_url: q.ref, task_id: run.task_id, head_sha: to, policy_id: q.carry.verifyPolicy, pr_number: q.pr.number, head_ref: q.pr.headRef, now })
+    : null;
+  const event = appendEvent(db, {
+    source: q.source,
+    kind: "run.head_carried",
+    runId: run.id,
+    taskId: run.task_id,
+    payload: { pr: q.ref, from: q.carry.from, to, steps: q.carry.steps, via: q.via, verify: request?.id ?? null },
+    ts: now,
+  });
+  const note = `head ${to.slice(0, 8)} is ${q.carry.from.slice(0, 8)} plus only a clean merge of main${request ? `; verify queued (${request.id})` : ""}`;
+  return { request: request?.id ?? null, note, seq: event.seq };
+}
+
+/**
+ * A delivered routine PR whose head moved, on GitHub, to the delivered head
+ * plus only clean merges of main: the delivery moves to the new head with no
+ * worker turn. The run stays ready and its merge gate open; standing human
+ * records are voided as at any new head (they bind the head you saw); the
+ * verify of the new head is queued. Call inside a transaction, after
+ * carryApplies held (applyPrObservation checks it).
+ */
+export function carryDelivery(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, checks: ChecksSummary | null, carry: Carry, now: number): { request: string | null } | null {
+  if (!carryApplies(db, run, delivered, delivered.ref, carry)) return null;
+  db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES (?1, ?2, 'pr', ?3, ?4, ?5, ?6)").run(artifactId(now), run.task_id, delivered.ref, pr.headSha, now, delivered.head);
+  voidApprovals(db, run.task_id, now, `the head moved to ${pr.headSha.slice(0, 8)} by a clean merge of main`);
+  const { request, note, seq } = noteCarried(db, run, { ref: delivered.ref, pr, carry, source: "github", via: "watcher" }, now);
+  const title = taskTitle(db, run.task_id);
+  openReadyItem(db, run, seq, `PR ready: ${title} (${run.project_id}), ${checks ? checksLine(checks) : "checks unknown"}; ${note}`, now);
+  return { request };
+}
+
+/**
+ * Record a verified delivery: the artifact, run ready, the backlog link, the
+ * item. `carry`: the worker delivered the delivered head plus only clean
+ * merges of main; for routine work the artifact names the head it carries
+ * from and the new head's verify is queued. Call inside a transaction.
+ */
+export function recordDelivery(db: Db, run: RunWithPolicy, verified: VerifiedPr | VerifiedLocal, via: string, now: number, carry: Carry | null = null): Record<string, unknown> {
   const previous = deliveredOf(db, run.task_id);
   const head = verified.kind === "pr" ? verified.pr.headSha : verified.head;
   const ref = verified.kind === "pr" ? verified.url : run.branch;
+  const carried = verified.kind === "pr" && carryApplies(db, run, previous, ref, carry) ? carry : null;
   if (previous && previous.head !== head) voidApprovals(db, run.task_id, now, `a new head ${head.slice(0, 8)} was delivered`);
   if (!previous || previous.head !== head || previous.ref !== ref) {
-    db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)").run(artifactId(now), run.task_id, verified.kind, ref, head, now);
+    db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)").run(artifactId(now), run.task_id, verified.kind, ref, head, now, carried?.from ?? null);
   }
   db.query("UPDATE runs SET state = 'ready', updated_at = ?2 WHERE id = ?1").run(run.id, now);
   const title = taskTitle(db, run.task_id);
   let line: string;
+  let queued: string | null = null;
   if (verified.kind === "pr") {
     recordPrEvidence(db, run.id, prEvidenceFrom(verified.pr, verified.checks, now), now);
     if (!previous || previous.ref !== ref) recordIntent(db, { file: "backlog", verb: "update", taskId: run.task_id, positional: [run.task_id], flags: { pr: ref }, now });
     const checks = verified.checks ? checksLine(verified.checks) : "checks unknown";
     line = run.sensitive ? `Sensitive PR waits for your approval: ${title} (${run.project_id}), ${checks}` : `PR ready: ${title} (${run.project_id}), ${checks}`;
+    if (carried) {
+      const noted = noteCarried(db, run, { ref, pr: verified.pr, carry: carried, source: "cli", via: "deliver" }, now);
+      line += `; ${noted.note}`;
+      queued = noted.request;
+    }
   } else {
     line = run.sensitive
       ? `Sensitive local-only branch waits for your approval: ${title} (${run.project_id}), ${verified.commits} commit(s)`
@@ -259,5 +337,6 @@ export function recordDelivery(db: Db, run: RunWithPolicy, verified: VerifiedPr 
   });
   resolveRunItems(db, run.id, ["worker_idle", "pr_closed", "checks_red"], "run.delivered", now);
   openReadyItem(db, run, event.seq, line, now);
-  return verified.kind === "pr" ? { run: run.id, state: "ready", pr: ref, head } : { run: run.id, state: "ready", branch: run.branch, head, commits: verified.commits };
+  if (verified.kind === "local") return { run: run.id, state: "ready", branch: run.branch, head, commits: verified.commits };
+  return { run: run.id, state: "ready", pr: ref, head, ...(carried ? { carried_from: carried.from, verify_queued: queued ?? "-" } : {}) };
 }

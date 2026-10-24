@@ -709,6 +709,14 @@ const SCHEMA_MIGRATIONS_SQL = /* sql */ `
 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER);
 `;
 
+/**
+ * Migration 32: the head a delivery carries its standing from (docs/notes/2026-10-23-a-clean-merge-fm.md):
+ * set when a routine PR's new head was proven to be the delivered one plus only clean merges of main.
+ */
+const ARTIFACT_CARRIED_FROM_SQL = /* sql */ `
+ALTER TABLE artifacts ADD COLUMN carried_from TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -741,6 +749,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 29, name: "verify-queue", sql: VERIFY_QUEUE_SQL },
   { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
+  { version: 32, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

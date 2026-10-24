@@ -134,3 +134,44 @@ export function cancelRequest(db: Db, request: VerifyRequest, reason: string, no
   appendEvent(db, { source: "daemon", kind: "verify.cancelled", taskId: request.task_id, payload: { request: request.id, pr: request.pr_url, head: request.head_sha, reason }, ts: now });
   return true;
 }
+
+/** What a daemon-made request for a carried head needs (src/lifecycle/delivery.ts carryDelivery). */
+export interface CarriedVerify {
+  project_id: string;
+  pr_url: string;
+  task_id: string;
+  head_sha: string;
+  /** Today's verify policy of the project. */
+  policy_id: string;
+  pr_number: number;
+  head_ref: string;
+  now: number;
+}
+
+/**
+ * Queue the verify a carried head still needs (docs/notes/2026-10-23-a-clean-merge-fm.md): none when one
+ * is queued, running or passed at this head under this policy. The steps run with the PATH of the
+ * project's latest request that brought one (launchd's own PATH lacks ~/.bun/bin), else the daemon's.
+ * Call inside a transaction; the caller kicks the scheduler after the commit.
+ */
+export function queueCarriedVerify(db: Db, q: CarriedVerify): VerifyRequest | null {
+  if (findQueued(db, q.pr_url, q.head_sha, q.policy_id)) return null;
+  const covered = db
+    .query("SELECT 1 FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state IN ('running','passed') LIMIT 1")
+    .get(q.pr_url, q.head_sha, q.policy_id);
+  if (covered) return null;
+  const last = db.query(`SELECT path FROM verify_queue WHERE project_id = ?1 AND path IS NOT NULL ORDER BY requested_at DESC, ${ORDER} LIMIT 1`).get(q.project_id) as { path: string } | null;
+  return insertRequest(db, {
+    project_id: q.project_id,
+    pr_url: q.pr_url,
+    task_id: q.task_id,
+    head_sha: q.head_sha,
+    policy_id: q.policy_id,
+    pr_number: q.pr_number,
+    head_ref: q.head_ref,
+    worktree: null,
+    source: "auto",
+    path: last?.path ?? null,
+    now: q.now,
+  });
+}

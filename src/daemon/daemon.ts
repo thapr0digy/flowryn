@@ -76,6 +76,8 @@ import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffP
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
+import { verifyConfig } from "../verify/config.ts";
+import { verifyPolicyId } from "../verify/policy.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 
 export interface DaemonOptions {
@@ -490,6 +492,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         void delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => log(`cleanup ${runId}: ${(error as Error).stack ?? String(error)}`)),
       nudgeConflicts: () => upkeepConfig(config).nudge_conflicts,
       kickScheduler: () => scheduler?.kick(),
+      verifyPolicy: (projectId) => {
+        const steps = verifyConfig(config, projectId);
+        return steps ? verifyPolicyId(steps) : null;
+      },
       log,
       now: Date.now,
     });

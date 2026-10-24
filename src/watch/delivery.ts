@@ -12,6 +12,7 @@ import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
+import { cleanMainMerge, type CleanMerge } from "../policy/clean-merge.ts";
 import { headHistory, type HeadHistory } from "../policy/head-history.ts";
 import { applyNmObservation, applyPrObservation, headMoveRecorded, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
@@ -48,8 +49,10 @@ export interface DeliveryWatcherDeps {
   cleanup(runId: string): void;
   /** `[upkeep] nudge_conflicts`: a delivered PR that conflicts with its base sends its ship back. */
   nudgeConflicts(): boolean;
-  /** A nudged ship's last stage waits for a grant: the scheduler looks now. */
+  /** A nudged ship's last stage waits for a grant, or a carried head's verify was queued: the scheduler looks now. */
   kickScheduler(): void;
+  /** The project's verify policy identity under today's config, or null when it has no verify steps (src/verify/policy.ts); absent: none. */
+  verifyPolicy?(projectId: string): string | null;
   log(line: string): void;
   now(): number;
 }
@@ -176,16 +179,17 @@ export class DeliveryWatcher {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
         const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
+        const carry = history === "descends" ? { proof: await this.cleanMergeOf(run, delivered.head, pr.headSha, pr.baseRef), verifyPolicy: this.deps.verifyPolicy?.(run.project_id) ?? null } : undefined;
         tx(db, () => noteForgeUp(db, "github", now()));
         const mergeSha = pr.state === "merged" ? pr.mergeSha : null;
         const observed = deliveryTransition(db, seen, mergeSha ? MERGED_PARTS : PR_PARTS, "pr_observation", "github", now(), (current) =>
-          applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history }),
+          applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history, ...(carry ? { carry } : {}) }),
         );
         if (!observed.applied && mergeSha && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, mergeSha, "github");
         const applied = observed.applied ? observed.value : { landed: false, nudged: false };
         this.backoffMs = 0;
         if (applied.landed) this.deps.cleanup(run.id);
-        if (applied.nudged) this.deps.kickScheduler();
+        if (applied.nudged || applied.carried) this.deps.kickScheduler();
       } catch (error) {
         if (error instanceof ForgeError && error.kind === "not_found") {
           this.deps.log(`delivery watcher: ${delivered.ref} is not found on GitHub`);
@@ -208,6 +212,21 @@ export class DeliveryWatcher {
     const cwd = existsSync(run.worktree_path) ? run.worktree_path : getProject(this.deps.db, run.project_id)?.path;
     if (!cwd) return "unknown";
     return headHistory(this.deps.git, cwd, delivered, head, prNumber, this.deps.headFetchGit ?? this.deps.git).catch(() => "unknown" as const);
+  }
+
+  /**
+   * Whether a delivered head that moved by commits on top moved only by clean
+   * merges of the project's default branch (docs/notes/2026-10-23-a-clean-merge-fm.md),
+   * asked of git where headHistoryOf asked; never a yes when git cannot say.
+   */
+  private async cleanMergeOf(run: RunWithPolicy, delivered: string, head: string, prBase: string): Promise<CleanMerge> {
+    const project = getProject(this.deps.db, run.project_id);
+    if (!project) return { ok: false, why: `project ${run.project_id} is not registered` };
+    if (prBase !== project.default_branch) return { ok: false, why: `the PR's base is ${prBase}, not ${project.default_branch}` };
+    const cwd = existsSync(run.worktree_path) ? run.worktree_path : project.path;
+    return cleanMainMerge(this.deps.git, cwd, { from: delivered, to: head, base: project.default_branch, fetchGit: this.deps.headFetchGit ?? this.deps.git }).catch(
+      (error: unknown) => ({ ok: false, why: `git could not say: ${(error as Error).message}` }) as const,
+    );
   }
 
   /** A merge proven after its run ended: kept as a fact, the run not revived (noteMergedAfterEnd). */
