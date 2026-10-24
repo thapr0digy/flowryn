@@ -71,7 +71,7 @@ export async function cleanMainMerge(git: GitRunner, cwd: string, q: CleanMergeQ
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => line.trim().split(/\s+/))
-    .reverse();
+    .toReversed();
   if (chain.length === 0) return { ok: false, why: `${short(q.to)} adds nothing to ${short(q.from)}` };
   if (chain.length > MAX_CARRY_COMMITS) return { ok: false, why: `more than ${MAX_CARRY_COMMITS} commits on top of ${short(q.from)}` };
   const fetched = { done: false };

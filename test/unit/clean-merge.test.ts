@@ -44,6 +44,8 @@ function mergeMain(cwd: string): string {
 }
 
 const git = (): GitRunner => gitRunner("git", 10_000, GIT_ENV);
+/** A GitRunner whose merge-tree is cut off at its deadline. */
+const cutOff: GitRunner = async (args, cwd) => (args[0] === "merge-tree" ? { code: 124, stdout: "", stderr: "timed out" } : git()(args, cwd));
 const prove = (to: string, from = approved, cwd = primary, runner = git(), fetchGit?: GitRunner) => cleanMainMerge(runner, cwd, { from, to, base: "main", ...(fetchGit ? { fetchGit } : {}) });
 
 describe("a clean merge of main", () => {
@@ -165,11 +167,9 @@ describe("not a clean merge of main: today's path", () => {
   });
 
   test(`more than ${MAX_CARRY_COMMITS} commits on top is not looked at`, async () => {
+    // The length is checked before any commit is looked at, so plain commits make the chain cheaply.
     let head = approved;
-    for (let i = 0; i <= MAX_CARRY_COMMITS; i++) {
-      mergeOnOrigin(other, `m${i}.txt`, `${i}\n`);
-      head = mergeMain(primary);
-    }
+    for (let i = 0; i <= MAX_CARRY_COMMITS; i++) head = commit(primary, `m${i}.txt`, `${i}\n`);
     const proof = await prove(head);
     expect(!proof.ok && proof.why).toContain(`more than ${MAX_CARRY_COMMITS} commits`);
   });
@@ -177,7 +177,6 @@ describe("not a clean merge of main: today's path", () => {
   test("git that cannot say is never a yes: a cut-off merge-tree, a missing head", async () => {
     mergeOnOrigin(other, "main.txt", "main moved\n");
     const head = mergeMain(primary);
-    const cutOff: GitRunner = async (args, cwd) => (args[0] === "merge-tree" ? { code: 124, stdout: "", stderr: "timed out" } : git()(args, cwd));
     const proof = await prove(head, approved, primary, cutOff);
     expect(!proof.ok && proof.why).toContain("git could not say: merge-tree");
     const missing = await prove("0123456789abcdef0123456789abcdef01234567");
