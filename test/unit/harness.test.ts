@@ -160,8 +160,8 @@ describe("worker contract text", () => {
     // The style block leads the instructions (design section 11).
     expect(text.startsWith("Reply in the fewest words")).toBe(true);
     expect(text).toContain("$FLOWRYN_BIN stage done [--review <lavish url>]");
-    // The budget grew by the toolkit's tool map (src/policy/toolkit.ts TOOL_MAP), which follows the style block.
-    expect(text.split("\n").length).toBeLessThan(38);
+    // The budget grew by the toolkit's tool map (src/policy/toolkit.ts TOOL_MAP), which follows the style block, then by the review-page line and the run's own $TMPDIR line.
+    expect(text.split("\n").length).toBeLessThan(39);
     expect(text).toContain(TOOL_MAP);
     expect(workerContract("pi", null).startsWith(TOOL_MAP)).toBe(true);
     expect(text.indexOf(TOOL_MAP)).toBeGreaterThan(text.indexOf("Reply in the fewest words"));
