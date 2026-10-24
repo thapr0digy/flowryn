@@ -6,7 +6,7 @@ import type { OperationRow } from "../lifecycle/operations.ts";
 import { liveCounts } from "./pools.ts";
 import { quotaState } from "./quota.ts";
 import type { HostState } from "./scheduler.ts";
-import { RESUME_COMMAND, usagePause } from "./usage.ts";
+import { resumeCommand, usagePause } from "./usage.ts";
 
 /**
  * Why the scheduler refused a grant, as the rule saw it (docs/notes/2026-10-12-next-steps-md-wz.md):
@@ -23,32 +23,36 @@ export interface Refusal {
 const iso = (t: number) => new Date(t).toISOString();
 const clock = (t: number) => new Date(t).toTimeString().slice(0, 5);
 
-export function usageRefusal(db: Db, now: number): Refusal {
-  const pause = usagePause(db);
-  if (!pause) return { rule: "capacity.usage_limit", reason: "the Claude usage limit pauses Claude starts", facts: [], unblock: [{ by: "captain", action: RESUME_COMMAND }] };
+export function usageRefusal(db: Db, account: string, now: number, overflow: string | null = null): Refusal {
+  const pause = usagePause(db, account);
+  const tail = overflow ? `; ${overflow}` : "";
+  if (!pause) return { rule: "capacity.usage_limit", reason: `the usage limit on account ${account} pauses its starts${tail}`, facts: [], unblock: [{ by: "captain", action: resumeCommand(account) }] };
   const probing = now >= pause.until && pause.probe !== null;
   return {
     rule: "capacity.usage_limit",
-    reason: probing ? `the Claude usage limit: run ${pause.probe!.run} probes it first` : `the Claude usage limit pauses Claude starts until ${clock(pause.until)}`,
+    reason: (probing ? `the usage limit on account ${account}: run ${pause.probe!.run} probes it first` : `the usage limit on account ${account} pauses its starts until ${clock(pause.until)}`) + tail,
     facts: [
+      { name: "account", value: account, at: pause.since },
       { name: "usage limit hit", value: pause.who, at: pause.since },
       { name: "pause until", value: iso(pause.until), at: pause.since },
       ...(pause.probe ? [{ name: "probe", value: pause.probe.run, at: pause.probe.at }] : []),
     ],
     unblock: [
-      { by: "flowryn", action: probing ? "lifts the pause when the probe's turn ends normally" : `lets one Claude run probe it after ${clock(pause.until)}` },
-      { by: "captain", action: RESUME_COMMAND },
+      { by: "flowryn", action: probing ? "lifts the pause when the probe's turn ends normally" : `lets one run on ${account} probe it after ${clock(pause.until)}` },
+      { by: "captain", action: resumeCommand(account) },
     ],
   };
 }
 
-export function quotaRefusal(db: Db): Refusal {
-  const quota = quotaState(db);
+export function quotaRefusal(db: Db, account: string, overflow: string | null = null): Refusal {
+  const quota = quotaState(db, account);
+  const tail = overflow ? `; ${overflow}` : "";
   return {
     rule: "capacity.quota_floor",
-    reason: quota ? `the Claude quota is ${quota.percent}%, under the ${quota.floor}% floor` : "the Claude quota is under its floor",
+    reason: (quota ? `the quota of account ${account} is ${quota.percent}%, under the ${quota.floor}% floor` : `the quota of account ${account} is under its floor`) + tail,
     facts: quota
       ? [
+          { name: "account", value: account, at: quota.since },
           { name: "quota remaining", value: `${quota.percent}%${quota.window ? ` (${quota.window})` : ""}`, at: quota.since },
           { name: "floor", value: `${quota.floor}%`, at: quota.since },
           ...(quota.resets_at ? [{ name: "window resets", value: quota.resets_at, at: quota.since }] : []),
@@ -56,7 +60,20 @@ export function quotaRefusal(db: Db): Refusal {
       : [],
     unblock: [
       { by: "flowryn", action: "starts it once a quota reading is at or over the floor" },
-      { by: "captain", action: RESUME_COMMAND },
+      { by: "captain", action: resumeCommand(account) },
+    ],
+  };
+}
+
+/** The account's login is signed out: its runs wait until a check passes. `since` is when the episode began. */
+export function signedOutRefusal(account: string, detail: string, login: string, since: number): Refusal {
+  return {
+    rule: "capacity.account_signed_out",
+    reason: `account ${account} is signed out`,
+    facts: [{ name: "sign-in check", value: detail, at: since }],
+    unblock: [
+      { by: "captain", action: login },
+      { by: "flowryn", action: "starts it once the account's sign-in check passes" },
     ],
   };
 }

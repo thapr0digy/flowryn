@@ -42,6 +42,7 @@ export const ERROR_CODES = {
   contract_unverified: EXIT.policy,
   daemon_unavailable: EXIT.unavailable,
   delivery_refused: EXIT.policy,
+  design_page_invalid: EXIT.validation,
   forge_unavailable: EXIT.failure,
   fork_pr: EXIT.policy,
   // a chat-answer grant names another item or choice than the command

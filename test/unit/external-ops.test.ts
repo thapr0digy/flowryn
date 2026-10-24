@@ -275,7 +275,7 @@ describe("the axi tools and the other helpers, silent", () => {
 
   test("quota-axi reads unknown within its budget", async () => {
     const tool = silentTool("quota-axi");
-    const { value, ms } = await fromReady(join(dir, "quota-axi.pid"), () => probeQuota(tool, null, TIMEOUT_MS));
+    const { value, ms } = await fromReady(join(dir, "quota-axi.pid"), () => probeQuota(tool, null, undefined, TIMEOUT_MS));
     expect(value).toEqual({ state: "unknown", detail: "quota-axi took over 0.3 s" });
     expect(ms).toBeLessThan(BUDGET_MS);
     await settled(join(dir, "quota-axi.pid"));
