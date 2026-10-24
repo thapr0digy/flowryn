@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { DaemonInfo } from "../api/verbs.ts";
 import { openItem, resolveItems } from "../attention/items.ts";
+import { harnessAccounts } from "../config/accounts.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { policyMode } from "../config/policy.ts";
 import { binDir } from "../daemon/caller-binary.ts";
@@ -25,8 +26,8 @@ import {
   type AutoAttempt,
   type VersionOf,
 } from "../lifecycle/harness-gate.ts";
-import { quotaHolds } from "../sched/quota.ts";
-import { usageGate } from "../sched/usage.ts";
+import { heldQuotaAccounts } from "../sched/quota.ts";
+import { pausedAccounts } from "../sched/usage.ts";
 import { autoRecordLine, reportProblem } from "./grant.ts";
 import { MANIFEST_ENV, readManifest, recoverOwned, type CleanupOutcome } from "./owned.ts";
 import { CONTRACT_CLEANUP_BUDGET_MS, removeScratchHome } from "./runner.ts";
@@ -188,6 +189,10 @@ interface Current {
   version: string;
   startedAt: number;
   process: AutoProcess | null;
+}
+
+function accountsNamed(ids: string[]): string {
+  return `${ids.length === 1 ? "account" : "accounts"} ${ids.join(", ")}`;
 }
 
 function relaxed(config: FlowrynConfig): boolean {
@@ -388,8 +393,12 @@ export class AutoContractChecker {
     if (this.deps.restartBusy()) return "a daemon restart";
     const herdr = this.deps.herdrDown();
     if (herdr) return `Herdr (${herdr})`;
-    if (harness === "claude" && usageGate(this.deps.db, this.deps.now(), null) === "paused") return "the Claude usage pause";
-    if (harness === "claude" && quotaHolds(this.deps.db)) return "the Claude quota floor";
+    // A contract run uses [workers.<harness>]'s login, which a declared account may share, so it waits on any account of the harness.
+    const mine = new Set([harness, ...harnessAccounts(this.deps.config(), harness).map((a) => a.id)]);
+    const paused = pausedAccounts(this.deps.db, this.deps.now()).filter((a) => mine.has(a));
+    if (paused.length > 0) return `the usage pause on ${accountsNamed(paused)}`;
+    const held = heldQuotaAccounts(this.deps.db).filter((a) => mine.has(a));
+    if (held.length > 0) return `the quota floor on ${accountsNamed(held)}`;
     return null;
   }
 

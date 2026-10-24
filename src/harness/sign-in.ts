@@ -52,8 +52,7 @@ async function claudeSignedIn(account: Account, binary: string): Promise<string 
   const status = json(out.stdout);
   if (out.ok && status?.loggedIn === true) return null;
   const why = status && status.loggedIn === false ? "not signed in" : `claude auth status ${out.detail}`;
-  const login = account.config_dir ? `CLAUDE_CONFIG_DIR=${account.config_dir} claude, then /login` : "env -u CLAUDE_CONFIG_DIR claude, then /login";
-  return `account ${account.id} (${account.config_dir ?? "Claude's default login"}): ${why}; sign in with ${login}`;
+  return `account ${account.id} (${account.config_dir ?? "Claude's default login"}): ${why}; sign in with ${loginCommand(account)}`;
 }
 
 async function piSignedIn(account: Account, binary: string): Promise<string | null> {
@@ -70,7 +69,13 @@ async function piSignedIn(account: Account, binary: string): Promise<string | nu
     if (listed) return null;
     why = `no model listed for provider ${provider}`;
   }
-  return `account ${account.id} (${account.agent_dir}, provider ${provider}): ${why}; sign in with PI_CODING_AGENT_DIR=${account.agent_dir} pi, then /login`;
+  return `account ${account.id} (${account.agent_dir}, provider ${provider}): ${why}; sign in with ${loginCommand(account)}`;
+}
+
+/** The command that signs the account's login in, in your own terminal. */
+export function loginCommand(account: Account): string {
+  if (account.harness === "pi") return `PI_CODING_AGENT_DIR=${account.agent_dir} pi, then /login`;
+  return account.config_dir ? `CLAUDE_CONFIG_DIR=${account.config_dir} claude, then /login` : "env -u CLAUDE_CONFIG_DIR claude, then /login";
 }
 
 /** Null when the account may launch now. Only a declared account is checked: the implicit one launches as Flowryn always has. */

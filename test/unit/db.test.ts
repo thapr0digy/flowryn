@@ -107,22 +107,22 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("migration 32 gives every delivery a carried_from, empty for the ones it finds", () => {
+  test("migration 33 gives every delivery a carried_from, empty for the ones it finds", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 31));
+    migrate(db, MIGRATIONS.slice(0, 32));
     db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'pr', 'https://github.com/acme/web/pull/1', 'abc', 1)").run();
-    expect(migrate(db, MIGRATIONS, () => 5)).toEqual([32]);
+    expect(migrate(db, MIGRATIONS, () => 5)).toEqual([33]);
     expect(db.query("SELECT carried_from FROM artifacts WHERE id = 'a1'").get()).toEqual({ carried_from: null });
-    expect(db.query("SELECT name FROM schema_migrations WHERE version = 32").get()).toEqual({ name: "artifact-carried-from" });
+    expect(db.query("SELECT name FROM schema_migrations WHERE version = 33").get()).toEqual({ name: "artifact-carried-from" });
     db.close();
   });
 
   test("a database from before the name ledger gets its earlier migrations named from this binary, with no time", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 30));
-    expect(migrate(db, MIGRATIONS, () => 99)).toEqual(MIGRATIONS.slice(30).map((m) => m.version));
+    expect(migrate(db, MIGRATIONS.slice(0, 31), () => 99)).toEqual([31]);
     const rows = db.query("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all() as { version: number; name: string; applied_at: number | null }[];
-    expect(rows.map((r) => r.name)).toEqual(MIGRATIONS.map((m) => m.name));
+    expect(rows.map((r) => r.name)).toEqual(MIGRATIONS.slice(0, 31).map((m) => m.name));
     expect(rows.filter((r) => r.applied_at === null).map((r) => r.version)).toEqual(MIGRATIONS.slice(0, 30).map((m) => m.version));
     expect(rows.find((r) => r.version === 31)).toEqual({ version: 31, name: "migration-names", applied_at: 99 });
     db.close();

@@ -22,6 +22,7 @@ import { guardTurnEnd } from "./turn-end-guard.ts";
 import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
+import { accountOfTranscript, defaultAccount } from "../config/accounts.ts";
 import { parseToolkitDenial, recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { ulidTime } from "../util/ulid.ts";
 
@@ -337,19 +338,39 @@ function signalVerb(
 }
 
 /**
- * The Claude usage limit (design section 16), seen by any Claude session,
- * worker or leader: a turn that ends in StopFailure with error rate_limit
- * pauses Claude work (or re-arms an expired pause); a turn that ends normally, or Claude's own
- * quota_auto_resume_fired notification, lifts the pause. Call inside the
- * hook's transaction; returns what changed, for the reply.
+ * The usage limit (design section 16), seen by any Claude session, worker or
+ * leader, for the account it runs on: a turn that ends in StopFailure with
+ * error rate_limit pauses that account's work (or re-arms an expired pause); a
+ * turn that ends normally, or Claude's own quota_auto_resume_fired
+ * notification, lifts it. Call inside the hook's transaction; returns what
+ * changed, for the reply.
  */
-export function usageSignal(ctx: HandlerCtx, harness: "claude" | "pi", who: string, signal: { stop?: boolean; error?: string | null; details?: string | null; notification?: string | null }): "paused" | "resumed" | null {
+export function usageSignal(ctx: HandlerCtx, harness: "claude" | "pi", account: string, who: string, signal: { stop?: boolean; error?: string | null; details?: string | null; notification?: string | null }): "paused" | "resumed" | null {
   if (harness !== "claude") return null;
   const now = ctx.now();
-  if (signal.error === "rate_limit") return noteUsageLimit(ctx.db, who, sanitizeUsage(signal.details), now, schedTiming(ctx.config())) ? "paused" : null;
-  if (signal.stop || signal.notification === "quota_auto_resume_fired") return clearUsageLimit(ctx.db, signal.stop ? `a turn of ${who} ended normally` : `Claude resumed ${who} after the reset`, now) ? "resumed" : null;
-  if (signal.notification?.startsWith("quota_auto_resume_")) appendEvent(ctx.db, { source: "hook", kind: "sched.usage_notice", payload: { who, notification: signal.notification }, ts: now });
+  if (signal.error === "rate_limit") return noteUsageLimit(ctx.db, account, who, sanitizeUsage(signal.details), now, schedTiming(ctx.config())) ? "paused" : null;
+  if (signal.stop || signal.notification === "quota_auto_resume_fired") return clearUsageLimit(ctx.db, account, signal.stop ? `a turn of ${who} ended normally` : `Claude resumed ${who} after the reset`, now) ? "resumed" : null;
+  if (signal.notification?.startsWith("quota_auto_resume_")) appendEvent(ctx.db, { source: "hook", kind: "sched.usage_notice", payload: { account, who, notification: signal.notification }, ts: now });
   return null;
+}
+
+/** The account a worker's usage signal is about: the one its run records (an older run: the harness's implicit one). */
+function runAccountId(run: RunWithPolicy): string {
+  return run.account ?? run.harness;
+}
+
+/**
+ * The account a leader's usage signal is about: the Claude account whose
+ * directory holds the leader's transcript (Claude keeps them in
+ * `<config dir>/projects/`), else the default Claude account.
+ */
+function leaderAccount(ctx: HandlerCtx, input: { transcript_path?: string | null }): string {
+  const config = ctx.config();
+  const recorded = ctx.caller.session
+    ? ((ctx.db.query("SELECT transcript_path FROM leader_sessions WHERE session_id = ?1").get(ctx.caller.session) as { transcript_path: string | null } | null)?.transcript_path ?? null)
+    : null;
+  const transcript = typeof input.transcript_path === "string" ? input.transcript_path : recorded;
+  return (accountOfTranscript(config, transcript) ?? defaultAccount(config, "claude")).id;
 }
 
 function sanitizeUsage(details: string | null | undefined): string {
@@ -535,8 +556,8 @@ const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pend
   ctx.fleet.continuations.delete(run.id);
   markIdle(ctx, run, HOOK_SIGNALS.stop);
   const data = reminder !== null ? { run: run.id, reminder: true, context: reminder } : { run: run.id };
-  return withUsage({ data }, usageSignal(ctx, harness, `worker ${run.task_id}`, { stop: true }));
-}, (ctx, _input, args) => withUsage(leader.stop(ctx), usageSignal(ctx, harnessOf(args), "the leader", { stop: true })));
+  return withUsage({ data }, usageSignal(ctx, harness, runAccountId(run), `worker ${run.task_id}`, { stop: true }));
+}, (ctx, input, args) => withUsage(leader.stop(ctx), usageSignal(ctx, harnessOf(args), leaderAccount(ctx, input), "the leader", { stop: true })));
 
 const stopFailure = signalVerb(
   "stop-failure",
@@ -549,9 +570,9 @@ const stopFailure = signalVerb(
     markIdle(ctx, run, HOOK_SIGNALS["stop-failure"]);
     const input = parseInput(args);
     appendEvent(ctx.db, { source: "hook", kind: "run.turn_failed", runId: run.id, taskId: run.task_id, payload: { error: typeof input.error === "string" ? input.error : null } });
-    return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { error: input.error, details: input.error_details }));
+    return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), runAccountId(run), `worker ${run.task_id}`, { error: input.error, details: input.error_details }));
   },
-  (ctx, input, args) => withUsage(leader.stopFailure(ctx), usageSignal(ctx, harnessOf(args), "the leader", { error: input.error ?? null, details: input.error_details ?? null })),
+  (ctx, input, args) => withUsage(leader.stopFailure(ctx), usageSignal(ctx, harnessOf(args), leaderAccount(ctx, input), "the leader", { error: input.error ?? null, details: input.error_details ?? null })),
 );
 
 const sessionEnd = signalVerb(
@@ -605,9 +626,9 @@ const notify = signalVerb(
       }
       return { data: { run: run.id } };
     }
-    return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), `worker ${run.task_id}`, { notification: input.notification_type ?? null }));
+    return withUsage({ data: { run: run.id } }, usageSignal(ctx, harnessOf(args), runAccountId(run), `worker ${run.task_id}`, { notification: input.notification_type ?? null }));
   },
-  (ctx, input, args) => withUsage(leader.notify(ctx, input), usageSignal(ctx, harnessOf(args), "the leader", { notification: input.notification_type ?? null })),
+  (ctx, input, args) => withUsage(leader.notify(ctx, input), usageSignal(ctx, harnessOf(args), leaderAccount(ctx, input), "the leader", { notification: input.notification_type ?? null })),
   undefined,
   async (ctx, args) => {
     // The screen, read before the transaction; a hook must answer fast, so give up after 1.5 s.

@@ -1,8 +1,9 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FAKE_VERSION, makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { quotaJson, waitUntil } from "../helpers/harness.ts";
 
 /**
  * Accounts end to end (docs/notes/2026-10-22-multiple-ai-provider-u9.md): the
@@ -63,12 +64,31 @@ afterEach(async () => {
   for (const env of envs.splice(0)) await env.cleanup();
 });
 
-async function accountsFleet(): Promise<FleetEnv> {
+const FAST = "[sched]\npass_ms = 250\nquota_cache_ms = 300";
+
+async function accountsFleet(extra = "", signedIn = [WORK, PERSONAL], accounts = ACCOUNTS): Promise<FleetEnv> {
   // An inherited key in the daemon's environment must not answer for any account's login.
-  const env = await makeFleetEnv({ origin: true, extraConfig: ACCOUNTS, daemonEnv: { ANTHROPIC_API_KEY: "sk-inherited" } });
+  const env = await makeFleetEnv({ origin: true, extraConfig: `${accounts}\n${extra}`, daemonEnv: { ANTHROPIC_API_KEY: "sk-inherited" } });
   envs.push(env);
-  signInClaude(env, [WORK, PERSONAL]);
+  signInClaude(env, signedIn);
   return env;
+}
+
+function one<T>(env: FleetEnv, sql: string): T | null {
+  const db = env.h.db();
+  try {
+    return db.query(sql).get() as T | null;
+  } finally {
+    db.close();
+  }
+}
+
+const openItem = (env: FleetEnv, kind: string) => one<{ line: string }>(env, `SELECT line FROM items WHERE kind = '${kind}' AND state IN ('open','presented')`);
+
+async function dispatchOn(env: FleetEnv, account: string | null, body: string): Promise<string> {
+  const sent = await env.json(["dispatch", "web", "--kind", "scout", ...(account ? ["--account", account] : []), "--body-file", "-"], { stdin: body });
+  if (sent.code !== 0) throw new Error(`dispatch failed: ${JSON.stringify(sent.reply)}`);
+  return (sent.reply.data as { run: string }).run;
 }
 
 function runCount(env: FleetEnv): number {
@@ -121,11 +141,70 @@ describe("accounts", () => {
     expect(JSON.stringify(plan.reply)).toContain("account_scope_mismatch");
   });
 
-  test("a signed-out account refuses at dispatch and says how to sign in", async () => {
-    const env = await accountsFleet();
-    const refused = await env.json(["dispatch", "web", "--kind", "scout", "--account", "claude-work-2", "--body-file", "-"], { stdin: "x" });
-    expect(refused.code).toBe(69);
-    expect(JSON.stringify(refused.reply)).toContain(`CLAUDE_CONFIG_DIR=${WORK_SIGNED_OUT} claude, then /login`);
-    expect(runCount(env)).toBe(0);
+  test("a signed-out account's run waits with a P1 naming the login command, and starts once it is signed in", async () => {
+    const env = await accountsFleet(FAST);
+    const sent = await env.json(["dispatch", "web", "--kind", "scout", "--account", "claude-work-2", "--body-file", "-"], { stdin: "x\nFAKE: sleep 60000" });
+    expect(sent.code).toBe(0);
+    const { run: runId } = sent.reply.data as { run: string };
+    await waitUntil(() => openItem(env, "account_signed_out") !== null, 15_000, "the signed-out P1");
+    expect(openItem(env, "account_signed_out")!.line).toContain(`CLAUDE_CONFIG_DIR=${WORK_SIGNED_OUT} claude, then /login`);
+    expect(env.run(runId).proc_pid).toBeNull();
+    expect(JSON.stringify((await env.json(["capacity"])).reply.data)).toContain("claude-work-2 signed out");
+    signInClaude(env, [WORK, PERSONAL, WORK_SIGNED_OUT]);
+    await env.waitRun(runId, (r) => r.proc_pid !== null, "the worker once its account is signed in");
+    expect(openItem(env, "account_signed_out")).toBeNull();
+  });
+
+  test("a usage limit on one account holds only that account's runs", async () => {
+    const env = await accountsFleet(FAST, [WORK, PERSONAL, WORK_SIGNED_OUT]);
+    const limited = await dispatchOn(env, "claude-work", "Hits the limit\nFAKE: usage-limit\nFAKE: sleep 60000");
+    await waitUntil(() => openItem(env, "usage_limit") !== null, 15_000, "the usage pause");
+    expect(one<{ task_id: string }>(env, "SELECT task_id FROM items WHERE kind = 'usage_limit'")!.task_id).toBe("account:claude-work");
+    const held = await dispatchOn(env, "claude-work", "Waits\nFAKE: sleep 60000");
+    const other = await dispatchOn(env, "claude-work-2", "Carries on\nFAKE: sleep 60000");
+    await env.waitRun(other, (r) => r.proc_pid !== null, "the run on the other account");
+    await Bun.sleep(1_000);
+    expect(env.run(held).proc_pid).toBeNull();
+    const view = await env.json(["capacity"]);
+    expect(JSON.stringify(view.reply.data)).toContain("claude-work usage limit");
+    expect(view.reply.hints).toContain("flowryn capacity resume --account claude-work");
+    expect(env.run(limited).account).toBe("claude-work");
+  });
+
+  test("a low quota moves a fresh launch to the overflow account; flowryn accounts shows each account's quota", async () => {
+    const overflow = ACCOUNTS.replace('model = "opus"', 'model = "opus"\noverflow = ["claude-work-2"]');
+    const env = await accountsFleet(FAST, [WORK, PERSONAL, WORK_SIGNED_OUT], overflow);
+    writeFileSync(join(env.h.home, "quota-claude-work.json"), quotaJson(2));
+    const runId = await dispatchOn(env, null, "Overflows\nFAKE: sleep 60000");
+    const run = await env.waitRun(runId, (r) => r.proc_pid !== null, "the overflowed worker");
+    expect(run).toMatchObject({ account: "claude-work-2" });
+    expect(env.herdr.panes.get(run.pane_id!)!.env.CLAUDE_CONFIG_DIR).toBe(WORK_SIGNED_OUT);
+    const moved = JSON.parse(one<{ payload: string }>(env, "SELECT payload FROM events WHERE kind = 'sched.overflow'")!.payload) as Record<string, string>;
+    expect(moved).toMatchObject({ from: "claude-work", to: "claude-work-2", why: "capacity.quota_floor" });
+    // One probe per account, each pointed at its own login.
+    const calls = readFileSync(join(env.h.home, "quota-calls.log"), "utf8");
+    expect(calls).toContain(`dir=${WORK}`);
+    expect(calls).toContain(`dir=${WORK_SIGNED_OUT}`);
+    const listed = (await env.json(["accounts"])).reply.data as { accounts: { account: string; quota: string; usage: string; overflow: string }[] };
+    const byId = Object.fromEntries(listed.accounts.map((a) => [a.account, a]));
+    expect(byId["claude-work"]).toMatchObject({ quota: "low 2% (floor 5%)", usage: "-", overflow: "claude-work-2" });
+    expect(byId["claude-work-2"]!.quota).toMatch(/^ok 80% at \d\d:\d\d$/);
+    expect(byId["claude-personal"]).toMatchObject({ quota: "not read yet", overflow: "-" });
+    expect(byId.pi!.quota).toBe("unknown (account pi names no Pi provider)");
+  });
+
+  test("a ready plan phase on a held account starts on its overflow account", async () => {
+    const overflow = ACCOUNTS.replace('model = "opus"', 'model = "opus"\noverflow = ["claude-work-2"]');
+    const env = await accountsFleet(FAST, [WORK, PERSONAL, WORK_SIGNED_OUT], overflow);
+    writeFileSync(join(env.h.home, "quota-claude-work.json"), quotaJson(1));
+    expect((await env.json(["project", "set", "web", "--autonomy", "manual"])).code).toBe(0);
+    const filed = await env.json(["plan", "web", "--body-file", "-"], { stdin: "# One step\n## Phase 1: Only\nFAKE: sleep 60000\n" });
+    expect(filed.code).toBe(0);
+    const task = (filed.reply.data as { phases: { task: string }[] }).phases[0]!.task;
+    expect((await env.json(["project", "set", "web", "--autonomy", "plan"])).code).toBe(0);
+    await waitUntil(() => one(env, `SELECT 1 FROM runs WHERE task_id = '${task}'`) !== null, 20_000, "the phase's run");
+    expect(one<{ account: string; model: string | null }>(env, `SELECT account, model FROM runs WHERE task_id = '${task}'`)).toEqual({ account: "claude-work-2", model: null });
+    const moved = JSON.parse(one<{ payload: string }>(env, "SELECT payload FROM events WHERE kind = 'sched.overflow'")!.payload) as Record<string, string>;
+    expect(moved).toMatchObject({ from: "claude-work", to: "claude-work-2", at: "phase start" });
   });
 });

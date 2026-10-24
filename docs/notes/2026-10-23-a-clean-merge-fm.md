@@ -51,7 +51,7 @@ Every call goes through the caller's bounded `GitRunner`. Git must be 2.38 or la
 
 ## Data
 
-Migration 32 (`artifact-carried-from`) adds `artifacts.carried_from TEXT`. The proof's steps live in the `run.head_carried` event.
+Migration 33 (`artifact-carried-from`) adds `artifacts.carried_from TEXT`. The proof's steps live in the `run.head_carried` event.
 
 ## Evidence
 
@@ -85,7 +85,7 @@ The payoff grows as the conflict hotspots go (`2026-10-22-remove-conflict-hotspo
 - `test/integration/clean-merge-carry.test.ts` (real daemon, fake GitHub over a bare origin):
   - main moves and is merged into the PR branch; the watcher carries the delivery, the queued verify passes at the new head, and `merge` lands under yolo at that head;
   - an evil merge keeps the divergence, queues no verify, and `merge` refuses `head_moved`.
-- `test/unit/db.test.ts`: migration 32.
+- `test/unit/db.test.ts`: migration 33.
 
 ## Choices
 

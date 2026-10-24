@@ -38,6 +38,7 @@ import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
 import { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
 import { request } from "../../src/transport/unix.ts";
+import { DESIGN_TEMPLATE } from "../../src/skills/design-template.ts";
 import { QA_TEMPLATE } from "../../src/skills/qa-template.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
@@ -378,13 +379,13 @@ class LiveLeader {
  * stage starts by acknowledging its steers. Visual QA is real: an nginx:alpine
  * container labelled with the run, a curl, a chrome-devtools-axi screenshot.
  */
-function phaseOneScript(label: string, planFile: string, evidenceFile: string): string {
+function phaseOneScript(label: string, designFile: string, planFile: string, evidenceFile: string): string {
   const site = `m5-live/${label}`;
   const ack = "for id in $($FLOWRYN_BIN inbox --json | jq -r '.data.steers[].id'); do $FLOWRYN_BIN ack $id; done";
   const container = "flowryn-qa-$FLOWRYN_RUN";
   const axi = "CHROME_DEVTOOLS_AXI_SESSION=flowryn-$FLOWRYN_RUN chrome-devtools-axi";
   const steps = [
-    `bash mkdir -p "$FLOWRYN_REPORT_DIR/design" && printf '<html><body><h1>Design: the ${label} cart page</h1><p>A static cart page, served by nginx. Assumption: the page carries an element with id cart. Phase 2 adds checkout.</p></body></html>\\n' > "$FLOWRYN_REPORT_DIR/design/design.html" && cp ${JSON.stringify(planFile)} "$FLOWRYN_REPORT_DIR/plan.md" && $FLOWRYN_BIN stage done --review "file://$FLOWRYN_REPORT_DIR/design/design.html" --plan-file "$FLOWRYN_REPORT_DIR/plan.md"`,
+    `bash mkdir -p "$FLOWRYN_REPORT_DIR/design" && cp ${JSON.stringify(designFile)} "$FLOWRYN_REPORT_DIR/design/design.html" && cp ${JSON.stringify(planFile)} "$FLOWRYN_REPORT_DIR/plan.md" && $FLOWRYN_BIN stage done --review "file://$FLOWRYN_REPORT_DIR/design/design.html" --plan-file "$FLOWRYN_REPORT_DIR/plan.md"`,
     "say the design is ready for review",
     `bash ${ack} && mkdir -p ${site} && printf '<html><body><h1 id="cart">Cart</h1></body></html>\\n' > ${site}/index.html && printf 'grep -q "id=.cart." "$(dirname "$0")/index.html"\\n' > ${site}/test.sh && sh ${site}/test.sh && git add ${site} && git commit -q -m "m5 live: ${label} cart page" && $FLOWRYN_BIN stage done && sleep 5`,
     `bash ${ack} && docker run -d --label flowryn.run=$FLOWRYN_RUN --label com.docker.compose.project=flowryn-$FLOWRYN_RUN --name ${container} -p 127.0.0.1::80 nginx:alpine && docker cp ${site}/. ${container}:/usr/share/nginx/html/ && sleep 2 && port=$(docker port ${container} 80/tcp | head -1 | sed 's/.*://') && mkdir -p "$FLOWRYN_REPORT_DIR/qa" && curl -s "http://127.0.0.1:$port/" > "$FLOWRYN_REPORT_DIR/qa/page.html" && grep -q 'id="cart"' "$FLOWRYN_REPORT_DIR/qa/page.html" && (${axi} open "http://127.0.0.1:$port/" > "$FLOWRYN_REPORT_DIR/qa/walk.txt" 2>&1 && ${axi} screenshot "$FLOWRYN_REPORT_DIR/qa/cart.png" >> "$FLOWRYN_REPORT_DIR/qa/walk.txt" 2>&1; ${axi} stop > /dev/null 2>&1; true) && sleep 12`,
@@ -394,6 +395,25 @@ function phaseOneScript(label: string, planFile: string, evidenceFile: string): 
     "say DONE",
   ];
   return `FLOWRYN-SCRIPT: ${steps.join(" ;; ")}`;
+}
+
+/** Phase 1's design page: the design skill's template, filled the way a worker would. */
+function designPage(label: string): string {
+  const slots: Record<string, string> = {
+    "{{TITLE}}": `Design: the ${label} cart page`,
+    "{{SUBTITLE}}": "A live lab task, in two phases; no part needs a model.",
+    "{{TLDR}}": "The shop has no cart page. This adds a static one, served by nginx; a second phase adds checkout.",
+    "{{ASK}}": "<p>Approve, or send changes.</p>",
+    "{{BEFORE_AFTER}}": "<tr><td>The cart</td><td>No page</td><td>A page that shows the cart</td></tr>",
+    "{{GOALS}}": "A cart page that loads.",
+    "{{NON_GOALS}}": "Checkout, which phase two adds.",
+    "{{DIAGRAM}}": "<pre>browser -&gt; nginx -&gt; cart page</pre>",
+    "{{HOW}}": "<ol><li>Write the page.</li><li>Serve it from a container.</li></ol>",
+    "{{ALTERNATIVES}}": "<p>Doing nothing leaves the shop without a cart.</p>",
+    "{{RISKS}}": "<p>The page may not load; the visual check would show it.</p>",
+    "{{DETAIL}}": "<p>Assumption: the page carries an element with id cart.</p>",
+  };
+  return Object.entries(slots).reduce((page, [slot, text]) => page.replaceAll(slot, text), DESIGN_TEMPLATE);
 }
 
 /** Phase 1's QA page: the visual QA skill's template, filled the way a worker would. */
@@ -565,9 +585,11 @@ async function twoPhaseFeature(
   const planFile = join(home, "plans", `${label}.md`);
   mkdirSync(join(home, "plans"), { recursive: true });
   writeFileSync(planFile, planText(label, phase2));
+  const designFile = join(home, "plans", `${label}-design.html`);
+  writeFileSync(designFile, designPage(label));
   const evidenceFile = join(home, "plans", `${label}-evidence.html`);
   writeFileSync(evidenceFile, evidencePage(label));
-  const reply = await call("dispatch", { project, kind: "ship", harness: "pi", workflow: "feature-ui", title: `m5 live ${label} cart`, body: `Build the ${label} cart page, in stages.\n${phaseOneScript(label, planFile, evidenceFile)}` });
+  const reply = await call("dispatch", { project, kind: "ship", harness: "pi", workflow: "feature-ui", title: `m5 live ${label} cart`, body: `Build the ${label} cart page, in stages.\n${phaseOneScript(label, designFile, planFile, evidenceFile)}` });
   if (!reply.ok) throw new Error(`dispatch: ${JSON.stringify(reply.error)}`);
   const { task, run } = reply.data as { task: string; run: string };
   dispatched.push(task);
