@@ -28,6 +28,9 @@ import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { openRunForTask } from "./runs.ts";
 import { isDropped } from "./drop.ts";
+import { projectRepo } from "./delivery.ts";
+import { blockerLabel, openWatch, parseAfter, setWaiter, watchLabel, watchOfTask, type AfterEvent } from "./watches.ts";
+import { ForgeError } from "../forge/types.ts";
 import { dismissEarlierRunsQuestions } from "./gate-questions.ts";
 
 /** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
@@ -37,7 +40,7 @@ export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 /** What a task may wait for: a ship lands; a decision lands once answered (its task is done). */
-export const BLOCKER_KINDS = ["ship", "decision"] as const;
+export const BLOCKER_KINDS = ["ship", "decision", "watch"] as const;
 
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
@@ -248,7 +251,7 @@ type DispatchPlan =
   | { mode: "now"; project: ProjectRow; account: Account; version: string; base: string; override: ModeOverride | null }
   | { mode: "task"; project: ProjectRow; account: Account; version: string; base: string; taskId: string; override: ModeOverride | null }
   | { mode: "queued"; project: ProjectRow; account: Account; version: string; base: string; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
-  | { mode: "queue"; project: ProjectRow; account: Account; blockedBy: string[]; override: ModeOverride | null };
+  | { mode: "queue"; project: ProjectRow; account: Account; blockedBy: string[]; events: AfterEvent[]; prHint: string | null; override: ModeOverride | null };
 
 /** --harness when given: claude or pi. */
 export function harnessFlag(args: Record<string, unknown>): HarnessId | null {
@@ -298,6 +301,8 @@ function blockerKind(db: Db, id: string): string | null {
   // run_id IS NULL: a run-scoped q<N> names a run's own task, which always has a task_policy row
   // caught by the check above, so this branch is standalone (k<N>) decisions only.
   if (db.query("SELECT 1 FROM decisions WHERE task_id = ?1 AND run_id IS NULL").get(id)) return "decision";
+  // A watch's task (src/lifecycle/watches.ts) has no task_policy row either; it lands when its event fires.
+  if (watchOfTask(db, id)) return "watch";
   const task = (readSnapshot(db, "backlog")?.tasks ?? []).find((t) => t.id === id);
   return task ? (task.kind ?? "ship") : null;
 }
@@ -340,20 +345,55 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const kind = stringArg(args as never, "kind");
   if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship or scout");
   const account = accountFor(ctx.config(), project, args);
-  const blockedBy = (args["blocked-by"] as string[] | undefined) ?? [];
-  if (blockedBy.length > 0) {
+  const after = parseAfter((args.after as string[] | undefined) ?? []);
+  const blockedBy = [...new Set([...((args["blocked-by"] as string[] | undefined) ?? []), ...after.tasks])];
+  if (blockedBy.length > 0 || after.events.length > 0) {
     if (kind !== "ship") throw new FlowrynError("bad_args", "a task that waits for others is a ship");
     const kinds = new Map(blockedBy.map((id) => [id, blockerKind(ctx.db, id)]));
     const unknown = blockedBy.filter((id) => kinds.get(id) === null);
     if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
     const unshipped = blockedBy.filter((id) => !(BLOCKER_KINDS as readonly string[]).includes(kinds.get(id) ?? ""));
     if (unshipped.length > 0) {
-      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, "wait for the report yourself, then dispatch");
+      const scout = unshipped.find((id) => kinds.get(id) === "scout");
+      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, scout ? `wait for its report instead: --after report:${scout}` : "wait for the report yourself, then dispatch");
     }
-    return { mode: "queue", project, account, blockedBy, override };
+    const prHint = await checkAfterEvents(ctx, project, after.events);
+    return { mode: "queue", project, account, blockedBy, events: after.events, prHint, override };
   }
-  if (boolArg(args as never, "auto")) throw new FlowrynError("bad_args", "--auto goes with --blocked-by: a task that starts by itself once its blockers land");
+  if (boolArg(args as never, "auto")) throw new FlowrynError("bad_args", "--auto goes with --blocked-by or --after: a task that starts by itself once its blockers land");
   return { mode: "now", project, account, override, ...(await checkStart(startDepsOf(ctx), project, account)) };
+}
+
+/**
+ * Refuse an --after event that cannot happen: a scout task not of this
+ * project, or a PR GitHub does not know or closed unmerged. A merged PR is
+ * accepted (its watch fires on the next pass). GitHub out of reach is not a
+ * refusal: the watcher reads the PR later; the hint says so.
+ */
+async function checkAfterEvents(ctx: HandlerCtx, project: ProjectRow, events: AfterEvent[]): Promise<string | null> {
+  let hint: string | null = null;
+  for (const event of events) {
+    if (event.kind === "report") {
+      if (isDropped(ctx.db, event.task)) throw new FlowrynError("not_found", `${event.task} was dropped`, `flowryn show ${event.task}`);
+      const policy = ctx.db.query("SELECT kind, project_id FROM task_policy WHERE task_id = ?1").get(event.task) as { kind: string; project_id: string } | null;
+      if (!policy) throw new FlowrynError("not_found", `no task ${event.task}`, "flowryn fleet");
+      if (policy.kind !== "scout") throw new FlowrynError("bad_args", `${event.task} is a ${policy.kind}, not a scout: only a scout reports`, `wait for it to land instead: --after task:${event.task}`);
+      if (policy.project_id !== project.id) throw new FlowrynError("bad_args", `${event.task} belongs to project ${policy.project_id}, not ${project.id}`);
+      continue;
+    }
+    const webUrl = ctx.delivery.github().web_url;
+    const repo = projectRepo(project, webUrl);
+    if (!repo) throw new FlowrynError("bad_args", `project ${project.id} has no GitHub remote, so it has no PR ${event.number}`);
+    try {
+      const pr = await ctx.delivery.forge().pull({ ...repo, number: event.number });
+      if (pr.state === "closed") throw new FlowrynError("bad_args", `PR #${event.number} in ${repo.owner}/${repo.repo} was closed without merging`, pr.url);
+    } catch (error) {
+      if (error instanceof FlowrynError) throw error;
+      if (error instanceof ForgeError && error.kind === "not_found") throw new FlowrynError("not_found", `no PR #${event.number} in ${repo.owner}/${repo.repo}`);
+      hint = `GitHub did not answer (${(error as Error).message}); the PR is checked once it does`;
+    }
+  }
+  return hint;
 }
 
 /**
@@ -363,6 +403,9 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
  * `--blocked-by <task>` files it Queued instead, starting by itself once
  * those tasks land when `--auto` is given (section 11: ad hoc tasks stay
  * manual unless you pass --auto); `--task <id>` starts such a Queued task yourself.
+ * `--after <event>` files it Queued until each event happens and implies
+ * --auto: task:<id> is a blocker like --blocked-by; pr:<n> and report:<task>
+ * are watches (src/lifecycle/watches.ts).
  */
 export const dispatchVerb: VerbSpec = {
   name: "dispatch",
@@ -377,7 +420,8 @@ export const dispatchVerb: VerbSpec = {
     sensitive: { type: "boolean", help: "security-relevant: merges need a human record even under yolo" },
     workflow: { type: "string", help: "the workflow: feature, feature-ui (with visual QA), fix, or one from [workflows] (default: the project's; scouts: scout)", placeholder: "id" },
     "blocked-by": { type: "list", help: "file it Queued until these tasks land (repeatable)", placeholder: "task" },
-    auto: { type: "boolean", help: "with --blocked-by: start by itself once its blockers land" },
+    after: { type: "list", help: "file it Queued until this happens, then start it by itself: task:<id> lands, pr:<number> merges, or report:<scout task> lands (repeatable)", placeholder: "event" },
+    auto: { type: "boolean", help: "with --blocked-by: start by itself once its blockers land (--after implies it)" },
     task: { type: "string", help: "start this Queued task (a plan phase) now; its blockers must have landed", placeholder: "id" },
     mode: { type: "string", help: "this task's delivery mode, overriding the project's: no-mistakes, direct-PR or local-only", placeholder: "mode" },
     "mode-reason": { type: "string", help: "with --mode: why (kept on the task)", placeholder: "text" },
@@ -409,6 +453,9 @@ export const dispatchVerb: VerbSpec = {
     const title = taskTitleFrom(stringArg(args, "title"), body);
     const workflow = workflowFor(config, stringArg(args, "workflow") ?? (kind === "scout" ? "scout" : plan.project.workflow), kind);
     if (plan.mode === "queue") {
+      const watches = plan.events.map((event) => openWatch(ctx.db, { project: plan.project, event, now }));
+      const blockedBy = [...plan.blockedBy, ...watches.map((w) => w.task_id)];
+      const auto = boolArg(args, "auto") || watches.length > 0 || ((args.after as string[] | undefined) ?? []).length > 0;
       const filed = recordPlan(ctx.db, {
         project: plan.project,
         title,
@@ -417,20 +464,29 @@ export const dispatchVerb: VerbSpec = {
         gateId: null,
         workflow: workflow.id,
         harness: plan.account.harness,
-        blockedBy: plan.blockedBy,
+        blockedBy,
         override: plan.override,
         filedBy: ctx.caller.role,
         state: "approved",
         now,
       });
       const taskId = filed.phases[0]!.task_id;
-      if (!boolArg(args, "auto")) ctx.db.query("UPDATE task_policy SET auto = 0 WHERE task_id = ?1").run(taskId);
+      for (const watch of watches) setWaiter(ctx.db, watch, taskId, "cli", now);
+      if (!auto) ctx.db.query("UPDATE task_policy SET auto = 0 WHERE task_id = ?1").run(taskId);
       if (boolArg(args, "sensitive")) ctx.db.query("UPDATE task_policy SET sensitive = 1 WHERE task_id = ?1").run(taskId);
       applyModeOverride(ctx.db, taskId, plan.override);
       if ((plan.project.yolo === 0 || boolArg(args, "sensitive")) && decisionsConfig(config).reserved_classes.includes("merge")) reserveBlockingDecisions(ctx.db, plan.blockedBy, now);
+      const hints = auto && plan.project.autonomy === "plan" ? [`flowryn show ${taskId}`] : [`flowryn dispatch ${plan.project.id} --task ${taskId} (once its blockers land${auto ? `; project ${plan.project.id}'s autonomy is manual` : ""})`];
       return {
-        data: { task: taskId, plan: filed.id, state: "queued", blocked_by: plan.blockedBy, auto: boolArg(args, "auto") ? "on" : "off" },
-        hints: boolArg(args, "auto") ? [`flowryn show ${taskId}`] : [`flowryn dispatch ${plan.project.id} --task ${taskId} (once its blockers land)`],
+        data: {
+          task: taskId,
+          plan: filed.id,
+          state: "queued",
+          blocked_by: plan.blockedBy,
+          ...(watches.length > 0 ? { waits_for: watches.map((w) => `${watchLabel(w)} (${w.task_id})`) } : {}),
+          auto: auto ? "on" : "off",
+        },
+        hints: plan.prHint ? [plan.prHint, ...hints] : hints,
       };
     }
     const taskId = mintTaskId(title, takenIds(ctx.db));
@@ -442,6 +498,8 @@ export const dispatchVerb: VerbSpec = {
     };
   },
   async settle(ctx, result) {
+    // A watch on a PR that already merged fires on the delivery watcher's next pass: look now.
+    if (result.data.waits_for) ctx.delivery.watch();
     await ctx.sched.passNow();
     return withStartState(ctx, result);
   },
@@ -527,7 +585,7 @@ export function planView(db: Db, planId: string, bodies = false): Record<string,
         phase: p.phase_no,
         task: p.task_id,
         title: p.title,
-        at: run ? `${run.state} · ${run.stage} ${run.stage_state}` : plan.state !== "approved" ? plan.state : waiting.length > 0 ? `queued, waits for ${waiting.join(" ")}` : "queued, ready",
+        at: run ? `${run.state} · ${run.stage} ${run.stage_state}` : plan.state !== "approved" ? plan.state : waiting.length > 0 ? `queued, waits for ${waiting.map((dep) => blockerLabel(db, dep)).join(", ")}` : "queued, ready",
         ...(bodies ? { body: sanitizeBlock(p.body) } : {}),
       };
     }),

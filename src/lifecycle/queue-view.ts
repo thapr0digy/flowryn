@@ -6,12 +6,14 @@ import type { BacklogTask } from "../journal/tasks-axi.ts";
 import { blockersOf, hasLanded, phaseOfTask } from "./plans.ts";
 import { getProject } from "./projects.ts";
 import { openRunForTask } from "./runs.ts";
+import { blockerLabel, watchOfTask } from "./watches.ts";
 
 /**
  * Queued work: what fleet, show, the board and the briefing all mean by
  * "Queued", so their lists and counts agree. A task is queued when the
  * backlog snapshot has it Queued, it is not a standalone decision's task
- * (those belong to `flowryn decision list`), and it has no open run (a run
+ * (those belong to `flowryn decision list`) or a watch's (the waiting task
+ * shows it in words), and it has no open run (a run
  * that started before the snapshot caught up is in flight, not queued).
  * Hand-added backlog tasks with no Flowryn policy count too.
  */
@@ -34,6 +36,8 @@ export interface QueuedTask {
   blockedBy: string[];
   /** The blockers that have not landed yet. */
   waits: string[];
+  /** The same, as the user reads them: a watch's event ("PR #112 to merge") in place of its task id. */
+  waitLabels: string[];
   hold: BacklogTask["hold"];
   /** What starts it: a command, "starts by itself", "unhold", or "-". */
   next: string;
@@ -82,7 +86,14 @@ function hasAnyRun(db: Db, taskId: string): boolean {
 
 function isQueued(db: Db, task: BacklogTask): boolean {
   // A dropped task leaves the queue at once, before the journal's rm reaches the backlog snapshot.
-  return task.state === "queued" && task.kind !== "decision" && openRunForTask(db, task.id) === null && db.query("SELECT 1 FROM drops WHERE task_id = ?1").get(task.id) === null;
+  return (
+    task.state === "queued" &&
+    task.kind !== "decision" &&
+    task.kind !== "watch" &&
+    watchOfTask(db, task.id) === null &&
+    openRunForTask(db, task.id) === null &&
+    db.query("SELECT 1 FROM drops WHERE task_id = ?1").get(task.id) === null
+  );
 }
 
 /** One queued backlog task, described. */
@@ -110,6 +121,7 @@ function describe(db: Db, task: BacklogTask, backlog: BacklogTask[]): QueuedTask
     auto,
     blockedBy,
     waits,
+    waitLabels: waits.map((dep) => blockerLabel(db, dep)),
     hold: task.hold,
     next: nextStep(db, task.id, policy, status, startsByItself, project),
     filed: policy === null ? "backlog" : policy.import_source ? "imported" : "flowryn",
@@ -171,5 +183,5 @@ export function queuedAge(now: number, q: QueuedTask, age: (now: number, since: 
 /** The fleet's and board's `waits` cell: the unlanded blockers, the hold, or "-". */
 export function waitsCell(q: QueuedTask): string {
   if (q.status === "held") return [q.hold?.kind, q.hold?.reason].filter((s) => s).join(": ") || "held";
-  return q.waits.length > 0 ? q.waits.join(" ") : "-";
+  return q.waitLabels.length > 0 ? q.waitLabels.join(", ") : "-";
 }

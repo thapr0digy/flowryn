@@ -760,6 +760,21 @@ CREATE UNIQUE INDEX auto_merges_live ON auto_merges(run_id) WHERE state IN ('que
 CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
 `;
 
+/**
+ * Event waits (docs/notes/2026-10-24-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
+ * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
+ * it when the event happens (fired), or when nothing waits for it any more (closed).
+ */
+const WATCHES_SQL = /* sql */ `
+CREATE TABLE watches (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, waiter_task TEXT NOT NULL, project_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('pr','report')), target TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','fired','closed')),
+  detail TEXT, checked_at INTEGER, created_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX watches_state ON watches(state);
+CREATE INDEX watches_waiter ON watches(waiter_task);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -795,6 +810,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 32, name: "job-procs", sql: JOB_PROCS_SQL },
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
+  { version: 35, name: "watches", sql: WATCHES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

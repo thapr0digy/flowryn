@@ -3,7 +3,8 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
-import { deliveredOf, type Delivered } from "../lifecycle/delivery.ts";
+import { deliveredOf, projectRepo, type Delivered } from "../lifecycle/delivery.ts";
+import { applyVerdict, backlogTasks, closeWatch, openWatches, orphanReason, ownPrVerdict, pendingTaskIds, prUrlOf, prVerdict, reportVerdict, watchOfTask, type WatchVerdict } from "../lifecycle/watches.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
@@ -165,6 +166,7 @@ export class DeliveryWatcher {
       await this.watchNoMistakes();
       this.landDeliveredScouts();
       this.resumeCleanups();
+      await this.settleWatches();
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
@@ -297,6 +299,52 @@ export class DeliveryWatcher {
   }
 
   /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
+  /**
+   * The event waits of `dispatch --after` (src/lifecycle/watches.ts): close a
+   * watch nothing waits for, fire one whose event happened (a scout's report,
+   * a PR Flowryn delivered that landed, else GitHub's word on the PR), and
+   * kick the scheduler when one fired. GitHub is skipped while it is quiet
+   * after a failure; Flowryn's own records still decide.
+   */
+  private async settleWatches(): Promise<void> {
+    const { db, now } = this.deps;
+    let fired = false;
+    for (const watch of openWatches(db)) {
+      if (this.stopped) return;
+      const orphan = orphanReason(db, watch, backlogTasks(db), pendingTaskIds(db));
+      if (orphan) {
+        tx(db, () => closeWatch(db, watch, orphan.why, orphan.removeTask, now()));
+        continue;
+      }
+      let verdict: WatchVerdict | null = null;
+      if (watch.kind === "report") verdict = reportVerdict(db, watch.target);
+      else {
+        const project = getProject(db, watch.project_id);
+        const repo = project ? projectRepo(project, this.deps.webUrl()) : null;
+        if (!repo) continue;
+        const ref = { ...repo, number: Number(watch.target) };
+        verdict = ownPrVerdict(db, prUrlOf(repo, ref.number, this.deps.webUrl()));
+        if (!verdict) {
+          if (now() < this.forgeQuietUntil) continue;
+          try {
+            verdict = prVerdict((await this.deps.forge().pull(ref)).state);
+            tx(db, () => noteForgeUp(db, "github", now()));
+          } catch (error) {
+            if (error instanceof ForgeError && error.kind === "not_found") verdict = { stuck: "GitHub does not find it" };
+            else {
+              this.forgeFailed(error);
+              continue;
+            }
+          }
+        }
+      }
+      const current = verdict;
+      // The watch may have closed or fired while GitHub was read.
+      if (tx(db, () => (watchOfTask(db, watch.task_id)?.state === "open" ? applyVerdict(db, watch, current, now()) : false))) fired = true;
+    }
+    if (fired) this.deps.kickScheduler();
+  }
+
   private forgeFailed(error: unknown): void {
     const { db, now } = this.deps;
     // Unavailable or rate-limited while a merge waits: one P1 for the outage (design section 16).

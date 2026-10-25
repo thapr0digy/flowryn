@@ -66,6 +66,9 @@ export type ItemClass = "actionable" | "info";
  * The leader follow-ups (src/attention/follow-up.ts): user_acted, something you
  * did outside the leader session (an approval, a decline, a gate pass) that the
  * leader follows up; landed, a merge proven outside the leader's own merge call.
+ * watch_stuck: a task filed with `dispatch --after` waits for an event that
+ * cannot happen as things stand (its PR closed unmerged, its scout failed or
+ * dropped; src/lifecycle/watches.ts).
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -95,6 +98,7 @@ export const LANE_TABLE = {
   docker_leftover: { lane: "P1", class: "actionable" },
   contract_leftover: { lane: "P1", class: "actionable" },
   phase_blocked: { lane: "P1", class: "actionable" },
+  watch_stuck: { lane: "P1", class: "actionable" },
   usage_limit: { lane: "P1", class: "actionable" },
   quota_low: { lane: "P1", class: "actionable" },
   account_signed_out: { lane: "P1", class: "actionable" },
