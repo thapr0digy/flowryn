@@ -10,7 +10,8 @@ import type { TestCounts } from "./summary.ts";
  */
 
 export type VerificationState = "running" | "passed" | "failed" | "error";
-export type StepState = "waiting" | "running" | "passed" | "failed";
+/** `stopped`: a step of a parallel group ended early because another step of its group failed. */
+export type StepState = "waiting" | "running" | "passed" | "failed" | "stopped";
 
 export interface VerifyStep {
   name: string;
@@ -20,8 +21,16 @@ export interface VerifyStep {
   /** The step's output, in the verification's directory. */
   log: string;
   tests: TestCounts | null;
-  /** Why it failed beyond the exit code: a timeout, a missing binary. */
+  /** Why it failed beyond the exit code (a timeout, a missing binary), or a hang it recovered from. */
   detail: string | null;
+  /** Steps with the same group run at the same time; groups run in order. Absent on rows from before groups: each step its own. */
+  group?: number;
+  /** The step's own deadline (verify_step_timeout_min or its history); null: only the run's. Absent on older rows. */
+  deadline_ms?: number | null;
+  /** How many times it ran: 2 when it hung at its own deadline and was retried. Absent on older rows. */
+  attempts?: number;
+  /** How many of its attempts were killed at the step's own deadline. Absent on older rows. */
+  hangs?: number;
 }
 
 export interface VerificationRow {
@@ -124,14 +133,23 @@ export function insertVerification(db: Db, v: NewVerification): Verification {
   return getVerification(db, id)!;
 }
 
-/** Record the steps as they stand now (a step began or ended). Call inside a transaction. */
-export function recordSteps(db: Db, v: Verification, steps: VerifyStep[], ended: VerifyStep | null, now: number): void {
+/** Record the steps as they stand now, with an event for the step that began, ended, or began again after a hang. Call inside a transaction. */
+export function recordSteps(db: Db, v: Verification, steps: VerifyStep[], changed: VerifyStep, now: number): void {
   db.query("UPDATE verifications SET steps = ?2 WHERE id = ?1 AND state = 'running'").run(v.id, JSON.stringify(steps));
+  const ended = changed.state !== "running";
   appendEvent(db, {
     source: "daemon",
     kind: "pr.verify_step",
     taskId: v.task_id,
-    payload: { verification: v.id, step: (ended ?? steps.find((s) => s.state === "running"))?.name ?? null, state: ended?.state ?? "running", exit: ended?.exit ?? null, ms: ended?.ms ?? null },
+    payload: {
+      verification: v.id,
+      step: changed.name,
+      state: changed.state,
+      exit: ended ? changed.exit : null,
+      ms: ended ? changed.ms : null,
+      attempt: changed.attempts ?? 1,
+      hangs: changed.hangs ?? 0,
+    },
     ts: now,
   });
 }

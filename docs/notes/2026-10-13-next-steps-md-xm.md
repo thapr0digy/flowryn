@@ -66,6 +66,6 @@ One helper replaces the eight copies; each keeps its own signature and result sh
 - `ps` (`psRunnerAt`, `src/runtime/proc.ts`) has no deadline, and a failing ps reads as "process gone". It is local and does not fork; making its failure unknown changes every liveness reader (the reconciler, `terminate`, the lease), which is its own change.
 - `spawnSync` calls with no timeout: the Claude trust check's `git rev-parse` (`src/harness/claude/trust.ts`) and the poller's sweep `ps`; both local and blocking, both to get a `timeout` option.
 - Leaf tools with a pid-only timer: `osascript`, `/usr/bin/open`, `<harness> --version`, `herdr session list`, the `[sched] probe`. None forks in practice; they move to `runBounded` when touched.
-- The detached `launchctl kickstart -k` of a restart: meant to outlive the daemon; its owner is launchd.
+- The detached `flowryn daemon relaunch` of a restart (a `launchctl kickstart -k` before docs/notes/2026-10-23-automatic-daemon-restart-fh.md): meant to outlive the daemon, and bounded by its own waits.
 - A descendant that outlives its leader across a daemon force-kill is not recovered: once the leader is gone no identity proves the group is ours.
 - Verification's git calls are not counted against the job's `timeout_ms`; each is bounded on its own.

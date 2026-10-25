@@ -7,7 +7,7 @@ import { stateFiles } from "../config/paths.ts";
 import { sha256Hex } from "../util/hash.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { FlowrynError } from "../api/errors.ts";
-import { SMOKE_TIMEOUT_MS, detached, runProc, type Supervisor } from "../daemon/restart.ts";
+import { SMOKE_TIMEOUT_MS, commandOf, detached, runProc, smokeEnv, type Supervisor } from "../daemon/restart.ts";
 
 export const BASE_LABEL = "dev.flowryn.flowrynd";
 const SYSTEM_PATH = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -156,12 +156,13 @@ export const LAUNCHD_DEPS: LaunchdDeps = {
   bootstrapBackoffMs: [250, 500, 1_000, 2_000],
 };
 
-function domain(): string {
+/** The per-user launchd domain the agent lives in. */
+export function launchdDomain(): string {
   return `gui/${userInfo().uid}`;
 }
 
 async function loaded(label: string, deps: LaunchdDeps): Promise<boolean> {
-  return (await deps.launchctl(["print", `${domain()}/${label}`])).exitCode === 0;
+  return (await deps.launchctl(["print", `${launchdDomain()}/${label}`])).exitCode === 0;
 }
 
 export async function isLoaded(label: string): Promise<boolean> {
@@ -175,7 +176,7 @@ export async function isLoaded(label: string): Promise<boolean> {
  * with "5: Input/output error". Returns false when it was still loaded at the timeout.
  */
 export async function unloadAgent(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<boolean> {
-  await deps.launchctl(["bootout", `${domain()}/${label}`]);
+  await deps.launchctl(["bootout", `${launchdDomain()}/${label}`]);
   for (let waited = 0; waited < deps.unloadTimeoutMs; waited += deps.unloadPollMs) {
     if (!(await loaded(label, deps))) return true;
     await deps.sleep(deps.unloadPollMs);
@@ -189,7 +190,7 @@ export async function loadAgent(label: string, path: string, deps: LaunchdDeps =
   const attempts = deps.bootstrapBackoffMs.length + 1;
   let last: LaunchctlResult = { exitCode: 0, output: "" };
   for (let attempt = 0; attempt < attempts; attempt++) {
-    last = await deps.launchctl(["bootstrap", domain(), path]);
+    last = await deps.launchctl(["bootstrap", launchdDomain(), path]);
     if (last.exitCode === 0) return;
     const wait = deps.bootstrapBackoffMs[attempt];
     if (wait !== undefined) await deps.sleep(wait);
@@ -197,8 +198,8 @@ export async function loadAgent(label: string, path: string, deps: LaunchdDeps =
   const stillLoaded = await loaded(label, deps);
   const hint = stillLoaded
     ? `; the previous agent ${label} is still loaded, so run flowryn daemon uninstall, then flowryn daemon install again`
-    : `; check the plist with plutil -lint ${path} and launchctl print ${domain()}/${label}`;
-  throw new Error(`launchctl bootstrap ${domain()} ${path} failed after ${attempts} attempts (exit ${last.exitCode}: ${last.output || "no output"})${hint}`);
+    : `; check the plist with plutil -lint ${path} and launchctl print ${launchdDomain()}/${label}`;
+  throw new Error(`launchctl bootstrap ${launchdDomain()} ${path} failed after ${attempts} attempts (exit ${last.exitCode}: ${last.output || "no output"})${hint}`);
 }
 
 /** Write the plist and (re)load it; launchd then starts the daemon (RunAtLoad). */
@@ -223,12 +224,12 @@ export async function uninstallService(label: string, path: string): Promise<boo
 
 /** Start (or restart) an installed agent. */
 export async function kickstart(label: string): Promise<boolean> {
-  return (await launchctl(["kickstart", `${domain()}/${label}`])).exitCode === 0;
+  return (await launchctl(["kickstart", `${launchdDomain()}/${label}`])).exitCode === 0;
 }
 
 /** The running pid launchd reports for the agent, or null when it is not loaded or not running. */
 export async function agentPid(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<number | null> {
-  const printed = await deps.launchctl(["print", `${domain()}/${label}`]);
+  const printed = await deps.launchctl(["print", `${launchdDomain()}/${label}`]);
   if (printed.exitCode !== 0) return null;
   const match = /^\s*pid = (\d+)\s*$/m.exec(printed.output);
   return match ? Number(match[1]) : null;
@@ -262,13 +263,19 @@ export function plistDrift(installed: InstalledPlist, spec: PlistSpec): string[]
   return drift;
 }
 
+/** The helper the restart runs: this binary (the installed one, as the plist names it) with `daemon relaunch`. */
+export function relaunchCommand(spec: PlistSpec, path: string, oldPid: number): string[] {
+  return [...commandOf(spec.program), "daemon", "relaunch", "--old-pid", String(oldPid)];
+}
+
 /**
  * The launchd supervisor for `flowryn daemon restart`: this process must be
  * the agent's running pid; the next daemon runs the installed plist's
  * program, which must match what `daemon install` would write (a stale plist
- * is refused: re-installing stays in your terminal); the restart is a
- * detached `launchctl kickstart -k`, which stops this daemon (SIGTERM, a
- * clean exit) and starts the program again.
+ * is refused: re-installing stays in your terminal); the restart is the
+ * detached helper `flowryn daemon relaunch` (src/service/relaunch.ts), which
+ * re-bootstraps the agent (stopping this daemon with SIGTERM, a clean exit)
+ * and makes sure a new daemon answers.
  */
 export function launchdSupervisor(spec: PlistSpec, env: NodeJS.ProcessEnv, deps: LaunchdDeps = LAUNCHD_DEPS, path: string = plistPath(spec.label)): Supervisor {
   return {
@@ -295,7 +302,8 @@ export function launchdSupervisor(spec: PlistSpec, env: NodeJS.ProcessEnv, deps:
       return { program: installed.program };
     },
     restart() {
-      return detached("/bin/launchctl", ["kickstart", "-k", `${domain()}/${spec.label}`], env);
+      const [bin, ...rest] = relaunchCommand(spec, path, process.pid);
+      return detached(bin!, rest, smokeEnv(env));
     },
   };
 }
