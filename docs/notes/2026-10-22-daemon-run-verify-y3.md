@@ -80,7 +80,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   - `restartGuards` has no `validation` guard. `carriedValidations` lists those runs, with their no-mistakes step, in the restart's reply (`carried`), in the `daemon.restart_requested` event and in the CLI's restart reply.
   - A parked restart no longer re-reads no-mistakes every 5 s, since no guard depends on that read.
 - Recovery (`src/verify/runner.ts`): a verification stopped with the daemon (recorded by the job itself, including one stopped during its setup's fetch or worktree add), or found running at startup, is recorded as `error`. It is then requeued at rank -1 with `source = recovered` and `recovered_from` set, once. `verify show v<n>` shows `requeued: vq<n>`. A verification started before migration 29 has no request and is not requeued.
-- Fetching a PR head uses `--no-write-fetch-head`, so jobs in one repository can fetch at once.
+- Fetching a PR head uses `--no-write-fetch-head`, so jobs in one repository can fetch at once. Their worktree adds and removals take turns (docs/notes/2026-10-24-flaky-test-draining-v9.md).
 - Tests:
   - `test/unit/verify-queue.test.ts`: the migration; order, position and joining; what a request waits on; the restart hold and its bound; the drain up to the cap and FIFO; jobs in one repository each fetching their own PR head at once; holds by restart, host and pool; cancellation of a closed PR, a moved head or a project with no steps, and an outage that leaves the request queued; today's policy at start; the requeue from startup recovery and from a stop (mid-step or during setup), once only, and not for a verification from before migration 29.
   - `test/unit/restart.test.ts`: validations carried in every shape, never a guard.
