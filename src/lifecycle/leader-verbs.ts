@@ -13,7 +13,7 @@ import { getLease, getSession } from "../lease/lease.ts";
 import { wakeBlockedLine } from "../leader/wake-state.ts";
 import { pinHistory } from "../lease/repin.ts";
 import { getDecision } from "./decisions.ts";
-import { findRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
+import { findRun, isTerminal, modelView, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
@@ -794,6 +794,7 @@ const show: VerbSpec = {
         project: policy.project_id,
         mode: policy.mode_reason ? `${policy.delivery_mode} (${policy.mode_reason})` : policy.delivery_mode,
         harness: `${run.harness} ${run.harness_version}`,
+        ...modelView(ctx.db, run),
         // Only a declared account: the implicit one is named after its harness, already shown.
         ...(run.account && run.account !== run.harness ? { account: run.account } : {}),
         state: run.state,

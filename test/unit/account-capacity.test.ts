@@ -84,8 +84,8 @@ interface Stand {
   probed: string[];
 }
 
-function scheduler(stand: Stand, overflow = false, now = () => 1_000_000) {
-  const config = parseConfig(ACCOUNTS(overflow), HOME);
+function scheduler(stand: Stand, overflow = false, now = () => 1_000_000, text = ACCOUNTS(overflow)) {
+  const config = parseConfig(text, HOME);
   return new Scheduler({
     db,
     config: () => config,
@@ -116,8 +116,8 @@ function scheduler(stand: Stand, overflow = false, now = () => 1_000_000) {
   });
 }
 
-async function pass(stand: Stand, overflow = false): Promise<void> {
-  const s = scheduler(stand, overflow);
+async function pass(stand: Stand, overflow = false, text?: string): Promise<void> {
+  const s = scheduler(stand, overflow, undefined, text);
   await s.passNow();
   s.stop();
 }
@@ -174,7 +174,38 @@ describe("overflow ([accounts.<id>] overflow)", () => {
     await pass(s, true);
     expect(s.launches).toEqual(["r1:fresh"]);
     expect(run("r1")).toMatchObject({ account: "work-b", model: "sonnet", effort: "low" });
-    expect(events("sched.overflow")).toEqual([{ from: "work-a", to: "work-b", why: "capacity.quota_floor", at: "grant" }]);
+    expect(events("sched.overflow")).toEqual([{ from: "work-a", to: "work-b", why: "capacity.quota_floor", at: "grant", model: "sonnet", effort: "low", model_source: "account work-b", effort_source: "account work-b" }]);
+  });
+
+  test("the task's own model goes with it to the overflow account; its effort is looked up again there (model-and-effort-sc)", async () => {
+    waiting("r1", "work-a");
+    db.query("UPDATE runs SET model_pin = 'fable' WHERE id = 'r1'").run();
+    await pass(stand({ quota: { "work-a": 2 } }), true);
+    expect(run("r1")).toMatchObject({ account: "work-b", model: "fable", effort: "low" });
+    expect(events("sched.overflow")[0]).toMatchObject({ model: "fable", model_source: "dispatch", effort_source: "account work-b" });
+  });
+
+  test("a Pi run whose own model is another provider's passes over a target that cannot serve it (model-and-effort-sc)", async () => {
+    const pi = `[tools]
+pi = "/bin/true"
+[accounts.codex-a]
+harness = "pi"
+provider = "openai-codex"
+model = "openai-codex/gpt-5-codex"
+overflow = ["kimi", "codex-b"]
+[accounts.kimi]
+harness = "pi"
+provider = "kimi-coding"
+model = "kimi-coding/k2"
+[accounts.codex-b]
+harness = "pi"
+provider = "openai-codex"
+model = "openai-codex/gpt-5-mini"
+`;
+    waiting("r1", "codex-a", "fresh", 1, "pi");
+    db.query("UPDATE runs SET model_pin = 'openai-codex/gpt-5-codex' WHERE id = 'r1'").run();
+    await pass(stand({ quota: { "codex-a": 2 } }), true, pi);
+    expect(run("r1")).toMatchObject({ account: "codex-b", model: "openai-codex/gpt-5-codex" });
   });
 
   test("without overflow configured the same run waits on its account", async () => {

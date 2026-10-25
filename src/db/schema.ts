@@ -743,6 +743,18 @@ INSERT INTO meta (key, value) VALUES ('pr_feedback_since', CAST(strftime('%s', '
   ON CONFLICT(key) DO NOTHING;
 `;
 
+/**
+ * Migration 34 (docs/notes/2026-10-24-model-and-effort-sc.md): the model and effort a task chose
+ * at dispatch (`dispatch --model/--effort`, a plan phase's `model:` and `effort:` lines). Null is
+ * "not chosen": the workflow's default, then the account's, then the harness's apply at each launch.
+ */
+const MODEL_CHOICE_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN model_pin TEXT;
+ALTER TABLE runs ADD COLUMN effort_pin TEXT;
+ALTER TABLE plan_phases ADD COLUMN model TEXT;
+ALTER TABLE plan_phases ADD COLUMN effort TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -777,6 +789,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
   { version: 32, name: "job-procs", sql: JOB_PROCS_SQL },
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
+  { version: 34, name: "model-choice", sql: MODEL_CHOICE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

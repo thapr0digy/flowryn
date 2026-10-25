@@ -13,7 +13,8 @@ import { releaseLeases } from "../sched/pools.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { runAccount, type Account } from "../config/accounts.ts";
 import type { FlowrynConfig } from "../config/config.ts";
-import { accountFor, checkStart, createRun, harnessFlag, startDepsOf } from "./dispatch.ts";
+import { accountFor, checkStart, createRun, harnessFlag, pinsFor, startDepsOf } from "./dispatch.ts";
+import type { ModelPins } from "../config/model-choice.ts";
 import { dispatchedTask, reportDirFor } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
@@ -42,7 +43,11 @@ import { flowLine, openGate, requestStage } from "./stages.ts";
  * the cleanup (`flowryn cleanup`), since its worker is being stopped.
  */
 
-type Promotion = { mode: "live"; runId: string } | { mode: "task"; taskId: string; account: Account; version: string; base: string };
+/**
+ * --model and --effort: a live scout's run keeps its own choice unless they replace it (its worker
+ * is relaunched as a ship, so they apply then); a new run takes only what they say.
+ */
+type Promotion = { mode: "live"; runId: string; pins: ModelPins } | { mode: "task"; taskId: string; account: Account; pins: ModelPins; version: string; base: string };
 
 function scoutRun(db: Db, target: string): RunWithPolicy {
   const found = findRun(db, target);
@@ -87,7 +92,7 @@ function becomeShip(db: Db, taskId: string, project: ProjectRow, workflow: Workf
   recordIntent(db, { file: "backlog", verb: "update", taskId, positional: [taskId], flags: { kind: "ship" }, now });
 }
 
-function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: string): HandlerResult {
+function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: string, pins: ModelPins): HandlerResult {
   const { db } = ctx;
   const run = getRunWithPolicy(db, runId);
   if (!run || run.kind !== "scout" || isTerminal(run.state) || run.state === "landed") throw new FlowrynError("not_ready", `${runId} changed meanwhile`, "flowryn promote again");
@@ -98,7 +103,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
   const now = ctx.now();
   const words = sanitizeBlock(stringArg(args as never, "body") ?? "").trim();
   becomeShip(db, run.task_id, project, workflow, boolArg(args as never, "sensitive"), now);
-  db.query("UPDATE runs SET workflow = ?2, workflow_def = ?3, updated_at = ?4 WHERE id = ?1").run(run.id, workflow.id, JSON.stringify(workflow), now);
+  db.query("UPDATE runs SET workflow = ?2, workflow_def = ?3, model_pin = ?5, effort_pin = ?6, updated_at = ?4 WHERE id = ?1").run(run.id, workflow.id, JSON.stringify(workflow), now, pins.model, pins.effort);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "promoted to a ship", now);
   // A review the scout's own workflow had open is moot: the ship's workflow starts over.
   const open = openGate(db, run.id, "review");
@@ -143,7 +148,7 @@ function promoteTask(ctx: HandlerCtx, args: Record<string, unknown>, p: Extract<
     "",
     scout?.body ?? title,
   ].join("\n");
-  const runId = createRun(db, config, { taskId: p.taskId, title, body, project, kind: "ship", account: p.account, version: p.version, base: p.base, workflow, sensitive: boolArg(args as never, "sensitive"), existing: true, by: ctx.caller.role, override: null, now });
+  const runId = createRun(db, config, { taskId: p.taskId, title, body, project, kind: "ship", account: p.account, pins: p.pins, version: p.version, base: p.base, workflow, sensitive: boolArg(args as never, "sensitive"), existing: true, by: ctx.caller.role, override: null, now });
   resolveRunItems(db, last.id, ["report_ready"], "run.promoted", now);
   appendEvent(db, { source: "cli", kind: "run.promoted", runId, taskId: p.taskId, payload: { from: "scout", scout_run: last.id, workflow: workflow.id, mode: project.delivery_mode, in_place: "task", report: reportPath, by: ctx.caller.role }, ts: now });
   return {
@@ -166,6 +171,8 @@ const promote: VerbSpec = {
     "body-file": { type: "string", help: "what to ship, from a file or - for stdin", fileFor: "body" },
     workflow: { type: "string", help: "the ship workflow (default: the project's)", placeholder: "id" },
     harness: { type: "string", help: "a scout whose run is over: the new run's harness (default: the scout's)", placeholder: "harness" },
+    model: { type: "string", help: "the ship's model (default: a live scout's own choice, else the workflow's, the account's, the harness's)", placeholder: "model" },
+    effort: { type: "string", help: "the ship's effort (default as for --model)", placeholder: "level" },
     sensitive: { type: "boolean", help: "security-relevant: merges need a human record even under yolo" },
   },
   kind: "mutation",
@@ -179,18 +186,19 @@ const promote: VerbSpec = {
     }
     if (!isTerminal(run.state)) {
       if (stringArg(args, "harness") && stringArg(args, "harness") !== run.harness) throw new FlowrynError("bad_args", `${run.task_id} is promoted with its worker, which runs on ${run.harness}`);
-      return { mode: "live", runId: run.id };
+      const pins = pinsFor(args, runAccount(ctx.config(), project, run.account, run.harness), { model: run.model_pin, effort: run.effort_pin }, "promote");
+      return { mode: "live", runId: run.id, pins };
     }
     // Over: a new run on the same task, checked as a dispatch is.
     if (existsSync(run.worktree_path)) {
       throw new FlowrynError("not_ready", `the scout's worktree ${run.worktree_path} is still there`, `flowryn cleanup ${run.task_id} (--discard needs your approval), then promote`);
     }
     const account = promotedAccount(ctx.config(), project, args, run);
-    return { mode: "task", taskId: run.task_id, account, ...(await checkStart(startDepsOf(ctx), project, account)) };
+    return { mode: "task", taskId: run.task_id, account, pins: pinsFor(args, account, undefined, "promote"), ...(await checkStart(startDepsOf(ctx), project, account)) };
   },
   apply(ctx, args, prepared) {
     const promotion = prepared as Promotion;
-    return promotion.mode === "live" ? promoteLive(ctx, args, promotion.runId) : promoteTask(ctx, args, promotion);
+    return promotion.mode === "live" ? promoteLive(ctx, args, promotion.runId, promotion.pins) : promoteTask(ctx, args, promotion);
   },
   async settle(ctx, result) {
     ctx.journal.kick();

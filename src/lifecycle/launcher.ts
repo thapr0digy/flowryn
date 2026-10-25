@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
-import { styleBlock } from "../config/workflows.ts";
+import { currentWorkflow, styleBlock } from "../config/workflows.ts";
+import { checkPinsAtLaunch, resolveModelChoice, type ModelChoice } from "../config/model-choice.ts";
 import { runAccount, workersFor } from "../config/accounts.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
@@ -222,7 +223,12 @@ export class Launcher {
     if (!project) throw new Error(`project ${run.project_id} is gone`);
     const config = this.deps.config();
     // The account recorded at dispatch, checked against its project's scope again at every launch.
-    const workers = workersFor(workersConfig(config), runAccount(config, project, run.account, run.harness));
+    const account = runAccount(config, project, run.account, run.harness);
+    // Looked up at every launch: the task's own choice, then the workflow's default, the account's, the harness's.
+    const pins = { model: run.model_pin, effort: run.effort_pin };
+    checkPinsAtLaunch(pins, account);
+    const choice = resolveModelChoice(config, { pins, workflow: currentWorkflow(config, run.workflow), account });
+    const workers = workersFor(workersConfig(config), account, choice);
     const timing = timingConfig(config);
     const runtime = this.deps.runtime();
     if (!runtime) throw new TransientLaunchError("Herdr is not reachable");
@@ -328,7 +334,7 @@ export class Launcher {
     await runtime.startAgent(paneId, { kind: plan.kind, name: agentName, args: plan.args });
     const harness = await runtime.harnessProcess(paneId, (p) => adapter.matchesProcess(p, binary), timing.launch_timeout_ms);
     if (!harness) throw new Error(`the ${run.harness} process did not appear in pane ${paneId} within ${timing.launch_timeout_ms} ms${paneEvidence(await this.paneScreen(runtime, paneId))}`);
-    return this.recordWorker(run, mode, claimed, paneId, harness);
+    return this.recordWorker(run, mode, claimed, paneId, harness, choice);
   }
 
   /**
@@ -337,7 +343,7 @@ export class Launcher {
    * worker-start races this) or a cancel superseded the launch, so the process
    * can still be found; then it is stopped here. Whether the worker stays.
    */
-  private async recordWorker(run: RunWithPolicy, mode: LaunchMode, claimed: OperationRow, paneId: string, harness: HarnessProcess): Promise<boolean> {
+  private async recordWorker(run: RunWithPolicy, mode: LaunchMode, claimed: OperationRow, paneId: string, harness: HarnessProcess, choice: ModelChoice): Promise<boolean> {
     const { db, now } = this.deps;
     const timing = timingConfig(this.deps.config());
     const stop = tx(db, () => {
@@ -358,14 +364,15 @@ export class Launcher {
       db.query(
         `UPDATE runs SET proc_pid = ?2, proc_start = ?3, proc_exe = ?4, state = CASE WHEN state = 'launching' THEN 'running' ELSE state END,
            pending_launch = CASE WHEN pending_launch = ?7 THEN NULL ELSE pending_launch END,
-           stage_note = CASE WHEN ?6 = 1 AND (pending_launch IS NULL OR pending_launch = ?7) THEN NULL ELSE stage_note END, updated_at = ?5 WHERE id = ?1`,
-      ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now(), mode === "resume" ? 0 : 1, mode);
+           stage_note = CASE WHEN ?6 = 1 AND (pending_launch IS NULL OR pending_launch = ?7) THEN NULL ELSE stage_note END,
+           model = ?8, effort = ?9, updated_at = ?5 WHERE id = ?1`,
+      ).run(run.id, harness.identity.pid, harness.identity.start, harness.identity.exe, now(), mode === "resume" ? 0 : 1, mode, choice.model, choice.effort);
       appendEvent(db, {
         source: "daemon",
         kind: "run.launched",
         runId: run.id,
         taskId: run.task_id,
-        payload: { mode, pane: paneId, pid: harness.identity.pid, exe: harness.identity.exe, argv0: harness.process.argv0, operation: claimed.id },
+        payload: { mode, pane: paneId, pid: harness.identity.pid, exe: harness.identity.exe, argv0: harness.process.argv0, operation: claimed.id, ...choice },
       });
       return isTerminal(current.state);
     });
