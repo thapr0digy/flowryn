@@ -53,6 +53,10 @@ export type ItemClass = "actionable" | "info";
  * the sync left alone (informational); conflict_nudged, a delivered PR that
  * conflicts sent its ship back to merge its base (informational); and
  * pr_conflict, one that still conflicts after its nudges.
+ * Review feedback (src/reconcile/reviews.ts): review_steered, a delivered PR's
+ * new reviews or comments sent its ship back to address them (informational);
+ * review_unanswered, a review thread still unanswered after its sends, or more
+ * feedback after the sends one delivered head may get.
  * The policy follow-through (src/upkeep/policy-follow.ts): policy_sent_back,
  * a delivered ship sent back to merge main's policy change (informational);
  * policy_behind, a ship delivered again still behind a policy change it was
@@ -109,11 +113,14 @@ export const LANE_TABLE = {
   user_acted: { lane: "P1", class: "actionable" },
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
+  auto_merge_held: { lane: "P1", class: "actionable" },
+  review_unanswered: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   build_held: { lane: "P1", class: "info" },
   checkout_unsynced: { lane: "P1", class: "info" },
   conflict_nudged: { lane: "P1", class: "info" },
+  review_steered: { lane: "P1", class: "info" },
   policy_sent_back: { lane: "P1", class: "info" },
   policy_behind: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
@@ -144,21 +151,24 @@ export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropp
  * Items that wake an idle leader as a P0 would, though they are P1: what you
  * did outside the leader session (user_acted, and a pass you asked for on a
  * review page), a merge that landed without the leader's own merge call, and
- * a yolo task's PR ready for the leader to verify and merge (LEADER_WAKE_SQL).
- * Each wakes it once (followUpBatch in router.ts).
+ * a yolo task's PR ready for the leader to verify and merge (LEADER_WAKE_SQL),
+ * and an auto-merge that was held. Each wakes it once (followUpBatch in router.ts).
  */
-export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready"];
+export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready", "auto_merge_held"];
 
 /**
  * SQL for "item `i` is a leader follow-up": a LEADER_WAKE_KINDS item, where a
  * pr_ready counts only when its task is yolo (the leader merges it with no
- * prompt). A pr_ready that waits on you is not one: it wakes only while you
- * are away (awayWakeSql in away.ts). A pr_ready is never sensitive work,
- * which opens sensitive_action_waiting instead.
+ * prompt) and no auto-merge is working on its run (the daemon merges it with
+ * no leader turn; a held one wakes it as auto_merge_held). A pr_ready that
+ * waits on you is not one: it wakes only while you are away (awayWakeSql in
+ * away.ts). A pr_ready is never sensitive work, which opens
+ * sensitive_action_waiting instead.
  */
 export const LEADER_WAKE_SQL = `(i.kind IN (${LEADER_WAKE_KINDS.filter((k) => k !== "pr_ready")
   .map((k) => `'${k}'`)
-  .join(", ")}) OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1)))`;
+  .join(", ")}) OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1)
+    AND NOT EXISTS (SELECT 1 FROM auto_merges wa WHERE wa.run_id = i.run_id AND wa.state IN ('queued','verifying','waiting_checks','merging'))))`;
 
 export interface ItemRow {
   id: string;

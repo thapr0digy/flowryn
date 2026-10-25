@@ -723,7 +723,45 @@ CREATE INDEX job_procs_lease ON job_procs(lease_id);
 `;
 
 /**
- * Migration 33: how many background notices a chat-answer grant was held across
+ * Migration 33 (docs/notes/2026-10-23-read-pr-reviews-fn.md): one row per review or comment the
+ * delivery watcher has read on a delivered PR (src/reconcile/reviews.ts), keyed per task by the
+ * forge's own id, so each steers its worker once and a tracked thread is raised again until it is
+ * answered. `pr_feedback_since` (ms) is when Flowryn started reading them: anything written before
+ * is a baseline, recorded and never sent, so the upgrade does not flood open PRs with old comments.
+ */
+const PR_FEEDBACK_SQL = /* sql */ `
+CREATE TABLE pr_feedback (
+  task_id TEXT NOT NULL, run_id TEXT NOT NULL, pr_url TEXT NOT NULL, key TEXT NOT NULL,
+  kind TEXT NOT NULL, author TEXT NOT NULL, url TEXT NOT NULL, written_at INTEGER NOT NULL,
+  tracked INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('baseline','ignored','held','sent','answered','escalated')),
+  sends INTEGER NOT NULL DEFAULT 0, first_sent_at INTEGER, last_sent_at INTEGER,
+  answered_at INTEGER, answered_how TEXT, seen_at INTEGER NOT NULL,
+  PRIMARY KEY (task_id, key));
+CREATE INDEX pr_feedback_run ON pr_feedback(run_id, state);
+INSERT INTO meta (key, value) VALUES ('pr_feedback_since', CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+  ON CONFLICT(key) DO NOTHING;
+`;
+
+/**
+ * Migration 34: yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2). One
+ * row per delivery of an opted-in yolo ship, driven from queued to merged, or held or superseded,
+ * by src/verify/auto-merge.ts. A run has at most one live row.
+ */
+const AUTO_MERGES_SQL = /* sql */ `
+CREATE TABLE auto_merges (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  ref TEXT NOT NULL, head_sha TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','verifying','waiting_checks','merging','merged','held','superseded','sent_back')),
+  request_id TEXT, verification_id TEXT, merge_id TEXT,
+  reason TEXT, detail TEXT,
+  created_at INTEGER NOT NULL, state_since INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX auto_merges_live ON auto_merges(run_id) WHERE state IN ('queued','verifying','waiting_checks','merging');
+CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
+`;
+
+/**
+ * Migration 35: how many background notices a chat-answer grant was held across
  * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
  * as a notice before the grant is used.
  */
@@ -764,7 +802,9 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
   { version: 32, name: "job-procs", sql: JOB_PROCS_SQL },
-  { version: 33, name: "grant-held", sql: GRANT_HELD_SQL },
+  { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
+  { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
+  { version: 35, name: "grant-held", sql: GRANT_HELD_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

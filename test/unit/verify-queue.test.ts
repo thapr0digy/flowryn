@@ -104,6 +104,8 @@ function fixture(steps: string[] = ["true"], caps = "validation = 5"): Fixture {
     merge: async () => {
       throw new Error("no merges here");
     },
+    feedback: async () => ({ reviews: [], reviewComments: [], issueComments: [] }),
+    reviewThreads: async () => [],
   };
   f.deps = {
     db,
@@ -243,7 +245,8 @@ describe("draining the queue", () => {
     }
     expect(await drainVerifyQueue(f.deps)).toBe(4);
     await settled(f.db, ["v1", "v2", "v3", "v4"]);
-    expect(["v1", "v2", "v3", "v4"].map((id) => [getVerification(f.db, id)!.state, getVerification(f.db, id)!.head_sha])).toEqual(heads.map((h) => ["passed", h]));
+    // The detail names git's error when a job collides (concurrent worktree adds: src/runtime/repo-lock.ts).
+    expect(["v1", "v2", "v3", "v4"].map((id) => [getVerification(f.db, id)!.state, getVerification(f.db, id)!.head_sha, getVerification(f.db, id)!.detail])).toEqual(heads.map((h) => ["passed", h, null]));
     expect(git(f.repo, ["worktree", "list", "--porcelain"]).split("\n").filter((l) => l.startsWith("worktree ")).length).toBe(1);
   }, 30_000);
 

@@ -30,7 +30,9 @@ export interface RunContext {
   binary: string;
   /** The daemon socket the worker's CLI calls; a sandboxed shell tool must be allowed to reach it. */
   daemonSocket: string;
-  /** Directories the worker's CLI and reports write outside the worktree (its spool, its report directory). */
+  /** The run's private temp directory (src/lifecycle/run-tmp.ts); the adapter points the worker's TMPDIR into it. */
+  tmpDir: string;
+  /** Directories the worker's CLI and reports write outside the worktree (its spool, its report directory, its temp directory). */
   writable: string[];
   /** Paths the worker's sandbox must never write, even inside a writable one (the project's git hooks and config, Flowryn's backlog and to-dos). */
   readOnly: string[];

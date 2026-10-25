@@ -31,7 +31,7 @@ The UserPromptSubmit hook input carries only `prompt` (with `session_id`, `trans
 
    The verify then sets `verified_at` only while `held_prompts` is still the count it checked. If a notice arrived during the check, the command is refused and a retry checks again.
 
-`flowryn show c<N>` shows `held: across N background notice(s)`. Migration 33 adds `captain_grants.held_prompts`.
+`flowryn show c<N>` shows `held: across N background notice(s)`. Migration 35 adds `captain_grants.held_prompts`.
 
 | After the answer… | Before | Now |
 |---|---|---|
@@ -68,7 +68,7 @@ In the transcript survey, 209 of 230 notices taken in mid-turn had their line be
 - **Two layers, not one.** The hook sees only text, and the transcript lags by milliseconds; each catches what the other can miss.
 - **A count at use, not a text match.** Holds are compared with notices, so the check does not depend on the hook's text matching the transcript's.
 - **An allow-list of origins** (`task-notification`, `peer`). The others are rare, never seen mid-turn, and fail closed.
-- **Turn accounting is not changed.** A notice taken in mid-turn still runs `startTurn`, which marks the turn's carried items lost (q72's turn lost i609 to i613). That was reported as its own finding (i622).
+- **Turn accounting is not changed here.** A notice taken in mid-turn used to run `startTurn`, which marked the turn's carried items lost (q72's turn lost i609 to i613). That was reported as its own finding (i622) and fixed by background-notifications-6g (`takenMidTurn` and `continueTurn`, docs/notes/2026-10-23-background-notifications-6g.md).
 
 ## Tests
 

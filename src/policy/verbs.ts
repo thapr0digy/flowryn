@@ -1,43 +1,21 @@
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
-import { tx, type Db } from "../db/db.ts";
 import { checksLine } from "../forge/types.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
-import { deliveryBasis, requireDeliveryBasis, staleBasis, type BasisPart, type DeliveryBasis } from "../lifecycle/observed.ts";
-import { landRun } from "../lifecycle/landing.ts";
-import { noteMergedAfterEnd } from "../reconcile/delivery.ts";
-import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
-import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { deliveryBasis } from "../lifecycle/observed.ts";
+import type { ProjectRow } from "../lifecycle/projects.ts";
+import { findRun, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import type { DiscardAttempt } from "../lifecycle/landing.ts";
 import { discardRef, findAttempt, findHumanApproval, insertApproval } from "./approvals.ts";
 import { prepareCaptainGrant } from "./grants.ts";
 import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
-import { verifyConfig } from "../verify/config.ts";
-import { verifyPolicyId } from "../verify/policy.ts";
 import { verificationLine } from "../verify/store.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { openUserActed } from "../attention/follow-up.ts";
-import { resolveItems } from "../attention/items.ts";
-import {
-  channelOf,
-  checkGate,
-  chooseApproval,
-  executeMerge,
-  gatherFacts,
-  latestMerge,
-  recordMergeRequest,
-  recordMergeResult,
-  rememberFacts,
-  takeApproval,
-  targetOf,
-  type ChoiceResult,
-  type GateResult,
-  type MergeContext,
-  type MergeFacts,
-  type MergeRow,
-} from "./merge.ts";
+import { checkGate, chooseApproval, gatherFacts, type MergeFacts } from "./merge.ts";
+import { applyMerge, mergeable, mergeContext, runAndProject, settleMerge, type MergePrepared } from "./merge-path.ts";
 
 /**
  * The M4 verbs (design sections 7 and 12): `merge` through the merge gate,
@@ -46,29 +24,7 @@ import {
  * key, which bind a /dev/tty challenge to exactly what you were shown.
  */
 
-export function mergeContext(ctx: HandlerCtx): MergeContext {
-  return {
-    db: ctx.db,
-    forge: ctx.delivery.forge(),
-    git: ctx.delivery.git,
-    github: ctx.delivery.github(),
-    now: ctx.now,
-    verifyPolicy: (projectId) => {
-      const config = verifyConfig(ctx.config(), projectId);
-      return config ? verifyPolicyId(config) : null;
-    },
-  };
-}
-
-/** The run a task (or run id) names, with its project; any state. */
-export function runAndProject(db: Db, target: string): { run: RunWithPolicy; project: ProjectRow } {
-  const found = findRun(db, target);
-  const run = found ? getRunWithPolicy(db, found.id) : null;
-  if (!run) throw new FlowrynError("not_found", `no task or run ${target}`, "flowryn fleet");
-  const project = getProject(db, run.project_id);
-  if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
-  return { run, project };
-}
+export { mergeContext, runAndProject };
 
 /** What a merge would land, in a few lines: for your confirm, your prompt and `approve`. */
 export function mergeSummary(facts: MergeFacts): Record<string, unknown> {
@@ -100,34 +56,6 @@ export function verifyLine(facts: MergeFacts): string {
 
 // --- merge ----------------------------------------------------------------------------------
 
-/** Merges whose settle is asking GitHub now, so a replayed call never asks twice. */
-const executing = new Set<string>();
-
-interface MergePrepared {
-  facts: MergeFacts;
-  gate: GateResult;
-  chosen: ChoiceResult;
-  /** The run as the gate's reads started (docs/notes/2026-10-13-next-steps-md-av.md). */
-  seen: DeliveryBasis;
-}
-
-/** A merge is requested only for the delivery, merge and run state the gate read: a redelivery, cancel or merge in between refuses it. */
-const MERGE_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "merge", "operation"];
-
-async function mergeable(ctx: HandlerCtx, target: string): Promise<{ run: RunWithPolicy; project: ProjectRow }> {
-  const { run, project } = runAndProject(ctx.db, target);
-  if (run.kind !== "ship") throw new FlowrynError("not_ready", `${run.task_id} is a scout; scouts deliver a report, not a merge`);
-  if (run.state === "merging") {
-    const last = latestMerge(ctx.db, run.task_id);
-    if (last && (last.state === "requested" || ctx.delivery.inFlight.has(last.id))) throw new FlowrynError("merge_in_flight", `merge ${last.id} of ${run.task_id} is in flight`, `flowryn show ${run.task_id}`);
-  } else if (run.state === "landed" || run.state === "cleaned") {
-    throw new FlowrynError("not_ready", `${run.task_id} is already ${run.state}`, `flowryn show ${run.task_id}`);
-  } else if (run.state !== "ready") {
-    throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}, not ready to merge`, `flowryn show ${run.task_id}`);
-  }
-  return { run, project };
-}
-
 const merge: VerbSpec = {
   name: "merge",
   summary: "Merge a delivered ship through the merge gate; it counts only once the merge is proven",
@@ -145,7 +73,7 @@ const merge: VerbSpec = {
     const task = stringArg(args, "task")!;
     const allowRed = stringArg(args, "allow-red");
     if (allowRed !== undefined && allowRed.length === 0) throw new FlowrynError("bad_args", "--allow-red needs the name of the one failing check to waive");
-    const { run, project } = await mergeable(ctx, task);
+    const { run, project } = mergeable(ctx.db, ctx.delivery, task);
     const seen = deliveryBasis(ctx.db, run.id);
     const facts = await gatherFacts(mergeContext(ctx), run, project);
     // A chat answer never waives a red check: with --allow-red only the prompt, Pi's confirm or your shell count.
@@ -160,85 +88,10 @@ const merge: VerbSpec = {
     return { facts, gate, chosen, seen };
   },
   apply(ctx, _args, prepared) {
-    const { facts, gate, chosen, seen } = prepared as MergePrepared;
-    const now = ctx.now();
-    if (gate.alreadyMerged) {
-      const ended = getRunWithPolicy(ctx.db, facts.run.id)!;
-      const delivered = deliveredOf(ctx.db, ended.task_id);
-      if (isTerminal(ended.state) && delivered && !staleBasis(seen, deliveryBasis(ctx.db, ended.id), ["delivered"]).delivered) {
-        const sha = facts.pr!.mergeSha ?? facts.head;
-        rememberFacts(ctx.db, facts, now);
-        noteMergedAfterEnd(ctx.db, ended, delivered, { mergeSha: sha, source: "github" }, now);
-        const lateMerge = latestMerge(ctx.db, ended.task_id);
-        return {
-          data: { task: ended.task_id, run: ended.id, run_state: ended.state, ...(lateMerge ? { state: lateMerge.state } : {}), merged: "after_end", sha, detail: `the PR was merged after the run was ${ended.state}; the run is not revived and a divergence asks you` },
-          hints: [`flowryn show ${ended.task_id}`],
-        };
-      }
-    }
-    // A PR GitHub already reads merged lands the run whatever else changed, as long as it is still the delivery.
-    requireDeliveryBasis(ctx.db, seen, gate.alreadyMerged ? ["delivered"] : MERGE_PARTS, "merge", "cli", now, `flowryn merge ${facts.run.task_id} again`);
-    const run = getRunWithPolicy(ctx.db, facts.run.id)!;
-    rememberFacts(ctx.db, facts, now);
-    if (gate.alreadyMerged) {
-      landRun(ctx.db, run, { mergeSha: facts.pr!.mergeSha ?? facts.head, how: "merged_elsewhere", by: ctx.caller.role === "leader" ? "leader" : "other" }, now);
-      return { data: { task: run.task_id, run: run.id, state: "landed", merged: "already", sha: facts.pr!.mergeSha ?? "-" }, hints: [`flowryn show ${run.task_id}`] };
-    }
-    if (run.state !== "ready" && run.state !== "merging") throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}`);
-    const channel = channelOf(chosen.choice!);
-    const approval = takeApproval(ctx.db, facts, chosen.choice!, "merge", now);
-    const mergeId = recordMergeRequest(ctx.db, facts, approval, channel, gate.waived, ctx.delivery.github().merge_method, now, gate.localGreen);
-    // The merge you approved is requested: its follow-up is done.
-    resolveItems(ctx.db, "user_acted", run.task_id, `merge ${mergeId} requested`, now);
-    // In flight from here: the watcher leaves a requested merge alone until this daemon has asked GitHub.
-    ctx.delivery.inFlight.add(mergeId);
-    const noVerify = facts.local?.policy ? null : `project ${facts.project.id} has no verify steps: this merge ran no local verify (add [projects.${facts.project.id}] verify to config.toml to require one)`;
-    return {
-      data: { task: run.task_id, run: run.id, merge: mergeId, head: facts.head, approval, channel, waived: gate.waived ?? "-", local_green: gate.localGreen ?? "-", ...(noVerify ? { verify: "none configured" } : {}), state: "merging" },
-      ...(noVerify ? { hints: [noVerify] } : {}),
-    };
+    return applyMerge(ctx, prepared as MergePrepared, ctx.caller);
   },
-  async settle(ctx, result) {
-    const runId = String(result.data.run ?? "");
-    if (result.data.merged === "already") {
-      void ctx.delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => ctx.log(`cleanup ${runId}: ${(error as Error).message}`));
-      return result;
-    }
-    if (result.data.merged === "after_end") return result;
-    const mergeId = String(result.data.merge ?? "");
-    let row = ctx.db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow | null;
-    if (!row) throw new FlowrynError("internal", `merge ${mergeId} is gone`);
-    let endedBefore = null as RunWithPolicy | null;
-    if (row.state === "requested" && ctx.delivery.inFlight.has(mergeId) && !executing.has(mergeId)) {
-      executing.add(mergeId);
-      try {
-        const { run, project } = runAndProject(ctx.db, runId);
-        const outcome = await executeMerge(mergeContext(ctx), targetOf(row, project, `${taskTitle(ctx.db, run.task_id)} (${run.task_id})`));
-        tx(ctx.db, () => {
-          const current = getRunWithPolicy(ctx.db, runId)!;
-          if (isTerminal(current.state)) endedBefore = current;
-          recordMergeResult(ctx.db, current, mergeId, outcome, ctx.now(), ctx.caller.role === "leader" ? "leader" : "other");
-          if (outcome.state === "refused") {
-            openUserActed(ctx.db, ctx.caller.role, { action: "merge_refused", taskId: current.task_id, runId: current.id, line: `The user's merge of ${taskTitle(ctx.db, current.task_id)} (${current.task_id}) was refused: ${outcome.detail}; tell the user why`, now: ctx.now() });
-          }
-        });
-      } finally {
-        executing.delete(mergeId);
-        ctx.delivery.inFlight.delete(mergeId);
-      }
-      row = ctx.db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow;
-      if (row.state === "merged" && !endedBefore) void ctx.delivery.cleanup(runId, { discardApproval: null, auto: true }).catch((error: unknown) => ctx.log(`cleanup ${runId}: ${(error as Error).message}`));
-    }
-    ctx.delivery.watch(runId);
-    const data = { ...result.data, state: row.state, sha: row.merge_sha ?? "-", detail: row.detail ?? "-" };
-    if (row.state === "refused") throw new FlowrynError("merge_refused", `merge ${mergeId} refused: ${row.detail ?? "no detail"}`, `flowryn show ${result.data.task}`);
-    if (row.state === "unproven" || row.state === "requested") {
-      throw new FlowrynError("not_landed", `merge ${mergeId} was requested but is not proven (${row.detail ?? "no answer yet"}); the task is not landed and flowrynd keeps checking`, `flowryn show ${result.data.task}`);
-    }
-    if (endedBefore) {
-      return { data: { ...data, run_state: endedBefore.state, merged: "after_end", detail: `the PR was merged after the run was ${endedBefore.state}; the run is not revived and a divergence asks you` }, hints: [`flowryn show ${result.data.task}`] };
-    }
-    return { data: { ...data, cleanup: "running" }, hints: [...(result.hints ?? []), `flowryn show ${result.data.task}`] };
+  settle(ctx, result) {
+    return settleMerge(ctx, result, ctx.caller);
   },
 };
 
