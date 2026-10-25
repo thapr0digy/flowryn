@@ -1,5 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
+import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
@@ -314,6 +315,8 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
   }
   const verified = delivered ? latestVerification(ctx.db, approvalRef(delivered)) : null;
   if (verified) view.verified = verificationLine(verified);
+  const auto = latestAutoMerge(ctx.db, run.id);
+  if (auto) view.auto_merge = autoMergeLine(ctx.db, auto);
   const merge = latestMerge(ctx.db, run.task_id);
   if (merge) {
     const approval = ctx.db.query("SELECT channel, actor FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: string; actor: string } | null;

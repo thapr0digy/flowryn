@@ -53,6 +53,8 @@ export interface DeliveryWatcherDeps {
   nudgeConflicts(): boolean;
   /** A nudged ship's last stage waits for a grant: the scheduler looks now. */
   kickScheduler(): void;
+  /** A pass finished: what it read may move a yolo auto-merge on (src/verify/auto-merge.ts). */
+  passed?(): void;
   /** `[upkeep] steer_reviews`: a delivered PR's reviews and comments steer its worker; off when absent. */
   steerReviews?(): boolean;
   /** `[upkeep] review_reraise_hours` in ms: an unanswered review thread is sent again after this long (0: never). */
@@ -166,6 +168,7 @@ export class DeliveryWatcher {
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
+    this.deps.passed?.();
   }
 
   private runs(sql: string, ...params: (string | number)[]): RunWithPolicy[] {

@@ -128,6 +128,26 @@ function startTurn(ctx: HandlerCtx, s: LeaderSessionRow, now: number, source: st
   return turn;
 }
 
+/**
+ * Claude takes a message that arrives during a turn (a background task or Monitor notice, a
+ * subagent hand-back, a message typed while busy) into that same turn: UserPromptSubmit runs for
+ * it, and no Stop came before it (M0 c01, spike c16). Busy with no interrupt marker since the turn
+ * started means the turn still runs; a turn this daemon did not start (no offset) is unknown, so
+ * it starts a new one (docs/notes/2026-10-23-background-notifications-6g.md).
+ */
+function takenMidTurn(ctx: HandlerCtx, s: LeaderSessionRow, now: number): boolean {
+  if (s.harness !== "claude" || !busyNow(s, now) || !s.transcript_path) return false;
+  const offset = ctx.attention.turnOffsets.get(s.session_id);
+  return offset !== undefined && !transcriptShowsInterrupt(s.transcript_path, offset);
+}
+
+/** A prompt taken into the running turn: same turn number, nothing it carried is lost. Inside a transaction. */
+function continueTurn(ctx: HandlerCtx, s: LeaderSessionRow, now: number, source: string): number {
+  refreshBusy(ctx, s, now);
+  appendEvent(ctx.db, { source: "hook", kind: "leader.prompt_taken", payload: { session: s.session_id, turn: s.turn_no, source }, ts: now });
+  return s.turn_no;
+}
+
 function refreshBusy(ctx: HandlerCtx, s: LeaderSessionRow, now: number): void {
   setSession(ctx.db, s.session_id, { busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms, last_event_at: now });
 }
@@ -331,6 +351,7 @@ export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): 
  * before_agent_start for your prompt (source "user"), agent_start for any run
  * (source "run"), which repeats on retries and so is idempotent while busy
  * (M0 p04). A prompt you typed makes you active and gets the P1 digest.
+ * A Claude prompt that arrives while a turn runs joins that turn (takenMidTurn).
  */
 export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null): HandlerResult {
   const s = leaderSession(ctx);
@@ -349,7 +370,9 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
     heartbeat(ctx.db, s.session_id, now);
     return { data: {} };
   }
-  const turn = startTurn(ctx, s, now, input.source ?? "prompt");
+  const source = input.source ?? "prompt";
+  const continues = takenMidTurn(ctx, s, now);
+  const turn = continues ? continueTurn(ctx, s, now, source) : startTurn(ctx, s, now, source);
   if (!isWakePrompt(input.prompt)) {
     if (s.user_inactive_since !== null) {
       setSession(ctx.db, s.session_id, { user_inactive_since: null });
@@ -358,7 +381,8 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
     // You are back: an automatic away ends, and its return brief rides this message (awayLines).
     endAutoAway(ctx.db, now);
   }
-  if (s.harness === "claude" && s.transcript_path) ctx.attention.turnOffsets.set(s.session_id, transcriptSize(s.transcript_path));
+  // A prompt taken into the running turn keeps its offset, so an interrupt earlier in the turn still shows.
+  if (!continues && s.harness === "claude" && s.transcript_path) ctx.attention.turnOffsets.set(s.session_id, transcriptSize(s.transcript_path));
   heartbeat(ctx.db, s.session_id, now);
   if (late) {
     appendEvent(ctx.db, { source: "hook", kind: "leader.digest_late", payload: { session: s.session_id, turn }, ts: now });

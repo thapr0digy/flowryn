@@ -89,6 +89,16 @@ export interface QueueDeps extends VerifyDeps {
   env?: NodeJS.ProcessEnv;
 }
 
+/** Why a request whose head moved was cancelled; headMovedCancelled tells it from the other reasons. */
+function headMovedCancel(what: "head" | "PR head", from: string, to: string): string {
+  return `the ${what} moved from ${from.slice(0, 8)} to ${to.slice(0, 8)}; verify the new head`;
+}
+
+/** A request cancelled because its head moved: the worker is mid-redelivery (src/verify/auto-merge.ts waits for it). */
+export function headMovedCancelled(detail: string | null): boolean {
+  return detail !== null && /^the (PR )?head moved from [0-9a-f]{1,8} to [0-9a-f]{1,8}; verify the new head$/.test(detail);
+}
+
 type Wanted = { start: VerifyConfig; projectPath: string } | { cancel: string } | { wait: string };
 
 /** Is the request still worth running: its project still has verify steps, its PR is open at the same head (local-only work: the worktree HEAD)? */
@@ -106,7 +116,7 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     const head = request.worktree ? await deps.git(["rev-parse", "HEAD"], request.worktree) : null;
     if (!head || head.code !== 0) return { cancel: `cannot read the head of ${request.pr_url}${request.worktree ? ` in ${request.worktree}` : ""}` };
     const sha = head.stdout.trim();
-    if (sha !== request.head_sha) return { cancel: `the head moved from ${request.head_sha.slice(0, 8)} to ${sha.slice(0, 8)}; verify the new head` };
+    if (sha !== request.head_sha) return { cancel: headMovedCancel("head", request.head_sha, sha) };
     return { start: config, projectPath };
   }
   const ref = parsePrUrl(request.pr_url, deps.webUrl());
@@ -114,7 +124,7 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
   try {
     const pr = await deps.forge().pull(ref);
     if (pr.state !== "open") return { cancel: `${request.pr_url} is ${pr.state}` };
-    if (pr.headSha !== request.head_sha) return { cancel: `the PR head moved from ${request.head_sha.slice(0, 8)} to ${pr.headSha.slice(0, 8)}; verify the new head` };
+    if (pr.headSha !== request.head_sha) return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
   } catch (error) {
     if (error instanceof ForgeError && error.kind === "not_found") return { cancel: `GitHub has no ${request.pr_url}` };
     if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})` };

@@ -32,14 +32,16 @@ import { dismissRunQuestions } from "./gate-questions.ts";
 export const LANDED_BEFORE_CANCEL = "the run landed before the cancel took effect; the merge stands";
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered"] as const;
+const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered", "auto_merge_held"] as const;
 
 /**
  * Who proved a landing: the leader's own merge call (its reply says it
- * landed), or anything else (your merge, the delivery watcher's later proof,
- * a merge on GitHub), which opens a landed item so the leader reports it.
+ * landed), the daemon's yolo auto-merge (src/verify/auto-merge.ts: no leader
+ * turn; its yolo_merged item records it), or anything else (your merge, the
+ * delivery watcher's later proof, a merge on GitHub), which opens a landed
+ * item so the leader reports it.
  */
-export type LandedBy = "leader" | "other";
+export type LandedBy = "leader" | "auto" | "other";
 
 export interface LandingProof {
   mergeSha: string;
@@ -63,7 +65,7 @@ export function landRun(db: Db, run: RunWithPolicy, proof: LandingProof, now: nu
   closeMergeGate(db, run, { passed: true, approvalId: merge?.approval_id ?? null }, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   const event = appendEvent(db, { source: proof.how === "merge" ? "daemon" : "github", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { merge_sha: proof.mergeSha, how: proof.how, merge: proof.mergeId ?? null, by: proof.by }, ts: now });
-  if (proof.by !== "leader") openItem(db, { kind: "landed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: landedLine(db, run, proof.mergeSha), now });
+  if (proof.by === "other") openItem(db, { kind: "landed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: landedLine(db, run, proof.mergeSha), now });
   run.state = "landed";
 }
 
@@ -87,6 +89,8 @@ export interface LandingDeps {
   exitWorker(runId: string): Promise<{ ok: boolean; detail: string }>;
   /** Close the run's Herdr workspace, best effort. */
   closeWorkspace(runId: string): Promise<void>;
+  /** Remove the run's temp directory (src/lifecycle/run-tmp.ts); throws when it cannot. */
+  removeRunTmp?(runId: string): "removed" | "absent" | "not_ours";
   /** Apply the backlog intents just recorded (the task done) without waiting for the journal's next pass. */
   kickJournal(): void;
   log(line: string): void;
@@ -145,6 +149,19 @@ export function landScout(db: Db, run: RunWithPolicy, report: string, now: numbe
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   appendEvent(db, { source: "daemon", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { how: "report", report }, ts: now });
   run.state = "landed";
+}
+
+/** The worker has stopped and its processes were reaped: its temp directory goes too. A failure is logged and recorded, never fails the cleanup. */
+function removeTmp(deps: LandingDeps, run: RunWithPolicy): void {
+  if (!deps.removeRunTmp) return;
+  try {
+    const removed = deps.removeRunTmp(run.id);
+    if (removed === "not_ours") deps.log(`cleanup ${run.task_id}: the run's temp directory belongs to another run or home; left in place`);
+  } catch (error) {
+    const message = (error as Error).message;
+    deps.log(`cleanup ${run.task_id}: the run's temp directory was not removed: ${message}`);
+    tx(deps.db, () => appendEvent(deps.db, { source: "daemon", kind: "run.tmp_remove_failed", runId: run.id, taskId: run.task_id, payload: { error: message }, ts: deps.now() }));
+  }
 }
 
 /**
@@ -228,7 +245,10 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
     }
   });
   deps.kickJournal();
-  if (outcome.outcome === "removed") await deps.closeWorkspace(run.id).catch(() => undefined);
+  if (outcome.outcome === "removed") {
+    removeTmp(deps, run);
+    await deps.closeWorkspace(run.id).catch(() => undefined);
+  }
   const after = getRunWithPolicy(db, run.id);
   return { ...outcome, run: run.id, task: run.task_id, state: after?.state ?? run.state };
 }
