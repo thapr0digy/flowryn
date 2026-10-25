@@ -62,7 +62,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   | verifying | passed | waiting_checks |
   | verifying | `error`, and startup recovery requeued it | queued, following the rerun |
   | verifying | a step exited non-zero, first time at this head | sent_back: the ship stage starts again with the step, its exit and its last 40 lines as the steer |
-  | verifying | a timeout, an unrequeued `error`, a failure with no failing step, or a second failure at this head | held (`verify_timeout`, `verify_error`, `verify_failed`) |
+  | verifying | a timeout (the run's deadline, or a step whose every attempt hung past `verify_step_timeout_min`: `endedAtDeadline`), an unrequeued `error`, a failure with no failing step, or a second failure at this head | held (`verify_timeout`, `verify_error`, `verify_failed`) |
   | waiting_checks | the watcher's PR evidence shows no pending check at the head | the merge, through the merge path |
   | waiting_checks | checks pending, or the PR head moved, for over 6 h | held (`checks_timeout`, `head_moved`) |
   | merging | its merge is proven | merged |
@@ -73,7 +73,7 @@ The user's answer in the design review (q78): a verify that fails because a step
 - **The merge** is the `merge` verb's own path, `src/policy/merge-path.ts`. `mergeable`, `applyMerge` and `settleMerge` are shared with the verb, and `prepareDaemonMerge` is the verb's prepare without a harness channel. The caller is `DAEMON_CALLER` (`{ role: "daemon" }`, a type only the daemon process constructs, not a `Role`), so `chooseApproval` finds no leader channel and uses a standing human approval (`flowryn approve`) if there is one, else the yolo posture: channel `yolo`. `checkGate` is unchanged. `merge.requested` has source `daemon` and `by: auto` (the verb's carry `by: leader` or `human`). Under channel `yolo` the run lands `by: auto` whoever proves the merge, its own settle or the watcher after a restart (`recordMergeResult` looks the merge up in `auto_merges`); one that used a standing human approval lands `by: other`, so a `landed` item reports it.
 - **Gate refusals.** `checks_pending`, `forge_unavailable`, `merge_in_flight`, `not_ready` and `head_moved` mean "not yet": the next pass tries again, and `head_moved` holds after 6 h. A stale read is recorded as the verb's is and tried again. Any other code holds with the gate's message and its help as the next command (`red_checks` names the `--allow-red` waiver).
 - **Items.**
-  - New `auto_merge_held` (P1, actionable, in `LEADER_WAKE_KINDS` and the away wake). Its line is `Auto-merge held: <title> (<task>): <reason>; <next command>`. A landing, a send-back and a redelivery resolve it.
+  - New `auto_merge_held` (P1, actionable, in `LEADER_WAKE_KINDS` and the away wake). Its line is `Auto-merge held: <title> (<task>): <reason>; <next command>`. It is named in the leader's follow-up wake line (`an auto-merge is held`). A landing, a send-back and a redelivery resolve it.
   - `pr_ready` still opens. Its line ends with the progress, kept current: `; auto-merge: verify queued (vq7, 2 of 3)`, `verifying (v41)`, `verify v41 passed, waiting on checks`, `merging (mg12)`, `held (red_checks)`. A queued row's place moving rewrites the line with an `auto_merge.queue_moved` event (its request, position and queue length); a steady queue writes nothing.
   - `LEADER_WAKE_SQL` skips a yolo `pr_ready` while its run has a live auto-merge, so the leader takes no turn for it.
   - A merge landed `by: auto` opens no `landed` item, only `yolo_merged` (info).
