@@ -24,6 +24,20 @@ export interface ContractDelivery {
   lastStage?: { id: string; pools: string[] };
   /** The text is that stage's own, which has already started. */
   inLastStage?: boolean;
+  /** The worker's harness, which names the shell timeout a foreground pipeline wait needs. */
+  harness?: HarnessId;
+}
+
+/** Each harness's shell timeout that outlasts no-mistakes' default 8-minute --wait (Claude's Bash defaults to 2 minutes). */
+const WAIT_TIMEOUT: Record<HarnessId, string> = { claude: "Bash timeout 600000", pi: "bash timeout 600" };
+
+/** The pipeline waits in the foreground: a backgrounded call leaves the worker idle and costs a wake per return (docs/notes/2026-10-23-workers-wait-on-fn.md). */
+function waitLines(d: ContractDelivery): string[] {
+  const timeout = d.harness ? WAIT_TIMEOUT[d.harness] : "a 10-minute shell timeout";
+  return [
+    `  Drive it with ONE foreground no-mistakes axi run --wait per call (${timeout}); never background it or poll axi status.`,
+    "  A call that returns on elapsed wait, not a gate or outcome: run the same call again at once. After respond, reattach with axi run --wait.",
+  ];
 }
 
 /** A no-mistakes ship's pipeline runs under its last stage's slots: start that stage first. */
@@ -46,6 +60,7 @@ export function deliveryLines(d: ContractDelivery): string[] {
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
     ...beginLines(d),
+    ...waitLines(d),
     "  An ask-user finding: $FLOWRYN_BIN ask --nomistakes --options <its choices> --blocks <what waits> --body-file - with it; never answer it yourself.",
     "  A rule may settle it at once: then act on the steer it names.",
     `  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/${d.defaultBranch}, resolve, commit, plain git push, then run the pipeline again.`,

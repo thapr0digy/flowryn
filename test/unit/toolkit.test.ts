@@ -309,6 +309,41 @@ describe("rule: leader-shell (the Pi leader's gate, moved from the bridge)", () 
   });
 });
 
+function background(command: string, over: Partial<ToolCall> = {}) {
+  return toolkitVerdict(call("Bash", { command, run_in_background: true }, over), PATHS);
+}
+
+describe("rule: pipeline (no-mistakes waits in the foreground)", () => {
+  test.each([
+    "no-mistakes axi run --intent 'ship it'",
+    "no-mistakes axi run",
+    "no-mistakes axi respond --action fix --findings f1",
+    "cd /work/repo && no-mistakes axi run --wait 8m",
+    "cd /work/repo; no-mistakes axi run --intent \"$(cat $TMPDIR/intent.txt)\" 2>&1 | tail -40",
+  ])("denies a backgrounded %s", (cmd) => {
+    const v = background(cmd);
+    expect(v?.rule).toBe("pipeline");
+    expect(v?.tool).toBe("no-mistakes axi run --wait");
+    expect(v?.reason).toContain("Bash timeout 600000");
+  });
+
+  test("the same commands in the foreground pass", () => {
+    expect(ruleOf("no-mistakes axi run --intent 'ship it'")).toBeNull();
+    expect(ruleOf("no-mistakes axi respond --action fix")).toBeNull();
+    expect(toolkitVerdict(call("Bash", { command: "no-mistakes axi run", run_in_background: false }), PATHS)).toBeNull();
+  });
+
+  test("other background jobs and other no-mistakes verbs pass", () => {
+    expect(background("bun test > $TMPDIR/full.log 2>&1")).toBeNull();
+    expect(background("no-mistakes axi status")).toBeNull();
+    expect(background("echo no-mistakes axi run")).toBeNull();
+  });
+
+  test("a leader is held to it too", () => {
+    expect(background("no-mistakes axi run", { role: "leader" })?.rule).toBe("pipeline");
+  });
+});
+
 describe("accepted misses (confused-agent threat model)", () => {
   test.each(["G=gh; $G pr list", "alias g=gh; g pr list", "./scripts/release.sh", "python -c 'import subprocess; subprocess.run([\"gh\"])'", "make release", "npm run publish", "echo Z2g= | base64 -d | sh"])("does not see %s", (cmd) => {
     expect(ruleOf(cmd)).toBeNull();

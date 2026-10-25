@@ -191,6 +191,19 @@ describe("worker contract text", () => {
     for (const mode of ["direct-PR", "local-only"] as const) expect(workerContract("claude", STYLE_BLOCK, { kind: "ship", mode, defaultBranch: "trunk" })).not.toContain("merge conflicts");
   });
 
+  test("a no-mistakes ship drives the pipeline with one foreground --wait call, with its harness's shell timeout; other modes do not carry it", () => {
+    const nm: ContractDelivery = { kind: "ship", mode: "no-mistakes", defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] } };
+    const drive = (timeout: string) => `  Drive it with ONE foreground no-mistakes axi run --wait per call (${timeout}); never background it or poll axi status.`;
+    expect(workerContract("claude", STYLE_BLOCK, { ...nm, harness: "claude" }).split("\n")).toContain(drive("Bash timeout 600000"));
+    expect(workerContract("pi", null, { ...nm, harness: "pi" }).split("\n")).toContain(drive("bash timeout 600"));
+    expect(workerContract("claude", null, nm).split("\n")).toContain(drive("a 10-minute shell timeout"));
+    expect(workerContract("claude", null, nm)).toContain("run the same call again at once. After respond, reattach with axi run --wait.");
+    // The wait follows the stage begin, so the pipeline it drives already holds its slot.
+    const lines = workerContract("claude", null, nm).split("\n");
+    expect(lines.findIndex((l) => l.includes("Drive it with ONE"))).toBeGreaterThan(lines.findIndex((l) => l.includes("stage begin ship")));
+    for (const mode of ["direct-PR", "local-only"] as const) expect(workerContract("claude", null, { kind: "ship", mode, defaultBranch: "main" })).not.toContain("--wait");
+  });
+
   test("the prompt line is one short line that points at the full task", () => {
     expect(promptLine("scout", "t1", "/r/task.md")).toBe("Flowryn scout t1. Your full task is in /r/task.md; read it first, then do it.");
   });
