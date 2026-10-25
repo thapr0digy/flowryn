@@ -107,13 +107,13 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("migration 34 gives every delivery a carried_from, empty for the ones it finds", () => {
+  test("migration 35 gives every delivery a carried_from, empty for the ones it finds", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 33));
+    migrate(db, MIGRATIONS.slice(0, 34));
     db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'pr', 'https://github.com/acme/web/pull/1', 'abc', 1)").run();
-    expect(migrate(db, MIGRATIONS, () => 5)).toEqual([34]);
+    expect(migrate(db, MIGRATIONS, () => 5)).toEqual([35]);
     expect(db.query("SELECT carried_from FROM artifacts WHERE id = 'a1'").get()).toEqual({ carried_from: null });
-    expect(db.query("SELECT name FROM schema_migrations WHERE version = 34").get()).toEqual({ name: "artifact-carried-from" });
+    expect(db.query("SELECT name FROM schema_migrations WHERE version = 35").get()).toEqual({ name: "artifact-carried-from" });
     db.close();
   });
 

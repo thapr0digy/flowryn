@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
-import { ForgeError, type Forge } from "../forge/types.ts";
+import { ForgeError, type Forge, type PullRequest } from "../forge/types.ts";
 import { deliveredOf, type Delivered } from "../lifecycle/delivery.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
@@ -18,6 +18,7 @@ import { applyNmObservation, applyPrObservation, headMoveRecorded, noteMergedAft
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 import { applyFeedback, openInlineThreads } from "../reconcile/reviews.ts";
 import { feedbackItems } from "../forge/feedback.ts";
+import type { AutoMergeDelivery } from "../verify/auto-merge.ts";
 
 /**
  * The delivery watchers (design section 4, src/watch): GitHub PR state, head
@@ -56,6 +57,10 @@ export interface DeliveryWatcherDeps {
   kickScheduler(): void;
   /** The project's verify policy identity under today's config, or null when it has no verify steps (src/verify/policy.ts); absent: none. */
   verifyPolicy?(projectId: string): string | null;
+  /** A pass finished: what it read may move a yolo auto-merge on (src/verify/auto-merge.ts). */
+  passed?(): void;
+  /** A delivery was carried to a new head: start its yolo auto-merge as a deliver does (startAutoMerge); absent: none. */
+  autoMerge?(run: RunWithPolicy, delivery: AutoMergeDelivery, now: number): void;
   /** `[upkeep] steer_reviews`: a delivered PR's reviews and comments steer its worker; off when absent. */
   steerReviews?(): boolean;
   /** `[upkeep] review_reraise_hours` in ms: an unanswered review thread is sent again after this long (0: never). */
@@ -169,6 +174,7 @@ export class DeliveryWatcher {
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
+    this.deps.passed?.();
   }
 
   private runs(sql: string, ...params: (string | number)[]): RunWithPolicy[] {
@@ -198,7 +204,15 @@ export class DeliveryWatcher {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
         const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
-        const carry = history === "descends" ? { proof: await this.cleanMergeOf(run, delivered.head, pr.headSha, pr.baseRef), verifyPolicy: this.deps.verifyPolicy?.(run.project_id) ?? null } : undefined;
+        const autoMerge = this.deps.autoMerge;
+        const carry =
+          history === "descends"
+            ? {
+                proof: await this.cleanMergeOf(run, delivered.head, pr.headSha, pr.baseRef),
+                verifyPolicy: this.deps.verifyPolicy?.(run.project_id) ?? null,
+                ...(autoMerge ? { autoMerge: (r: RunWithPolicy, moved: PullRequest, at: number) => autoMerge(r, { ref: delivered.ref, head: moved.headSha, prNumber: moved.number, headRef: moved.headRef, worktree: null }, at) } : {}),
+              }
+            : undefined;
         tx(db, () => noteForgeUp(db, "github", now()));
         const mergeSha = pr.state === "merged" ? pr.mergeSha : null;
         const observed = deliveryTransition(db, seen, mergeSha ? MERGED_PARTS : PR_PARTS, "pr_observation", "github", now(), (current) =>

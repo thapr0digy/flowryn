@@ -26,6 +26,7 @@ import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 import { landScout } from "./landing.ts";
+import { startAutoMerge } from "../verify/auto-merge.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -457,7 +458,18 @@ const deliver: VerbSpec = {
     if (outcome.ship) {
       const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now, outcome.carry ?? null);
       if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
-      return { data, hints: ["end your turn"] };
+      const ship = outcome.ship;
+      // An opted-in yolo project's delivery is verified and merged by the daemon (src/verify/auto-merge.ts).
+      const auto = startAutoMerge(
+        ctx.db,
+        ctx.config(),
+        run,
+        ship.kind === "pr"
+          ? { ref: ship.url, head: ship.pr.headSha, prNumber: ship.pr.number, headRef: ship.pr.headRef, worktree: null }
+          : { ref: `local:${run.branch}`, head: ship.head, prNumber: null, headRef: null, worktree: run.worktree_path },
+        now,
+      );
+      return { data: auto ? { ...data, auto_merge: auto.id } : data, hints: ["end your turn"] };
     }
     const delivered = outcome.report!;
     if (run.state === "ready") {

@@ -5,7 +5,7 @@ import { openItem, findOpenRunItem } from "../attention/items.ts";
 import type { GitHubConfig } from "../config/delivery.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
-import { appendEvent } from "../db/events.ts";
+import { appendEvent, type EventSource } from "../db/events.ts";
 import { canonicalPrUrl, parsePrUrl } from "../forge/github.ts";
 import { checksLine, ForgeError, type ChecksSummary, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
 import { getLease, getSession } from "../lease/lease.ts";
@@ -193,8 +193,22 @@ export type ApprovalChoice =
   | { kind: "grant"; grant: string; session: string }
   | { kind: "yolo" };
 
+/**
+ * The daemon's own merge (the yolo auto-merge, src/verify/auto-merge.ts): it
+ * brings no harness channel, so only a standing human record or the yolo
+ * posture can allow it. Never a token's role: nothing outside the daemon
+ * process can be it.
+ */
+export interface DaemonCaller {
+  role: "daemon";
+}
+
+export const DAEMON_CALLER: DaemonCaller = { role: "daemon" };
+
+export type MergeCaller = Caller | DaemonCaller;
+
 export interface MergeAsk {
-  caller: Caller;
+  caller: MergeCaller;
   /** The Pi extension's approval key, read from stdin (never from an environment). */
   approvalKey?: string;
   /** The head the Pi confirm showed you. */
@@ -457,8 +471,24 @@ export function latestMerge(db: Db, taskId: string): MergeRow | null {
   return db.query("SELECT * FROM merges WHERE task_id = ?1 ORDER BY requested_at DESC, rowid DESC LIMIT 1").get(taskId) as MergeRow | null;
 }
 
+/** Who asked for a merge, on its `merge.requested` event: the CLI verb (`by` its caller), or the daemon's auto-merge (`by: auto`). */
+export interface MergeRequester {
+  source: EventSource;
+  by: "leader" | "human" | "auto";
+}
+
 /** Record the merge request and move the run to merging. Call inside a transaction. */
-export function recordMergeRequest(db: Db, facts: MergeFacts, approvalId: string, channel: Channel, waived: string | null, method: string, now: number, localGreen: string | null = null): string {
+export function recordMergeRequest(
+  db: Db,
+  facts: MergeFacts,
+  approvalId: string,
+  channel: Channel,
+  waived: string | null,
+  method: string,
+  now: number,
+  localGreen: string | null = null,
+  requester: MergeRequester = { source: "cli", by: "leader" },
+): string {
   const next = Number(getMeta(db, "next_merge_no") ?? "1");
   setMeta(db, "next_merge_no", String(next + 1));
   const id = `mg${next}`;
@@ -468,11 +498,11 @@ export function recordMergeRequest(db: Db, facts: MergeFacts, approvalId: string
   ).run(id, facts.run.task_id, facts.ref, facts.head, approvalId, now, method, waived ? `waived ${waived}` : null, localGreen);
   db.query("UPDATE runs SET state = 'merging', updated_at = ?2 WHERE id = ?1").run(facts.run.id, now);
   appendEvent(db, {
-    source: "cli",
+    source: requester.source,
     kind: "merge.requested",
     runId: facts.run.id,
     taskId: facts.run.task_id,
-    payload: { merge: id, ref: facts.ref, head: facts.head, approval: approvalId, channel, waived, local_green: localGreen, method, checks: facts.checks ? checksLine(facts.checks) : null },
+    payload: { merge: id, ref: facts.ref, head: facts.head, approval: approvalId, channel, waived, local_green: localGreen, method, checks: facts.checks ? checksLine(facts.checks) : null, by: requester.by },
     ts: now,
   });
   return id;
@@ -545,12 +575,16 @@ export async function proveLocal(git: GitRunner, project: ProjectRow, head: stri
  * follows, outside this transaction), or, if it already ended, is kept as a
  * divergence (noteMergedAfterEnd). Unproven: the run stays merging, the
  * task is not landed, and a P1 says so. Refused: the run is ready again.
- * Call inside a transaction.
+ * A merge the auto-merge asked for under yolo lands `by: auto` whoever proves
+ * it (its own settle, or the watcher after a restart); its yolo_merged item
+ * reports it. One that used a standing human approval lands `by: other`, so a
+ * landed item reports it instead. Call inside a transaction.
  */
 export function recordMergeResult(db: Db, run: RunWithPolicy, mergeId: string, result: MergeResultState, now: number, by: LandedBy = "other"): void {
   const merge = db.query("SELECT * FROM merges WHERE id = ?1").get(mergeId) as MergeRow | null;
   if (!merge || merge.state === "merged" || merge.state === "refused") return;
   const approval = db.query("SELECT channel FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: Channel } | null;
+  if (db.query("SELECT 1 FROM auto_merges WHERE merge_id = ?1").get(mergeId)) by = approval?.channel === "yolo" ? "auto" : "other";
   if (result.state === "merged") {
     db.query("UPDATE merges SET state = 'merged', merge_sha = ?2, proven_at = ?3, checked_at = ?3, detail = COALESCE(detail || '; ', '') || ?4 WHERE id = ?1").run(mergeId, result.sha, now, result.detail);
     const delivered = isTerminal(run.state) ? deliveredOf(db, run.task_id) : null;

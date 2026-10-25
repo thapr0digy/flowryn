@@ -223,7 +223,7 @@ describe("launching on an account", () => {
   const run = (dir: string): RunContext => ({
     runId: "r1", taskId: "t1", kind: "ship", worktree: dir, projectPath: dir, runDir: dir, sessionId: "s1",
     instructionsFile: join(dir, "task.md"), contractFile: join(dir, "contract.md"), promptLine: "go", flowrynBin: "/bin/flowryn",
-    binary: "/bin/claude", daemonSocket: "/s", writable: [], readOnly: [], permissionsDeny: [],
+    binary: "/bin/claude", daemonSocket: "/s", tmpDir: join(dir, "tmp"), writable: [], readOnly: [], permissionsDeny: [],
   });
 
   test("a pinned Claude login gets its config dir and unsets the credentials that outrank it", () => {

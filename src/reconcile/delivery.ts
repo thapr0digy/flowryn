@@ -46,7 +46,7 @@ export interface ObservationOptions {
   /** How the PR head moved from the delivered head (headHistory), when the watcher asked git; absent reads as unknown. */
   history?: HeadHistory;
   /** Whether the moved head is the delivered one plus only clean merges of main (cleanMainMerge), asked when it descends. */
-  carry?: { proof: CleanMerge; verifyPolicy: string | null };
+  carry?: { proof: CleanMerge; verifyPolicy: string | null; autoMerge?(run: RunWithPolicy, pr: PullRequest, now: number): void };
 }
 
 /** The start every summary of one head move shares, whatever its history tag. */
@@ -181,6 +181,8 @@ export function applyPrObservation(
     if (carry?.proof.ok && carryDelivery(db, run, delivered, pr, checks, { from: delivered.head, steps: carry.proof.steps, verifyPolicy: carry.verifyPolicy }, now)) {
       current = deliveredOf(db, run.task_id) ?? delivered;
       carried = true;
+      // The carried head is a delivery: an opted-in yolo project's auto-merge follows it as it follows a deliver.
+      carry.autoMerge?.(run, pr, now);
     } else {
       const why = !carry ? null : carry.proof.ok ? "only routine work (yolo, not sensitive) carries a clean merge of main" : `not only a clean merge of main (${carry.proof.why})`;
       headMoved(db, run, delivered, pr, opts.history ?? "unknown", why, now);

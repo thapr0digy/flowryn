@@ -8,7 +8,9 @@ import { QUESTION_KINDS } from "./items.ts";
  * follows. A turn with no turn end (an interrupt, a dropped hook, an API
  * error) leaves it carried, and the next turn start marks it `lost`, so it is
  * carried again. An informational item drops to the board after three
- * carries that were never presented.
+ * carries that were never presented. A Claude prompt taken into a running
+ * turn (a background notice, a message typed while busy) starts no turn, so
+ * it loses nothing.
  *
  * Each carry names the turn it expects to appear in: a digest and a Stop
  * continuation belong to the running turn; a waiter, a trigger and a

@@ -7,6 +7,7 @@ import { tx } from "../db/db.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { runBounded } from "../runtime/bounded.ts";
 import { readIdentity, terminate, type ProcIdentity, type PsRunner, type TerminateOptions, type TerminateResult } from "../runtime/proc.ts";
+import { withRepoLock } from "../runtime/repo-lock.ts";
 import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
 import { appendEvent } from "../db/events.ts";
 import type { VerifyItem } from "./config.ts";
@@ -22,7 +23,8 @@ import { parseBunSummary, type TestCounts } from "./summary.ts";
  * environment (the steps of a parallel group at once), parse bun's test
  * summary from each step's output, copy the built binary out, record the
  * outcome, and remove the worktree. As many jobs run at once as the
- * validation pool allows (src/verify/start.ts). Besides the run's deadline, each step has
+ * validation pool allows (src/verify/start.ts); their worktree adds and removals in one
+ * repository take turns (src/runtime/repo-lock.ts). Besides the run's deadline, each step has
  * its own (src/verify/deadline.ts): at either, the step's process group is
  * listed into its log and killed, and a step killed at its own deadline runs
  * once more (docs/notes/2026-10-22-verify-reliability-per-xe.md). The job
@@ -319,7 +321,12 @@ function ownPath(root: string, path: string, leaf: "dir" | "wt"): boolean {
   return path.startsWith(root + sep) && pattern.test(path.slice(root.length + 1));
 }
 
+/** Under the repository's worktree lock (src/runtime/repo-lock.ts), like the add. */
 export async function removeWorktree(deps: Pick<VerifyDeps, "git" | "root" | "log">, v: Pick<Verification, "id" | "worktree_path" | "project_path">): Promise<void> {
+  await withRepoLock(v.project_path, () => removeWorktreeLocked(deps, v));
+}
+
+async function removeWorktreeLocked(deps: Pick<VerifyDeps, "git" | "root" | "log">, v: Pick<Verification, "id" | "worktree_path" | "project_path">): Promise<void> {
   if (!existsSync(v.worktree_path)) {
     await deps.git(["worktree", "prune"], v.project_path);
     return;
@@ -404,12 +411,20 @@ async function deadlineBlock(deps: VerifyDeps, pgid: number, why: string): Promi
   return `\n--- flowryn verify: killed at ${why}; its process group ${pgid} at that moment ---\n${table}\n---\n`;
 }
 
+const RUN_OUT = "timed out: the run's";
+
+/** Whether a finished step's last attempt was killed at a deadline: its own (each attempt hung) or the run's. */
+export function endedAtDeadline(step: Pick<VerifyStep, "attempts" | "hangs" | "detail">): boolean {
+  const hangs = step.hangs ?? 0;
+  return (hangs > 0 && hangs >= (step.attempts ?? 1)) || (step.detail?.includes(RUN_OUT) ?? false);
+}
+
 /**
  * Why a finished step ended as it did beyond its exit code, or null. `firstLog` is its first
  * attempt's log; `step.log` its last.
  */
 function stepDetail(step: VerifyStep, result: StepResult, deadline: StepDeadline | null, plan: VerifyPlan, firstLog: string, stoppedBy: string | null): string | null {
-  const runOut = `timed out: the run's ${duration(plan.timeoutMs)} were up`;
+  const runOut = `${RUN_OUT} ${duration(plan.timeoutMs)} were up`;
   const hangs = step.hangs ?? 0;
   const at = deadline ? deadlineLine(deadline) : "its deadline";
   if (hangs === 2) return `hung twice: killed at ${at} both times; process groups in ${firstLog} and ${step.log}`;
@@ -450,7 +465,8 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
     if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
-    const added = await deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path);
+    // One worktree change at a time per repository: concurrent adds collide in git itself.
+    const added = await withRepoLock(v.project_path, () => deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path));
     worktreeAdded = added.code === 0;
     if (job.aborted) return stoppedMidRun();
     if (!worktreeAdded) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });

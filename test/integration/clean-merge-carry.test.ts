@@ -105,6 +105,28 @@ describe("a clean merge of main into a delivered routine PR", () => {
   );
 
   test(
+    "an opted-in yolo auto-merge follows the carried head and lands it there with no merge asked",
+    async () => {
+      const gateDir = mkdtempSync(join(tmpdir(), "fw-carry-gate-"));
+      dirs.push(gateDir);
+      const gate = join(gateDir, "go");
+      // The verify waits on a file, so the delivered head cannot land before the clean merge of main is pushed.
+      const steps = [`while [ ! -f ${gate} ]; do sleep 0.1; done; ${STEPS[0]}`];
+      env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: `[projects.web]\nverify = ${JSON.stringify(steps)}\nauto_merge = true\n` });
+      const e = env;
+      const { run, branch } = await delivered(e);
+      const head = pushMergeOfMain(e, branch);
+
+      await waitUntil(() => query(e, "SELECT 1 FROM auto_merges WHERE head_sha = ?1", head).length > 0, 30_000, "an auto-merge of the carried head");
+      writeFileSync(gate, "");
+      await waitUntil(() => query(e, "SELECT 1 FROM auto_merges WHERE head_sha = ?1 AND state = 'merged'", head).length > 0, 90_000, "the carried head to auto-merge");
+      expect(query<{ state: string }>(e, "SELECT state FROM runs WHERE id = ?1", run).map((r) => r.state)).not.toContain("ready");
+      expect(query<{ head_sha: string }>(e, "SELECT head_sha FROM approvals WHERE action = 'merge'")).toEqual([{ head_sha: head }]);
+    },
+    { timeout: 150_000 },
+  );
+
+  test(
     "a merge of main that slips in an edit is not carried: today's divergence, naming why, and no verify",
     async () => {
       env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: VERIFY_CONFIG });

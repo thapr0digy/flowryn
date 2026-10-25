@@ -335,7 +335,7 @@ export function recordDelivery(db: Db, run: RunWithPolicy, verified: VerifiedPr 
       : { outcome: "local", branch: run.branch, head, commits: verified.commits, verified: "local", via },
     ts: now,
   });
-  resolveRunItems(db, run.id, ["worker_idle", "pr_closed", "checks_red"], "run.delivered", now);
+  resolveRunItems(db, run.id, ["worker_idle", "pr_closed", "checks_red", "auto_merge_held"], "run.delivered", now);
   openReadyItem(db, run, event.seq, line, now);
   if (verified.kind === "local") return { run: run.id, state: "ready", branch: run.branch, head, commits: verified.commits };
   return { run: run.id, state: "ready", pr: ref, head, ...(carried ? { carried_from: carried.from, verify_queued: queued ?? "-" } : {}) };

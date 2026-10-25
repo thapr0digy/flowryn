@@ -3,13 +3,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { parseConfig } from "../../src/config/config.ts";
 import type { ChecksSummary, PullRequest } from "../../src/forge/types.ts";
 import { deliveredOf, recordDelivery, type Carry } from "../../src/lifecycle/delivery.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { openGate, openMergeGate } from "../../src/lifecycle/stages.ts";
 import { insertApproval } from "../../src/policy/approvals.ts";
 import type { CleanMerge } from "../../src/policy/clean-merge.ts";
-import { applyPrObservation, type Applied } from "../../src/reconcile/delivery.ts";
+import { applyPrObservation, type Applied, type ObservationOptions } from "../../src/reconcile/delivery.ts";
+import { startAutoMerge } from "../../src/verify/auto-merge.ts";
+import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { insertRequest } from "../../src/verify/queue.ts";
 
 /**
@@ -49,15 +52,19 @@ function seed(policy: { yolo: number; sensitive: number }): void {
   });
 }
 
-function observe(proof: CleanMerge | undefined, verifyPolicy: string | null = POLICY, at = now + 60_000): Applied {
+function observe(proof: CleanMerge | undefined, verifyPolicy: string | null = POLICY, at = now + 60_000, autoMerge?: NonNullable<ObservationOptions["carry"]>["autoMerge"]): Applied {
   const delivered = deliveredOf(db, "t1")!;
   return tx(db, () =>
     applyPrObservation(db, getRunWithPolicy(db, "r1")!, delivered, { pr: pr(B), checks: GREEN }, new Set(), at, {
       nudgeConflicts: false,
       history: "descends",
-      ...(proof ? { carry: { proof, verifyPolicy } } : {}),
+      ...(proof ? { carry: { proof, verifyPolicy, ...(autoMerge ? { autoMerge } : {}) } } : {}),
     }),
   );
+}
+
+function delivery(head: string) {
+  return { ref: PR_URL, head, prNumber: 7, headRef: "ship", worktree: null };
 }
 
 function rows<T>(sql: string, ...params: string[]): T[] {
@@ -125,6 +132,23 @@ describe("a routine PR whose head moved by a clean merge of main", () => {
     expect(observe(CLEAN, null)).toEqual({ landed: false, carried: true });
     expect(rows("SELECT id FROM verify_queue")).toHaveLength(0);
     expect(rows<{ line: string }>("SELECT line FROM items WHERE kind = 'pr_ready'")[0]!.line).toEndWith("plus only a clean merge of main");
+  });
+
+  test("an opted-in yolo project's auto-merge follows the carried head, on the verify the carry queued", () => {
+    seed({ yolo: 1, sensitive: 0 });
+    const steps = ["bun test"];
+    const config = parseConfig(`[projects.web]\nverify = ${JSON.stringify(steps)}\nauto_merge = true\n`, dir);
+    const policy = verifyPolicyId({ steps, binary: null });
+    const before = tx(db, () => startAutoMerge(db, config, getRunWithPolicy(db, "r1")!, delivery(A), now))!;
+    observe(CLEAN, policy, now + 60_000, (run, moved, at) => void startAutoMerge(db, config, run, delivery(moved.headSha), at));
+    const merges = rows<{ id: string; head_sha: string; state: string; request_id: string | null }>("SELECT id, head_sha, state, request_id FROM auto_merges ORDER BY created_at");
+    expect(merges.map((m) => [m.id, m.head_sha, m.state])).toEqual([
+      [before.id, A, "superseded"],
+      [merges[1]!.id, B, "queued"],
+    ]);
+    const queued = rows<{ id: string }>("SELECT id FROM verify_queue WHERE head_sha = ?1", B);
+    expect(queued).toHaveLength(1);
+    expect(merges[1]!.request_id).toBe(queued[0]!.id);
   });
 
   test("a sign-off you gave stays bound to the head you saw: it is voided at the carried head", () => {

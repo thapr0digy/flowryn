@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { HarnessId } from "../harness/types.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
@@ -8,7 +8,7 @@ import { formatMs, steerStatus, type MessageRow } from "../lifecycle/steers.ts";
  * The harness contract suite (design section 5, "Contract tests gate every
  * harness version"): launch, capture the session id, observe busy and idle,
  * deliver while busy and while idle, interrupt, (Claude only) the toolkit's
- * live check, exit, resume, then a verified deliver. Every step runs against one real worker in a real Herdr session,
+ * live check, the worker's own temp dir, exit, resume, then a verified deliver. Every step runs against one real worker in a real Herdr session,
  * dispatched through a scratch flowrynd, so it exercises the same adapter,
  * hooks or extension, and reconciler as production.
  *
@@ -52,6 +52,10 @@ export interface ContractEnv {
   log(line: string): void;
   /** The directory holding the Claude worker's `.claude.json` ([workers.claude] config_dir, CLAUDE_CONFIG_DIR or HOME); null for Pi. */
   claudeStore: string | null;
+  /** The run's FLOWRYN_REPORT_DIR. */
+  reportDir(): string;
+  /** The TMPDIR the run's worker must see, in and out of its sandbox (src/lifecycle/run-tmp.ts). */
+  workerTmpDir(): string;
 }
 
 export interface ContractStep {
@@ -94,6 +98,9 @@ export function contractBody(harness: HarnessId, scripted: boolean): string {
       "bash perl -e 'sleep 120'",
       "bash $FLOWRYN_BIN ack m6",
       "say FOUR",
+      "bash $FLOWRYN_BIN ack m7",
+      `bash ${TMPDIR_COMMAND}`,
+      "say SEVEN",
       `bash mkdir -p "$FLOWRYN_REPORT_DIR" && echo 'contract ok' > "$FLOWRYN_REPORT_DIR/report.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/report.md"`,
       "say DONE",
     ];
@@ -248,6 +255,46 @@ export function hiddenToolsVerdict(offered: string[], enabled: boolean): { error
   return { error: null, detail: `none of its ${offered.length} deferred tools is claude-in-chrome` };
 }
 
+/** What the temp dir step has the worker run with its own shell tool: inside Claude's sandbox, when the user runs it. */
+const TMPDIR_COMMAND = 'echo "$TMPDIR" > "$FLOWRYN_REPORT_DIR/tmpdir.txt"';
+
+function sameDir(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The worker's shell sees its run's own TMPDIR
+ * (docs/notes/2026-10-22-give-every-worker-73.md): for Claude, the per-uid
+ * dir its sandbox derives from CLAUDE_CODE_TMPDIR, the same path an
+ * unsandboxed command inherits; never the shared /tmp/claude-<uid> or the
+ * user's own temp dir.
+ */
+const tmpDirStep: ContractStep = {
+  name: "temp dir",
+  typicalSeconds: 15,
+  async run(env, state) {
+    const id = await sendSteer(env, state, `Acknowledge this steer. Then run exactly this command with your shell tool: ${TMPDIR_COMMAND}. Then reply with the single word SEVEN and end your turn.`);
+    await waitAcked(env, id, LONG_MS);
+    const file = join(env.reportDir(), "tmpdir.txt");
+    const seen = await env.waitFor("the worker to write its $TMPDIR", LONG_MS, () => {
+      try {
+        return readFileSync(file, "utf8").trim() || null;
+      } catch {
+        return null;
+      }
+    });
+    await env.waitFor("idle again", LONG_MS, () => env.run().liveness === "idle");
+    const expected = env.workerTmpDir();
+    if (!sameDir(seen, expected)) throw new Error(`the worker's shell has TMPDIR ${seen}, not its run's own ${expected}`);
+    return `TMPDIR ${seen}${seen === expected ? "" : ` (${expected})`}; ${timings(env, id)}`;
+  },
+};
+
 /**
  * Claude only: the toolkit's live check (ship 2). A raw `gh` is denied by the
  * PreToolUse hook in bypassPermissions, and the bare-name `permissions.deny`
@@ -393,6 +440,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
       },
     },
     ...(harness === "claude" ? [toolkitStep] : []),
+    tmpDirStep,
     {
       name: "exit",
       typicalSeconds: 2,

@@ -17,6 +17,7 @@ import type { RunContext } from "../harness/types.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import type { HarnessProcess, HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate } from "../runtime/proc.ts";
+import { withRepoLock } from "../runtime/repo-lock.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
 import { configStaticLayers } from "../policy/static.ts";
@@ -26,6 +27,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
 import { markLost } from "./steers.ts";
+import { ensureRunTmp } from "./run-tmp.ts";
 import { ensureHarnessShim, ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
 import { claimOperation, confirmOperation, escalatedStart, getOperation, launchKind, openOperation, requestOperation, type OperationRow } from "./operations.ts";
 
@@ -241,6 +243,8 @@ export class Launcher {
     const spool = join(spoolDir(config.data_dir), run.id);
     ensureDir(spoolDir(config.data_dir), 0o700);
     ensureDir(spool, 0o700);
+    // The worker's own TMPDIR, the same path in and out of its sandbox (src/lifecycle/run-tmp.ts).
+    const tmp = ensureRunTmp({ root: workers.tmp_root, runId: run.id, stateDir: config.state_dir, harness: run.harness });
     const instructionsFile = join(runDir, "task.md");
     const contractFile = join(runDir, "contract.md");
     const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
@@ -267,7 +271,8 @@ export class Launcher {
       flowrynBin,
       binary,
       daemonSocket: this.deps.socketPath,
-      writable: [spool, reportDir, ...gitAccess.writable],
+      tmpDir: tmp.dir,
+      writable: [spool, reportDir, ...tmp.writable, ...gitAccess.writable],
       readOnly: [...gitAccess.readOnly, ...toolkit.denyWrite],
       permissionsDeny: toolkit.permissionsDeny,
       stagePlugin: skills.claudePlugin,
@@ -415,7 +420,7 @@ export class Launcher {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const exists = await this.deps.git(["-C", project.path, "rev-parse", "--verify", "--quiet", `refs/heads/${run.branch}`]);
     const args = exists.exitCode === 0 ? ["worktree", "add", path, run.branch] : ["worktree", "add", "-b", run.branch, path, run.base_sha];
-    const added = await this.deps.git(["-C", project.path, ...args]);
+    const added = await withRepoLock(project.path, () => this.deps.git(["-C", project.path, ...args]));
     if (added.exitCode !== 0) throw new Error(`git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`);
     return realpathSync(path);
   }

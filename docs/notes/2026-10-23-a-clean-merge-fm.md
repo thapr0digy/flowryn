@@ -42,6 +42,7 @@ Every call goes through the caller's bounded `GitRunner`. Git must be 2.38 or la
 
   The run stays `ready`, the merge gate stays open, and no steer is sent. The watcher kicks the scheduler, which drains the queue. Otherwise the divergence opens as before, and its summary names why: `, not carried: only routine work (yolo, not sensitive) carries a clean merge of main`, or `, not carried: not only a clean merge of main (<why>)`. A rewrite or unknown history keeps today's summary.
 - **`deliver`** (`src/lifecycle/worker.ts`): a worker that redelivers the same PR at such a head gets the same proof before the transaction. For routine work `recordDelivery` stamps `carried_from`, appends `run.head_carried` (`via: deliver`) and queues the verify. Its reply carries `carried_from` and `verify_queued`.
+- **Yolo auto-merge** (`src/verify/auto-merge.ts`, `[projects.<id>] auto_merge`): a carried head counts as a delivery. `deliver` already calls `startAutoMerge` after `recordDelivery`. On the watcher path, `applyPrObservation` calls the carry's `autoMerge` hook in the same transaction; the daemon wires it to `startAutoMerge`. That supersedes the live row at the old head and starts one at the new head on the verify the carry queued. Without the hook, the old row would be superseded as `redelivered` and nothing would merge the carried head.
 - **`flowryn show`**: `carried_from: <head> (the new head adds only a clean merge of main)`.
 - **Unchanged:** `checkGate` (the exact delivered head, and local green at exactly this head), `chooseApproval`, the conflict nudge, `sendBack`, sensitive and non-yolo work, and local-only deliveries.
 
@@ -51,7 +52,7 @@ Every call goes through the caller's bounded `GitRunner`. Git must be 2.38 or la
 
 ## Data
 
-Migration 34 (`artifact-carried-from`) adds `artifacts.carried_from TEXT`. The proof's steps live in the `run.head_carried` event.
+Migration 35 (`artifact-carried-from`) adds `artifacts.carried_from TEXT`. The proof's steps live in the `run.head_carried` event.
 
 ## Evidence
 
@@ -81,11 +82,13 @@ The payoff grows as the conflict hotspots go (`2026-10-22-remove-conflict-hotspo
   - the queued verify, its PATH and dedupe, and no request when the project has no steps;
   - a human record voided;
   - sensitive and non-yolo work kept on the old path with the reason, and so is a failed proof;
-  - the `deliver`-side carry, and a proof from another head that is ignored.
+  - the `deliver`-side carry, and a proof from another head that is ignored;
+  - an opted-in auto-merge: the old head's row is superseded, and the new head's row waits on the carried verify.
 - `test/integration/clean-merge-carry.test.ts` (real daemon, fake GitHub over a bare origin):
   - main moves and is merged into the PR branch; the watcher carries the delivery, the queued verify passes at the new head, and `merge` lands under yolo at that head;
+  - with `auto_merge = true`, the carried head auto-merges with no `merge` asked;
   - an evil merge keeps the divergence, queues no verify, and `merge` refuses `head_moved`.
-- `test/unit/db.test.ts`: migration 34.
+- `test/unit/db.test.ts`: migration 35.
 
 ## Choices
 

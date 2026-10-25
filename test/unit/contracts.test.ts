@@ -76,9 +76,9 @@ describe("contract cleanup", () => {
 });
 
 describe("contract suite", () => {
-  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, (Claude) toolkit, exit, resume, deliver", () => {
+  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, (Claude) toolkit, temp dir, exit, resume, deliver", () => {
     const pi = contractSteps("pi").map((s) => s.name);
-    expect(contractSteps("claude").map((s) => s.name)).toEqual([...pi.slice(0, pi.indexOf("exit")), "toolkit", ...pi.slice(pi.indexOf("exit"))]);
+    expect(contractSteps("claude").map((s) => s.name)).toEqual([...pi.slice(0, pi.indexOf("temp dir")), "toolkit", ...pi.slice(pi.indexOf("temp dir"))]);
     expect(pi).toEqual([
       "launch",
       "session id",
@@ -88,6 +88,7 @@ describe("contract suite", () => {
       "deliver while idle",
       "urgent while busy",
       "interrupt",
+      "temp dir",
       "exit",
       "resume",
       "deliver",
@@ -97,7 +98,7 @@ describe("contract suite", () => {
   test("the scripted Pi worker acknowledges every steer the suite sends, each long command's before it runs", () => {
     const script = contractBody("pi", true).split("FLOWRYN-SCRIPT: ")[1]!.split(" ;; ");
     const acks = script.filter((s) => s.startsWith("bash $FLOWRYN_BIN ack ")).map((s) => s.split(" ").at(-1));
-    expect(acks).toEqual(["m1", "m2", "m3", "m4", "m5", "m6"]);
+    expect(acks).toEqual(["m1", "m2", "m3", "m4", "m5", "m6", "m7"]);
     expect(script.indexOf("bash $FLOWRYN_BIN ack m3")).toBe(script.indexOf("bash perl -e 'sleep 60'") - 1);
     expect(script.indexOf("bash $FLOWRYN_BIN ack m5")).toBe(script.indexOf("bash perl -e 'sleep 120'") - 1);
   });
@@ -140,7 +141,7 @@ describe("contract progress", () => {
     expect(contractEstimateSeconds("pi")).toBeGreaterThan(60);
     expect(contractEstimateSeconds("pi")).toBeLessThan(contractEstimateSeconds("claude"));
     const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
-    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 23 steps, about ${minutes} min`);
+    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 25 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");
   });
 });
@@ -162,6 +163,8 @@ function slowPiWorker(startMs: number): { env: ContractEnv; asked: string[] } {
     harness: "pi",
     scripted: false,
     claudeStore: null,
+    reportDir: () => "/nonexistent/report",
+    workerTmpDir: () => "/nonexistent/tmp",
     async call(verb, args) {
       const now = Date.now();
       const id = `m${steers.length + 1}`;
