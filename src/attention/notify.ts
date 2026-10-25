@@ -5,6 +5,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
+import { scopeIds, taskScope } from "../leader/scope.ts";
 
 /**
  * OS and Herdr notifications (design section 9): a P0 at once, coalesced
@@ -35,6 +36,8 @@ interface Pending {
   id: string;
   lane: string;
   line: string;
+  task_id: string | null;
+  run_id: string | null;
 }
 
 const DAY_MS = 86_400_000;
@@ -69,9 +72,24 @@ function lastSent(db: Db, kind: "p0" | "batch"): number | null {
   return row.at;
 }
 
-function summary(items: Pending[]): string {
+/**
+ * The notification text. Notifications reach you, not a model, so they cover every scope; with more
+ * than one scope each names the scope of its first item (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+ */
+function summary(items: Pending[], label: (item: Pending) => string): string {
   const first = items[0]!;
-  return items.length === 1 ? first.line : `${first.line} (+${items.length - 1} more: flowryn board)`;
+  const line = `${label(first)}${first.line}`;
+  return items.length === 1 ? line : `${line} (+${items.length - 1} more: flowryn board)`;
+}
+
+/** "[work] " for an item of the work scope, when config has more than one scope; "" otherwise. */
+function scopeLabeler(db: Db, config: FlowrynConfig): (item: Pending) => string {
+  if (scopeIds(config).length < 2) return () => "";
+  return (item) => {
+    const taskId = item.task_id ?? (item.run_id ? ((db.query("SELECT task_id FROM runs WHERE id = ?1").get(item.run_id) as { task_id: string } | null)?.task_id ?? null) : null);
+    const scope = taskId ? taskScope(db, config, taskId) : null;
+    return scope && scope !== "global" ? `[${scope}] ` : "";
+  };
 }
 
 export class NotifyPump {
@@ -104,40 +122,41 @@ export class NotifyPump {
     if (channels.length === 0) return [];
     const now = this.deps.now();
     const ageMs = leaderTiming(this.deps.config()).age_ms;
+    const label = scopeLabeler(db, this.deps.config());
     return tx(db, () => {
       const sends: { channels: string[]; title: string; text: string }[] = [];
       const p0 = db
         .query(
-          `SELECT id, lane, line FROM items WHERE lane = 'P0' AND class = 'actionable' AND state IN ('open','presented')
+          `SELECT id, lane, line, task_id, run_id FROM items WHERE lane = 'P0' AND class = 'actionable' AND state IN ('open','presented')
              AND (last_notified_at IS NULL OR last_notified_at <= ?1) ORDER BY opened_at`,
         )
         .all(now - cfg.p0_renotify_min * 60_000) as Pending[];
       const lastP0 = lastSent(db, "p0");
       if (p0.length > 0 && (lastP0 === null || now - lastP0 >= cfg.p0_coalesce_s * 1_000)) {
-        sends.push(this.record(p0, "p0", channels, `Flowryn: ${p0.length === 1 ? "a P0 needs you" : `${p0.length} P0s need you`}`, now));
+        sends.push(this.record(p0, "p0", channels, `Flowryn: ${p0.length === 1 ? "a P0 needs you" : `${p0.length} P0s need you`}`, now, label));
       }
       const batch = db
         .query(
-          `SELECT id, lane, line FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented') AND kind NOT IN ('worker_question','review_feedback')
+          `SELECT id, lane, line, task_id, run_id FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented') AND kind NOT IN ('worker_question','review_feedback')
              AND (last_notified_at IS NULL OR (opened_at <= ?1 AND last_notified_at <= ?2)) ORDER BY opened_at`,
         )
         .all(now - ageMs, now - DAY_MS) as Pending[];
       const lastBatch = lastSent(db, "batch");
       if (batch.length > 0 && (lastBatch === null || now - lastBatch >= cfg.min_interval_min * 60_000)) {
-        sends.push(this.record(batch, "batch", channels, `Flowryn: ${batch.length === 1 ? "1 item needs you" : `${batch.length} items need you`}`, now));
+        sends.push(this.record(batch, "batch", channels, `Flowryn: ${batch.length === 1 ? "1 item needs you" : `${batch.length} items need you`}`, now, label));
       }
       return sends;
     });
   }
 
-  private record(items: Pending[], kind: "p0" | "batch", channels: string[], title: string, now: number) {
+  private record(items: Pending[], kind: "p0" | "batch", channels: string[], title: string, now: number, label: (item: Pending) => string) {
     const { db } = this.deps;
     const id = nextNotificationId(db);
     const ids = items.map((i) => i.id);
     db.query("INSERT INTO notifications (id, item_ids, channel, sent_at) VALUES (?1, ?2, ?3, ?4)").run(id, JSON.stringify(ids), `${kind}:${channels.join("+")}`, now);
     for (const item of ids) db.query("UPDATE items SET last_notified_at = ?2 WHERE id = ?1").run(item, now);
     appendEvent(db, { source: "daemon", kind: "notification.sent", payload: { notification: id, kind, items: ids, channels }, ts: now });
-    return { channels, title, text: summary(items) };
+    return { channels, title, text: summary(items, label) };
   }
 
   private async deliver(channels: string[], title: string, text: string): Promise<void> {

@@ -183,6 +183,7 @@ const diagExportVerb: VerbSpec = {
   flags: { "include-text": { type: "boolean", help: "include decision, gate and event text" } },
   kind: "read",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target" },
   read(ctx, args) {
     return { data: diagExport(ctx, stringArg(args, "target")!, boolArg(args, "include-text")) };
   },

@@ -107,16 +107,16 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("migration 35 adds the task's own model and effort to runs and plan phases, null for the rows already there", () => {
+  test("migration 36 adds the task's own model and effort to runs and plan phases, null for the rows already there", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 34));
+    migrate(db, MIGRATIONS.slice(0, 35));
     db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('p', 'u', '/p', 'main', 'no-mistakes')");
     db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('t1', 'p', 'ship', 'no-mistakes', 0, 'fix', 1)");
     db.query(
       `INSERT INTO runs (id, task_id, harness, harness_version, model, state, liveness, workflow, stage, agent_session, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
        VALUES ('r1', 't1', 'claude', 'v', 'opus', 'running', 'busy', 'fix', 'build', 's', '/w', 'b', 'abc', 'h', 1, 1)`,
     ).run();
-    expect(migrate(db, MIGRATIONS.slice(0, 35))).toEqual([35]);
+    expect(migrate(db, MIGRATIONS.slice(0, 36))).toEqual([36]);
     expect(db.query("SELECT model, model_pin, effort_pin FROM runs WHERE id = 'r1'").get()).toEqual({ model: "opus", model_pin: null, effort_pin: null });
     const columns = (db.query("PRAGMA table_info(plan_phases)").all() as { name: string }[]).map((c) => c.name);
     expect(columns).toEqual(expect.arrayContaining(["model", "effort"]));

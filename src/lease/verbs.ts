@@ -4,8 +4,10 @@ import { appendEvent } from "../db/events.ts";
 import { grantsConfig } from "../config/leader.ts";
 import { readIdentity } from "../runtime/proc.ts";
 import { applyRepin, planRepin, processCwd, type RepinPlan } from "./repin.ts";
-import { attachProcess, claim, closeSession, getLease, getSession, openSession, openSessions, type LeaderHarness } from "./lease.ts";
+import { allLeases, attachProcess, claim, closeSession, getLease, getSession, openSession, openSessions, UNCONFIRMED_SCOPE, type LeaderHarness, type LeaseRow } from "./lease.ts";
 import { wakeBlockedLine } from "../leader/wake-state.ts";
+import { accountById, defaultAccount } from "../config/accounts.ts";
+import { sessionProjectsDir } from "../leader/login.ts";
 
 /**
  * The lease verbs (design section 10). `lead.*` are internal: `flowryn lead`
@@ -37,6 +39,7 @@ const leadOpen: VerbSpec = {
     harness: { type: "string", help: "claude or pi" },
     pane: { type: "string", help: "the Herdr pane the leader runs in (HERDR_PANE_ID)" },
     cwd: { type: "string", help: "the leader's working directory" },
+    account: { type: "string", help: "the account whose login the leader runs on; its scope is the session's (default: the harness's default account)" },
   },
   kind: "mutation",
   roles: ["human"],
@@ -45,8 +48,19 @@ const leadOpen: VerbSpec = {
   apply(ctx, args) {
     const harness = stringArg(args, "harness");
     if (harness !== "claude" && harness !== "pi") throw new FlowrynError("bad_args", "--harness must be claude or pi");
-    const opened = openSession(ctx.db, { harness: harness as LeaderHarness, pane: stringArg(args, "pane") ?? null, cwd: stringArg(args, "cwd") ?? null, now: ctx.now() });
-    return { data: { session: opened.session, token: opened.token } };
+    // The scope comes from config's account, never from the caller's word (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+    const named = stringArg(args, "account");
+    const account = named ? accountById(ctx.config(), named) : defaultAccount(ctx.config(), harness);
+    if (account.harness !== harness) throw new FlowrynError("bad_args", `account ${account.id} is a ${account.harness} account, not ${harness}`);
+    const opened = openSession(ctx.db, {
+      harness: harness as LeaderHarness,
+      pane: stringArg(args, "pane") ?? null,
+      cwd: stringArg(args, "cwd") ?? null,
+      now: ctx.now(),
+      account: account.id,
+      scope: account.scope,
+    });
+    return { data: { session: opened.session, token: opened.token, account: account.id, scope: account.scope } };
   },
 };
 
@@ -57,6 +71,7 @@ const leadAttach: VerbSpec = {
   flags: { pid: { type: "int", help: "the harness process id" } },
   kind: "mutation",
   roles: ["hook"],
+  scope: { kind: "self" },
   ephemeral: true,
   async prepare(_ctx, args) {
     const pid = intArg(args, "pid");
@@ -79,6 +94,7 @@ const leadClose: VerbSpec = {
   flags: { reason: { type: "string", help: "why, one word" } },
   kind: "mutation",
   roles: ["hook"],
+  scope: { kind: "self" },
   ephemeral: true,
   apply(ctx, args) {
     const session = sessionOfCaller(ctx);
@@ -98,25 +114,40 @@ const leaderStatus: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  // Sessions and leases name no task; a scoped caller sees its own scope's.
+  scope: { kind: "list" },
   read(ctx) {
-    const lease = getLease(ctx.db);
-    const holder = lease.session_id ? getSession(ctx.db, lease.session_id) : null;
-    const sessions = openSessions(ctx.db).map((s) => ({
-      session: s.session_id,
-      harness: s.harness,
-      pane: s.pane_id ?? "-",
-      lease: s.session_id === lease.session_id ? "holder" : "read-only",
-      busy: s.busy === 1 && s.busy_until !== null && s.busy_until > ctx.now ? "yes" : "no",
-      you: s.user_inactive_since === null ? "active" : "inactive",
-      seen: age(ctx.now, s.last_event_at),
-    }));
+    const mine = (scope: string) => ctx.caller.scope === undefined || ctx.caller.scope === scope;
+    const leases = allLeases(ctx.db).filter((l) => mine(l.scope));
+    const holders = new Set(leases.map((l) => l.session_id).filter((s): s is string => s !== null));
+    const sessions = openSessions(ctx.db)
+      .filter((s) => mine(s.scope) || s.session_id === ctx.caller.session)
+      .map((s) => ({
+        session: s.session_id,
+        harness: s.harness,
+        account: s.account ?? "-",
+        scope: s.scope === UNCONFIRMED_SCOPE ? "unconfirmed" : s.scope,
+        pane: s.pane_id ?? "-",
+        lease: holders.has(s.session_id) ? "holder" : "read-only",
+        busy: s.busy === 1 && s.busy_until !== null && s.busy_until > ctx.now ? "yes" : "no",
+        you: s.user_inactive_since === null ? "active" : "inactive",
+        seen: age(ctx.now, s.last_event_at),
+      }));
+    const view = (lease: LeaseRow) => {
+      const holder = lease.session_id ? getSession(ctx.db, lease.session_id) : null;
+      return lease.session_id
+        ? { scope: lease.scope, session: lease.session_id, harness: holder?.harness ?? lease.harness ?? "-", pane: holder?.pane_id ?? "-", epoch: lease.epoch, heartbeat: age(ctx.now, lease.heartbeat_at) }
+        : { scope: lease.scope, session: "vacant", epoch: lease.epoch };
+    };
+    const own = ctx.caller.scope && ctx.caller.scope !== UNCONFIRMED_SCOPE ? getLease(ctx.db, ctx.caller.scope) : null;
+    const shown = own ? [own] : leases;
+    const wake = shown.map((l) => wakeBlockedLine(ctx.db, l.session_id, ctx.now)).find((line) => line !== null) ?? "-";
     return {
       data: {
-        lease: lease.session_id
-          ? { session: lease.session_id, harness: holder?.harness ?? lease.harness ?? "-", pane: holder?.pane_id ?? "-", epoch: lease.epoch, heartbeat: age(ctx.now, lease.heartbeat_at) }
-          : { session: "vacant", epoch: lease.epoch },
+        // One scope's lease reads as before; several are listed by scope.
+        ...(shown.length > 1 ? { leases: shown.map(view) } : { lease: shown.length === 1 ? view(shown[0]!) : { session: "vacant", epoch: 0 } }),
         you: ctx.caller.session ?? ctx.caller.role,
-        wake: wakeBlockedLine(ctx.db, lease.session_id, ctx.now) ?? "-",
+        wake,
         sessions,
       },
       hints: ctx.caller.role === "reader" ? ["flowryn leader claim"] : [],
@@ -136,6 +167,8 @@ const leaderClaim: VerbSpec = {
   flags: { session: { type: "string", help: "your terminal only: the leader session to hand the lease to", placeholder: "L<n>" } },
   kind: "mutation",
   roles: ["leader", "reader", "human"],
+  // A session claims its own scope's lease; your terminal hands any session its own scope's.
+  scope: { kind: "self" },
   apply(ctx, args) {
     const named = stringArg(args, "session");
     if (ctx.caller.session && named && named !== ctx.caller.session) throw new FlowrynError("bad_args", "a leader session claims for itself; --session is for your own terminal");
@@ -143,7 +176,8 @@ const leaderClaim: VerbSpec = {
     if (!target) throw new FlowrynError("bad_args", "name the session: flowryn leader claim --session <id>", "flowryn leader status");
     const session = getSession(ctx.db, target);
     if (!session || session.ended_at !== null) throw new FlowrynError("not_found", `no open leader session ${target}`, "flowryn leader status");
-    const lease = getLease(ctx.db);
+    if (session.scope === UNCONFIRMED_SCOPE) throw new FlowrynError("scope_refused", `leader session ${target}'s login is not confirmed, so it leads no scope`, "start the leader again with flowryn lead");
+    const lease = getLease(ctx.db, session.scope);
     const now = ctx.now();
     if (lease.session_id === target) return { data: { session: target, epoch: lease.epoch, already: true } };
     const claimed = claim(ctx.db, target, `claim by ${ctx.caller.role}`, now);
@@ -174,14 +208,18 @@ const leaderRepinBegin: VerbSpec = {
   name: "leader.repin.begin",
   summary: "Start a /dev/tty repin: the leader's pinned and new directory, and the code to type back",
   positionals: [],
-  flags: { dir: { type: "string", help: "the directory to pin (absolute); default: the one the transcript names" } },
+  flags: {
+    dir: { type: "string", help: "the directory to pin (absolute); default: the one the transcript names" },
+    session: { type: "string", help: "the leading session to repin, when several lead (one per scope)" },
+  },
   kind: "mutation",
   roles: ["human"],
   // The reply carries the challenge code: never kept in the reply table.
   ephemeral: true,
   async prepare(ctx, args): Promise<RepinPrepared> {
     const now = ctx.now();
-    const plan = planRepin(ctx.db, { dir: stringArg(args, "dir") ?? null, projectsDir: grantsConfig(ctx.config()).claude_projects_dir });
+    const fallback = grantsConfig(ctx.config()).claude_projects_dir;
+    const plan = planRepin(ctx.db, { dir: stringArg(args, "dir") ?? null, session: stringArg(args, "session") ?? null, projectsDir: (account) => sessionProjectsDir(ctx.config(), account, fallback) });
     const s = getSession(ctx.db, plan.session)!;
     const identity = s.proc_pid !== null && s.proc_start !== null && s.proc_exe !== null ? { pid: s.proc_pid, start: s.proc_start, exe: s.proc_exe } : null;
     const cwd = await processCwd(identity, ctx.attention.lsof?.() ?? null, ctx.attention.ps);

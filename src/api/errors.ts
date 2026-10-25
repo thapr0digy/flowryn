@@ -102,6 +102,8 @@ export const ERROR_CODES = {
   review_invalid: EXIT.validation,
   role_refused: EXIT.role,
   run_not_active: EXIT.validation,
+  // a leader reaching another scope's task, or a session whose login is unconfirmed (docs/notes/2026-10-24-leader-scoping-and-vj.md)
+  scope_refused: EXIT.role,
   stage_waiting: EXIT.policy,
   // flowryn drop: the task has landed
   task_landed: EXIT.policy,

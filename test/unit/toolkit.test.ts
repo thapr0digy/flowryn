@@ -26,6 +26,13 @@ function names(line: string): string[] {
 }
 
 describe("shell normalizer: what the rules see", () => {
+  test("a substitution inside an unquoted ${…} parameter is read as a command", () => {
+    expect(names("echo ${x:-$(gh pr list)}")).toContain("gh");
+    expect(ruleOf("echo ${x:-$(gh pr list)}")).toBe("github");
+    expect(ruleOf("x=${y:-`sqlite3 app.db .dump`}")).toBe("sqlite");
+    expect(ruleOf("echo ${a:-${b:-$(gh api user)}}")).toBe("github");
+  });
+
   test.each([
     ["plain", "gh pr list", ["gh"]],
     ["chained", "cd x && gh pr list; ls", ["cd", "gh", "ls"]],

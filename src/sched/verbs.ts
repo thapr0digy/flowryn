@@ -15,6 +15,7 @@ import { accountsConfig, harnessAccounts } from "../config/accounts.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { queuedRequests } from "../verify/queue.ts";
 import { waitingOn } from "../verify/start.ts";
+import { lensFor } from "../leader/scope.ts";
 
 const MAX_WAITING_ROWS = 20;
 
@@ -57,6 +58,7 @@ const capacity: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx) {
     const cfg = capacityConfig(ctx.config);
     const counts = liveCounts(ctx.db);
@@ -72,7 +74,10 @@ const capacity: VerbSpec = {
            AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')`,
       )
       .all() as (RunWithPolicy & { priority: number })[];
+    // A scoped leader sees its own scope's waiting runs; pools and accounts are shared and name no task.
+    const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
     const waiting = rows
+      .filter((run) => lens.task(run.task_id))
       .map((run) => {
         const pos = positionOf(ctx.db, run, run.kind);
         return { run, pos, needs: neededPools(ctx.db, run, pos), remaining: pos.def.stages.length - 1 - pos.index };

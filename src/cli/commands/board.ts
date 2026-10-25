@@ -6,7 +6,7 @@ import { loadConfig } from "../../config/config.ts";
 import { leaderTiming } from "../../config/leader.ts";
 import { flowrynHome, stateFiles } from "../../config/paths.ts";
 import { openDb, type Db } from "../../db/db.ts";
-import { describeSession, getLease, getSession } from "../../lease/lease.ts";
+import { allLeases, describeSession, getSession } from "../../lease/lease.ts";
 import { localDate } from "../../lifecycle/dates.ts";
 import { todoViews } from "../../lifecycle/todos.ts";
 import { queuedWork, waitsCell } from "../../lifecycle/queue-view.ts";
@@ -68,9 +68,17 @@ interface UpdateRow {
 export function boardFrame(db: Db, facts: BoardFacts, ageMs: number): string[] {
   const { now } = facts;
   const lines: string[] = [];
-  const lease = getLease(db);
-  const holder = lease.session_id ? getSession(db, lease.session_id) : null;
-  const leader = holder ? `${describeSession(holder)} (lease ${lease.epoch})` : "none";
+  // Your terminal sees every scope: each scope's leader (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+  const held = allLeases(db).filter((l) => l.session_id !== null);
+  const scoped = held.length > 1 || (held[0] !== undefined && held[0].scope !== "default");
+  const leader =
+    held
+      .map((lease) => {
+        const holder = getSession(db, lease.session_id!);
+        return holder ? `${describeSession(holder)} (${scoped ? `${lease.scope}, ` : ""}lease ${lease.epoch})` : null;
+      })
+      .filter((l): l is string => l !== null)
+      .join("; ") || "none";
   lines.push(`Flowryn board · ${new Date(now).toLocaleTimeString("en-GB")} · daemon ${facts.daemon} · leader: ${leader}`);
 
   const needs = openActionable(db, now, ageMs);
