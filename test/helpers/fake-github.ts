@@ -7,7 +7,9 @@ import { createHash } from "node:crypto";
  * (its "origin"): then a PR's head follows the pushed branch, as on GitHub,
  * and a merge really lands on the bare repo's base branch (a squash or a
  * merge commit), so the cleanup guard sees what it would see after a real
- * merge. Knobs make the forge unreachable, rate limited, fail annotation reads, or accept a merge it
+ * merge. A PR's reviews, inline review comments and conversation comments
+ * are served in GitHub's REST shapes, and their threads' resolution through
+ * the GraphQL reviewThreads query (POST /graphql). Knobs make the forge unreachable, rate limited, fail annotation reads, or accept a merge it
  * never reports (the unproven-merge case). Nothing here reaches the network.
  */
 
@@ -48,6 +50,37 @@ export interface FakePr {
    * one); a boolean or null (GitHub still computing) forces it.
    */
   mergeable?: boolean | null;
+  /** The login that opened it (user.login); the repo owner by default. */
+  author?: string;
+  reviews: FakeReview[];
+  reviewComments: FakeComment[];
+  issueComments: FakeComment[];
+  /** Root comment ids of the resolved review threads. */
+  resolvedThreads: Set<number>;
+}
+
+/** Who wrote a review or comment: a login, its author_association, and whether it is a bot. */
+export interface FakeAuthor {
+  login: string;
+  association?: string;
+  bot?: boolean;
+}
+
+export interface FakeReview extends FakeAuthor {
+  id: number;
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
+  body: string;
+  at: string;
+}
+
+export interface FakeComment extends FakeAuthor {
+  id: number;
+  body: string;
+  at: string;
+  /** Inline review comments only. */
+  path?: string;
+  line?: number;
+  inReplyTo?: number;
 }
 
 export type MergeMode = "real" | "accept-unproven" | "error-500" | "refuse";
@@ -99,6 +132,8 @@ export class FakeGitHub {
   readonly webUrl: string;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private nextNumber = 1;
+  /** Review and comment ids, one sequence as on GitHub, so a later one has a larger id. */
+  private nextFeedbackId = 1000;
   /** Check runs served so far, by id, for their annotations. */
   private readonly checkRuns = new Map<number, FakeCheck>();
 
@@ -145,7 +180,7 @@ export class FakeGitHub {
   }
 
   /** Add a PR directly (fixtures and tests); `open` keeps following the bare branch when there is one. */
-  addPr(fullName: string, pr: Partial<FakePr> & { headRef: string; headSha?: string }): FakePr {
+  addPr(fullName: string, pr: Partial<Omit<FakePr, "reviews" | "reviewComments" | "issueComments" | "resolvedThreads">> & { headRef: string; headSha?: string }): FakePr {
     const repo = this.repo(fullName);
     const number = pr.number ?? this.nextNumber;
     this.nextNumber = Math.max(this.nextNumber, number + 1);
@@ -164,6 +199,11 @@ export class FakeGitHub {
       mergeSha: pr.mergeSha ?? null,
       pendingMerge: null,
       ...(pr.mergeable !== undefined ? { mergeable: pr.mergeable } : {}),
+      ...(pr.author ? { author: pr.author } : {}),
+      reviews: [],
+      reviewComments: [],
+      issueComments: [],
+      resolvedThreads: new Set(),
     };
     repo.prs.push(created);
     return created;
@@ -177,6 +217,32 @@ export class FakeGitHub {
 
   prUrl(fullName: string, number: number): string {
     return `${this.webUrl}/${fullName}/pull/${number}`;
+  }
+
+  /** A submitted review; returns its id. */
+  addReview(fullName: string, number: number, review: FakeAuthor & { state: FakeReview["state"]; body?: string; at?: string }): number {
+    const id = this.nextFeedbackId++;
+    this.pr(fullName, number).reviews.push({ ...review, id, body: review.body ?? "", at: review.at ?? new Date().toISOString() });
+    return id;
+  }
+
+  /** An inline review comment (a reply when `inReplyTo` names its thread's first comment); returns its id. */
+  addReviewComment(fullName: string, number: number, comment: FakeAuthor & { body: string; path?: string; line?: number; inReplyTo?: number; at?: string }): number {
+    const id = this.nextFeedbackId++;
+    this.pr(fullName, number).reviewComments.push({ path: "src/app.ts", line: 1, ...comment, id, at: comment.at ?? new Date().toISOString() });
+    return id;
+  }
+
+  /** A comment on the PR's conversation tab; returns its id. */
+  addIssueComment(fullName: string, number: number, comment: FakeAuthor & { body: string; at?: string }): number {
+    const id = this.nextFeedbackId++;
+    this.pr(fullName, number).issueComments.push({ ...comment, id, at: comment.at ?? new Date().toISOString() });
+    return id;
+  }
+
+  /** Resolve the review thread whose first comment is `rootId`. */
+  resolveThread(fullName: string, number: number, rootId: number): void {
+    this.pr(fullName, number).resolvedThreads.add(rootId);
   }
 
   setChecks(fullName: string, sha: string, checks: FakeCheck[]): void {
@@ -239,7 +305,54 @@ export class FakeGitHub {
       head: { ref: pr.headRef, sha: head, repo: { full_name: pr.headRepo ?? full } },
       base: { ref: pr.baseRef, repo: { full_name: full } },
       mergeable: this.mergeableOf(repo, pr, head),
+      user: { login: pr.author ?? repo.owner, type: "User" },
     };
+  }
+
+  private userJson(author: FakeAuthor): Record<string, unknown> {
+    return { user: { login: author.login, type: author.bot ? "Bot" : "User" }, author_association: author.association ?? "NONE" };
+  }
+
+  private feedbackJson(repo: FakeRepo, pr: FakePr, kind: "reviews" | "comments" | "issue-comments"): Record<string, unknown>[] {
+    const base = `${this.webUrl}/${repo.owner}/${repo.repo}/pull/${pr.number}`;
+    if (kind === "reviews") {
+      return pr.reviews.map((r) => ({ id: r.id, ...this.userJson(r), state: r.state, body: r.body, submitted_at: r.at, html_url: `${base}#pullrequestreview-${r.id}`, commit_id: pr.headSha }));
+    }
+    if (kind === "comments") {
+      return pr.reviewComments.map((c) => ({
+        id: c.id,
+        ...this.userJson(c),
+        body: c.body,
+        created_at: c.at,
+        updated_at: c.at,
+        html_url: `${base}#discussion_r${c.id}`,
+        path: c.path,
+        line: c.line ?? null,
+        original_line: c.line ?? null,
+        ...(c.inReplyTo ? { in_reply_to_id: c.inReplyTo } : {}),
+      }));
+    }
+    return pr.issueComments.map((c) => ({ id: c.id, ...this.userJson(c), body: c.body, created_at: c.at, updated_at: c.at, html_url: `${base}#issuecomment-${c.id}` }));
+  }
+
+  /** One page of a list, as GitHub pages it (`per_page`, `page`). */
+  private page<T>(url: URL, all: T[]): T[] {
+    const perPage = Number(url.searchParams.get("per_page") ?? "30");
+    const page = Number(url.searchParams.get("page") ?? "1");
+    return all.slice((page - 1) * perPage, page * perPage);
+  }
+
+  /** GitHub's GraphQL API, for the one query Flowryn makes: a PR's reviewThreads. */
+  private graphql(req: Request, path: string, body: Record<string, unknown>): Response {
+    const query = String(body.query ?? "");
+    const variables = (body.variables ?? {}) as { owner?: string; name?: string; number?: number };
+    if (!query.includes("reviewThreads")) return this.json(req, path, 200, { errors: [{ message: "the fake GitHub answers only reviewThreads" }] });
+    const repo = this.repos.get(`${variables.owner}/${variables.name}`);
+    const pr = repo?.prs.find((p) => p.number === variables.number);
+    if (!repo || !pr) return this.json(req, path, 200, { data: { repository: null }, errors: [{ type: "NOT_FOUND", message: "Could not resolve to a PullRequest" }] });
+    const roots = pr.reviewComments.filter((c) => !c.inReplyTo);
+    const nodes = roots.map((c) => ({ isResolved: pr.resolvedThreads.has(c.id), comments: { nodes: [{ databaseId: c.id }] } }));
+    return this.json(req, path, 200, { data: { repository: { pullRequest: { reviewThreads: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } } } });
   }
 
   private json(req: Request, path: string, status: number, body: unknown, extraHeaders: Record<string, string> = {}): Response {
@@ -279,6 +392,15 @@ export class FakeGitHub {
     if (this.rateLimited) {
       return this.json(req, path, 403, { message: "API rate limit exceeded (fake)" }, { "X-RateLimit-Remaining": "0", "X-RateLimit-Reset": String(Math.floor(Date.now() / 1000) + 60) });
     }
+    if (req.method === "POST" && url.pathname === "/graphql") {
+      let query: Record<string, unknown> = {};
+      try {
+        query = (await req.json()) as Record<string, unknown>;
+      } catch {
+        query = {};
+      }
+      return this.graphql(req, path, query);
+    }
     const match = /^\/repos\/([^/]+)\/([^/]+)\/(.*)$/.exec(url.pathname);
     const repo = match ? this.repos.get(`${decodeURIComponent(match[1]!)}/${decodeURIComponent(match[2]!)}`) : undefined;
     if (!match || !repo) return this.json(req, path, 404, { message: "Not Found" });
@@ -316,6 +438,13 @@ export class FakeGitHub {
         return this.json(req, path, 200, this.prJson(repo, pr));
       }
       if (req.method === "PUT" && pull[2]) return this.merge(req, path, repo, pr, body);
+    }
+    const feedback = /^(pulls|issues)\/(\d+)\/(reviews|comments)$/.exec(rest);
+    if (req.method === "GET" && feedback && !(feedback[1] === "issues" && feedback[3] === "reviews")) {
+      const pr = repo.prs.find((p) => p.number === Number(feedback[2]));
+      if (!pr) return this.json(req, path, 404, { message: "Not Found" });
+      const kind = feedback[1] === "issues" ? "issue-comments" : (feedback[3] as "reviews" | "comments");
+      return this.json(req, path, 200, this.page(url, this.feedbackJson(repo, pr, kind)));
     }
     const commit = /^commits\/([^/]+)\/(check-runs|status)$/.exec(rest);
     if (req.method === "GET" && commit) {

@@ -53,6 +53,10 @@ export type ItemClass = "actionable" | "info";
  * the sync left alone (informational); conflict_nudged, a delivered PR that
  * conflicts sent its ship back to merge its base (informational); and
  * pr_conflict, one that still conflicts after its nudges.
+ * Review feedback (src/reconcile/reviews.ts): review_steered, a delivered PR's
+ * new reviews or comments sent its ship back to address them (informational);
+ * review_unanswered, a review thread still unanswered after its sends, or more
+ * feedback after the sends one delivered head may get.
  * The policy follow-through (src/upkeep/policy-follow.ts): policy_sent_back,
  * a delivered ship sent back to merge main's policy change (informational);
  * policy_behind, a ship delivered again still behind a policy change it was
@@ -109,11 +113,13 @@ export const LANE_TABLE = {
   user_acted: { lane: "P1", class: "actionable" },
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
+  review_unanswered: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   build_held: { lane: "P1", class: "info" },
   checkout_unsynced: { lane: "P1", class: "info" },
   conflict_nudged: { lane: "P1", class: "info" },
+  review_steered: { lane: "P1", class: "info" },
   policy_sent_back: { lane: "P1", class: "info" },
   policy_behind: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
