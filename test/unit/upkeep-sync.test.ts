@@ -136,15 +136,17 @@ function upkeepTable(extra: Record<string, unknown>): FlowrynConfig {
 describe("[upkeep]", () => {
   test("defaults: every chosen hook on, 24 h before an ended worktree is cleaned", () => {
     expect(upkeepConfig(defaultConfig("/h"))).toEqual(DEFAULT_UPKEEP);
-    expect(DEFAULT_UPKEEP).toEqual({ build_after_merge: true, sync_primary: true, clean_ended_hours: 24, nudge_conflicts: true, explanations_keep_days: 30, explanations_keep_per_run: 200, interval_ms: 600_000 });
+    expect(DEFAULT_UPKEEP).toEqual({ build_after_merge: true, sync_primary: true, clean_ended_hours: 24, nudge_conflicts: true, steer_reviews: true, review_reraise_hours: 24, explanations_keep_days: 30, explanations_keep_per_run: 200, interval_ms: 600_000 });
   });
 
   test("each hook has its own switch", () => {
-    expect(upkeepConfig(upkeepTable({ build_after_merge: false, sync_primary: false, clean_ended_hours: 0, nudge_conflicts: false, explanations_keep_days: 0, explanations_keep_per_run: 5, interval_ms: 500 }))).toEqual({
+    expect(upkeepConfig(upkeepTable({ build_after_merge: false, sync_primary: false, clean_ended_hours: 0, nudge_conflicts: false, steer_reviews: false, review_reraise_hours: 0, explanations_keep_days: 0, explanations_keep_per_run: 5, interval_ms: 500 }))).toEqual({
       build_after_merge: false,
       sync_primary: false,
       clean_ended_hours: 0,
       nudge_conflicts: false,
+      steer_reviews: false,
+      review_reraise_hours: 0,
       explanations_keep_days: 0,
       explanations_keep_per_run: 5,
       interval_ms: 500,
@@ -156,6 +158,8 @@ describe("[upkeep]", () => {
     expect(() => upkeepConfig(upkeepTable({ sync_primary: "yes" }))).toThrow("[upkeep] sync_primary must be true or false");
     expect(() => upkeepConfig(upkeepTable({ clean_ended_hours: -1 }))).toThrow("clean_ended_hours");
     expect(() => upkeepConfig(upkeepTable({ interval_ms: 0 }))).toThrow("interval_ms");
+    expect(() => upkeepConfig(upkeepTable({ review_reraise_hours: -1 }))).toThrow("[upkeep] review_reraise_hours must be a number of hours");
+    expect(() => upkeepConfig(upkeepTable({ steer_reviews: 1 }))).toThrow("[upkeep] steer_reviews must be true or false");
     expect(() => upkeepConfig(upkeepTable({ explanations_keep_days: -1 }))).toThrow("[upkeep] explanations_keep_days must be a whole number");
     expect(() => upkeepConfig(upkeepTable({ explanations_keep_per_run: 2.5 }))).toThrow("[upkeep] explanations_keep_per_run must be a whole number");
   });

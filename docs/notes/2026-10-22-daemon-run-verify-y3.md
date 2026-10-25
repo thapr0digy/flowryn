@@ -53,7 +53,7 @@ The user's answer in the design review (q78): a verify that fails because a step
 
   The deliver reply carries `auto_merge: am<n>`. A failed verify at the head does not count: the redelivery verifies again.
 - **PATH.** A CLI verify records its caller's PATH in meta (`verify_path:<project>`); an auto request uses it, else the daemon's PATH plus `~/.bun/bin` (`autoVerifyPath`).
-- **State machine** (`src/verify/auto-merge.ts`, `AutoMerger`, table `auto_merges`, migration 33, at most one live row per run). The controller is kicked after each scheduler drain of the verify queue (a verify started or finished), after each delivery-watcher pass, and every 60 s; daemon shutdown waits for a pass under way before it closes the database.
+- **State machine** (`src/verify/auto-merge.ts`, `AutoMerger`, table `auto_merges`, migration 34, at most one live row per run). The controller is kicked after each scheduler drain of the verify queue (a verify started or finished), after each delivery-watcher pass, and every 60 s; daemon shutdown waits for a pass under way before it closes the database.
 
   | From | Event | To |
   |---|---|---|
