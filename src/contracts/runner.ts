@@ -8,12 +8,13 @@ import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { requireNotificationsOff } from "../config/leader.ts";
 import { socketPath, stateFiles } from "../config/paths.ts";
 import { renderToml } from "../config/toml.ts";
-import { workersConfig } from "../config/workers.ts";
+import { tmpRoot, workersConfig } from "../config/workers.ts";
 import { claudeConfigDir } from "../harness/claude/trust.ts";
 import { migrate, openDb, tx, type Db } from "../db/db.ts";
 import { PING_VERB } from "../daemon/system-verbs.ts";
 import type { HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
+import { runTmpDir, workerTmpDir } from "../lifecycle/run-tmp.ts";
 import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
 import { descendantCommands, isAlive, readIdentity, readProcessTable, terminate } from "../runtime/proc.ts";
@@ -157,6 +158,8 @@ export function scratchConfig(options: ContractOptions, pin: HarnessPin, home: s
   const real = options.config;
   const workers: Record<string, unknown> = { ...(real.extra.workers as Record<string, unknown> | undefined) };
   workers.worktree_root = join(home, "wt");
+  // The real home's root, resolved: a relative one would otherwise resolve against the scratch home.
+  workers.tmp_root = tmpRoot(real);
   workers.branch_prefix = branchPrefix;
   // The contract worker ends its turns without an outcome on purpose; a reminder would keep it busy past the idle step.
   workers.turn_end_guard = false;
@@ -208,6 +211,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
     herdr_socket: options.herdrSocket,
     branch_prefix: prefix,
     project: null,
+    tmp_root: tmpRoot(options.config),
     daemon: null,
     workspaces: [],
     harnesses: [],
@@ -374,6 +378,8 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       },
       log: options.log,
       claudeStore: options.harness === "claude" ? (workersConfig(options.config).claude.config_dir ?? claudeConfigDir(process.env)) : null,
+      reportDir: () => join(home, "data", String(dispatched.data.task)),
+      workerTmpDir: () => workerTmpDir(options.harness, runTmpDir(tmpRoot(options.config), runId)),
     };
     steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log, drift)));
   } finally {

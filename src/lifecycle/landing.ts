@@ -87,6 +87,8 @@ export interface LandingDeps {
   exitWorker(runId: string): Promise<{ ok: boolean; detail: string }>;
   /** Close the run's Herdr workspace, best effort. */
   closeWorkspace(runId: string): Promise<void>;
+  /** Remove the run's temp directory (src/lifecycle/run-tmp.ts); throws when it cannot. */
+  removeRunTmp?(runId: string): "removed" | "absent" | "not_ours";
   /** Apply the backlog intents just recorded (the task done) without waiting for the journal's next pass. */
   kickJournal(): void;
   log(line: string): void;
@@ -145,6 +147,19 @@ export function landScout(db: Db, run: RunWithPolicy, report: string, now: numbe
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   appendEvent(db, { source: "daemon", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { how: "report", report }, ts: now });
   run.state = "landed";
+}
+
+/** The worker has stopped and its processes were reaped: its temp directory goes too. A failure is logged and recorded, never fails the cleanup. */
+function removeTmp(deps: LandingDeps, run: RunWithPolicy): void {
+  if (!deps.removeRunTmp) return;
+  try {
+    const removed = deps.removeRunTmp(run.id);
+    if (removed === "not_ours") deps.log(`cleanup ${run.task_id}: the run's temp directory belongs to another run or home; left in place`);
+  } catch (error) {
+    const message = (error as Error).message;
+    deps.log(`cleanup ${run.task_id}: the run's temp directory was not removed: ${message}`);
+    tx(deps.db, () => appendEvent(deps.db, { source: "daemon", kind: "run.tmp_remove_failed", runId: run.id, taskId: run.task_id, payload: { error: message }, ts: deps.now() }));
+  }
 }
 
 /**
@@ -228,7 +243,10 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
     }
   });
   deps.kickJournal();
-  if (outcome.outcome === "removed") await deps.closeWorkspace(run.id).catch(() => undefined);
+  if (outcome.outcome === "removed") {
+    removeTmp(deps, run);
+    await deps.closeWorkspace(run.id).catch(() => undefined);
+  }
   const after = getRunWithPolicy(db, run.id);
   return { ...outcome, run: run.id, task: run.task_id, state: after?.state ?? run.state };
 }
