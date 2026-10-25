@@ -14,6 +14,7 @@ import type { HostVerdict } from "../sched/host.ts";
 import { tx } from "../db/db.ts";
 import { verifyConfig, verifySnippet, type VerifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
+import { rememberVerifyPath } from "./auto-merge.ts";
 import { findQueued, getRequest, insertRequest, positionOf, queuedRequests, requeuedFrom, type VerifyRequest } from "./queue.ts";
 import { isVerifying, readTail, type VerifyDeps } from "./runner.ts";
 import { admitRequest, launchVerification, planOf, queueHold, verifyRoot as rootOf, VERIFY_POOL, waitingOn } from "./start.ts";
@@ -196,6 +197,9 @@ const verifyStart: VerbSpec = {
     const joined = findQueued(ctx.db, target.url, pr.headSha, policy);
     if (joined) return { data: { ...requestView(ctx.db, joined, caps, now), attached: true } };
     const ahead = queuedRequests(ctx.db).length > 0;
+    const path = stringArg(args, "path");
+    // The project's daemon-made verifies (auto-merge) run with the PATH of its latest CLI verify.
+    if (path) rememberVerifyPath(ctx.db, target.project.id, path);
     const request = insertRequest(ctx.db, {
       project_id: target.project.id,
       pr_url: target.url,
@@ -206,7 +210,7 @@ const verifyStart: VerbSpec = {
       head_ref: pr.headRef,
       worktree: target.worktree,
       source: "cli",
-      path: stringArg(args, "path") ?? null,
+      path: path ?? null,
       now,
     });
     // It starts now only when nothing waits ahead of it, no restart holds verifies back, a slot is free and the host check passes; else it waits its turn.

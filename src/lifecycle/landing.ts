@@ -32,14 +32,16 @@ import { dismissRunQuestions } from "./gate-questions.ts";
 export const LANDED_BEFORE_CANCEL = "the run landed before the cancel took effect; the merge stands";
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered"] as const;
+const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered", "auto_merge_held"] as const;
 
 /**
  * Who proved a landing: the leader's own merge call (its reply says it
- * landed), or anything else (your merge, the delivery watcher's later proof,
- * a merge on GitHub), which opens a landed item so the leader reports it.
+ * landed), the daemon's yolo auto-merge (src/verify/auto-merge.ts: no leader
+ * turn; its yolo_merged item records it), or anything else (your merge, the
+ * delivery watcher's later proof, a merge on GitHub), which opens a landed
+ * item so the leader reports it.
  */
-export type LandedBy = "leader" | "other";
+export type LandedBy = "leader" | "auto" | "other";
 
 export interface LandingProof {
   mergeSha: string;
@@ -63,7 +65,7 @@ export function landRun(db: Db, run: RunWithPolicy, proof: LandingProof, now: nu
   closeMergeGate(db, run, { passed: true, approvalId: merge?.approval_id ?? null }, now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   const event = appendEvent(db, { source: proof.how === "merge" ? "daemon" : "github", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { merge_sha: proof.mergeSha, how: proof.how, merge: proof.mergeId ?? null, by: proof.by }, ts: now });
-  if (proof.by !== "leader") openItem(db, { kind: "landed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: landedLine(db, run, proof.mergeSha), now });
+  if (proof.by === "other") openItem(db, { kind: "landed", eventSeq: event.seq, taskId: run.task_id, runId: run.id, line: landedLine(db, run, proof.mergeSha), now });
   run.state = "landed";
 }
 

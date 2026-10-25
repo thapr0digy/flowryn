@@ -1,6 +1,6 @@
 import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { accountsConfig, accountsView } from "./accounts.ts";
-import { verifyConfig } from "../verify/config.ts";
+import { autoMergeEnabled, verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
@@ -42,7 +42,10 @@ function workflowsView(config: FlowrynConfig): Record<string, unknown> {
 
 function projectsView(config: FlowrynConfig): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const id of Object.keys(table(config.extra.projects, "[projects]"))) out[id] = verifyConfig(config, id) ?? { verify: "none" };
+  for (const id of Object.keys(table(config.extra.projects, "[projects]"))) {
+    const verify = verifyConfig(config, id);
+    out[id] = verify ? { ...verify, ...(autoMergeEnabled(config, id) ? { auto_merge: true } : {}) } : { verify: "none" };
+  }
   return out;
 }
 

@@ -80,6 +80,7 @@ import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
+import { AutoMerger } from "../verify/auto-merge.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -457,6 +458,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     };
     const cleanups = new Map<string, Promise<CleanupReport>>();
     let deliveryWatcher: DeliveryWatcher | null = null;
+    let autoMerger: AutoMerger | null = null;
     let upkeep: Upkeep | null = null;
     let policyFollow: PolicyFollower | null = null;
     const delivery: DeliveryServices = {
@@ -501,6 +503,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       reviewReraiseMs: () => upkeepConfig(config).review_reraise_hours * 3_600_000,
       notifySteer: (runId) => bus.notify(runId),
       kickScheduler: () => scheduler?.kick(),
+      // What the watcher read (checks, merges) may move a yolo auto-merge on.
+      passed: () => autoMerger?.kick(),
       log,
       now: Date.now,
     });
@@ -531,6 +535,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       notify: (runId) => bus.notify(runId),
       startDeps,
       kickJournal: () => journal.kick(),
+      // A verify that started or finished may move a yolo auto-merge on.
       drainVerifies: (isStopped) =>
         drainVerifyQueue({
           stopped: isStopped,
@@ -545,8 +550,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           webUrl: () => github().web_url,
           projectPath: (projectId) => getProject(database, projectId)?.path ?? null,
           host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
-        }),
+        }).finally(() => autoMerger?.kick()),
     });
+    // Yolo auto-merge (src/verify/auto-merge.ts): an opted-in project's deliveries verified and merged with no leader turn.
+    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick() });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
       passNow: async () => scheduler?.passNow(),
@@ -781,6 +788,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     await reconciler.passNow("startup");
     deliveryWatcher.start();
     scheduler.start();
+    autoMerger.start();
     lavishPoller.kick();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
@@ -847,7 +855,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const reason = await stopped;
     log(`stopping: ${reason}`);
     // Every timer first, then wait for what is under way: the database closes only after its last use.
-    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }];
+    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }];
     stopVerifications();
     clearInterval(pass);
     clearInterval(steady);

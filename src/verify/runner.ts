@@ -411,12 +411,20 @@ async function deadlineBlock(deps: VerifyDeps, pgid: number, why: string): Promi
   return `\n--- flowryn verify: killed at ${why}; its process group ${pgid} at that moment ---\n${table}\n---\n`;
 }
 
+const RUN_OUT = "timed out: the run's";
+
+/** Whether a finished step's last attempt was killed at a deadline: its own (each attempt hung) or the run's. */
+export function endedAtDeadline(step: Pick<VerifyStep, "attempts" | "hangs" | "detail">): boolean {
+  const hangs = step.hangs ?? 0;
+  return (hangs > 0 && hangs >= (step.attempts ?? 1)) || (step.detail?.includes(RUN_OUT) ?? false);
+}
+
 /**
  * Why a finished step ended as it did beyond its exit code, or null. `firstLog` is its first
  * attempt's log; `step.log` its last.
  */
 function stepDetail(step: VerifyStep, result: StepResult, deadline: StepDeadline | null, plan: VerifyPlan, firstLog: string, stoppedBy: string | null): string | null {
-  const runOut = `timed out: the run's ${duration(plan.timeoutMs)} were up`;
+  const runOut = `${RUN_OUT} ${duration(plan.timeoutMs)} were up`;
   const hangs = step.hangs ?? 0;
   const at = deadline ? deadlineLine(deadline) : "its deadline";
   if (hangs === 2) return `hung twice: killed at ${at} both times; process groups in ${firstLog} and ${step.log}`;
