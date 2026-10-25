@@ -16,12 +16,15 @@ import { cleanMainMerge, type CleanMerge } from "../policy/clean-merge.ts";
 import { headHistory, type HeadHistory } from "../policy/head-history.ts";
 import { applyNmObservation, applyPrObservation, headMoveRecorded, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
+import { applyFeedback, openInlineThreads } from "../reconcile/reviews.ts";
+import { feedbackItems } from "../forge/feedback.ts";
 
 /**
  * The delivery watchers (design section 4, src/watch): GitHub PR state, head
  * and checks for every delivered ship (conditional requests with ETags, so a
  * quiet poll costs nothing), the proof of a merge still unproven, local-only
- * merges, the read-only no-mistakes status of validating runs, and landed
+ * merges, the reviews and comments on delivered PRs (src/reconcile/reviews.ts),
+ * the read-only no-mistakes status of validating runs, and landed
  * runs whose cleanup never ran (the daemon stopped in between), and the
  * CI-wait watchdog's question (src/lifecycle/ci-wait.ts). They observe;
  * src/reconcile/delivery.ts applies. A failing forge backs off, it is never
@@ -53,6 +56,12 @@ export interface DeliveryWatcherDeps {
   kickScheduler(): void;
   /** The project's verify policy identity under today's config, or null when it has no verify steps (src/verify/policy.ts); absent: none. */
   verifyPolicy?(projectId: string): string | null;
+  /** `[upkeep] steer_reviews`: a delivered PR's reviews and comments steer its worker; off when absent. */
+  steerReviews?(): boolean;
+  /** `[upkeep] review_reraise_hours` in ms: an unanswered review thread is sent again after this long (0: never). */
+  reviewReraiseMs?(): number;
+  /** A steer was recorded for a live run: ring it now. */
+  notifySteer?(runId: string): void;
   log(line: string): void;
   now(): number;
 }
@@ -62,6 +71,8 @@ const MAX_BACKOFF_MS = 10 * 60_000;
 const NM_DOWN_AFTER = 3;
 /** A read for the restart guard is skipped when a status read finished this recently. */
 export const VALIDATION_READ_MIN_GAP_MS = 15_000;
+/** A PR's review threads (a GraphQL read, which no ETag makes free) are read at most this often while one waits on an answer. */
+export const REVIEW_THREADS_MIN_GAP_MS = 5 * 60_000;
 /** The pool the ship stage's no-mistakes pipeline runs under (src/config/workflows.ts). */
 const VALIDATION_POOL = "validation";
 
@@ -80,6 +91,8 @@ const LOCAL_MERGE_PARTS: readonly BasisPart[] = ["state", "merge", "operation"];
  * alone. A run that ended meanwhile is not revived (noteMergedAfterEnd).
  */
 const MERGED_PARTS: readonly BasisPart[] = ["delivered"];
+/** A review read applies only to the run and delivery it was read for. */
+const REVIEW_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "merge", "operation"];
 
 export class DeliveryWatcher {
   private readonly deps: DeliveryWatcherDeps;
@@ -93,6 +106,8 @@ export class DeliveryWatcher {
   private nmFailures = 0;
   private nmRead: Promise<void> | null = null;
   private nmReadAt = Number.NEGATIVE_INFINITY;
+  /** When each PR's review threads were last read. */
+  private readonly threadsReadAt = new Map<string, number>();
 
   constructor(deps: DeliveryWatcherDeps) {
     this.deps = deps;
@@ -103,10 +118,12 @@ export class DeliveryWatcher {
     this.schedule(0);
   }
 
-  stop(): void {
+  /** No new pass after this; resolves when the pass under way, if any, has ended (the daemon closes the database after). */
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    await this.running;
   }
 
   /**
@@ -143,6 +160,8 @@ export class DeliveryWatcher {
   async pass(): Promise<void> {
     try {
       await this.watchPrs();
+      // Its own failure never holds up the watchers after it.
+      await this.watchReviews().catch((error: unknown) => this.deps.log(`delivery watcher: reviews: ${(error as Error).stack ?? String(error)}`));
       await this.watchLocalMerges();
       await this.watchNoMistakes();
       this.landDeliveredScouts();
@@ -193,6 +212,60 @@ export class DeliveryWatcher {
       } catch (error) {
         if (error instanceof ForgeError && error.kind === "not_found") {
           this.deps.log(`delivery watcher: ${delivered.ref} is not found on GitHub`);
+          continue;
+        }
+        this.forgeFailed(error);
+        return;
+      }
+    }
+  }
+
+  /**
+   * Reviews and comments on every open delivered PR whose ship is delivered
+   * or back at work on it (src/reconcile/reviews.ts): each new one steers the
+   * worker, an unanswered thread is raised again. Review threads' resolution
+   * (GraphQL) is read only while an inline thread waits, at most every
+   * REVIEW_THREADS_MIN_GAP_MS per PR. Shares the PR watcher's GitHub backoff.
+   */
+  private async watchReviews(): Promise<void> {
+    const { db, now } = this.deps;
+    if (!this.deps.steerReviews?.() || now() < this.forgeQuietUntil) return;
+    const runs = this.runs(
+      `SELECT r.id FROM runs r JOIN task_policy p ON p.task_id = r.task_id
+       WHERE p.kind = 'ship' AND p.delivery_mode != 'local-only' AND r.state IN ('ready','running','validating') ORDER BY r.updated_at`,
+    );
+    const forge = this.deps.forge();
+    for (const run of runs) {
+      if (this.stopped) return;
+      const seen = deliveryBasis(db, run.id);
+      const delivered = deliveredOf(db, run.task_id);
+      if (!delivered || delivered.kind !== "pr") continue;
+      const ref = parsePrUrl(delivered.ref, this.deps.webUrl());
+      if (!ref) continue;
+      try {
+        const pr = await forge.pull(ref);
+        if (pr.state !== "open") continue;
+        const feedback = await forge.feedback(ref);
+        const lastThreads = this.threadsReadAt.get(delivered.ref) ?? Number.NEGATIVE_INFINITY;
+        const readThreads = openInlineThreads(db, run.task_id) > 0 && now() - lastThreads >= REVIEW_THREADS_MIN_GAP_MS;
+        const threads = readThreads ? await forge.reviewThreads(ref) : null;
+        if (readThreads) this.threadsReadAt.set(delivered.ref, now());
+        tx(db, () => noteForgeUp(db, "github", now()));
+        const items = feedbackItems(feedback, pr.author ?? null, threads);
+        const observed = deliveryTransition(db, seen, REVIEW_PARTS, "review_observation", "github", now(), (current) => {
+          if (current.state !== "ready" && current.state !== "running" && current.state !== "validating") return null;
+          return applyFeedback(db, current, delivered, items, { reraiseMs: this.deps.reviewReraiseMs?.() ?? 0 }, now());
+        });
+        const outcome = observed.applied ? observed.value : null;
+        this.backoffMs = 0;
+        if (outcome?.via === "send_back") this.deps.kickScheduler();
+        if (outcome?.via === "steer") this.deps.notifySteer?.(run.id);
+        if (outcome && outcome.sent.length + outcome.reraised.length > 0) {
+          this.deps.log(`delivery watcher: ${run.task_id}: review feedback ${outcome.via === "send_back" ? "sent back" : "steered"} (${[...outcome.sent, ...outcome.reraised].join(", ")})`);
+        }
+      } catch (error) {
+        if (error instanceof ForgeError && error.kind === "not_found") {
+          this.deps.log(`delivery watcher: reviews of ${delivered.ref}: not found on GitHub`);
           continue;
         }
         this.forgeFailed(error);

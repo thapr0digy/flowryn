@@ -121,10 +121,16 @@ export class Reconciler {
     this.deps = deps;
   }
 
-  stop(): void {
+  /**
+   * No new pass after this; resolves when the pass under way (if any) has
+   * ended, so the daemon closes the database only after its last use. A pass
+   * stops at its next step once stopped.
+   */
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    while (this.running) await this.running.catch(() => undefined);
   }
 
   /** Ask for a look at one run (or all) soon; calls within the debounce window coalesce. */
@@ -178,9 +184,13 @@ export class Reconciler {
     const { db, now, timing, log } = this.deps;
     const runs = openRuns(db);
     const stats = await this.passRuns(runs.map((r) => r.id), reason);
+    if (this.stopped) return;
     await this.scanOrphans();
+    if (this.stopped) return;
     await this.scanDocker();
+    if (this.stopped) return;
     await this.checkBacklog();
+    if (this.stopped) return;
     tx(db, () => flagUnackedSteers(db, now(), timing()));
     for (const run of runs) if (unackedSteers(db, run.id).length > 0) this.deps.bus.notify(run.id);
     if (reason === "startup" && stats.dead >= HUSK_RESTART_THRESHOLD) {
@@ -577,6 +587,7 @@ export class Reconciler {
       log(`reconcile: the backlog could not be read for the invariant pass: ${(error as Error).message}`);
       return;
     }
+    if (this.stopped) return;
     const result = tx(db, () => checkInvariant(db, now()));
     if (result && result.opened.length + result.resolved.length > 0) {
       log(`reconcile: invariant: ${result.opened.length} divergence(s) opened (${result.opened.join(",") || "-"}), ${result.resolved.length} settled (${result.resolved.join(",") || "-"})`);
@@ -588,6 +599,7 @@ export class Reconciler {
     const docker = this.deps.docker?.();
     if (!docker) return;
     const containers = await listLabelled(docker);
+    if (this.stopped) return;
     if (containers === null || containers.length === 0) return;
     const findings = applyDocker(this.deps.db, containers, this.deps.now());
     if (findings.over.length + findings.leftover.length > 0) this.deps.log(`reconcile: docker: over the lease ${findings.over.join(",") || "-"}; left without one ${findings.leftover.join(",") || "-"}`);
@@ -607,6 +619,7 @@ export class Reconciler {
     } catch {
       return;
     }
+    if (this.stopped) return;
     const { db, now } = this.deps;
     for (const pane of panes) {
       const runId = pane.tokens[RUN_TOKEN];
