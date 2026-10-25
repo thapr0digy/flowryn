@@ -75,7 +75,7 @@ The payoff grows as the conflict hotspots go (`2026-10-22-remove-conflict-hotspo
   - an older main commit as the second parent;
   - a stale copy that fetches main once.
 
-  Not covered: a conflict resolved by hand, an evil merge, a non-main branch, main as the first parent, an octopus merge, a clean merge plus an own commit, a rebase, more than 20 commits, a cut-off `merge-tree`, and a missing head.
+  Refused (not carried): a conflict resolved by hand, an evil merge, a non-main branch, main as the first parent, an octopus merge, a clean merge plus an own commit, a rebase, more than 20 commits, a cut-off `merge-tree`, and a missing head.
 - `test/unit/carry-delivery.test.ts` checks:
   - the watcher-side carry (artifact, event, no divergence, run ready, gate open, ready line);
   - the queued verify, its PATH and dedupe, and no request when the project has no steps;
