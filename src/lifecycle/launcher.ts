@@ -17,6 +17,7 @@ import type { RunContext } from "../harness/types.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import type { HarnessProcess, HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate } from "../runtime/proc.ts";
+import { withRepoLock } from "../runtime/repo-lock.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
 import { configStaticLayers } from "../policy/static.ts";
@@ -415,7 +416,7 @@ export class Launcher {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const exists = await this.deps.git(["-C", project.path, "rev-parse", "--verify", "--quiet", `refs/heads/${run.branch}`]);
     const args = exists.exitCode === 0 ? ["worktree", "add", path, run.branch] : ["worktree", "add", "-b", run.branch, path, run.base_sha];
-    const added = await this.deps.git(["-C", project.path, ...args]);
+    const added = await withRepoLock(project.path, () => this.deps.git(["-C", project.path, ...args]));
     if (added.exitCode !== 0) throw new Error(`git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`);
     return realpathSync(path);
   }
