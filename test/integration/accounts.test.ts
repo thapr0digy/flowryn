@@ -68,7 +68,8 @@ const FAST = "[sched]\npass_ms = 250\nquota_cache_ms = 300";
 
 async function accountsFleet(extra = "", signedIn = [WORK, PERSONAL], accounts = ACCOUNTS): Promise<FleetEnv> {
   // An inherited key in the daemon's environment must not answer for any account's login.
-  const env = await makeFleetEnv({ origin: true, extraConfig: `${accounts}\n${extra}`, daemonEnv: { ANTHROPIC_API_KEY: "sk-inherited" } });
+  // The fleet's project is a work one, so its leader leads the work scope (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+  const env = await makeFleetEnv({ origin: true, extraConfig: `${accounts}\n${extra}`, daemonEnv: { ANTHROPIC_API_KEY: "sk-inherited" }, leaderScope: "work" });
   envs.push(env);
   signInClaude(env, signedIn);
   return env;
