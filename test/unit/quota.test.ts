@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { tx } from "../../src/db/db.ts";
-import { quotaCheck } from "../../src/doctor/doctor.ts";
+import { quotaChecks } from "../../src/doctor/doctor.ts";
 import { judgeQuota, overrideQuota, parseQuota, probeQuota, QUOTA_ARGS, quotaHolds, quotaLine, quotaState, recordQuota, type QuotaReading } from "../../src/sched/quota.ts";
 import { makeHome, quotaJson, type TestHome } from "../helpers/harness.ts";
 
@@ -72,24 +72,24 @@ describe("the floor", () => {
     const db = h.db();
     const events = () => (db.query("SELECT kind FROM events WHERE kind LIKE 'sched.quota_%' ORDER BY seq").all() as { kind: string }[]).map((e) => e.kind);
     const item = () => db.query("SELECT state, line FROM items WHERE kind = 'quota_low' ORDER BY rowid DESC").get() as { state: string; line: string } | null;
-    tx(db, () => recordQuota(db, known(80), 5, 1));
-    tx(db, () => recordQuota(db, known(60), 5, 2));
+    tx(db, () => recordQuota(db, "claude", known(80), 5, 1));
+    tx(db, () => recordQuota(db, "claude", known(60), 5, 2));
     expect(events()).toEqual(["sched.quota_ok"]);
-    expect(quotaState(db)).toMatchObject({ state: "ok", percent: 80, since: 1 });
-    expect(quotaHolds(db)).toBe(false);
-    tx(db, () => recordQuota(db, known(3), 5, 3));
-    tx(db, () => recordQuota(db, known(2), 5, 4));
+    expect(quotaState(db, "claude")).toMatchObject({ state: "ok", percent: 80, since: 1 });
+    expect(quotaHolds(db, "claude")).toBe(false);
+    tx(db, () => recordQuota(db, "claude", known(3), 5, 3));
+    tx(db, () => recordQuota(db, "claude", known(2), 5, 4));
     expect(events()).toEqual(["sched.quota_ok", "sched.quota_low"]);
-    expect(quotaHolds(db)).toBe(true);
+    expect(quotaHolds(db, "claude")).toBe(true);
     expect(item()!.state).toBe("open");
-    expect(item()!.line).toContain("Claude quota 3% (seven_day), under the 5% floor; new Claude runs wait until it resets at");
-    expect(quotaLine(quotaState(db)!)).toBe("claude 3% (floor 5%) low; new Claude runs wait");
-    tx(db, () => recordQuota(db, { state: "unknown", detail: "quota-axi exited 1" }, 5, 5));
-    expect(quotaHolds(db)).toBe(false);
+    expect(item()!.line).toContain("Account claude: quota 3% (seven_day), under the 5% floor; new runs on claude wait until it resets at");
+    expect(quotaLine(quotaState(db, "claude")!)).toBe("3% (floor 5%) low; new runs on it wait");
+    tx(db, () => recordQuota(db, "claude", { state: "unknown", detail: "quota-axi exited 1" }, 5, 5));
+    expect(quotaHolds(db, "claude")).toBe(false);
     expect(item()!.state).toBe("resolved");
-    expect(quotaLine(quotaState(db)!)).toBe("unknown (quota-axi exited 1); nothing waits on it");
+    expect(quotaLine(quotaState(db, "claude")!)).toBe("unknown (quota-axi exited 1); nothing waits on it");
     // A new floor is recorded even when the verdict stays the same.
-    tx(db, () => recordQuota(db, { state: "unknown", detail: "quota-axi exited 1" }, 10, 6));
+    tx(db, () => recordQuota(db, "claude", { state: "unknown", detail: "quota-axi exited 1" }, 10, 6));
     expect(events()).toEqual(["sched.quota_ok", "sched.quota_low", "sched.quota_unknown", "sched.quota_unknown"]);
     db.close();
   });
@@ -98,18 +98,18 @@ describe("the floor", () => {
     const h = makeHome();
     homes.push(h);
     const db = h.db();
-    expect(tx(db, () => overrideQuota(db, 1))).toBe(false);
-    tx(db, () => recordQuota(db, known(1), 5, 2));
-    expect(tx(db, () => overrideQuota(db, 3))).toBe(true);
-    expect(tx(db, () => overrideQuota(db, 4))).toBe(false);
-    expect(quotaHolds(db)).toBe(false);
+    expect(tx(db, () => overrideQuota(db, "claude", 1))).toBe(false);
+    tx(db, () => recordQuota(db, "claude", known(1), 5, 2));
+    expect(tx(db, () => overrideQuota(db, "claude", 3))).toBe(true);
+    expect(tx(db, () => overrideQuota(db, "claude", 4))).toBe(false);
+    expect(quotaHolds(db, "claude")).toBe(false);
     expect((db.query("SELECT state FROM items WHERE kind = 'quota_low'").get() as { state: string }).state).toBe("resolved");
     // Still low: the override stands. Back over the floor and low again: it holds again.
-    tx(db, () => recordQuota(db, known(0), 5, 5));
-    expect(quotaHolds(db)).toBe(false);
-    tx(db, () => recordQuota(db, known(90), 5, 6));
-    tx(db, () => recordQuota(db, known(1), 5, 7));
-    expect(quotaHolds(db)).toBe(true);
+    tx(db, () => recordQuota(db, "claude", known(0), 5, 5));
+    expect(quotaHolds(db, "claude")).toBe(false);
+    tx(db, () => recordQuota(db, "claude", known(90), 5, 6));
+    tx(db, () => recordQuota(db, "claude", known(1), 5, 7));
+    expect(quotaHolds(db, "claude")).toBe(true);
     db.close();
   });
 });
@@ -138,12 +138,34 @@ function config(extra: Record<string, unknown> = {}, tool: string | null = scrip
 
 const at = (r: QuotaReading) => async () => r;
 
-describe("doctor's quota probe line", () => {
-  test("ok over the floor, warn under it or when the probe fails, nothing when the floor is off or quota-axi is missing", async () => {
-    expect(await quotaCheck(config(), at(known(80)))).toEqual({ check: "quota probe", status: "ok", detail: "claude 80% (seven_day) effective, floor 5%" });
-    expect(await quotaCheck(config(), at(known(3)))).toMatchObject({ status: "warn", detail: expect.stringContaining("under the 5% floor: new Claude runs wait") });
-    expect(await quotaCheck(config(), at({ state: "unknown", detail: "quota-axi exited 1" }))).toMatchObject({ status: "warn", detail: "quota-axi exited 1; new Claude runs never wait on the quota while it fails" });
-    expect(await quotaCheck(config({ capacity: { quota: { floor: 0 } } }), at(known(0)))).toBeNull();
-    expect(await quotaCheck(config({}, join(tmpdir(), "fw-no-such-quota-axi")), at(known(80)))).toBeNull();
+describe("doctor's quota probe lines", () => {
+  test("one per account: ok over the floor, warn under it or when the probe fails, nothing when the floor is off or quota-axi is missing", async () => {
+    expect(await quotaChecks(config(), at(known(80)))).toEqual([{ check: "quota probe claude", status: "ok", detail: "80% (seven_day) effective, floor 5%" }]);
+    expect(await quotaChecks(config(), at(known(3)))).toMatchObject([{ status: "warn", detail: expect.stringContaining("under the 5% floor: new runs on claude wait (flowryn capacity resume --account claude starts them anyway)") }]);
+    expect(await quotaChecks(config(), at({ state: "unknown", detail: "quota-axi exited 1" }))).toMatchObject([{ status: "warn", detail: "quota-axi exited 1; new runs on claude never wait on the quota while it fails" }]);
+    expect(await quotaChecks(config({ capacity: { quota: { floor: 0 } } }), at(known(0)))).toEqual([]);
+    expect(await quotaChecks(config({}, join(tmpdir(), "fw-no-such-quota-axi")), at(known(80)))).toEqual([]);
+  });
+
+  test("two Claude accounts get a row each; a Pi account quota-axi cannot read gets none", async () => {
+    const accounts = {
+      accounts: {
+        "claude-work": { harness: "claude", config_dir: "/x/work" },
+        "claude-home": { harness: "claude" },
+        chatgpt: { harness: "pi", provider: "openai-codex", model: "openai-codex/gpt-5", agent_dir: "/x/pi" },
+        other: { harness: "pi", provider: "anthropic", model: "anthropic/opus", agent_dir: "/x/pi" },
+      },
+    };
+    const seen: string[] = [];
+    const checks = await quotaChecks(config(accounts), async (_tool, _node, account) => {
+      seen.push(account.id);
+      return known(account.id === "claude-work" ? 2 : 60);
+    });
+    expect(checks.map((c) => [c.check, c.status])).toEqual([
+      ["quota probe claude-work", "warn"],
+      ["quota probe claude-home", "ok"],
+      ["quota probe chatgpt", "ok"],
+    ]);
+    expect(seen.toSorted()).toEqual(["chatgpt", "claude-home", "claude-work"]);
   });
 });
