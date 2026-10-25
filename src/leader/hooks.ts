@@ -27,7 +27,9 @@ import { awayConfig } from "../config/leader.ts";
 import { acceptedWithoutCi } from "../lifecycle/ci-wait.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { appendEvent } from "../db/events.ts";
-import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
+import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, UNCONFIRMED_SCOPE, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
+import { refScope, sees, sessionLens, type ScopeLens } from "./scope.ts";
+import { confirmLogin, type ReportedLogin } from "./login.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { decisionRef } from "../lifecycle/decision-verbs.ts";
@@ -168,6 +170,11 @@ function interruptedByTranscript(ctx: HandlerCtx, s: LeaderSessionRow): boolean 
  * pushed to it. Away counts as inactive: your remote-control chat never
  * fires idle_prompt on the Mac.
  */
+/** The items this session may be handed, and how it sees them: its scope's (src/leader/scope.ts). */
+function visibleTo(ctx: PushCtx, s: LeaderSessionRow): ScopeLens {
+  return sessionLens(ctx.db, ctx.config(), s.session_id);
+}
+
 function pushMode(s: LeaderSessionRow, now: number, away: AwayPosture | null): PushMode | null {
   if (busyNow(s, now)) return s.harness === "pi" ? "continuation" : null;
   if (s.user_inactive_since === null && away === null) return null;
@@ -211,13 +218,14 @@ export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): { pu
   const startsTurn = mode === "waiter" || mode === "trigger";
   const budgets = ctx.attention.notify();
   const p0Budget = away ? awayConfig(ctx.config()).max_wakes_per_hour : budgets.max_triggered_turns_per_hour;
+  const visible = visibleTo(ctx, s);
   if (mode && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") + rewakesLastHour(ctx.db, s.session_id, now, "p0") >= p0Budget)) {
-    const item = p0Candidate(ctx.db, s.session_id, now, ctx.attention.timing().age_ms, away?.since ?? null);
+    const item = p0Candidate(ctx.db, s.session_id, now, ctx.attention.timing().age_ms, away?.since ?? null, visible);
     if (item) return { push: { items: [item], mode, kind: "p0", more: 0 }, dueAt: null };
-    const follow = followUpBatch(ctx.db, s.session_id);
+    const follow = followUpBatch(ctx.db, s.session_id, visible);
     if (follow) return { push: { items: follow.items, mode, kind: "follow_up", more: follow.more }, dueAt: null };
   }
-  const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
+  const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms, visible);
   if (!batch) return { push: null, dueAt: null };
   if (!mode) return { push: null, dueAt: batch.dueAt };
   if (startsTurn && now < batch.dueAt) return { push: null, dueAt: batch.dueAt };
@@ -264,12 +272,34 @@ export async function prepareSessionStart(ctx: HandlerCtx): Promise<{ state: str
 }
 
 /**
+ * The session's login, as its first hook reports it, must be the account `flowryn lead` bound it
+ * to (docs/notes/2026-10-24-leader-scoping-and-vj.md): Claude's transcript inside that account's
+ * projects folder, and the hook's own config folder that account's. A mismatch leaves the session
+ * in no scope: it sees nothing and claims nothing. Inside a transaction; returns the problem or null.
+ */
+function checkLogin(ctx: HandlerCtx, s: LeaderSessionRow, input: LeaderHookInput, login: ReportedLogin | null, now: number): string | null {
+  if (s.scope === UNCONFIRMED_SCOPE) return "its login was not confirmed earlier";
+  const problem = confirmLogin(ctx.config(), s, { transcriptPath: input.transcript_path ?? s.transcript_path, login });
+  if (!problem) return null;
+  setSession(ctx.db, s.session_id, { scope: UNCONFIRMED_SCOPE });
+  s.scope = UNCONFIRMED_SCOPE;
+  releaseScope(ctx, s, problem, now);
+  return problem;
+}
+
+function releaseScope(ctx: HandlerCtx, s: LeaderSessionRow, problem: string, now: number): void {
+  ctx.db.query("UPDATE leader_lease SET session_id = NULL, harness = NULL, pane_id = NULL, token_hash = NULL, approval_key_hash = NULL, heartbeat_at = ?2 WHERE session_id = ?1").run(s.session_id, now);
+  loseCarried(ctx.db, s.session_id, null, now);
+  appendEvent(ctx.db, { source: "hook", kind: "leader.scope_unconfirmed", payload: { session: s.session_id, account: s.account, problem }, ts: now });
+}
+
+/**
  * A leader session started, resumed, cleared or compacted. It claims the
  * lease when it is vacant or stale; the holder gets the briefing (which
  * re-lists every open actionable item, so it also re-grounds a compacted
  * session), anyone else one read-only banner line.
  */
-export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: { state: string; epoch: number }): HandlerResult {
+export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: { state: string; epoch: number }, login: ReportedLogin | null = null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
   const source = input.source ?? "startup";
@@ -286,17 +316,23 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
     loseCarried(ctx.db, s.session_id, null, now);
     s.busy = 0;
   }
-  const lease = getLease(ctx.db);
-  const holderRow = lease.session_id ? getSession(ctx.db, lease.session_id) : null;
+  const loginProblem = checkLogin(ctx, s, input, login, now);
   let claimed: Claimed | null = null;
-  if (!lease.session_id || !holderRow || holderRow.ended_at !== null) claimed = claim(ctx.db, s.session_id, "vacant", now);
-  else if (lease.session_id !== s.session_id && prepared.state === "stale" && prepared.epoch === lease.epoch) claimed = claim(ctx.db, s.session_id, "stale", now);
+  if (!loginProblem) {
+    const lease = getLease(ctx.db, s.scope);
+    const holderRow = lease.session_id ? getSession(ctx.db, lease.session_id) : null;
+    if (!lease.session_id || !holderRow || holderRow.ended_at !== null) claimed = claim(ctx.db, s.session_id, "vacant", now);
+    else if (lease.session_id !== s.session_id && prepared.state === "stale" && prepared.epoch === lease.epoch) claimed = claim(ctx.db, s.session_id, "stale", now);
+  }
   heartbeat(ctx.db, s.session_id, now);
   const holder = isHolder(ctx.db, s.session_id);
   let context: string;
   let listed = 0;
-  if (!holder) {
-    context = readOnlyBanner(ctx.db);
+  if (loginProblem) {
+    context = `Flowryn: this session's login does not match account ${s.account ?? "-"} that flowryn lead started it on (${loginProblem}), so it leads no scope and sees nothing. Quit, and start the leader again with: flowryn lead`;
+    setSession(ctx.db, s.session_id, { banner: null });
+  } else if (!holder) {
+    context = readOnlyBanner(ctx.db, s.session_id);
     setSession(ctx.db, s.session_id, { banner: null });
   } else {
     const turn = compact && busyNow(s, now) ? s.turn_no : s.turn_no + 1;
@@ -304,8 +340,8 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
     listed = briefing.listed;
     context = briefing.text;
   }
-  const epoch = getLease(ctx.db).epoch;
-  appendEvent(ctx.db, { source: "hook", kind: "leader.session_started", payload: { session: s.session_id, source, holder, epoch, listed, claimed: claimed !== null }, ts: now });
+  const epoch = s.scope === UNCONFIRMED_SCOPE ? 0 : getLease(ctx.db, s.scope).epoch;
+  appendEvent(ctx.db, { source: "hook", kind: "leader.session_started", payload: { session: s.session_id, source, holder, epoch, listed, claimed: claimed !== null, scope: s.scope }, ts: now });
   const data: Record<string, unknown> = { session: s.session_id, holder, epoch, context };
   if (claimed?.previous) data.previous = claimed.previous;
   // The approval key goes only to a Pi extension, over its own hook call; never into an environment (design section 7).
@@ -382,7 +418,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
       if (woken.length > 0) lines.push(followUpText(woken));
     }
     if (!isWakePrompt(input.prompt)) lines.push(...awayLines(ctx, s, now));
-    const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx)));
+    const digest = composeDigest(digestCandidates(ctx.db, s.session_id, now, ageMs(ctx), visibleTo(ctx, s)));
     if (digest) {
       for (const item of digest.shown) carry(ctx.db, { itemId: item.id, session: s.session_id, turn, path: "digest", now });
       lines.push(digest.text);
@@ -402,7 +438,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
 function awayLines(ctx: HandlerCtx, s: LeaderSessionRow, now: number): string[] {
   expireAway(ctx.db, now);
   const ended = takePendingBrief(ctx.db, now);
-  if (ended) return [composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: ageMs(ctx), reason: ended.reason })];
+  if (ended) return [composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: ageMs(ctx), reason: ended.reason, lens: sessionLens(ctx.db, ctx.config(), s.session_id) })];
   const cfg = awayConfig(ctx.config());
   if (cfg.auto_after_min > 0) return [];
   const suggestion = awaySuggestion(ctx.db, {
@@ -657,6 +693,12 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: Tool
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   const gated = gatedCommands(command);
   if (gated.length === 0) return result;
+  // Another scope's task: its prompt would name that task, and the verb refuses it anyway (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+  const lens = sessionLens(ctx.db, ctx.config(), s.session_id);
+  if (lens.restricted) {
+    const outside = gated.find((g) => g.task !== "" && !sees(ctx.config(), s.scope, refScope(ctx.db, ctx.config(), g.task) ?? s.scope));
+    if (outside) return { data: { permission: "deny", reason: `Flowryn: ${outside.task} is outside this leader's scope (${s.scope || "unconfirmed"}); the leader of its scope, or the user's own terminal, can do it.` } };
+  }
   const lines: string[] = [];
   for (const g of gated) {
     // A waiver is never routine: only your word can make one, so it is always asked.
@@ -706,7 +748,7 @@ export function approvalKey(ctx: HandlerCtx): HandlerResult {
   if (s.harness !== "pi") throw new FlowrynError("role_refused", "only a Pi leader's extension holds an approval key");
   if (!isHolder(ctx.db, s.session_id)) throw new FlowrynError("not_leader", "this session does not hold the lease", "flowryn leader claim");
   const key = mintToken("key");
-  ctx.db.query("UPDATE leader_lease SET approval_key_hash = ?2 WHERE id = 1 AND session_id = ?1").run(s.session_id, hashToken(key));
+  ctx.db.query("UPDATE leader_lease SET approval_key_hash = ?2 WHERE session_id = ?1").run(s.session_id, hashToken(key));
   appendEvent(ctx.db, { source: "hook", kind: "leader.approval_key", payload: { session: s.session_id }, ts: ctx.now() });
   return { data: { key } };
 }
@@ -733,7 +775,8 @@ export function stop(ctx: HandlerCtx): HandlerResult {
   const presented = confirmTurn(ctx.db, s.session_id, s.turn_no, now);
   heartbeat(ctx.db, s.session_id, now);
   if (s.harness === "claude" && s.continuations < MAX_LEADER_CONTINUATIONS && isHolder(ctx.db, s.session_id)) {
-    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), getAway(ctx.db, now)?.since ?? null);
+    const visible = visibleTo(ctx, s);
+    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), getAway(ctx.db, now)?.since ?? null, visible);
     if (item && carry(ctx.db, { itemId: item.id, session: s.session_id, turn: s.turn_no, path: "continuation", now })) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
       appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: item.id, path: "continuation", turn: s.turn_no }, ts: now });
@@ -742,9 +785,9 @@ export function stop(ctx: HandlerCtx): HandlerResult {
     // Worker questions ride the turn that is ending at once: the batch window only holds back a wake.
     // Items to relay (a worker's report, a dropped restart) ride in the same continuation, each once.
     const carryNow = (pushed: RankedItem) => carry(ctx.db, { itemId: pushed.id, session: s.session_id, turn: s.turn_no, path: "continuation", now });
-    const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms);
+    const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms, visible);
     const questions = (batch?.items ?? []).filter(carryNow);
-    const relay = relayBatch(ctx.db, s.session_id);
+    const relay = relayBatch(ctx.db, s.session_id, visible);
     const relayed = (relay?.items ?? []).filter(carryNow);
     if (questions.length > 0 || relayed.length > 0) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
@@ -861,7 +904,9 @@ export async function waitForP0(ctx: HandlerCtx, waiter: string): Promise<WaitOu
 }
 
 function heldByAnother(db: Db, sessionId: string): boolean {
-  const holder = getLease(db).session_id;
+  const own = getSession(db, sessionId);
+  if (!own || own.scope === UNCONFIRMED_SCOPE) return true;
+  const holder = getLease(db, own.scope).session_id;
   if (!holder || holder === sessionId) return false;
   const row = getSession(db, holder);
   return row !== null && row.ended_at === null;

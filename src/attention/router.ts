@@ -39,6 +39,22 @@ const QUESTION_LIST = QUESTION_KINDS.map((k) => `'${k}'`).join(", ");
 /** A leader follow-up (something you did, a merge that landed, a yolo PR ready) tops its lane. */
 const RANK_ORDER = `ORDER BY i.lane, NOT ${LEADER_WAKE_SQL}, aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC`;
 
+/**
+ * Which items a session may be handed, and how it is shown them: its scope's, with task-less lines
+ * that may name other scopes' tasks made neutral (src/leader/scope.ts ScopeLens). The reads below
+ * filter after the query, so a scoped session's push never takes another scope's item.
+ */
+export interface ItemView {
+  item(item: Pick<RankedItem, "task_id" | "run_id">): boolean;
+  redact<T extends RankedItem>(item: T): T;
+}
+
+const ALL_ITEMS: ItemView = { item: () => true, redact: (item) => item };
+
+function seen(rows: RankedItem[], view: ItemView): RankedItem[] {
+  return rows.filter((row) => view.item(row)).map((row) => view.redact(row));
+}
+
 /** One push carries at most this many questions, like the digest's lines; the rest go in the next. */
 export const QUESTION_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
@@ -56,8 +72,8 @@ export function openActionable(db: Db, now: number, ageMs: number): RankedItem[]
  * been shown yet (presented or carried in this session), open actionable
  * ones and informational ones still under their attempt limit.
  */
-export function digestCandidates(db: Db, session: string, now: number, ageMs: number): RankedItem[] {
-  return db
+export function digestCandidates(db: Db, session: string, now: number, ageMs: number, view: ItemView = ALL_ITEMS): RankedItem[] {
+  return seen(db
     .query(
       `${RANK_SELECT}
        WHERE i.lane IN ('P0','P1')
@@ -65,7 +81,7 @@ export function digestCandidates(db: Db, session: string, now: number, ageMs: nu
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?3 AND s.state IN ('presented','carried','offered'))
        ${RANK_ORDER}`,
     )
-    .all(now - ageMs, MAX_INFO_ATTEMPTS, session) as RankedItem[];
+    .all(now - ageMs, MAX_INFO_ATTEMPTS, session) as RankedItem[], view);
 }
 
 /**
@@ -75,17 +91,18 @@ export function digestCandidates(db: Db, session: string, now: number, ageMs: nu
  * counts as a P0 here too (awayWakeSql); its stored lane stays as it is.
  * Leader follow-ups go as a batch (followUpBatch), never one push each.
  */
-export function p0Candidate(db: Db, session: string, now: number, ageMs: number, awaySince: number | null = null): RankedItem | null {
+export function p0Candidate(db: Db, session: string, now: number, ageMs: number, awaySince: number | null = null, view: ItemView = ALL_ITEMS): RankedItem | null {
   return (
-    (db
-      .query(
+    seen(
+      db.query(
         `${RANK_SELECT}
          WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST}) AND NOT ${LEADER_WAKE_SQL}
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried','offered'))
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
-         ${RANK_ORDER} LIMIT 1`,
-      )
-      .get(now - ageMs, session, awaySince) as RankedItem | null) ?? null
+         ${RANK_ORDER}`,
+      ).all(now - ageMs, session, awaySince) as RankedItem[],
+      view,
+    )[0] ?? null
   );
 }
 
@@ -105,8 +122,8 @@ export interface QuestionBatch {
  * oldest is `batchMs` old, so questions a ship opens in a burst wake the
  * leader once; questions of other ships ride along in the same push.
  */
-export function questionBatch(db: Db, session: string, batchMs: number): QuestionBatch | null {
-  const rows = db
+export function questionBatch(db: Db, session: string, batchMs: number, view: ItemView = ALL_ITEMS): QuestionBatch | null {
+  const rows = seen(db
     .query(
       `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
        FROM items i
@@ -117,7 +134,7 @@ export function questionBatch(db: Db, session: string, batchMs: number): Questio
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
        ORDER BY i.opened_at ASC, i.rowid ASC`,
     )
-    .all(session) as RankedItem[];
+    .all(session) as RankedItem[], view);
   if (rows.length === 0) return null;
   const items = rows.slice(0, QUESTION_BATCH_MAX);
   return { items, more: rows.length - items.length, dueAt: rows[0]!.opened_at + batchMs };
@@ -145,8 +162,8 @@ export const RELAY_FOOTER = "Each is relayed to the user, or dismissed: flowryn 
  * any path (a digest, the briefing, an earlier turn end), and not leased to a
  * push path anywhere. So each blocks one turn end once, oldest first.
  */
-export function relayBatch(db: Db, session: string): { items: RankedItem[]; more: number } | null {
-  const rows = db
+export function relayBatch(db: Db, session: string, view: ItemView = ALL_ITEMS): { items: RankedItem[]; more: number } | null {
+  const rows = seen(db
     .query(
       `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
        FROM items i
@@ -157,7 +174,7 @@ export function relayBatch(db: Db, session: string): { items: RankedItem[]; more
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
        ORDER BY i.opened_at ASC, i.rowid ASC`,
     )
-    .all(session) as RankedItem[];
+    .all(session) as RankedItem[], view);
   if (rows.length === 0) return null;
   const items = rows.slice(0, RELAY_BATCH_MAX);
   return { items, more: rows.length - items.length };
@@ -184,8 +201,8 @@ export const FOLLOW_UP_FOOTER = "Follow each up as its line says (a ready yolo P
  * first. Due at once: each is one action of yours, so it wakes the leader
  * once, and several inside one wait share the push.
  */
-export function followUpBatch(db: Db, session: string): { items: RankedItem[]; more: number } | null {
-  const rows = db
+export function followUpBatch(db: Db, session: string, view: ItemView = ALL_ITEMS): { items: RankedItem[]; more: number } | null {
+  const rows = seen(db
     .query(
       `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
        FROM items i
@@ -196,7 +213,7 @@ export function followUpBatch(db: Db, session: string): { items: RankedItem[]; m
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
        ORDER BY i.opened_at ASC, i.rowid ASC`,
     )
-    .all(session) as RankedItem[];
+    .all(session) as RankedItem[], view);
   if (rows.length === 0) return null;
   const items = rows.slice(0, FOLLOW_UP_BATCH_MAX);
   return { items, more: rows.length - items.length };

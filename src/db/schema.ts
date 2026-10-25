@@ -722,6 +722,29 @@ CREATE TABLE job_procs (
 CREATE INDEX job_procs_lease ON job_procs(lease_id);
 `;
 
+/**
+ * Migration 33 (docs/notes/2026-10-24-leader-scoping-and-vj.md): a leader per scope. The lease is one
+ * row per scope (`id` stays the rowid, its old `id = 1` check goes), and a leader session records the
+ * account its login matched and that account's scope ('' while the login is unconfirmed: it sees
+ * nothing). Existing rows take the implicit scope `default`, which the daemon moves to `[scopes] default`
+ * when that is another scope (src/leader/scope.ts). A task with no project (a to-do, a standalone
+ * decision) remembers the scope of the leader that created it; your terminal's are in the default scope.
+ */
+const LEADER_SCOPES_SQL = /* sql */ `
+CREATE TABLE leader_lease_scoped (
+  id INTEGER PRIMARY KEY, scope TEXT NOT NULL DEFAULT 'default', session_id TEXT, harness TEXT, pane_id TEXT,
+  epoch INTEGER NOT NULL, token_hash TEXT, approval_key_hash TEXT,
+  claimed_at INTEGER, heartbeat_at INTEGER);
+INSERT INTO leader_lease_scoped (id, scope, session_id, harness, pane_id, epoch, token_hash, approval_key_hash, claimed_at, heartbeat_at)
+  SELECT id, 'default', session_id, harness, pane_id, epoch, token_hash, approval_key_hash, claimed_at, heartbeat_at FROM leader_lease;
+DROP TABLE leader_lease;
+ALTER TABLE leader_lease_scoped RENAME TO leader_lease;
+CREATE UNIQUE INDEX leader_lease_scope ON leader_lease(scope);
+ALTER TABLE leader_sessions ADD COLUMN account TEXT;
+ALTER TABLE leader_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'default';
+CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -755,6 +778,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 30, name: "accounts", sql: ACCOUNTS_SQL },
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
   { version: 32, name: "job-procs", sql: JOB_PROCS_SQL },
+  { version: 33, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

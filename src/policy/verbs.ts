@@ -139,6 +139,7 @@ const merge: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
   // The gate reads GitHub, the merge asks it and reads the proof back.
   replyMs: 120_000,
   async prepare(ctx, args): Promise<MergePrepared> {
@@ -251,6 +252,7 @@ const decline: VerbSpec = {
   flags: { "body-file": { type: "string", help: "what to change, from a file or - for stdin", fileFor: "body" } },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
   apply(ctx, args) {
     const { run } = runAndProject(ctx.db, stringArg(args, "task")!);
     if (run.state !== "ready") throw new FlowrynError("not_ready", `${run.task_id} is ${run.state}; only a delivered, unmerged ship can be declined`);
@@ -292,6 +294,7 @@ const cleanup: VerbSpec = {
   flags: { discard: { type: "boolean", help: "discard unlanded work (needs a human discard approval: flowryn approve <task> --discard)" } },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
   replyMs: 120_000,
   async prepare(ctx, args) {
     const task = stringArg(args, "task")!;

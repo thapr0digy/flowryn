@@ -170,6 +170,7 @@ const promote: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
   async prepare(ctx, args): Promise<Promotion> {
     const run = scoutRun(ctx.db, stringArg(args, "task")!);
     const project = projectOf(ctx.db, run);

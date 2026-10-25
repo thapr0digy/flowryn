@@ -13,7 +13,7 @@ import { basename, shellCommands, type Command } from "./shell.ts";
  * a URL host or a file path; no model is involved.
  */
 
-export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell"] as const;
+export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "scope-paths"] as const;
 export type ToolkitRule = (typeof TOOLKIT_RULES)[number];
 
 export interface ToolkitVerdict {
@@ -41,6 +41,11 @@ export interface ToolkitPaths {
   flowrynDb: string;
   /** TASKS_AXI_FILE in the hook's environment, if set. */
   tasksAxiFile?: string | null;
+  /**
+   * A leader of a home with more than one scope: the files and folders it may not touch, other
+   * scopes' work and the stores that hold every scope's tasks (src/leader/scope-guard.ts). Absolute.
+   */
+  scopeDenied?: readonly string[];
 }
 
 /** The fixed instruction block for workers and leaders, after [style] (scout section 2, L1). Fixed text, so the prompt cache holds. */
@@ -62,6 +67,8 @@ const LEADER_SHELL_REASON =
 
 const SHELL_TOOLS = new Set(["bash"]);
 const FILE_TOOLS = new Set(["edit", "write", "multiedit", "notebookedit"]);
+/** Tools that read a path (Claude's and Pi's): only the scope-paths rule looks at them. */
+const READ_TOOLS = new Set(["read", "grep", "glob", "ls", "find", "notebookread"]);
 
 const MCP_RULES: { pattern: RegExp; rule: Exclude<ToolkitRule, "leader-shell"> }[] = [
   { pattern: /^mcp__.*github/i, rule: "github" },
@@ -78,6 +85,7 @@ const TOOL_FOR: Record<Exclude<ToolkitRule, "leader-shell">, string> = {
   browser: "chrome-devtools-axi",
   tasks: "tasks-axi",
   "flowryn-tasks": "flowryn",
+  "scope-paths": "flowryn",
 };
 
 /** The verdict for one tool call: the first rule it breaks, or null. Never throws. */
@@ -100,12 +108,16 @@ function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
       const hit = commandVerdict(c, call, paths);
       if (hit) return hit;
     }
+    for (const c of shellCommands(command)) {
+      const hit = scopeShellVerdict(c, call, paths);
+      if (hit) return hit;
+    }
     return null;
   }
-  if (FILE_TOOLS.has(tool)) {
+  if (FILE_TOOLS.has(tool) || READ_TOOLS.has(tool)) {
     const target = [call.toolInput.file_path, call.toolInput.path, call.toolInput.notebook_path].find((p): p is string => typeof p === "string" && p.length > 0);
     if (!target) return null;
-    return fileVerdict(target, call, paths, `${call.toolName} on ${target}`);
+    return (FILE_TOOLS.has(tool) ? fileVerdict(target, call, paths, `${call.toolName} on ${target}`) : null) ?? scopeVerdict(target, call, paths, `${call.toolName} on ${target}`);
   }
   if (tool === "skill") {
     const skill = String(call.toolInput.skill ?? "");
@@ -142,7 +154,48 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
       return call.role === "worker"
         ? "Flowryn owns this backlog; ask your leader ($FLOWRYN_BIN ask) for the change."
         : "Flowryn owns this backlog; use the flowryn verbs (dispatch, plan, todo add, decision add, ...).";
+    case "scope-paths":
+      return "it holds another scope's work, or every scope's tasks; this leader sees its own scope through the flowryn verbs (fleet, show, brief).";
   }
+}
+
+// --- a leader's scope (docs/notes/2026-10-24-leader-scoping-and-vj.md) ----------------------------
+
+/** Is `path` one of the denied paths, or inside one? */
+function underDenied(path: string, denied: readonly string[]): boolean {
+  const p = resolve(path);
+  return denied.some((d) => p === d || p.startsWith(`${d}/`));
+}
+
+/** A leader's tool call on a path of another scope, or on a store of every scope's tasks. */
+function scopeVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what: string): ToolkitVerdict | null {
+  if (call.role !== "leader" || !paths.scopeDenied || paths.scopeDenied.length === 0) return null;
+  return underDenied(resolvePath(target, call.cwd, paths.home), paths.scopeDenied) ? deny("scope-paths", call, what) : null;
+}
+
+/** A shell word that names a path: absolute, home-relative, or relative with a slash. */
+function pathWord(word: string): string | null {
+  const value = word.includes("=") && !word.startsWith("/") ? word.slice(word.indexOf("=") + 1) : word;
+  if (value.length === 0 || value.startsWith("-")) return null;
+  return value.startsWith("/") || value.startsWith("~") || value.startsWith("$HOME") || value.startsWith("${HOME}") || value.includes("/") ? value : null;
+}
+
+/** The scope-paths rule for one shell command: any argument, redirect or tasks-axi file it names. */
+function scopeShellVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
+  if (call.role !== "leader" || !paths.scopeDenied || paths.scopeDenied.length === 0) return null;
+  const words = [...c.argv.filter((w, i) => i > 0 || w.includes("/")), ...c.redirects.map((r) => r.target), ...Object.values(c.assignments)];
+  for (const word of words) {
+    const path = pathWord(word);
+    if (path && underDenied(resolvePath(path, call.cwd, paths.home), paths.scopeDenied)) return deny("scope-paths", call, `\`${c.argv[0]}\` on ${path}`);
+  }
+  // tasks-axi reads backlog.md in its cwd (or TASKS_AXI_FILE) without naming it.
+  if (c.name === "tasks-axi") {
+    const file = c.assignments.TASKS_AXI_FILE ?? paths.tasksAxiFile ?? "backlog.md";
+    if (!c.argv.includes("--file") && !c.argv.some((a) => a.startsWith("--file=")) && underDenied(resolvePath(file, call.cwd, paths.home), paths.scopeDenied)) {
+      return deny("scope-paths", call, "`tasks-axi` on Flowryn's backlog");
+    }
+  }
+  return null;
 }
 
 // --- shell commands ----------------------------------------------------------------------------

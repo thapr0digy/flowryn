@@ -1,7 +1,7 @@
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { getLease, getSession } from "../lease/lease.ts";
+import { allLeases, getSession } from "../lease/lease.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import type { ItemKind } from "./items.ts";
 
@@ -158,11 +158,16 @@ export function autoAway(db: Db, input: { afterMs: number; now: number }): AwayP
   return startAway(db, { until: input.now + AWAY_MAX_MS, words: null, by: AUTO_AWAY_BY, now: input.now, since: inactiveSince, source: "daemon" }).posture;
 }
 
-/** When you went inactive in the lease holder's session; null with no open holder (nobody could be woken) or while you are active. */
+/**
+ * When you went inactive in the lease holders' sessions (one per scope); null with no open holder
+ * (nobody could be woken) or while you are active in any of them. Inactive in all: since the latest.
+ */
 function holderInactiveSince(db: Db): number | null {
-  const holder = getLease(db).session_id;
-  const session = holder ? getSession(db, holder) : null;
-  return session && session.ended_at === null ? session.user_inactive_since : null;
+  const sessions = allLeases(db)
+    .map((l) => (l.session_id ? getSession(db, l.session_id) : null))
+    .filter((s): s is NonNullable<typeof s> => s !== null && s.ended_at === null);
+  if (sessions.length === 0 || sessions.some((s) => s.user_inactive_since === null)) return null;
+  return Math.max(...sessions.map((s) => s.user_inactive_since!));
 }
 
 /** Your own message (or Pi's report that you are active) ends an automatic away; its brief rides your next message. A manual one stays. Call inside a transaction. */

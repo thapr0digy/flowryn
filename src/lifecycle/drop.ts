@@ -234,6 +234,7 @@ const drop: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target" },
   apply(ctx, args) {
     const target = stringArg(args, "target")!;
     const reason = sanitizeBlock(stringArg(args, "body") ?? "").trim();

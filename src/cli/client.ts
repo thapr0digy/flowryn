@@ -3,6 +3,7 @@ import { loadConfig } from "../config/config.ts";
 import { flowrynHome, socketPath, spoolDir, stateFiles } from "../config/paths.ts";
 import { openDb } from "../db/db.ts";
 import { authorize, resolveCaller } from "../api/auth.ts";
+import { enforceScope } from "../leader/scope.ts";
 import { errorReply, okReply, type Envelope, type Reply } from "../api/envelope.ts";
 import { EXIT, FlowrynError, toErrorBody, type ErrorBody, type ExitCode } from "../api/errors.ts";
 import { writeSpoolFile } from "../api/spool.ts";
@@ -60,6 +61,7 @@ function readOfflineReply(spec: VerbSpec, envelope: Envelope, io: CliIo): { repl
     const caller = resolveCaller(db, envelope.token, envelope.channel);
     authorize(spec, caller, db);
     const args = validateArgs(spec, envelope.args);
+    enforceScope(spec, db, config, caller, args);
     const result = spec.read!({ db, config, now: Date.now(), caller }, args);
     return { reply: okReply(result.data, result.hints), banner: READ_ONLY_BANNER };
   } finally {

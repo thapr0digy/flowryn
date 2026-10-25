@@ -156,6 +156,7 @@ const verifyStart: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target", project: "project" },
   replyMs: 60_000,
   async prepare(ctx, args): Promise<StartPrepared> {
     const github = ctx.delivery.github();
@@ -262,6 +263,7 @@ const verifyShow: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "ref", arg: "id" },
   read(ctx, args) {
     const id = stringArg(args, "id")!;
     if (/^vq\d+$/.test(id)) {

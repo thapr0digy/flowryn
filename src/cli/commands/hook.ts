@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { defaultConfig, loadConfig, type FlowrynConfig } from "../../config/config.ts";
 import { flowrynHome, socketPath, stateFiles } from "../../config/paths.ts";
 import { toolkitVerdict, type ToolkitPaths, type ToolkitVerdict } from "../../policy/toolkit.ts";
+import { accountsConfig } from "../../config/accounts.ts";
+import { readScopeDeny, sharedStores } from "../../policy/scope-paths.ts";
 import { request, TransportError } from "../../transport/unix.ts";
 import { ulid } from "../../util/ulid.ts";
 import { PROTO } from "../../version.ts";
@@ -92,7 +94,27 @@ function toolkitPaths(io: CliIo): ToolkitPaths {
     flowrynTodos: config.tasks.todos,
     flowrynDb: stateFiles(config.state_dir).db,
     tasksAxiFile: io.env.TASKS_AXI_FILE ?? null,
+    scopeDenied: leaderScopeDenied(io, config),
   };
+}
+
+/**
+ * A leader of a home with more than one scope: Flowryn's shared task stores and its scope's list
+ * of other scopes' folders (src/leader/scope-guard.ts). `flowryn lead` puts the scope in the
+ * leader's environment; a leader with none (an unconfirmed launch) is denied every list's folders.
+ */
+function leaderScopeDenied(io: CliIo, config: FlowrynConfig): string[] {
+  if (!io.env.FLOWRYN_TOKEN?.startsWith("fwl_")) return [];
+  let scopes: string[];
+  try {
+    scopes = Object.keys(accountsConfig(config).scopes);
+  } catch {
+    return [];
+  }
+  if (scopes.length < 2) return [];
+  const scope = io.env.FLOWRYN_LEADER_SCOPE ?? "";
+  const lists = scopes.includes(scope) ? [scope] : scopes;
+  return [...sharedStores(config), ...lists.flatMap((s) => readScopeDeny(config.state_dir, s))];
 }
 
 /**
@@ -139,7 +161,9 @@ function signalHook(name: string, summary: string): VerbSpec {
       const input = await readInput(io);
       const verdict = name === "pre-tool" ? localVerdict(io, harness, input) : null;
       const toolkit = verdict ? { toolkit: JSON.stringify({ rule: verdict.rule, tool: verdict.tool }) } : {};
-      const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart(), ...toolkit }, SLOW_HOOKS[name] ?? HOOK_TIMEOUTS).catch(() => null);
+      // A leader's session start reports the login folder this process runs on, for the daemon's check (src/leader/login.ts).
+      const login = name === "session-start" ? { login: JSON.stringify({ config_dir: io.env.CLAUDE_CONFIG_DIR ?? null, agent_dir: io.env.PI_CODING_AGENT_DIR ?? null }) } : {};
+      const reply = await call(io, `hook.${name}`, { harness, input, "started-at": processStart(), ...toolkit, ...login }, SLOW_HOOKS[name] ?? HOOK_TIMEOUTS).catch(() => null);
       // A toolkit denial never waits on the daemon: down, slow or refusing, the call is still denied.
       if (verdict && harness === "claude" && !io.json) {
         const data = reply?.ok ? ((reply.data ?? {}) as Record<string, unknown>) : {};

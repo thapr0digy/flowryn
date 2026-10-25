@@ -7,6 +7,7 @@ import { boolArg, intArg, stringArg, type Args, type HandlerCtx, type VerbSpec }
 import { slugify } from "./ids.ts";
 import { defaultAutonomy, workflowFor } from "../config/workflows.ts";
 import type { FlowrynConfig } from "../config/config.ts";
+import { lensFor, projectScopeById, requireInScope } from "../leader/scope.ts";
 
 export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as const;
 export const HARNESSES = ["claude", "pi"] as const;
@@ -138,6 +139,7 @@ const projectAdd: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "self" },
   prepare: (ctx, args) => inspectRepo(ctx, stringArg(args, "path")!),
   apply(ctx, args, prepared) {
     const facts = prepared as RepoFacts;
@@ -166,6 +168,8 @@ const projectAdd: VerbSpec = {
       autonomy: oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy") ?? defaultAutonomy(ctx.config()),
     };
     insertProject(ctx.db, row);
+    // A scoped leader registers only its own scope's projects; refusing rolls the insert back.
+    requireInScope(ctx.config(), ctx.caller, projectScopeById(ctx.db, ctx.config(), id), `project ${id}`);
     return { data: { project: projectView(row) }, hints: ["flowryn project list", `flowryn project set ${id} --mode <mode>`] };
   },
 };
@@ -197,6 +201,7 @@ const projectSet: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "project", arg: "id" },
   apply(ctx, args) {
     const id = stringArg(args, "id")!;
     const current = getProject(ctx.db, id);
@@ -248,8 +253,12 @@ const projectList: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx) {
-    const projects = listProjects(ctx.db).map((p) => ({
+    const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+    const projects = listProjects(ctx.db)
+      .filter((p) => lens.project(p.id))
+      .map((p) => ({
       id: p.id,
       mode: p.delivery_mode,
       yolo: p.yolo ? "on" : "off",

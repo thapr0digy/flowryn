@@ -8,7 +8,7 @@ import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { canonicalPrUrl, parsePrUrl } from "../forge/github.ts";
 import { checksLine, ForgeError, type ChecksSummary, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
-import { getLease, getSession } from "../lease/lease.ts";
+import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { approvalRef, deliveredOf, prEvidenceFrom, recordPrEvidence, remoteHead, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun, type LandedBy } from "../lifecycle/landing.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
@@ -247,9 +247,9 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
     );
   }
   if (leader?.harness === "pi") {
-    const lease = getLease(db);
+    const lease = leaseOfSession(db, leader.session_id);
     if (!ask.approvalKey) reasons.push("no approval key: merge through the flowryn_merge tool, which asks you first");
-    else if (lease.session_id !== leader.session_id || !lease.approval_key_hash || hashToken(ask.approvalKey) !== lease.approval_key_hash) reasons.push("the approval key is not this lease's");
+    else if (!lease || lease.session_id !== leader.session_id || !lease.approval_key_hash || hashToken(ask.approvalKey) !== lease.approval_key_hash) reasons.push("the approval key is not this lease's");
     else return { choice: { kind: "key", session: leader.session_id, allowRed }, why: "" };
   }
   if (allowRed !== null) reasons.push(`waiving ${JSON.stringify(allowRed)} needs your word; yolo never waives a check`);
