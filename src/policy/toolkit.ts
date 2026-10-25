@@ -264,7 +264,7 @@ function scopeShellVerdict(commands: Command[], call: ToolCall, paths: ToolkitPa
     const words = [...c.argv.filter((w, i) => i > 0 || w.includes("/")), ...c.redirects.map((r) => r.target), ...Object.values(c.assignments)];
     for (const word of words) {
       const path = pathWord(word);
-      if (path && (touchesDenied(at(path), paths.scopeDenied, false) || (WILDCARD.test(path) && wildcardTouchesDenied(path, at("."), paths)))) {
+      if (path && (touchesDenied(at(path), paths.scopeDenied, false) || (c.globs.includes(word) && wildcardTouchesDenied(path, at("."), paths)))) {
         return deny("scope-paths", call, `\`${c.argv[0]}\` on ${path}`);
       }
     }
