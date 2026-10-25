@@ -122,6 +122,8 @@ export interface FleetOptions {
   origin?: boolean;
   /** More config after the fleet's own sections ([github], [cleanup], [leader], ...). */
   extraConfig?: string;
+  /** The scope the seeded leader leads (default: the implicit one, which a config with scopes moves to its default). */
+  leaderScope?: string;
   /** More [tools] lines (`name = "path"`); one naming lavish_axi or quota_axi replaces the home's stand-in. */
   tools?: string[];
   yolo?: boolean;
@@ -178,7 +180,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
   let herdr = await FakeHerdr.start(join(home, "herdr.sock"), herdrOptions);
   if (options.herdrSubscribe) herdr.subscribeReply = options.herdrSubscribe;
   let herdrUp = true;
-  const leader = seedLeader(h);
+  const leader = seedLeader(h, options.leaderScope);
   if (options.contracts !== false) {
     const db = h.db();
     tx(db, () => {

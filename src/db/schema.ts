@@ -761,7 +761,30 @@ CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
 `;
 
 /**
- * Migration 35: the head a delivery carries its standing from (docs/notes/2026-10-23-a-clean-merge-fm.md):
+ * Migration 35 (docs/notes/2026-10-24-leader-scoping-and-vj.md): a leader per scope. The lease is one
+ * row per scope (`id` stays the rowid, its old `id = 1` check goes), and a leader session records the
+ * account its login matched and that account's scope ('' while the login is unconfirmed: it sees
+ * nothing). Existing rows take the implicit scope `default`, which the daemon moves to `[scopes] default`
+ * when that is another scope (src/leader/scope.ts). A task with no project (a to-do, a standalone
+ * decision) remembers the scope of the leader that created it; your terminal's are in the default scope.
+ */
+const LEADER_SCOPES_SQL = /* sql */ `
+CREATE TABLE leader_lease_scoped (
+  id INTEGER PRIMARY KEY, scope TEXT NOT NULL DEFAULT 'default', session_id TEXT, harness TEXT, pane_id TEXT,
+  epoch INTEGER NOT NULL, token_hash TEXT, approval_key_hash TEXT,
+  claimed_at INTEGER, heartbeat_at INTEGER);
+INSERT INTO leader_lease_scoped (id, scope, session_id, harness, pane_id, epoch, token_hash, approval_key_hash, claimed_at, heartbeat_at)
+  SELECT id, 'default', session_id, harness, pane_id, epoch, token_hash, approval_key_hash, claimed_at, heartbeat_at FROM leader_lease;
+DROP TABLE leader_lease;
+ALTER TABLE leader_lease_scoped RENAME TO leader_lease;
+CREATE UNIQUE INDEX leader_lease_scope ON leader_lease(scope);
+ALTER TABLE leader_sessions ADD COLUMN account TEXT;
+ALTER TABLE leader_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'default';
+CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
+`;
+
+/**
+ * Migration 36: the head a delivery carries its standing from (docs/notes/2026-10-23-a-clean-merge-fm.md):
  * set when a routine PR's new head was proven to be the delivered one plus only clean merges of main.
  */
 const ARTIFACT_CARRIED_FROM_SQL = /* sql */ `
@@ -803,7 +826,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 32, name: "job-procs", sql: JOB_PROCS_SQL },
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
-  { version: 35, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
+  { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
+  { version: 36, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -104,6 +104,7 @@ const resolve: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "id" },
   async prepare(ctx, args) {
     // Judge against the backlog as it is now: a hand edit not yet seen is diffed first.
     await ctx.watcher.refreshIfIdle("backlog");

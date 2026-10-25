@@ -82,6 +82,8 @@ import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
+import { adoptLegacyScope } from "../leader/scope.ts";
+import { refreshScopeGuard } from "../leader/scope-guard.ts";
 import { AutoMerger, startAutoMerge } from "../verify/auto-merge.ts";
 
 export interface DaemonOptions {
@@ -245,6 +247,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const { instance, restarted } = tx(database, () => {
       const id = ensureInstanceId(database);
       appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, build, commit, migrated, instance: id } });
+      // Leases and sessions from before scopes join [scopes] default (src/leader/scope.ts).
+      adoptLegacyScope(database, config, startedAt);
       // A restart the old daemon asked for: record who asked, with the build before and after.
       return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
@@ -800,6 +804,15 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
     // The leader waiter fallback: a holder whose waiter is gone gets a fixed line typed when a wake is due.
+    // Each scope's list of other scopes' folders, for its leaders' folder guard (src/leader/scope-guard.ts).
+    const guardScopes = () => {
+      try {
+        refreshScopeGuard(database, config);
+      } catch (error) {
+        log(`scope guard: ${(error as Error).message}`);
+      }
+    };
+    guardScopes();
     const rewake = new LeaderRewake({ db: database, attention, config: () => config, runtime: () => runtime, now: Date.now, log, startedAt: Date.now() });
     const attentionTick = setInterval(() => {
       const latest = lastItemNo(database);
@@ -808,6 +821,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         attention.bus.notifyAll();
       }
       autoAwayIfDue();
+      guardScopes();
       void inflight.track(notifyPump.tick());
       void inflight.track(rewake.tick());
     }, ATTENTION_TICK_MS);
@@ -847,6 +861,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         if (next.state_dir !== config.state_dir) log("SIGHUP: state_dir changed; restart the daemon to use it");
         config = { ...next, state_dir: config.state_dir };
         const at = Date.now();
+        tx(database, () => adoptLegacyScope(database, config, at));
         configStatus = { loaded_at: at, reload: { at, outcome: "accepted", error: null } };
         watcher.rewatch();
         void watcher.checkAll("sighup");

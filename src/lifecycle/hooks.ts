@@ -23,6 +23,8 @@ import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
 import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 import { accountOfTranscript, defaultAccount } from "../config/accounts.ts";
+import type { ReportedLogin } from "../leader/login.ts";
+import { refScope, requireInScope } from "../leader/scope.ts";
 import { parseToolkitDenial, recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { ulidTime } from "../util/ulid.ts";
 
@@ -89,7 +91,24 @@ function hookFlags() {
     waiter: { type: "string" as const, help: "a waiter's id (a ULID minted when it was armed)" },
     "started-at": { type: "int" as const, help: "when the hook process started (ms); a digest it cannot hand over in time is not carried" },
     toolkit: { type: "string" as const, help: "the toolkit rule the hook process denied this tool call by (JSON), for the toolkit.denied event" },
+    login: { type: "string" as const, help: "a leader's session start: the login folder in the hook's own environment (JSON {config_dir, agent_dir})" },
   };
+}
+
+function textOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/** The login folder a leader's session-start hook reports (src/leader/login.ts); null when it reports none. */
+function reportedLogin(args: Args): ReportedLogin | null {
+  const raw = stringArg(args, "login");
+  if (raw === undefined) return null;
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    return { config_dir: textOrNull(value.config_dir), agent_dir: textOrNull(value.agent_dir) };
+  } catch {
+    return null;
+  }
 }
 
 function isLeaderCall(ctx: HandlerCtx): boolean {
@@ -314,6 +333,8 @@ function signalVerb(
     flags: hookFlags(),
     kind: "mutation",
     roles: ["worker", "hook"],
+    // A leader's hooks are its own session's: what they hand it is filtered by its scope (src/leader/hooks.ts).
+    scope: { kind: "self" },
     ephemeral: true,
     async prepare(ctx, args) {
       if (isLeaderCall(ctx)) return leaderPrepare ? leaderPrepare(ctx, args) : undefined;
@@ -360,16 +381,18 @@ function runAccountId(run: RunWithPolicy): string {
 }
 
 /**
- * The account a leader's usage signal is about: the Claude account whose
- * directory holds the leader's transcript (Claude keeps them in
+ * The account a leader's usage signal is about: the Claude account the session
+ * was started on (docs/notes/2026-10-24-leader-scoping-and-vj.md), else the one
+ * whose directory holds the leader's transcript (Claude keeps them in
  * `<config dir>/projects/`), else the default Claude account.
  */
 function leaderAccount(ctx: HandlerCtx, input: { transcript_path?: string | null }): string {
   const config = ctx.config();
   const recorded = ctx.caller.session
-    ? ((ctx.db.query("SELECT transcript_path FROM leader_sessions WHERE session_id = ?1").get(ctx.caller.session) as { transcript_path: string | null } | null)?.transcript_path ?? null)
+    ? (ctx.db.query("SELECT transcript_path, account, harness FROM leader_sessions WHERE session_id = ?1").get(ctx.caller.session) as { transcript_path: string | null; account: string | null; harness: string } | null)
     : null;
-  const transcript = typeof input.transcript_path === "string" ? input.transcript_path : recorded;
+  if (recorded?.account && recorded.harness === "claude") return recorded.account;
+  const transcript = typeof input.transcript_path === "string" ? input.transcript_path : (recorded?.transcript_path ?? null);
   return (accountOfTranscript(config, transcript) ?? defaultAccount(config, "claude")).id;
 }
 
@@ -390,6 +413,8 @@ function leaderVerb(name: string, summary: string, body: LeaderBody, prepare?: (
     flags: hookFlags(),
     kind: "mutation",
     roles: ["hook"],
+    // A leader's hooks are its own session's: what they hand it is filtered by its scope (src/leader/hooks.ts).
+    scope: { kind: "self" },
     ephemeral: true,
     async prepare(ctx, args) {
       leaderOnly(ctx, name);
@@ -595,7 +620,7 @@ const sessionEnd = signalVerb(
 const sessionStart = leaderVerb(
   "session-start",
   "Leader hook: session start, resume, clear or compaction; claims a vacant or stale lease and returns the briefing",
-  (ctx, input, _args, prepared) => leader.sessionStart(ctx, input, prepared as { state: string; epoch: number }),
+  (ctx, input, args, prepared) => leader.sessionStart(ctx, input, prepared as { state: string; epoch: number }, reportedLogin(args)),
   (ctx) => leader.prepareSessionStart(ctx),
   async (ctx, result) => {
     // The old holder's waiter exits silently (design section 10).
@@ -667,6 +692,7 @@ const mergeSummaryHook = leaderVerb(
   async (ctx, args) => {
     const input = parseInput(args) as leader.LeaderHookInput;
     try {
+      requireInScope(ctx.config(), ctx.caller, refScope(ctx.db, ctx.config(), String(input.task ?? "")), String(input.task ?? ""));
       const { run, project } = runAndProject(ctx.db, String(input.task ?? ""));
       return mergeSummary(await gatherFacts(mergeContext(ctx), run, project));
     } catch (error) {
@@ -683,6 +709,7 @@ const gateSummaryHook = leaderVerb(
   async (ctx, args) => {
     const input = parseInput(args) as leader.LeaderHookInput;
     try {
+      requireInScope(ctx.config(), ctx.caller, refScope(ctx.db, ctx.config(), String(input.task ?? "")), String(input.task ?? ""));
       const { run, gate } = openReviewGate(ctx.db, String(input.task ?? ""));
       return { task: run.task_id, title: taskTitle(ctx.db, run.task_id), project: run.project_id, stage: gate.stage, gate: gate.id, review: gate.review_url ?? "-", plan: pendingPlanLine(ctx.db, gate.id) ?? "-", questions: gateQuestionsLine(ctx.db, gate.id) ?? "-" };
     } catch (error) {

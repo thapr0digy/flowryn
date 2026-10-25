@@ -21,6 +21,7 @@ const chatQuestion: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "ref", arg: "item" },
   read(ctx, args) {
     const form = chatForm(ctx.db, parseRef(stringArg(args, "item")!));
     return {
@@ -79,6 +80,7 @@ const grantUse: VerbSpec = {
   flags: { "body-file": { type: "string", help: "your relay of the user's words (gate changes needs some)", fileFor: "body" } },
   kind: "mutation",
   roles: ["leader"],
+  scope: { kind: "ref", arg: "grant" },
   replyMs: 120_000,
   async prepare(ctx, args): Promise<UsePrepared> {
     const { g, spec, args: target } = targetFor(ctx, args);
