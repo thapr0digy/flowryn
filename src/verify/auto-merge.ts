@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerResult } from "../api/verbs.ts";
