@@ -2,7 +2,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { hashToken } from "../api/auth.ts";
 import { stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
-import { getLease, getSession } from "../lease/lease.ts";
+import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { openUserActed } from "../attention/follow-up.ts";
@@ -97,6 +97,7 @@ const gatePass: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
   async prepare(ctx, args): Promise<PassPrepared> {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
     checkStage(gate, stringArg(args, "stage"));
@@ -130,9 +131,9 @@ const gatePass: VerbSpec = {
       approval = { channel: "claude-ask", actor: `${user()} (Claude prompt, leader ${session.session_id})`, head };
     } else if (session?.harness === "pi") {
       const key = stringArg(args, "approval_key")?.trim();
-      const lease = getLease(ctx.db);
+      const lease = leaseOfSession(ctx.db, session.session_id);
       if (!key) throw new FlowrynError("approval_required", "no approval key: pass the gate through the flowryn_gate_pass tool, which asks you first", help);
-      if (lease.session_id !== session.session_id || !lease.approval_key_hash || hashToken(key) !== lease.approval_key_hash) throw new FlowrynError("approval_required", "the approval key is not this lease's", help);
+      if (!lease || lease.session_id !== session.session_id || !lease.approval_key_hash || hashToken(key) !== lease.approval_key_hash) throw new FlowrynError("approval_required", "the approval key is not this lease's", help);
       approval = { channel: "pi-confirm", actor: `${user()} (Pi confirm, leader ${session.session_id})`, head };
     }
     if (!approval) throw new FlowrynError("approval_required", "a review gate passes only with your word from a human channel", help);
@@ -164,6 +165,7 @@ const gateChanges: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
   async prepare(ctx, args) {
     // Changes need no word from you; a chat answer is still taken (and a "Pass" answer refuses them).
     const { gate } = openReviewGate(ctx.db, stringArg(args, "task")!);

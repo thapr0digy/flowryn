@@ -3,10 +3,11 @@ import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
 import { upkeepConfig } from "../config/upkeep.ts";
 import { isValidIsoDate, localDate } from "../lifecycle/dates.ts";
-import { getProject } from "../lifecycle/projects.ts";
+import { getProject, listProjects } from "../lifecycle/projects.ts";
 import { isTerminal, TERMINAL_STATES, type RunState } from "../lifecycle/runs.ts";
 import { POLICY_EVENT } from "../upkeep/policy-follow.ts";
 import { storeStats, type StoreSection } from "./store-stats.ts";
+import { lensFor } from "../leader/scope.ts";
 
 /**
  * `flowryn stats` (docs/notes/2026-10-13-measure-waiting-time-na.md): how long
@@ -31,6 +32,7 @@ const TERMINAL = `(${TERMINAL_STATES.map((s) => `'${s}'`).join(",")})`;
 export interface Scope {
   since: number;
   now: number;
+  /** The project counted (--project), or a scoped leader's projects as a JSON list; null for all. */
   project: string | null;
   /** The first event seq at or after `since` (firstSeqAtOrAfter). */
   firstSeq: number;
@@ -93,9 +95,10 @@ function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   else map.set(key, [value]);
 }
 
-/** SQL that is true when `column` (a task id) belongs to the scope's project, or always without --project. */
+/** SQL that is true when `column` (a task id) belongs to the scope's project (or one of its JSON list), or always for all. */
 function inProject(column: string): string {
-  return `($project IS NULL OR ${column} IN (SELECT task_id FROM task_policy WHERE project_id = $project))`;
+  return `($project IS NULL OR ${column} IN (SELECT task_id FROM task_policy WHERE project_id = $project
+    OR project_id IN (SELECT value FROM json_each(CASE WHEN json_valid($project) THEN $project ELSE '[]' END))))`;
 }
 
 // --- waits ------------------------------------------------------------------------------------
@@ -593,9 +596,13 @@ export interface StatsReport {
 export function statsReport(ctx: ReadCtx, sinceText: string, project: string | null): StatsReport {
   const since = parseSince(sinceText, ctx.now);
   if (project !== null && !getProject(ctx.db, project)) throw new FlowrynError("not_found", `no project ${project}`, "flowryn project list");
+  // A scoped leader counts only its scope's projects (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+  const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+  if (project !== null && !lens.project(project)) throw new FlowrynError("scope_refused", `project ${project} is outside this leader's scope`, "your own terminal sees every scope");
+  const counted = project ?? (lens.restricted ? JSON.stringify(listProjects(ctx.db).map((p) => p.id).filter((id) => lens.project(id))) : null);
   const took: Record<string, string> = {};
   const gaps = standingGaps(ctx, since);
-  const scope: Scope = { since, now: ctx.now, project, firstSeq: timed(took, "window", () => firstSeqAtOrAfter(ctx.db, since)) };
+  const scope: Scope = { since, now: ctx.now, project: counted, firstSeq: timed(took, "window", () => firstSeqAtOrAfter(ctx.db, since)) };
   const waits = timed(took, "waits", () => summarizeWaits(allWaits(ctx.db, scope, gaps), scope));
   const { rows, extra } = timed(took, "interventions", () => {
     const list = interventions(ctx.db, scope, gaps);
@@ -603,7 +610,7 @@ export function statsReport(ctx: ReadCtx, sinceText: string, project: string | n
   });
   const store = timed(took, "store", () => storeStats(ctx, scope, gaps));
   return {
-    window: { since: `${localStamp(since)} (${sinceText})`, until: localStamp(ctx.now), project: project ?? "all" },
+    window: { since: `${localStamp(since)} (${sinceText})`, until: localStamp(ctx.now), project: project ?? (lens.restricted ? `scope ${lens.scope}` : "all") },
     waits,
     interventions: rows,
     unneeded: extra,
@@ -623,6 +630,7 @@ const stats: VerbSpec = {
   },
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx, args) {
     const report = statsReport(ctx, stringArg(args, "since") ?? DEFAULT_SINCE, stringArg(args, "project") ?? null);
     return { data: { ...report }, hints: ["flowryn capacity", "flowryn show <task> --timeline"] };

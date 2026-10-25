@@ -4,7 +4,7 @@ import { clockLabel } from "../attention/away.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
-import { getLease, getSession, type LeaderSessionRow } from "../lease/lease.ts";
+import { allLeases, getSession, type LeaderSessionRow } from "../lease/lease.ts";
 import { settledStatus } from "../lifecycle/idle-carry.ts";
 import { DIALOG_QUESTION } from "../lifecycle/prompt-wedge.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
@@ -140,7 +140,8 @@ export async function screenBlocker(runtime: RewakeRuntime, pane: string): Promi
 }
 
 export class LeaderRewake {
-  private dueTicks = 0;
+  /** Per lease holder (one per scope): how many ticks in a row a wake was due. */
+  private readonly dueTicks = new Map<string, number>();
   private running = false;
 
   constructor(private readonly deps: RewakeDeps) {}
@@ -158,12 +159,19 @@ export class LeaderRewake {
     }
   }
 
-  /** The lease holder and the wake due for it now (null when none is), or null when it has a waiter or none is due. */
-  private due(): { s: LeaderSessionRow; ids: string[]; budget: WakeBudget } | null {
+  /** The lease holders, one per scope. */
+  private holders(): string[] {
+    return allLeases(this.deps.db)
+      .map((l) => l.session_id)
+      .filter((id): id is string => id !== null);
+  }
+
+  /** The holder's session and the wake due for it now, or null when it has a waiter or none is due. */
+  private due(holder: string): { s: LeaderSessionRow; ids: string[]; budget: WakeBudget } | null {
     const { db, attention, now } = this.deps;
     const t = now();
-    const holder = getLease(db).session_id;
-    const s = holder ? getSession(db, holder) : null;
+    if (!this.holders().includes(holder)) return null;
+    const s = getSession(db, holder);
     if (!s || s.ended_at !== null) return null;
     if (attention.bus.hasWaiter(s.session_id)) return null;
     const seen = Math.max(attention.bus.lastSeen(s.session_id) ?? 0, this.deps.startedAt);
@@ -174,11 +182,17 @@ export class LeaderRewake {
   }
 
   private async check(): Promise<void> {
+    const holders = this.holders();
+    for (const gone of this.dueTicks.keys()) if (!holders.includes(gone)) this.dueTicks.delete(gone);
+    for (const holder of holders) await this.checkHolder(holder);
+  }
+
+  private async checkHolder(holder: string): Promise<void> {
     const { db, now } = this.deps;
-    const due = this.due();
+    const due = this.due(holder);
     if (!due) {
-      this.dueTicks = 0;
-      this.settle(null, null);
+      this.dueTicks.set(holder, 0);
+      this.settle(holder, null);
       return;
     }
     const { s } = due;
@@ -187,14 +201,15 @@ export class LeaderRewake {
     const runtime = this.deps.runtime();
     const blocked = rewakeBlocker({ session: s, herdr: runtime !== null, lastTyped, now: now() });
     if (blocked) {
-      this.dueTicks = 0;
+      this.dueTicks.set(holder, 0);
       this.settle(s.session_id, blocked);
       return;
     }
     // At most one rewake per grace window, and only once the wake held over two ticks.
     if (lastTyped !== null && now() - lastTyped < this.deps.attention.timing().waiter_grace_ms) return;
-    this.dueTicks += 1;
-    if (this.dueTicks < 2) return;
+    const ticks = (this.dueTicks.get(holder) ?? 0) + 1;
+    this.dueTicks.set(holder, ticks);
+    if (ticks < 2) return;
     let refused: string | null;
     try {
       refused = await paneBlocker(runtime!, s);
@@ -206,7 +221,7 @@ export class LeaderRewake {
       return;
     }
     // Re-check right before the keys: a waiter may have come back, the wake been taken, or Herdr turned busy.
-    const still = this.due();
+    const still = this.due(holder);
     if (!still || still.s.session_id !== s.session_id) return;
     const status = await runtime!.agentStatus(s.pane_id!).catch(() => null);
     if (!settledStatus(status)) {
@@ -221,7 +236,7 @@ export class LeaderRewake {
     }
     const line = rewakeLine(still.ids);
     await runtime!.typeLine(s.pane_id!, line);
-    this.dueTicks = 0;
+    this.dueTicks.set(holder, 0);
     const t = now();
     tx(db, () => {
       const current = rewakeState(db, s.session_id);
@@ -232,10 +247,8 @@ export class LeaderRewake {
   }
 
   /** Keep why no wake can reach the holder (null: nothing stops one), with an event only when it changes. */
-  private settle(session: string | null, reason: string | null): void {
+  private settle(holder: string, reason: string | null): void {
     const { db, now } = this.deps;
-    const holder = session ?? getLease(db).session_id;
-    if (!holder) return;
     const state = rewakeState(db, holder);
     if (state.reason === reason) return;
     const t = now();

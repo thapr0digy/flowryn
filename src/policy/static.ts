@@ -93,8 +93,16 @@ export function configStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_
  * (src/policy/grants.ts), so the leader must not be able to write one. Only `.jsonl` files: the
  * same directory holds Claude's memory notes, which the leader may keep writing. Bash cannot
  * write there either inside Claude's sandbox, whose write allow-list leaves `~/.claude` out.
+ * One settings file serves every leader of the home, so it names every Claude account's folder.
+ *
+ * With more than one scope (docs/notes/2026-10-24-leader-scoping-and-vj.md) a leader also may not
+ * read Flowryn's backlog, to-dos or database: they hold every scope's tasks, and a leader reads its
+ * own through the flowryn verbs. The hook's scope-paths rule (src/policy/toolkit.ts) backs this up
+ * for the shell and covers the other scope's folders.
  */
-export function leaderStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir">, claudeProjectsDir: string): StaticLayers {
+export function leaderStaticLayers(config: Pick<FlowrynConfig, "tasks" | "state_dir">, claudeProjectsDirs: string | readonly string[], options: { multiScope?: boolean } = {}): StaticLayers {
   const base = configStaticLayers(config);
-  return { permissionsDeny: [...base.permissionsDeny, absoluteRule("Edit", `${claudeProjectsDir}/**/*.jsonl`)], denyWrite: base.denyWrite };
+  const dirs = [...new Set(typeof claudeProjectsDirs === "string" ? [claudeProjectsDirs] : claudeProjectsDirs)];
+  const reads = options.multiScope ? [config.tasks.backlog, config.tasks.todos, stateFiles(config.state_dir).db].map((path) => absoluteRule("Read", path)) : [];
+  return { permissionsDeny: [...base.permissionsDeny, ...dirs.map((dir) => absoluteRule("Edit", `${dir}/**/*.jsonl`)), ...reads], denyWrite: base.denyWrite };
 }
