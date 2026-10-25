@@ -104,6 +104,8 @@ function fixture(steps: string[] = ["true"], caps = "validation = 5"): Fixture {
     merge: async () => {
       throw new Error("no merges here");
     },
+    feedback: async () => ({ reviews: [], reviewComments: [], issueComments: [] }),
+    reviewThreads: async () => [],
   };
   f.deps = {
     db,
