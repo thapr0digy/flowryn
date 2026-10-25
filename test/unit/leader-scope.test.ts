@@ -400,6 +400,15 @@ describe("the folder guard", () => {
     expect(at(CODE, "Glob", { pattern: "../work/**" })).toBe("scope-paths");
     expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: "../../work/api/*.md" })).toBe("scope-paths");
     expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: "src/**/*.ts" })).toBeNull();
+    expect(at(join(CODE, "site"), "Glob", { pattern: "{../../work,src}/**/*.ts" })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: `{${WORK},src}/**` })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: "{src,test}/**/*.ts" })).toBeNull();
+    // A shell wildcard word reaches what it would expand to.
+    expect(at(CODE, "Bash", { command: `cat ${root}/*/api/README.md` })).toBe("scope-paths");
+    expect(at(join(CODE, "site"), "Bash", { command: "cat ../../*/api/README.md" })).toBe("scope-paths");
+    expect(at(join(CODE, "site"), "Bash", { command: "cat ../../{work,code}/x" })).toBe("scope-paths");
+    expect(at(root, "Bash", { command: "cat *" })).toBe("scope-paths");
+    expect(at(join(CODE, "site"), "Bash", { command: "cat src/*.ts" })).toBeNull();
     expect(at(join(WORK, "api"), "LS", {})).toBe("scope-paths");
     expect(at(root, "LS", {})).toBeNull();
     expect(at(root, "Grep", { pattern: "x", path: CODE })).toBeNull();

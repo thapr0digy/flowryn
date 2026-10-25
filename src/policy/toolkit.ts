@@ -183,14 +183,50 @@ function scopeVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what:
   return touchesDenied(resolvePath(target, call.cwd, paths.home), paths.scopeDenied, recursive) ? deny("scope-paths", call, what) : null;
 }
 
-/** A Glob pattern's folder before its first wildcard, resolved against its base: where it searches (an absolute or `../` pattern leaves the base). */
+/** A Glob's pattern: an absolute, `../` or brace pattern searches outside its path. */
 function globVerdict(base: string, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
+  if (!scopeActive(call, paths)) return null;
   const pattern = typeof call.toolInput.pattern === "string" ? call.toolInput.pattern : "";
-  const literal = pattern.split(/[*?[{]/)[0]!;
-  const folder = literal.slice(0, literal.lastIndexOf("/") + 1);
-  if (!folder) return null;
-  const root = resolvePath(folder, resolvePath(base, call.cwd, paths.home), paths.home);
-  return scopeVerdict(root, call, paths, `${call.toolName} on ${pattern}`, true);
+  return wildcardTouchesDenied(pattern, resolvePath(base, call.cwd, paths.home), paths) ? deny("scope-paths", call, `${call.toolName} on ${pattern}`) : null;
+}
+
+const WILDCARD = /[*?[{]/;
+const MAX_BRACE_ALTERNATIVES = 64;
+
+/** A pattern with its `{a,b}` alternatives expanded, as the shell and Glob do. */
+function expandBraces(pattern: string): string[] {
+  const open = pattern.indexOf("{");
+  if (open < 0) return [pattern];
+  let depth = 0;
+  const commas: number[] = [];
+  for (let i = open; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) {
+      if (commas.length === 0) return [pattern];
+      const prefix = pattern.slice(0, open);
+      const suffix = pattern.slice(i + 1);
+      const bounds = [open, ...commas, i];
+      const out: string[] = [];
+      for (let k = 0; k + 1 < bounds.length && out.length < MAX_BRACE_ALTERNATIVES; k++) {
+        out.push(...expandBraces(prefix + pattern.slice(bounds[k]! + 1, bounds[k + 1]) + suffix));
+      }
+      return out.slice(0, MAX_BRACE_ALTERNATIVES);
+    } else if (ch === "," && depth === 1) commas.push(i);
+  }
+  return [pattern];
+}
+
+/**
+ * Does a wildcard pattern reach a denied path: each alternative's folder before its first wildcard,
+ * resolved against `base` (the base itself when the pattern names none), checked as a recursive root.
+ */
+function wildcardTouchesDenied(pattern: string, base: string, paths: ToolkitPaths & { scopeDenied: readonly string[] }): boolean {
+  return expandBraces(pattern).some((alternative) => {
+    const literal = alternative.split(WILDCARD)[0]!;
+    const folder = literal.slice(0, literal.lastIndexOf("/") + 1);
+    return touchesDenied(folder ? resolvePath(folder, base, paths.home) : base, paths.scopeDenied, true);
+  });
 }
 
 /** A shell word as a path: anything but a flag, with a `--flag=` or `VAR=` prefix dropped. */
@@ -228,7 +264,9 @@ function scopeShellVerdict(commands: Command[], call: ToolCall, paths: ToolkitPa
     const words = [...c.argv.filter((w, i) => i > 0 || w.includes("/")), ...c.redirects.map((r) => r.target), ...Object.values(c.assignments)];
     for (const word of words) {
       const path = pathWord(word);
-      if (path && touchesDenied(at(path), paths.scopeDenied, false)) return deny("scope-paths", call, `\`${c.argv[0]}\` on ${path}`);
+      if (path && (touchesDenied(at(path), paths.scopeDenied, false) || (WILDCARD.test(path) && wildcardTouchesDenied(path, at("."), paths)))) {
+        return deny("scope-paths", call, `\`${c.argv[0]}\` on ${path}`);
+      }
     }
     if (recursiveCommand(c)) {
       const operands = c.argv.slice(1).filter((a) => !a.startsWith("-"));
