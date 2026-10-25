@@ -396,6 +396,10 @@ describe("the folder guard", () => {
     expect(at(root, "Grep", { pattern: "billing" })).toBe("scope-paths");
     expect(at(root, "Glob", { pattern: "**/*.ts" })).toBe("scope-paths");
     expect(at(CODE, "Glob", { pattern: `${WORK}/**/*.ts` })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: `${WORK}/**/*.ts` })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { pattern: "../work/**" })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: "../../work/api/*.md" })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { path: join(CODE, "site"), pattern: "src/**/*.ts" })).toBeNull();
     expect(at(join(WORK, "api"), "LS", {})).toBe("scope-paths");
     expect(at(root, "LS", {})).toBeNull();
     expect(at(root, "Grep", { pattern: "x", path: CODE })).toBeNull();

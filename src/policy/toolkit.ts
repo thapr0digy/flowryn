@@ -116,10 +116,14 @@ function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
   }
   if (FILE_TOOLS.has(tool) || READ_TOOLS.has(tool)) {
     const named = [call.toolInput.file_path, call.toolInput.path, call.toolInput.notebook_path].find((p): p is string => typeof p === "string" && p.length > 0);
-    const target = named ?? (tool === "glob" ? globRoot(call.toolInput.pattern) : null) ?? (CWD_TOOLS.has(tool) ? call.cwd : null);
+    const target = named ?? (CWD_TOOLS.has(tool) ? call.cwd : null);
     if (!target) return null;
     const what = `${call.toolName} on ${target}`;
-    return (FILE_TOOLS.has(tool) && named ? fileVerdict(named, call, paths, what) : null) ?? scopeVerdict(target, call, paths, what, RECURSIVE_TOOLS.has(tool));
+    return (
+      (FILE_TOOLS.has(tool) && named ? fileVerdict(named, call, paths, what) : null) ??
+      scopeVerdict(target, call, paths, what, RECURSIVE_TOOLS.has(tool)) ??
+      (tool === "glob" ? globVerdict(target, call, paths) : null)
+    );
   }
   if (tool === "skill") {
     const skill = String(call.toolInput.skill ?? "");
@@ -179,11 +183,14 @@ function scopeVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what:
   return touchesDenied(resolvePath(target, call.cwd, paths.home), paths.scopeDenied, recursive) ? deny("scope-paths", call, what) : null;
 }
 
-/** An absolute or home-relative Glob pattern's folder before its first wildcard: where it searches. */
-function globRoot(pattern: unknown): string | null {
-  if (typeof pattern !== "string" || !(pattern.startsWith("/") || pattern.startsWith("~"))) return null;
+/** A Glob pattern's folder before its first wildcard, resolved against its base: where it searches (an absolute or `../` pattern leaves the base). */
+function globVerdict(base: string, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
+  const pattern = typeof call.toolInput.pattern === "string" ? call.toolInput.pattern : "";
   const literal = pattern.split(/[*?[{]/)[0]!;
-  return literal.slice(0, literal.lastIndexOf("/") + 1) || null;
+  const folder = literal.slice(0, literal.lastIndexOf("/") + 1);
+  if (!folder) return null;
+  const root = resolvePath(folder, resolvePath(base, call.cwd, paths.home), paths.home);
+  return scopeVerdict(root, call, paths, `${call.toolName} on ${pattern}`, true);
 }
 
 /** A shell word as a path: anything but a flag, with a `--flag=` or `VAR=` prefix dropped. */
