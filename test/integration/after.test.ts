@@ -152,6 +152,28 @@ describe("dispatch --after pr:<n>", () => {
     expect(query(env, "SELECT id FROM watches")).toEqual([]);
   }, 90_000);
 
+  test("refusals: a watch task named as a blocker, and --after, --blocked-by or --auto with --task", async () => {
+    const env = await shipEnv();
+    openPr(env, 47);
+    const filed = await fileAfter(env, ["pr:47"]);
+    const task = filed.data.task as string;
+    const watch = watchOf(env, task);
+    const viaAfter = await fileAfter(env, [`task:${watch.task_id}`]);
+    expect(viaAfter.code).toBe(3);
+    expect(viaAfter.error).toContain(`${watch.task_id} is a watch`);
+    expect(viaAfter.error).toContain("--after pr:<number>");
+    const viaBlockedBy = await env.fleet.json(["dispatch", "web", "--kind", "ship", "--blocked-by", watch.task_id, "--body-file", "-"], { stdin: "Behind the watch" });
+    expect(viaBlockedBy.code).toBe(3);
+    expect(JSON.stringify(viaBlockedBy.reply)).toContain(`${watch.task_id} is a watch`);
+    for (const flags of [["--after", "pr:47"], ["--blocked-by", task], ["--auto"]]) {
+      const started = await env.fleet.json(["dispatch", "web", "--task", task, ...flags]);
+      expect(started.code).toBe(3);
+      expect(JSON.stringify(started.reply)).toContain("--task starts a task that is already filed");
+    }
+    expect(query(env, "SELECT id FROM watches")).toEqual([{ id: watch.id }]);
+    expect(runsOf(env, task)).toEqual([]);
+  }, 90_000);
+
   test("dropping the waiting task closes its watch and removes the watch task from the backlog", async () => {
     const env = await shipEnv();
     openPr(env, 45);

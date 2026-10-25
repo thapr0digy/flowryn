@@ -40,7 +40,7 @@ export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 /** What a task may wait for: a ship lands; a decision lands once answered (its task is done). */
-export const BLOCKER_KINDS = ["ship", "decision", "watch"] as const;
+export const BLOCKER_KINDS = ["ship", "decision"] as const;
 
 const MAX_TITLE = 120;
 const MAX_BODY = 64_000;
@@ -322,6 +322,7 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const override = modeOverride(args, project);
   const taskId = stringArg(args as never, "task");
   if (taskId) {
+    if (args.after !== undefined || args["blocked-by"] !== undefined || boolArg(args as never, "auto")) throw new FlowrynError("bad_args", "--task starts a task that is already filed: --after, --blocked-by and --auto go with a new task");
     if (isDropped(ctx.db, taskId)) throw new FlowrynError("not_found", `${taskId} was dropped`, `flowryn show ${taskId}`);
     // A queued task that is not a plan phase (cutover C3: imported work): its blockers must have landed.
     const queued = queuedTaskOf(ctx.db, taskId);
@@ -355,7 +356,8 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     const unshipped = blockedBy.filter((id) => !(BLOCKER_KINDS as readonly string[]).includes(kinds.get(id) ?? ""));
     if (unshipped.length > 0) {
       const scout = unshipped.find((id) => kinds.get(id) === "scout");
-      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, scout ? `wait for its report instead: --after report:${scout}` : "wait for the report yourself, then dispatch");
+      const watch = unshipped.some((id) => kinds.get(id) === "watch");
+      throw new FlowrynError("bad_args", `${unshipped.map((id) => `${id} is a ${kinds.get(id)}`).join(", ")}: only a ship or a decision lands, so a task can wait only for those`, scout ? `wait for its report instead: --after report:${scout}` : watch ? "wait for the event itself: --after pr:<number> or --after report:<scout task>" : "wait for the report yourself, then dispatch");
     }
     const prHint = await checkAfterEvents(ctx, project, after.events);
     return { mode: "queue", project, account, blockedBy, events: after.events, prHint, override };
