@@ -224,12 +224,34 @@ function scan(src: string): Scan {
       i += op.length;
       continue;
     }
-    if (c === "*" || c === "?" || c === "[" || (c === "{" && src[i - 1] !== "$" && BRACE_EXPANSION.test(src.slice(i)))) glob = true;
+    if (c === "$" && src[i + 1] !== undefined && "?*@#!$-0123456789".includes(src[i + 1]!)) {
+      append(src.slice(i, i + 2));
+      i += 2;
+      continue;
+    }
+    if (c === "$" && src[i + 1] === "{") {
+      const end = closingBrace(src, i + 2);
+      append(src.slice(i, end + 1));
+      i = end + 1;
+      continue;
+    }
+    if (c === "*" || c === "?" || c === "[" || (c === "{" && BRACE_EXPANSION.test(src.slice(i)))) glob = true;
     append(c);
     i++;
   }
   pushWord();
   return { tokens, nested };
+}
+
+/** The index of the `}` closing a `${` opened just before `i`, counting nested braces; the end of src when unbalanced. */
+function closingBrace(src: string, i: number): number {
+  let depth = 1;
+  for (; i < src.length; i++) {
+    if (src[i] === "\\") i++;
+    else if (src[i] === "{") depth++;
+    else if (src[i] === "}" && --depth === 0) return i;
+  }
+  return src.length;
 }
 
 /** `{a,b}` at the start of the text: a brace expansion, unlike `{x}` or `${x}`. */

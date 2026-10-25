@@ -410,11 +410,13 @@ describe("the folder guard", () => {
     expect(at(root, "Bash", { command: "cat *" })).toBe("scope-paths");
     expect(at(join(CODE, "site"), "Bash", { command: "cat src/*.ts" })).toBeNull();
     // Quoted text is never expanded, so it reads nothing.
-    for (const command of ['flowryn todo add "Should we ship?"', "jq '.items[]' code/x.json", "awk '{print $1}' code/f", "echo '{a,b}'", 'cat "${HOME}/notes.md"', "rg 'foo.*bar' code/", "cat \\*"]) {
+    for (const command of ['flowryn todo add "Should we ship?"', "jq '.items[]' code/x.json", "awk '{print $1}' code/f", "echo '{a,b}'", 'cat "${HOME}/notes.md"', "rg 'foo.*bar' code/", "cat \\*", "make test; echo $?", "echo $*", "echo ${arr[@]}", "echo ${x:-*}", "echo $#"]) {
       expect(at(root, "Bash", { command })).toBeNull();
     }
     expect(at(root, "Bash", { command: "cat ../../*/api/README.md" })).toBe("scope-paths");
     expect(at(root, "Bash", { command: "cat {work,code}/x" })).toBe("scope-paths");
+    expect(at(root, "Bash", { command: "cat *" })).toBe("scope-paths");
+    expect(at(root, "Bash", { command: "cat ${HOME}*" })).toBe("scope-paths");
     expect(at(join(WORK, "api"), "LS", {})).toBe("scope-paths");
     expect(at(root, "LS", {})).toBeNull();
     expect(at(root, "Grep", { pattern: "x", path: CODE })).toBeNull();
