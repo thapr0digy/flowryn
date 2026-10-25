@@ -68,7 +68,7 @@ export const ERROR_CODES = {
   no_change: EXIT.policy,
   // `flowryn back` with no away to end and no recent brief to reprint
   not_away: EXIT.validation,
-  // a project with no [projects.<id>] verify steps
+  // a project with no [projects.<id>] verify steps, or flowryn notify test with no [notify] command
   not_configured: EXIT.validation,
   not_fast_forward: EXIT.policy,
   not_found: EXIT.notFound,

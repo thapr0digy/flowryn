@@ -95,11 +95,7 @@ export function absolutePath(path: string): string {
     .join(":");
 }
 
-/**
- * The environment a step runs with: the daemon's, minus anything that would
- * point it at this Flowryn (FLOWRYN_*), make it a child of a Claude session,
- * or hand it a GitHub token; with the caller's PATH when one came.
- */
+/** The environment a step runs with: the daemon's, scrubbed (src/runtime/child-env.ts), with the caller's PATH when one came. */
 export function stepEnv(base: NodeJS.ProcessEnv, path: string | null = null): Record<string, string> {
   const env = scrubbedEnv(base);
   if (path) {
