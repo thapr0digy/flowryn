@@ -54,6 +54,8 @@ export interface LeaderEnv {
   /** A P1 that is not a question (a PR ready), so only a digest or a briefing carries it. */
   openPlainP1(text: string): string;
   withDb<T>(fn: (db: Db) => T): T;
+  /** Kill the daemon and start a new one on the same home: its in-memory state (transcript offsets) is gone. */
+  restartDaemon(): Promise<void>;
   bridgeEnv(harness: LeaderHarness, drivers: [BridgeDriver, BridgeDriver]): BridgeEnv;
   cleanup(): Promise<void>;
 }
@@ -132,6 +134,10 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
     call,
     openSession,
     withDb,
+    async restartDaemon() {
+      await env.daemon.kill9();
+      env.daemon = await startDaemon(h);
+    },
     async claude(pane) {
       const opened = await openSession("claude", pane);
       const fake = new FakeClaudeLeader({ settingsPath: files.claudeSettings, env: opened.env, dir: h.home, cwd, onQuit: closeWith(opened.token) });
@@ -205,7 +211,7 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
     },
     async cleanup() {
       for (const fake of fakes) fake.kill();
-      await daemon.kill9().catch(() => {});
+      await env.daemon.kill9().catch(() => {});
       await herdr?.stop().catch(() => {});
       if (process.env.FLOWRYN_TEST_KEEP === "1") process.stderr.write(`kept test home: ${h.home}\n`);
       else h.cleanup();

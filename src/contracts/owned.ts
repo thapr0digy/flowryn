@@ -5,6 +5,7 @@ import { openDb } from "../db/db.ts";
 import { HerdrClient } from "../runtime/herdr/client.ts";
 import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate, type ProcIdentity, type TerminateResult } from "../runtime/proc.ts";
+import { sweepRunTmp } from "../lifecycle/run-tmp.ts";
 import { createdWorktrees, removeOwnWorktrees, type CreatedWorktree, type GitRun } from "./cleanup.ts";
 
 /**
@@ -37,6 +38,8 @@ export interface OwnedResources {
   branch_prefix: string;
   /** The caller's checkout its worktrees were made in; null for the scratch repository, which goes with the home. */
   project: string | null;
+  /** `[workers] tmp_root`: the run's temp directory lives there, outside the home; absent in a manifest from before it. */
+  tmp_root?: string;
   /** The scratch daemon, once spawned. */
   daemon: ProcIdentity | null;
   /** Copied in from the scratch database when cleanup starts; the database is read again on recovery. */
@@ -87,6 +90,7 @@ export function readManifest(path: string): { owned: OwnedResources | null; prob
       herdr_socket: raw.herdr_socket,
       branch_prefix: raw.branch_prefix,
       project: typeof raw.project === "string" ? raw.project : null,
+      ...(typeof raw.tmp_root === "string" ? { tmp_root: raw.tmp_root } : {}),
       daemon: identity(raw.daemon),
       workspaces: Array.isArray(raw.workspaces) ? raw.workspaces.filter((w): w is string => typeof w === "string") : [],
       harnesses: Array.isArray(raw.harnesses) ? raw.harnesses.map(identity).filter((p): p is ProcIdentity => p !== null) : [],
@@ -226,6 +230,11 @@ export async function releaseOwned(owned: OwnedResources, deps: ReleaseDeps, opt
   for (const proc of owned.harnesses) {
     const ended = await end(proc, { group: true, graceMs: RELEASE_LIMITS.processGraceMs });
     if (!ended.ok) problems.push(`harness pid ${proc.pid} did not exit (${ended.signal}, ${ended.evidence})`);
+  }
+  // The run's temp directory is outside the home: a scratch daemon stopped before its own cleanup leaves it behind.
+  if (owned.tmp_root) {
+    const swept = sweepRunTmp({ root: owned.tmp_root, stateDir: join(owned.home, "state"), keep: () => false });
+    for (const failed of swept.failed) problems.push(`run temp dir ${failed.dir} not removed: ${failed.error}`);
   }
   // Only a caller's own checkout has git state to undo; a scratch repository goes with the scratch home.
   if (owned.project) {

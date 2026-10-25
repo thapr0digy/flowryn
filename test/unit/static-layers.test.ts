@@ -84,9 +84,9 @@ describe("the toolkit's static layers", () => {
 });
 
 describe("the toolkit contract step", () => {
-  test("runs for Claude only, after the interrupt and before the exit", () => {
+  test("runs for Claude only, after the interrupt and before the temp dir check and the exit", () => {
     const claude = contractSteps("claude").map((s) => s.name);
-    expect(claude.slice(claude.indexOf("interrupt"), claude.indexOf("exit") + 1)).toEqual(["interrupt", "toolkit", "exit"]);
+    expect(claude.slice(claude.indexOf("interrupt"), claude.indexOf("exit") + 1)).toEqual(["interrupt", "toolkit", "temp dir", "exit"]);
     expect(contractSteps("pi").map((s) => s.name)).not.toContain("toolkit");
   });
 

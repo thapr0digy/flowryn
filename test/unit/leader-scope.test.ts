@@ -232,7 +232,7 @@ describe("one lease per scope", () => {
     expect(allLeases(db)).toEqual([]);
   });
 
-  test("migration 34 keeps the lease from before scopes, in the implicit scope; the daemon moves it to [scopes] default", () => {
+  test("migration 35 keeps the lease from before scopes, in the implicit scope; the daemon moves it to [scopes] default", () => {
     const s = tx(db, () => openSession(db, { harness: "claude", pane: null, cwd: null, now: 1 }));
     tx(db, () => claim(db, s.session, "vacant", 2));
     expect(getLease(db, LEGACY_SCOPE).session_id).toBe(s.session);

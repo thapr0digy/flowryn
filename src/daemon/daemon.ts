@@ -33,6 +33,7 @@ import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
 import { PING_VERB } from "./system-verbs.ts";
 import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
+import { removeRunTmp, sweepRunTmp } from "../lifecycle/run-tmp.ts";
 import { configSectionProblems, type ConfigStatus } from "../config/effective.ts";
 import { exitRun, interruptRun, type ControlDeps } from "../lifecycle/control.ts";
 import { UrgentPreempter } from "../lifecycle/urgent.ts";
@@ -81,6 +82,7 @@ import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 import { adoptLegacyScope } from "../leader/scope.ts";
 import { refreshScopeGuard } from "../leader/scope-guard.ts";
+import { AutoMerger } from "../verify/auto-merge.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -453,12 +455,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         const run = getRun(database, runId);
         if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id);
       },
+      removeRunTmp: (runId) => removeRunTmp({ root: workersConfig(config).tmp_root, runId, stateDir: config.state_dir }),
       kickJournal: () => journal.kick(),
       log,
       now: Date.now,
     };
     const cleanups = new Map<string, Promise<CleanupReport>>();
     let deliveryWatcher: DeliveryWatcher | null = null;
+    let autoMerger: AutoMerger | null = null;
     let upkeep: Upkeep | null = null;
     let policyFollow: PolicyFollower | null = null;
     const delivery: DeliveryServices = {
@@ -503,6 +507,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       reviewReraiseMs: () => upkeepConfig(config).review_reraise_hours * 3_600_000,
       notifySteer: (runId) => bus.notify(runId),
       kickScheduler: () => scheduler?.kick(),
+      // What the watcher read (checks, merges) may move a yolo auto-merge on.
+      passed: () => autoMerger?.kick(),
       log,
       now: Date.now,
     });
@@ -533,6 +539,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       notify: (runId) => bus.notify(runId),
       startDeps,
       kickJournal: () => journal.kick(),
+      // A verify that started or finished may move a yolo auto-merge on.
       drainVerifies: (isStopped) =>
         drainVerifyQueue({
           stopped: isStopped,
@@ -547,8 +554,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           webUrl: () => github().web_url,
           projectPath: (projectId) => getProject(database, projectId)?.path ?? null,
           host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
-        }),
+        }).finally(() => autoMerger?.kick()),
     });
+    // Yolo auto-merge (src/verify/auto-merge.ts): an opted-in project's deliveries verified and merged with no leader turn.
+    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick() });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
       passNow: async () => scheduler?.passNow(),
@@ -747,6 +756,18 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     } catch (error) {
       log(`verify: startup recovery failed: ${(error as Error).message}`);
     }
+    // Run temp dirs whose run is gone or cleaned up (a cleanup that failed to remove one, a crash), and a deleted home's.
+    try {
+      const keep = (runId: string) => {
+        const row = database.query("SELECT cleanup FROM runs WHERE id = ?1").get(runId) as { cleanup: string | null } | null;
+        return row !== null && row.cleanup !== "done";
+      };
+      const swept = sweepRunTmp({ root: workersConfig(config).tmp_root, stateDir: config.state_dir, keep });
+      if (swept.removed.length > 0) log(`run tmp: removed ${swept.removed.length} left over: ${swept.removed.join(", ")}`);
+      for (const failed of swept.failed) log(`run tmp: ${failed.dir} was not removed: ${failed.error}`);
+    } catch (error) {
+      log(`run tmp: the startup sweep failed: ${(error as Error).message}`);
+    }
     resolveReady();
     // The last restart's helper gave up and this daemon came up another way: one P1 says so.
     // Only once ready, so a helper probing after it writes the record always sees a daemon that missed it.
@@ -771,6 +792,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     await reconciler.passNow("startup");
     deliveryWatcher.start();
     scheduler.start();
+    autoMerger.start();
     lavishPoller.kick();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
@@ -848,7 +870,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const reason = await stopped;
     log(`stopping: ${reason}`);
     // Every timer first, then wait for what is under way: the database closes only after its last use.
-    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }];
+    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }];
     stopVerifications();
     clearInterval(pass);
     clearInterval(steady);

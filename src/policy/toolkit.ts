@@ -13,7 +13,7 @@ import { basename, shellCommands, type Command } from "./shell.ts";
  * a URL host or a file path; no model is involved.
  */
 
-export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "scope-paths"] as const;
+export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths"] as const;
 export type ToolkitRule = (typeof TOOLKIT_RULES)[number];
 
 export interface ToolkitVerdict {
@@ -89,6 +89,7 @@ const TOOL_FOR: Record<Exclude<ToolkitRule, "leader-shell">, string> = {
   browser: "chrome-devtools-axi",
   tasks: "tasks-axi",
   "flowryn-tasks": "flowryn",
+  pipeline: "no-mistakes axi run --wait",
   "scope-paths": "flowryn",
 };
 
@@ -108,7 +109,12 @@ function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
     if (call.role === "leader" && call.harness === "pi" && LEADER_SHELL_GATE.test(command)) {
       return { rule: "leader-shell", tool: "flowryn_merge, flowryn_gate_pass or flowryn_decide", reason: LEADER_SHELL_REASON };
     }
-    for (const c of shellCommands(command)) {
+    const commands = shellCommands(command);
+    if (call.toolInput.run_in_background === true) {
+      const pipeline = commands.find(isPipelineDrive);
+      if (pipeline) return deny("pipeline", call, `a backgrounded \`${pipeline.argv.slice(0, 3).join(" ")}\``);
+    }
+    for (const c of commands) {
       const hit = commandVerdict(c, call, paths);
       if (hit) return hit;
     }
@@ -156,6 +162,8 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
       return "use chrome-devtools-axi (a project's own playwright test is fine).";
     case "tasks":
       return "change a backlog.md or todos.md with tasks-axi.";
+    case "pipeline":
+      return "run it in the foreground: one no-mistakes axi run --wait per call, with Bash timeout 600000. A call that returns on elapsed wait: run it again.";
     case "flowryn-tasks":
       return call.role === "worker"
         ? "Flowryn owns this backlog; ask your leader ($FLOWRYN_BIN ask) for the change."
@@ -298,6 +306,11 @@ const PLAYWRIGHT_ALLOWED = new Set(["", "test", "show-report", "install", "insta
 const SCRIPT_RUNNERS = new Set(["node", "bun", "deno", "python", "python3"]);
 const GIT_VALUED_GLOBALS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--exec-path"]);
 const TASKS_AXI_READS = new Set(["", "list", "show", "ready", "--help", "-h", "help", "-v", "-V", "--version"]);
+
+/** A call that drives a no-mistakes run and blocks on it: `axi run` (start or reattach) or `axi respond`. */
+function isPipelineDrive(c: Command): boolean {
+  return c.name === "no-mistakes" && c.argv[1] === "axi" && (c.argv[2] === "run" || c.argv[2] === "respond");
+}
 
 function commandVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
   const shown = c.argv.slice(0, 3).join(" ");

@@ -744,7 +744,24 @@ INSERT INTO meta (key, value) VALUES ('pr_feedback_since', CAST(strftime('%s', '
 `;
 
 /**
- * Migration 34 (docs/notes/2026-10-24-leader-scoping-and-vj.md): a leader per scope. The lease is one
+ * Migration 34: yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2). One
+ * row per delivery of an opted-in yolo ship, driven from queued to merged, or held or superseded,
+ * by src/verify/auto-merge.ts. A run has at most one live row.
+ */
+const AUTO_MERGES_SQL = /* sql */ `
+CREATE TABLE auto_merges (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  ref TEXT NOT NULL, head_sha TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','verifying','waiting_checks','merging','merged','held','superseded','sent_back')),
+  request_id TEXT, verification_id TEXT, merge_id TEXT,
+  reason TEXT, detail TEXT,
+  created_at INTEGER NOT NULL, state_since INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX auto_merges_live ON auto_merges(run_id) WHERE state IN ('queued','verifying','waiting_checks','merging');
+CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
+`;
+
+/**
+ * Migration 35 (docs/notes/2026-10-24-leader-scoping-and-vj.md): a leader per scope. The lease is one
  * row per scope (`id` stays the rowid, its old `id = 1` check goes), and a leader session records the
  * account its login matched and that account's scope ('' while the login is unconfirmed: it sees
  * nothing). Existing rows take the implicit scope `default`, which the daemon moves to `[scopes] default`
@@ -800,7 +817,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 31, name: "migration-names", sql: SCHEMA_MIGRATIONS_SQL },
   { version: 32, name: "job-procs", sql: JOB_PROCS_SQL },
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
-  { version: 34, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
+  { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
+  { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -13,7 +13,7 @@ import { gatedCommands } from "../../src/leader/hooks.ts";
 import { ATTEMPT_WINDOW_MS, ChallengeStore, findAttempt, insertApproval, matchAttempt, recordAttempt, voidPendingAttempts } from "../../src/policy/approvals.ts";
 import { runCleanup } from "../../src/policy/cleanup.ts";
 import { gitRunner } from "../../src/policy/git.ts";
-import { checkGate, chooseApproval, type MergeFacts } from "../../src/policy/merge.ts";
+import { checkGate, chooseApproval, DAEMON_CALLER, type MergeFacts } from "../../src/policy/merge.ts";
 import { isActive, ownParkedRun, parseNmStatus } from "../../src/policy/nomistakes.ts";
 import type { RunWithPolicy } from "../../src/lifecycle/runs.ts";
 import type { ProjectRow } from "../../src/lifecycle/projects.ts";
@@ -221,6 +221,24 @@ describe("the merge gate, in the design's order", () => {
     expect(chooseApproval(d, facts(), { caller: leader }, "merge", now).why).toContain("was for head h0");
     tx(d, () => insertApproval(d, { task: "t", ref: facts().ref, head: "h1", channel: "cli-tty", actor: "me", action: "merge", now }));
     expect(chooseApproval(d, facts(), { caller: leader, approvalKey: "k1", head: "h1" }, "merge", now).choice?.kind).toBe("row");
+  });
+});
+
+describe("the daemon as merge caller (yolo auto-merge)", () => {
+  test("a daemon caller gets the yolo posture and nothing else; never a waiver, never for a task that is not yolo; sensitive work is refused at the gate", () => {
+    const d = freshDb();
+    const now = 5_000_000;
+    tx(d, () => {
+      d.query("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo) VALUES ('web', 'x', '/p', 'main', 'direct-PR', 1)").run();
+      d.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('t', 'web', 'ship', 'direct-PR', 1, 'fix', 0)").run();
+    });
+    const chosen = chooseApproval(d, facts(), { caller: DAEMON_CALLER }, "merge", now);
+    expect(chosen.choice?.kind).toBe("yolo");
+    expect(checkGate(facts(), chosen)).toEqual({ waived: null, alreadyMerged: false, localGreen: null });
+    expect(code(() => checkGate(facts({}, 1), chooseApproval(d, facts({}, 1), { caller: DAEMON_CALLER }, "merge", now)))).toBe("approval_required");
+    expect(chooseApproval(d, facts(), { caller: DAEMON_CALLER, allowRed: "ci" }, "merge", now).choice).toBeNull();
+    tx(d, () => d.query("UPDATE task_policy SET yolo = 0").run());
+    expect(chooseApproval(d, facts(), { caller: DAEMON_CALLER }, "merge", now).choice).toBeNull();
   });
 });
 

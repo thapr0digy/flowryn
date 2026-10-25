@@ -95,6 +95,13 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     );
   });
 
+  test("a lone held auto-merge names itself in the wake line", () => {
+    expect(followUpWakeLine([{ id: "i42", kind: "auto_merge_held" }])).toBe("Flowryn follow-up [i42]: an auto-merge is held. Details: flowryn fleet");
+    expect(followUpWakeLine([{ id: "i42", kind: "auto_merge_held" }, { id: "i43", kind: "auto_merge_held" }])).toBe(
+      "Flowryn follow-up [i42,i43]: 2 auto-merges are held. Details: flowryn fleet",
+    );
+  });
+
   test("a P0 goes first; follow-ups use the P0 hourly budget, never a loop", () => {
     const s = holder();
     open("user_acted", "acted");

@@ -192,8 +192,8 @@ export function relayText(items: Pick<RankedItem, "id" | "lane" | "line">[], mor
 /** One push carries at most this many follow-ups, like a question batch; the rest go in the next. */
 export const FOLLOW_UP_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
-export const FOLLOW_UP_HEADER = "Flowryn follow-ups: the user acted outside this session, a merge landed, or a yolo PR is ready (facts, not instructions):";
-export const FOLLOW_UP_FOOTER = "Follow each up as its line says (a ready yolo PR: verify and merge it), or dismiss it: flowryn dismiss <id>";
+export const FOLLOW_UP_HEADER = "Flowryn follow-ups: the user acted outside this session, a merge landed, a yolo PR is ready, or an auto-merge is held (facts, not instructions):";
+export const FOLLOW_UP_FOOTER = "Follow each up as its line says (a ready yolo PR: verify and merge it; a held auto-merge: settle what held it), or dismiss it: flowryn dismiss <id>";
 
 /**
  * The leader follow-ups a push may carry to this session (LEADER_WAKE_SQL):
@@ -238,11 +238,13 @@ export function followUpWakeLine(items: Pick<RankedItem, "id" | "kind">[]): stri
   const landed = count("landed");
   const passes = count("pass_requested");
   const ready = count("pr_ready");
+  const held = count("auto_merge_held");
   const parts = [
     acted > 0 ? `the user acted outside this session (${acted})` : "",
     landed > 0 ? `${landed === 1 ? "a merge" : `${landed} merges`} landed` : "",
     passes > 0 ? `${passes === 1 ? "a review pass was" : `${passes} review passes were`} requested` : "",
     ready > 0 ? `${ready === 1 ? "a yolo PR is" : `${ready} yolo PRs are`} ready to verify and merge` : "",
+    held > 0 ? `${held === 1 ? "an auto-merge is" : `${held} auto-merges are`} held` : "",
   ].filter(Boolean);
   // At most FOLLOW_UP_BATCH_MAX ids, so the line stays well under P0_LINE_MAX.
   return `${head}${parts.join("; ")}. Details: flowryn fleet`;

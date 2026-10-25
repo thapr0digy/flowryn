@@ -650,7 +650,7 @@ describe("a requested launch or resume no launcher claimed", () => {
     deadRun();
     tx(db, () => requestOperation(db, { run: { id: "r1", task_id: "t1" }, kind: "resume", mode: "resume", requestedBy: "reconciler", source: "reconciler", now: Date.now() }));
     const gate = barrier();
-    const d = daemon({ harnessGate: () => gate.hold(() => ({ harness: "claude", state: "verified", version: "1", revision: 1 }) as const) });
+    const d = daemon({ harnessGate: () => gate.hold(() => ({ harness: "claude", state: "verified", version: "1", revision: CONTRACT_REVISIONS.claude }) as const) });
     const pass = d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
     await gate.reached;
     tx(db, () => {

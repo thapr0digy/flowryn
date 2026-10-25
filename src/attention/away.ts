@@ -55,7 +55,7 @@ export interface AwayEnded {
  * leader follow-ups (LEADER_WAKE_KINDS) wake it whether you are away or only
  * inactive; they are listed here so the away suggestion and brief count them.
  */
-export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed"];
+export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed", "auto_merge_held"];
 
 /**
  * SQL for "item `i` wakes the leader while away", with `?<since>` the away
@@ -63,7 +63,7 @@ export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_request
  */
 export function awayWakeSql(sinceParam: string): string {
   return `(${sinceParam} IS NOT NULL AND i.opened_at >= ${sinceParam} AND (
-      i.kind IN ('gate_ready','pass_requested','checks_red','user_acted','landed')
+      i.kind IN ('gate_ready','pass_requested','checks_red','user_acted','landed','auto_merge_held')
       OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy ap WHERE ap.task_id = i.task_id AND ap.yolo = 0))
       OR (i.kind = 'report_ready' AND EXISTS (SELECT 1 FROM decisions ad WHERE ad.origin = i.task_id AND ad.state = 'open' AND ad.reserved_reason IS NOT NULL))))`;
 }

@@ -61,7 +61,7 @@ function projectOf(db: Db, run: RunWithPolicy): ProjectRow {
 /** What the promoted worker is told: the task is a ship now, what that asks of its branch, and how it delivers. */
 function promotionNote(project: ProjectRow, run: RunWithPolicy, workflow: WorkflowDef, words: string, reportPath: string | null): string {
   const last = workflow.stages[workflow.stages.length - 1]!;
-  const delivery = deliveryLines({ kind: "ship", mode: project.delivery_mode, defaultBranch: project.default_branch, lastStage: { id: last.id, pools: last.pools } })
+  const delivery = deliveryLines({ kind: "ship", mode: project.delivery_mode, defaultBranch: project.default_branch, lastStage: { id: last.id, pools: last.pools }, harness: run.harness })
     .map((l) => l.replace(/^-\s*/, "").trim())
     .join(" ");
   return [

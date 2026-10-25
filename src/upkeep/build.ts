@@ -9,6 +9,7 @@ import { appendEvent } from "../db/events.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { runBounded } from "../runtime/bounded.ts";
+import { withRepoLock } from "../runtime/repo-lock.ts";
 
 /**
  * The build after a Flowryn merge (spec 3, phase 3; the review chose "the
@@ -242,8 +243,10 @@ export class MergeBuilder {
         rmSync(worktree, { recursive: true, force: true });
       }
       mkdirSync(this.deps.workDir, { recursive: true });
-      await must(["worktree", "prune"], project.path);
-      await must(["worktree", "add", "--detach", worktree, commit], project.path);
+      await withRepoLock(project.path, async () => {
+        await must(["worktree", "prune"], project.path);
+        await must(["worktree", "add", "--detach", worktree, commit], project.path);
+      });
     }
     const head = await must(["rev-parse", "HEAD"], worktree);
     if (head !== commit) throw new StepFailed(`the build worktree is at ${head.slice(0, 8)}, not ${commit.slice(0, 8)}`);
