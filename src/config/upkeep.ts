@@ -14,6 +14,9 @@ import { table, type FlowrynConfig } from "./config.ts";
  *   cleanup guard once it has been idle this long; 0 turns it off.
  * - `nudge_conflicts`: a delivered PR GitHub reads as unmergeable sends its
  *   ship back to merge origin's default branch and deliver again.
+ * - `steer_reviews`: a review or comment on a delivered PR steers its worker
+ *   (src/reconcile/reviews.ts); `review_reraise_hours`: an unanswered review
+ *   thread is sent again after this many hours, then as often; 0 turns that off.
  * - `explanations_keep_days`, `explanations_keep_per_run`: closed wait
  *   explanations older than this many days, and beyond a run's newest this
  *   many, are deleted; 0 turns either bound off. Open ones always stay.
@@ -26,6 +29,8 @@ export interface UpkeepConfig {
   sync_primary: boolean;
   clean_ended_hours: number;
   nudge_conflicts: boolean;
+  steer_reviews: boolean;
+  review_reraise_hours: number;
   explanations_keep_days: number;
   explanations_keep_per_run: number;
   interval_ms: number;
@@ -36,6 +41,8 @@ export const DEFAULT_UPKEEP: UpkeepConfig = {
   sync_primary: true,
   clean_ended_hours: 24,
   nudge_conflicts: true,
+  steer_reviews: true,
+  review_reraise_hours: 24,
   explanations_keep_days: 30,
   explanations_keep_per_run: 200,
   interval_ms: 600_000,
@@ -60,6 +67,8 @@ export function upkeepConfig(config: FlowrynConfig): UpkeepConfig {
   }
   const hours = raw.clean_ended_hours ?? DEFAULT_UPKEEP.clean_ended_hours;
   if (typeof hours !== "number" || !Number.isFinite(hours) || hours < 0) throw new FlowrynError("config_invalid", "[upkeep] clean_ended_hours must be a number of hours, 0 or more (0 turns it off)");
+  const reraise = raw.review_reraise_hours ?? DEFAULT_UPKEEP.review_reraise_hours;
+  if (typeof reraise !== "number" || !Number.isFinite(reraise) || reraise < 0) throw new FlowrynError("config_invalid", "[upkeep] review_reraise_hours must be a number of hours, 0 or more (0 turns it off)");
   const interval = raw.interval_ms ?? DEFAULT_UPKEEP.interval_ms;
   if (typeof interval !== "number" || !Number.isInteger(interval) || interval <= 0) throw new FlowrynError("config_invalid", "[upkeep] interval_ms must be a positive integer");
   return {
@@ -67,6 +76,8 @@ export function upkeepConfig(config: FlowrynConfig): UpkeepConfig {
     sync_primary: bool(raw.sync_primary, "sync_primary"),
     clean_ended_hours: hours,
     nudge_conflicts: bool(raw.nudge_conflicts, "nudge_conflicts"),
+    steer_reviews: bool(raw.steer_reviews, "steer_reviews"),
+    review_reraise_hours: reraise,
     explanations_keep_days: keep(raw.explanations_keep_days, "explanations_keep_days"),
     explanations_keep_per_run: keep(raw.explanations_keep_per_run, "explanations_keep_per_run"),
     interval_ms: interval,

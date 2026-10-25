@@ -22,6 +22,8 @@ export type ItemClass = "actionable" | "info";
  * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
  * restart_dropped: a `flowryn daemon restart` that will not happen (its binary
  * failed the check, its supervisor refused, or `--when-idle` expired).
+ * restart_failed: a launchd restart that left flowrynd down until something
+ * else brought it back (src/service/relaunch.ts); opened by the next daemon.
  * review_feedback: what you sent from a review page the daemon polls.
  * pass_requested: the user asked on a review page to pass its gate; the
  * leader confirms it with them through a human channel.
@@ -51,6 +53,10 @@ export type ItemClass = "actionable" | "info";
  * the sync left alone (informational); conflict_nudged, a delivered PR that
  * conflicts sent its ship back to merge its base (informational); and
  * pr_conflict, one that still conflicts after its nudges.
+ * Review feedback (src/reconcile/reviews.ts): review_steered, a delivered PR's
+ * new reviews or comments sent its ship back to address them (informational);
+ * review_unanswered, a review thread still unanswered after its sends, or more
+ * feedback after the sends one delivered head may get.
  * The policy follow-through (src/upkeep/policy-follow.ts): policy_sent_back,
  * a delivered ship sent back to merge main's policy change (informational);
  * policy_behind, a ship delivered again still behind a policy change it was
@@ -100,17 +106,20 @@ export const LANE_TABLE = {
   herdr_unreachable: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
+  restart_failed: { lane: "P1", class: "actionable" },
   build_refused: { lane: "P1", class: "actionable" },
   worker_report: { lane: "P1", class: "actionable" },
   build_failed: { lane: "P1", class: "actionable" },
   user_acted: { lane: "P1", class: "actionable" },
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
+  review_unanswered: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   build_held: { lane: "P1", class: "info" },
   checkout_unsynced: { lane: "P1", class: "info" },
   conflict_nudged: { lane: "P1", class: "info" },
+  review_steered: { lane: "P1", class: "info" },
   policy_sent_back: { lane: "P1", class: "info" },
   policy_behind: { lane: "P1", class: "info" },
   phase_started: { lane: "P1", class: "info" },
@@ -135,7 +144,7 @@ export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_q
  * worker's report, a dropped restart or a stuck validation is not left for
  * your next message.
  */
-export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "validation_stuck", "user_acted", "landed", "pass_requested"];
+export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "restart_failed", "validation_stuck", "user_acted", "landed", "pass_requested"];
 
 /**
  * Items that wake an idle leader as a P0 would, though they are P1: what you

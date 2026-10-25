@@ -117,7 +117,7 @@ export class BuildWatcher {
   private lastKey: string | null = null;
   private changedAt = 0;
   private judgedKey: string | null = null;
-  private running = false;
+  private running: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: BuildWatchDeps) {
@@ -137,20 +137,20 @@ export class BuildWatcher {
     loop();
   }
 
-  stop(): void {
+  /** No new look after this; resolves when the look under way, if any, has ended (the daemon closes the database after). */
+  async stop(): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    await this.running?.catch(() => undefined);
   }
 
   /** One look at the installed binary; judges it once it is new and settled. */
   async tick(): Promise<void> {
     if (this.running) return;
-    this.running = true;
-    try {
-      await this.look();
-    } finally {
-      this.running = false;
-    }
+    this.running = this.look().finally(() => {
+      this.running = null;
+    });
+    await this.running;
   }
 
   private async target(now: number): Promise<string[] | null> {

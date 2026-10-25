@@ -11,14 +11,17 @@ import { runBounded } from "../runtime/bounded.ts";
 import type { OpenChallenge } from "../policy/approvals.ts";
 import { oldestStep, type NmActiveStep } from "../policy/nomistakes.ts";
 import { sha256Hex } from "../util/hash.ts";
+import { failureLine, type RestartFailure } from "../service/restart-failure.ts";
 
 /**
  * `flowryn daemon restart` (leader-safe restart): the leader, or you, applies
  * a new build without your terminal. Everything here is plain code: the
  * guards are queries over the database and the daemon's memory, the binary
  * check runs the launchd target's `version --json`, and the restart itself is
- * launchd's `kickstart -k`, asked by this daemon (it runs outside any Bash
- * sandbox, so the leader's shell never needs launchctl).
+ * the detached helper `flowryn daemon relaunch` (src/service/relaunch.ts),
+ * which re-bootstraps the launchd agent and checks a new daemon answers,
+ * asked by this daemon (it runs outside any Bash sandbox, so the leader's
+ * shell never needs launchctl).
  */
 
 /** No second restart this soon after the last one: a plain timer against a restart loop. */
@@ -467,6 +470,17 @@ export function recordRestarted(db: Db, current: Omit<DaemonSnapshot, "uptime_s"
   appendEvent(db, { source: "daemon", kind: "daemon.restarted", payload, ts: now });
   resolveItems(db, "restart_dropped", null, "daemon.restarted", now);
   return payload;
+}
+
+/**
+ * At startup: the last restart's helper gave up (src/service/relaunch.ts) and
+ * this daemon came up some other way, so record it and open one P1 naming
+ * what failed and what to run if it happens again. Call inside a transaction.
+ */
+export function recordRestartFailure(db: Db, failure: RestartFailure, now: number): void {
+  const { seq } = appendEvent(db, { source: "daemon", kind: "daemon.restart_failed", payload: { ...failure, downtime_ms: Math.max(0, now - failure.at) }, ts: now });
+  if (findOpenItem(db, "restart_failed", null)) return;
+  openItem(db, { kind: "restart_failed", eventSeq: seq, line: `Daemon restart left flowrynd down until it was started another way; if a restart does this again, run ${failure.run}. ${failureLine(failure)}`, now });
 }
 
 /** Restarts since a moment, for the briefing: who asked, and the build before and after. */
