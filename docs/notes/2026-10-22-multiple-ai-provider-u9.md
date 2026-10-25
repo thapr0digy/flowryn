@@ -1,7 +1,7 @@
 # Multiple AI accounts per harness
 
 - Status: partial
-- Open: phase 3's leader per scope is docs/notes/2026-10-24-leader-scoping-and-vj.md, and moving `~/.flowryn-work` into the main home is its plan p19; `doctor --contracts --account` is not built (contract runs use the implicit Claude account, from `[workers.claude]`); a declared account has not yet run live, and neither has a per-account quota probe against two real logins or Pi's `openai-codex` store
+- Open: phase 3's leader per scope is docs/notes/2026-10-24-leader-scoping-and-vj.md, and moving `~/.flowryn-work` into the main home is its `flowryn home adopt` (built; not yet run on the real work home); `doctor --contracts --account` is not built (contract runs use the implicit Claude account, from `[workers.claude]`); a declared account has not yet run live, and neither has a per-account quota probe against two real logins or Pi's `openai-codex` store
 - Config: `[accounts.<id>] harness`, `[accounts.<id>] scope`, `[accounts.<id>] config_dir`, `[accounts.<id>] agent_dir`, `[accounts.<id>] provider`, `[accounts.<id>] model`, `[accounts.<id>] effort`, `[accounts.<id>] overflow`, `[scopes] default`, `[scopes.<id>] paths`, `[scopes.<id>] remotes`, `[scopes.<id>] accounts`, `[projects.<id>] scope`, `[projects.<id>] account`
 
 Before this, a Flowryn home had one Claude login and one Pi login for workers (`[workers.claude]`, `[workers.pi]`). Work repositories needed a whole second home (`FLOWRYN_HOME=~/.flowryn-work`, its Claude login in `~/.claude-work`). Now one home can hold several logins, and a rule keeps work and personal apart. The design was reviewed at gate g159. The user chose a leader per scope for phase 3.

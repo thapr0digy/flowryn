@@ -28,6 +28,7 @@ import { hashFile, readSnapshot, type JournalFile } from "../journal/snapshot.ts
 import { listen, request, type Listener } from "../transport/unix.ts";
 import { ensureDir } from "../util/fsx.ts";
 import { tryExclusiveLock, type HeldLock } from "../util/flock.ts";
+import { adoptedLine, readAdoptedMarker } from "../lifecycle/home-adopt.ts";
 import { ulid } from "../util/ulid.ts";
 import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
@@ -210,6 +211,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   // Work outlived the shutdown grace: it may still query, so the database is left for the exit to close.
   let keepDbOpen = false;
   const sock = socketPath(home, env);
+  // A home adopted into another (flowryn home adopt) stays an archive: a clean exit, so launchd leaves it stopped.
+  const adopted = readAdoptedMarker(home);
+  if (adopted) {
+    say(adoptedLine(home, adopted));
+    return 0;
+  }
 
   try {
     let config = loadConfig(home).config;

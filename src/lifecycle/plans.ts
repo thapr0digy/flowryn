@@ -129,7 +129,8 @@ export function parsePlan(text: string): { title: string | null; phases: PlanPha
   return { title, phases };
 }
 
-function nextPlanId(db: Db): string {
+/** The next free plan id (`p<N>`), reserved as it is read. Call inside a transaction. */
+export function nextPlanId(db: Db): string {
   const next = Number(getMeta(db, "next_plan_no") ?? "1");
   setMeta(db, "next_plan_no", String(next + 1));
   return `p${next}`;

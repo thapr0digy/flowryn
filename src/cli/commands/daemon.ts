@@ -8,6 +8,7 @@ import { EXIT } from "../../api/errors.ts";
 import type { CliIo, VerbSpec } from "../../api/verbs.ts";
 import { boolArg, intArg } from "../../api/verbs.ts";
 import { runDaemon } from "../../daemon/daemon.ts";
+import { adoptedLine, readAdoptedMarker } from "../../lifecycle/home-adopt.ts";
 import { PING_VERB, RESTART_VERB, STOP_VERB, systemVerbs } from "../../daemon/system-verbs.ts";
 import type { DaemonSnapshot } from "../../daemon/restart.ts";
 import { callServerVerb } from "../client.ts";
@@ -86,6 +87,8 @@ const status: VerbSpec = {
     if (reply && reply.ok) return print(io, okReply(reply.data, []));
     if (reply && !reply.ok) return print(io, reply);
     const home = flowrynHome(io.env);
+    const adopted = readAdoptedMarker(home);
+    if (adopted) return print(io, okReply({ daemon: "not started", reason: adoptedLine(home, adopted) }));
     const { config } = loadConfig(home);
     const label = serviceLabel(home);
     const lock = stateFiles(config.state_dir).lock;
