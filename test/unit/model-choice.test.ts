@@ -118,6 +118,12 @@ describe("checks", () => {
   });
 });
 
+describe("existing config", () => {
+  test("an account's or [workers]'s effort is not checked against the list, so no config that loaded before starts failing", () => {
+    expect(choose('[accounts.work]\nharness = "claude"\neffort = "turbo"', { account: "work" })).toMatchObject({ effort: "turbo", effort_source: "account work" });
+  });
+});
+
 describe("[workflows.<id>.<harness>]", () => {
   test("a table without stages on a built-in workflow keeps its stages and adds the defaults", () => {
     const wf = workflowsConfig(config('[workflows.feature.claude]\nmodel = "opus"\n[workflows.feature.pi]\neffort = "high"')).feature!;
