@@ -66,6 +66,7 @@ describe("a Claude worker: one raw call per rule is denied through the real pre-
       { rule: "browser", tool: "chrome-devtools-axi", name: "mcp__claude-in-chrome__navigate", input: { url: "https://x" } },
       { rule: "tasks", tool: "tasks-axi", name: "Edit", input: { file_path: join(env.repo, "backlog.md"), old_string: "a", new_string: "b" } },
       { rule: "flowryn-tasks", tool: "flowryn", name: "Bash", input: { command: `echo '- [ ] x' >> ${env.h.backlog}` } },
+      { rule: "pipeline", tool: "no-mistakes axi run --wait", name: "Bash", input: { command: "no-mistakes axi run --intent 'ship it'", run_in_background: true } },
     ];
     for (const c of cases) {
       const decision = await preTool(env, token, c.name, c.input);
@@ -79,6 +80,7 @@ describe("a Claude worker: one raw call per rule is denied through the real pre-
     expect(JSON.stringify(denials(env, { run }))).not.toContain("gh pr list");
     // An allowed call is untouched.
     expect(await preTool(env, token, "Bash", { command: "gh-axi pr list && git status" })).toBeNull();
+    expect(await preTool(env, token, "Bash", { command: "no-mistakes axi run --intent 'ship it'", timeout: 600_000 })).toBeNull();
   }, 60_000);
 
   test("the daemon down: the hook process still denies (no daemon call needed)", async () => {

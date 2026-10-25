@@ -244,7 +244,7 @@ export class Launcher {
     const instructionsFile = join(runDir, "task.md");
     const contractFile = join(runDir, "contract.md");
     const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
-    const delivery = { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch, lastStage: lastStageOf(this.deps.db, run) };
+    const delivery = { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch, lastStage: lastStageOf(this.deps.db, run), harness: run.harness };
     writeFileAtomic(instructionsFile, this.taskFile(run, config, delivery, mode), 0o600);
     writeFileAtomic(contractFile, workerContract(run.harness, styleBlock(config), delivery), 0o600);
     const skills = writeStageSkills(config.state_dir);
