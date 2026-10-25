@@ -46,6 +46,8 @@ flowryn lead                 # Claude Code leader here; --pi for Pi; harness arg
 
 The leader runs with its own settings under `~/.flowryn/leader/`; your harness settings are never edited. It gets a briefing at session start, a digest of updates on your next message, and P0s as they happen.
 
+With work and personal accounts in one home, start one leader per scope: `flowryn lead --account claude-work` leads work only, and a leader on your personal login leads personal only (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+
 The core verbs (you or the leader):
 
 ```bash

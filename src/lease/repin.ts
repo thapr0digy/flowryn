@@ -6,7 +6,7 @@ import { appendEvent } from "../db/events.ts";
 import { runCommand } from "../policy/command.ts";
 import { claudeProjectSlug, tailLines, TRANSCRIPT_TAIL_BYTES, voidSessionGrants } from "../policy/grants.ts";
 import { isAlive, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
-import { getLease, getSession } from "./lease.ts";
+import { allLeases, getSession, isHolder } from "./lease.ts";
 
 /**
  * `flowryn leader repin` (docs/notes/2026-10-11-flowryn-leader-repin-xv.md): your terminal moves
@@ -84,23 +84,41 @@ function liveGrantCount(db: Db, session: string): number {
 }
 
 /**
- * What a repin of the lease holder would do, or why it would not help. `dir` is the directory you
- * named (absolute, from the CLI); without it the transcript names exactly one. Throws FlowrynError.
+ * The leading Claude session a repin is for: the one you name, else the only lease holder. With a
+ * leader per scope (docs/notes/2026-10-24-leader-scoping-and-vj.md) several may lead; you name one.
  */
-export function planRepin(db: Db, a: { dir: string | null; projectsDir: string }): RepinPlan {
-  const lease = getLease(db);
-  if (!lease.session_id) throw new FlowrynError("not_found", "no leader session holds the lease", "flowryn lead");
-  const s = getSession(db, lease.session_id);
-  if (!s || s.ended_at !== null) throw new FlowrynError("not_found", `leader session ${lease.session_id} has ended`, "flowryn leader status");
+function repinTarget(db: Db, named: string | null): string {
+  const holders = allLeases(db)
+    .map((l) => l.session_id)
+    .filter((id): id is string => id !== null);
+  if (named) {
+    if (!holders.includes(named)) throw new FlowrynError("not_found", `leader session ${named} holds no lease`, "flowryn leader status");
+    return named;
+  }
+  if (holders.length === 0) throw new FlowrynError("not_found", "no leader session holds the lease", "flowryn lead");
+  if (holders.length > 1) throw new FlowrynError("bad_args", `${holders.length} leader sessions lead (${holders.join(", ")}): name the one to repin`, "flowryn leader repin --session <id> [<dir>]");
+  return holders[0]!;
+}
+
+/**
+ * What a repin of a lease holder would do, or why it would not help. `dir` is the directory you
+ * named (absolute, from the CLI); without it the transcript names exactly one. `projectsDir` gives
+ * Claude's projects directory of the session's account. Throws FlowrynError.
+ */
+export function planRepin(db: Db, a: { dir: string | null; session?: string | null; projectsDir: string | ((account: string | null) => string) }): RepinPlan {
+  const target = repinTarget(db, a.session ?? null);
+  const s = getSession(db, target);
+  if (!s || s.ended_at !== null) throw new FlowrynError("not_found", `leader session ${target} has ended`, "flowryn leader status");
+  const projectsDir = typeof a.projectsDir === "string" ? a.projectsDir : a.projectsDir(s.account);
   if (s.harness !== "claude") throw new FlowrynError("bad_args", `${s.session_id} is a ${s.harness} leader; chat-answer grants are Claude-only, so there is nothing to repin`);
   if (!s.transcript_path) throw new FlowrynError("not_found", `${s.session_id} has no Claude transcript recorded yet (its SessionStart hook has not run)`);
   const transcript = s.transcript_path;
   if (!isFile(transcript)) throw new FlowrynError("not_found", `${s.session_id}'s transcript ${transcript} cannot be read`);
   const folderPath = dirname(transcript);
   const folder = basename(folderPath);
-  const projectsReal = realOrNull(a.projectsDir);
+  const projectsReal = realOrNull(projectsDir);
   if (!projectsReal || realOrNull(dirname(folderPath)) !== projectsReal) {
-    throw new FlowrynError("bad_args", `${s.session_id}'s transcript ${transcript} is not in a folder of Claude's projects directory (${a.projectsDir})`, "set [grants] claude_projects_dir to the projects directory of the leader's Claude");
+    throw new FlowrynError("bad_args", `${s.session_id}'s transcript ${transcript} is not in a folder of Claude's projects directory (${projectsDir})`, "set [grants] claude_projects_dir to the projects directory of the leader's Claude, or lead on the account whose login holds it");
   }
   if (s.cwd && claudeProjectSlug(s.cwd) === folder) {
     throw new FlowrynError("no_change", `${s.session_id} is already pinned to ${s.cwd}, the directory of its transcript's folder`, "flowryn show <grant> says why a grant was refused");
@@ -134,7 +152,7 @@ export function planRepin(db: Db, a: { dir: string | null; projectsDir: string }
 export function applyRepin(db: Db, a: { session: string; oldCwd: string | null; newCwd: string; transcript: string; actor: string; now: number }): { voided: number } {
   const s = getSession(db, a.session);
   if (!s || s.ended_at !== null) throw new FlowrynError("challenge_failed", `leader session ${a.session} ended since you were shown it`, "flowryn leader repin");
-  if (getLease(db).session_id !== a.session) throw new FlowrynError("challenge_failed", `${a.session} no longer holds the lease`, "flowryn leader repin");
+  if (!isHolder(db, a.session)) throw new FlowrynError("challenge_failed", `${a.session} no longer holds the lease`, "flowryn leader repin");
   if (s.cwd !== a.oldCwd || s.transcript_path !== a.transcript) throw new FlowrynError("challenge_failed", `the pin or transcript of ${a.session} changed since you were shown it`, "flowryn leader repin");
   db.query("UPDATE leader_sessions SET cwd = ?2, pinned_at = ?3 WHERE session_id = ?1").run(a.session, a.newCwd, a.now);
   const voided = voidSessionGrants(db, a.session, REPIN_VOID_REASON, a.now);

@@ -1,5 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
+import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
@@ -9,8 +10,9 @@ import { recordIntent } from "../journal/journal.ts";
 import { MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { answerDecision, captainChannel, decisionView } from "./decision-verbs.ts";
 import { getGrant, grantLines, grantView } from "../policy/grants.ts";
-import { getLease, getSession } from "../lease/lease.ts";
-import { wakeBlockedLine } from "../leader/wake-state.ts";
+import { getSession, isHolder, UNCONFIRMED_SCOPE } from "../lease/lease.ts";
+import { wakeLineFor } from "../leader/wake-state.ts";
+import { lensFor } from "../leader/scope.ts";
 import { pinHistory } from "../lease/repin.ts";
 import { getDecision } from "./decisions.ts";
 import { findRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
@@ -64,6 +66,7 @@ const steer: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target" },
   apply(ctx, args) {
     const run = activeRunFor(ctx.db, stringArg(args, "target")!);
     const body = sanitizeBlock(stringArg(args, "body") ?? "").trim();
@@ -92,6 +95,7 @@ const answer: VerbSpec = {
   flags: { "body-file": { type: "string", help: "anything to add, from a file or - for stdin", fileFor: "body" } },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "decision" },
   apply(ctx, args) {
     const id = stringArg(args, "decision")!;
     const choice = stringArg(args, "choice")!;
@@ -130,6 +134,7 @@ const cancel: VerbSpec = {
   flags: { reason: { type: "string", help: "one line, for the backlog hold", placeholder: "text" } },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target" },
   apply(ctx, args) {
     const run = activeRunFor(ctx.db, stringArg(args, "target")!);
     if (run.state === "landed") throw new FlowrynError("run_not_active", `${run.task_id} landed: its merge is proven and stands; nothing was cancelled`, `flowryn cleanup ${run.task_id}`);
@@ -192,6 +197,7 @@ const resume: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target" },
   async prepare(ctx, args) {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     // Design section 5: the installed version is checked before a resume, as at dispatch.
@@ -256,6 +262,7 @@ const interrupt: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "target" },
   async prepare(ctx, args) {
     const run = activeRunFor(ctx.db, stringArg(args, "target")!);
     return { run: run.id, task: run.task_id, verified: await ctx.fleet.interruptRun(run.id) };
@@ -314,6 +321,8 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
   }
   const verified = delivered ? latestVerification(ctx.db, approvalRef(delivered)) : null;
   if (verified) view.verified = verificationLine(verified);
+  const auto = latestAutoMerge(ctx.db, run.id);
+  if (auto) view.auto_merge = autoMergeLine(ctx.db, auto);
   const merge = latestMerge(ctx.db, run.task_id);
   if (merge) {
     const approval = ctx.db.query("SELECT channel, actor FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: string; actor: string } | null;
@@ -393,14 +402,18 @@ const fleet: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx) {
-    const rows = ctx.db
-      .query(
-        `SELECT r.*, p.project_id, p.kind FROM runs r JOIN task_policy p ON p.task_id = r.task_id
-         WHERE r.state NOT IN ('cleaned','failed','cancelled') OR r.updated_at > ?1
-         ORDER BY r.started_at DESC`,
-      )
-      .all(ctx.now - 86_400_000) as FleetRow[];
+    const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+    const rows = (
+      ctx.db
+        .query(
+          `SELECT r.*, p.project_id, p.kind FROM runs r JOIN task_policy p ON p.task_id = r.task_id
+           WHERE r.state NOT IN ('cleaned','failed','cancelled') OR r.updated_at > ?1
+           ORDER BY r.started_at DESC`,
+        )
+        .all(ctx.now - 86_400_000) as FleetRow[]
+    ).filter((r) => lens.task(r.task_id));
     const list = rows.slice(0, MAX_FLEET_ROWS).map((r) => ({
       id: r.task_id,
       kind: r.kind,
@@ -413,24 +426,28 @@ const fleet: VerbSpec = {
       needs: needs(ctx, r),
     }));
     // Only what needs you counts, as in the briefing's "Needs you": informational items are on the board.
-    const lanes = ctx.db.query("SELECT lane, COUNT(*) AS n FROM items WHERE class = 'actionable' AND state IN ('open','presented') GROUP BY lane").all() as { lane: string; n: number }[];
-    const count = (lane: string) => lanes.find((l) => l.lane === lane)?.n ?? 0;
+    const lanes = (ctx.db.query("SELECT lane, task_id, run_id FROM items WHERE class = 'actionable' AND state IN ('open','presented')").all() as { lane: string; task_id: string | null; run_id: string | null }[]).filter(
+      (i) => lens.item(i),
+    );
+    const count = (lane: string) => lanes.filter((l) => l.lane === lane).length;
     const data: Record<string, unknown> = { fleet: list, open: `P0 ${count("P0")} · P1 ${count("P1")}`, capacity: capacityLine(ctx) };
     if (rows.length > MAX_FLEET_ROWS) data.more = `${rows.length - MAX_FLEET_ROWS} older rows not shown`;
     const away = getAway(ctx.db, ctx.now);
     if (away) data.away = awayLine(away, ctx.now);
-    const wake = wakeBlockedLine(ctx.db, getLease(ctx.db).session_id, ctx.now);
+    const wake = wakeLineFor(ctx.db, ctx.caller.session ?? null, ctx.now);
     if (wake) data.wake = wake;
-    const queued = queuedWork(ctx.db);
+    const queued = queuedWork(ctx.db).filter((q) => lens.task(q.id));
     // Why each waiting run waits, from its recorded explanation (docs/notes/2026-10-13-next-steps-md-wq.md); detail is show --why.
-    const held = waitingRuns(ctx.db);
+    const held = waitingRuns(ctx.db).filter((w) => lens.task(w.task_id));
     if (held.length > 0) data.waiting = held.map((w) => ({ task: w.task_id, ...waitingPointer(w) }));
     if (queued.length > 0) {
       data.queued = queued.slice(0, MAX_QUEUED_ROWS).map((q) => queuedRow(ctx, q));
       if (queued.length > MAX_QUEUED_ROWS) data.queued_more = `${queued.length - MAX_QUEUED_ROWS} more queued: backlog.md`;
     }
     // Every open actionable item, P0 first: fleet lists what needs you, like every briefing (design section 9).
-    const waiting = openActionable(ctx.db, ctx.now, leaderTiming(ctx.config).age_ms);
+    const waiting = openActionable(ctx.db, ctx.now, leaderTiming(ctx.config).age_ms)
+      .filter((i) => lens.item(i))
+      .map((i) => lens.redact(i));
     if (waiting.length > 0) {
       data.needs = waiting.slice(0, MAX_NEEDS_ROWS).map((i) => ({ id: i.id, lane: i.lane, line: sanitizeLine(i.line, 120) }));
       if (waiting.length > MAX_NEEDS_ROWS) data.needs_more = `${waiting.length - MAX_NEEDS_ROWS} more: flowryn board`;
@@ -705,6 +722,7 @@ const show: VerbSpec = {
   },
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "ref", arg: "target" },
   read(ctx, args) {
     const asked = stringArg(args, "target")!;
     let target = asked;
@@ -723,7 +741,9 @@ const show: VerbSpec = {
           session: leader.session_id,
           harness: leader.harness,
           pane: leader.pane_id ?? "-",
-          lease: getLease(ctx.db).session_id === leader.session_id ? "holder" : "read-only",
+          account: leader.account ?? "-",
+          scope: leader.scope === UNCONFIRMED_SCOPE ? "unconfirmed" : leader.scope,
+          lease: isHolder(ctx.db, leader.session_id) ? "holder" : "read-only",
           state: leader.ended_at === null ? "open" : `ended ${new Date(leader.ended_at).toISOString()}`,
           cwd: leader.cwd ?? "-",
           transcript: leader.transcript_path ?? "-",
@@ -748,7 +768,11 @@ const show: VerbSpec = {
     if (dropped) return droppedView(ctx, dropped, text);
     const run = findRun(ctx.db, target) as FleetRow | null;
     if (!run) {
-      if (item) return { data: { item: target, lane: item.lane, state: item.state, line: text.stored(item.line, item.full_line, Number.POSITIVE_INFINITY), ...text.pointer(asked) } };
+      if (item) {
+        // A task-less item may name other scopes' tasks: a scoped leader sees its neutral line (src/leader/scope.ts).
+        const shown = lensFor(ctx.db, ctx.config, ctx.caller.scope).redact({ ...item, id: target });
+        return { data: { item: target, lane: shown.lane, state: shown.state, line: text.stored(shown.line, shown.full_line, Number.POSITIVE_INFINITY), ...text.pointer(asked) } };
+      }
       const queued = queuedTask(ctx.db, target);
       if (queued) return queuedView(ctx, queued, text);
       const phase = phaseOfTask(ctx.db, target);

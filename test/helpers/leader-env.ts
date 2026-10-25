@@ -178,7 +178,7 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
         driver: (i) => drivers[i],
         openP0: env.openP0,
         openP1: env.openP1,
-        lease: () => withDb((db) => (db.query("SELECT session_id AS session, epoch FROM leader_lease WHERE id = 1").get() as { session: string | null; epoch: number } | null) ?? { session: null, epoch: 0 }),
+        lease: () => withDb((db) => (db.query("SELECT session_id AS session, epoch FROM leader_lease WHERE scope = 'default'").get() as { session: string | null; epoch: number } | null) ?? { session: null, epoch: 0 }),
         presentations: (item) =>
           withDb((db) => db.query("SELECT session_id, turn_no, path, state FROM presentations WHERE item_id = ?1 ORDER BY carried_at").all(item) as PresentationView[]),
         leaderSession: (session) =>

@@ -80,6 +80,9 @@ import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
+import { adoptLegacyScope } from "../leader/scope.ts";
+import { refreshScopeGuard } from "../leader/scope-guard.ts";
+import { AutoMerger } from "../verify/auto-merge.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -242,6 +245,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const { instance, restarted } = tx(database, () => {
       const id = ensureInstanceId(database);
       appendEvent(database, { source: "daemon", kind: "daemon.started", payload: { pid: process.pid, version: VERSION, proto: PROTO, build, commit, migrated, instance: id } });
+      // Leases and sessions from before scopes join [scopes] default (src/leader/scope.ts).
+      adoptLegacyScope(database, config, startedAt);
       // A restart the old daemon asked for: record who asked, with the build before and after.
       return { instance: id, restarted: recordRestarted(database, { pid: process.pid, version: VERSION, proto: PROTO, build, commit }, startedAt) };
     });
@@ -460,6 +465,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     };
     const cleanups = new Map<string, Promise<CleanupReport>>();
     let deliveryWatcher: DeliveryWatcher | null = null;
+    let autoMerger: AutoMerger | null = null;
     let upkeep: Upkeep | null = null;
     let policyFollow: PolicyFollower | null = null;
     const delivery: DeliveryServices = {
@@ -504,6 +510,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       reviewReraiseMs: () => upkeepConfig(config).review_reraise_hours * 3_600_000,
       notifySteer: (runId) => bus.notify(runId),
       kickScheduler: () => scheduler?.kick(),
+      // What the watcher read (checks, merges) may move a yolo auto-merge on.
+      passed: () => autoMerger?.kick(),
       log,
       now: Date.now,
     });
@@ -534,6 +542,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       notify: (runId) => bus.notify(runId),
       startDeps,
       kickJournal: () => journal.kick(),
+      // A verify that started or finished may move a yolo auto-merge on.
       drainVerifies: (isStopped) =>
         drainVerifyQueue({
           stopped: isStopped,
@@ -548,8 +557,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           webUrl: () => github().web_url,
           projectPath: (projectId) => getProject(database, projectId)?.path ?? null,
           host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
-        }),
+        }).finally(() => autoMerger?.kick()),
     });
+    // Yolo auto-merge (src/verify/auto-merge.ts): an opted-in project's deliveries verified and merged with no leader turn.
+    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick() });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
       passNow: async () => scheduler?.passNow(),
@@ -784,10 +795,20 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     await reconciler.passNow("startup");
     deliveryWatcher.start();
     scheduler.start();
+    autoMerger.start();
     lavishPoller.kick();
     const steady = setInterval(() => reconciler?.schedule(undefined, "steady"), timing().pass_ms);
     let seenItem = lastItemNo(database);
     // The leader waiter fallback: a holder whose waiter is gone gets a fixed line typed when a wake is due.
+    // Each scope's list of other scopes' folders, for its leaders' folder guard (src/leader/scope-guard.ts).
+    const guardScopes = () => {
+      try {
+        refreshScopeGuard(database, config);
+      } catch (error) {
+        log(`scope guard: ${(error as Error).message}`);
+      }
+    };
+    guardScopes();
     const rewake = new LeaderRewake({ db: database, attention, config: () => config, runtime: () => runtime, now: Date.now, log, startedAt: Date.now() });
     const attentionTick = setInterval(() => {
       const latest = lastItemNo(database);
@@ -796,6 +817,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         attention.bus.notifyAll();
       }
       autoAwayIfDue();
+      guardScopes();
       void inflight.track(notifyPump.tick());
       void inflight.track(rewake.tick());
     }, ATTENTION_TICK_MS);
@@ -835,6 +857,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         if (next.state_dir !== config.state_dir) log("SIGHUP: state_dir changed; restart the daemon to use it");
         config = { ...next, state_dir: config.state_dir };
         const at = Date.now();
+        tx(database, () => adoptLegacyScope(database, config, at));
         configStatus = { loaded_at: at, reload: { at, outcome: "accepted", error: null } };
         watcher.rewatch();
         void watcher.checkAll("sighup");
@@ -850,7 +873,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const reason = await stopped;
     log(`stopping: ${reason}`);
     // Every timer first, then wait for what is under way: the database closes only after its last use.
-    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }];
+    const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }];
     stopVerifications();
     clearInterval(pass);
     clearInterval(steady);

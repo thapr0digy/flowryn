@@ -93,6 +93,7 @@ export const recordContract: VerbSpec = {
   },
   kind: "mutation",
   roles: ["human", "leader"],
+  scope: { kind: "none" },
   apply(ctx, args) {
     const harness = stringArg(args, "harness") ?? "";
     const version = stringArg(args, "version") ?? "";
@@ -133,6 +134,7 @@ export const mayRecordContract: VerbSpec = {
   },
   kind: "read",
   roles: ["human", "leader"],
+  scope: { kind: "none" },
   read(ctx, args) {
     if (!ctx.info) throw new FlowrynError("daemon_unavailable", "the daemon is down, so nothing can be recorded", "flowryn daemon status");
     grantFor(ctx.caller, ctx.config, ctx.info, args);

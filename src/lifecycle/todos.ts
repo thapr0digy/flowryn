@@ -9,6 +9,7 @@ import type { BacklogTask } from "../journal/tasks-axi.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { localDate, parseDueArg } from "./dates.ts";
 import { mintTaskId } from "./ids.ts";
+import { lensFor, recordTaskScope } from "../leader/scope.ts";
 
 /**
  * Personal to-dos live in tasks-axi's todos.md with --kind todo. tasks-axi
@@ -133,6 +134,7 @@ const todoAdd: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "self" },
   apply(ctx, args) {
     const title = validateTitle(stringArg(args, "title")!);
     const due = stringArg(args, "due") ? dueArg(stringArg(args, "due")!, ctx.now()) : null;
@@ -143,6 +145,8 @@ const todoAdd: VerbSpec = {
     const flags: Record<string, string> = { kind: TODO_KIND };
     if (body.length > 0) flags.body = body;
     const intent = recordIntent(ctx.db, { file: "todos", verb: "add", taskId: id, positional: [id, title], flags, now: ctx.now() });
+    // A scoped leader's to-do stays in its scope (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+    recordTaskScope(ctx.db, ctx.caller, id);
     appendEvent(ctx.db, { source: "cli", kind: "todo.added", taskId: id, payload: { title, due, intent: intent.id } });
     return { data: { todo: id, title, due: due ?? "-", intent: intent.id }, hints: ["flowryn todo list", `flowryn todo done ${id}`] };
   },
@@ -156,6 +160,7 @@ const todoDone: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "id" },
   prepare: freshTodos,
   apply(ctx, args) {
     const id = stringArg(args, "id")!;
@@ -177,6 +182,7 @@ const todoDue: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "id" },
   prepare: freshTodos,
   apply(ctx, args) {
     const id = stringArg(args, "id")!;
@@ -204,6 +210,7 @@ const todoEdit: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "id" },
   prepare: freshTodos,
   apply(ctx, args) {
     const id = stringArg(args, "id")!;
@@ -235,6 +242,7 @@ const todoRm: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "id" },
   prepare: freshTodos,
   apply(ctx, args) {
     const id = stringArg(args, "id")!;
@@ -254,7 +262,9 @@ function listTodos(ctx: ReadCtx, args: Args): HandlerResult {
   if (filter && filter !== "today" && filter !== "overdue") throw new FlowrynError("bad_args", "--due must be today or overdue");
   const all = boolArg(args, "all");
   const when = (due: string | null) => (due === null ? "-" : due < today ? "overdue" : due === today ? "today" : "later");
+  const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
   const rows = todoViews(ctx.db)
+    .filter((v) => lens.task(v.id))
     .filter((v) => all || v.state !== "done")
     .filter((v) => !filter || (filter === "today" ? v.due !== null && v.due <= today : v.due !== null && v.due < today))
     .toSorted((a, b) => {
@@ -284,6 +294,7 @@ const todoList: VerbSpec = {
   },
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read: listTodos,
 };
 
