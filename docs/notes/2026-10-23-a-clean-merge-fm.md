@@ -48,7 +48,7 @@ Every call goes through the caller's bounded `GitRunner`. Git must be 2.38 or la
 
 ## The re-verify
 
-`queueCarriedVerify` (`src/verify/queue.ts`) inserts a `source = auto` request for the new head under today's verify policy. It inserts nothing in three cases: the project has no verify steps, a request is already queued at that head and policy, or a verification there is running or passed. The steps run with the PATH of the project's latest request that carried one, because launchd's own PATH lacks `~/.bun/bin`. Otherwise they use the daemon's PATH.
+`queueCarriedVerify` (`src/verify/queue.ts`) inserts a `source = auto` request for the new head under today's verify policy. It inserts nothing in three cases: the project has no verify steps, a request is already queued at that head and policy, or a verification there is running or passed. The steps run with `autoVerifyPath`, the same PATH rule as the auto-merge's verify: the project's latest `flowryn verify` caller's PATH (`verify_path:<project>`), else the daemon's plus `~/.bun/bin`, because launchd's own PATH lacks it.
 
 ## Data
 

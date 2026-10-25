@@ -14,7 +14,7 @@ import { applyMerge, prepareDaemonMerge, settleMerge, type MergeServices } from 
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { autoMergeEnabled, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
-import { findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
+import { autoVerifyPath, findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
 import { endedAtDeadline, readTail } from "./runner.ts";
 import { headMovedCancelled } from "./start.ts";
 import { finishedAtHead, getVerification, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
@@ -155,18 +155,6 @@ function move(db: Db, row: AutoMergeRow, to: AutoMergeState, fields: MoveFields,
   });
   refreshReadyLine(db, next);
   return { row: next, seq: event.seq };
-}
-
-/** The PATH a daemon-made verify runs its steps with: the project's latest `flowryn verify` caller's, else the daemon's plus ~/.bun/bin. */
-export function autoVerifyPath(db: Db, projectId: string, env: NodeJS.ProcessEnv = process.env): string {
-  const kept = getMeta(db, `verify_path:${projectId}`);
-  if (kept) return kept;
-  return [env.PATH, join(homedir(), ".bun", "bin")].filter((dir): dir is string => Boolean(dir)).join(":");
-}
-
-/** Remember a CLI verify's PATH for the project's daemon-made verifies. Call inside a transaction. */
-export function rememberVerifyPath(db: Db, projectId: string, path: string): void {
-  if (path.length > 0) setMeta(db, `verify_path:${projectId}`, path);
 }
 
 /** What a ship delivered, as the auto-merge needs it. */

@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
@@ -148,10 +150,21 @@ export interface CarriedVerify {
   now: number;
 }
 
+/** The PATH a daemon-made verify runs its steps with: the project's latest `flowryn verify` caller's, else the daemon's plus ~/.bun/bin. */
+export function autoVerifyPath(db: Db, projectId: string, env: NodeJS.ProcessEnv = process.env): string {
+  const kept = getMeta(db, `verify_path:${projectId}`);
+  if (kept) return kept;
+  return [env.PATH, join(homedir(), ".bun", "bin")].filter((dir): dir is string => Boolean(dir)).join(":");
+}
+
+/** Remember a CLI verify's PATH for the project's daemon-made verifies. Call inside a transaction. */
+export function rememberVerifyPath(db: Db, projectId: string, path: string): void {
+  if (path.length > 0) setMeta(db, `verify_path:${projectId}`, path);
+}
+
 /**
  * Queue the verify a carried head still needs (docs/notes/2026-10-23-a-clean-merge-fm.md): none when one
- * is queued, running or passed at this head under this policy. The steps run with the PATH of the
- * project's latest request that brought one (launchd's own PATH lacks ~/.bun/bin), else the daemon's.
+ * is queued, running or passed at this head under this policy. The steps run with `autoVerifyPath`.
  * Call inside a transaction; the caller kicks the scheduler after the commit.
  */
 export function queueCarriedVerify(db: Db, q: CarriedVerify): VerifyRequest | null {
@@ -160,7 +173,6 @@ export function queueCarriedVerify(db: Db, q: CarriedVerify): VerifyRequest | nu
     .query("SELECT 1 FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state IN ('running','passed') LIMIT 1")
     .get(q.pr_url, q.head_sha, q.policy_id);
   if (covered) return null;
-  const last = db.query(`SELECT path FROM verify_queue WHERE project_id = ?1 AND path IS NOT NULL ORDER BY requested_at DESC, ${ORDER} LIMIT 1`).get(q.project_id) as { path: string } | null;
   return insertRequest(db, {
     project_id: q.project_id,
     pr_url: q.pr_url,
@@ -171,7 +183,7 @@ export function queueCarriedVerify(db: Db, q: CarriedVerify): VerifyRequest | nu
     head_ref: q.head_ref,
     worktree: null,
     source: "auto",
-    path: last?.path ?? null,
+    path: autoVerifyPath(db, q.project_id),
     now: q.now,
   });
 }

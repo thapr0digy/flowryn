@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { migrate, openDb, setMeta, tx, type Db } from "../../src/db/db.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import type { ChecksSummary, PullRequest } from "../../src/forge/types.ts";
 import { deliveredOf, recordDelivery, type Carry } from "../../src/lifecycle/delivery.ts";
@@ -102,11 +102,9 @@ describe("a routine PR whose head moved by a clean merge of main", () => {
     expect(event).toEqual([{ pr: PR_URL, from: A, to: B, steps: [{ commit: B, main: MAIN, tree: TREE }], via: "watcher", verify: "vq1" }]);
   });
 
-  test("re-verify is still required: a verify of the new head is queued under today's policy, with the PATH of the project's last request", () => {
+  test("re-verify is still required: a verify of the new head is queued under today's policy, with the project's last verify caller's PATH", () => {
     seed({ yolo: 1, sensitive: 0 });
-    tx(db, () =>
-      insertRequest(db, { project_id: "web", pr_url: PR_URL, task_id: "t1", head_sha: A, policy_id: POLICY, pr_number: 7, head_ref: "ship", worktree: null, source: "cli", path: "/opt/bun/bin:/usr/bin", now }),
-    );
+    tx(db, () => setMeta(db, "verify_path:web", "/opt/bun/bin:/usr/bin"));
     observe(CLEAN);
     const queued = rows<{ head_sha: string; policy_id: string; source: string; path: string; pr_number: number; head_ref: string }>(
       "SELECT head_sha, policy_id, source, path, pr_number, head_ref FROM verify_queue WHERE head_sha = ?1",
