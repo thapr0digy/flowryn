@@ -8,6 +8,7 @@ import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
 import { AWAY_MAX_MS, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief } from "./away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "./briefing.ts";
+import type { CommandMessage, CommandOutcome } from "./notify.ts";
 
 /**
  * `flowryn brief`: the briefing on demand, as a session start would show it.
@@ -166,4 +167,30 @@ const back: VerbSpec = {
   },
 };
 
-export const ATTENTION_VERBS: VerbSpec[] = [brief, dismiss, away, back];
+/**
+ * `flowryn notify test` (your terminal only): run `[notify] command` once
+ * with a sample, in the daemon, so it gets the environment, cwd and deadline
+ * a real send gets (docs/notes/2026-10-25-notifications-that-reach-6f.md).
+ */
+const notifyTest: VerbSpec = {
+  name: "notify test",
+  summary: "Run [notify] command once with a sample notification, the way the daemon sends one",
+  positionals: [],
+  flags: {},
+  kind: "mutation",
+  roles: ["human"],
+  replyMs: 120_000,
+  async prepare(ctx) {
+    if (!ctx.attention.notifyTest) throw new FlowrynError("not_supported", "this daemon has no notification pump");
+    return ctx.attention.notifyTest();
+  },
+  apply(ctx, _args, prepared) {
+    // The pump recorded the run (notification.command) when it ended, so a failure below is kept.
+    const { message, outcome } = prepared as { message: CommandMessage; outcome: CommandOutcome };
+    const result = outcome.timedOut ? "timed out" : outcome.code === 0 ? "ok" : `exit ${outcome.code}`;
+    if (outcome.code !== 0) throw new FlowrynError("notify_failed", `the notify command failed: ${result}${outcome.stderr ? `: ${outcome.stderr}` : ""}`, "it runs as /bin/sh -c '<command>' with the daemon's environment: use full paths");
+    return { data: { command: result, away: message.away ? "yes" : "no" }, hints: ["check that the sample reached you"] };
+  },
+};
+
+export const ATTENTION_VERBS: VerbSpec[] = [brief, dismiss, away, back, notifyTest];

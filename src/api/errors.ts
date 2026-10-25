@@ -79,6 +79,8 @@ export const ERROR_CODES = {
   not_ready: EXIT.policy,
   not_supervised: EXIT.policy,
   not_supported: EXIT.validation,
+  // flowryn notify test: [notify] command exited non-zero or timed out
+  notify_failed: EXIT.failure,
   // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
   observation_stale: EXIT.policy,
   // flowryn drop: a phase of the plan has started

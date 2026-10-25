@@ -408,6 +408,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       now: Date.now,
       log,
       off: () => notificationsOff(env),
+      env,
+      cwd: home,
       ...(recorder ? { macos: recordingNotify(recorder) } : {}),
     });
     if (notificationsOff(env)) log("notify: off (FLOWRYN_NOTIFY=off or FLOWRYN_NOTIFIER=null): notifications are recorded, none is delivered");
@@ -417,6 +419,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       timing: () => leaderTiming(config),
       notify: () => notifyConfig(config),
       kick: () => void inflight.track(notifyPump.tick()),
+      notifyTest: () => inflight.track(notifyPump.testCommand()),
       lsof: lsofPath,
       turnOffsets: new Map(),
     };
