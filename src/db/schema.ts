@@ -761,7 +761,7 @@ CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
 `;
 
 /**
- * Event waits (docs/notes/2026-10-24-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
+ * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
  * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
  * it when the event happens (fired), or when nothing waits for it any more (closed).
  */

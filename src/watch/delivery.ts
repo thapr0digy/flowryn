@@ -311,11 +311,14 @@ export class DeliveryWatcher {
     let fired = false;
     for (const watch of openWatches(db)) {
       if (this.stopped) return;
-      const orphan = orphanReason(db, watch, backlogTasks(db), pendingTaskIds(db));
+      const pending = pendingTaskIds(db);
+      const orphan = orphanReason(db, watch, backlogTasks(db), pending);
       if (orphan) {
         tx(db, () => closeWatch(db, watch, orphan.why, orphan.removeTask, now()));
         continue;
       }
+      // Fire only once the backlog holds the waiting task and its edge, so the scheduler kicked below can start it at once.
+      if (pending.has(watch.task_id) || pending.has(watch.waiter_task)) continue;
       let verdict: WatchVerdict | null = null;
       if (watch.kind === "report") verdict = reportVerdict(db, watch.target);
       else {

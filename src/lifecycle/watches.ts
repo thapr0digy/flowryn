@@ -14,7 +14,7 @@ import type { ProjectRow } from "./projects.ts";
 import { holdReason } from "./runs.ts";
 
 /**
- * Event waits (docs/notes/2026-10-24-when-x-then-yv.md): `dispatch --after
+ * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after
  * <event>` files a task Queued until an event happens. A task landing is an
  * ordinary blocked-by edge; a PR merging or a scout's report landing is a
  * watch: a held backlog task only Flowryn completes, which the queued task is
