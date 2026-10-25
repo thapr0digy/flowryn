@@ -218,8 +218,16 @@ describe("the verify verdict (the user's answer q78)", () => {
   test("a timeout, an error, or a failure with no failing step is held", () => {
     expect(verifyVerdict(v("failed", [step({ exit: null, detail: "timed out: the run's 30 min were up" })]))).toMatchObject({ hold: "verify_timeout" });
     expect(verifyVerdict(v("failed", [step({ exit: 143, detail: "timed out: the run's 30 min were up" })]))).toMatchObject({ hold: "verify_timeout" });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 2, hangs: 2, detail: "hung twice: killed at 5 min both times; process groups in a.log and b.log" })]))).toMatchObject({ hold: "verify_timeout" });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 1, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; no time left in the run to retry it" })]))).toMatchObject({ hold: "verify_timeout" });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 2, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; timed out: the run's 30 min were up" })]))).toMatchObject({ hold: "verify_timeout" });
     expect(verifyVerdict(v("error", [], "the daemon stopped mid-run"))).toMatchObject({ hold: "verify_error" });
     expect(verifyVerdict(v("failed", [step({ state: "passed", exit: 0 })], "dist/flowryn was not built"))).toMatchObject({ hold: "verify_failed", detail: "verify v9 failed: dist/flowryn was not built" });
+  });
+
+  test("a step whose retry after one hang exited non-zero goes back to the worker", () => {
+    const retried = step({ exit: 1, attempts: 2, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; its retry exited 1" });
+    expect(verifyVerdict(v("failed", [retried]))).toEqual({ sendBack: retried });
   });
 
   test("the send-back carries the step, its exit and the tail of its log", () => {

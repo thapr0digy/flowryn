@@ -15,7 +15,7 @@ import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { autoMergeEnabled, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
-import { readTail } from "./runner.ts";
+import { endedAtDeadline, readTail } from "./runner.ts";
 import { headMovedCancelled } from "./start.ts";
 import { finishedAtHead, getVerification, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
 
@@ -259,7 +259,7 @@ export type VerifyVerdict = { sendBack: VerifyStep } | { hold: "verify_failed" |
 export function verifyVerdict(v: Verification): VerifyVerdict {
   if (v.state === "error") return { hold: "verify_error", detail: `verify ${v.id} ended in an error: ${v.detail ?? "no detail"}` };
   const step = v.steps.find((s) => s.state === "failed");
-  if (step?.detail?.startsWith("timed out")) return { hold: "verify_timeout", detail: `verify ${v.id} timed out in \`${step.name}\`` };
+  if (step && endedAtDeadline(step)) return { hold: "verify_timeout", detail: `verify ${v.id} timed out in \`${step.name}\`` };
   if (!step || step.exit === null || step.exit === 0) return { hold: "verify_failed", detail: `verify ${v.id} failed: ${v.detail ?? step?.detail ?? "no failing step recorded"}` };
   return { sendBack: step };
 }
