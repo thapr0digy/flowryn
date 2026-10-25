@@ -266,6 +266,21 @@ describe("what a scoped leader is handed", () => {
     expect(yours.text).toContain("WORKSECRET");
   });
 
+  test("each scope's leader gets its own Morning line once a day; your terminal keeps the home's marker", () => {
+    const config = twoScopes();
+    const now = new Date(2026, 8, 24, 10, 0).getTime();
+    const brief = (session: string | null) =>
+      tx(db, () => composeBriefing(db, { session, now, morningHour: 9, ageMs: 86_400_000, markMorning: true, config })).morning;
+    const work = tx(db, () => openSession(db, { harness: "claude", pane: null, cwd: null, now: 1, account: "claude-work", scope: "work" }));
+    const personal = tx(db, () => openSession(db, { harness: "claude", pane: null, cwd: null, now: 1, account: "claude-personal", scope: "personal" }));
+    expect(brief(work.session)).toBe(true);
+    expect(brief(work.session)).toBe(false);
+    expect(brief(personal.session)).toBe(true);
+    expect(brief(personal.session)).toBe(false);
+    expect(brief(null)).toBe(true);
+    expect(brief(null)).toBe(false);
+  });
+
   test("assumption broken by the build: task-less items do name tasks (a GitHub outage lists the merges that wait), so a scoped leader gets a neutral line", () => {
     seedBoth();
     const config = twoScopes();
@@ -371,6 +386,35 @@ describe("the folder guard", () => {
     expect(leaderCall("Bash", { command: `cd ${join(WORK, "api")} && ls` })).toBe("scope-paths");
     expect(leaderCall("Bash", { command: `wc -l < ${join(HOME, "flowryn", "data", "backlog.md")}` })).toBe("scope-paths");
     expect(toolkitVerdict({ harness: "claude", role: "leader", toolName: "Bash", toolInput: { command: "tasks-axi list" }, cwd: join(HOME, "flowryn", "data") }, PATHS)?.rule).toBe("scope-paths");
+  });
+
+  test("a search with no path, a recursive search above another scope's folder, and words after a cd are refused", () => {
+    const at = (cwd: string, toolName: string, toolInput: Record<string, unknown>) => toolkitVerdict({ harness: "claude", role: "leader", toolName, toolInput, cwd }, PATHS)?.rule ?? null;
+    const data = join(HOME, "flowryn", "data");
+    // Grep, Glob and LS with no path work on the cwd; Grep and Glob search under it.
+    expect(at(WORK, "Grep", { pattern: "billing" })).toBe("scope-paths");
+    expect(at(root, "Grep", { pattern: "billing" })).toBe("scope-paths");
+    expect(at(root, "Glob", { pattern: "**/*.ts" })).toBe("scope-paths");
+    expect(at(CODE, "Glob", { pattern: `${WORK}/**/*.ts` })).toBe("scope-paths");
+    expect(at(join(WORK, "api"), "LS", {})).toBe("scope-paths");
+    expect(at(root, "LS", {})).toBeNull();
+    expect(at(root, "Grep", { pattern: "x", path: CODE })).toBeNull();
+    expect(at(CODE, "Grep", { pattern: "billing" })).toBeNull();
+    // A recursive shell search whose root holds a denied folder.
+    for (const command of ["rg billing", "grep -r billing .", "grep -rn billing", "find .", "ls -R", "tree", `rg billing ${root}`, "fd x ../"]) {
+      expect(at(root, "Bash", { command })).toBe("scope-paths");
+    }
+    expect(at(CODE, "Bash", { command: "rg billing" })).toBeNull();
+    expect(at(root, "Bash", { command: "rg billing ./code" })).toBeNull();
+    expect(at(root, "Bash", { command: "ls" })).toBeNull();
+    expect(at(root, "Bash", { command: "grep billing notes.txt" })).toBeNull();
+    // Words after a cd are read from where it went; a bare name is a path too.
+    expect(at(CODE, "Bash", { command: `cd ${data} && cat backlog.md` })).toBe("scope-paths");
+    expect(at(CODE, "Bash", { command: `cd ${root} && cat work/api/README.md` })).toBe("scope-paths");
+    expect(at(CODE, "Bash", { command: `cd ${root}; rg billing` })).toBe("scope-paths");
+    expect(at(data, "Bash", { command: "cat backlog.md" })).toBe("scope-paths");
+    expect(at(CODE, "Bash", { command: "cat backlog.md" })).toBeNull();
+    expect(at(data, "Bash", { command: `cd ${CODE} && cat backlog.md` })).toBeNull();
   });
 
   test("its own folders, a worker, and a leader with no list are untouched", () => {

@@ -245,10 +245,15 @@ function autoCheckLines(db: Db, config: FlowrynConfig | undefined): string[] {
   return lines;
 }
 
-/** Is the morning section due: at or after the morning hour, and not yet shown today? */
-export function morningDue(db: Db, now: number, morningHour: number): boolean {
+/** The meta key that marks a scope's morning section shown; an unrestricted lens keeps the home's one key. */
+function morningKey(lens: ScopeLens): string {
+  return lens.restricted && lens.scope ? `morning_shown:${lens.scope}` : "morning_shown";
+}
+
+/** Is the morning section due: at or after the morning hour, and not yet shown today to this lens's scope? */
+function morningDue(db: Db, now: number, morningHour: number, lens: ScopeLens): boolean {
   const date = new Date(now);
-  return date.getHours() >= morningHour && getMeta(db, "morning_shown") !== localDate(date);
+  return date.getHours() >= morningHour && getMeta(db, morningKey(lens)) !== localDate(date);
 }
 
 /** Compose the briefing. With markMorning it writes, so call it inside a transaction then. */
@@ -278,10 +283,10 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
     const names = todos.dueToday.slice(0, MAX_DUE_NAMES).join(" · ");
     lines.push(`Due today: ${names}${todos.dueToday.length > MAX_DUE_NAMES ? ` · +${todos.dueToday.length - MAX_DUE_NAMES} more` : ""}`);
   }
-  const morning = morningDue(db, input.now, input.morningHour);
+  const morning = morningDue(db, input.now, input.morningHour, lens);
   if (morning) {
     lines.push(`Morning: ${plural(todos.dueToday.length, "to-do")} due today · ${todos.overdue} overdue · ${plural(doneSince(db, yesterday(input.now), lens), "task")} done since yesterday.`);
-    if (input.markMorning) setMeta(db, "morning_shown", today);
+    if (input.markMorning) setMeta(db, morningKey(lens), today);
   }
   lines.push(COMMANDS_LINE);
   let text = lines.join("\n");

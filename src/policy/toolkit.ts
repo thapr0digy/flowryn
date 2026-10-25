@@ -69,6 +69,10 @@ const SHELL_TOOLS = new Set(["bash"]);
 const FILE_TOOLS = new Set(["edit", "write", "multiedit", "notebookedit"]);
 /** Tools that read a path (Claude's and Pi's): only the scope-paths rule looks at them. */
 const READ_TOOLS = new Set(["read", "grep", "glob", "ls", "find", "notebookread"]);
+/** Read tools that work on the session's cwd when given no path. */
+const CWD_TOOLS = new Set(["grep", "glob", "ls", "find"]);
+/** Read tools that search everything under their path. */
+const RECURSIVE_TOOLS = new Set(["grep", "glob", "find"]);
 
 const MCP_RULES: { pattern: RegExp; rule: Exclude<ToolkitRule, "leader-shell"> }[] = [
   { pattern: /^mcp__.*github/i, rule: "github" },
@@ -108,16 +112,14 @@ function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
       const hit = commandVerdict(c, call, paths);
       if (hit) return hit;
     }
-    for (const c of shellCommands(command)) {
-      const hit = scopeShellVerdict(c, call, paths);
-      if (hit) return hit;
-    }
-    return null;
+    return scopeShellVerdict(shellCommands(command), call, paths);
   }
   if (FILE_TOOLS.has(tool) || READ_TOOLS.has(tool)) {
-    const target = [call.toolInput.file_path, call.toolInput.path, call.toolInput.notebook_path].find((p): p is string => typeof p === "string" && p.length > 0);
+    const named = [call.toolInput.file_path, call.toolInput.path, call.toolInput.notebook_path].find((p): p is string => typeof p === "string" && p.length > 0);
+    const target = named ?? (tool === "glob" ? globRoot(call.toolInput.pattern) : null) ?? (CWD_TOOLS.has(tool) ? call.cwd : null);
     if (!target) return null;
-    return (FILE_TOOLS.has(tool) ? fileVerdict(target, call, paths, `${call.toolName} on ${target}`) : null) ?? scopeVerdict(target, call, paths, `${call.toolName} on ${target}`);
+    const what = `${call.toolName} on ${target}`;
+    return (FILE_TOOLS.has(tool) && named ? fileVerdict(named, call, paths, what) : null) ?? scopeVerdict(target, call, paths, what, RECURSIVE_TOOLS.has(tool));
   }
   if (tool === "skill") {
     const skill = String(call.toolInput.skill ?? "");
@@ -161,38 +163,82 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
 
 // --- a leader's scope (docs/notes/2026-10-24-leader-scoping-and-vj.md) ----------------------------
 
-/** Is `path` one of the denied paths, or inside one? */
-function underDenied(path: string, denied: readonly string[]): boolean {
+/** Is `path` one of the denied paths, or inside one? With `recursive`, also: does it hold one? */
+function touchesDenied(path: string, denied: readonly string[], recursive: boolean): boolean {
   const p = resolve(path);
-  return denied.some((d) => p === d || p.startsWith(`${d}/`));
+  return denied.some((d) => p === d || p.startsWith(`${d}/`) || (recursive && (p === "/" || d.startsWith(`${p}/`))));
 }
 
-/** A leader's tool call on a path of another scope, or on a store of every scope's tasks. */
-function scopeVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what: string): ToolkitVerdict | null {
-  if (call.role !== "leader" || !paths.scopeDenied || paths.scopeDenied.length === 0) return null;
-  return underDenied(resolvePath(target, call.cwd, paths.home), paths.scopeDenied) ? deny("scope-paths", call, what) : null;
+function scopeActive(call: ToolCall, paths: ToolkitPaths): paths is ToolkitPaths & { scopeDenied: readonly string[] } {
+  return call.role === "leader" && !!paths.scopeDenied && paths.scopeDenied.length > 0;
 }
 
-/** A shell word that names a path: absolute, home-relative, or relative with a slash. */
+/** A leader's tool call on a path of another scope, or on a store of every scope's tasks; a recursive one also above them. */
+function scopeVerdict(target: string, call: ToolCall, paths: ToolkitPaths, what: string, recursive = false): ToolkitVerdict | null {
+  if (!scopeActive(call, paths)) return null;
+  return touchesDenied(resolvePath(target, call.cwd, paths.home), paths.scopeDenied, recursive) ? deny("scope-paths", call, what) : null;
+}
+
+/** An absolute or home-relative Glob pattern's folder before its first wildcard: where it searches. */
+function globRoot(pattern: unknown): string | null {
+  if (typeof pattern !== "string" || !(pattern.startsWith("/") || pattern.startsWith("~"))) return null;
+  const literal = pattern.split(/[*?[{]/)[0]!;
+  return literal.slice(0, literal.lastIndexOf("/") + 1) || null;
+}
+
+/** A shell word as a path: anything but a flag, with a `--flag=` or `VAR=` prefix dropped. */
 function pathWord(word: string): string | null {
   const value = word.includes("=") && !word.startsWith("/") ? word.slice(word.indexOf("=") + 1) : word;
-  if (value.length === 0 || value.startsWith("-")) return null;
-  return value.startsWith("/") || value.startsWith("~") || value.startsWith("$HOME") || value.startsWith("${HOME}") || value.includes("/") ? value : null;
+  return value.length === 0 || value.startsWith("-") ? null : value;
 }
 
-/** The scope-paths rule for one shell command: any argument, redirect or tasks-axi file it names. */
-function scopeShellVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
-  if (call.role !== "leader" || !paths.scopeDenied || paths.scopeDenied.length === 0) return null;
-  const words = [...c.argv.filter((w, i) => i > 0 || w.includes("/")), ...c.redirects.map((r) => r.target), ...Object.values(c.assignments)];
-  for (const word of words) {
-    const path = pathWord(word);
-    if (path && underDenied(resolvePath(path, call.cwd, paths.home), paths.scopeDenied)) return deny("scope-paths", call, `\`${c.argv[0]}\` on ${path}`);
-  }
-  // tasks-axi reads backlog.md in its cwd (or TASKS_AXI_FILE) without naming it.
-  if (c.name === "tasks-axi") {
-    const file = c.assignments.TASKS_AXI_FILE ?? paths.tasksAxiFile ?? "backlog.md";
-    if (!c.argv.includes("--file") && !c.argv.some((a) => a.startsWith("--file=")) && underDenied(resolvePath(file, call.cwd, paths.home), paths.scopeDenied)) {
-      return deny("scope-paths", call, "`tasks-axi` on Flowryn's backlog");
+const ALWAYS_RECURSIVE = new Set(["rg", "find", "fd", "tree", "ag", "ack"]);
+const GREPS = new Set(["grep", "egrep", "fgrep"]);
+
+/** Does this command read everything under its folders (with none named, under the cwd)? */
+function recursiveCommand(c: Command): boolean {
+  const flags = c.argv.slice(1).filter((a) => a.startsWith("-"));
+  if (ALWAYS_RECURSIVE.has(c.name)) return true;
+  if (GREPS.has(c.name)) return flags.some((f) => f === "--recursive" || f === "--dereference-recursive" || (/^-[^-]/.test(f) && /[rR]/.test(f)));
+  if (c.name === "ls") return flags.some((f) => f === "--recursive" || (/^-[^-]/.test(f) && f.includes("R")));
+  return false;
+}
+
+/** A word that plainly names a folder rather than a pattern. */
+function looksLikePath(word: string): boolean {
+  return word === "." || word === ".." || word.includes("/") || word.startsWith("~");
+}
+
+/**
+ * The scope-paths rule for a shell line: any argument, redirect or tasks-axi file a command names,
+ * each resolved against the folder the line's `cd`s have reached, and a recursive command's roots.
+ */
+function scopeShellVerdict(commands: Command[], call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
+  if (!scopeActive(call, paths)) return null;
+  let cwd = call.cwd;
+  const at = (path: string) => resolvePath(path, cwd, paths.home);
+  for (const c of commands) {
+    const words = [...c.argv.filter((w, i) => i > 0 || w.includes("/")), ...c.redirects.map((r) => r.target), ...Object.values(c.assignments)];
+    for (const word of words) {
+      const path = pathWord(word);
+      if (path && touchesDenied(at(path), paths.scopeDenied, false)) return deny("scope-paths", call, `\`${c.argv[0]}\` on ${path}`);
+    }
+    if (recursiveCommand(c)) {
+      const operands = c.argv.slice(1).filter((a) => !a.startsWith("-"));
+      const roots = operands.some(looksLikePath) ? operands : [...operands, "."];
+      const root = roots.find((r) => touchesDenied(at(r), paths.scopeDenied, true));
+      if (root !== undefined) return deny("scope-paths", call, `\`${c.argv[0]}\` under ${at(root)}`);
+    }
+    // tasks-axi reads backlog.md in its cwd (or TASKS_AXI_FILE) without naming it.
+    if (c.name === "tasks-axi") {
+      const file = c.assignments.TASKS_AXI_FILE ?? paths.tasksAxiFile ?? "backlog.md";
+      if (!c.argv.includes("--file") && !c.argv.some((a) => a.startsWith("--file=")) && touchesDenied(at(file), paths.scopeDenied, false)) {
+        return deny("scope-paths", call, "`tasks-axi` on Flowryn's backlog");
+      }
+    }
+    if (c.name === "cd" || c.name === "pushd") {
+      const dest = c.argv.slice(1).find((a) => !a.startsWith("-"));
+      cwd = dest ? at(dest) : paths.home;
     }
   }
   return null;
