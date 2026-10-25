@@ -408,6 +408,7 @@ describe("the folder guard", () => {
     expect(at(join(CODE, "site"), "Bash", { command: "cat ../../*/api/README.md" })).toBe("scope-paths");
     expect(at(join(CODE, "site"), "Bash", { command: "cat ../../{work,code}/x" })).toBe("scope-paths");
     expect(at(root, "Bash", { command: "cat *" })).toBe("scope-paths");
+    expect(at(CODE, "Bash", { command: `cd \${DIR:-$(cat ${join(HOME, "flowryn", "data", "backlog.md")})}` })).toBe("scope-paths");
     expect(at(join(CODE, "site"), "Bash", { command: "cat src/*.ts" })).toBeNull();
     // Quoted text is never expanded, so it reads nothing.
     for (const command of ['flowryn todo add "Should we ship?"', "jq '.items[]' code/x.json", "awk '{print $1}' code/f", "echo '{a,b}'", 'cat "${HOME}/notes.md"', "rg 'foo.*bar' code/", "cat \\*", "make test; echo $?", "echo $*", "echo ${arr[@]}", "echo ${x:-*}", "echo $#"]) {

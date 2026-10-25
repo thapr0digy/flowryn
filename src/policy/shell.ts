@@ -130,10 +130,13 @@ function scan(src: string): Scan {
   let i = 0;
   let word: string | null = null;
   let glob = false;
+  /** Inside a `${…}` parameter: its text is never a glob, but its substitutions are still read. */
+  let paramDepth = 0;
   const pushWord = () => {
     if (word !== null) tokens.push({ kind: "word", text: word, glob });
     word = null;
     glob = false;
+    paramDepth = 0;
   };
   const append = (text: string) => {
     word = (word ?? "") + text;
@@ -230,28 +233,18 @@ function scan(src: string): Scan {
       continue;
     }
     if (c === "$" && src[i + 1] === "{") {
-      const end = closingBrace(src, i + 2);
-      append(src.slice(i, end + 1));
-      i = end + 1;
+      append("${");
+      paramDepth++;
+      i += 2;
       continue;
     }
-    if (c === "*" || c === "?" || c === "[" || (c === "{" && BRACE_EXPANSION.test(src.slice(i)))) glob = true;
+    if (paramDepth > 0 && (c === "{" || c === "}")) paramDepth += c === "{" ? 1 : -1;
+    else if (paramDepth === 0 && (c === "*" || c === "?" || c === "[" || (c === "{" && BRACE_EXPANSION.test(src.slice(i))))) glob = true;
     append(c);
     i++;
   }
   pushWord();
   return { tokens, nested };
-}
-
-/** The index of the `}` closing a `${` opened just before `i`, counting nested braces; the end of src when unbalanced. */
-function closingBrace(src: string, i: number): number {
-  let depth = 1;
-  for (; i < src.length; i++) {
-    if (src[i] === "\\") i++;
-    else if (src[i] === "{") depth++;
-    else if (src[i] === "}" && --depth === 0) return i;
-  }
-  return src.length;
 }
 
 /** `{a,b}` at the start of the text: a brace expansion, unlike `{x}` or `${x}`. */
