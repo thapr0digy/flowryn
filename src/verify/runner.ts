@@ -6,6 +6,7 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { readIdentity, terminate, type ProcIdentity, type PsRunner, type TerminateOptions, type TerminateResult } from "../runtime/proc.ts";
+import { withRepoLock } from "../runtime/repo-lock.ts";
 import { liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
 import { appendEvent } from "../db/events.ts";
 import { insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
@@ -18,7 +19,8 @@ import { parseBunSummary, type TestCounts } from "./summary.ts";
  * at it, run the configured steps in order through /bin/sh with a scrubbed
  * environment, parse bun's test summary from each step's output, copy the
  * built binary out, record the outcome, and remove the worktree. As many jobs
- * run at once as the validation pool allows (src/verify/start.ts). The job holds a validation
+ * run at once as the validation pool allows (src/verify/start.ts); their worktree adds and removals in one
+ * repository take turns (src/runtime/repo-lock.ts). The job holds a validation
  * slot (a job lease the verb took with the row), released only once its steps'
  * process groups are gone and its worktree removed.
  */
@@ -219,7 +221,12 @@ function ownPath(root: string, path: string, leaf: "dir" | "wt"): boolean {
   return path.startsWith(root + sep) && pattern.test(path.slice(root.length + 1));
 }
 
+/** Under the repository's worktree lock (src/runtime/repo-lock.ts), like the add. */
 export async function removeWorktree(deps: Pick<VerifyDeps, "git" | "root" | "log">, v: Pick<Verification, "id" | "worktree_path" | "project_path">): Promise<void> {
+  await withRepoLock(v.project_path, () => removeWorktreeLocked(deps, v));
+}
+
+async function removeWorktreeLocked(deps: Pick<VerifyDeps, "git" | "root" | "log">, v: Pick<Verification, "id" | "worktree_path" | "project_path">): Promise<void> {
   if (!existsSync(v.worktree_path)) {
     await deps.git(["worktree", "prune"], v.project_path);
     return;
@@ -323,7 +330,8 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
     if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
-    const added = await deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path);
+    // One worktree change at a time per repository: concurrent adds collide in git itself.
+    const added = await withRepoLock(v.project_path, () => deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path));
     worktreeAdded = added.code === 0;
     if (job.aborted) return stoppedMidRun();
     if (!worktreeAdded) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
