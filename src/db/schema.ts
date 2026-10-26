@@ -793,7 +793,15 @@ ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
 `;
 
 /**
- * Migration 37 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
+ * Migration 37: the head a delivery carries its standing from (docs/notes/2026-10-23-a-clean-merge-fm.md):
+ * set when a routine PR's new head was proven to be the delivered one plus only clean merges of main.
+ */
+const ARTIFACT_CARRIED_FROM_SQL = /* sql */ `
+ALTER TABLE artifacts ADD COLUMN carried_from TEXT;
+`;
+
+/**
+ * Migration 38 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
  * per message: the user's (from the daemon's poll), the worker's (`review reply`) and Flowryn's own
  * notes, in order per gate; `steer_id` is the steer that carried a user message to the worker. The
  * gate records its one summary for the leader (`summary_item`, `summarized_at`, the conversation file
@@ -848,7 +856,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
   { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
-  { version: 37, name: "review-chat", sql: REVIEW_CHAT_SQL },
+  { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
+  { version: 38, name: "review-chat", sql: REVIEW_CHAT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
