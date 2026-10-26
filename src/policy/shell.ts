@@ -25,6 +25,8 @@ export interface RawCommand {
   stdin: string;
   /** Piped from a command whose output the line does not show: anything but echo/printf, or a heredoc/here-string. */
   pipedOpaque: boolean;
+  /** Words and redirect targets the shell would expand as a glob: an unquoted `*`, `?`, `[` or `{a,b}`. */
+  globs: string[];
 }
 
 /** A command after its assignments and wrappers are peeled off. */
@@ -37,6 +39,8 @@ export interface Command {
   redirects: Redirect[];
   stdin: string;
   pipedOpaque: boolean;
+  /** As in RawCommand. */
+  globs: string[];
 }
 
 const MAX_DEPTH = 4;
@@ -45,7 +49,7 @@ const MAX_DEPTH = 4;
 const LITERAL_SOURCES = new Set(["echo", "printf"]);
 const KEYWORDS = new Set(["{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "case", "esac", "in", "for", "select", "function"]);
 
-type Token = { kind: "word"; text: string } | { kind: "op"; text: string } | { kind: "redir"; text: string } | { kind: "heredoc"; text: string };
+type Token = { kind: "word"; text: string; glob: boolean } | { kind: "op"; text: string } | { kind: "redir"; text: string } | { kind: "heredoc"; text: string };
 
 interface Scan {
   tokens: Token[];
@@ -71,7 +75,7 @@ function commandsAt(line: string, depth: number): Command[] {
 export function rawCommands(line: string): { raw: RawCommand[]; nested: string[] } {
   const { tokens, nested } = scan(line.replace(/\\\r?\n/g, ""));
   const raw: RawCommand[] = [];
-  let current: RawCommand = { words: [], redirects: [], stdin: "", pipedOpaque: false };
+  let current: RawCommand = { words: [], redirects: [], stdin: "", pipedOpaque: false, globs: [] };
   let hereText = false;
   let pipedText = "";
   let pipedOpaque = false;
@@ -85,7 +89,7 @@ export function rawCommands(line: string): { raw: RawCommand[]; nested: string[]
       pipedText = "";
       pipedOpaque = false;
     }
-    current = { words: [], redirects: [], stdin: pipedText, pipedOpaque };
+    current = { words: [], redirects: [], stdin: pipedText, pipedOpaque, globs: [] };
     hereText = false;
   };
   for (let i = 0; i < tokens.length; i++) {
@@ -102,7 +106,10 @@ export function rawCommands(line: string): { raw: RawCommand[]; nested: string[]
       if (token.text === "dup") continue;
       const next = tokens[i + 1];
       const target = next && next.kind === "word" ? next.text : "";
-      if (next && next.kind === "word") i++;
+      if (next && next.kind === "word") {
+        if (next.glob) current.globs.push(next.text);
+        i++;
+      }
       if (token.text.startsWith("<<")) hereText = true;
       if (token.text === "<<<") current.stdin += (current.stdin ? "\n" : "") + target;
       else if (!token.text.startsWith("<<")) current.redirects.push({ op: token.text, target });
@@ -110,6 +117,7 @@ export function rawCommands(line: string): { raw: RawCommand[]; nested: string[]
     }
     if (current.words.length === 0 && KEYWORDS.has(token.text)) continue;
     current.words.push(token.text);
+    if (token.glob) current.globs.push(token.text);
   }
   finish(null);
   return { raw, nested };
@@ -121,9 +129,14 @@ function scan(src: string): Scan {
   const pendingHeredocs: { delimiter: string; strip: boolean }[] = [];
   let i = 0;
   let word: string | null = null;
+  let glob = false;
+  /** Inside a `${…}` parameter: its text is never a glob, but its substitutions are still read. */
+  let paramDepth = 0;
   const pushWord = () => {
-    if (word !== null) tokens.push({ kind: "word", text: word });
+    if (word !== null) tokens.push({ kind: "word", text: word, glob });
     word = null;
+    glob = false;
+    paramDepth = 0;
   };
   const append = (text: string) => {
     word = (word ?? "") + text;
@@ -214,12 +227,28 @@ function scan(src: string): Scan {
       i += op.length;
       continue;
     }
+    if (c === "$" && src[i + 1] !== undefined && "?*@#!$-0123456789".includes(src[i + 1]!)) {
+      append(src.slice(i, i + 2));
+      i += 2;
+      continue;
+    }
+    if (c === "$" && src[i + 1] === "{") {
+      append("${");
+      paramDepth++;
+      i += 2;
+      continue;
+    }
+    if (paramDepth > 0 && (c === "{" || c === "}")) paramDepth += c === "{" ? 1 : -1;
+    else if (paramDepth === 0 && (c === "*" || c === "?" || c === "[" || (c === "{" && BRACE_EXPANSION.test(src.slice(i))))) glob = true;
     append(c);
     i++;
   }
   pushWord();
   return { tokens, nested };
 }
+
+/** `{a,b}` at the start of the text: a brace expansion, unlike `{x}` or `${x}`. */
+const BRACE_EXPANSION = /^\{[^\s{}]*,[^\s{}]*\}/;
 
 function readOperator(src: string, i: number): string | null {
   for (const op of ["&&", "||", "|&", ";;", ";", "|", "&", "(", ")"]) {
@@ -389,7 +418,7 @@ function peelWords(words: string[], assignments: Record<string, string>, raw: Ra
   if (rest.length === 0) return [];
   // A scoped package run by npx keeps its scope: `@playwright/mcp`, not `mcp`.
   const name = rest[0]!.startsWith("@") ? rest[0]!.toLowerCase() : basename(rest[0]!);
-  const command: Command = { argv: rest, name, assignments: env, redirects: raw.redirects, stdin: raw.stdin, pipedOpaque: raw.pipedOpaque };
+  const command: Command = { argv: rest, name, assignments: env, redirects: raw.redirects, stdin: raw.stdin, pipedOpaque: raw.pipedOpaque, globs: raw.globs };
 
   if (name === "command" && rest.slice(1).some((w) => w === "-v" || w === "-V")) return [command];
   if (name === "env") return peelEnv(rest, env, raw, depth);
@@ -436,7 +465,7 @@ function peelEnv(words: string[], assignments: Record<string, string>, raw: RawC
     }
     break;
   }
-  if (i >= words.length) return [{ argv: words, name: "env", assignments: env, redirects: raw.redirects, stdin: raw.stdin, pipedOpaque: raw.pipedOpaque }];
+  if (i >= words.length) return [{ argv: words, name: "env", assignments: env, redirects: raw.redirects, stdin: raw.stdin, pipedOpaque: raw.pipedOpaque, globs: raw.globs }];
   return peelWords(words.slice(i), env, raw, depth);
 }
 

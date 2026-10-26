@@ -3,6 +3,7 @@ import { basename, dirname, join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type HandlerCtx } from "../api/verbs.ts";
 import { grantsConfig } from "../config/leader.ts";
+import { sessionProjectsDir } from "../leader/login.ts";
 import { getSession } from "../lease/lease.ts";
 import { findAttempt, type ApprovalAction } from "./approvals.ts";
 import { tx, getMeta, setMeta, type Db } from "../db/db.ts";
@@ -588,7 +589,9 @@ export function prepareCaptainGrant(ctx: HandlerCtx, args: Args, ask: { item: st
     return null;
   }
   if (!named && attempt && findAttempt(ctx.db, { session, action: attempt.action, task: attempt.task, now: ctx.now() })) return null;
-  return prepareGrant(ctx, { session, item: ask.item, choice: ask.choice, grantId: named, ...(ask.head !== undefined ? { head: ask.head } : {}) }, grantsConfig(ctx.config()).claude_projects_dir);
+  // The leader's own login's projects folder (docs/notes/2026-10-24-leader-scoping-and-vj.md); the implicit account keeps [grants].
+  const projectsDir = sessionProjectsDir(ctx.config(), getSession(ctx.db, session)?.account ?? null, grantsConfig(ctx.config()).claude_projects_dir);
+  return prepareGrant(ctx, { session, item: ask.item, choice: ask.choice, grantId: named, ...(ask.head !== undefined ? { head: ask.head } : {}) }, projectsDir);
 }
 
 /** Who answered, for an approval row or an event: you, through a chat answer the leader asked. */

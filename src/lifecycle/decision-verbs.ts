@@ -6,7 +6,7 @@ import { resolveDecisionItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { normalizeAnswer } from "../lavish/questions.ts";
-import { getLease, getSession } from "../lease/lease.ts";
+import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { findAttempt, matchAttempt } from "../policy/approvals.ts";
@@ -20,6 +20,7 @@ import { getProject } from "./projects.ts";
 import { getRun, isTerminal } from "./runs.ts";
 import type { ShowText } from "./show-text.ts";
 import { createSteer } from "./steers.ts";
+import { lensFor, projectRefScope, recordTaskScope, refScope, requireInScope } from "../leader/scope.ts";
 
 const OPTION = DECISION_OPTION;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -163,8 +164,8 @@ export function captainChannel(ctx: HandlerCtx, d: DecisionRow, typed: string, a
   }
   if (session?.harness === "pi") {
     const key = stringArg(args, "approval_key")?.trim();
-    const lease = getLease(ctx.db);
-    if (!key || lease.session_id !== session.session_id || !lease.approval_key_hash || hashToken(key) !== lease.approval_key_hash) throw new FlowrynError("approval_required", "no valid approval key: answer through the flowryn_decide tool, which asks the user first", help);
+    const lease = leaseOfSession(ctx.db, session.session_id);
+    if (!key || !lease || lease.session_id !== session.session_id || !lease.approval_key_hash || hashToken(key) !== lease.approval_key_hash) throw new FlowrynError("approval_required", "no valid approval key: answer through the flowryn_decide tool, which asks the user first", help);
     return "pi-confirm";
   }
   throw new FlowrynError("approval_required", "a captain answer needs the user's word", help);
@@ -187,6 +188,7 @@ const decisionAdd: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "self" },
   apply(ctx, args) {
     const key = stringArg(args, "key");
     const question = stringArg(args, "question");
@@ -196,12 +198,16 @@ const decisionAdd: VerbSpec = {
     const blocks = (args.blocks as string[] | undefined) ?? [];
     const unknown = blocks.filter((b) => !blockTargetExists(ctx, b));
     if (unknown.length > 0) throw new FlowrynError("not_found", `no task ${unknown.join(", ")}`, "flowryn fleet");
+    // A scoped leader's decision stays in its scope: its project and the tasks it blocks too (docs/notes/2026-10-24-leader-scoping-and-vj.md).
+    if (project) requireInScope(ctx.config(), ctx.caller, projectRefScope(ctx.db, ctx.config(), project), `project ${project}`);
+    for (const b of blocks) requireInScope(ctx.config(), ctx.caller, refScope(ctx.db, ctx.config(), b), b);
     const opts = options(stringArg(args, "options"));
     const recommend = stringArg(args, "recommend") ?? null;
     if (recommend && opts.length > 0 && !opts.includes(recommend)) throw new FlowrynError("bad_args", `--recommend must be one of: ${opts.join(", ")}`);
     const context = sanitizeBlock(stringArg(args, "body") ?? "").trim() || null;
     const reserved = reservedReason({ question, context, sourceReason: stringArg(args, "reserved") ?? null, blocksYoloOff: blocksYoloOff(ctx, blocks) }, decisionsConfig(ctx.config()));
     const made = createStandaloneDecision(ctx.db, { key, question, options: opts, recommendation: recommend, context, origin: stringArg(args, "origin") ?? "leader", reservedReason: reserved, blocks, project: project ?? null, now: ctx.now() });
+    if (made.created) recordTaskScope(ctx.db, ctx.caller, made.taskId);
     // The row's actual reserved_reason, not the freshly computed one: a repeat add never clears an
     // existing reason, and may only upgrade a null one (createStandaloneDecision's dedup path).
     return { data: { decision: made.id, task: made.taskId, reserved: made.reservedReason ?? "-", already: !made.created }, hints: [`flowryn show ${made.id}`] };
@@ -228,6 +234,7 @@ const decide: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "decision" },
   async prepare(ctx, args) {
     // A chat answer (docs/notes/2026-10-10-chat-answers-authorise-5g.md): checked against Claude's transcript before the transaction.
     const id = stringArg(args, "decision")!;
@@ -307,6 +314,7 @@ const decisionDefer: VerbSpec = {
   flags: { until: { type: "string", help: "YYYY-MM-DD", placeholder: "date" } },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "decision" },
   apply(ctx, args) {
     const id = stringArg(args, "decision")!;
     const until = stringArg(args, "until");
@@ -366,9 +374,11 @@ const decisionList: VerbSpec = {
   },
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx, args) {
     const filter = boolArg(args, "all") ? "all" : boolArg(args, "deferred") ? "deferred" : boolArg(args, "reserved") ? "reserved" : "open";
-    const decisions = openDecisions(ctx, filter).map((d) => ({ id: d.id, task: d.task_id, reserved: d.reserved_reason ?? "-", gate: d.gate_id ?? "-", question: sanitizeLine(d.question, 100), state: d.state }));
+    const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+    const decisions = openDecisions(ctx, filter).filter((d) => lens.task(d.task_id)).map((d) => ({ id: d.id, task: d.task_id, reserved: d.reserved_reason ?? "-", gate: d.gate_id ?? "-", question: sanitizeLine(d.question, 100), state: d.state }));
     return { data: { decisions }, hints: decisions.length > 0 ? ["flowryn show <id>", "flowryn decide <id> <choice> --rationale <why>"] : [] };
   },
 };

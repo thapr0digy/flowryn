@@ -49,6 +49,8 @@ export interface FakeClaudeOptions {
   env: Record<string, string>;
   /** Where this fake keeps its transcript (the interrupt marker lands here). */
   dir: string;
+  /** Claude's projects folder for the transcript (default <dir>/claude-projects): an account's <config dir>/projects. */
+  projectsDir?: string;
   cwd: string;
   /** Called when the session quits, the way `flowryn lead` closes it. */
   onQuit?: () => Promise<void>;
@@ -89,7 +91,7 @@ export class FakeClaudeLeader implements BridgeDriver {
     this.opts = opts;
     this.cwd = opts.cwd;
     this.settings = JSON.parse(readFileSync(opts.settingsPath, "utf8"));
-    const projectDir = join(opts.dir, "claude-projects", claudeProjectSlug(opts.cwd));
+    const projectDir = join(opts.projectsDir ?? join(opts.dir, "claude-projects"), claudeProjectSlug(opts.cwd));
     mkdirSync(projectDir, { recursive: true });
     this.transcript = join(projectDir, `${this.sessionId}.jsonl`);
     writeFileSync(this.transcript, "");

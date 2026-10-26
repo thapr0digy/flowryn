@@ -6,6 +6,7 @@ import { quotaState, quotaTarget } from "../sched/quota.ts";
 import { usagePause } from "../sched/usage.ts";
 import { quotaCell, usageCell } from "../sched/verbs.ts";
 import { listProjects } from "./projects.ts";
+import { lensFor } from "../leader/scope.ts";
 
 function login(account: Account): string {
   if (account.harness === "pi") return `${account.agent_dir ?? "Pi's own (~/.pi/agent)"}${account.provider ? ` provider ${account.provider}` : ""}`;
@@ -34,6 +35,7 @@ const accounts: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx) {
     let config;
     try {
@@ -44,6 +46,10 @@ const accounts: VerbSpec = {
     const open = ctx.db.query("SELECT account, COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') GROUP BY account").all() as { account: string | null; n: number }[];
     const running = new Map(open.map((r) => [r.account, r.n]));
     const { floor } = capacityConfig(ctx.config).quota;
+    // Accounts are config, shown whole; a scoped leader sees its own scope's projects and a count of the rest.
+    const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+    const all = listProjects(ctx.db);
+    const shown = all.filter((p) => lens.project(p.id));
     return {
       data: {
         default_scope: config.default_scope,
@@ -60,7 +66,8 @@ const accounts: VerbSpec = {
           usage: usageCell(ctx.now, usagePause(ctx.db, a.id)),
           overflow: a.overflow.join(" ") || "-",
         })),
-        projects: listProjects(ctx.db).map((p) => {
+        ...(shown.length < all.length ? { other_scopes: `${all.length - shown.length} project(s) not shown` } : {}),
+        projects: shown.map((p) => {
           try {
             return { project: p.id, scope: projectScope(ctx.config, config, p), account: resolveAccount(ctx.config, p).id };
           } catch (error) {
