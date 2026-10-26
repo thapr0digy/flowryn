@@ -6,6 +6,7 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { runBounded } from "../runtime/bounded.ts";
+import { scrubbedEnv } from "../runtime/child-env.ts";
 import { readIdentity, terminate, type ProcIdentity, type PsRunner, type TerminateOptions, type TerminateResult } from "../runtime/proc.ts";
 import { withRepoLock } from "../runtime/repo-lock.ts";
 import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
@@ -94,18 +95,9 @@ export function absolutePath(path: string): string {
     .join(":");
 }
 
-/**
- * The environment a step runs with: the daemon's, minus anything that would
- * point it at this Flowryn (FLOWRYN_*), make it a child of a Claude session,
- * or hand it a GitHub token; with the caller's PATH when one came.
- */
+/** The environment a step runs with: the daemon's, scrubbed (src/runtime/child-env.ts), with the caller's PATH when one came. */
 export function stepEnv(base: NodeJS.ProcessEnv, path: string | null = null): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(base)) {
-    if (value === undefined) continue;
-    if (key.startsWith("FLOWRYN_") || key === "CLAUDECODE" || key.startsWith("CLAUDE_CODE_") || key === "GH_TOKEN" || key === "GITHUB_TOKEN") continue;
-    env[key] = value;
-  }
+  const env = scrubbedEnv(base);
   if (path) {
     const dirs = absolutePath(path);
     if (dirs) env.PATH = dirs;

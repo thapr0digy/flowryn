@@ -60,6 +60,10 @@ export interface NotifyConfig {
   p0_renotify_min: number;
   /** Turns a batch of worker questions may start in a leader per hour, apart from the P0 budget; beyond that, your next message carries them. */
   max_question_wakes_per_hour: number;
+  /** A shell command run for every P0 notification and, while you are away, the batched one, with the text on stdin; empty is off. */
+  command: string;
+  /** The command is ended (its whole process group) after this many seconds. */
+  command_timeout_s: number;
 }
 
 export const DEFAULT_NOTIFY: NotifyConfig = {
@@ -70,6 +74,8 @@ export const DEFAULT_NOTIFY: NotifyConfig = {
   max_triggered_turns_per_hour: 3,
   p0_renotify_min: 240,
   max_question_wakes_per_hour: 6,
+  command: "",
+  command_timeout_s: 10,
 };
 
 function table(value: unknown, where: string): Record<string, unknown> {
@@ -102,13 +108,17 @@ export function notifyConfig(config: FlowrynConfig): NotifyConfig {
   for (const key of Object.keys(raw)) {
     if (!(key in DEFAULT_NOTIFY)) throw new FlowrynError("config_invalid", `[notify] ${key} is not a known setting`);
   }
-  const ints = ["min_interval_min", "p0_coalesce_s", "max_triggered_turns_per_hour", "p0_renotify_min", "max_question_wakes_per_hour"] as const;
+  const ints = ["min_interval_min", "p0_coalesce_s", "max_triggered_turns_per_hour", "p0_renotify_min", "max_question_wakes_per_hour", "command_timeout_s"] as const;
   const out = positiveInts(raw, DEFAULT_NOTIFY, "[notify]", ints);
   for (const key of ["macos", "herdr"] as const) {
     const value = raw[key];
     if (value === undefined) continue;
     if (typeof value !== "boolean") throw new FlowrynError("config_invalid", `[notify] ${key} must be true or false`);
     out[key] = value;
+  }
+  if (raw.command !== undefined) {
+    if (typeof raw.command !== "string") throw new FlowrynError("config_invalid", "[notify] command must be a string (a shell command; empty turns it off)");
+    out.command = raw.command.trim();
   }
   return out;
 }
