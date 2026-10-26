@@ -79,10 +79,12 @@ import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffP
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
+import { verifyConfig } from "../verify/config.ts";
+import { verifyPolicyId } from "../verify/policy.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 import { adoptLegacyScope } from "../leader/scope.ts";
 import { refreshScopeGuard } from "../leader/scope-guard.ts";
-import { AutoMerger } from "../verify/auto-merge.ts";
+import { AutoMerger, startAutoMerge } from "../verify/auto-merge.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -507,8 +509,13 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       reviewReraiseMs: () => upkeepConfig(config).review_reraise_hours * 3_600_000,
       notifySteer: (runId) => bus.notify(runId),
       kickScheduler: () => scheduler?.kick(),
+      verifyPolicy: (projectId) => {
+        const steps = verifyConfig(config, projectId);
+        return steps ? verifyPolicyId(steps) : null;
+      },
       // What the watcher read (checks, merges) may move a yolo auto-merge on.
       passed: () => autoMerger?.kick(),
+      autoMerge: (run, d, now) => void startAutoMerge(database, config, run, d, now),
       log,
       now: Date.now,
     });

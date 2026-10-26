@@ -13,7 +13,6 @@ import { recordMergeResult } from "../../src/policy/merge.ts";
 import { inertDelivery } from "../../src/policy/services.ts";
 import {
   AutoMerger,
-  autoVerifyPath,
   getAutoMerge,
   liveAutoMerge,
   sendBackText,
@@ -23,7 +22,7 @@ import {
 } from "../../src/verify/auto-merge.ts";
 import { autoMergeEnabled, verifyConfig } from "../../src/verify/config.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
-import { getRequest, insertRequest, markStarted } from "../../src/verify/queue.ts";
+import { autoVerifyPath, getRequest, insertRequest, markStarted } from "../../src/verify/queue.ts";
 import { initialSteps } from "../../src/verify/runner.ts";
 import { headMovedCancelled } from "../../src/verify/start.ts";
 import { finishVerification, insertVerification, type Verification, type VerifyStep } from "../../src/verify/store.ts";
