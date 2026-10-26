@@ -82,8 +82,8 @@ describe("home adopt assumptions", () => {
     // The main home has never heard of the landed task: it would count as not landed.
     expect(hasLanded(db, "done-x0", [])).toBe(false);
     const phases: PhaseRow[] = [
-      { plan_id: "p1", phase_no: 1, task_id: "done-x0", title: "one", body: "one", workflow: "fix", harness: null, account: null, blocked_by: "[]" },
-      { plan_id: "p1", phase_no: 2, task_id: "next-x1", title: "two", body: "two", workflow: "fix", harness: null, account: null, blocked_by: '["done-x0"]' },
+      { plan_id: "p1", phase_no: 1, task_id: "done-x0", title: "one", body: "one", workflow: "fix", harness: null, account: null, model: null, effort: null, blocked_by: "[]" },
+      { plan_id: "p1", phase_no: 2, task_id: "next-x1", title: "two", body: "two", workflow: "fix", harness: null, account: null, model: null, effort: null, blocked_by: '["done-x0"]' },
     ];
     const old = oldHome([task("done-x0", "done"), task("next-x1", "queued", ["done-x0"])], phases);
     const payload = tx(db, () => adoptHome(db, config, old, undefined, 1));
