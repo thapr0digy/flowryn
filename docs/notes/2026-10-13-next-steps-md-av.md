@@ -64,7 +64,7 @@ Each transition names its parts:
 |---|---|---|
 | `pr_observation` | state, stage, stage_state, delivered, merge, operation | the validation slot does not bear on a PR |
 | `merge` | state, stage, stage_state, delivered, merge, operation | same |
-| `deliver` | state, stage, stage_state, delivered, operation | a merge needs a delivery first; the slot is released by the delivery itself |
+| `deliver` | lifecycle, stage, stage_state, delivered, operation | a merge needs a delivery first; the slot is released by the delivery itself; `lifecycle` is the state with `validating` read as `running`, so a pipeline starting or ending mid-delivery does not stale it (docs/notes/2026-10-25-two-flaky-integration-u3.md) |
 | `nm_observation` | state, stage, stage_state, operation, validation | the PR and merge do not bear on the pipeline's status |
 | `ci_wait` | state, stage, stage_state, delivered, operation, validation | |
 | `local_merge_proof` | state, merge, operation | a merging run's stage is done |

@@ -351,7 +351,7 @@ describe("flowryn verify", () => {
       const gated = `[projects.web]\nverify = ${JSON.stringify([`while [ ! -f ${go} ]; do sleep 0.05; done`, ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
       env = await makeShipEnv({
         mode: "direct-PR",
-        extraConfig: `${gated}[capacity]\nvalidation = 1\n[capacity.host]\nmin_free_mem_gb = 8\nmax_load_per_core = 1.5\nprobe = ${JSON.stringify(host.probe)}\n[sched]\nhost_cache_ms = 1\n`,
+        extraConfig: `${gated}[capacity]\nvalidation = 1\n[capacity.host]\nmin_free_mem_gb = 8\nmax_load_per_core = 1.5\nprobe = ${JSON.stringify(host.probe)}\n[sched]\nhost_cache_ms = 1\npass_ms = 250\n`,
       });
       const e = env;
       const { task } = await unstartedShip(e, "admitted");
@@ -368,7 +368,7 @@ describe("flowryn verify", () => {
       const joined = await e.fleet.json(["verify", "1", "--detach"]);
       expect(joined.reply.data).toMatchObject({ request: "vq1", queued: true, attached: true });
 
-      // The host recovers: the scheduler starts it, and it holds the one validation slot.
+      // The host recovers: nothing kicks the scheduler, so its steady pass (pass_ms) notices it, starts the verify, and it holds the one validation slot.
       host.set(64);
       await waitUntil(() => query<{ state: string }>(e, "SELECT state FROM verify_queue WHERE id = 'vq1'")[0]?.state === "started", 15_000, "vq1 started");
       expect((await e.fleet.json(["verify", "show", "vq1"])).reply.data).toMatchObject({ request: "vq1", state: "started", verification: "v1" });
