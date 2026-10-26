@@ -354,7 +354,7 @@ export class LavishPoller {
       const answers = gateQuestions(this.deps.db, gate)
         .filter((d) => d.state === "answered")
         .map((d) => `${d.id} = ${sanitizeLine(d.answer ?? "-", 200)}`);
-      const sent = routePageBatch(this.deps.db, gate, { messages: words, answers }, this.deps.now());
+      const sent = routePageBatch(this.deps.db, gate, { messages: words, answers, ended: out.ended }, this.deps.now());
       let item: string | null = null;
       if (out.ended) {
         recordLavishEnded(this.deps.db, gate, this.deps.now());
