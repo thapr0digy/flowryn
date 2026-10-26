@@ -1,5 +1,5 @@
 [test]
-# Integration tests start daemons and run the real tasks-axi; CI runners are slower than laptops.
-timeout = 30000
+# bun test ignores a `timeout` key here (and a preload's setDefaultTimeout reaches only one file of a run): a test that
+# needs more than bun's 5 s default sets its own timeout, or its file calls setDefaultTimeout.
 # No test posts a real notification: osascript is refused in-process, and harness daemons deliver none.
 preload = ["./test/helpers/no-notifications.ts"]

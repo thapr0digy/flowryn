@@ -784,7 +784,16 @@ CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
 `;
 
 /**
- * Migration 36 (docs/notes/2026-10-24-model-and-effort-sc.md): the model and effort a task chose
+ * Migration 36: how many background notices a chat-answer grant was held across
+ * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
+ * as a notice before the grant is used.
+ */
+const GRANT_HELD_SQL = /* sql */ `
+ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
+ * Migration 37 (docs/notes/2026-10-24-model-and-effort-sc.md): the model and effort a task chose
  * at dispatch (`dispatch --model/--effort`, a plan phase's `model:` and `effort:` lines). Null is
  * "not chosen": the workflow's default, then the account's, then the harness's apply at each launch.
  */
@@ -831,7 +840,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
-  { version: 36, name: "model-choice", sql: MODEL_CHOICE_SQL },
+  { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
+  { version: 37, name: "model-choice", sql: MODEL_CHOICE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
