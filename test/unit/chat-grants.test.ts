@@ -345,6 +345,35 @@ describe("background notices hold a grant (docs/notes/2026-10-17-chat-answers-su
     expect(tx(w.db, () => takeGrant(w.db, grant, "decide", now))).toMatchObject({ consumed_by: "decide", held_prompts: 1 });
   });
 
+  test("a notice held while the use reads the transcript refuses the use, verifies nothing, and a retry passes", () => {
+    const w = world();
+    const now = Date.now();
+    const grant = grantIn(askAndAnswer(w, "toolu_race", "no", now));
+    const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
+    // The prompt hook holds the grant after prepareGrant read its row and before it records the check.
+    let raced = false;
+    const racing = new Proxy(w.db, {
+      get(target, key) {
+        if (key !== "query") {
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          if (!raced && sql.includes("FROM chat_questions")) {
+            raced = true;
+            tx(target, () => holdSessionGrants(target, w.session, now));
+          }
+          return target.query(sql);
+        };
+      },
+    });
+    expect(() => prepareGrant({ db: racing, now: () => now }, ask, w.projects)).toThrow(`grant ${grant} cannot be used: a message arrived while its transcript was checked; retry in a moment`);
+    expect(getGrant(w.db, grant)).toMatchObject({ held_prompts: 1, verified_at: null, voided_at: null });
+    expect(w.db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'grant.verified'").get()).toEqual({ n: 0 });
+    writeEntry(w, "monitor-event");
+    expect(prepareGrant({ db: w.db, now: () => now }, ask, w.projects)).toBe(grant);
+  });
+
   test("migration 36: grants keep their rows and start held across no notice", () => {
     const dir = tempDir();
     const db = openDb(join(dir, "flowryn.db"));
