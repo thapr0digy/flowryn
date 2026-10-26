@@ -602,7 +602,7 @@ export class Scheduler {
     const config = this.deps.config();
     const phases = db
       .query(
-        `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
+        `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT MAX(x.phase_no) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
          FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id JOIN task_policy tp ON tp.task_id = ph.task_id
          WHERE pl.state = 'approved' AND tp.auto = 1 AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ph.task_id)
          ORDER BY pl.created_at, ph.phase_no`,

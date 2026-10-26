@@ -140,7 +140,8 @@ export function parsePlan(text: string): { title: string | null; phases: PlanPha
   return { title, phases };
 }
 
-function nextPlanId(db: Db): string {
+/** The next free plan id (`p<N>`), reserved as it is read. Call inside a transaction. */
+export function nextPlanId(db: Db): string {
   const next = Number(getMeta(db, "next_plan_no") ?? "1");
   setMeta(db, "next_plan_no", String(next + 1));
   return `p${next}`;
@@ -313,7 +314,7 @@ export function phaseOfTask(db: Db, taskId: string): (PhaseRow & { plan_title: s
   return db
     .query(
       `SELECT ph.*, pl.title AS plan_title, pl.state AS plan_state, pl.project_id,
-              (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
+              (SELECT MAX(x.phase_no) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
        FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id WHERE ph.task_id = ?1`,
     )
     .get(taskId) as (PhaseRow & { plan_title: string; plan_state: string; project_id: string; phases: number }) | null;
