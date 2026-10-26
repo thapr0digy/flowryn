@@ -13,7 +13,7 @@ import { LavishPoller } from "../../src/lavish/poller.ts";
 import { channelHint, channelView, pollFailureReason, recordChannelFailure, recordChannelOk } from "../../src/lavish/channel.ts";
 import { answerDecision, lavishAnswer } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision } from "../../src/lifecycle/decisions.ts";
-import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateFeedback, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
+import { checkReviewPage, dismissGateQuestions, gateAnswersNote, gateQuestionsLine, gatesToPoll, gatesWithWidget, openGateQuestions, recordGateComment, requestGatePass, requireGateAnswered, widgetState } from "../../src/lifecycle/gate-questions.ts";
 import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
 import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
@@ -660,8 +660,12 @@ describe("a gate's questions as decisions", () => {
     const body = getMessage(db, steer!)!.body;
     const run = getRunWithPolicy(db, runId)!;
     expect(body.length).toBeLessThan(MAX_STEER_CHARS);
-    expect(body).toContain(`"""${"a".repeat(2_000)}""" [cut; the full text is in ${notes}]`);
-    expect(body).toContain(`read ${notes}`);
+    // Each Send's comment went to the worker as it came: the verdict points at the conversation and the notes, never a quote.
+    const conversation = join(reportDir, "design", "review-g1.md");
+    expect(body).toContain(`The review page's conversation with you is in ${conversation}.`);
+    expect(body).toContain(`Everything the page sent, in full: read ${notes}.`);
+    expect(body).not.toContain('"""');
+    expect(readFileSync(conversation, "utf8")).toContain("a".repeat(3_000));
     expect(body.endsWith(stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run)))).toBe(true);
   });
 
@@ -732,7 +736,7 @@ describe("a gate's questions as decisions", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested' AND state = 'open'").get()).toEqual({ n: 1 });
     const reply = readFileSync(calls, "utf8");
     expect(reply).toContain("Pass requested. This page cannot pass the review");
-    expect(reply).toContain("Your note for the worker is kept");
+    expect(reply).toContain("Sent to the worker; its answer will appear here.");
   });
 
   test("a long free answer and note reach the verdict whole", () => {
@@ -742,16 +746,6 @@ describe("a gate's questions as decisions", () => {
     tx(db, () => lavishAnswer(ctx(), { gate: "g1", decision: "q3", choice: [answer], note }));
     const verdict = gateAnswersNote(db, "g1")!;
     expect(verdict).toContain(`q3 (verb-name) = ${answer} [their note: ${note}]`);
-  });
-
-  test("a poll return with only notes kept (nothing decoded, nothing recorded) still opens a review_feedback item", () => {
-    open();
-    expect(tx(db, () => openGateFeedback(db, "g1", { recorded: [], feedback: [], notes: null }, NOW))).toBeNull();
-    const id = tx(db, () => openGateFeedback(db, "g1", { recorded: [], feedback: [], notes: "/tmp/lavish-notes-g1.txt" }, NOW));
-    expect(id).not.toBeNull();
-    const item = db.query("SELECT kind, line FROM items WHERE id = ?1").get(id) as { kind: string; line: string };
-    expect(item.kind).toBe("review_feedback");
-    expect(item.line).toBe(`Review feedback on ${taskId} (design gate g1): the user left notes beside the page`);
   });
 
   test("a cancelled run's open questions close unanswered, labelled as such, and its page is neither polled nor rewritten", () => {
@@ -768,12 +762,15 @@ describe("a gate's questions as decisions", () => {
     expect(gatesWithWidget(db, [])).toEqual([]);
   });
 
-  test("a failed run keeps its questions open: not polled while it is down, and its gate still refuses once it is resumed", () => {
+  test("a failed run keeps its questions open: polled while its worktree remains (a page message resumes it), and its gate still refuses once it is resumed", () => {
     open();
     tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
     expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["open", "open", "open"]);
-    expect(gatesToPoll(db)).toEqual([]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
     expect(gatesWithWidget(db, [])).toEqual([]);
+    db.query("UPDATE runs SET cleanup = 'done' WHERE id = ?1").run(runId);
+    expect(gatesToPoll(db)).toEqual([]);
+    db.query("UPDATE runs SET cleanup = NULL WHERE id = ?1").run(runId);
     db.query("UPDATE runs SET state = 'running', liveness = 'busy', ended_at = NULL WHERE id = ?1").run(runId);
     expect(() => requireGateAnswered(db, { id: "g1", stage: "design" })).toThrow(/3 open questions/);
     expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
@@ -1073,11 +1070,12 @@ describe("review-channel health", () => {
     expect(channelItems().filter((i) => i.state === "open")).toHaveLength(0);
     await failOnce(again, 10_000);
     expect(channelItems().filter((i) => i.state === "open")).toHaveLength(1);
-    tx(db, () => failRun(db, getRun(db, runId)!, "test", "daemon", NOW));
+    // A failed run's page is still polled (a message there resumes it); a cancelled one's is not.
+    tx(db, () => cancelRun(db, getRun(db, runId)!, "test", "cli", NOW));
     again.pass();
     expect(channelItems().filter((i) => i.state === "open")).toHaveLength(0);
     const why = (db.query("SELECT payload FROM events WHERE kind = 'gate.channel_cleared' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).why);
-    expect(why).toEqual(["lavish-axi is not installed", "the run failed"]);
+    expect(why).toEqual(["lavish-axi is not installed", "the run cancelled"]);
   });
 
   test("a gate failing below the threshold clears too once it is no longer polled; its last healthy time stays", async () => {

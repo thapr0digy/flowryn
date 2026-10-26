@@ -137,7 +137,7 @@ export class NotifyPump {
       }
       const batch = db
         .query(
-          `SELECT id, lane, line, task_id, run_id FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented') AND kind NOT IN ('worker_question','review_feedback')
+          `SELECT id, lane, line, task_id, run_id FROM items WHERE lane = 'P1' AND class = 'actionable' AND state IN ('open','presented') AND kind NOT IN ('worker_question','review_feedback','review_summary')
              AND (last_notified_at IS NULL OR (opened_at <= ?1 AND last_notified_at <= ?2)) ORDER BY opened_at`,
         )
         .all(now - ageMs, now - DAY_MS) as Pending[];

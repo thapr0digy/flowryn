@@ -19,7 +19,7 @@ import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { dismissGateQuestions } from "./gate-questions.ts";
 import { discardPlansOfGate } from "./plans.ts";
-import { flowLine, openGate, requestStage } from "./stages.ts";
+import { flowLine, openGate, REVIEW_ITEMS, requestStage } from "./stages.ts";
 
 /**
  * `flowryn promote <task>` (design sections 4 and 12): a scout promoted to a
@@ -106,7 +106,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
     db.query("UPDATE gates SET state = 'changes', feedback = 'promoted to a ship', closed_at = ?2 WHERE id = ?1").run(open.id, now);
     discardPlansOfGate(db, open.id, now);
     dismissGateQuestions(db, run, open.id, now, "promoted", "cli");
-    resolveRunItems(db, run.id, ["gate_ready", "review_feedback", "pass_requested", "review_channel"], "run.promoted", now);
+    resolveRunItems(db, run.id, REVIEW_ITEMS, "run.promoted", now);
   }
   // A worker that runs is stopped and its session resumed under the ship contract; one not launched yet starts as a ship.
   if (run.pending_launch !== "fresh" && run.pending_launch !== "resume") run.pending_launch = "relaunch";

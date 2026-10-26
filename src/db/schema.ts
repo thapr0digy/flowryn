@@ -783,6 +783,24 @@ ALTER TABLE leader_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'default';
 CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
 `;
 
+/**
+ * Migration 36 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
+ * per message: the user's (from the daemon's poll), the worker's (`review reply`) and Flowryn's own
+ * notes, in order per gate; `steer_id` is the steer that carried a user message to the worker. The
+ * gate records its one summary for the leader (`summary_item`, `summarized_at`) and how many workers
+ * a page message resumed (`page_resumes`).
+ */
+const REVIEW_CHAT_SQL = /* sql */ `
+CREATE TABLE review_messages (
+  gate_id TEXT NOT NULL REFERENCES gates(id), seq INTEGER NOT NULL,
+  author TEXT NOT NULL CHECK (author IN ('user','worker','flowryn')),
+  body TEXT NOT NULL, steer_id TEXT, created_at INTEGER NOT NULL,
+  PRIMARY KEY (gate_id, seq));
+ALTER TABLE gates ADD COLUMN summary_item TEXT;
+ALTER TABLE gates ADD COLUMN summarized_at INTEGER;
+ALTER TABLE gates ADD COLUMN page_resumes INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -819,6 +837,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
+  { version: 36, name: "review-chat", sql: REVIEW_CHAT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

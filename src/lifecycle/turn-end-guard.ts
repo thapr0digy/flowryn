@@ -1,9 +1,10 @@
 import type { Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { findOpenRunItem } from "../attention/items.ts";
-import { TURN_END_REMINDER } from "../harness/contract-text.ts";
+import { REVIEW_TURN_END_REMINDER, TURN_END_REMINDER } from "../harness/contract-text.ts";
 import { runningBackgroundJobs } from "./background-jobs.ts";
 import { waitingOnOthers } from "./idle-alert.ts";
+import { unansweredPageSteer } from "./review-chat.ts";
 import type { RunRow } from "./runs.ts";
 
 /**
@@ -18,8 +19,8 @@ import type { RunRow } from "./runs.ts";
  * steer said to (steer --end-turn), is waiting, not stuck: no reminder.
  */
 
-/** What a worker records when it finishes or hands a turn over: stage done or begin, deliver, ask, report (any status), fail. */
-export const OUTCOME_KINDS = ["stage.done", "stage.requested", "stage.delivered", "run.delivered", "decision.opened", "worker.report", "worker.failed"] as const;
+/** What a worker records when it finishes or hands a turn over: stage done or begin, deliver, ask, report (any status), fail, a review reply. */
+export const OUTCOME_KINDS = ["stage.done", "stage.requested", "stage.delivered", "run.delivered", "decision.opened", "worker.report", "worker.failed", "review.replied"] as const;
 
 export const WAIT_BACKGROUND = "its own background job";
 export const WAIT_END_TURN = "the leader said end the turn";
@@ -64,6 +65,8 @@ function toldToEndTurn(db: Db, run: RunRow): boolean {
  */
 export function pendingWait(db: Db, run: RunRow, now: number, source: EventSource): string | null {
   if (run.state !== "running") return `run ${run.state}`;
+  // A review gate is a rightful wait, except for a page message the worker was handed and has not answered.
+  if (run.stage_state === "review" && unansweredPageSteer(db, run.id)) return null;
   if (run.stage_state !== "active") return `stage ${run.stage_state}`;
   if (run.pending_launch !== null) return `pending launch ${run.pending_launch}`;
   if (waitingOnOthers(db, run)) return "an open question";
@@ -145,7 +148,7 @@ export function guardTurnEnd(db: Db, run: RunRow, turn: TurnEnd, now: number): s
     payload: { episode_from: episodeFrom, harness: turn.harness, stop_hook_active: turn.stopHookActive },
     ts: now,
   });
-  return TURN_END_REMINDER;
+  return run.stage_state === "review" ? REVIEW_TURN_END_REMINDER : TURN_END_REMINDER;
 }
 
 /** Did the worker ignore this episode's reminder (the worker_idle pointer says so)? */

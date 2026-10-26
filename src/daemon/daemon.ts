@@ -676,7 +676,20 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const reviewOpener = new ReviewOpener({ db: database, review: () => reviewConfig(config), mode: () => opener, log, now: Date.now });
     if (opener.kind === "off") log(`browser: review pages are not opened (${opener.why})`);
     else if (opener.kind === "record") log(`browser: review pages are recorded to ${opener.path} (FLOWRYN_OPENER), never opened`);
-    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now, pidDir: join(config.state_dir, "lavish-polls"), opener: reviewOpener, channelAlertMs: () => reviewConfig(config).channel_alert_ms });
+    const lavishPoller = new LavishPoller({
+      db: database,
+      lavish: lavishTool,
+      log,
+      now: Date.now,
+      pidDir: join(config.state_dir, "lavish-polls"),
+      opener: reviewOpener,
+      channelAlertMs: () => reviewConfig(config).channel_alert_ms,
+      // A review page's words went to its worker: deliver the steer now, and grant a resume it asked for.
+      routed: (runId, resumed) => {
+        bus.notify(runId);
+        if (resumed) scheduler?.kick();
+      },
+    });
 
     const services: DaemonServices = {
       db: database,
@@ -694,7 +707,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       delivery,
       sched,
       restart,
-      lavish: { kick: () => lavishPoller.kick() },
+      lavish: { kick: () => lavishPoller.kick(), reply: (gate, page, text) => lavishPoller.reply(gate, page, text) },
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 

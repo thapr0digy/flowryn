@@ -54,13 +54,23 @@ export interface PollOutput {
   otherPrompts: number;
   /** The text of each prompt that is not an answer, as the user wrote it (empty when the output does not decode). */
   feedback: string[];
+  /** The same prompts with what each points at: the page text an annotation is on, or null for a chat message. */
+  messages: PageMessage[];
+}
+
+export interface PageMessage {
+  said: string;
+  /** The page text an annotation or a selection is on (cut), or null. */
+  on: string | null;
 }
 
 const MAX_FEEDBACK = 20;
 const MAX_FEEDBACK_CHARS = 2_000;
 
+const MAX_ON_CHARS = 200;
+
 /** The user's own words in each prompt that is not an answer, read through the TOON decoder; nothing when it does not decode. */
-function feedbackTexts(stdout: string): string[] {
+function feedbackMessages(stdout: string): PageMessage[] {
   let parsed: unknown;
   try {
     parsed = decodeToon(stdout);
@@ -69,15 +79,18 @@ function feedbackTexts(stdout: string): string[] {
   }
   const prompts = (parsed as { prompts?: unknown } | null)?.prompts;
   if (!Array.isArray(prompts)) return [];
-  const texts: string[] = [];
+  const messages: PageMessage[] = [];
   for (const p of prompts) {
-    const text = (p as { prompt?: unknown } | null)?.prompt;
+    const prompt = p as { prompt?: unknown; tag?: unknown; text?: unknown } | null;
+    const text = prompt?.prompt;
     if (typeof text !== "string" || ANSWER_PROMPT.test(text)) continue;
     const trimmed = text.trim();
-    if (trimmed.length > 0) texts.push(trimmed.slice(0, MAX_FEEDBACK_CHARS));
-    if (texts.length >= MAX_FEEDBACK) break;
+    // A chat message's text is Lavish's own label ("Freeform message"); an annotation's is the page text it is on.
+    const on = prompt?.tag !== "message" && typeof prompt?.text === "string" && prompt.text.trim().length > 0 ? prompt.text.trim().slice(0, MAX_ON_CHARS) : null;
+    if (trimmed.length > 0) messages.push({ said: trimmed.slice(0, MAX_FEEDBACK_CHARS), on });
+    if (messages.length >= MAX_FEEDBACK) break;
   }
-  return texts;
+  return messages;
 }
 
 const GATE_ID = /^g\d{1,9}$/;
@@ -169,5 +182,6 @@ export function parsePollOutput(stdout: string): PollOutput {
     tokens += 1;
   }
   const count = Number(PROMPT_COUNT.exec(stdout)?.[1] ?? "0");
-  return { status, ended, answers, sends, malformed, otherPrompts: Math.max(0, count - tokens - malformed), feedback: feedbackTexts(stdout) };
+  const messages = feedbackMessages(stdout);
+  return { status, ended, answers, sends, malformed, otherPrompts: Math.max(0, count - tokens - malformed), feedback: messages.map((m) => m.said), messages };
 }

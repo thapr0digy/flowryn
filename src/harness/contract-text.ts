@@ -85,7 +85,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     ...(style ? ["Be terse in replies, reports and status: outcomes only, no recaps.", "Review pages are for a human reader: write them by your stage skill's page rules, not tersely."] : []),
     "- Your task runs in stages; your task file names the current one and its skill.",
     "  Stage finished: $FLOWRYN_BIN stage done [--review <lavish url>]; then end your",
-    "  turn and wait: a steer starts the next stage or brings the review verdict. Ending a turn to wait on your own background job or agent is fine; any other turn ended with no outcome brings one reminder.",
+    "  turn and wait: a steer starts the next stage or brings the review verdict. Ending a turn to wait on your own background job or agent is fine; any other turn ended with no outcome brings one reminder. While your review waits, a steer may bring the user's words from its page: answer with $FLOWRYN_BIN review reply --body-file - (shown in the page; never lavish-axi poll or reply yourself), revise the page if asked, then end your turn.",
     "- Tell your leader what it should act on: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -",
     "  (report progress is only recorded). A finding that needs a decision is a question: ask it (below).",
     "- Work autonomously: decide what you can; record each choice and why (design page or PR).",
@@ -132,6 +132,8 @@ export function urgentBlockLine(id: string, body: string): string {
 
 /** The turn-end guard's one reminder per episode (src/lifecycle/turn-end-guard.ts). */
 export const TURN_END_REMINDER = "You ended your turn without an outcome. Finish with one of: stage done, deliver, ask --blocking, report blocked, fail.";
+/** The same reminder at a review gate, where the outcome due is a reply to the user's page message. */
+export const REVIEW_TURN_END_REMINDER = "You ended your turn without answering the user's message on your review page. Answer it: $FLOWRYN_BIN review reply --body-file -";
 
 /** The one-line pointer an idle-wake waiter prints: a fact that stands on its own (M0 finding 5). */
 export function steerPointer(id: string): string {

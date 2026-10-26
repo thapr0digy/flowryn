@@ -4,6 +4,7 @@ import { WORKER_VERBS } from "../lifecycle/worker.ts";
 import { HOOK_VERBS } from "../lifecycle/hooks.ts";
 import { dispatchVerb, planVerb } from "../lifecycle/dispatch.ts";
 import { STAGE_VERBS } from "../lifecycle/stages.ts";
+import { REVIEW_VERBS } from "../lifecycle/review-verbs.ts";
 import { GATE_VERBS } from "../policy/gates.ts";
 import { SCHED_VERBS } from "../sched/verbs.ts";
 import { LEADER_RUN_VERBS } from "../lifecycle/leader-verbs.ts";
@@ -28,6 +29,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   dispatchVerb,
   planVerb,
   ...STAGE_VERBS,
+  ...REVIEW_VERBS,
   ...GATE_VERBS,
   ...SCHED_VERBS,
   ...LEADER_RUN_VERBS,
