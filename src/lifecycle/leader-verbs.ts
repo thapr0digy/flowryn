@@ -312,6 +312,7 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
   if (delivered) {
     view[delivered.kind === "pr" ? "pr" : "branch"] = delivered.ref;
     view.delivered_head = delivered.head.slice(0, 12);
+    if (delivered.carriedFrom) view.carried_from = `${delivered.carriedFrom.slice(0, 12)} (the new head adds only a clean merge of main)`;
   }
   const pr = prEvidence(ctx.db, run.id);
   if (pr) {

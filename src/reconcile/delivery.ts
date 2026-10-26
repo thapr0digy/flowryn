@@ -2,7 +2,7 @@ import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems 
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { ChecksSummary, PullRequest } from "../forge/types.ts";
-import { prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
+import { carryDelivery, deliveredOf, prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { askedCiWait } from "../lifecycle/ci-wait.ts";
 import { isTerminal, recordEvidence, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
@@ -10,6 +10,7 @@ import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
 import { isActive, isConflictGate, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
+import type { CleanMerge } from "../policy/clean-merge.ts";
 import type { HeadHistory } from "../policy/head-history.ts";
 import { openDivergence } from "./divergence.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
@@ -35,6 +36,8 @@ export interface Applied {
   landed: boolean;
   /** The run was sent back to merge its base (the conflict nudge): the scheduler should look. */
   nudged?: boolean;
+  /** The head moved by a clean merge of main and the delivery carried over, with a verify queued: the scheduler should look. */
+  carried?: boolean;
 }
 
 export interface ObservationOptions {
@@ -42,6 +45,8 @@ export interface ObservationOptions {
   nudgeConflicts: boolean;
   /** How the PR head moved from the delivered head (headHistory), when the watcher asked git; absent reads as unknown. */
   history?: HeadHistory;
+  /** Whether the moved head is the delivered one plus only clean merges of main (cleanMainMerge), asked when it descends. */
+  carry?: { proof: CleanMerge; verifyPolicy: string | null; autoMerge?(run: RunWithPolicy, pr: PullRequest, now: number): void };
 }
 
 /** The start every summary of one head move shares, whatever its history tag. */
@@ -64,11 +69,12 @@ export function headMoveRecorded(db: Db, runId: string, delivered: string, head:
 }
 
 /** The divergence for a moved head, tagged when its history was rewritten or git could not say. */
-function headMoved(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, history: HeadHistory, now: number): void {
+function headMoved(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, history: HeadHistory, notCarried: string | null, now: number): void {
   if (headMoveRecorded(db, run.id, delivered.head, pr.headSha)) return;
   const from = delivered.head.slice(0, 8);
   const to = pr.headSha.slice(0, 8);
-  const tag = history === "rewritten" ? `, history rewritten: ${to} does not descend from ${from}` : history === "unknown" ? ", ancestry unknown" : "";
+  const tag =
+    history === "rewritten" ? `, history rewritten: ${to} does not descend from ${from}` : history === "unknown" ? ", ancestry unknown" : notCarried ? `, not carried: ${notCarried}` : "";
   openDivergence(
     db,
     "github",
@@ -168,12 +174,25 @@ export function applyPrObservation(
     }
     return { landed: false };
   }
-  if (pr.headSha !== delivered.head) headMoved(db, run, delivered, pr, opts.history ?? "unknown", now);
+  let carried = false;
+  let current = delivered;
+  if (pr.headSha !== delivered.head) {
+    const carry = opts.carry;
+    if (carry?.proof.ok && carryDelivery(db, run, delivered, pr, checks, { from: delivered.head, steps: carry.proof.steps, verifyPolicy: carry.verifyPolicy }, now)) {
+      current = deliveredOf(db, run.task_id) ?? delivered;
+      carried = true;
+      // The carried head is a delivery: an opted-in yolo project's auto-merge follows it as it follows a deliver.
+      carry.autoMerge?.(run, pr, now);
+    } else {
+      const why = !carry ? null : carry.proof.ok ? "only routine work (yolo, not sensitive) carries a clean merge of main" : `not only a clean merge of main (${carry.proof.why})`;
+      headMoved(db, run, delivered, pr, opts.history ?? "unknown", why, now);
+    }
+  }
   if (pr.draft) {
     openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary: `the delivered PR ${pr.url} was turned into a draft` }, now);
   }
   if (pr.mergeable === true) resolveRunItems(db, run.id, ["pr_conflict"], "mergeable", now);
-  if (opts.nudgeConflicts && pr.mergeable === false && pr.headSha === delivered.head && !pr.draft && nudgeConflict(db, run, delivered, pr, title, now)) {
+  if (opts.nudgeConflicts && pr.mergeable === false && pr.headSha === current.head && !pr.draft && nudgeConflict(db, run, current, pr, title, now)) {
     return { landed: false, nudged: true };
   }
   if (checks?.state === "red") {
@@ -188,7 +207,7 @@ export function applyPrObservation(
   } else if (checks?.state === "green" || checks?.state === "none") {
     resolveRunItems(db, run.id, ["checks_red"], "checks green", now);
   }
-  return { landed: false };
+  return carried ? { landed: false, carried: true } : { landed: false };
 }
 
 /**
