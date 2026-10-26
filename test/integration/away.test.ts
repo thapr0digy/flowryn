@@ -5,6 +5,7 @@ import { openItem } from "../../src/attention/items.ts";
 import { tx } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { transcriptFixture } from "../helpers/transcript-fixtures.ts";
 
 /**
  * Away mode (task away-mode-remote-bb): while you are away, a new item only
@@ -209,6 +210,32 @@ describe("automatic away and ready work", () => {
       // Shown once: the next message carries no brief.
       await lead.prompt("and again");
       expect(lead.seen.filter((s) => s.text.includes("Flowryn return brief"))).toHaveLength(1);
+    },
+    T,
+  );
+
+  test(
+    "a background notice during an automatic away neither ends it nor marks the user active; the user's own message does (docs/notes/2026-10-17-chat-answers-survive-es.md)",
+    async () => {
+      env = await makeLeaderEnv();
+      const lead = await env.claude();
+      await lead.start();
+      await lead.prompt("first");
+      await lead.goInactive();
+      env.withDb((db) => db.query("UPDATE leader_sessions SET user_inactive_since = ?1").run(Date.now() - 3 * HOUR));
+      await waitFor("the automatic away to start", 15_000, () => env!.withDb((db) => getAway(db, Date.now()))?.by === AUTO_AWAY_BY);
+      const activeEvents = () => env!.withDb((db) => db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'leader.user_active'").get() as { n: number }).n;
+      const activeBefore = activeEvents();
+
+      const absorbed = await lead.absorb(transcriptFixture("monitor-event"));
+      expect(absorbed.contexts.join("\n")).not.toContain("Flowryn return brief");
+      expect(env.withDb((db) => getAway(db, Date.now()))).toMatchObject({ by: AUTO_AWAY_BY });
+      expect(activeEvents()).toBe(activeBefore);
+
+      await lead.prompt("I'm back");
+      expect(env.withDb((db) => getAway(db, Date.now()))).toBeNull();
+      expect(activeEvents()).toBe(activeBefore + 1);
+      expect(lead.seen.findLast((s) => s.text.includes("Flowryn return brief"))!.text).toContain("automatic away, the user returned");
     },
     T,
   );

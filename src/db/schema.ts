@@ -784,6 +784,15 @@ CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
 `;
 
 /**
+ * Migration 36: how many background notices a chat-answer grant was held across
+ * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
+ * as a notice before the grant is used.
+ */
+const GRANT_HELD_SQL = /* sql */ `
+ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
  * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
  * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
  * it when the event happens (fired), or when nothing waits for it any more (closed).
@@ -834,7 +843,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
-  { version: 36, name: "watches", sql: WATCHES_SQL },
+  { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
+  { version: 37, name: "watches", sql: WATCHES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
