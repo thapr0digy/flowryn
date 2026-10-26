@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, constants, fstatSync, ftruncateSync, openSync, statSync, writeSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { openItem } from "../attention/items.ts";
+import { join } from "node:path";
+import { openItem, resolveRunItems } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
@@ -152,11 +152,13 @@ export function routePageBatch(db: Db, gateId: string, batch: PageBatch, now: nu
   if (gate.state !== "open") return nobody("closed");
   if (run.state === "cancelled") return nobody("cancelled");
   if (run.state === "cleaned" || run.cleanup === "done") return nobody("ended");
+  const open = openOperation(db, run.id);
+  if (open?.kind === "cancel") return nobody("cancelled");
 
   const steer = createSteer(db, run, pageSteerText(gate, { messages: kept, answers: batch.answers, ended: batch.ended }), now).id;
   keep(steer);
   // A launch or resume already asked for (the reconciler's own, the page's, one waiting for its grant) brings the steer along.
-  if (run.pending_launch !== null || openOperation(db, run.id) !== null) return { to: "restarting", steer };
+  if (run.pending_launch !== null || open !== null) return { to: "restarting", steer };
   const dead = run.state === "failed" || run.liveness === "dead" || run.liveness === "orphaned";
   if (!dead) return { to: "worker", steer };
   // The steer stays queued for whoever resumes the worker later.
@@ -199,6 +201,7 @@ function requestPageResume(db: Db, run: RunRow, gate: GateRunRow, now: number): 
     recordIntent(db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
     recordIntent(db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
   }
+  resolveRunItems(db, run.id, ["failure_needs_you", "operation_escalated"], "run.resume_requested", now);
   db.query("UPDATE gates SET page_resumes = page_resumes + 1 WHERE id = ?1").run(gate.id);
   appendEvent(db, { source: "daemon", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: "review page", gate: gate.id, resume: run.resume_count + 1, via_scheduler: true }, ts: now });
   appendEvent(db, { source: "daemon", kind: "review.revived", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, from: run.state === "failed" ? "failed" : run.liveness, page_resumes: gate.page_resumes + 1 }, ts: now });
@@ -296,9 +299,7 @@ export function conversationFile(gateId: string): string {
 
 /** The conversation file of a gate, when its summary wrote one. */
 export function conversationPath(db: Db, gateId: string): string | null {
-  const gate = db.query("SELECT page_path, summarized_at FROM gates WHERE id = ?1").get(gateId) as { page_path: string | null; summarized_at: number | null } | null;
-  if (!gate?.page_path || gate.summarized_at === null) return null;
-  return reviewMessages(db, gateId).length > 0 ? join(dirname(gate.page_path), conversationFile(gateId)) : null;
+  return (db.query("SELECT conversation_path FROM gates WHERE id = ?1").get(gateId) as { conversation_path: string | null } | null)?.conversation_path ?? null;
 }
 
 function pageRevised(page: string | null, openedAt: number): boolean {
@@ -340,6 +341,7 @@ export function summarizeReview(db: Db, gateId: string, outcome: ReviewOutcome, 
   if (messages.length > 0 && gate.page_path) {
     try {
       file = writeBesidePage(gate.page_path, conversationFile(gateId), summaryText(db, gate, outcome, messages, answered.map((d) => `${d.id} = ${sanitizeLine(d.answer ?? "-", 200)}`), revised, passWords));
+      db.query("UPDATE gates SET conversation_path = ?2 WHERE id = ?1").run(gateId, file);
     } catch (error) {
       log?.(`review: cannot write gate ${gateId}'s conversation beside ${gate.page_path}: ${(error as Error).message}`);
     }

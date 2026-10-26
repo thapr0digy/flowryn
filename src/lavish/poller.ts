@@ -367,7 +367,11 @@ export class LavishPoller {
       if (run) this.deps.routed?.(run, routed.to === "resumed");
     }
     const recorded = outcomes.length > 0 || comments.length > 0 || passes.length > 0;
-    if (!out.ended && (recorded || routed)) this.replies.set(gate, { page, text: this.replyText(gate, outcomes, routed, comments, passes, out.feedback.some(readsAsPass)) });
+    if (!out.ended && (recorded || routed)) {
+      const text = this.replyText(gate, outcomes, routed, comments, passes, out.feedback.some(readsAsPass));
+      const queued = this.replies.get(gate);
+      this.replies.set(gate, { page, text: queued ? `${queued.text}\n\n${text}` : text });
+    }
     const extra = [comments.length > 0 ? `comment ${comments.join(", ")}` : null, passes.length > 0 ? `pass ${passes.map((p) => p.outcome).join(", ")}` : null].filter(Boolean);
     const to = routed ? `, ${words.length} message(s) ${routed.to === "nobody" ? `kept (${routed.why})` : `to the worker (${routed.to})`}` : "";
     this.deps.log(`lavish: gate ${gate}: ${outcomes.length > 0 ? outcomes.map((o) => `${o.decision} ${o.outcome}`).join(", ") : "no answers"}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}${to}${out.ended ? `, the user ended the session${summary ? ` (summary ${summary})` : ""}` : ""}`);

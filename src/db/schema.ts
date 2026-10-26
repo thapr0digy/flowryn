@@ -796,8 +796,8 @@ ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
  * Migration 37 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
  * per message: the user's (from the daemon's poll), the worker's (`review reply`) and Flowryn's own
  * notes, in order per gate; `steer_id` is the steer that carried a user message to the worker. The
- * gate records its one summary for the leader (`summary_item`, `summarized_at`) and how many workers
- * a page message resumed (`page_resumes`).
+ * gate records its one summary for the leader (`summary_item`, `summarized_at`, the conversation file
+ * it wrote in `conversation_path`) and how many workers a page message resumed (`page_resumes`).
  */
 const REVIEW_CHAT_SQL = /* sql */ `
 CREATE TABLE review_messages (
@@ -808,6 +808,7 @@ CREATE TABLE review_messages (
 ALTER TABLE gates ADD COLUMN summary_item TEXT;
 ALTER TABLE gates ADD COLUMN summarized_at INTEGER;
 ALTER TABLE gates ADD COLUMN page_resumes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gates ADD COLUMN conversation_path TEXT;
 `;
 
 export const MIGRATIONS: readonly Migration[] = [

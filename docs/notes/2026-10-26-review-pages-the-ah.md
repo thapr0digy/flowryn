@@ -21,16 +21,16 @@ The user asked to talk to the worker inside a review page instead of through the
 |---|---|---|
 | open | idle, busy, starting | steer (an idle worker wakes as for any steer) |
 | any, with a launch or resume already pending | - | steer waits; page: "restarting" |
-| open | dead or orphaned, nothing pending | request a resume through the scheduler (`pending_launch = 'resume'`, an operation `requested_by = 'review page'`), as `flowryn resume` does; page told |
+| open | dead or orphaned, nothing pending | request a resume through the scheduler (`pending_launch = 'resume'`, an operation `requested_by = 'review page'`), as `flowryn resume` does (resolving its `failure_needs_you` and `operation_escalated` items); page told |
 | failed, worktree present | - | the same resume; the task goes back In flight (`unhold`, `start` intents) |
-| cancelled | - | nothing; the words are kept, no steer |
+| cancelled, or a cancel under way | - | nothing; the words are kept, no steer |
 | cleaned, or cleanup done | - | nothing yet (phase 2) |
 
-`gatesToPoll` also polls an open gate of a failed run whose worktree remains, so its page keeps listening. Page-triggered resumes are counted on the gate (`page_resumes`); past `PAGE_RESUMES_MAX` (2) the steer stays queued and one `review_worker_gone` P1 tells the leader (`flowryn resume <task>`, or tell the user). The scheduler's grant still checks capacity and the harness version.
+`gatesToPoll` also polls an open gate of a failed run whose worktree remains, so its page keeps listening. Page-triggered resumes are counted on the gate (`page_resumes`); past `PAGE_RESUMES_MAX` (2) the steer stays queued and one `review_worker_gone` P1 tells the leader (`flowryn resume <task>`, which resolves it, or tell the user). The scheduler's grant still checks capacity and the harness version.
 
 ## The leader's one summary
 
-Once per gate, on the first of: the poll reports the session ended (Send & End), the gate passes, the gate is sent back (`summarizeReview`, called from the poller, `passReviewGate` and `sendBack`). The item line leads with the outcome and the counts: messages from the user, replies, answers given on the page, "page revised" (the page's modification time is after the gate opened) and resumes; then, while the gate is still open, "ask the user to pass or send changes", flagging words that read as a pass. The whole conversation goes to `review-<gate>.md` beside the page (written without following a symlink). The item is `review_summary` (P1 actionable, batched with the worker questions like `review_feedback` was) when the session ended with the gate open, `review_recap` (P1 info) once the gate had closed. A gate closing with nothing from the page records `summarized_at` and opens no item. The verdict steer then points at the conversation file (and the raw notes) instead of quoting the comment.
+Once per gate, on the first of: the poll reports the session ended (Send & End), the gate passes, the gate is sent back (`summarizeReview`, called from the poller, `passReviewGate` and `sendBack`). The item line leads with the outcome and the counts: messages from the user, replies, answers given on the page, "page revised" (the page's modification time is after the gate opened) and resumes; then, while the gate is still open, "ask the user to pass or send changes", flagging words that read as a pass. The whole conversation goes to `review-<gate>.md` beside the page (written without following a symlink). The item is `review_summary` (P1 actionable, batched with the worker questions like `review_feedback` was) when the session ended with the gate open, `review_recap` (P1 info) once the gate had closed. A gate closing with nothing from the page records `summarized_at` and opens no item. The gate records the file it wrote (`conversation_path`); the verdict steer then points at it (and the raw notes) instead of quoting the comment.
 
 Mid-session the leader sees only `pass_requested`, `review_channel`, `steer_unacked`, `auto_resumed` and `review_worker_gone`.
 

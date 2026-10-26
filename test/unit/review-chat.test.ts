@@ -7,6 +7,7 @@ import { LavishPoller } from "../../src/lavish/poller.ts";
 import { WIDGET_FILE } from "../../src/lavish/widget.ts";
 import { gateAnswersNote } from "../../src/lifecycle/gate-questions.ts";
 import { addReviewMessage, conversationFile, pageSteerText, PAGE_RESUMES_MAX, replyGate, reviewMessages, routePageBatch, summarizeReview, unansweredPageSteer } from "../../src/lifecycle/review-chat.ts";
+import { requestOperation } from "../../src/lifecycle/operations.ts";
 import { cancelRun, failRun, getRun } from "../../src/lifecycle/runs.ts";
 import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
 import { makeHome, seedRun, waitUntil, type TestHome } from "../helpers/harness.ts";
@@ -112,9 +113,11 @@ describe("where a page batch goes", () => {
     expect(db.query("SELECT page_resumes FROM gates WHERE id = 'g1'").get()).toEqual({ page_resumes: 1 });
   });
 
-  test("a failed run with its worktree is resumed and its task goes back In flight", () => {
+  test("a failed run with its worktree is resumed, its task goes back In flight, and its failure item is settled", () => {
     tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
+    expect(items("failure_needs_you").map((i) => i.state)).toEqual(["open"]);
     expect(route()).toMatchObject({ to: "resumed" });
+    expect(items("failure_needs_you").map((i) => i.state)).toEqual(["resolved"]);
     expect(getRun(db, runId)).toMatchObject({ state: "running", pending_launch: "resume" });
     const intents = db.query("SELECT verb FROM intents WHERE task_id = ?1 ORDER BY seq").all(taskId) as { verb: string }[];
     expect(intents.map((i) => i.verb).slice(-2)).toEqual(["unhold", "start"]);
@@ -157,6 +160,12 @@ describe("the worker's side", () => {
     db.query("UPDATE gates SET lavish_ended = 1 WHERE id = 'g1'").run();
     expect(unansweredPageSteer(db, runId)).toBe(false);
   });
+  test("while a cancel is under way the words are kept for the leader, no steer and no restart", () => {
+    tx(db, () => requestOperation(db, { run: getRun(db, runId)!, kind: "cancel", mode: null, requestedBy: "leader", source: "cli", now: NOW }));
+    expect(route()).toMatchObject({ to: "nobody", why: "cancelled" });
+    expect(db.query("SELECT COUNT(*) AS n FROM messages WHERE run_id = ?1").get(runId)).toEqual({ n: 0 });
+    expect(reviewMessages(db, "g1").map((m) => [m.author, m.steer_id])).toEqual([["user", null]]);
+  });
 
   test("a reply needs an open gate with a page whose session the user has not ended", () => {
     expect(replyGate(db, runId)).toMatchObject({ id: "g1", page_path: page });
@@ -196,7 +205,15 @@ describe("the leader's one summary", () => {
     expect(items("review_recap")[0]!.line).toContain("the review was sent back; 1 message from the user, 0 replies, page revised");
   });
 
-  test("a symlinked conversation file is never written through; the summary still opens", () => {
+  test("a gate closing with only the worker's words writes no conversation file, so the verdict steer quotes the comment", () => {
+    tx(db, () => addReviewMessage(db, { id: "g1", run_id: runId }, "worker", "I widened the table.", NOW + 30));
+    db.query("UPDATE gates SET state = 'passed', comment = 'Looks good' WHERE id = 'g1'").run();
+    expect(tx(db, () => summarizeReview(db, "g1", "passed", NOW + 40))).toBeNull();
+    expect(existsSync(join(page, "..", conversationFile("g1")))).toBe(false);
+    expect(gateAnswersNote(db, "g1")).toBe('The user also wrote on the review page: """Looks good"""');
+  });
+
+  test("a symlinked conversation file is never written through; the summary still opens and the verdict steer never names it", () => {
     route();
     const victim = join(h.home, "victim.txt");
     writeFileSync(victim, "keep");
@@ -205,6 +222,7 @@ describe("the leader's one summary", () => {
     expect(tx(db, () => summarizeReview(db, "g1", "ended", NOW + 40, (m) => logs.push(m)))).not.toBeNull();
     expect(readFileSync(victim, "utf8")).toBe("keep");
     expect(logs.some((l) => l.includes("cannot write gate g1's conversation"))).toBe(true);
+    expect(gateAnswersNote(db, "g1") ?? "").not.toContain(conversationFile("g1"));
   });
 });
 
