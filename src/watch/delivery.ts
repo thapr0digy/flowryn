@@ -328,7 +328,6 @@ export class DeliveryWatcher {
     if (kept) this.deps.log(`delivery watcher: ${delivered.ref} merged at ${mergeSha.slice(0, 8)} after its run ended; a divergence asks you`);
   }
 
-  /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
   /**
    * The event waits of `dispatch --after` (src/lifecycle/watches.ts): close a
    * watch nothing waits for, fire one whose event happened (a scout's report,
@@ -354,19 +353,21 @@ export class DeliveryWatcher {
       else {
         const project = getProject(db, watch.project_id);
         const repo = project ? projectRepo(project, this.deps.webUrl()) : null;
-        if (!repo) continue;
-        const ref = { ...repo, number: Number(watch.target) };
-        verdict = ownPrVerdict(db, prUrlOf(repo, ref.number, this.deps.webUrl()));
-        if (!verdict) {
-          if (now() < this.forgeQuietUntil) continue;
-          try {
-            verdict = prVerdict((await this.deps.forge().pull(ref)).state);
-            tx(db, () => noteForgeUp(db, "github", now()));
-          } catch (error) {
-            if (error instanceof ForgeError && error.kind === "not_found") verdict = { stuck: "GitHub does not find it" };
-            else {
-              this.forgeFailed(error);
-              continue;
+        if (!repo) verdict = { stuck: project ? `project ${watch.project_id} has no GitHub remote` : `project ${watch.project_id} is gone` };
+        else {
+          const ref = { ...repo, number: Number(watch.target) };
+          verdict = ownPrVerdict(db, prUrlOf(repo, ref.number, this.deps.webUrl()));
+          if (!verdict) {
+            if (now() < this.forgeQuietUntil) continue;
+            try {
+              verdict = prVerdict((await this.deps.forge().pull(ref)).state);
+              tx(db, () => noteForgeUp(db, "github", now()));
+            } catch (error) {
+              if (error instanceof ForgeError && error.kind === "not_found") verdict = { stuck: "GitHub does not find it" };
+              else {
+                this.forgeFailed(error);
+                continue;
+              }
             }
           }
         }
@@ -378,6 +379,7 @@ export class DeliveryWatcher {
     if (fired) this.deps.kickScheduler();
   }
 
+  /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
   private forgeFailed(error: unknown): void {
     const { db, now } = this.deps;
     // Unavailable or rate-limited while a merge waits: one P1 for the outage (design section 16).

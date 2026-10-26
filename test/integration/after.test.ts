@@ -125,6 +125,24 @@ describe("dispatch --after pr:<n>", () => {
     expect(watchOf(env, task)).toMatchObject({ id: watch.id, state: "open", detail: null });
   }, 90_000);
 
+  test("a project that lost its GitHub remote after dispatch: the wait raises the stuck P1 instead of waiting silently", async () => {
+    const env = await shipEnv();
+    openPr(env, 45);
+    const filed = await fileAfter(env, ["pr:45"]);
+    const task = filed.data.task as string;
+    const db = env.fleet.h.db();
+    try {
+      db.query("UPDATE projects SET repo_url = '/srv/git/web.git' WHERE id = 'web'").run();
+    } finally {
+      db.close();
+    }
+    await waitUntil(() => query(env, "SELECT 1 FROM items WHERE kind = 'watch_stuck' AND state IN ('open','presented')").length === 1, 15_000, "the stuck P1");
+    const line = query<{ line: string }>(env, "SELECT line FROM items WHERE kind = 'watch_stuck'")[0]!.line;
+    expect(line).toContain(`${task} waits for PR #45 to merge, but project web has no GitHub remote`);
+    expect(watchOf(env, task)).toMatchObject({ state: "open", detail: "project web has no GitHub remote" });
+    expect(runsOf(env, task)).toEqual([]);
+  }, 90_000);
+
   test("refusals: an unknown form, a PR GitHub does not know, a closed PR, a scout as task:, a ship as report:", async () => {
     const env = await shipEnv();
     const unknown = await fileAfter(env, ["merge:41"]);
