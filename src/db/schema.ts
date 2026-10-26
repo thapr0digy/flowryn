@@ -784,7 +784,16 @@ CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
 `;
 
 /**
- * Migration 36: the head a delivery carries its standing from (docs/notes/2026-10-23-a-clean-merge-fm.md):
+ * Migration 36: how many background notices a chat-answer grant was held across
+ * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
+ * as a notice before the grant is used.
+ */
+const GRANT_HELD_SQL = /* sql */ `
+ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
+ * Migration 37: the head a delivery carries its standing from (docs/notes/2026-10-23-a-clean-merge-fm.md):
  * set when a routine PR's new head was proven to be the delivered one plus only clean merges of main.
  */
 const ARTIFACT_CARRIED_FROM_SQL = /* sql */ `
@@ -827,7 +836,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
-  { version: 36, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
+  { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
+  { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

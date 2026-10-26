@@ -4,6 +4,7 @@ import { tx } from "../../src/db/db.ts";
 import { openDivergence } from "../../src/reconcile/divergence.ts";
 import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { transcriptFixture } from "../helpers/transcript-fixtures.ts";
 
 /**
  * Chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md), end to end through the
@@ -285,5 +286,81 @@ describe("chat answers authorise captain actions", () => {
       expect(JSON.parse(merged.stdout).data).toMatchObject({ state: "merged", channel: "claude-chat" });
     },
     { timeout: 90_000 },
+  );
+});
+
+describe("background notices between your answer and its use (docs/notes/2026-10-17-chat-answers-survive-es.md)", () => {
+  test(
+    "a Monitor event, a finished background task and a subagent hand-back hold the grant; none marks you active",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const decision = await reservedDecision(e, "notice1");
+      const leader = await claudeLeader(e);
+      const q = await chatQuestion(e, decision);
+      const grant = grantOf((await leader.ask([q], { answers: { [q.question]: "no" } })).contexts);
+      const db = e.fleet.h.db();
+      db.query("UPDATE leader_sessions SET user_inactive_since = 1 WHERE session_id = ?1").run(leader.session());
+      db.close();
+      for (const name of ["monitor-event", "background-task-done", "subagent-handback"] as const) {
+        const absorbed = await leader.absorb(transcriptFixture(name));
+        expect(absorbed.contexts.join("\n")).not.toContain("inactive");
+      }
+      const used = await leader.runBash(`flowryn grant use ${grant} --json`, { approve: false });
+      expect(used).toMatchObject({ prompted: false, ran: true, code: 0 });
+      expect(JSON.parse(used.stdout).data).toMatchObject({ decision, answer: "no", by: "captain", grant });
+      expect((await e.fleet.json(["show", grant], token(e))).reply.data).toMatchObject({ held: "across 3 background notices", state: `used by decide ${decision}` });
+      expect(rows(e, "SELECT 1 FROM events WHERE kind = 'leader.user_active'")).toEqual([]);
+      expect(rows<{ n: number }>(e, "SELECT COUNT(*) AS n FROM events WHERE kind = 'grant.held'")[0]!.n).toBe(3);
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a message you type after your answer voids the grant, alone or beside a notice",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const decision = await reservedDecision(e, "notice2");
+      const leader = await claudeLeader(e);
+      const q = await chatQuestion(e, decision);
+
+      const first = grantOf((await leader.ask([q], { answers: { [q.question]: "no" } })).contexts);
+      await leader.absorb(transcriptFixture("monitor-event"));
+      await leader.absorb(transcriptFixture("typed-while-busy"));
+      const refused = await leader.runBash(`flowryn grant use ${first} --json`, { approve: false });
+      expect(refused.code).toBe(2);
+      expect(JSON.parse(refused.stdout).error.message).toBe(`grant ${first} was voided: the user sent a new message`);
+
+      // Your text that looks like a notice to the hook is still yours in Claude's transcript.
+      const second = grantOf((await leader.ask([q], { answers: { [q.question]: "no" } })).contexts);
+      const notice = (transcriptFixture("monitor-event").attachment as { prompt: string }).prompt;
+      await leader.absorb(transcriptFixture("typed-while-busy"), { prompt: notice });
+      const disguised = await leader.runBash(`flowryn grant use ${second} --json`, { approve: false });
+      expect(JSON.parse(disguised.stdout).error.message).toBe(`grant ${second} was voided: the user sent a new message`);
+      expect((await e.fleet.json(["show", decision], token(e))).reply.data).toMatchObject({ state: "open" });
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "a notice Claude has not yet written to its transcript refuses the use until it has",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const decision = await reservedDecision(e, "notice3");
+      const leader = await claudeLeader(e);
+      const q = await chatQuestion(e, decision);
+      const grant = grantOf((await leader.ask([q], { answers: { [q.question]: "no" } })).contexts);
+      const absorbed = await leader.absorb(transcriptFixture("monitor-event"), { write: false });
+      const early = await leader.runBash(`flowryn grant use ${grant} --json`, { approve: false });
+      expect(early.code).toBe(2);
+      expect(JSON.parse(early.stdout).error.message).toContain("does not yet show 1 of the 1");
+      absorbed.write();
+      const used = await leader.runBash(`flowryn grant use ${grant} --json`, { approve: false });
+      expect(used).toMatchObject({ ran: true, code: 0 });
+      expect(JSON.parse(used.stdout).data).toMatchObject({ decision, grant });
+    },
+    { timeout: 60_000 },
   );
 });

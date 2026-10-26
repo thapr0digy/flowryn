@@ -389,9 +389,11 @@ function deliveryAsked(ctx: HandlerCtx, run: RunWithPolicy, args: Record<string,
  * What a ship's delivery depends on: verified at one head, it is recorded only
  * if no newer delivery, send-back, stage change or operation (a cancel asked
  * for, a new worker) landed while GitHub and git were read
- * (docs/notes/2026-10-13-next-steps-md-av.md).
+ * (docs/notes/2026-10-13-next-steps-md-av.md). Its pipeline starting or
+ * ending meanwhile (running ↔ validating) is not one: a worker delivers as its
+ * pipeline passes, while the watcher may be reading it end.
  */
-const DELIVER_PARTS: readonly BasisPart[] = ["state", "stage", "stage_state", "delivered", "operation"];
+const DELIVER_PARTS: readonly BasisPart[] = ["lifecycle", "stage", "stage_state", "delivered", "operation"];
 
 /**
  * A PR redelivered at a head that is the delivered one plus only clean merges
