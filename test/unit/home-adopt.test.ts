@@ -7,7 +7,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { intentArgs, pendingIntents } from "../../src/journal/journal.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { adoptedLine, adoptHome, readAdoptedMarker, type OldHome } from "../../src/lifecycle/home-adopt.ts";
-import { hasLanded, type PhaseRow, type PlanRow } from "../../src/lifecycle/plans.ts";
+import { hasLanded, phaseOfTask, type PhaseRow, type PlanRow } from "../../src/lifecycle/plans.ts";
 import type { ProjectRow } from "../../src/lifecycle/projects.ts";
 import { renderPlist } from "../../src/service/launchd.ts";
 import { realTasksAxi } from "../helpers/harness.ts";
@@ -89,6 +89,7 @@ describe("home adopt assumptions", () => {
     const payload = tx(db, () => adoptHome(db, config, old, undefined, 1));
     expect(payload.dropped_edges).toEqual([{ task: "next-x1", blocked_by: "done-x0", why: "landed" }]);
     expect(db.query("SELECT task_id, blocked_by FROM plan_phases").all()).toEqual([{ task_id: "next-x1", blocked_by: "[]" }]);
+    expect(phaseOfTask(db, "next-x1")).toMatchObject({ phase_no: 2, phases: 2 });
     expect(intentArgs(pendingIntents(db, "backlog")[0]!).flags["blocked-by"]).toBeUndefined();
   });
 
@@ -102,6 +103,19 @@ describe("home adopt assumptions", () => {
   test("assumption: launchd leaves the adopted daemon's clean exit stopped (KeepAlive on SuccessfulExit false)", () => {
     const plist = renderPlist({ label: "dev.flowryn.flowrynd.test", program: ["/d/flowryn", "daemon", "run"], env: {}, logDir: "/l", workingDir: "/w" });
     expect(plist).toMatch(/<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/);
+  });
+
+  test("a to-do's hold moves with it and its blocked-by edges are listed as dropped", () => {
+    const { db, config } = mainDb();
+    const old = oldHome([]);
+    old.todos = [{ ...task("held-t1", "queued", ["other-t2"]), kind: "todo", repo: null, hold: { kind: "external", reason: "waits", until: null } }];
+    const payload = tx(db, () => adoptHome(db, config, old, undefined, 1));
+    expect(payload.dropped_edges).toEqual([{ task: "held-t1", blocked_by: "other-t2", why: "to-do" }]);
+    expect(pendingIntents(db, "todos").map((i) => [i.verb, i.task_id, intentArgs(i).flags["blocked-by"] ?? null])).toEqual([
+      ["add", "held-t1", null],
+      ["hold", "held-t1", null],
+    ]);
+    expect(intentArgs(pendingIntents(db, "todos")[1]!).flags).toEqual({ reason: "waits", kind: "external" });
   });
 
   test("a marker that cannot be read still marks the home adopted", () => {

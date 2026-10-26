@@ -32,7 +32,7 @@ import { todoViews } from "./todos.ts";
  * its database read-only, its backlog and to-dos through tasks-axi `list`.
  * What moves goes in through this home's own channels in one transaction:
  * projects and policy rows straight into flowryn.db, backlog and to-do adds
- * through `recordIntent`, with one `home.adopted` event naming every old to
+ * (and holds) through `recordIntent`, with one `home.adopted` event naming every old to
  * new id and every dropped edge.
  */
 
@@ -210,7 +210,7 @@ function adoptScope(config: FlowrynConfig, accounts: AccountsConfig, old: OldHom
 export interface DroppedEdge {
   task: string;
   blocked_by: string;
-  why: "landed" | "not queued";
+  why: "landed" | "not queued" | "to-do";
 }
 
 export interface AdoptionPayload {
@@ -404,6 +404,8 @@ export function adoptHome(db: Db, config: FlowrynConfig, old: OldHome, requested
     if (todo.body.length > 0) flags.body = todo.body;
     if (todo.priority !== null) flags.priority = String(todo.priority);
     recordIntent(db, { file: "todos", verb: "add", taskId: todo.id, positional: [todo.id, normalizedTitle(todo)], flags, now });
+    if (todo.hold) recordIntent(db, { file: "todos", verb: "hold", taskId: todo.id, positional: [todo.id], flags: holdFlags(todo.hold), now });
+    for (const gone of blockersOf(todo)) dropped.push({ task: todo.id, blocked_by: gone, why: "to-do" });
     pinScope(todo.id);
     todos[todo.id] = todo.id;
   }

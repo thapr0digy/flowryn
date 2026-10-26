@@ -284,7 +284,7 @@ export function phaseOfTask(db: Db, taskId: string): (PhaseRow & { plan_title: s
   return db
     .query(
       `SELECT ph.*, pl.title AS plan_title, pl.state AS plan_state, pl.project_id,
-              (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
+              (SELECT MAX(x.phase_no) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
        FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id WHERE ph.task_id = ?1`,
     )
     .get(taskId) as (PhaseRow & { plan_title: string; plan_state: string; project_id: string; phases: number }) | null;

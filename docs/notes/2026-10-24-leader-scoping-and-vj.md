@@ -77,14 +77,14 @@ It refuses (`adopt_refused`, exit 2), and moves nothing, while:
 What moves, in one transaction with one `home.adopted` event (old home, scope, projects added and skipped, every old to new task, to-do and plan id, every dropped edge):
 
 - projects, inserted with their settings;
-- the old backlog's Queued tasks, added through `recordIntent` with their kind, repo, body, priority, PR and report links, and a `hold` intent for a held task; to-dos not done, added to this home's to-dos;
+- the old backlog's Queued tasks, added through `recordIntent` with their kind, repo, body, priority, PR and report links, and a `hold` intent for a held task; to-dos not done, added to this home's to-dos with their kind, body and priority, and a `hold` intent for a held to-do;
 - their `task_policy` rows, copied;
-- approved plans with a moved phase, under the next free plan ids here; only the moved phases are copied (a landed phase stays in the archive), with their phase numbers, and with no gate (the old gate id names an old home's gate);
+- approved plans with a moved phase, under the next free plan ids here; only the moved phases are copied (a landed phase stays in the archive), with their phase numbers, and with no gate (the old gate id names an old home's gate); a phase's "Phase n of m" label takes m from the plan's highest phase number, so it still counts the landed phases;
 - a task with no project of its own (a to-do, a hand-added task) gets the adopted scope in `task_scopes`, so it does not fall into this home's default scope.
 
-A blocked-by edge, in the backlog or a plan phase, whose blocker did not move is dropped and listed with why: `landed` (Done in the old home) or `not queued`. Kept edges point at moved tasks, and the adds run blockers first, since tasks-axi's `--blocked-by` needs its blocker to exist.
+A blocked-by edge, in the backlog or a plan phase, whose blocker did not move is dropped and listed with why: `landed` (Done in the old home) or `not queued`. A to-do's blocked-by edges are not carried: each is listed with why `to-do`. Kept edges point at moved tasks, and the adds run blockers first, since tasks-axi's `--blocked-by` needs its blocker to exist.
 
-After the commit, `<old home>/adopted.json` records where the work went (this home, the time, the scope and the moved ids). The old daemon then refuses to start: it prints `home_adopted: …` and exits 0, so launchd's KeepAlive (on an unsuccessful exit only) leaves it stopped; `flowryn daemon start` there answers the same. The old files are otherwise untouched and stay readable. A rerun that finds this home's `home.adopted` event for that old home (by real path) only rewrites the marker.
+After the commit, `<old home>/adopted.json` records where the work went (this home, the time, the scope and the moved ids). The old daemon then refuses to start: it prints `home_adopted: …` and exits 0, so launchd's KeepAlive (on an unsuccessful exit only) leaves it stopped; `flowryn daemon start` there answers the same line without starting anything. The old files are otherwise untouched and stay readable. A rerun that finds this home's `home.adopted` event for that old home (by real path) only rewrites the marker.
 
 ## Choices made in the build
 

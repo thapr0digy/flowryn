@@ -240,6 +240,14 @@ describe("home adopt", () => {
     expect(stderr).toContain("home_adopted");
     expect(stderr).toContain(main.home);
     expect(existsSync(join(old.home, "run", "flowrynd.sock"))).toBe(false);
+
+    const started = Date.now();
+    const start = await cliJson(old, ["daemon", "start"]);
+    expect(start.code).toBe(0);
+    expect(start.reply).toMatchObject({ ok: true, data: { daemon: "not started" } });
+    expect(String((start.reply.data as Record<string, unknown>).reason)).toContain("home_adopted");
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(existsSync(join(old.home, "run", "flowrynd.sock"))).toBe(false);
   }, 60_000);
 
   test("refuses while the old daemon answers on its socket", async () => {

@@ -87,8 +87,6 @@ const status: VerbSpec = {
     if (reply && reply.ok) return print(io, okReply(reply.data, []));
     if (reply && !reply.ok) return print(io, reply);
     const home = flowrynHome(io.env);
-    const adopted = readAdoptedMarker(home);
-    if (adopted) return print(io, okReply({ daemon: "not started", reason: adoptedLine(home, adopted) }));
     const { config } = loadConfig(home);
     const label = serviceLabel(home);
     const lock = stateFiles(config.state_dir).lock;
@@ -121,6 +119,8 @@ const start: VerbSpec = {
     const existing = await ping(io.env);
     if (existing?.ok) return print(io, okReply({ daemon: "already running", ...(existing.data as object) }));
     const home = flowrynHome(io.env);
+    const adopted = readAdoptedMarker(home);
+    if (adopted) return print(io, okReply({ daemon: "not started", reason: adoptedLine(home, adopted) }));
     const { config } = loadConfig(home);
     const label = serviceLabel(home);
     let how: string;
