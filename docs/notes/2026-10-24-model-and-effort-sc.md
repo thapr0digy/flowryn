@@ -30,7 +30,7 @@ A `[workflows.<id>]` table without `stages` on a built-in id (`feature`, `featur
 
 ## When it is looked up
 
-At every launch: a run's first launch, a resume, a fresh stage worker and a relaunch. The task's own choice is stored on the run (`runs.model_pin`, `runs.effort_pin`, migration 37), so a resume keeps it; the other levels are read from config as it is then, so a workflow or account edit applies to the next launch, as an account's model always did. `runs.model` and `runs.effort` hold what the last launch used (dispatch fills them with its own lookup), and `run.dispatched`, `run.launched` and `sched.overflow` carry `model`, `effort`, `model_source` and `effort_source`.
+At every launch: a run's first launch, a resume, a fresh stage worker and a relaunch. The task's own choice is stored on the run (`runs.model_pin`, `runs.effort_pin`, migration 38), so a resume keeps it; the other levels are read from config as it is then, so a workflow or account edit applies to the next launch, as an account's model always did. `runs.model` and `runs.effort` hold what the last launch used (dispatch fills them with its own lookup), and `run.dispatched`, `run.launched` and `sched.overflow` carry `model`, `effort`, `model_source` and `effort_source`.
 
 `flowryn show <task>` and the dispatch reply show both with their source: `model: sonnet (workflow fix)`, `effort: high (dispatch)`, `default (harness default)`. Sources are `dispatch`, `workflow <id>`, `account <id>`, `[workers.<harness>]` and `harness default`.
 
@@ -56,5 +56,5 @@ At every launch: a run's first launch, a resume, a fresh stage worker and a rela
 
 - `test/unit/model-choice.test.ts`: each level alone, all levels together, model and effort independent, an account's inherited value named as the harness's, the other harness's defaults ignored, the Pi provider skip and refusal, the effort lists, model names a shell cannot split, workflow tables without stages, bad workflow values, plan phase lines, existing account effort left unchecked.
 - `test/unit/account-capacity.test.ts`: overflow keeps the task's own model and looks the effort up on the target; a Pi target of another provider is passed over.
-- `test/unit/db.test.ts`: migration 37 on a database at 36.
+- `test/unit/db.test.ts`: migration 38 on a database at 37.
 - `test/integration/model-choice.test.ts`, through the real CLI and daemon with the fake Herdr: dispatch's model and the workflow's effort in the typed launch, the dispatch reply, the launch event and `show`; a resume keeps the task's model and follows a workflow edit read on SIGHUP; bad values refuse before a run or phase exists; a home with none of this launches with no model or effort flag; plan phase lines reach the worker and `--blocked-by --model` is stored on the phase; a live promote with `--model` relaunches on it with the new workflow's effort.

@@ -17,7 +17,11 @@ import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { deliveryBasis, requireDeliveryBasis, type BasisPart, type DeliveryBasis } from "./observed.ts";
-import { recordDelivery, verifyLocalDelivery, verifyPrDelivery, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
+import { deliveredOf, recordDelivery, verifyLocalDelivery, verifyPrDelivery, type Carry, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
+import { cleanMainMerge } from "../policy/clean-merge.ts";
+import type { GitRunner } from "../policy/landed.ts";
+import { verifyConfig } from "../verify/config.ts";
+import { verifyPolicyId } from "../verify/policy.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
@@ -392,6 +396,22 @@ function deliveryAsked(ctx: HandlerCtx, run: RunWithPolicy, args: Record<string,
 const DELIVER_PARTS: readonly BasisPart[] = ["lifecycle", "stage", "stage_state", "delivered", "operation"];
 
 /**
+ * A PR redelivered at a head that is the delivered one plus only clean merges
+ * of main (docs/notes/2026-10-23-a-clean-merge-fm.md): the proof, asked of
+ * git in the run's worktree before the transaction; recordDelivery applies it
+ * to routine work only. Null when there is nothing to prove (a first delivery,
+ * the same head, another PR) or the proof fails.
+ */
+async function carryOf(ctx: HandlerCtx, git: GitRunner, run: RunWithPolicy, base: string, ship: VerifiedPr): Promise<Carry | null> {
+  const previous = deliveredOf(ctx.db, run.task_id);
+  if (!previous || previous.kind !== "pr" || previous.ref !== ship.url || previous.head === ship.pr.headSha || ship.pr.baseRef !== base) return null;
+  const proof = await cleanMainMerge(git, run.worktree_path, { from: previous.head, to: ship.pr.headSha, base });
+  if (!proof.ok) return null;
+  const steps = verifyConfig(ctx.config(), run.project_id);
+  return { from: previous.head, steps: proof.steps, verifyPolicy: steps ? verifyPolicyId(steps) : null };
+}
+
+/**
  * `flowryn deliver`: the worker's outcome, verified before the run is ready.
  * The task kind decides it: a scout delivers `--report <path>`; a ship
  * delivers `--pr <url>` (no-mistakes, direct-PR), checked by the named-head
@@ -427,17 +447,18 @@ const deliver: VerbSpec = {
     const deps = { db: ctx.db, git: ctx.delivery.git, forge: ctx.delivery.forge(), webUrl: ctx.delivery.github().web_url, now: ctx.now };
     const seen = deliveryBasis(ctx.db, run.id);
     if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen };
-    return { ship: await verifyPrDelivery(deps, run, project, asked.url), seen };
+    const ship = await verifyPrDelivery(deps, run, project, asked.url);
+    return { ship, seen, carry: await carryOf(ctx, deps.git, run, project.default_branch, ship) };
   },
   apply(ctx, _args, prepared) {
     const run = activeRun(ctx);
     const now = ctx.now();
-    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis };
+    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis; carry?: Carry | null };
     if (outcome.seen) requireDeliveryBasis(ctx.db, outcome.seen, DELIVER_PARTS, "deliver", "cli", now, "read your steers, then deliver again");
     if (run.state !== "ready" && pipelineNeedsLastStage(ctx.db, run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {
-      const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now);
+      const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now, outcome.carry ?? null);
       if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
       const ship = outcome.ship;
       // An opted-in yolo project's delivery is verified and merged by the daemon (src/verify/auto-merge.ts).
