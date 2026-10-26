@@ -111,6 +111,12 @@ export interface DeliveryBasis {
   run: string;
   /** null once the run is gone. */
   state: RunRow["state"] | null;
+  /**
+   * The state with `validating` read as `running`: no-mistakes starting or
+   * ending its pipeline moves a working run between the two, which a
+   * delivery's reads do not rest on.
+   */
+  lifecycle: RunRow["state"] | null;
   stage: string | null;
   stage_state: RunRow["stage_state"] | null;
   /** The latest `pr`/`local` delivery: `<kind> <ref> <head>`. */
@@ -123,7 +129,7 @@ export interface DeliveryBasis {
   validation: string | null;
 }
 
-export const BASIS_PARTS = ["state", "stage", "stage_state", "delivered", "merge", "operation", "validation"] as const;
+export const BASIS_PARTS = ["state", "lifecycle", "stage", "stage_state", "delivered", "merge", "operation", "validation"] as const;
 export type BasisPart = (typeof BASIS_PARTS)[number];
 export type StaleParts = Partial<Record<BasisPart | "run", { seen: unknown; current: unknown }>>;
 export type DeliveryObserved<T> = { applied: true; value: T } | { applied: false; changed: StaleParts };
@@ -131,7 +137,7 @@ export type DeliveryObserved<T> = { applied: true; value: T } | { applied: false
 /** Read a run's delivery basis now. */
 export function deliveryBasis(db: Db, runId: string): DeliveryBasis {
   const run = getRun(db, runId);
-  if (!run) return { run: runId, state: null, stage: null, stage_state: null, delivered: null, merge: null, operation: null, validation: null };
+  if (!run) return { run: runId, state: null, lifecycle: null, stage: null, stage_state: null, delivered: null, merge: null, operation: null, validation: null };
   const delivered = deliveredOf(db, run.task_id);
   const merge = latestMerge(db, run.task_id);
   const operation = latestOperation(db, run.id);
@@ -139,6 +145,7 @@ export function deliveryBasis(db: Db, runId: string): DeliveryBasis {
   return {
     run: run.id,
     state: run.state,
+    lifecycle: run.state === "validating" ? "running" : run.state,
     stage: run.stage,
     stage_state: run.stage_state,
     delivered: delivered ? `${delivered.kind} ${delivered.ref} ${delivered.head}` : null,
