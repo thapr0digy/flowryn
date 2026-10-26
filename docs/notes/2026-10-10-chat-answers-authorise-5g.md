@@ -33,7 +33,7 @@ Audit: every step is an event: `chat.question_asked`, `chat.question_denied`, `c
 
 ## Lifetime (the user's choices)
 
-- **q43: end of turn, at most 10 minutes.** A grant is voided at Stop, at the user's next message and at session end (`voidSessionGrants`), and expires `GRANT_TTL_MS` (10 min) after it is made.
+- **q43: end of turn, at most 10 minutes.** A grant is voided at Stop, at the user's next message and at session end (`voidSessionGrants`), and expires `GRANT_TTL_MS` (10 min) after it is made. A background notice Claude injects as a user turn (a Monitor event, a finished background task, a subagent hand-back) is not the user's message: it holds the grant instead (docs/notes/2026-10-17-chat-answers-survive-es.md).
 - **q44: eligible actions**: reserved decisions, gate pass, gate changes and divergence resolve. Any open decision with 2 to 4 options can be asked, since a captain answer to an unreserved one only records more than the leader may. Gate changes and divergence resolve need no word from the user. Their grant records that the answer was the user's (and a "Pass" answer refuses changes); it does not gate them.
 - **q45: merges are included, bound to the head the question showed, never waiving a red check.** A merge with `--allow-red` takes no grant.
 - A confirmed prompt for the same item still works and wins: it voids that item's live grants. So does a standing `flowryn approve` record that a merge uses, and a later chat answer to the same item in the same session (`a later answer replaced it`), so only the user's latest answer can run.

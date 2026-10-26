@@ -784,7 +784,16 @@ CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
 `;
 
 /**
- * Migration 36 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
+ * Migration 36: how many background notices a chat-answer grant was held across
+ * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
+ * as a notice before the grant is used.
+ */
+const GRANT_HELD_SQL = /* sql */ `
+ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
+`;
+
+/**
+ * Migration 37 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
  * per message: the user's (from the daemon's poll), the worker's (`review reply`) and Flowryn's own
  * notes, in order per gate; `steer_id` is the steer that carried a user message to the worker. The
  * gate records its one summary for the leader (`summary_item`, `summarized_at`) and how many workers
@@ -837,7 +846,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
-  { version: 36, name: "review-chat", sql: REVIEW_CHAT_SQL },
+  { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
+  { version: 37, name: "review-chat", sql: REVIEW_CHAT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
