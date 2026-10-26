@@ -1,4 +1,5 @@
 [test]
-# A test's default timeout is set in test/helpers/default-timeout.ts: bun test ignores a `timeout` key here.
+# bun test ignores a `timeout` key here (and a preload's setDefaultTimeout reaches only one file of a run): a test that
+# needs more than bun's 5 s default sets its own timeout, or its file calls setDefaultTimeout.
 # No test posts a real notification: osascript is refused in-process, and harness daemons deliver none.
-preload = ["./test/helpers/default-timeout.ts", "./test/helpers/no-notifications.ts"]
+preload = ["./test/helpers/no-notifications.ts"]

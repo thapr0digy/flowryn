@@ -58,18 +58,28 @@ other transition still compares `state`. A terminal run is still always
 stale. A stale delivery now names `lifecycle` in its `changed` parts where it
 named `state`.
 
-### 3. `drop.test.ts` "flowryn drop through the CLI …": bun ignores the suite's 30 s default
+### 3. `drop.test.ts` "flowryn drop through the CLI …": bun's 5 s default, not the suite's 30 s
 
-The test sets no timeout and takes 3 to 5 s alone. `bunfig.toml` said
-`[test] timeout = 30000`, but bun test 1.3 ignores that key (a 6 s test in a
-scratch directory with only that bunfig times out at 5 s; `--timeout` and
-`setDefaultTimeout` work), so every test in the suite without a timeout of its
-own ran under bun's 5 s default. Making the drop test faster is not realistic
-(a daemon start and a dozen CLI processes, three 10 s journal waits), so the
-fix is the suite's intended default: a new preload,
-`test/helpers/default-timeout.ts`, calls `setDefaultTimeout(30_000)`, and the
-ignored key is gone from `bunfig.toml`. 30 s is realistic for this test: it
-took 9 to 13 s with every core busy.
+The test sets no timeout and takes 3 to 5 s alone, 9 to 13 s with every core
+busy. `bunfig.toml` said `[test] timeout = 30000`, but bun test 1.3.8 ignores
+that key: a 5.5 s test in a scratch directory with only that bunfig times out
+at 5 s. Nor can a preload set it: a preload's `setDefaultTimeout(30_000)`
+(even from a global `beforeAll` or `beforeEach`) reached only one file of a
+three-file run. Only `--timeout` on the command line, a test's own timeout, or
+`setDefaultTimeout` in the test file itself work, and the verify steps run a
+plain `bun test`. So every test without a timeout of its own runs under 5 s.
+
+Making the drop test faster is not realistic (a daemon start, a dozen CLI
+processes, three journal waits of up to 10 s), so it gets its own timeout,
+60 s: well past its loaded time, and its internal waits still name what
+stalled first. `bunfig.toml` loses the ignored key, and its comment says how
+a test gets more than 5 s.
+
+About 110 other integration tests in 16 files set no timeout either (most in
+`decisions`, `cli`, `decisions-confirm`, `leader-cli`, `daemon`); they are
+fast today but share the same cliff. Fixing them is left to a follow-up
+(reported to the leader): a `setDefaultTimeout(30_000)` line per file, which
+would touch files parallel ships edit.
 
 ### Open questions
 
@@ -83,8 +93,9 @@ None left open. Choices made:
   Dropping it would also let a delivery through a state change that matters
   (a run sent back from `ready`, one that ended); folding only
   `validating` into `running` keeps every other change stale.
-- Drop test: fix the suite default rather than give this one test a
-  timeout. It is the same cause for every test that relies on the default.
+- Drop test: its own timeout rather than a suite-wide default, which no
+  preload can set and a per-file line would spread over 16 files other ships
+  touch. The wider fix is a follow-up.
 
 ## Tests
 
@@ -95,9 +106,6 @@ None left open. Choices made:
   (`running → validating`, a pipeline starting). Both failed before the fix
   (the reply was `observation_stale`) and pass after. The existing races (a
   newer delivery, a send-back) stay stale.
-- `test/unit/test-timeout.test.ts`: a test with no timeout runs past 5.3 s
-  (fails with the old bunfig), and bunfig preloads the default and sets no
-  ignored `timeout` key.
 
 ## Before and after
 
@@ -105,4 +113,4 @@ None left open. Choices made:
 |---|---|---|
 | verify "takes a validation slot" | 4 of 12 failed alone ("vq1 started") | 0 of 12 alone, 0 of 6 under load |
 | ci-wait "asks the user once" | 0 of 12 alone, 0 of 12 under load; 1 seen in verify v57; the barrier test above fails every time | 0 of 12 alone, 0 of 6 under load; the barrier test passes |
-| drop "flowryn drop through the CLI" | 4 of 8 failed alone, 5 of 5 under load (5 s cut) | 0 of 8 alone, 0 of 5 under load |
+| drop "flowryn drop through the CLI" | 4 of 8 failed alone, 5 of 5 under load (5 s cut) | 0 of 5 alone, 0 of 5 under load |

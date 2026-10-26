@@ -16,6 +16,7 @@ function inSnapshot(env: FleetEnv, id: string): boolean {
   return (readSnapshot(env.h.db(), "backlog")?.tasks ?? []).some((t) => t.id === id);
 }
 
+// A daemon, a dozen CLI calls and three journal waits: 3-5 s alone, 9-13 s with every core busy, past bun's 5 s default.
 test("flowryn drop through the CLI: refuses started work and a missing reason, drops a queued task and a plan, and the backlog follows", async () => {
   const env = await makeFleetEnv();
   envs.push(env);
@@ -72,4 +73,4 @@ test("flowryn drop through the CLI: refuses started work and a missing reason, d
   const again = await env.json(["dispatch", "web", "--task", "web-base-q1"]);
   expect(again.code).toBe(4);
   expect(JSON.stringify(again.reply)).toContain("was dropped");
-});
+}, 60_000);
