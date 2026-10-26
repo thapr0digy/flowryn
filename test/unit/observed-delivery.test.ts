@@ -540,7 +540,7 @@ describe("deliver: the named-head gate's reads", () => {
     expect(reply.error).toMatchObject({ code: "observation_stale" });
     expect(deliveredOf(db, "t1")!.head).toBe(HEAD_B);
     expect(count("run.delivered")).toBe(1);
-    expect(staleEvents().map((e) => [e.transition, Object.keys(e.changed).toSorted()])).toEqual([["deliver", ["delivered", "stage_state", "state"]]]);
+    expect(staleEvents().map((e) => [e.transition, Object.keys(e.changed).toSorted()])).toEqual([["deliver", ["delivered", "lifecycle", "stage_state"]]]);
   });
 
   test("a send-back while a redelivery is verified: the run stays sent back", async () => {
@@ -560,6 +560,40 @@ describe("deliver: the named-head gate's reads", () => {
     expect(state()).toBe("running");
     expect(deliveredOf(db, "t1")!.head).toBe(HEAD_A);
     expect(staleEvents()[0]!.transition).toBe("deliver");
+  });
+
+  test("assumption: the pipeline ending while a delivery is verified changes nothing it rests on; the delivery stands", async () => {
+    db.query("UPDATE runs SET state = 'validating' WHERE id = 'r1'").run();
+    github.checksGate = barrier();
+    const gate = github.checksGate;
+    const replying = call("deliver", { pr: PR_URL }, "worker");
+    await gate.reached;
+    // The watcher reads no-mistakes' run gone: validating → running, as the worker's pipeline passes.
+    nm.text = "run: null\n";
+    await watcher().pass();
+    expect(count("run.validated")).toBe(1);
+    gate.open();
+    const reply = await replying;
+    expect(reply.ok).toBe(true);
+    expect(deliveredOf(db, "t1")!.head).toBe(HEAD_A);
+    expect(state()).toBe("ready");
+    expect(staleEvents().filter((e) => e.transition === "deliver")).toEqual([]);
+  });
+
+  test("a pipeline starting while a delivery is verified (running → validating) does not stale it either", async () => {
+    newValidationSlot();
+    github.checksGate = barrier();
+    const gate = github.checksGate;
+    const replying = call("deliver", { pr: PR_URL }, "worker");
+    await gate.reached;
+    nm.text = CI_WAIT;
+    await watcher().pass();
+    expect(state()).toBe("validating");
+    gate.open();
+    const reply = await replying;
+    expect(reply.ok).toBe(true);
+    expect(deliveredOf(db, "t1")!.head).toBe(HEAD_A);
+    expect(staleEvents().filter((e) => e.transition === "deliver")).toEqual([]);
   });
 });
 
