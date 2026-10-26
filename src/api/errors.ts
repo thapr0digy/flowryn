@@ -68,7 +68,7 @@ export const ERROR_CODES = {
   no_change: EXIT.policy,
   // `flowryn back` with no away to end and no recent brief to reprint
   not_away: EXIT.validation,
-  // a project with no [projects.<id>] verify steps
+  // a project with no [projects.<id>] verify steps, or flowryn notify test with no [notify] command
   not_configured: EXIT.validation,
   not_fast_forward: EXIT.policy,
   not_found: EXIT.notFound,
@@ -79,6 +79,8 @@ export const ERROR_CODES = {
   not_ready: EXIT.policy,
   not_supervised: EXIT.policy,
   not_supported: EXIT.validation,
+  // flowryn notify test: [notify] command exited non-zero or timed out
+  notify_failed: EXIT.failure,
   // a delivery or merge whose reads were overtaken by a newer change to the run (docs/notes/2026-10-13-next-steps-md-av.md)
   observation_stale: EXIT.policy,
   // flowryn drop: a phase of the plan has started
