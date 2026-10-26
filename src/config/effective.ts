@@ -35,7 +35,9 @@ function workflowsView(config: FlowrynConfig): Record<string, unknown> {
   const own = table(config.extra.workflows, "[workflows]");
   const out: Record<string, unknown> = {};
   for (const [id, wf] of Object.entries(workflowsConfig(config))) {
-    out[id] = { source: id in own ? (id in DEFAULT_WORKFLOWS ? "config (replaces the built-in)" : "config") : "built-in", stages: wf.stages };
+    const ownTable = id in own ? table(own[id], `[workflows.${id}]`) : null;
+    const source = ownTable === null ? "built-in" : !(id in DEFAULT_WORKFLOWS) ? "config" : ownTable.stages === undefined ? "built-in, with config defaults" : "config (replaces the built-in)";
+    out[id] = { source, stages: wf.stages, ...(wf.models ? { models: wf.models } : {}) };
   }
   return out;
 }

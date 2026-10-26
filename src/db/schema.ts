@@ -801,7 +801,19 @@ ALTER TABLE artifacts ADD COLUMN carried_from TEXT;
 `;
 
 /**
- * Migration 38 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
+ * Migration 38 (docs/notes/2026-10-24-model-and-effort-sc.md): the model and effort a task chose
+ * at dispatch (`dispatch --model/--effort`, a plan phase's `model:` and `effort:` lines). Null is
+ * "not chosen": the workflow's default, then the account's, then the harness's apply at each launch.
+ */
+const MODEL_CHOICE_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN model_pin TEXT;
+ALTER TABLE runs ADD COLUMN effort_pin TEXT;
+ALTER TABLE plan_phases ADD COLUMN model TEXT;
+ALTER TABLE plan_phases ADD COLUMN effort TEXT;
+`;
+
+/**
+ * Migration 39 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
  * per message: the user's (from the daemon's poll), the worker's (`review reply`) and Flowryn's own
  * notes, in order per gate; `steer_id` is the steer that carried a user message to the worker. The
  * gate records its one summary for the leader (`summary_item`, `summarized_at`, the conversation file
@@ -857,7 +869,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
   { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
   { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
-  { version: 38, name: "review-chat", sql: REVIEW_CHAT_SQL },
+  { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
+  { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
