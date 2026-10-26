@@ -783,6 +783,15 @@ ALTER TABLE leader_sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'default';
 CREATE TABLE task_scopes (task_id TEXT PRIMARY KEY, scope TEXT NOT NULL);
 `;
 
+/**
+ * Migration 36: how many background notices a chat-answer grant was held across
+ * (docs/notes/2026-10-17-chat-answers-survive-es.md). Each must show in Claude's transcript
+ * as a notice before the grant is used.
+ */
+const GRANT_HELD_SQL = /* sql */ `
+ALTER TABLE captain_grants ADD COLUMN held_prompts INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -819,6 +828,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 33, name: "pr-feedback", sql: PR_FEEDBACK_SQL },
   { version: 34, name: "auto-merges", sql: AUTO_MERGES_SQL },
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
+  { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
