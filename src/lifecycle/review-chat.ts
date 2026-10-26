@@ -219,11 +219,11 @@ export function routedReply(routed: Routed): string {
     case "nobody":
       switch (routed.why) {
         case "cancelled":
-          return "This task was cancelled, so no worker reads this page; your message goes to your leader with the review's summary.";
+          return "This task was cancelled, so no one reads this page now; your message is kept, but tell your leader in chat if it matters.";
         case "ended":
-          return "This review's worker has ended for good; your message goes to your leader with the review's summary.";
+          return "This review's worker has ended for good, so no one reads this page now; your message is kept, but tell your leader in chat if it matters.";
         case "closed":
-          return "This review has already closed; your message is kept for your leader.";
+          return "This review has already closed, so no one reads this page now; your message is kept, but tell your leader in chat if it matters.";
         default:
           return "The worker has stopped and Flowryn will not restart it again by itself; your message is kept and your leader is told.";
       }
