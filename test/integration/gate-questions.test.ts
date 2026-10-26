@@ -477,12 +477,15 @@ describe("a review page's worker is gone", () => {
       writeFileSync(join(f.h.home, "lavish-reply-fail"), "");
       f.herdr.killHarness(parked.pane_id!, "SIGKILL");
       await f.waitRun(run, (r) => r.liveness === "dead", "the dead worker", 20_000);
+      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'failure_needs_you' AND run_id = ?1 AND state = 'open'", run) !== null, 10_000, "the death's P0");
 
       queuePoll(f, 1, gate.id, [], ["Why a table here?"]);
       const back = await f.waitRun(run, (r) => r.resume_count === 2 && r.liveness !== "dead" && r.proc_pid !== null && r.proc_pid !== parked.proc_pid, "the worker resumed from the page", 30_000);
       expect(back.agent_session).toBe(parked.agent_session);
       expect(one<{ page_resumes: number }>(f, "SELECT page_resumes FROM gates WHERE id = ?1", gate.id)).toEqual({ page_resumes: 1 });
       expect(one<{ requested_by: string }>(f, "SELECT requested_by FROM operations WHERE run_id = ?1 AND kind = 'resume' ORDER BY created_at DESC LIMIT 1", run)).toEqual({ requested_by: "review page" });
+      // The page's resume settles the death's P0, as flowryn resume does: nobody is told to resume a worker already coming back.
+      expect(one<{ state: string; resolved_by: string }>(f, "SELECT state, resolved_by FROM items WHERE kind = 'failure_needs_you' AND run_id = ?1", run)).toEqual({ state: "resolved", resolved_by: "run.resume_requested" });
       await waitUntil(() => readFileSync(calls, "utf8").includes("The worker had stopped; Flowryn is resuming it"), 10_000, "Flowryn's reply on the page");
       // Lavish refused the worker's reply: it rides the next poll, which displaces the old listener.
       await waitUntil(() => readFileSync(calls, "utf8").includes(`poll ${gate.page_path} --agent-reply Back, and the table stays. --takeover`), 20_000, "the reply carried by the next poll");

@@ -36,7 +36,7 @@ Mid-session the leader sees only `pass_requested`, `review_channel`, `steer_unac
 
 ## Data
 
-Migration 37 `review-chat`: `review_messages (gate_id, seq, author 'user'|'worker'|'flowryn', body, steer_id, created_at)`; `gates.summary_item`, `gates.summarized_at`, `gates.page_resumes`. Events: `review.message`, `review.replied`, `review.reply_shown`, `review.unrouted`, `review.revived`, `review.worker_gone`, `review.summarized`.
+Migration 37 `review-chat`: `review_messages (gate_id, seq, author 'user'|'worker'|'flowryn', body, steer_id, created_at)`; `gates.summary_item`, `gates.summarized_at`, `gates.conversation_path`, `gates.page_resumes`. Events: `review.message`, `review.replied`, `review.reply_shown`, `review.unrouted`, `review.revived`, `review.worker_gone`, `review.summarized`.
 
 ## Choices
 
