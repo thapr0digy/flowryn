@@ -223,7 +223,8 @@ describe("the briefing", () => {
     expect(composeBriefing(db, { session: null, now: early, morningHour: 5, ageMs: AGE, markMorning: false }).text).toContain("Leader: none");
     const opened = tx(db, () => openSession(db, { harness: "pi", pane: "w3:p1", cwd: null, now: early }));
     tx(db, () => claim(db, opened.session, "test", early));
-    expect(readOnlyBanner(db)).toBe("Flowryn: read-only: leader is pi in pane w3:p1. Take over with: flowryn leader claim");
+    const reader = tx(db, () => openSession(db, { harness: "claude", pane: null, cwd: null, now: early }));
+    expect(readOnlyBanner(db, reader.session)).toBe("Flowryn: read-only: leader is pi in pane w3:p1. Take over with: flowryn leader claim");
   });
 });
 

@@ -6,7 +6,7 @@ export const VERSION = "0.24.0";
  * a mismatch (exit 76), so a stale binary in an old worker never talks past a
  * newer daemon. Bump it on any envelope or verb-argument change.
  */
-export const PROTO = 7;
+export const PROTO = 8;
 
 /** tasks-axi version the intent journal was verified against (docs/m0-verdicts.md). */
 export const PINNED_TASKS_AXI = "0.2.5";

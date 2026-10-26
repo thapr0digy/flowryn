@@ -8,6 +8,7 @@ import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
 import { AWAY_MAX_MS, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief } from "./away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "./briefing.ts";
+import { lensFor } from "../leader/scope.ts";
 
 /**
  * `flowryn brief`: the briefing on demand, as a session start would show it.
@@ -20,8 +21,9 @@ const brief: VerbSpec = {
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
+  scope: { kind: "list" },
   read(ctx) {
-    if (ctx.caller.role === "reader") return { data: { briefing: [readOnlyBanner(ctx.db)] }, hints: ["flowryn leader claim"] };
+    if (ctx.caller.role === "reader") return { data: { briefing: [readOnlyBanner(ctx.db, ctx.caller.session ?? "")] }, hints: ["flowryn leader claim"] };
     const briefing = composeBriefing(ctx.db, {
       session: ctx.caller.role === "leader" ? (ctx.caller.session ?? null) : null,
       now: ctx.now,
@@ -29,6 +31,7 @@ const brief: VerbSpec = {
       ageMs: leaderTiming(ctx.config).age_ms,
       markMorning: false,
       config: ctx.config,
+      lens: lensFor(ctx.db, ctx.config, ctx.caller.scope),
     });
     return { data: { briefing: briefing.text.split("\n") }, hints: ["flowryn fleet", "flowryn show <id>"] };
   },
@@ -65,6 +68,7 @@ const dismiss: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "item" },
   apply(ctx, args) {
     const id = stringArg(args, "item")!;
     const item = ctx.db.query("SELECT id, class, state, kind, task_id, run_id, decision_id FROM items WHERE id = ?1").get(id) as ItemRef | null;
@@ -120,6 +124,8 @@ const away: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  // Your posture, for every scope; the words are yours and name no task.
+  scope: { kind: "none" },
   apply(ctx, args) {
     const now = ctx.now();
     const cfg = awayConfig(ctx.config());
@@ -153,6 +159,8 @@ const back: VerbSpec = {
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
+  // The return brief it prints is filtered to the caller's scope.
+  scope: { kind: "list" },
   apply(ctx) {
     const now = ctx.now();
     expireAway(ctx.db, now);
@@ -161,7 +169,7 @@ const back: VerbSpec = {
     if (!ended || now - ended.ended_at > REPRINT_MS) throw new FlowrynError("not_away", "you are not away", "flowryn away [--until <time>]");
     // An expiry's brief printed here does not ride the next message as well.
     takePendingBrief(ctx.db, now);
-    const text = composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: leaderTiming(ctx.config()).age_ms, reason: ended.reason });
+    const text = composeReturnBrief(ctx.db, { since: ended.since, until: ended.ended_at, now, ageMs: leaderTiming(ctx.config()).age_ms, reason: ended.reason, lens: lensFor(ctx.db, ctx.config(), ctx.caller.scope) });
     return { data: { away: endedNow ? "ended" : `already ended (${ended.reason})`, brief: text.split("\n") } };
   },
 };

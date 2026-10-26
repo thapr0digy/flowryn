@@ -48,7 +48,7 @@ describe("leader sessions and roles", () => {
     tx(db, () => claim(db, a.session, "test", 2));
     expect(resolveCaller(db, a.token, null)).toMatchObject({ role: "leader", session: a.session });
     tx(db, () => closeSession(db, a.session, "quit", 3));
-    expect(getLease(db).session_id).toBeNull();
+    expect(getLease(db, "default").session_id).toBeNull();
     expect(refusal(() => resolveCaller(db, a.token, null))).toBe("bad_token");
   });
 
@@ -78,13 +78,13 @@ describe("the lease (design section 10)", () => {
     const second = tx(db, () => claim(db, b.session, "explicit", 4));
     expect(second).toMatchObject({ epoch: 2, previous: a.session });
     expect(second.approvalKey).not.toBe(first.approvalKey);
-    expect(getLease(db)).toMatchObject({ session_id: b.session, harness: "pi", pane_id: "w3:p1", epoch: 2 });
+    expect(getLease(db, "default")).toMatchObject({ session_id: b.session, harness: "pi", pane_id: "w3:p1", epoch: 2 });
     expect(getSession(db, a.session)!.banner).toBe("Flowryn: leadership moved to pi in pane w3:p1; this session is read-only.");
     expect(getSession(db, b.session)!.brief_pending).toBe(1);
     expect(db.query("SELECT state FROM presentations WHERE item_id = ?1").get(item)).toEqual({ state: "lost" });
     expect(release(db, a.session, "not mine", 5)).toBe(false);
     expect(tx(db, () => release(db, b.session, "quit", 5))).toBe(true);
-    expect(getLease(db)).toMatchObject({ session_id: null, epoch: 2 });
+    expect(getLease(db, "default")).toMatchObject({ session_id: null, epoch: 2 });
   });
 
   test("stale needs both a silent heartbeat and the holder's process gone; a live silent holder is never taken over", async () => {

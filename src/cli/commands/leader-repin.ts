@@ -18,8 +18,8 @@ import { daemonCall, openDevTty, type Tty } from "./approve.ts";
 const CODE_WAIT_MS = 115_000;
 
 /** Show what the repin changes, read the code back, repin. The reply is the daemon's. */
-export async function runRepinFlow(env: NodeJS.ProcessEnv, tty: Tty, flow: { dir: string | null; actor: string }): Promise<Reply> {
-  const begun = await daemonCall(env, "leader.repin.begin", { dir: flow.dir ?? undefined });
+export async function runRepinFlow(env: NodeJS.ProcessEnv, tty: Tty, flow: { dir: string | null; actor: string; session?: string | null }): Promise<Reply> {
+  const begun = await daemonCall(env, "leader.repin.begin", { dir: flow.dir ?? undefined, session: flow.session ?? undefined });
   if (!begun.ok) return begun;
   const d = begun.data as Record<string, unknown>;
   const voids = Number(d.live_grants);
@@ -51,7 +51,7 @@ const leaderRepin: VerbSpec = {
   name: "leader repin",
   summary: "Move the leading Claude session's pinned directory to the one its transcript is under, in your own terminal: reads a code from /dev/tty",
   positionals: [{ name: "dir", required: false, help: "the directory to pin; default: the one the transcript names" }],
-  flags: {},
+  flags: { session: { type: "string", help: "the leading session to repin, when one leads per scope", placeholder: "L<n>" } },
   kind: "local",
   roles: ["human"],
   async local(args, io) {
@@ -67,7 +67,7 @@ const leaderRepin: VerbSpec = {
     }
     try {
       const dir = stringArg(args, "dir");
-      const reply = await runRepinFlow(io.env, tty, { dir: dir ? resolve(dir) : null, actor: io.env.USER || io.env.LOGNAME || "you" });
+      const reply = await runRepinFlow(io.env, tty, { dir: dir ? resolve(dir) : null, actor: io.env.USER || io.env.LOGNAME || "you", session: stringArg(args, "session") ?? null });
       return print(io, reply.ok ? okReply(reply.data, reply.hints) : reply);
     } finally {
       tty.close();

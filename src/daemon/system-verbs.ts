@@ -36,6 +36,7 @@ export function systemVerbs(): VerbSpec[] {
       flags: {},
       kind: "read",
       roles: ["leader", "reader", "worker", "hook", "human", "anonymous"],
+      scope: { kind: "none" },
       read(ctx) {
         const pending = pendingIntents(ctx.db).length;
         const failed = (ctx.db.query("SELECT COUNT(*) AS n FROM intents WHERE state = 'failed'").get() as { n: number }).n;
@@ -66,6 +67,7 @@ export function systemVerbs(): VerbSpec[] {
       flags: {},
       kind: "read",
       roles: ["leader", "reader", "worker", "human"],
+      scope: { kind: "none" },
       read(ctx) {
         // The read-only fallback has only the file on disk, which is not what a running daemon accepted.
         if (!ctx.info) throw new FlowrynError("daemon_unavailable", "the daemon is not running, so it has no accepted configuration", "flowryn daemon status");
@@ -110,6 +112,7 @@ export function systemVerbs(): VerbSpec[] {
       },
       kind: "mutation",
       roles: ["leader", "human"],
+      scope: { kind: "none" },
       // Never replayed from the idempotency table or the spool: a stored "restarting" reply must not kick a later daemon.
       ephemeral: true,
       // The binary check runs the target's version (and codesign) with a 10 s limit each.

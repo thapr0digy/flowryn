@@ -244,14 +244,15 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   };
 }
 
-/** Give the home a leader lease and return its token (the lease manager itself is M3). */
-export function seedLeader(h: TestHome): string {
+/** Give the home a leader lease (of `scope`, default the implicit one) and return its token (the lease manager itself is M3). */
+export function seedLeader(h: TestHome, scope = "default"): string {
   const token = mintToken("leader");
   const db = h.db();
   tx(db, () => {
-    db.query("INSERT OR REPLACE INTO leader_lease (id, session_id, harness, epoch, token_hash, claimed_at, heartbeat_at) VALUES (1, 'test-session', 'claude', 1, ?1, ?2, ?2)").run(
+    db.query("INSERT OR REPLACE INTO leader_lease (id, scope, session_id, harness, epoch, token_hash, claimed_at, heartbeat_at) VALUES (1, ?3, 'test-session', 'claude', 1, ?1, ?2, ?2)").run(
       hashToken(token),
       Date.now(),
+      scope,
     );
   });
   db.close();

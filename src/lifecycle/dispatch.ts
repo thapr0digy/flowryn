@@ -430,6 +430,7 @@ export const dispatchVerb: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "project", arg: "project" },
   prepare: (ctx, args) => prepareDispatch(ctx, args),
   apply(ctx, args, prepared) {
     const plan = prepared as DispatchPlan;
@@ -537,6 +538,7 @@ export const planVerb: VerbSpec = {
   },
   kind: "mutation",
   roles: ["leader", "human"],
+  scope: { kind: "project", arg: "project" },
   apply(ctx, args) {
     const projectId = stringArg(args, "project")!;
     const project = getProject(ctx.db, projectId);

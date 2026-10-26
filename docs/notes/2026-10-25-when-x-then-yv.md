@@ -19,7 +19,7 @@ Refused at dispatch (nothing filed): an unknown form (`bad_args`, listing the th
 
 ## Watches
 
-A PR or report event is a watch (`src/lifecycle/watches.ts`, table `watches`, migration 35, ids `w<N>`): a held backlog task of kind `watch` (id like `after-pr-112-k3`, title "Wait for PR #112 to merge") that only Flowryn completes, and that the queued task is blocked by. This is the shape standalone decision tasks already have, so every rule that starts queued work (the scheduler's auto-dispatch, `waitingOn`, `hasLanded`, the queue view, a hand edit to the backlog winning) applies unchanged. The watch task's add and hold go into the journal before the waiting task's add names it in `--blocked-by`, all in the dispatch's transaction.
+A PR or report event is a watch (`src/lifecycle/watches.ts`, table `watches`, migration 36, ids `w<N>`): a held backlog task of kind `watch` (id like `after-pr-112-k3`, title "Wait for PR #112 to merge") that only Flowryn completes, and that the queued task is blocked by. This is the shape standalone decision tasks already have, so every rule that starts queued work (the scheduler's auto-dispatch, `waitingOn`, `hasLanded`, the queue view, a hand edit to the backlog winning) applies unchanged. The watch task's add and hold go into the journal before the waiting task's add names it in `--blocked-by`, all in the dispatch's transaction.
 
 The delivery watcher's pass (`DeliveryWatcher.settleWatches`, `src/watch/delivery.ts`, every `[github] poll_ms`) settles each open watch:
 
@@ -37,6 +37,7 @@ Events: `watch.opened`, `watch.fired`, `watch.stuck`, `watch.closed`.
 - A watch task is not Queued work (like a decision's task), so it does not show in the queue or its counts.
 - `flowryn show <watch task>` or `show w<N>`: what it waits for, the waiting task, its state, the stuck reason, when it was opened and last checked.
 - The dispatch reply has `waits_for` (each watch's event and task id).
+- A watch and its task are in their project's scope (docs/notes/2026-10-24-leader-scoping-and-vj.md): a scoped leader sees, and can `show`, only its own scope's.
 
 ## Choices
 
@@ -46,7 +47,7 @@ Events: `watch.opened`, `watch.fired`, `watch.stuck`, `watch.closed`.
 - **No give-up deadline** (the predecessor's `never-true` after a week): the wait is visible in the queue, and the cases where it truly cannot happen raise `watch_stuck`.
 - **Stuck keeps the watch open** rather than a terminal `failed` state: both causes are reversible, and dropping work is the user's call.
 - **No new configuration**: the watch reads ride the delivery watcher's cadence and back-off.
-- **PROTO 7**: `dispatch` gained an argument. No `CONTRACT_REVISIONS` bump: the worker path is unchanged.
+- **PROTO 8**: `dispatch` gained an argument. No `CONTRACT_REVISIONS` bump: the worker path is unchanged.
 
 ## Tests
 

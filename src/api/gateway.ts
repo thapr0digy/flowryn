@@ -4,6 +4,7 @@ import { isUlid } from "../util/ulid.ts";
 import { PROTO } from "../version.ts";
 import { PROTO_EXEMPT_VERBS } from "../daemon/system-verbs.ts";
 import { authorize, resolveCaller } from "./auth.ts";
+import { enforceScope, recordScopeRefusal } from "../leader/scope.ts";
 import { errorReply, okReply, parseEnvelope, type Envelope, type Reply } from "./envelope.ts";
 import { FlowrynError, toErrorBody } from "./errors.ts";
 import { validateArgs, type Args, type DaemonServices, type HandlerCtx, type HandlerResult, type VerbSpec } from "./verbs.ts";
@@ -67,6 +68,7 @@ export class Gateway {
     const caller = resolveCaller(services.db, env.token, env.channel);
     authorize(spec, caller, services.db);
     const args = validateArgs(spec, env.args);
+    enforceScope(spec, services.db, services.config(), caller, args, (refusal) => tx(services.db, () => recordScopeRefusal(services.db, caller, refusal, services.now())));
     const ctx: HandlerCtx = { ...services, caller, ulid: env.ulid, via };
 
     if (spec.kind === "read") {

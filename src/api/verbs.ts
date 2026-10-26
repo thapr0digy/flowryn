@@ -11,6 +11,7 @@ import type { LavishServices } from "../lavish/services.ts";
 import { FlowrynError } from "./errors.ts";
 import type { ReportRead } from "../attention/read-close.ts";
 import type { RestartController } from "../daemon/restart.ts";
+import type { VerbScope } from "../leader/scope.ts";
 
 /**
  * Who is calling, resolved from the token (design section 12). `human` is a
@@ -28,6 +29,11 @@ export interface Caller {
   taskId: string | null;
   /** The leader session (`L<n>`) the token belongs to, for leader and reader callers. */
   session?: string | null;
+  /**
+   * The scope a leader or reader caller sees and acts in (docs/notes/2026-10-24-leader-scoping-and-vj.md);
+   * "" for a session whose login is unconfirmed (it sees nothing). Absent: unrestricted (your terminal).
+   */
+  scope?: string;
 }
 
 export type ArgValue = string | number | boolean | string[];
@@ -135,6 +141,11 @@ export interface VerbSpec {
   kind: VerbKind;
   /** Roles the daemon accepts for this verb. Local verbs check their own rules. */
   roles: Role[];
+  /**
+   * What the verb does with a leader's scope (src/leader/scope.ts): required on every verb a leader
+   * or reader can call (a unit test checks), so a scoped leader never reaches another scope's tasks.
+   */
+  scope?: VerbScope;
   /** Worker verbs spool to disk when the daemon is down (exit 75). */
   spool?: boolean;
   /**
