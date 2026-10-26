@@ -800,6 +800,18 @@ const ARTIFACT_CARRIED_FROM_SQL = /* sql */ `
 ALTER TABLE artifacts ADD COLUMN carried_from TEXT;
 `;
 
+/**
+ * Migration 38 (docs/notes/2026-10-24-model-and-effort-sc.md): the model and effort a task chose
+ * at dispatch (`dispatch --model/--effort`, a plan phase's `model:` and `effort:` lines). Null is
+ * "not chosen": the workflow's default, then the account's, then the harness's apply at each launch.
+ */
+const MODEL_CHOICE_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN model_pin TEXT;
+ALTER TABLE runs ADD COLUMN effort_pin TEXT;
+ALTER TABLE plan_phases ADD COLUMN model TEXT;
+ALTER TABLE plan_phases ADD COLUMN effort TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -838,6 +850,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 35, name: "leader-scopes", sql: LEADER_SCOPES_SQL },
   { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
   { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
+  { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

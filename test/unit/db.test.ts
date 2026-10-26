@@ -111,9 +111,25 @@ describe("migrations", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 36));
     db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'pr', 'https://github.com/acme/web/pull/1', 'abc', 1)").run();
-    expect(migrate(db, MIGRATIONS, () => 5)).toEqual([37]);
+    expect(migrate(db, MIGRATIONS.slice(0, 37), () => 5)).toEqual([37]);
     expect(db.query("SELECT carried_from FROM artifacts WHERE id = 'a1'").get()).toEqual({ carried_from: null });
     expect(db.query("SELECT name FROM schema_migrations WHERE version = 37").get()).toEqual({ name: "artifact-carried-from" });
+    db.close();
+  });
+
+  test("migration 38 adds the task's own model and effort to runs and plan phases, null for the rows already there", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 37));
+    db.exec("INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode) VALUES ('p', 'u', '/p', 'main', 'no-mistakes')");
+    db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('t1', 'p', 'ship', 'no-mistakes', 0, 'fix', 1)");
+    db.query(
+      `INSERT INTO runs (id, task_id, harness, harness_version, model, state, liveness, workflow, stage, agent_session, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+       VALUES ('r1', 't1', 'claude', 'v', 'opus', 'running', 'busy', 'fix', 'build', 's', '/w', 'b', 'abc', 'h', 1, 1)`,
+    ).run();
+    expect(migrate(db, MIGRATIONS.slice(0, 38))).toEqual([38]);
+    expect(db.query("SELECT model, model_pin, effort_pin FROM runs WHERE id = 'r1'").get()).toEqual({ model: "opus", model_pin: null, effort_pin: null });
+    const columns = (db.query("PRAGMA table_info(plan_phases)").all() as { name: string }[]).map((c) => c.name);
+    expect(columns).toEqual(expect.arrayContaining(["model", "effort"]));
     db.close();
   });
 

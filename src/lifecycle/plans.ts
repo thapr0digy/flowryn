@@ -1,5 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import { ID as ACCOUNT_ID, resolveAccount } from "../config/accounts.ts";
+import { checkModelName, checkPins } from "../config/model-choice.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
@@ -29,6 +30,9 @@ export interface PlanPhase {
   harness: "claude" | "pi" | null;
   /** The account the phase runs on (an `account:` line); null: resolved by the project's rules when it starts. */
   account?: string | null;
+  /** The phase's own model and effort (`model:` and `effort:` lines); null: the plan's, else not chosen. */
+  model?: string | null;
+  effort?: string | null;
   /** Earlier phases of the same plan this one waits for, by number (1-based); null: the one before it. */
   after: number[] | null;
 }
@@ -55,13 +59,15 @@ export interface PhaseRow {
   workflow: string;
   harness: string | null;
   account: string | null;
+  model: string | null;
+  effort: string | null;
   blocked_by: string;
 }
 
 export const MAX_PHASES = 20;
 const MAX_PHASE_BODY = 64_000;
 const MAX_TITLE = 120;
-const DIRECTIVE = /^(workflow|harness|account|after):\s*(.+)$/i;
+const DIRECTIVE = /^(workflow|harness|account|model|effort|after):\s*(.+)$/i;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
 
 function cleanTitle(heading: string): string {
@@ -72,7 +78,7 @@ function cleanTitle(heading: string): string {
 /**
  * Parse a plan: an optional `# title`, then one `## <phase>` section per
  * phase. A section may start with `workflow: <id>`, `harness: claude|pi`,
- * `account: <id>` and `after: <n>[, <n>]` lines; the rest is the phase's task. Each phase waits for
+ * `account: <id>`, `model: <model>`, `effort: <level>` and `after: <n>[, <n>]` lines; the rest is the phase's task. Each phase waits for
  * the one before it unless `after` says otherwise.
  */
 export function parsePlan(text: string): { title: string | null; phases: PlanPhase[] } {
@@ -82,7 +88,7 @@ export function parsePlan(text: string): { title: string | null; phases: PlanPha
   let current: { heading: string; lines: string[] } | null = null;
   const finish = () => {
     if (!current) return;
-    const out: PlanPhase = { title: cleanTitle(current.heading), body: "", workflow: null, harness: null, account: null, after: null };
+    const out: PlanPhase = { title: cleanTitle(current.heading), body: "", workflow: null, harness: null, account: null, model: null, effort: null, after: null };
     const rest = [...current.lines];
     while (rest.length > 0 && rest[0]!.trim() === "") rest.shift();
     while (rest.length > 0) {
@@ -100,6 +106,11 @@ export function parsePlan(text: string): { title: string | null; phases: PlanPha
       } else if (key!.toLowerCase() === "account") {
         if (!ACCOUNT_ID.test(v)) throw new FlowrynError("bad_args", `plan phase "${out.title}": account ${v} is not an account id`);
         out.account = v;
+      } else if (key!.toLowerCase() === "model") {
+        out.model = checkModelName(v, `plan phase "${out.title}": model`);
+      } else if (key!.toLowerCase() === "effort") {
+        // Checked against the harness once the phase's account is known (checkPhaseAccounts).
+        out.effort = v;
       } else {
         const numbers = v.split(/[,\s]+/).filter(Boolean).map(Number);
         if (numbers.length === 0 || numbers.some((n) => !Number.isInteger(n) || n < 1)) throw new FlowrynError("bad_args", `plan phase "${out.title}": after takes phase numbers, such as after: 1`);
@@ -158,6 +169,9 @@ export interface NewPlan {
   harness?: "claude" | "pi" | null;
   /** The phases' account (plan --account); a phase's own account: or harness: line wins. */
   account?: string | null;
+  /** The phases' model and effort (plan --model/--effort); a phase's own lines win. */
+  model?: string | null;
+  effort?: string | null;
   /** Extra blockers phase 1 waits for (a dispatch with --blocked-by). */
   blockedBy?: string[];
   /** A dispatch's per-task delivery mode (cutover C3), carried into the plan.filed event. */
@@ -179,9 +193,22 @@ function phaseAccount(phase: PlanPhase, plan: { account?: string | null; harness
   };
 }
 
-/** Each phase's account is checked at filing, so a phase outside the project's scope refuses now, not when it would start. */
-export function checkPhaseAccounts(config: FlowrynConfig, project: ProjectRow, phases: PlanPhase[], plan: { account?: string | null; harness?: "claude" | "pi" | null } = {}): void {
-  for (const phase of phases) resolveAccount(config, project, phaseAccount(phase, plan));
+/** A phase's model and effort: its own lines, else the plan's. */
+function phasePins(phase: PlanPhase, plan: { model?: string | null; effort?: string | null }): { model: string | null; effort: string | null } {
+  return { model: phase.model ?? plan.model ?? null, effort: phase.effort ?? plan.effort ?? null };
+}
+
+/**
+ * Each phase's account is checked at filing, so a phase outside the project's scope refuses now, not
+ * when it would start; so are its model and effort, against that account (and again when it starts).
+ */
+export function checkPhaseAccounts(
+  config: FlowrynConfig,
+  project: ProjectRow,
+  phases: PlanPhase[],
+  plan: { account?: string | null; harness?: "claude" | "pi" | null; model?: string | null; effort?: string | null } = {},
+): void {
+  for (const phase of phases) checkPins(phasePins(phase, plan), resolveAccount(config, project, phaseAccount(phase, plan)), `plan phase "${phase.title}"`);
 }
 
 /** Record a plan and its phases (task ids minted now, so a replay names the same tasks). Call inside a transaction. */
@@ -204,8 +231,9 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
     minted.push(taskId);
     const deps = phase.after ? phase.after.map((n) => minted[n - 1]!) : i > 0 ? [minted[i - 1]!] : [...(p.sourceTask ? [p.sourceTask] : []), ...(p.blockedBy ?? [])];
     const request = phaseAccount(phase, p);
-    const row: PhaseRow = { plan_id: id, phase_no: i + 1, task_id: taskId, title: phase.title, body: phase.body.length > 0 ? phase.body : phase.title, workflow: phase.workflow ?? p.workflow, harness: request.harness, account: request.account, blocked_by: JSON.stringify(deps) };
-    db.query("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, harness, blocked_by, account) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)").run(
+    const pins = phasePins(phase, p);
+    const row: PhaseRow = { plan_id: id, phase_no: i + 1, task_id: taskId, title: phase.title, body: phase.body.length > 0 ? phase.body : phase.title, workflow: phase.workflow ?? p.workflow, harness: request.harness, account: request.account, model: pins.model, effort: pins.effort, blocked_by: JSON.stringify(deps) };
+    db.query("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, harness, blocked_by, account, model, effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)").run(
       row.plan_id,
       row.phase_no,
       row.task_id,
@@ -215,6 +243,8 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
       row.harness,
       row.blocked_by,
       row.account,
+      row.model,
+      row.effort,
     );
     rows.push(row);
   });
