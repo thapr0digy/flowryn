@@ -256,12 +256,13 @@ export function replyGate(db: Db, runId: string): { id: string; run_id: string; 
   } | null;
 }
 
-export type ReviewOutcome = "ended" | "passed" | "changes";
+export type ReviewOutcome = "ended" | "passed" | "changes" | "promoted";
 
 const OUTCOME_WORDS: Record<ReviewOutcome, string> = {
   ended: "the user ended the session",
   passed: "the review passed",
   changes: "the review was sent back",
+  promoted: "the scout was promoted to a ship and its review dropped",
 };
 
 interface SummaryGate {

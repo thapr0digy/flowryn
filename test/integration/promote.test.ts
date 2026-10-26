@@ -250,7 +250,7 @@ describe("a scout in a review with questions", () => {
         const recap = db.query("SELECT state, COALESCE(full_line, line) AS line FROM items WHERE kind = 'review_recap' AND run_id = ?1").all(run) as { state: string; line: string }[];
         expect(recap).toHaveLength(1);
         expect(recap[0]!.state).toBe("open");
-        expect(recap[0]!.line).toContain(`Review of ${task} (design gate ${gate}): the review was sent back; 1 message from the user`);
+        expect(recap[0]!.line).toContain(`Review of ${task} (design gate ${gate}): the scout was promoted to a ship and its review dropped; 1 message from the user`);
       } finally {
         db.close();
       }

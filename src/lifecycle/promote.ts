@@ -113,7 +113,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
     discardPlansOfGate(db, open.id, now);
     dismissGateQuestions(db, run, open.id, now, "promoted", "cli");
     resolveRunItems(db, run.id, REVIEW_ITEMS, "run.promoted", now);
-    summarizeReview(db, open.id, "changes", now);
+    summarizeReview(db, open.id, "promoted", now);
   }
   // A worker that runs is stopped and its session resumed under the ship contract; one not launched yet starts as a ship.
   if (run.pending_launch !== "fresh" && run.pending_launch !== "resume") run.pending_launch = "relaunch";
