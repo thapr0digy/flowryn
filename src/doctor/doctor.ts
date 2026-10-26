@@ -11,6 +11,7 @@ import { canCreateOrWrite } from "../util/fsx.ts";
 import { PINNED_TASKS_AXI, PROTO, VERIFIED_LAVISH_AXI, VERSION } from "../version.ts";
 import type { Reply } from "../api/envelope.ts";
 import { configSectionProblems } from "../config/effective.ts";
+import { notifyConfig } from "../config/leader.ts";
 import { POLICY_MODE_LINES, policyMode } from "../config/policy.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { harnessVersion } from "../lifecycle/fleet-services.ts";
@@ -343,6 +344,39 @@ export function notifyMacosCheck(config: FlowrynConfig): Check | null {
   return { check: "notify", status: "warn", detail: "[notify] has no macos key, so macOS notifications are on by default; set macos = true or false (flowryn init asks)" };
 }
 
+/**
+ * `[notify] command`'s last run, from its `notification.command` events: a
+ * failure warns, so a broken script is found before the night it is needed.
+ * Nothing when no command is set (or [notify] is invalid: its config check says so).
+ */
+export function notifyCommandCheck(config: FlowrynConfig, db: Db | null): Check | null {
+  let command: string;
+  try {
+    command = notifyConfig(config).command;
+  } catch {
+    return null;
+  }
+  if (command === "") return null;
+  const last = db ? (db.query("SELECT ts, payload FROM events WHERE kind = 'notification.command' ORDER BY seq DESC LIMIT 1").get() as { ts: number; payload: string } | null) : null;
+  if (!last) return { check: "notify command", status: "info", detail: "set, not run yet: flowryn notify test sends a sample through it" };
+  const run = JSON.parse(last.payload) as { kind: string; ok: boolean; code: number; timed_out: boolean; stderr: string };
+  const at = new Date(last.ts).toISOString().slice(0, 16).replace("T", " ");
+  if (run.ok) return { check: "notify command", status: "ok", detail: `last ran ${at} (${run.kind})` };
+  const why = run.timed_out ? "timed out" : `exit ${run.code}`;
+  return { check: "notify command", status: "warn", detail: `last run ${at} (${run.kind}) failed: ${why}${run.stderr ? `: ${run.stderr}` : ""}; fix it, then flowryn notify test` };
+}
+
+function notifyCommandChecks(config: FlowrynConfig): Check[] {
+  const { db: dbPath } = stateFiles(config.state_dir);
+  const db = existsSync(dbPath) ? openDb(dbPath, { readonly: true }) : null;
+  try {
+    const check = notifyCommandCheck(config, db);
+    return check ? [check] : [];
+  } finally {
+    db?.close();
+  }
+}
+
 /** Every doctor check, in reading order. Never mutates anything. */
 export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const home = flowrynHome(env.env);
@@ -368,6 +402,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(...(await tasksChecks(config)));
   checks.push(...(await lavishCheck(config)));
   checks.push(...databaseChecks(config));
+  checks.push(...notifyCommandChecks(config));
   checks.push(...(await daemonChecks(home, config, env)));
   checks.push(...configSectionProblems(config, env.env).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
   checks.push(await herdrCheck(config));

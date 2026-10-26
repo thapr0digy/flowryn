@@ -1,6 +1,7 @@
 import { DEFAULT_LEADER_TIMING, DEFAULT_NOTIFY, type LeaderTiming, type NotifyConfig } from "../config/leader.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import type { PsRunner } from "../runtime/proc.ts";
+import type { CommandMessage, CommandOutcome } from "./notify.ts";
 
 /**
  * What the leader hooks and attention verbs need from the running daemon
@@ -19,6 +20,8 @@ export interface AttentionServices {
   notify(): NotifyConfig;
   /** Ask the notification pump to run now. */
   kick(): void;
+  /** `flowryn notify test`: run `[notify] command` once with a sample (NotifyPump.testCommand); absent without a pump. */
+  notifyTest?(): Promise<{ message: CommandMessage; outcome: CommandOutcome }>;
   ps?: PsRunner;
   /** The daemon's resolved lsof path (src/policy/locks.ts); without it a process cwd reads as unknown on macOS. */
   lsof?: () => string | null;
