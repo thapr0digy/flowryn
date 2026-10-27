@@ -6,6 +6,7 @@ import { tx } from "../../src/db/db.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { FakeGitHub } from "../helpers/fake-github.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 
 /**
@@ -17,11 +18,13 @@ import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 
 let ship: ShipEnv | null = null;
 const fleets: FleetEnv[] = [];
+const githubs: FakeGitHub[] = [];
 const scratch: string[] = [];
 
 afterEach(async () => {
   await ship?.cleanup();
   ship = null;
+  for (const github of githubs.splice(0)) await github.stop().catch(() => {});
   for (const env of fleets.splice(0)) await env.cleanup();
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -163,6 +166,52 @@ describe("dispatch --base", () => {
       }
     },
     { timeout: 120_000 },
+  );
+
+  test(
+    "a based yolo worker that merges its base and redelivers keeps its delivery (carried at deliver, not only by the watcher)",
+    async () => {
+      // The watcher polls once an hour here, so only the worker's own redelivery can carry the new head.
+      const github = await FakeGitHub.start();
+      githubs.push(github);
+      const env = await makeFleetEnv({ mode: "direct-PR", origin: true, yolo: true, extraConfig: `[github]\napi_url = ${JSON.stringify(github.apiUrl)}\npoll_ms = 3600000\n` });
+      fleets.push(env);
+      github.addRepo("acme", "web", { bare: env.origin });
+      github.repo("acme/web").defaultChecks = [];
+      pushReleaseBranch(env.origin!);
+      const dispatched = await env.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--base", "release/2", "--body-file", "-"], {
+        stdin: `Fix the release\n${prSteps(github.apiUrl, "release/2")}FAKE: wait-file again\nFAKE: push\nFAKE: deliver-pr\nFAKE: sleep 120000`,
+      });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      const ready = await env.waitRun(run, (r) => r.state === "ready", "delivered into release/2");
+      const delivered = github.pr("acme/web", 1).headSha;
+
+      // Another PR lands on release/2; the worker takes its base as its contract says: git merge origin/release/2.
+      const dir = mkdtempSync(join(tmpdir(), "fl-base-redeliver-"));
+      scratch.push(dir);
+      git(dir, ["clone", "-q", env.origin!, "c"]);
+      const clone = join(dir, "c");
+      git(clone, ["switch", "-q", "release/2"]);
+      writeFileSync(join(clone, "landed.txt"), "another PR landed on release/2\n");
+      git(clone, ["add", "landed.txt"]);
+      git(clone, ["commit", "-q", "-m", "another release PR"]);
+      git(clone, ["push", "-q", "origin", "HEAD:refs/heads/release/2"]);
+      git(ready.worktree_path, ["fetch", "-q", "origin", "+refs/heads/release/2:refs/remotes/origin/release/2"]);
+      git(ready.worktree_path, ["merge", "-q", "--no-ff", "--no-edit", "origin/release/2"]);
+      const head = git(ready.worktree_path, ["rev-parse", "HEAD"]);
+      writeFileSync(join(env.h.dataDir, task, "again"), "");
+
+      const db = env.h.db();
+      try {
+        await waitUntil(() => db.query("SELECT 1 FROM events WHERE kind = 'run.head_carried'").get() !== null, 30_000, "the redelivery to carry the delivery");
+        const carried = JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'run.head_carried'").get() as { payload: string }).payload) as Record<string, unknown>;
+        expect(carried).toMatchObject({ from: delivered, to: head, via: "deliver" });
+      } finally {
+        db.close();
+      }
+    },
+    { timeout: 90_000 },
   );
 
   test("a queued ship keeps its base; starting a queued task refuses a new --base", async () => {

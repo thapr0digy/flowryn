@@ -33,7 +33,7 @@ Every call goes through the caller's bounded `GitRunner`. Git must be 2.38 or la
 
 ## Where it applies
 
-- **Delivery watcher** (`src/watch/delivery.ts`): when an open PR's head moved and `headHistory` says it descends, the watcher asks for the proof in the run's worktree, or the project checkout once the worktree is gone. The PR's base must be the project's default branch. `applyPrObservation` (`src/reconcile/delivery.ts`) then calls `carryDelivery`, which:
+- **Delivery watcher** (`src/watch/delivery.ts`): when an open PR's head moved and `headHistory` says it descends, the watcher asks for the proof in the run's worktree, or the project checkout once the worktree is gone. The PR's base must be the run's base (`runBase`: its `dispatch --base`, else the project's default branch; docs/notes/2026-10-27-stack-a-plan-4y.md), and the proof is of merges of that branch. `applyPrObservation` (`src/reconcile/delivery.ts`) then calls `carryDelivery`, which:
   - inserts the artifact for the new head with `carried_from`;
   - voids human records;
   - appends `run.head_carried` (`pr`, `from`, `to`, `steps`, `via: watcher`, `verify`);
