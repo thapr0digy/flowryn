@@ -831,6 +831,17 @@ ALTER TABLE gates ADD COLUMN page_resumes INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gates ADD COLUMN conversation_path TEXT;
 `;
 
+/**
+ * Migration 40 (docs/notes/2026-10-26-review-pages-the-ah.md, phase 2): a review whose run is gone
+ * for good (failed, its worktree cleaned up) is carried on by a new run of its task. A page message
+ * asks for one (`revive_requested_at`; the scheduler starts it); the old gate closes with the new
+ * run's id in `replaced_by`.
+ */
+const REVIEW_REVIVAL_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN revive_requested_at INTEGER;
+ALTER TABLE gates ADD COLUMN replaced_by TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -871,6 +882,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
+  { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
