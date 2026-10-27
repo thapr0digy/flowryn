@@ -286,4 +286,19 @@ describe("dispatch --after report:<scout>", () => {
     const shown = await env.fleet.json(["show", task]);
     expect(shown.reply.data).toMatchObject({ status: "waiting", waits: [first.task] });
   }, 90_000);
+
+  test("--model and --effort given with --after are kept while it waits and reach the worker the watch starts", async () => {
+    const env = await shipEnv();
+    const pr = openPr(env, 49);
+    const filed = await env.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--after", "pr:49", "--model", "haiku", "--effort", "low", "--body-file", "-"], { stdin: "After the API lands\nFAKE: sleep 60000" });
+    expect(filed.code).toBe(0);
+    const task = (filed.reply.data as { task: string }).task;
+    expect(query(env, "SELECT model, effort FROM plan_phases WHERE task_id = ?1", task)).toEqual([{ model: "haiku", effort: "low" }]);
+    merge(pr);
+    await waitUntil(() => runsOf(env, task).length === 1, 20_000, "the waiting task started");
+    await waitUntil(() => env.fleet.herdr.calls.some((c) => c.method === "agent.start"), 15_000, "the worker launched");
+    const args = (env.fleet.herdr.calls.filter((c) => c.method === "agent.start").at(-1)!.params as { args: string[] }).args;
+    expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+    expect(args[args.indexOf("--effort") + 1]).toBe("low");
+  }, 90_000);
 });
