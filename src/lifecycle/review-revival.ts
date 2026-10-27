@@ -10,7 +10,8 @@ import { createRun } from "./dispatch.ts";
 import { dispatchedTask } from "./launcher.ts";
 import { discardPlansOfGate } from "./plans.ts";
 import { getProject } from "./projects.ts";
-import { conversationPath, revivable, summarizeReview } from "./review-chat.ts";
+import { TASK_STILL_ON_RUN } from "./gate-questions.ts";
+import { conversationPath, goneForGood, revivable, summarizeReview } from "./review-chat.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { REVIEW_ITEMS, runWorkflow } from "./stages.ts";
 
@@ -23,7 +24,8 @@ import { REVIEW_ITEMS, runWorkflow } from "./stages.ts";
  * gated stage: the task goes back In flight, the old gate closes as replaced
  * (`replaced_by`), the leader gets the review's summary, and the new run's task
  * file names the old page, the conversation file and the page's notes. A
- * cancelled run is never revived. Plain rules over the database.
+ * cancelled run is never revived, nor one whose task moved on (a later run, a
+ * drop). Plain rules over the database.
  */
 
 /** Gates whose page asked for a new run, still open on a run gone for good. */
@@ -31,7 +33,7 @@ export function revivalsDue(db: Db): { gate: string; run: string }[] {
   return db
     .query(
       `SELECT g.id AS gate, g.run_id AS run FROM gates g JOIN runs r ON r.id = g.run_id
-       WHERE g.kind = 'review' AND g.state = 'open' AND g.revive_requested_at IS NOT NULL AND r.state = 'failed' AND r.cleanup = 'done'
+       WHERE g.kind = 'review' AND g.state = 'open' AND g.revive_requested_at IS NOT NULL AND r.state = 'failed' AND r.cleanup = 'done' AND ${TASK_STILL_ON_RUN}
        ORDER BY g.revive_requested_at`,
     )
     .all() as { gate: string; run: string }[];
@@ -68,7 +70,8 @@ export function revivalTarget(db: Db, gateId: string): { gate: RevivalGate; run:
   if (!run) throw new FlowrynError("not_found", `gate ${gateId}'s run is gone`);
   if (gate.state !== "open") throw new FlowrynError("not_ready", `gate ${gateId} is no longer open`, `flowryn show ${run.task_id}`);
   if (run.state === "cancelled") throw new FlowrynError("not_ready", `${run.task_id} was cancelled; a cancelled task is never restarted from its review`, `flowryn show ${run.task_id}`);
-  if (!revivable(run)) throw new FlowrynError("not_ready", `${run.task_id}'s run is ${run.state}${run.cleanup ? ` (cleanup ${run.cleanup})` : ""}, not failed and cleaned up`, `flowryn show ${run.task_id}`);
+  if (!goneForGood(run)) throw new FlowrynError("not_ready", `${run.task_id}'s run is ${run.state}${run.cleanup ? ` (cleanup ${run.cleanup})` : ""}, not failed and cleaned up`, `flowryn show ${run.task_id}`);
+  if (!revivable(db, run)) throw new FlowrynError("not_ready", `${run.task_id}'s review moved on: a later run of it started or it was dropped`, `flowryn show ${run.task_id}`);
   return { gate, run };
 }
 

@@ -7,7 +7,7 @@ import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { requirePageDir } from "../lavish/widget.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { gateQuestions, readsAsPass } from "./gate-questions.ts";
+import { gateQuestions, readsAsPass, TASK_STILL_ON_RUN } from "./gate-questions.ts";
 import { openOperation, requestOperation } from "./operations.ts";
 import { createSteer, MAX_STEER_CHARS } from "./steers.ts";
 import { taskTitle, type RunRow } from "./runs.ts";
@@ -156,7 +156,7 @@ export function routePageBatch(db: Db, gateId: string, batch: PageBatch, now: nu
   if (run.state === "cancelled") return nobody("cancelled");
   const open = openOperation(db, run.id);
   if (open?.kind === "cancel") return nobody("cancelled");
-  if (revivable(run)) {
+  if (revivable(db, run)) {
     keep(null);
     requestRevival(db, run, gate.id, now);
     return { to: "new_run" };
@@ -176,9 +176,14 @@ export function routePageBatch(db: Db, gateId: string, batch: PageBatch, now: nu
   return { to: "resumed", steer };
 }
 
-/** A run gone for good but not by the user's choice: failed, and its worktree cleaned up. A new run carries its review on. */
-export function revivable(run: Pick<RunRow, "state" | "cleanup">): boolean {
+/** A run gone for good but not by the user's choice: failed, and its worktree cleaned up. */
+export function goneForGood(run: Pick<RunRow, "state" | "cleanup">): boolean {
   return run.state === "failed" && run.cleanup === "done";
+}
+
+/** A run gone for good whose task has not moved on (no later run, no drop): a new run carries its review on. */
+export function revivable(db: Db, run: Pick<RunRow, "id" | "state" | "cleanup">): boolean {
+  return goneForGood(run) && db.query(`SELECT 1 FROM runs r WHERE r.id = ?1 AND ${TASK_STILL_ON_RUN}`).get(run.id) !== null;
 }
 
 /**

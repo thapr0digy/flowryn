@@ -24,16 +24,17 @@ The user asked to talk to the worker inside a review page instead of through the
 | failed, worktree present | - | the same resume; the task goes back In flight (`unhold`, `start` intents) |
 | cancelled, or a cancel under way | - | nothing; the words are kept, no steer |
 | failed, worktree cleaned up (`cleanup = 'done'`) | - | a new run of the task at the gated stage (below); the words are kept, no steer |
+| failed, worktree cleaned up, but a later run of the task started or the task was dropped | - | nothing (`ended`); the words are kept |
 | cleaned (landed) | - | nothing; the words are kept |
 
-`gatesToPoll` also polls an open gate of a failed run, with or without its worktree, so its page keeps listening; a cancelled run's page is not polled. Page-triggered resumes are counted on the gate (`page_resumes`); past `PAGE_RESUMES_MAX` (2) the steer stays queued and one `review_worker_gone` P1 tells the leader (`flowryn resume <task>`, which resolves it, or tell the user). The scheduler's grant still checks capacity and the harness version.
+`gatesToPoll` also polls an open gate of a failed run, with or without its worktree, so its page keeps listening; a cancelled run's page is not polled, nor a cleaned failed run's page once its task moved on (a later run of it, or a drop). Page-triggered resumes are counted on the gate (`page_resumes`); past `PAGE_RESUMES_MAX` (2) the steer stays queued and one `review_worker_gone` P1 tells the leader (`flowryn resume <task>`, which resolves it, or tell the user). The scheduler's grant still checks capacity and the harness version.
 
 ## A new run for a review whose run ended for good (phase 2)
 
 A run that failed and whose worktree `flowryn cleanup` removed has no worker to resume, but its open review gate and page remain. Two things carry the review on with a new run of the same task:
 
 - **A page message.** `routePageBatch` keeps the words, marks the gate (`gates.revive_requested_at`, one `review.revive_requested` event however many messages follow) and kicks the scheduler. The scheduler's `review revivals` step (`reviveReviews`, beside auto-dispatch) checks the start as a dispatch does (`checkStart`: Herdr, the harness contract, the primary checkout, the base) on the old run's account, then calls `reviveReview` in one transaction. A start that cannot happen yet opens one `review_worker_gone` P1 (`review.revive_blocked`) and is tried again each pass.
-- **The leader's `gate changes`.** On such a run, `prepare` checks the start and `apply` calls `reviveReview` with the leader's words; the reply is `state: replaced` with the new `run`. `--to` still picks another stage; the default is the gated stage. On a cancelled run `gate changes` is refused (`not_ready`, "a cancelled task is never restarted").
+- **The leader's `gate changes`.** On such a run, `prepare` checks the start and `apply` calls `reviveReview` with the leader's words; the reply is `state: replaced` with the new `run`. `--to` still picks another stage; the default is the gated stage. On a cancelled run `gate changes` is refused (`not_ready`, "a cancelled task is never restarted"), and on a cleaned failed run whose task moved on (a later run, a drop) too ("review moved on"); `revivalsDue` skips such a gate.
 
 `reviveReview` (`src/lifecycle/review-revival.ts`):
 

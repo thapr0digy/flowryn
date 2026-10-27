@@ -8,7 +8,7 @@ import { runAccount } from "../config/accounts.ts";
 import { checkStart, startDepsOf } from "../lifecycle/dispatch.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getProject } from "../lifecycle/projects.ts";
-import { revivable } from "../lifecycle/review-chat.ts";
+import { goneForGood } from "../lifecycle/review-chat.ts";
 import { revivalTarget, reviveReview } from "../lifecycle/review-revival.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { openUserActed } from "../attention/follow-up.ts";
@@ -177,9 +177,9 @@ const gateChanges: VerbSpec = {
   async prepare(ctx, args): Promise<ChangesPrepared> {
     // Changes need no word from you; a chat answer is still taken (and a "Pass" answer refuses them).
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
-    if (run.state === "cancelled") revivalTarget(ctx.db, gate.id);
+    if (run.state === "cancelled" || goneForGood(run)) revivalTarget(ctx.db, gate.id);
     const grant = prepareCaptainGrant(ctx, args, { item: gate.id, choice: "changes" }, null);
-    if (!revivable(run)) return { grant, revival: null };
+    if (!goneForGood(run)) return { grant, revival: null };
     // Its run ended for good: a new run carries the review on, checked as a dispatch is.
     const project = getProject(ctx.db, run.project_id);
     if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
@@ -189,8 +189,8 @@ const gateChanges: VerbSpec = {
   apply(ctx, args, prepared) {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
     const ready = prepared as ChangesPrepared | undefined;
-    if (run.state === "cancelled" || revivable(run)) revivalTarget(ctx.db, gate.id);
-    if (revivable(run) && ready?.revival?.gate !== gate.id) throw new FlowrynError("not_ready", `${run.task_id} changed meanwhile`, "send the changes again");
+    if (run.state === "cancelled" || goneForGood(run)) revivalTarget(ctx.db, gate.id);
+    if (goneForGood(run) && ready?.revival?.gate !== gate.id) throw new FlowrynError("not_ready", `${run.task_id} changed meanwhile`, "send the changes again");
     const grantId = ready?.grant ?? null;
     const used = grantId ? takeGrant(ctx.db, grantId, `gate changes ${gate.id}`, ctx.now()) : null;
     const leaderWords = (stringArg(args, "body") ?? "").trim();

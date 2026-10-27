@@ -91,6 +91,31 @@ describe("a page message on a run gone for good", () => {
     expect(revivalsDue(db)).toEqual([]);
   });
 
+  test("a later run of the task means the review moved on: the page is not polled and a message starts nothing", () => {
+    failAndClean();
+    db.query(
+      `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+       SELECT 'r02LATER', task_id, harness, harness_version, 'running', 'busy', workflow, stage, '/tmp/wt2', 'fm/y', base_sha, 'h2', started_at + 1, updated_at FROM runs WHERE id = ?1`,
+    ).run(runId);
+    expect(gatesToPoll(db)).toEqual([]);
+    expect(route()).toMatchObject({ to: "nobody", why: "ended" });
+    expect(db.query("SELECT revive_requested_at FROM gates WHERE id = 'g1'").get()).toEqual({ revive_requested_at: null });
+    db.query("UPDATE gates SET revive_requested_at = ?1 WHERE id = 'g1'").run(NOW);
+    expect(revivalsDue(db)).toEqual([]);
+    expect(() => revivalTarget(db, "g1")).toThrow(/review moved on/);
+  });
+
+  test("a dropped task means the review moved on: the page is not polled and a message starts nothing", () => {
+    failAndClean();
+    db.query("INSERT INTO drops (task_id, title, reason, dropped_by, dropped_at) VALUES (?1, ?1, 'not needed', 'cli', ?2)").run(taskId, NOW + 5);
+    expect(gatesToPoll(db)).toEqual([]);
+    expect(route()).toMatchObject({ to: "nobody", why: "ended" });
+    expect(db.query("SELECT revive_requested_at FROM gates WHERE id = 'g1'").get()).toEqual({ revive_requested_at: null });
+    db.query("UPDATE gates SET revive_requested_at = ?1 WHERE id = 'g1'").run(NOW);
+    expect(revivalsDue(db)).toEqual([]);
+    expect(() => revivalTarget(db, "g1")).toThrow(/review moved on/);
+  });
+
   test("a failed run whose worktree remains is resumed, not replaced", () => {
     tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
     expect(route()).toMatchObject({ to: "resumed" });

@@ -307,8 +307,11 @@ export interface PolledGate {
 }
 
 export const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
-/** A run a review page can still bring back: live, or failed (resumed while its worktree remains, else carried on by a new run). */
-const PAGE_RUN = "r.state NOT IN ('cleaned','cancelled')";
+/** The review of run `r` has not moved on: no later run of its task started, and the task was not dropped. */
+export const TASK_STILL_ON_RUN =
+  "NOT EXISTS (SELECT 1 FROM runs later WHERE later.task_id = r.task_id AND (later.started_at > r.started_at OR (later.started_at = r.started_at AND later.rowid > r.rowid))) AND NOT EXISTS (SELECT 1 FROM drops dropped WHERE dropped.task_id = r.task_id)";
+/** A run a review page can still bring back: live, or failed (resumed while its worktree remains, else carried on by a new run while the task is still on it). */
+const PAGE_RUN = `r.state NOT IN ('cleaned','cancelled') AND (r.state != 'failed' OR COALESCE(r.cleanup, '') != 'done' OR (${TASK_STILL_ON_RUN}))`;
 
 /**
  * Gates whose page the daemon polls: open on a live run with a known page,
@@ -317,7 +320,8 @@ const PAGE_RUN = "r.state NOT IN ('cleaned','cancelled')";
  * the page's agent as not listening while the review waits. A failed run's
  * page is listened to as well: a message there resumes its worker while its
  * worktree remains, else starts a new run of the task at the gated stage
- * (src/lifecycle/review-chat.ts). A cancelled run's page is not.
+ * (src/lifecycle/review-chat.ts) unless a later run or a drop moved the task
+ * on. A cancelled run's page is not.
  */
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
