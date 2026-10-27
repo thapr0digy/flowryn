@@ -24,7 +24,13 @@ export type ItemClass = "actionable" | "info";
  * failed the check, its supervisor refused, or `--when-idle` expired).
  * restart_failed: a launchd restart that left flowrynd down until something
  * else brought it back (src/service/relaunch.ts); opened by the next daemon.
- * review_feedback: what you sent from a review page the daemon polls.
+ * review_feedback: what you sent from a review page the daemon polls (before
+ * review pages talked to their worker; nothing opens it any more).
+ * review_summary: a review page's conversation ended while its gate is still
+ * open, so the leader puts pass or changes to the user; review_recap, the same
+ * summary once the gate had closed (informational); review_worker_gone, a page
+ * message found the review's worker gone and no resume left to try
+ * (src/lifecycle/review-chat.ts).
  * pass_requested: the user asked on a review page to pass its gate; the
  * leader confirms it with them through a human channel.
  * contract_recorded: the leader, or the daemon's automatic check, recorded a
@@ -78,6 +84,8 @@ export const LANE_TABLE = {
   report_ready: { lane: "P1", class: "actionable" },
   worker_question: { lane: "P1", class: "actionable" },
   review_feedback: { lane: "P1", class: "actionable" },
+  review_summary: { lane: "P1", class: "actionable" },
+  review_worker_gone: { lane: "P1", class: "actionable" },
   divergence: { lane: "P1", class: "actionable" },
   worker_idle: { lane: "P1", class: "actionable" },
   unproven_merge: { lane: "P1", class: "actionable" },
@@ -126,6 +134,7 @@ export const LANE_TABLE = {
   phase_started: { lane: "P1", class: "info" },
   auto_resumed: { lane: "P1", class: "info" },
   steer_acked: { lane: "P1", class: "info" },
+  review_recap: { lane: "P1", class: "info" },
   progress: { lane: "P2", class: "info" },
 } as const satisfies Record<string, { lane: Lane; class: ItemClass }>;
 
@@ -133,11 +142,11 @@ export type ItemKind = keyof typeof LANE_TABLE;
 
 /**
  * A worker's questions for you, blocking (P0) or not (P1), a review gate's,
- * and what you sent from a review page: they reach the leader as a batch
+ * and what you sent from a review page (its summary): they reach the leader as a batch
  * (questionBatch in router.ts), never one push each, so the P0 push path
  * leaves them alone.
  */
-export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_question_blocking", "review_feedback"];
+export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_question_blocking", "review_feedback", "review_summary"];
 
 /**
  * Items the leader handles by relaying them to you or dismissing them: a

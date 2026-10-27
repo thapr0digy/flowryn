@@ -138,9 +138,12 @@ describe("a review gate's questions", () => {
       const notes = join(gate.page_path, "..", `lavish-notes-${gate.id}.txt`);
       await waitUntil(() => existsSync(notes), 10_000, "the kept notes");
       expect(readFileSync(notes, "utf8")).toContain("Make the header bigger");
-      // What came from the page reaches the leader as one item, batched with worker questions.
-      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run) !== null, 10_000, "the review feedback item");
-      expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.line).toBe(`Review feedback on ${task} (design gate ${gate.id}): the user answered q1 = file and wrote "Make the header bigger"; notes beside the page`);
+      // What the user wrote goes to the worker as one steer, with the answers so far; nothing wakes the leader.
+      await waitUntil(() => one(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE '%Make the header bigger%'", run) !== null, 10_000, "the page steer");
+      const pageSteer = one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE '%Make the header bigger%'", run)!.body;
+      expect(pageSteer).toContain('[on the page text "Design"]\nMake the header bigger');
+      expect(pageSteer).toContain("[answers to your review questions so far: q1 = file]");
+      expect(rows(f, "SELECT 1 FROM items WHERE kind IN ('review_feedback','review_summary') AND run_id = ?1", run)).toEqual([]);
 
       // The leader relays q3 through Claude's prompt; the answer is held from the worker while the gate is open.
       const relayed = await leader.runBash(`flowryn decide q3 "flowryn keys" --by captain --json`, { approve: true });
@@ -160,8 +163,8 @@ describe("a review gate's questions", () => {
       await waitUntil(() => readFileSync(widget, "utf8").includes('"answer":"claude, pi"'), 10_000, "the widget shows q2 answered");
       expect(readFileSync(widget, "utf8")).toContain('"via":"your leader"');
       // Lavish's conversation hears what Flowryn recorded with the next poll, which keeps listening while the gate is open.
-      await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Your leader has your notes now, and they reach the worker with the verdict. 2 questions still open."), 10_000, "the reply after q1");
-      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Your note for the worker is kept; it reaches the worker with the verdict\. Pass requested\. This page cannot pass the review: your leader asks you to confirm it, or you run flowryn approve in your terminal\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
+      await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Sent to the worker; its answer will appear here. 2 questions still open."), 10_000, "the reply after q1");
+      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Sent to the worker; its answer will appear here\. Pass requested\. This page cannot pass the review: your leader asks you to confirm it, or you run flowryn approve in your terminal\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
       expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'pass_requested' AND run_id = ?1 AND state = 'open'", run)!.line).toContain(`flowryn gate pass ${task} --gate-id ${gate.id}`);
       expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open" });
 
@@ -171,8 +174,12 @@ describe("a review gate's questions", () => {
       await f.waitRun(run, (r) => r.stage === "build", "the build stage");
       const steer = one<{ body: string }>(f, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE 'The design review passed%'", run)!;
       expect(steer.body).toContain("The user's answers to your review questions: q1 (token-store) = file [their note: file survives resets]; q2 (harnesses) = claude, pi; q3 (verb-name) = flowryn keys.");
+      // The worker saw each message as it came: the verdict points at the conversation and the raw notes.
+      const conversation = join(gate.page_path, "..", `review-${gate.id}.md`);
+      expect(steer.body).toContain(`The review page's conversation with you is in ${conversation}.`);
       expect(steer.body).toContain(`read ${notes}`);
-      expect(steer.body).toContain('The user also wrote on the review page: """Keep the CLI name short."""');
+      expect(readFileSync(conversation, "utf8")).toContain("Keep the CLI name short.");
+      expect(one<{ line: string }>(f, "SELECT COALESCE(full_line, line) AS line FROM items WHERE kind = 'review_recap' AND run_id = ?1", run)!.line).toContain(`Review of ${task} (design gate ${gate.id}): the review passed; 2 messages from the user, 0 replies, answered q1 = file, q2 = claude, pi`);
       expect(one<{ resolved_by: string }>(f, "SELECT resolved_by FROM items WHERE kind = 'pass_requested' AND run_id = ?1", run)).toEqual({ resolved_by: `gate.passed ${gate.id}` });
       await waitUntil(() => readFileSync(widget, "utf8").includes('"gateState":"passed"'), 10_000, "the widget locked");
     },
@@ -303,7 +310,7 @@ describe("review-channel health", () => {
 
 describe("the daemon listens on every review page", () => {
   test(
-    "a page with no questions is polled from the hand-in; feedback reading as a pass wakes the leader as the user's word, and the gate stays open",
+    "a page with no questions is polled from the hand-in; the user talks with the worker there without waking the leader, and ending the session gives the leader one summary",
     async () => {
       ship = await makeShipEnv({ mode: "local-only", extraConfig: "[leader]\nquestion_batch_ms = 300" });
       const e = ship;
@@ -318,6 +325,9 @@ describe("the daemon listens on every review page", () => {
         "Feature listen",
         `FAKE: write design/design.html ${plain}`,
         "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
+        // The page's message arrives as a steer: the worker answers it in the page.
+        "FAKE: write reply.md Only you can pass it, outside the page: tell your leader.",
+        "FAKE: verb review reply --body-file $FLOWRYN_REPORT_DIR/reply.md",
         "FAKE: sleep 120000",
       ].join("\n");
       const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: body });
@@ -332,19 +342,34 @@ describe("the daemon listens on every review page", () => {
       expect(existsSync(join(gate.page_path, "..", "flowryn-questions.js"))).toBe(false);
 
       queuePoll(f, 1, gate.id, [], ["approved, ship it"]);
-      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run) !== null, 10_000, "the review feedback item");
-      const line = one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.line;
-      expect(line).toBe(`Review feedback on ${task} (design gate ${gate.id}) may read as a pass (ask the user; only flowryn gate pass passes it): the user wrote "approved, ship it"; notes beside the page`);
-      // It wakes the idle leader with the worker questions' batch; the gate passes only through a human channel.
-      await waitUntil(async () => (await leader.saw(`Review feedback on ${task}`)) > 0, 15_000, "the leader woken with the feedback");
-      expect(leader.seen.some((s) => s.via === "waiter" && s.text.includes("Flowryn questions ["))).toBe(true);
+      // The worker gets the words and answers in the page; the leader is not woken for it.
+      const replies = join(f.h.home, "lavish-replies.log");
+      await waitUntil(() => existsSync(replies) && readFileSync(replies, "utf8").includes("Only you can pass it, outside the page"), 15_000, "the worker's reply in the page");
+      expect(readFileSync(calls, "utf8")).toContain(`reply ${gate.page_path} --agent-reply-file -`);
+      await waitUntil(() => readFileSync(calls, "utf8").includes("Sent to the worker; its answer will appear here. If you meant to pass the review: only you can, outside this page"), 10_000, "Flowryn's reply on the page");
+      const workerReply = (await e.replies(task, 2))[1]!;
+      expect(workerReply.reply.data).toMatchObject({ gate: gate.id, shown: "shown" });
+      expect(rows<{ author: string }>(f, "SELECT author FROM review_messages WHERE gate_id = ?1 ORDER BY seq", gate.id).map((m) => m.author)).toEqual(["user", "worker"]);
+      expect(rows(f, "SELECT 1 FROM items WHERE kind IN ('review_feedback','review_summary') AND run_id = ?1", run)).toEqual([]);
+      expect(await leader.saw(`Review of ${task}`)).toBe(0);
       expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)!.state).toBe("open");
-      await waitUntil(() => readFileSync(calls, "utf8").includes("If you meant to pass the review, your leader will ask you to confirm it in Flowryn."), 10_000, "the reply on the page");
+
+      // Send & End: one summary wakes the leader, with the worker questions' batch; the gate is still open.
+      const dir = join(f.h.home, "lavish-queue");
+      writeFileSync(join(dir, "002.out"), `session:\n  file: /x/design.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nprompts[1]{uid,prompt,selector,tag,text}:\n  "",Thanks,"",message,Freeform message\n`);
+      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_summary' AND run_id = ?1", run) !== null, 10_000, "the review summary");
+      const summary = one<{ line: string }>(f, "SELECT COALESCE(full_line, line) AS line FROM items WHERE kind = 'review_summary' AND run_id = ?1", run)!.line;
+      expect(summary).toStartWith(`Review of ${task} (design gate ${gate.id}): the user ended the session; 2 messages from the user, 1 reply; still open: ask the user to pass or send changes (their words may read as a pass`);
+      await waitUntil(async () => (await leader.saw(`Review of ${task}`)) > 0, 15_000, "the leader woken with the summary");
+      expect(leader.seen.some((s) => s.via === "waiter" && s.text.includes("Flowryn questions ["))).toBe(true);
+      expect(one<{ lavish_ended: number; state: string }>(f, "SELECT lavish_ended, state FROM gates WHERE id = ?1", gate.id)).toEqual({ lavish_ended: 1, state: "open" });
 
       const passed = await e.approve(task, { gate: "design" });
       expect(passed.ok).toBe(true);
       await f.waitRun(run, (r) => r.stage === "build", "the build stage");
-      expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'review_feedback' AND run_id = ?1", run)!.state).toBe("resolved");
+      expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'review_summary' AND run_id = ?1", run)!.state).toBe("resolved");
+      // One summary per review: the pass adds no recap.
+      expect(rows(f, "SELECT 1 FROM items WHERE kind = 'review_recap' AND run_id = ?1", run)).toEqual([]);
       // Let the woken turn finish before cleanup removes the leader's directory under it.
       await leader.prompt("done");
     },
@@ -418,6 +443,56 @@ describe("the daemon listens on every review page", () => {
       expect(one<{ page_path: string }>(f, "SELECT page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!.page_path).toEndWith("design/design.html");
     },
     { timeout: 90_000 },
+  );
+});
+
+describe("a review page's worker is gone", () => {
+  test(
+    "a page message resumes the dead worker through the scheduler (the same run and session), which answers in the page; a refused reply rides the next poll",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const body = [
+        "Feature revive",
+        `FAKE: write design/design.html ${filledDesignPage()}`,
+        "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: write reply.md Back, and the table stays.",
+        "FAKE: verb review reply --body-file $FLOWRYN_REPORT_DIR/reply.md",
+        "FAKE: sleep 120000",
+      ].join("\n");
+      const { task, run } = await f.dispatch(body, { kind: "ship" });
+      const parked = await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review" && r.liveness === "idle", "the idle worker at its review");
+      const gate = one<{ id: string; page_path: string }>(f, "SELECT id, page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+      const calls = join(f.h.home, "lavish-calls.log");
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
+      // Its one automatic resume already used: the worker dies for good, and Lavish refuses replies for now.
+      const db = f.h.db();
+      try {
+        db.query("UPDATE runs SET resume_count = 1 WHERE id = ?1").run(run);
+      } finally {
+        db.close();
+      }
+      writeFileSync(join(f.h.home, "lavish-reply-fail"), "");
+      f.herdr.killHarness(parked.pane_id!, "SIGKILL");
+      await f.waitRun(run, (r) => r.liveness === "dead", "the dead worker", 20_000);
+      await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'failure_needs_you' AND run_id = ?1 AND state = 'open'", run) !== null, 10_000, "the death's P0");
+
+      queuePoll(f, 1, gate.id, [], ["Why a table here?"]);
+      const back = await f.waitRun(run, (r) => r.resume_count === 2 && r.liveness !== "dead" && r.proc_pid !== null && r.proc_pid !== parked.proc_pid, "the worker resumed from the page", 30_000);
+      expect(back.agent_session).toBe(parked.agent_session);
+      expect(one<{ page_resumes: number }>(f, "SELECT page_resumes FROM gates WHERE id = ?1", gate.id)).toEqual({ page_resumes: 1 });
+      expect(one<{ requested_by: string }>(f, "SELECT requested_by FROM operations WHERE run_id = ?1 AND kind = 'resume' ORDER BY created_at DESC LIMIT 1", run)).toEqual({ requested_by: "review page" });
+      // The page's resume settles the death's P0, as flowryn resume does: nobody is told to resume a worker already coming back.
+      expect(one<{ state: string; resolved_by: string }>(f, "SELECT state, resolved_by FROM items WHERE kind = 'failure_needs_you' AND run_id = ?1", run)).toEqual({ state: "resolved", resolved_by: "run.resume_requested" });
+      await waitUntil(() => readFileSync(calls, "utf8").includes("The worker had stopped; Flowryn is resuming it"), 10_000, "Flowryn's reply on the page");
+      // Lavish refused the worker's reply: it rides the next poll, which displaces the old listener.
+      await waitUntil(() => readFileSync(calls, "utf8").includes(`poll ${gate.page_path} --agent-reply Back, and the table stays. --takeover`), 20_000, "the reply carried by the next poll");
+      const reply = (await e.replies(task, 2))[1]!;
+      expect(reply.reply.data).toMatchObject({ gate: gate.id, shown: "queued" });
+    },
+    { timeout: 120_000 },
   );
 });
 

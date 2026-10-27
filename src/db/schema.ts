@@ -812,6 +812,25 @@ ALTER TABLE plan_phases ADD COLUMN model TEXT;
 ALTER TABLE plan_phases ADD COLUMN effort TEXT;
 `;
 
+/**
+ * Migration 39 (docs/notes/2026-10-26-review-pages-the-ah.md): a review page's conversation. One row
+ * per message: the user's (from the daemon's poll), the worker's (`review reply`) and Flowryn's own
+ * notes, in order per gate; `steer_id` is the steer that carried a user message to the worker. The
+ * gate records its one summary for the leader (`summary_item`, `summarized_at`, the conversation file
+ * it wrote in `conversation_path`) and how many workers a page message resumed (`page_resumes`).
+ */
+const REVIEW_CHAT_SQL = /* sql */ `
+CREATE TABLE review_messages (
+  gate_id TEXT NOT NULL REFERENCES gates(id), seq INTEGER NOT NULL,
+  author TEXT NOT NULL CHECK (author IN ('user','worker','flowryn')),
+  body TEXT NOT NULL, steer_id TEXT, created_at INTEGER NOT NULL,
+  PRIMARY KEY (gate_id, seq));
+ALTER TABLE gates ADD COLUMN summary_item TEXT;
+ALTER TABLE gates ADD COLUMN summarized_at INTEGER;
+ALTER TABLE gates ADD COLUMN page_resumes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gates ADD COLUMN conversation_path TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -851,6 +870,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 36, name: "grant-held", sql: GRANT_HELD_SQL },
   { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
+  { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

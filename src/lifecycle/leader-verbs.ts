@@ -226,7 +226,7 @@ const resume: VerbSpec = {
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
-    resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated"], "run.resume_requested", now);
+    resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated", "review_worker_gone"], "run.resume_requested", now);
     appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler } });
     return { data: { run: run.id, task: run.task_id, state: "resuming", operation: op.id }, hints: [`flowryn show ${run.task_id}`] };
   },

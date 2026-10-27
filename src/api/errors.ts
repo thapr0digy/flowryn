@@ -102,6 +102,8 @@ export const ERROR_CODES = {
   restart_cooldown: EXIT.policy,
   restart_dropped: EXIT.policy,
   restart_in_progress: EXIT.policy,
+  // a review reply to a review gate that closed, or whose page's Lavish session ended
+  review_closed: EXIT.policy,
   // a review URL that is not lavish's page for the review page (Q3)
   review_invalid: EXIT.validation,
   role_refused: EXIT.role,
