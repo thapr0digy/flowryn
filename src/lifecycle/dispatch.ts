@@ -177,6 +177,8 @@ export interface NewRun {
   sensitive: boolean;
   /** An existing Queued task (a plan phase): started in the backlog, not added. */
   existing: boolean;
+  /** The stage the run starts at (default: the workflow's first); a review carried on by a new run starts at its gated stage. */
+  stage?: string;
   by: string;
   /** cutover C3: a per-task delivery mode override, carried into the dispatch event's audit trail. */
   override: ModeOverride | null;
@@ -205,7 +207,8 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)
      ON CONFLICT(task_id) DO UPDATE SET workflow = excluded.workflow, sensitive = MAX(sensitive, excluded.sensitive)`,
   ).run(r.taskId, r.project.id, r.kind, r.project.delivery_mode, r.project.yolo, r.sensitive ? 1 : 0, r.workflow.id, r.now);
-  const first = r.workflow.stages[0]!;
+  const first = r.stage === undefined ? r.workflow.stages[0]! : r.workflow.stages.find((s) => s.id === r.stage);
+  if (!first) throw new FlowrynError("bad_args", `workflow ${r.workflow.id} has no stage ${r.stage}`);
   // The run token is minted at launch and kept in the run's private directory; this hash is a placeholder no token matches.
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, model, effort, state, liveness, workflow, stage,
@@ -238,6 +241,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
       intent: intent.id,
       by: r.by,
       workflow_def: r.workflow,
+      ...(r.stage !== undefined ? { stage: first.id } : {}),
       ...(r.override ? { mode: r.override.mode, mode_reason: r.override.reason } : {}),
     },
     ts: r.now,

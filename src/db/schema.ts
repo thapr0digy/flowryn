@@ -832,6 +832,17 @@ ALTER TABLE gates ADD COLUMN conversation_path TEXT;
 `;
 
 /**
+ * Migration 40 (docs/notes/2026-10-26-review-pages-the-ah.md, phase 2): a review whose run is gone
+ * for good (failed, its worktree cleaned up) is carried on by a new run of its task. A page message
+ * asks for one (`revive_requested_at`; the scheduler starts it); the old gate closes with the new
+ * run's id in `replaced_by`.
+ */
+const REVIEW_REVIVAL_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN revive_requested_at INTEGER;
+ALTER TABLE gates ADD COLUMN replaced_by TEXT;
+`;
+
+/**
  * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
  * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
  * it when the event happens (fired), or when nothing waits for it any more (closed).
@@ -886,7 +897,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
-  { version: 40, name: "watches", sql: WATCHES_SQL },
+  { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
+  { version: 41, name: "watches", sql: WATCHES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -19,7 +19,7 @@ Refused at dispatch (nothing filed): an unknown form (`bad_args`, listing the th
 
 ## Watches
 
-A PR or report event is a watch (`src/lifecycle/watches.ts`, table `watches`, migration 40, ids `w<N>`): a held backlog task of kind `watch` (id like `after-pr-112-k3`, title "Wait for PR #112 to merge") that only Flowryn completes, and that the queued task is blocked by. This is the shape standalone decision tasks already have, so every rule that starts queued work (the scheduler's auto-dispatch, `waitingOn`, `hasLanded`, the queue view, a hand edit to the backlog winning) applies unchanged. The watch task's add and hold go into the journal before the waiting task's add names it in `--blocked-by`, all in the dispatch's transaction.
+A PR or report event is a watch (`src/lifecycle/watches.ts`, table `watches`, migration 41, ids `w<N>`): a held backlog task of kind `watch` (id like `after-pr-112-k3`, title "Wait for PR #112 to merge") that only Flowryn completes, and that the queued task is blocked by. This is the shape standalone decision tasks already have, so every rule that starts queued work (the scheduler's auto-dispatch, `waitingOn`, `hasLanded`, the queue view, a hand edit to the backlog winning) applies unchanged. The watch task's add and hold go into the journal before the waiting task's add names it in `--blocked-by`, all in the dispatch's transaction.
 
 The delivery watcher's pass (`DeliveryWatcher.settleWatches`, `src/watch/delivery.ts`, every `[github] poll_ms`) settles each open watch:
 
