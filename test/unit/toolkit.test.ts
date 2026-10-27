@@ -363,3 +363,17 @@ test("other tools and empty input pass", () => {
   expect(toolkitVerdict(call("Edit", {}), PATHS)).toBeNull();
   expect(toolkitVerdict(call("mcp__lavish__x", {}), PATHS)).toBeNull();
 });
+
+describe("review-page rule: the daemon is a review page's one listener", () => {
+  test("a worker's own lavish-axi poll or reply is denied, naming review reply", () => {
+    expect(ruleOf("lavish-axi poll /r/design/design.html")).toBe("review-page");
+    expect(ruleOf("cd /r && lavish-axi reply design/design.html --agent-reply hi")).toBe("review-page");
+    expect(bash("lavish-axi poll design.html")!.reason).toContain("$FLOWRYN_BIN review reply --body-file -");
+  });
+
+  test("hosting a page, a leader's own poll and other lavish verbs are left alone", () => {
+    expect(ruleOf("lavish-axi --no-open /r/design/design.html")).toBeNull();
+    expect(ruleOf("lavish-axi playbook diagram")).toBeNull();
+    expect(ruleOf("lavish-axi poll /x/page.html", { role: "leader" })).toBeNull();
+  });
+});

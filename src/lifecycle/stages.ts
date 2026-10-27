@@ -24,6 +24,7 @@ import { reportDirFor } from "./launcher.ts";
 import { approvePlan, discardPlansOfGate, fileWorkerPlan, parsePlan } from "./plans.ts";
 import { getProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type PendingLaunch, type RunRow, type RunWithPolicy } from "./runs.ts";
+import { summarizeReview } from "./review-chat.ts";
 import { createSteer } from "./steers.ts";
 
 /**
@@ -251,6 +252,9 @@ export function closeMergeGate(db: Db, run: RunRow, outcome: { passed: true; app
   appendEvent(db, { source: "daemon", kind: outcome.passed ? "gate.passed" : "gate.changes", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, kind: "merge" }, ts: now });
 }
 
+/** What a review gate's close resolves: its own items, and what its page raised. */
+export const REVIEW_ITEMS = ["gate_ready", "review_feedback", "review_summary", "review_worker_gone", "pass_requested", "review_channel"] as const;
+
 /**
  * Pass an open review gate with the approval a human channel created (design
  * section 11: gates are human-bound like merges). The pending plan the gate
@@ -261,7 +265,8 @@ export function passReviewGate(db: Db, run: RunWithPolicy, gate: GateRow, approv
   const pos = positionOf(db, run, run.kind);
   db.query("UPDATE gates SET state = 'passed', approval_id = ?2, closed_at = ?3 WHERE id = ?1").run(gate.id, approval.id, now);
   appendEvent(db, { source: "cli", kind: "gate.passed", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, approval: approval.id, channel: approval.channel }, ts: now });
-  resolveRunItems(db, run.id, ["gate_ready", "review_feedback", "pass_requested", "review_channel"], `gate.passed ${gate.id}`, now);
+  resolveRunItems(db, run.id, REVIEW_ITEMS, `gate.passed ${gate.id}`, now);
+  summarizeReview(db, gate.id, "passed", now);
   const plan = db.query("SELECT id FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gate.id) as { id: string } | null;
   // Approving the design approves the plan it carried (design section 11): its phases reach the backlog now.
   if (plan) approvePlan(db, plan.id, `gate ${gate.id} (${approval.channel})`, now);
@@ -283,7 +288,8 @@ export function sendBack(db: Db, run: RunWithPolicy, gate: GateRow, words: strin
   const text = sanitizeBlock(words).trim();
   db.query("UPDATE gates SET state = 'changes', feedback = ?2, closed_at = ?3 WHERE id = ?1").run(gate.id, text, now);
   appendEvent(db, { source: "cli", kind: "gate.changes", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, to: pos.def.stages[target]!.id, by }, ts: now });
-  resolveRunItems(db, run.id, ["gate_ready", "review_feedback", "pass_requested", "review_channel"], `gate.changes ${gate.id}`, now);
+  resolveRunItems(db, run.id, REVIEW_ITEMS, `gate.changes ${gate.id}`, now);
+  summarizeReview(db, gate.id, "changes", now);
   discardPlansOfGate(db, gate.id, now);
   dismissGateQuestions(db, run, gate.id, now, "gate changes", "cli");
   const answers = gateAnswersNote(db, gate.id);

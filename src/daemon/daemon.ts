@@ -28,6 +28,7 @@ import { hashFile, readSnapshot, type JournalFile } from "../journal/snapshot.ts
 import { listen, request, type Listener } from "../transport/unix.ts";
 import { ensureDir } from "../util/fsx.ts";
 import { tryExclusiveLock, type HeldLock } from "../util/flock.ts";
+import { adoptedLine, readAdoptedMarker } from "../lifecycle/home-adopt.ts";
 import { ulid } from "../util/ulid.ts";
 import { PROTO, VERSION } from "../version.ts";
 import { fileLogger, type Log } from "./logger.ts";
@@ -212,6 +213,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
   // Work outlived the shutdown grace: it may still query, so the database is left for the exit to close.
   let keepDbOpen = false;
   const sock = socketPath(home, env);
+  // A home adopted into another (flowryn home adopt) stays an archive: a clean exit, so launchd leaves it stopped.
+  const adopted = readAdoptedMarker(home);
+  if (adopted) {
+    say(adoptedLine(home, adopted));
+    return 0;
+  }
 
   try {
     let config = loadConfig(home).config;
@@ -686,7 +693,20 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const reviewOpener = new ReviewOpener({ db: database, review: () => reviewConfig(config), mode: () => opener, log, now: Date.now });
     if (opener.kind === "off") log(`browser: review pages are not opened (${opener.why})`);
     else if (opener.kind === "record") log(`browser: review pages are recorded to ${opener.path} (FLOWRYN_OPENER), never opened`);
-    const lavishPoller = new LavishPoller({ db: database, lavish: lavishTool, log, now: Date.now, pidDir: join(config.state_dir, "lavish-polls"), opener: reviewOpener, channelAlertMs: () => reviewConfig(config).channel_alert_ms });
+    const lavishPoller = new LavishPoller({
+      db: database,
+      lavish: lavishTool,
+      log,
+      now: Date.now,
+      pidDir: join(config.state_dir, "lavish-polls"),
+      opener: reviewOpener,
+      channelAlertMs: () => reviewConfig(config).channel_alert_ms,
+      // A review page's words went to its worker: deliver the steer now, and grant a resume it asked for.
+      routed: (runId, resumed) => {
+        bus.notify(runId);
+        if (resumed) scheduler?.kick();
+      },
+    });
 
     const services: DaemonServices = {
       db: database,
@@ -704,7 +724,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       delivery,
       sched,
       restart,
-      lavish: { kick: () => lavishPoller.kick() },
+      lavish: { kick: () => lavishPoller.kick(), reply: (gate, page, text) => lavishPoller.reply(gate, page, text) },
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 

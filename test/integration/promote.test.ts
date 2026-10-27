@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { listTasks, processRunner, type BacklogTask } from "../../src/journal/tasks-axi.ts";
+import { addReviewMessage } from "../../src/lifecycle/review-chat.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
@@ -207,7 +208,7 @@ describe("a scout whose run is over", () => {
 
 describe("a scout in a review with questions", () => {
   test(
-    "is promoted: its open review questions close unanswered and its page is no longer polled",
+    "is promoted: its open review questions close unanswered, its page is no longer polled and its conversation is summarized for the leader",
     async () => {
       const page = filledDesignPage({ widget: true });
       const questions = JSON.stringify({ questions: [{ key: "store", kind: "single", question: "Where?", options: ["db", "file"], recommend: "db", blocks: "which store the cache writes to" }] });
@@ -234,8 +235,25 @@ describe("a scout in a review with questions", () => {
       };
       const gate = (decisions()[0] as { gate_id: string }).gate_id;
       expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "open", answered_via: null, items: 1, resolved_by: null }]);
+      const seeded = env.h.db();
+      try {
+        seeded.transaction(() => addReviewMessage(seeded, { id: gate, run_id: run }, "user", "Use the db", Date.now()))();
+      } finally {
+        seeded.close();
+      }
       expect((await env.json(["promote", task])).code).toBe(0);
       expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "dismissed", answered_via: "promoted", items: 0, resolved_by: `run.promoted ${gate}` }]);
+      // The page's conversation reaches the leader as the review's one summary.
+      const db = env.h.db();
+      try {
+        expect(db.query("SELECT summarized_at IS NOT NULL AS done FROM gates WHERE id = ?1").get(gate)).toEqual({ done: 1 });
+        const recap = db.query("SELECT state, COALESCE(full_line, line) AS line FROM items WHERE kind = 'review_recap' AND run_id = ?1").all(run) as { state: string; line: string }[];
+        expect(recap).toHaveLength(1);
+        expect(recap[0]!.state).toBe("open");
+        expect(recap[0]!.line).toContain(`Review of ${task} (design gate ${gate}): the scout was promoted to a ship and its review dropped; 1 message from the user`);
+      } finally {
+        db.close();
+      }
     },
     { timeout: 60_000 },
   );

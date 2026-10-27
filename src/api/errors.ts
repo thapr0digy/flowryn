@@ -27,6 +27,8 @@ export const ERROR_CODES = {
   // accounts (docs/notes/2026-10-22-multiple-ai-provider-u9.md): an account outside the project's scope, a signed-out login
   account_scope_mismatch: EXIT.policy,
   account_signed_out: EXIT.unavailable,
+  // flowryn home adopt: the old home is live, or its work clashes with this home's or its scope rules
+  adopt_refused: EXIT.policy,
   already_exists: EXIT.validation,
   already_running: EXIT.failure,
   approval_required: EXIT.policy,
@@ -100,6 +102,8 @@ export const ERROR_CODES = {
   restart_cooldown: EXIT.policy,
   restart_dropped: EXIT.policy,
   restart_in_progress: EXIT.policy,
+  // a review reply to a review gate that closed, or whose page's Lavish session ended
+  review_closed: EXIT.policy,
   // a review URL that is not lavish's page for the review page (Q3)
   review_invalid: EXIT.validation,
   role_refused: EXIT.role,

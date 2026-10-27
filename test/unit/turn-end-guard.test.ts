@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { DEFAULT_TIMING } from "../../src/config/workers.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
-import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
+import { REVIEW_TURN_END_REMINDER, TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
+import { addReviewMessage } from "../../src/lifecycle/review-chat.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { getRun } from "../../src/lifecycle/runs.ts";
 import { createSteer, markRung } from "../../src/lifecycle/steers.ts";
@@ -394,5 +395,25 @@ describe("deliberate stops already covered (regression)", () => {
     });
     expect(stop()).toBeNull();
     expect(reminders()).toBe(0);
+  });
+});
+
+describe("a review gate and the page's messages", () => {
+  test("a gate is a rightful wait, until a page message the worker was handed goes unanswered; a review reply is its outcome", () => {
+    update("UPDATE runs SET stage = 'design', stage_state = 'review' WHERE id = 'r1'");
+    update("INSERT INTO gates (id, run_id, stage, kind, state, opened_at, page_path) VALUES ('g1', 'r1', 'design', 'review', 'open', ?1, '/r/design.html')", clock);
+    expect(stop()).toBeNull();
+    clock += 10;
+    const steer = tx(db, () => createSteer(db, run(), "the user's words", clock));
+    tx(db, () => addReviewMessage(db, { id: "g1", run_id: "r1" }, "user", "Why a table?", clock, steer.id));
+    // Not yet handed to the worker: still a wait.
+    expect(stop()).toBeNull();
+    update("UPDATE messages SET carried_at = ?2 WHERE id = ?1", steer.id, clock + 5);
+    expect(stop()).toBe(REVIEW_TURN_END_REMINDER);
+    expect(OUTCOME_KINDS).toContain("review.replied");
+    clock += 10;
+    tx(db, () => addReviewMessage(db, { id: "g1", run_id: "r1" }, "worker", "Because rows compare.", clock));
+    expect(stop()).toBeNull();
+    expect(results().at(-1)).toMatchObject({ obeyed: true });
   });
 });

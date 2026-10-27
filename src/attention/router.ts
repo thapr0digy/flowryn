@@ -275,7 +275,7 @@ export function questionWakeLine(items: Pick<RankedItem, "id" | "kind" | "decisi
   const ids = items.map((i) => i.id).join(",");
   const decisions = items.map((i) => i.decision_id).filter((d): d is string => d !== null);
   const head = `${QUESTION_WAKE}${ids}]: `;
-  const onlyQuestions = items.every((i) => i.kind !== "review_feedback");
+  const onlyQuestions = items.every((i) => i.kind !== "review_feedback" && i.kind !== "review_summary");
   const count = `${items.length} ${onlyQuestions ? "worker question" : "item"}${items.length === 1 ? "" : "s"} for the user`;
   const details = `. Details: flowryn ${onlyQuestions ? "decision list" : "fleet"}`;
   const line = `${head}${count}${decisions.length > 0 ? ` (${decisions.join(", ")})` : ""}${details}`;
