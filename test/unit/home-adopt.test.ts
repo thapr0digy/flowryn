@@ -118,6 +118,22 @@ describe("home adopt assumptions", () => {
     expect(intentArgs(pendingIntents(db, "todos")[1]!).flags).toEqual({ reason: "waits", kind: "external" });
   });
 
+  test("an adopted plan phase keeps every column, its model and effort among them, under its new plan id", () => {
+    const { db, config } = mainDb();
+    const phase: PhaseRow = { plan_id: "p1", phase_no: 1, task_id: "pinned-x1", title: "one", body: "one", workflow: "fix", harness: "claude", account: "claude-work", model: "sonnet", effort: "high", blocked_by: "[]" };
+    const payload = tx(db, () => adoptHome(db, config, oldHome([task("pinned-x1", "queued")], [phase]), undefined, 1));
+    // SELECT * returns any column a later migration adds, so this fails until the copy carries it too.
+    expect(db.query("SELECT * FROM plan_phases").all()).toEqual([{ ...phase, plan_id: payload.plans.p1! }]);
+  });
+
+  test("an adopted task's policy row keeps every column", () => {
+    const { db, config } = mainDb();
+    const old = oldHome([task("policy-x1", "queued")]);
+    old.policies = [{ ...old.policies[0]!, sensitive: 1, auto: 0, reason: "why", import_source: "legacy:7", mode_reason: "mode" }];
+    tx(db, () => adoptHome(db, config, old, undefined, 1));
+    expect(db.query("SELECT * FROM task_policy").all()).toEqual(old.policies);
+  });
+
   test("a marker that cannot be read still marks the home adopted", () => {
     const home = join(root, "torn");
     mkdirSync(home, { recursive: true });
