@@ -701,7 +701,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       pidDir: join(config.state_dir, "lavish-polls"),
       opener: reviewOpener,
       channelAlertMs: () => reviewConfig(config).channel_alert_ms,
-      // A review page's words went to its worker: deliver the steer now, and grant a resume it asked for.
+      // A review page's words went to its worker: deliver the steer now, and grant a resume or start a new run it asked for.
       routed: (runId, resumed) => {
         bus.notify(runId);
         if (resumed) scheduler?.kick();
