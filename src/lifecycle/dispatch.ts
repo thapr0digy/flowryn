@@ -189,7 +189,7 @@ async function baseFlag(deps: StartDeps, args: Record<string, unknown>, project:
 }
 
 /** The base a Queued task was filed with (`dispatch --blocked-by … --base`); null: the default. */
-function storedBase(db: Db, taskId: string): string | null {
+export function storedBase(db: Db, taskId: string): string | null {
   return (db.query("SELECT base_branch FROM task_policy WHERE task_id = ?1").get(taskId) as { base_branch: string | null } | null)?.base_branch ?? null;
 }
 

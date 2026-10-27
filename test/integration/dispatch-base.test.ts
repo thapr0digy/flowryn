@@ -125,6 +125,46 @@ describe("dispatch --base", () => {
     { timeout: 60_000 },
   );
 
+  test(
+    "a based yolo PR whose head moves by a clean merge of its base is carried, not diverged",
+    async () => {
+      const verify = ["printf ' 1 pass\\n 0 fail\\n 1 expect() calls\\nRan 1 tests across 1 file. [1.00ms]\\n'"];
+      ship = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: `[projects.web]\nverify = ${JSON.stringify(verify)}\n` });
+      const e = ship;
+      e.github.repo("acme/web").defaultChecks = [];
+      pushReleaseBranch(e.fleet.origin!);
+      const { run } = await shipOnBase(e, "release/2");
+      await e.fleet.waitRun(run, (r) => r.state === "ready", "delivered into release/2");
+      const pr = e.github.pr("acme/web", 1);
+      const approved = pr.headSha;
+
+      const dir = mkdtempSync(join(tmpdir(), "fl-base-carry-"));
+      scratch.push(dir);
+      git(dir, ["clone", "-q", e.fleet.origin!, "c"]);
+      const clone = join(dir, "c");
+      git(clone, ["switch", "-q", "release/2"]);
+      writeFileSync(join(clone, "landed.txt"), "another PR landed on release/2\n");
+      git(clone, ["add", "landed.txt"]);
+      git(clone, ["commit", "-q", "-m", "another release PR"]);
+      git(clone, ["push", "-q", "origin", "HEAD:refs/heads/release/2"]);
+      git(clone, ["switch", "-q", pr.headRef]);
+      git(clone, ["merge", "-q", "--no-ff", "--no-edit", "origin/release/2"]);
+      git(clone, ["push", "-q", "origin", `HEAD:refs/heads/${pr.headRef}`, "HEAD:refs/pull/1/head"]);
+      const head = git(clone, ["rev-parse", "HEAD"]);
+
+      const db = e.fleet.h.db();
+      try {
+        await waitUntil(() => db.query("SELECT 1 FROM events WHERE kind = 'run.head_carried'").get() !== null, 30_000, "the delivery to carry to the new head");
+        const carried = JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'run.head_carried'").get() as { payload: string }).payload) as Record<string, unknown>;
+        expect(carried).toMatchObject({ from: approved, to: head, via: "watcher" });
+        expect(db.query("SELECT id FROM divergences WHERE summary LIKE 'the PR head moved%'").all()).toHaveLength(0);
+      } finally {
+        db.close();
+      }
+    },
+    { timeout: 120_000 },
+  );
+
   test("a queued ship keeps its base; starting a queued task refuses a new --base", async () => {
     const env = await makeFleetEnv({ mode: "no-mistakes", origin: true });
     fleets.push(env);

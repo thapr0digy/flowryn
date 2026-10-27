@@ -17,7 +17,7 @@ import { createStandaloneDecision, DECISION_OPTION, getDecision, isRuleAnswer, t
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject } from "./projects.ts";
-import { getRun, isTerminal, type RunRow } from "./runs.ts";
+import { getRun, getRunWithPolicy, isTerminal, runBase } from "./runs.ts";
 import type { ShowText } from "./show-text.ts";
 import { createSteer } from "./steers.ts";
 import { lensFor, projectRefScope, recordTaskScope, refScope, requireInScope } from "../leader/scope.ts";
@@ -67,11 +67,6 @@ function blockTargetExists(ctx: HandlerCtx, id: string): boolean {
  * question is held instead while its gate is open: the verdict steer carries
  * every answer at once (gate-questions.ts).
  */
-/** The branch a run's PR targets (its base, else its project's default), for a steer that names it. */
-function runBaseOf(db: Db, run: RunRow): string {
-  const project = db.query("SELECT p.default_branch FROM task_policy t JOIN projects p ON p.id = t.project_id WHERE t.task_id = ?1").get(run.task_id) as { default_branch: string } | null;
-  return run.base_branch ?? project?.default_branch ?? "main";
-}
 
 export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader" | "policy"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
   const now = ctx.now();
@@ -82,12 +77,12 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
   resolveDecisionItems(ctx.db, d.id, `decision.answered ${d.id}`, now);
   if (d.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: d.task_id, positional: [d.task_id], now });
   if (d.run_id === null) recordIntent(ctx.db, { file: "backlog", verb: "done", taskId: d.task_id, positional: [d.task_id], now });
-  const run = d.run_id ? getRun(ctx.db, d.run_id) : null;
+  const run = d.run_id ? getRunWithPolicy(ctx.db, d.run_id) : null;
   const held = d.gate_id !== null && (ctx.db.query("SELECT state FROM gates WHERE id = ?1").get(d.gate_id) as { state: string } | null)?.state === "open";
   let steer: string | null = null;
   if (run && !isTerminal(run.state) && !held) {
     // The CI-wait watchdog's question was never the worker's: its answer is carried out as an instruction (keep-waiting sends none).
-    const text = d.origin === CI_WAIT_ORIGIN ? ciWaitSteer(d.id, a.choice, a.words, runBaseOf(ctx.db, run)) : `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
+    const text = d.origin === CI_WAIT_ORIGIN ? ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) : `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
     if (text !== null) steer = createSteer(ctx.db, run, text, now, d.id).id;
   }
   return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [], held };

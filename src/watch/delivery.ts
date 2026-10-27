@@ -303,15 +303,16 @@ export class DeliveryWatcher {
 
   /**
    * Whether a delivered head that moved by commits on top moved only by clean
-   * merges of the project's default branch (docs/notes/2026-10-23-a-clean-merge-fm.md),
+   * merges of the run's base (docs/notes/2026-10-23-a-clean-merge-fm.md),
    * asked of git where headHistoryOf asked; never a yes when git cannot say.
    */
   private async cleanMergeOf(run: RunWithPolicy, delivered: string, head: string, prBase: string): Promise<CleanMerge> {
     const project = getProject(this.deps.db, run.project_id);
     if (!project) return { ok: false, why: `project ${run.project_id} is not registered` };
-    if (prBase !== project.default_branch) return { ok: false, why: `the PR's base is ${prBase}, not ${project.default_branch}` };
+    const base = runBase(run, project);
+    if (prBase !== base) return { ok: false, why: `the PR's base is ${prBase}, not ${base}` };
     const cwd = existsSync(run.worktree_path) ? run.worktree_path : project.path;
-    return cleanMainMerge(this.deps.git, cwd, { from: delivered, to: head, base: project.default_branch, fetchGit: this.deps.headFetchGit ?? this.deps.git }).catch(
+    return cleanMainMerge(this.deps.git, cwd, { from: delivered, to: head, base, fetchGit: this.deps.headFetchGit ?? this.deps.git }).catch(
       (error: unknown) => ({ ok: false, why: `git could not say: ${(error as Error).message}` }) as const,
     );
   }

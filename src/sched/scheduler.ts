@@ -11,7 +11,7 @@ import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
-import { checkStart, createRun, signInOf, type StartDeps } from "../lifecycle/dispatch.ts";
+import { checkStart, createRun, signInOf, storedBase, type StartDeps } from "../lifecycle/dispatch.ts";
 import { reviveReview, revivalBlocked, revivalsDue } from "../lifecycle/review-revival.ts";
 import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
@@ -646,8 +646,7 @@ export class Scheduler {
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
-        const base = (db.query("SELECT base_branch FROM task_policy WHERE task_id = ?1").get(phase.task_id) as { base_branch: string | null } | null)?.base_branch ?? null;
-        const start = await checkStart(this.deps.startDeps, project, account, base);
+        const start = await checkStart(this.deps.startDeps, project, account, storedBase(db, phase.task_id));
         made = this.startPhase(phase, project, account, start, workflow, usage === "probe", moved, now());
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
