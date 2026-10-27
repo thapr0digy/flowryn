@@ -838,6 +838,7 @@ const show: VerbSpec = {
         resumes: run.resume_count,
         worktree: run.worktree_path,
         branch: run.branch,
+        ...(run.base_branch ? { base: run.base_branch } : {}),
         artifacts,
         ...(deliveryView(ctx, run) ? { delivery: deliveryView(ctx, run) } : {}),
         steers,

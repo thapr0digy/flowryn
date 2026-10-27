@@ -642,7 +642,8 @@ export class Scheduler {
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
-        const start = await checkStart(this.deps.startDeps, project, account);
+        const base = (db.query("SELECT base_branch FROM task_policy WHERE task_id = ?1").get(phase.task_id) as { base_branch: string | null } | null)?.base_branch ?? null;
+        const start = await checkStart(this.deps.startDeps, project, account, base);
         made = this.startPhase(phase, project, account, start, workflow, usage === "probe", moved, now());
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
@@ -662,7 +663,7 @@ export class Scheduler {
     phase: PhaseRow & { plan_title: string; source_task: string | null; phases: number },
     project: ProjectRow,
     account: Account,
-    start: { version: string; base: string },
+    start: { version: string; base: string; baseBranch: string | null },
     workflow: WorkflowDef,
     probe: boolean,
     moved: { from: string; why: string } | null,
@@ -672,7 +673,7 @@ export class Scheduler {
     const config = this.deps.config();
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
-      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, baseBranch: start.baseBranch, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, account.id, runId, t);
       if (moved) appendEvent(db, { source: "daemon", kind: "sched.overflow", runId, taskId: phase.task_id, payload: { from: moved.from, to: account.id, why: moved.why, at: "phase start" }, ts: t });
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);

@@ -189,12 +189,12 @@ export function strandedCiWaits(db: Db): { id: string; task_id: string; state: s
 }
 
 /** The steer that carries out the user's answer; null for keep-waiting (the watchdog asks again later). */
-export function ciWaitSteer(decisionId: string, choice: string, words: string | null): string | null {
+export function ciWaitSteer(decisionId: string, choice: string, words: string | null, base = "main"): string | null {
   const said = words ? ` The user's words: "${sanitizeLine(words, 300)}"` : "";
   if (choice === "merge-main") {
     return (
       `The user chose merge-main for ${decisionId}: your no-mistakes pipeline waited in CI with no checks registered. ` +
-      "Merge origin/main into your branch with a new commit (git fetch origin, then git merge origin/main; never rebase or force-push), run the tests, " +
+      `Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}; never rebase or force-push), run the tests, ` +
       "then no-mistakes rerun (it cancels this run's CI wait and validates the branch again) and drive it with no-mistakes axi as usual. " +
       `Then deliver as usual.${said}`
     );

@@ -336,6 +336,13 @@ describe("CI-wait pieces", () => {
     expect(declaresNoCi(null)).toBe(false);
   });
 
+  test("merge-main names the run's base: main by default, a dispatch --base branch otherwise", () => {
+    expect(ciWaitSteer("q1", "merge-main", null)).toContain("git merge origin/main;");
+    const based = ciWaitSteer("q1", "merge-main", null, "release/2")!;
+    expect(based).toContain("Merge origin/release/2 into your branch");
+    expect(based).not.toContain("origin/main");
+  });
+
   test("keep-waiting and unknown answers carry no steer", () => {
     expect(ciWaitSteer("q1", "keep-waiting", null)).toBeNull();
     expect(ciWaitSteer("q1", "other", null)).toBeNull();

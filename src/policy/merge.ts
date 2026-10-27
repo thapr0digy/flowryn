@@ -12,7 +12,7 @@ import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { approvalRef, deliveredOf, prEvidenceFrom, recordPrEvidence, remoteHead, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun, type LandedBy } from "../lifecycle/landing.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
-import { isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { isTerminal, runBase, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import {
   consumeApproval,
   findAttempt,
@@ -361,6 +361,8 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   // 2 · not a draft, and the head on the remote (local-only: a clean fast-forward of the default branch).
   if (pr) {
     if (pr.draft) throw new FlowrynError("pr_draft", `${delivered.ref} is a draft`);
+    const base = runBase(run, project);
+    if (pr.baseRef !== base) throw new FlowrynError("base_mismatch", `merge refused: ${delivered.ref} targets ${pr.baseRef}, not its base ${base}`, `retarget it to ${base}, or flowryn decline ${task}`);
     if (facts.remote !== pr.headSha) throw new FlowrynError("head_not_on_remote", `the remote has ${facts.remote?.slice(0, 8) ?? "nothing"} for ${pr.headRef}, not the PR head ${pr.headSha.slice(0, 8)}`);
   } else {
     if (facts.primaryBranch !== project.default_branch) {

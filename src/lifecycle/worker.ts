@@ -22,7 +22,7 @@ import { cleanMainMerge } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
-import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { getRunWithPolicy, holdReason, isTerminal, runBase, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 import { landScout } from "./landing.ts";
@@ -192,7 +192,7 @@ const ask: VerbSpec = {
     const project = getProject(ctx.db, run.project_id);
     if (!project) return { ok: false, reason: `no project ${run.project_id}` };
     const config = ctx.config();
-    return readRuleFacts({ noMistakes: resolveTool(config, "no_mistakes"), git: ctx.delivery.git, timeoutMs: cleanupConfig(config).nomistakes_timeout_ms }, run.worktree_path, project.default_branch);
+    return readRuleFacts({ noMistakes: resolveTool(config, "no_mistakes"), git: ctx.delivery.git, timeoutMs: cleanupConfig(config).nomistakes_timeout_ms }, run.worktree_path, runBase(run, project));
   },
   apply(ctx, args, prepared) {
     const run = activeRun(ctx);

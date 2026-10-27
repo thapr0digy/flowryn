@@ -831,6 +831,16 @@ ALTER TABLE gates ADD COLUMN page_resumes INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE gates ADD COLUMN conversation_path TEXT;
 `;
 
+/**
+ * Migration 40 (docs/notes/2026-10-27-stack-a-plan-4y.md): a task's base branch, the branch it
+ * starts from and its PR targets (`dispatch --base`); null is the project's default branch. The
+ * task keeps what was asked; the run keeps the branch its PR targets now.
+ */
+const BASE_BRANCH_SQL = /* sql */ `
+ALTER TABLE task_policy ADD COLUMN base_branch TEXT;
+ALTER TABLE runs ADD COLUMN base_branch TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -871,6 +881,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 37, name: "artifact-carried-from", sql: ARTIFACT_CARRIED_FROM_SQL },
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
+  { version: 40, name: "base-branch", sql: BASE_BRANCH_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -8,7 +8,7 @@ import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, st
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { deliveryBasis, deliveryTransition, type BasisPart } from "../lifecycle/observed.ts";
-import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { getRun, getRunWithPolicy, runBase, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
@@ -444,11 +444,11 @@ export class DeliveryWatcher {
     if (checks === null || checks > 0) return;
     const project = getProject(db, run.project_id);
     if (!project) return;
-    const facts = await readBranchFacts(this.deps.git, run.worktree_path, project.default_branch);
+    const facts = await readBranchFacts(this.deps.git, run.worktree_path, runBase(run, project));
     const observed = deliveryTransition(db, seen, CI_WAIT_PARTS, "ci_wait", "nomistakes", now(), (current) => {
       if (current.state !== "validating" && current.state !== "running") return null;
       if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return null;
-      const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: project.default_branch }, facts, alert, now());
+      const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: runBase(run, project) }, facts, alert, now());
       yieldToCiWait(db, current, nm, now());
       return id;
     });

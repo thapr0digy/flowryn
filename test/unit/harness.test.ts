@@ -178,6 +178,24 @@ describe("worker contract text", () => {
     expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.");
   });
 
+  test("assumption: a task with no base gets the same contract text as before, byte for byte", () => {
+    for (const mode of ["direct-PR", "no-mistakes", "local-only"] as const) {
+      const before: ContractDelivery = { kind: "ship", mode, defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] } };
+      expect(workerContract("claude", STYLE_BLOCK, { ...before, base: null })).toBe(workerContract("claude", STYLE_BLOCK, before));
+    }
+  });
+
+  test("a task's base (dispatch --base) is its PR target, the branch it takes in, and no-mistakes' --base-branch", () => {
+    const direct = workerContract("claude", null, { kind: "ship", mode: "direct-PR", defaultBranch: "main", base: "release/2" });
+    expect(direct).toContain("open a PR into release/2 (gh-axi pr create)");
+    expect(direct).toContain("  To take your base: new commits, git merge origin/release/2, a plain git push.");
+    expect(direct).not.toContain("To take main");
+    const nm = workerContract("claude", null, { kind: "ship", mode: "no-mistakes", defaultBranch: "main", base: "release/2", lastStage: { id: "ship", pools: ["validation"] } });
+    expect(nm).toContain("  This task's base is release/2, not main: pass --base-branch release/2 on every no-mistakes axi run that starts a run.");
+    expect(nm).toContain("never respond (its fix rebases); git merge origin/release/2, resolve");
+    expect(workerContract("claude", null, { kind: "ship", mode: "no-mistakes", defaultBranch: "main" })).not.toContain("--base-branch");
+  });
+
   test("every ask the contract shows carries the flags ask requires, in every delivery mode", () => {
     const deliveries: ContractDelivery[] = [
       { kind: "scout", mode: "local-only", defaultBranch: "main" },

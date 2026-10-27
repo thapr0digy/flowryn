@@ -14,7 +14,7 @@ import { deliveredOf, projectRepo } from "./delivery.ts";
 import { reportLink } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { failOperation, openOperation } from "./operations.ts";
-import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { getRunWithPolicy, isTerminal, runBase, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { closeMergeGate } from "./stages.ts";
 import { dismissRunQuestions } from "./gate-questions.ts";
@@ -185,7 +185,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
         kind: run.kind,
         worktree: run.worktree_path,
         branch: run.branch,
-        defaultBranch: project.default_branch,
+        defaultBranch: runBase(run, project),
         repo: projectRepo(project, github.web_url),
         recordedPrUrl: delivered?.kind === "pr" ? delivered.ref : null,
         discardApproved: opts.discardApproval !== null || Boolean(opts.discardAttempt),
