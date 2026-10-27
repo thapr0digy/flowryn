@@ -307,22 +307,23 @@ export interface PolledGate {
 }
 
 export const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
-/** A run whose worker a review page can still bring back: live, or failed with its worktree still there. */
-const RESUMABLE_RUN = "(r.state NOT IN ('cleaned','failed','cancelled') OR (r.state = 'failed' AND COALESCE(r.cleanup, '') != 'done'))";
+/** A run a review page can still bring back: live, or failed (resumed while its worktree remains, else carried on by a new run). */
+const PAGE_RUN = "r.state NOT IN ('cleaned','cancelled')";
 
 /**
  * Gates whose page the daemon polls: open on a live run with a known page,
  * and the user has not ended the session. Every review page is listened to
  * while its gate is open, with or without questions, so Lavish never shows
  * the page's agent as not listening while the review waits. A failed run's
- * page is listened to as well while its worktree remains: a message there
- * resumes its worker (src/lifecycle/review-chat.ts).
+ * page is listened to as well: a message there resumes its worker while its
+ * worktree remains, else starts a new run of the task at the gated stage
+ * (src/lifecycle/review-chat.ts). A cancelled run's page is not.
  */
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
     .query(
       `SELECT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id
-       WHERE g.state = 'open' AND ${RESUMABLE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
+       WHERE g.state = 'open' AND ${PAGE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
     )
     .all() as PolledGate[];
 }

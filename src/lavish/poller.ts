@@ -56,7 +56,7 @@ export interface PollerDeps {
   channelAlertMs?(): number;
   /** How long a poll must keep running to count as listening (default STEADY_MS; tests shorten it). */
   steadyMs?: number;
-  /** After a batch went to a run: deliver its steer now, and start the scheduler's pass when it asked for a resume. */
+  /** After a batch went to a run: deliver its steer now, and start the scheduler's pass when it asked for a resume or a new run. */
   routed?(runId: string, resumed: boolean): void;
 }
 
@@ -364,7 +364,7 @@ export class LavishPoller {
     });
     if (routed && routed.to !== "nobody") {
       const run = (this.deps.db.query("SELECT run_id FROM gates WHERE id = ?1").get(gate) as { run_id: string } | null)?.run_id;
-      if (run) this.deps.routed?.(run, routed.to === "resumed");
+      if (run) this.deps.routed?.(run, routed.to === "resumed" || routed.to === "new_run");
     }
     const recorded = outcomes.length > 0 || comments.length > 0 || passes.length > 0;
     if (!out.ended && (recorded || routed)) {

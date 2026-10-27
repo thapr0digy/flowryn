@@ -20,9 +20,11 @@ import { taskTitle, type RunRow } from "./runs.ts";
  * batch, quoted between two nonce lines so it reads as feedback, never as
  * permission. The worker answers with `review reply`, which the daemon shows in
  * the page (`lavish-axi reply`). A worker that is gone is resumed (the same
- * run, at most PAGE_RESUMES_MAX times per gate); a cancelled or cleaned run is
- * never revived from here. When the session ends, or the gate passes or is
- * sent back, the leader gets one summary. Plain rules over the database: no
+ * run, at most PAGE_RESUMES_MAX times per gate). A failed run whose worktree
+ * was cleaned up is carried on by a new run of its task at the gated stage
+ * (src/lifecycle/review-revival.ts); a cancelled run is never revived. When the
+ * session ends, or the gate passes, is sent back or is replaced, the leader
+ * gets one summary. Plain rules over the database: no
  * model reads or writes any of it.
  */
 
@@ -75,6 +77,7 @@ export type Routed =
   | { to: "worker"; steer: string }
   | { to: "restarting"; steer: string }
   | { to: "resumed"; steer: string }
+  | { to: "new_run" }
   | { to: "nobody"; why: "cancelled" | "ended" | "closed" | "resume_limit" | "not_resumable"; item?: string | null };
 
 interface GateRunRow {
@@ -151,9 +154,14 @@ export function routePageBatch(db: Db, gateId: string, batch: PageBatch, now: nu
   };
   if (gate.state !== "open") return nobody("closed");
   if (run.state === "cancelled") return nobody("cancelled");
-  if (run.state === "cleaned" || run.cleanup === "done") return nobody("ended");
   const open = openOperation(db, run.id);
   if (open?.kind === "cancel") return nobody("cancelled");
+  if (revivable(run)) {
+    keep(null);
+    requestRevival(db, run, gate.id, now);
+    return { to: "new_run" };
+  }
+  if (run.state === "cleaned" || run.cleanup === "done") return nobody("ended");
 
   const steer = createSteer(db, run, pageSteerText(gate, { messages: kept, answers: batch.answers, ended: batch.ended }), now).id;
   keep(steer);
@@ -166,6 +174,21 @@ export function routePageBatch(db: Db, gateId: string, batch: PageBatch, now: nu
   if (!run.agent_session) return nobodyAfterSteer(db, run, gate, now, "not_resumable");
   requestPageResume(db, run, gate, now);
   return { to: "resumed", steer };
+}
+
+/** A run gone for good but not by the user's choice: failed, and its worktree cleaned up. A new run carries its review on. */
+export function revivable(run: Pick<RunRow, "state" | "cleanup">): boolean {
+  return run.state === "failed" && run.cleanup === "done";
+}
+
+/**
+ * Ask for a new run to carry a gone run's review on: the scheduler starts it
+ * (src/lifecycle/review-revival.ts). Asked once per gate. Call inside a
+ * transaction.
+ */
+function requestRevival(db: Db, run: RunRow, gateId: string, now: number): void {
+  const marked = db.query("UPDATE gates SET revive_requested_at = ?2 WHERE id = ?1 AND revive_requested_at IS NULL").run(gateId, now);
+  if (marked.changes > 0) appendEvent(db, { source: "daemon", kind: "review.revive_requested", runId: run.id, taskId: run.task_id, payload: { gate: gateId, by: "review page" }, ts: now });
 }
 
 /** Nothing brings the worker back now: the leader hears of it once. */
@@ -216,6 +239,8 @@ export function routedReply(routed: Routed): string {
       return "The worker is restarting; your message is kept and reaches it when it is back.";
     case "resumed":
       return "The worker had stopped; Flowryn is resuming it, and your message reaches it when it is back.";
+    case "new_run":
+      return "This review's worker has ended and its worktree is gone; Flowryn is starting a new run of the task at this stage, which reads this conversation and opens a new review.";
     case "nobody":
       switch (routed.why) {
         case "cancelled":
@@ -256,13 +281,14 @@ export function replyGate(db: Db, runId: string): { id: string; run_id: string; 
   } | null;
 }
 
-export type ReviewOutcome = "ended" | "passed" | "changes" | "promoted";
+export type ReviewOutcome = "ended" | "passed" | "changes" | "promoted" | "replaced";
 
 const OUTCOME_WORDS: Record<ReviewOutcome, string> = {
   ended: "the user ended the session",
   passed: "the review passed",
   changes: "the review was sent back",
   promoted: "the scout was promoted to a ship and its review dropped",
+  replaced: "its worker had ended for good (worktree removed), so a new run started",
 };
 
 interface SummaryGate {
@@ -318,7 +344,7 @@ function pageRevised(page: string | null, openedAt: number): boolean {
  * file beside the page with all of it. Nothing on the page and a closed gate:
  * recorded, no item. Call inside a transaction.
  */
-export function summarizeReview(db: Db, gateId: string, outcome: ReviewOutcome, now: number, log?: (message: string) => void): string | null {
+export function summarizeReview(db: Db, gateId: string, outcome: ReviewOutcome, now: number, log?: (message: string) => void, newRun?: string): string | null {
   const gate = db
     .query(
       `SELECT g.id, g.run_id, g.stage, g.state, g.page_path, g.opened_at, g.summarized_at, g.page_resumes, r.task_id, r.state AS run_state
@@ -358,8 +384,8 @@ export function summarizeReview(db: Db, gateId: string, outcome: ReviewOutcome, 
   const first = fromUser[0] ? `; first: "${sanitizeLine(fromUser[0].body, 60)}"` : "";
   const where = file ? `; conversation in ${file}` : "";
   // The item line is cut at its limit (the whole is kept for show): what the leader acts on first.
-  const line = `Review of ${gate.task_id} (${gate.stage} gate ${gateId}): ${OUTCOME_WORDS[outcome]}; ${counts.join(", ")}${ask}${where}${first}`;
-  const event = appendEvent(db, { source: "daemon", kind: "review.summarized", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, outcome, messages: fromUser.length, replies: replies.length, file, revised, pass_words: passWords }, ts: now });
+  const line = `Review of ${gate.task_id} (${gate.stage} gate ${gateId}): ${OUTCOME_WORDS[outcome]}${newRun ? ` (${newRun}, at stage ${gate.stage})` : ""}; ${counts.join(", ")}${ask}${where}${first}`;
+  const event = appendEvent(db, { source: "daemon", kind: "review.summarized", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, outcome, messages: fromUser.length, replies: replies.length, file, revised, pass_words: passWords, ...(newRun ? { new_run: newRun } : {}) }, ts: now });
   const item = openItem(db, { kind: stillOpen ? "review_summary" : "review_recap", eventSeq: event.seq, taskId: gate.task_id, runId: gate.run_id, line, now });
   db.query("UPDATE gates SET summary_item = ?2 WHERE id = ?1").run(gateId, item);
   return item;

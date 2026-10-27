@@ -762,14 +762,14 @@ describe("a gate's questions as decisions", () => {
     expect(gatesWithWidget(db, [])).toEqual([]);
   });
 
-  test("a failed run keeps its questions open: polled while its worktree remains (a page message resumes it), and its gate still refuses once it is resumed", () => {
+  test("a failed run keeps its questions open: polled while its worktree remains (a page message resumes it) and after (a page message starts a new run), and its gate still refuses once it is resumed", () => {
     open();
     tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
     expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["open", "open", "open"]);
     expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
     expect(gatesWithWidget(db, [])).toEqual([]);
     db.query("UPDATE runs SET cleanup = 'done' WHERE id = ?1").run(runId);
-    expect(gatesToPoll(db)).toEqual([]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
     db.query("UPDATE runs SET cleanup = NULL WHERE id = ?1").run(runId);
     db.query("UPDATE runs SET state = 'running', liveness = 'busy', ended_at = NULL WHERE id = ?1").run(runId);
     expect(() => requireGateAnswered(db, { id: "g1", stage: "design" })).toThrow(/3 open questions/);
