@@ -373,7 +373,9 @@ export function adoptHome(db: Db, config: FlowrynConfig, old: OldHome, requested
       for (const dep of deps.filter((d) => !moved.has(d))) {
         if (!dropped.some((e) => e.task === phase.task_id && e.blocked_by === dep)) dropped.push({ task: phase.task_id, blocked_by: dep, why: done.has(dep) ? "landed" : "not queued" });
       }
-      db.query("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, harness, blocked_by, account) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)").run(
+      db.query(
+        "INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, harness, blocked_by, account, model, effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+      ).run(
         id,
         phase.phase_no,
         phase.task_id,
@@ -383,6 +385,8 @@ export function adoptHome(db: Db, config: FlowrynConfig, old: OldHome, requested
         phase.harness,
         JSON.stringify(deps.filter((d) => moved.has(d))),
         phase.account,
+        phase.model,
+        phase.effort,
       );
     }
   }
