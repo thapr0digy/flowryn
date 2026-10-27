@@ -214,6 +214,8 @@ export interface GateRow {
   channel_reason?: string | null;
   channel_retry_at?: number | null;
   channel_item?: string | null;
+  /** The run that carried this review on after its own run ended for good (src/lifecycle/review-revival.ts). */
+  replaced_by?: string | null;
   approval_id: string | null;
   feedback: string | null;
   opened_at: number;

@@ -23,12 +23,13 @@ Refused (`bad_args`, exit 3): a scout (it opens no PR); a project or a `--mode` 
 
 ## Data
 
-Migration 40 (`base-branch`): `task_policy.base_branch` (what the task was filed with) and `runs.base_branch` (the branch the run's PR targets now; phase 2's retarget changes it during a run). Null is the project's default branch. `runBase(run, project)` (`src/lifecycle/runs.ts`) is the one place that resolves it.
+Migration 41 (`base-branch`): `task_policy.base_branch` (what the task was filed with) and `runs.base_branch` (the branch the run's PR targets now; phase 2's retarget changes it during a run). Null is the project's default branch. `runBase(run, project)` (`src/lifecycle/runs.ts`) is the one place that resolves it.
 
 ## Choices
 
 - The base is stored per run, not only per task, because stacking will change it mid-run.
 - The fetch happens at the start, not at filing, so a Queued task starts from the branch as it is then.
+- A review carried on by a new run (review revival, when the old run ended for good) starts from the old run's base again.
 - A promoted scout never has a base (a scout cannot take one), so promotion is unchanged.
 - No `PROTO` bump, as with `--mode` and `--model`: `--base` is a new optional argument, and an older daemon refuses an argument it does not know (`bad_args`), so a newer CLI can never start a task on the wrong branch through it.
 

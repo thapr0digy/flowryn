@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems } from "../attention/items.ts";
 import { existsSync } from "node:fs";
-import { accountsConfig, capacityAccount, resolveAccount, type Account } from "../config/accounts.ts";
+import { accountsConfig, capacityAccount, resolveAccount, runAccount, type Account } from "../config/accounts.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { capacityConfig, currentWorkflow, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
 import { checkPins, modelFits, resolveModelChoice } from "../config/model-choice.ts";
@@ -12,6 +12,7 @@ import { appendEvent } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, signInOf, type StartDeps } from "../lifecycle/dispatch.ts";
+import { reviveReview, revivalBlocked, revivalsDue } from "../lifecycle/review-revival.ts";
 import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
@@ -189,6 +190,9 @@ export class Scheduler {
   private async pass(): Promise<void> {
     await this.step("auto-dispatch", async () => {
       if ((await this.autoDispatch()) > 0) this.deps.kickJournal();
+    });
+    await this.step("review revivals", async () => {
+      if ((await this.reviveReviews()) > 0) this.deps.kickJournal();
     });
     await this.step("grant", () => this.grant());
     await this.step("alerts", async () => this.alerts());
@@ -653,6 +657,35 @@ export class Scheduler {
       if (made) {
         started++;
         this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} started as ${made}`);
+      }
+    }
+    return started;
+  }
+
+  /**
+   * A message on the review page of a run gone for good (failed, worktree
+   * cleaned) asked for a new run (src/lifecycle/review-revival.ts): start it
+   * on the old run's account once a start checks, as a dispatch would. One
+   * that cannot start yet tells the leader once and is tried again next pass.
+   */
+  private async reviveReviews(): Promise<number> {
+    const { db, now } = this.deps;
+    let started = 0;
+    for (const due of revivalsDue(db)) {
+      const config = this.deps.config();
+      try {
+        const run = getRunWithPolicy(db, due.run);
+        const project = run ? getProject(db, run.project_id) : null;
+        if (!run || !project) continue;
+        const account = runAccount(config, project, run.account, run.harness);
+        const start = await checkStart(this.deps.startDeps, project, account, run.base_branch);
+        const revived = tx(db, () => (revivalsDue(db).some((d) => d.gate === due.gate) ? reviveReview(db, config, { gateId: due.gate, by: "review page", words: null, account, start, now: now(), log: this.deps.log }) : null));
+        if (!revived) continue;
+        started++;
+        this.deps.log(`sched: gate ${due.gate}'s review page started ${revived.run} for ${revived.task} at stage ${revived.stage} (${revived.oldRun} had ended for good)`);
+      } catch (error) {
+        if (error instanceof FlowrynError) tx(db, () => revivalBlocked(db, due.gate, error.message, now()));
+        else this.deps.log(`sched: gate ${due.gate}'s new run failed to start: ${(error as Error).stack ?? String(error)}`);
       }
     }
     return started;

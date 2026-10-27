@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { ANSWER_MARK, encodeAnswer, encodeSend } from "../../src/lavish/poll-output.ts";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
+import { tx } from "../../src/db/db.ts";
+import { failRun, getRun } from "../../src/lifecycle/runs.ts";
 
 /**
  * A review gate's questions, end to end on the fake fleet (design: "A
@@ -524,5 +526,109 @@ describe("a file:// review while lavish-axi is not installed", () => {
       expect(first.reply).toContain("review_invalid");
     },
     { timeout: 90_000 },
+  );
+});
+
+describe("a review page whose run ended for good", () => {
+  const carried = (name: string) =>
+    [`Feature ${name}`, `FAKE: write design/design.html ${filledDesignPage()}`, "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html", "FAKE: sleep 120000"].join("\n");
+
+  /**
+   * The run at its review fails (as a resume whose launch failed does: failRun parks the task), then
+   * its worktree is cleaned up, which stops the worker.
+   */
+  async function failAndClean(f: FleetEnv, task: string, run: string): Promise<void> {
+    await f.waitRun(run, (r) => r.stage_state === "review" && r.liveness === "idle", "the idle worker at its review");
+    const db = f.h.db();
+    try {
+      tx(db, () => failRun(db, getRun(db, run)!, "resume failed: gone", "daemon", Date.now()));
+    } finally {
+      db.close();
+    }
+    const cleaned = await f.json(["cleanup", task]);
+    expect(cleaned.code).toBe(0);
+    expect(cleaned.reply.data).toMatchObject({ removed: true, state: "failed" });
+  }
+
+  test(
+    "a page message on a cleaned run starts a new run at the gated stage whose task file names the old page, the conversation and the notes",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const f = ship.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const { task, run } = await f.dispatch(carried("carry"), { kind: "ship" });
+      await f.waitRun(run, (r) => r.stage_state === "review", "the review");
+      const gate = one<{ id: string; page_path: string }>(f, "SELECT id, page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+      await failAndClean(f, task, run);
+      expect(existsSync(f.run(run).worktree_path)).toBe(false);
+
+      // The page is still listened to; the user writes on it.
+      const calls = join(f.h.home, "lavish-calls.log");
+      queuePoll(f, 1, gate.id, [], ["Why a table here?"]);
+      await waitUntil(() => one(f, "SELECT 1 FROM runs WHERE task_id = ?1 AND id != ?2", task, run) !== null, 30_000, "the new run");
+      const next = one<{ id: string }>(f, "SELECT id FROM runs WHERE task_id = ?1 AND id != ?2", task, run)!.id;
+      const back = await f.waitRun(next, (r) => r.stage === "design" && r.stage_state === "review", "the new run's own review", 30_000);
+      expect(back.worktree_path).toBe(f.run(run).worktree_path);
+      expect(existsSync(back.worktree_path)).toBe(true);
+
+      const old = one<{ state: string; replaced_by: string; notes_path: string; conversation_path: string }>(f, "SELECT state, replaced_by, notes_path, conversation_path FROM gates WHERE id = ?1", gate.id)!;
+      expect(old).toMatchObject({ state: "changes", replaced_by: next });
+      expect(old.notes_path).toBe(join(dirname(gate.page_path), `lavish-notes-${gate.id}.txt`));
+      expect(old.conversation_path).toBe(join(dirname(gate.page_path), `review-${gate.id}.md`));
+      expect(readFileSync(old.conversation_path, "utf8")).toContain("Why a table here?");
+      const taskFile = readFileSync(join(f.h.stateDir, "runs", next, "task.md"), "utf8");
+      expect(taskFile).toContain("Flowryn stage design");
+      expect(taskFile).toContain(`the old review page: ${gate.page_path}`);
+      expect(taskFile).toContain(`the review's conversation with the user: ${old.conversation_path}`);
+      expect(taskFile).toContain(`the notes the page sent: ${old.notes_path}`);
+
+      // The task is In flight again (its unhold and start applied), the leader's summary says a new run started, and the page was told.
+      await waitUntil(() => rows<{ state: string }>(f, "SELECT state FROM intents WHERE task_id = ?1 AND verb IN ('unhold','start')", task).every((i) => i.state === "applied"), 10_000, "the backlog intents");
+      expect(rows<{ verb: string }>(f, "SELECT verb FROM intents WHERE task_id = ?1 ORDER BY seq", task).map((i) => i.verb).slice(-2)).toEqual(["unhold", "start"]);
+      const recap = one<{ line: string }>(f, "SELECT COALESCE(full_line, line) AS line FROM items WHERE kind = 'review_recap' AND run_id = ?1", run)!;
+      expect(recap.line).toContain(`a new run started (${next}, at stage design)`);
+      expect(one(f, "SELECT 1 FROM items WHERE kind = 'divergence' AND state IN ('open','presented')")).toBeNull();
+      await waitUntil(() => readFileSync(calls, "utf8").includes("Flowryn is starting a new run of the task at this stage"), 10_000, "Flowryn's reply on the page");
+    },
+    { timeout: 150_000 },
+  );
+
+  test(
+    "on a cancelled run a page message and the leader's changes start nothing; on a cleaned failed run the changes start a new run with them",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const f = ship.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const cancelled = await f.dispatch(carried("stop"), { kind: "ship" });
+      await f.waitRun(cancelled.run, (r) => r.stage_state === "review" && r.liveness === "idle", "the review");
+      const gate = one<{ id: string }>(f, "SELECT id FROM gates WHERE run_id = ?1 AND state = 'open'", cancelled.run)!;
+      expect((await f.json(["cancel", cancelled.task])).code).toBe(0);
+      await f.waitRun(cancelled.run, (r) => r.state === "cancelled", "the cancelled run");
+      expect((await f.json(["cleanup", cancelled.task])).code).toBe(0);
+      queuePoll(f, 1, gate.id, [], ["Can you pick this up again?"]);
+      const queued = join(f.h.home, "lavish-queue", "001.out");
+      // A poll still running from before the cancel may take the message; nothing restarts the task either way.
+      await waitUntil(() => !existsSync(queued), 4_000, "the message taken").catch(() => undefined);
+      await Bun.sleep(1_000);
+      expect(rows(f, "SELECT id FROM runs WHERE task_id = ?1", cancelled.task)).toHaveLength(1);
+      expect(one<{ revive_requested_at: number | null }>(f, "SELECT revive_requested_at FROM gates WHERE id = ?1", gate.id)).toEqual({ revive_requested_at: null });
+      const refused = await f.json(["gate", "changes", cancelled.task, "--body-file", "-"], { stdin: "Use a list." });
+      expect(refused.code).not.toBe(0);
+      expect(JSON.stringify(refused.reply)).toContain("a cancelled task is never restarted");
+      expect(rows(f, "SELECT id FROM runs WHERE task_id = ?1", cancelled.task)).toHaveLength(1);
+      rmSync(queued, { force: true });
+
+      const failed = await f.dispatch(carried("again"), { kind: "ship" });
+      await failAndClean(f, failed.task, failed.run);
+      const sent = await f.json(["gate", "changes", failed.task, "--body-file", "-"], { stdin: "Use a list." });
+      expect(sent.code).toBe(0);
+      const data = sent.reply.data as { state: string; to: string; run: string; replaced: string };
+      expect(data).toMatchObject({ state: "replaced", to: "design", replaced: failed.run });
+      await f.waitRun(data.run, (r) => r.stage === "design" && r.stage_state === "review", "the new run's own review", 30_000);
+      const taskFile = readFileSync(join(f.h.stateDir, "runs", data.run, "task.md"), "utf8");
+      expect(taskFile).toContain("Your leader sent these changes: Use a list.");
+      expect(taskFile).toContain("the old review page: ");
+    },
+    { timeout: 150_000 },
   );
 });
