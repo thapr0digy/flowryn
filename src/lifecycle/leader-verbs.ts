@@ -734,7 +734,7 @@ function timelineView(ctx: ReadCtx, target: string, full: boolean): { data: Reco
 const show: VerbSpec = {
   name: "show",
   summary: "One task, run, item, decision, plan, divergence, review gate, chat-answer grant or leader session in detail; --full for untruncated text",
-  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>) or leader session (L<N>) id" }],
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>) or leader session (L<N>) id", complete: "task" }],
   flags: {
     full: { type: "boolean", help: "untruncated titles, lines and bodies" },
     why: { type: "boolean", help: "each recorded reason the run waits, whole: its rule, facts with their observation times, and who can end it" },
