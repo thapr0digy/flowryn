@@ -29,11 +29,11 @@ A wait already open at upgrade is explained on the first pass, dated by its sour
 | decision | `decision.deferred` | `defer_until` after today | Flowryn: shows it again on that date |
 | merge | `merge.auto` | a live auto-merge (queued, verifying, waiting on checks, merging) | Flowryn |
 | merge | `merge.held` | a held auto-merge | the leader: the command its `auto_merge_held` item names |
-| merge | `merge.checks_red` | stored GitHub evidence at the delivered head has red checks | the leader: steer the worker; you: waive exactly one |
+| merge | `merge.checks_red` | stored GitHub evidence at the delivered head has red checks, and you have not waived the only one at this head | the leader: steer the worker; you: waive exactly one |
 | merge | `merge.verify` / `merge.verify_failed` | the project has verify steps and no passing verify at the head | Flowryn while one runs or is queued; else the leader: `flowryn verify <task>` |
 | merge | `merge.checks_pending` | checks still running at the head | Flowryn (GitHub) |
 | merge | `merge.approval` | not yolo, or sensitive, with no live human approval at the head | you: `flowryn approve <task>` |
-| merge | `merge.ready` | nothing else is left | the leader: `flowryn merge <task>` |
+| merge | `merge.ready` | nothing else is left | the leader: `flowryn merge <task>` (with `--allow-red <check>` when your waiver passed a red check) |
 
 Every leader step also names you, with the same command for your terminal (`decide`, `verify` and `merge` take the human role). The merge rules follow `checkGate`'s order (red checks, local green, pending checks, approval); a test runs `checkGate` on the same facts for each step and expects the matching rule. A merge row needs an open merge gate and a delivery; evidence for another head is not read as this head's checks, and a PR that reads merged or closed has none (the landing and `pr_closed` own those).
 

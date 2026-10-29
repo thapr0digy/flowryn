@@ -294,6 +294,14 @@ describe("merges", () => {
       { by: "leader", action: "steer the worker to fix lint: flowryn steer t1 --body-file -" },
       { by: "captain", action: "waive it in your shell: flowryn approve t1 --allow-red lint" },
     ]);
+    db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at) VALUES ('ap1', 't1', ?1, ?2, 'cli-tty', 'me', 'merge', 'lint', ?3, ?4)").run(PR, HEAD, now, now + 60 * MIN);
+    pass();
+    expect(only().rule).toBe("merge.checks_pending");
+    checks(["lint"], []);
+    pass();
+    expect(only().rule).toBe("merge.ready");
+    expect(unblock(only())[0]).toEqual({ by: "leader", action: "flowryn merge t1 --allow-red lint" });
+    db.query("DELETE FROM approvals").run();
     checks([], ["test"]);
     pass();
     expect(only().rule).toBe("merge.checks_pending");
@@ -383,8 +391,9 @@ describe("assumption: the merge rules agree with the merge gate on the same fact
   /** checkGate's refusal code for each state, against the rule the writer records for it. */
 
 
-  const cases: { name: string; config: string; yolo: number; red: string[]; pending: string[]; verified: boolean; code: string; rule: string }[] = [
+  const cases: { name: string; config: string; yolo: number; red: string[]; pending: string[]; verified: boolean; waived?: string; code: string; rule: string }[] = [
     { name: "a red check", config: "", yolo: 1, red: ["lint"], pending: [], verified: false, code: "red_checks", rule: "merge.checks_red" },
+    { name: "a red check you waived", config: "", yolo: 0, red: ["lint"], pending: [], verified: false, waived: "lint", code: "pass", rule: "merge.ready" },
     { name: "no verify yet", config: VERIFY, yolo: 1, red: [], pending: [], verified: false, code: "verify_required", rule: "merge.verify" },
     { name: "checks still running", config: VERIFY, yolo: 1, red: [], pending: ["test"], verified: true, code: "checks_pending", rule: "merge.checks_pending" },
     { name: "no approval", config: "", yolo: 0, red: [], pending: [], verified: false, code: "approval_required", rule: "merge.approval" },
@@ -396,6 +405,9 @@ describe("assumption: the merge rules agree with the merge gate on the same fact
       deliver();
       checks(c.red, c.pending);
       if (c.verified) verification("v1", "passed");
+      if (c.waived) {
+        db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at) VALUES ('ap1', 't1', ?1, ?2, 'cli-tty', 'me', 'merge', ?3, ?4, ?5)").run(PR, HEAD, c.waived, now, now + 60 * MIN);
+      }
       expect(gateCode(parseConfig(c.config, HOME), c.red, c.pending)).toBe(c.code);
       pass(c.config);
       expect(only().rule).toBe(c.rule);

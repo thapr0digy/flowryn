@@ -157,7 +157,8 @@ function parseOptions(raw: string): string[] {
 
 /**
  * What a delivered run's merge waits on, from stored facts only, in the merge
- * gate's own order (src/policy/merge.ts `checkGate`): red checks, the local
+ * gate's own order (src/policy/merge.ts `checkGate`): red checks (one you
+ * waived at this head passes), the local
  * verify, pending checks, an approval; else only the merge itself is left. A
  * live auto-merge is Flowryn's own wait; a held one names the command its
  * item names. None when no merge gate is open.
@@ -180,7 +181,8 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   if (evidence && evidence.head === head && evidence.state !== "open") return null;
   const checksAt = evidence?.observed_at ?? null;
   const red = checks?.red ?? [];
-  if (red.length > 0) {
+  const waiver = red.length === 1 ? findHumanApproval(db, { task, action: "merge", ref, head, now, allowRed: red[0]! }) : null;
+  if (red.length > 0 && !waiver) {
     const unblock: Unblock[] = [{ by: "leader", action: `steer the worker to fix ${red.join(", ")}: flowryn steer ${task} --body-file -` }];
     if (red.length === 1) unblock.push({ by: "captain", action: `waive it in your shell: flowryn approve ${task} --allow-red ${shellWord(red[0]!)}` });
     return { rule: "merge.checks_red", reason: `merge waits: ${red.length} red check${red.length === 1 ? "" : "s"} (${red.join(", ")})`, facts: [headFact, { name: "red checks", value: red.join(", "), at: checksAt }], unblock, since: base };
@@ -216,7 +218,7 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
     };
   }
   const needsYou = run.sensitive === 1 || run.yolo !== 1;
-  const approval = needsYou ? findHumanApproval(db, { task, action: "merge", ref, head, now, allowRed: null }) : null;
+  const approval = waiver ?? (needsYou ? findHumanApproval(db, { task, action: "merge", ref, head, now, allowRed: null }) : null);
   const posture: Fact = { name: "policy", value: `${run.yolo === 1 ? "yolo" : "approval"}${run.sensitive === 1 ? ", sensitive" : ""}`, at: null };
   if (needsYou && !approval) {
     return {
@@ -230,13 +232,14 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
       since: verifiedAt,
     };
   }
+  const merge = waiver ? `flowryn merge ${task} --allow-red ${shellWord(red[0]!)}` : `flowryn merge ${task}`;
   return {
     rule: "merge.ready",
     reason: "ready to merge; waiting for the leader",
     facts: [headFact, posture, { name: "approval", value: approval ? approval.id : "yolo", at: approval ? approval.created_at : null }],
     unblock: [
-      { by: "leader", action: `flowryn merge ${task}` },
-      { by: "captain", action: `the same in your terminal: flowryn merge ${task}` },
+      { by: "leader", action: merge },
+      { by: "captain", action: `the same in your terminal: ${merge}` },
     ],
     since: verifiedAt,
   };
