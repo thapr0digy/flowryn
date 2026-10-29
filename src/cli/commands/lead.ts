@@ -119,7 +119,7 @@ const lead: VerbSpec = {
   positionals: [],
   flags: {
     pi: { type: "boolean", help: "lead with Pi instead of Claude Code" },
-    account: { type: "string", help: "the account to lead on; default: the one whose login folder your terminal points at (its scope is what the leader sees)", placeholder: "id" },
+    account: { type: "string", help: "the account to lead on; default: the one whose login folder your terminal points at (its scope is what the leader sees)", placeholder: "id", complete: "account" },
   },
   rest: { name: "args", help: "arguments for the harness, after --" },
   kind: "local",

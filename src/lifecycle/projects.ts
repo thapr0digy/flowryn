@@ -12,6 +12,8 @@ import { lensFor, projectScopeById, requireInScope } from "../leader/scope.ts";
 export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as const;
 export const HARNESSES = ["claude", "pi"] as const;
 export const AUTONOMY = ["plan", "manual"] as const;
+/** The words `project set --yolo` takes. */
+export const ON_OFF = ["on", "off"] as const;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
 export const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
@@ -130,12 +132,12 @@ const projectAdd: VerbSpec = {
     id: { type: "string", help: "project id (default: the directory name)" },
     "repo-url": { type: "string", help: "remote URL (default: origin)", placeholder: "url" },
     "default-branch": { type: "string", help: "default branch (default: origin/HEAD)", placeholder: "branch" },
-    mode: { type: "string", help: "delivery mode: no-mistakes, direct-PR or local-only", placeholder: "mode" },
+    mode: { type: "string", help: "delivery mode: no-mistakes, direct-PR or local-only", placeholder: "mode", values: DELIVERY_MODES },
     yolo: { type: "boolean", help: "merge green, non-sensitive work without a human record" },
     priority: { type: "int", help: "0 (highest) to 4; default 2", placeholder: "n" },
-    harness: { type: "string", help: "worker harness: claude or pi", placeholder: "harness" },
-    workflow: { type: "string", help: "its ships' workflow: fix (default), feature, feature-ui (with visual QA), or one from [workflows]", placeholder: "workflow" },
-    autonomy: { type: "string", help: "plan (phases start by themselves once their blockers land) or manual; default [autonomy]", placeholder: "mode" },
+    harness: { type: "string", help: "worker harness: claude or pi", placeholder: "harness", values: HARNESSES },
+    workflow: { type: "string", help: "its ships' workflow: fix (default), feature, feature-ui (with visual QA), or one from [workflows]", placeholder: "workflow", complete: "workflow" },
+    autonomy: { type: "string", help: "plan (phases start by themselves once their blockers land) or manual; default [autonomy]", placeholder: "mode", values: AUTONOMY },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -188,14 +190,14 @@ const SETTABLE: Record<string, keyof ProjectRow> = {
 const projectSet: VerbSpec = {
   name: "project set",
   summary: "Change a project's delivery mode, yolo posture, priority or defaults",
-  positionals: [{ name: "id", required: true, help: "project id" }],
+  positionals: [{ name: "id", required: true, help: "project id", complete: "project" }],
   flags: {
-    mode: { type: "string", help: "no-mistakes, direct-PR or local-only", placeholder: "mode" },
-    yolo: { type: "string", help: "on or off", placeholder: "on|off" },
+    mode: { type: "string", help: "no-mistakes, direct-PR or local-only", placeholder: "mode", values: DELIVERY_MODES },
+    yolo: { type: "string", help: "on or off", placeholder: "on|off", values: ON_OFF },
     priority: { type: "int", help: "0 (highest) to 4", placeholder: "n" },
-    harness: { type: "string", help: "claude or pi", placeholder: "harness" },
-    workflow: { type: "string", help: "its ships' workflow: fix, feature, feature-ui (with visual QA), or one from [workflows]", placeholder: "workflow" },
-    autonomy: { type: "string", help: "plan or manual", placeholder: "mode" },
+    harness: { type: "string", help: "claude or pi", placeholder: "harness", values: HARNESSES },
+    workflow: { type: "string", help: "its ships' workflow: fix, feature, feature-ui (with visual QA), or one from [workflows]", placeholder: "workflow", complete: "workflow" },
+    autonomy: { type: "string", help: "plan or manual", placeholder: "mode", values: AUTONOMY },
     "default-branch": { type: "string", help: "default branch", placeholder: "branch" },
     "repo-url": { type: "string", help: "remote URL", placeholder: "url" },
   },

@@ -703,7 +703,7 @@ const stageDone: VerbSpec = {
 const stageBegin: VerbSpec = {
   name: "stage begin",
   summary: "Start your last stage now (a no-mistakes ship: before its pipeline); stage_waiting means end your turn",
-  positionals: [{ name: "stage", required: true, help: "your workflow's last stage (ship)" }],
+  positionals: [{ name: "stage", required: true, help: "your workflow's last stage (ship)", complete: "stage" }],
   flags: {},
   kind: "mutation",
   roles: ["worker"],

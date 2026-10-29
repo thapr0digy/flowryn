@@ -324,7 +324,7 @@ const doctor: VerbSpec = {
   flags: {
     contracts: { type: "boolean", help: "run the harness contract suites and record each passing version" },
     "verify-only": { type: "boolean", help: "with --contracts: run the suites and report, record nothing (any caller, the leader included)" },
-    harness: { type: "string", help: "with --contracts: claude or pi (default: every installed harness)", placeholder: "harness" },
+    harness: { type: "string", help: "with --contracts: claude or pi (default: every installed harness)", placeholder: "harness", values: HARNESS_IDS },
     project: { type: "string", help: "with --contracts: a checkout to base the test worktree on (default: a scratch repo)", placeholder: "path" },
     "herdr-socket": { type: "string", help: "with --contracts: the Herdr session socket to run in (default: [herdr])", placeholder: "path" },
     model: {

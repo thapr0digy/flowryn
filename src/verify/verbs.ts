@@ -149,9 +149,9 @@ export function verificationView(v: Verification, now: number, db?: Db): Record<
 const verifyStart: VerbSpec = {
   name: "verify.start",
   summary: "Start a verification of a PR head (internal; flowryn verify)",
-  positionals: [{ name: "target", required: true, help: "task, PR number or PR URL" }],
+  positionals: [{ name: "target", required: true, help: "task, PR number or PR URL", complete: "task" }],
   flags: {
-    project: { type: "string", help: "the project a PR number belongs to", placeholder: "id" },
+    project: { type: "string", help: "the project a PR number belongs to", placeholder: "id", complete: "project" },
     path: { type: "string", help: "the caller's PATH, for the steps (the CLI sends it)", placeholder: "dirs" },
   },
   kind: "mutation",

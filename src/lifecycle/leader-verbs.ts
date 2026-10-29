@@ -59,7 +59,7 @@ function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
 const steer: VerbSpec = {
   name: "steer",
   summary: "Send a worker a steer; it is delivered at its next tool call or idle wake (--urgent: sooner, may cut a running tool)",
-  positionals: [{ name: "target", required: true, help: "task or run id" }],
+  positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: {
     "body-file": { type: "string", help: "the steer, from a file or - for stdin", fileFor: "body" },
     urgent: { type: "boolean", help: "block the worker's next tool call with it, and cut a tool running over 3s (its work is lost)" },
@@ -90,7 +90,7 @@ const answer: VerbSpec = {
   name: "answer",
   summary: "Answer a worker's question; the answer reaches it as a steer",
   positionals: [
-    { name: "decision", required: true, help: "decision id, such as q3" },
+    { name: "decision", required: true, help: "decision id, such as q3", complete: "decision" },
     { name: "choice", required: true, help: "one of the question's options" },
   ],
   flags: { "body-file": { type: "string", help: "anything to add, from a file or - for stdin", fileFor: "body" } },
@@ -131,7 +131,7 @@ const answer: VerbSpec = {
 const cancel: VerbSpec = {
   name: "cancel",
   summary: "Stop a worker and park its task (the worktree is kept)",
-  positionals: [{ name: "target", required: true, help: "task or run id" }],
+  positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: { reason: { type: "string", help: "one line, for the backlog hold", placeholder: "text" } },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -194,7 +194,7 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
 const resume: VerbSpec = {
   name: "resume",
   summary: "Resume a dead worker from its stored session, in the same worktree",
-  positionals: [{ name: "target", required: true, help: "task or run id" }],
+  positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
@@ -259,7 +259,7 @@ const resume: VerbSpec = {
 const interrupt: VerbSpec = {
   name: "interrupt",
   summary: "Interrupt a worker's current turn (verified); it stays alive and idle",
-  positionals: [{ name: "target", required: true, help: "task or run id" }],
+  positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],

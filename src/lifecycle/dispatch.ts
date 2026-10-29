@@ -12,7 +12,7 @@ import { herdrConfig, workersConfig } from "../config/workers.ts";
 import { accountSignIn } from "../harness/sign-in.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
-import { checkPins, NO_PINS, overPins, pinsOf, resolveModelChoice, type ModelPins } from "../config/model-choice.ts";
+import { checkPins, EFFORT_CHOICES, NO_PINS, overPins, pinsOf, resolveModelChoice, type ModelPins } from "../config/model-choice.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
@@ -433,22 +433,22 @@ async function checkAfterEvents(ctx: HandlerCtx, project: ProjectRow, events: Af
 export const dispatchVerb: VerbSpec = {
   name: "dispatch",
   summary: "Start a worker on a task: a ship (ends in a PR) or a scout (ends in a report); --task starts a Queued one",
-  positionals: [{ name: "project", required: true, help: "project id" }],
+  positionals: [{ name: "project", required: true, help: "project id", complete: "project" }],
   flags: {
-    kind: { type: "string", help: "ship or scout", placeholder: "kind" },
+    kind: { type: "string", help: "ship or scout", placeholder: "kind", values: TASK_KINDS },
     "body-file": { type: "string", help: "the task, from a file or - for stdin", fileFor: "body" },
     title: { type: "string", help: "backlog title (default: the body's first line)", placeholder: "text" },
-    harness: { type: "string", help: "claude or pi (default: the project's)", placeholder: "harness" },
-    account: { type: "string", help: "the account to run on, from [accounts] (default: the project's, else its scope's); never one outside the project's scope", placeholder: "id" },
+    harness: { type: "string", help: "claude or pi (default: the project's)", placeholder: "harness", values: HARNESS_IDS },
+    account: { type: "string", help: "the account to run on, from [accounts] (default: the project's, else its scope's); never one outside the project's scope", placeholder: "id", complete: "account" },
     model: { type: "string", help: "the worker's model (default: the workflow's, else the account's, else the harness's); a Pi account takes <provider>/<id>", placeholder: "model" },
-    effort: { type: "string", help: "the worker's effort: claude low|medium|high|xhigh|max, pi off|minimal|low|medium|high|xhigh|max (default: the workflow's, else the account's, else the harness's)", placeholder: "level" },
+    effort: { type: "string", help: "the worker's effort: claude low|medium|high|xhigh|max, pi off|minimal|low|medium|high|xhigh|max (default: the workflow's, else the account's, else the harness's)", placeholder: "level", values: EFFORT_CHOICES },
     sensitive: { type: "boolean", help: "security-relevant: merges need a human record even under yolo" },
-    workflow: { type: "string", help: "the workflow: feature, feature-ui (with visual QA), fix, or one from [workflows] (default: the project's; scouts: scout)", placeholder: "id" },
-    "blocked-by": { type: "list", help: "file it Queued until these tasks land (repeatable)", placeholder: "task" },
+    workflow: { type: "string", help: "the workflow: feature, feature-ui (with visual QA), fix, or one from [workflows] (default: the project's; scouts: scout)", placeholder: "id", complete: "workflow" },
+    "blocked-by": { type: "list", help: "file it Queued until these tasks land (repeatable)", placeholder: "task", complete: "task" },
     after: { type: "list", help: "file it Queued until this happens, then start it by itself: task:<id> lands, pr:<number> merges, or report:<scout task> lands (repeatable)", placeholder: "event" },
     auto: { type: "boolean", help: "with --blocked-by: start by itself once its blockers land (--after implies it)" },
-    task: { type: "string", help: "start this Queued task (a plan phase) now; its blockers must have landed", placeholder: "id" },
-    mode: { type: "string", help: "this task's delivery mode, overriding the project's: no-mistakes, direct-PR or local-only", placeholder: "mode" },
+    task: { type: "string", help: "start this Queued task (a plan phase) now; its blockers must have landed", placeholder: "id", complete: "task" },
+    mode: { type: "string", help: "this task's delivery mode, overriding the project's: no-mistakes, direct-PR or local-only", placeholder: "mode", values: DELIVERY_MODES },
     "mode-reason": { type: "string", help: "with --mode: why (kept on the task)", placeholder: "text" },
   },
   kind: "mutation",
@@ -557,15 +557,15 @@ function withStartState(ctx: HandlerCtx, result: HandlerResult): HandlerResult {
 export const planVerb: VerbSpec = {
   name: "plan",
   summary: "File a phased feature: one ship per ## section, each starting by itself once the one before it lands",
-  positionals: [{ name: "project", required: true, help: "project id" }],
+  positionals: [{ name: "project", required: true, help: "project id", complete: "project" }],
   flags: {
     "body-file": { type: "string", help: "the plan: an optional # title, then one ## section per phase", fileFor: "body" },
     title: { type: "string", help: "the plan's title (default: its # heading)", placeholder: "text" },
-    workflow: { type: "string", help: "the phases' workflow (default: the project's; a phase's workflow: line wins)", placeholder: "id" },
-    harness: { type: "string", help: "claude or pi (default: the project's; a phase's harness: line wins)", placeholder: "harness" },
-    account: { type: "string", help: "the phases' account (default: the project's, else its scope's; a phase's account: line wins)", placeholder: "id" },
+    workflow: { type: "string", help: "the phases' workflow (default: the project's; a phase's workflow: line wins)", placeholder: "id", complete: "workflow" },
+    harness: { type: "string", help: "claude or pi (default: the project's; a phase's harness: line wins)", placeholder: "harness", values: HARNESS_IDS },
+    account: { type: "string", help: "the phases' account (default: the project's, else its scope's; a phase's account: line wins)", placeholder: "id", complete: "account" },
     model: { type: "string", help: "the phases' model (a phase's model: line wins; default: the workflow's, else the account's)", placeholder: "model" },
-    effort: { type: "string", help: "the phases' effort (a phase's effort: line wins; default: the workflow's, else the account's)", placeholder: "level" },
+    effort: { type: "string", help: "the phases' effort (a phase's effort: line wins; default: the workflow's, else the account's)", placeholder: "level", values: EFFORT_CHOICES },
   },
   kind: "mutation",
   roles: ["leader", "human"],

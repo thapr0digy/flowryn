@@ -97,9 +97,9 @@ interface PassPrepared {
 const gatePass: VerbSpec = {
   name: "gate pass",
   summary: "Pass a task's open review gate: Claude asks the user first; Pi uses the flowryn_gate_pass tool; in your shell use flowryn approve --gate",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: {
-    stage: { type: "string", help: "the gate's stage, as a check (design, qa, ...)", placeholder: "stage" },
+    stage: { type: "string", help: "the gate's stage, as a check (design, qa, ...)", placeholder: "stage", complete: "stage" },
     "gate-id": { type: "string", help: "the gate you were shown (g<n>), as a check: refused when another gate is open", placeholder: "id" },
     "key-file": { type: "string", help: "Pi leader extension only: its approval key, from stdin", fileFor: "approval_key" },
   },
@@ -166,10 +166,10 @@ export async function stageStartedReply(ctx: HandlerCtx, result: HandlerResult):
 const gateChanges: VerbSpec = {
   name: "gate changes",
   summary: "Send a task back from its open review gate with your words (default: to the stage before it, e.g. qa back to build)",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: {
     "body-file": { type: "string", help: "what to change, from a file or - for stdin", fileFor: "body" },
-    to: { type: "string", help: "the stage to go back to (default: the nearest earlier stage without a review gate, else the gated stage)", placeholder: "stage" },
+    to: { type: "string", help: "the stage to go back to (default: the nearest earlier stage without a review gate, else the gated stage)", placeholder: "stage", complete: "stage" },
   },
   kind: "mutation",
   roles: ["leader", "human"],

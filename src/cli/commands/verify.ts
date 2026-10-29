@@ -94,9 +94,9 @@ async function followQueued(first: Record<string, unknown>, io: CliIo): Promise<
 const verify: VerbSpec = {
   name: "verify",
   summary: "Test a PR or local-only head in a clean worktree with the project's verify steps; a pass at the exact head is what the merge gate requires",
-  positionals: [{ name: "target", required: true, help: "task, PR number or PR URL" }],
+  positionals: [{ name: "target", required: true, help: "task, PR number or PR URL", complete: "task" }],
   flags: {
-    project: { type: "string", help: "the project a PR number belongs to (default: the only project with a GitHub remote)", placeholder: "id" },
+    project: { type: "string", help: "the project a PR number belongs to (default: the only project with a GitHub remote)", placeholder: "id", complete: "project" },
     detach: { type: "boolean", help: "start it and return the id; follow with flowryn verify show <id>" },
   },
   kind: "local",

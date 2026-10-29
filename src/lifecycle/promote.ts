@@ -14,7 +14,7 @@ import { sanitizeBlock } from "../util/sanitize.ts";
 import { runAccount, type Account } from "../config/accounts.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { accountFor, checkStart, createRun, harnessFlag, pinsFor, startDepsOf } from "./dispatch.ts";
-import type { ModelPins } from "../config/model-choice.ts";
+import { EFFORT_CHOICES, type ModelPins } from "../config/model-choice.ts";
 import { dispatchedTask, reportDirFor } from "./launcher.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { findRun, getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "./runs.ts";
@@ -22,6 +22,7 @@ import { dismissGateQuestions } from "./gate-questions.ts";
 import { discardPlansOfGate } from "./plans.ts";
 import { summarizeReview } from "./review-chat.ts";
 import { flowLine, openGate, REVIEW_ITEMS, requestStage } from "./stages.ts";
+import { HARNESS_IDS } from "../harness/types.ts";
 
 /**
  * `flowryn promote <task>` (design sections 4 and 12): a scout promoted to a
@@ -168,13 +169,13 @@ export function promotedAccount(config: FlowrynConfig, project: ProjectRow, args
 const promote: VerbSpec = {
   name: "promote",
   summary: "Promote a scout to a ship in place: the same task, and while it works, the same worker and worktree",
-  positionals: [{ name: "task", required: true, help: "the scout's task or run id" }],
+  positionals: [{ name: "task", required: true, help: "the scout's task or run id", complete: "task" }],
   flags: {
     "body-file": { type: "string", help: "what to ship, from a file or - for stdin", fileFor: "body" },
-    workflow: { type: "string", help: "the ship workflow (default: the project's)", placeholder: "id" },
-    harness: { type: "string", help: "a scout whose run is over: the new run's harness (default: the scout's)", placeholder: "harness" },
+    workflow: { type: "string", help: "the ship workflow (default: the project's)", placeholder: "id", complete: "workflow" },
+    harness: { type: "string", help: "a scout whose run is over: the new run's harness (default: the scout's)", placeholder: "harness", values: HARNESS_IDS },
     model: { type: "string", help: "the ship's model (default: a live scout's own choice, else the workflow's, the account's, the harness's)", placeholder: "model" },
-    effort: { type: "string", help: "the ship's effort (default as for --model)", placeholder: "level" },
+    effort: { type: "string", help: "the ship's effort (default as for --model)", placeholder: "level", values: EFFORT_CHOICES },
     sensitive: { type: "boolean", help: "security-relevant: merges need a human record even under yolo" },
   },
   kind: "mutation",

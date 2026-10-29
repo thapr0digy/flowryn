@@ -41,7 +41,22 @@ export type Args = Record<string, ArgValue | undefined>;
 
 export type FlagType = "string" | "boolean" | "int" | "list";
 
-export interface FlagSpec {
+/**
+ * Where shell completion finds the ids an argument names (src/cli/completion/values.ts):
+ * a read-only look at the database or config, never the daemon.
+ */
+export const COMPLETION_SOURCES = ["project", "task", "decision", "todo", "workflow", "stage", "account"] as const;
+export type CompletionSource = (typeof COMPLETION_SOURCES)[number];
+
+/** What shell completion offers for a value; hints only, the handler still checks what it gets. */
+export interface CompletionHint {
+  /** The fixed set the value comes from. */
+  values?: readonly string[];
+  /** Ids looked up when the user presses Tab. */
+  complete?: CompletionSource;
+}
+
+export interface FlagSpec extends CompletionHint {
   type: FlagType;
   help: string;
   /** Name of the argument a `--<flag>-file <path|->` flag fills; the CLI reads the file (or stdin) and sends the text. */
@@ -53,7 +68,7 @@ export interface FlagSpec {
   once?: boolean;
 }
 
-export interface PositionalSpec {
+export interface PositionalSpec extends CompletionHint {
   name: string;
   required: boolean;
   help: string;

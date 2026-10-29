@@ -626,7 +626,7 @@ const stats: VerbSpec = {
   positionals: [],
   flags: {
     since: { type: "string", help: "the window: 7d, 24h, 90m or YYYY-MM-DD (default 7d)", placeholder: "window" },
-    project: { type: "string", help: "only this project's waits and interventions (the store is always the whole database)", placeholder: "id" },
+    project: { type: "string", help: "only this project's waits and interventions (the store is always the whole database)", placeholder: "id", complete: "project" },
   },
   kind: "read",
   roles: ["leader", "reader", "human"],

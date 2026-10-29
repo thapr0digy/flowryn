@@ -34,7 +34,7 @@ function writeNew(path: string, text: string): void {
 const diagExport: VerbSpec = {
   name: "diag export",
   summary: "Write one run's redacted diagnostic record (run, stages, gates, decisions, wait explanations, events, config) to a local file",
-  positionals: [{ name: "target", required: true, help: "task or run id" }],
+  positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: {
     out: { type: "string", help: "the file to create (refused if it exists)", placeholder: "file" },
     "include-text": { type: "boolean", help: "include decision, gate and event text (tokens and config secrets stay redacted)" },

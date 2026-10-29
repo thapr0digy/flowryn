@@ -99,7 +99,7 @@ const resolve: VerbSpec = {
   summary: "Settle a divergence: keep-run (the run's state wins) or accept-edit (your backlog edit wins)",
   positionals: [
     { name: "id", required: true, help: "divergence id, such as d3" },
-    { name: "resolution", required: true, help: "keep-run or accept-edit" },
+    { name: "resolution", required: true, help: "keep-run or accept-edit", values: RESOLUTIONS },
   ],
   flags: {},
   kind: "mutation",

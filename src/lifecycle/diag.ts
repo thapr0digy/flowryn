@@ -179,7 +179,7 @@ export function diagExport(ctx: ReadCtx, target: string, includeText: boolean): 
 const diagExportVerb: VerbSpec = {
   name: "diag.export",
   summary: "One run's diagnostic record, redacted (flowryn diag export writes it to a file)",
-  positionals: [{ name: "target", required: true, help: "task or run id" }],
+  positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: { "include-text": { type: "boolean", help: "include decision, gate and event text" } },
   kind: "read",
   roles: ["leader", "human"],

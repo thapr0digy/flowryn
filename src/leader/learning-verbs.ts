@@ -47,7 +47,7 @@ const learnVerb: VerbSpec = {
   summary: "Record a one-line fact about the projects for later leader sessions",
   positionals: [{ name: "lesson", required: false, help: `one line, at most ${LESSON_MAX_CHARS} characters (or --body-file -)` }],
   flags: {
-    project: { type: "string", help: "the project it is about", placeholder: "id" },
+    project: { type: "string", help: "the project it is about", placeholder: "id", complete: "project" },
     until: { type: "string", help: "set it aside after this day: YYYY-MM-DD, tomorrow or +Nd", placeholder: "date" },
     replaces: { type: "string", help: "a lesson this one corrects, set aside as replaced", placeholder: "l<N>" },
     "body-file": { type: "string", help: "the lesson, read from a file or - for stdin", fileFor: "body" },
@@ -116,7 +116,7 @@ const learningsVerb: VerbSpec = {
   positionals: [],
   flags: {
     archived: { type: "boolean", help: "the set-aside ones instead, and why" },
-    project: { type: "string", help: "only this project's", placeholder: "id" },
+    project: { type: "string", help: "only this project's", placeholder: "id", complete: "project" },
   },
   kind: "read",
   roles: ["leader", "reader", "human"],
