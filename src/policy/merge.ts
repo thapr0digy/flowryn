@@ -611,5 +611,5 @@ export function recordMergeResult(db: Db, run: RunWithPolicy, mergeId: string, r
 
 /** Refresh the PR evidence the gate read, so show and the board agree with what was decided. */
 export function rememberFacts(db: Db, facts: MergeFacts, now: number): void {
-  if (facts.pr) recordPrEvidence(db, facts.run.id, prEvidenceFrom(facts.pr, facts.checks, now), now);
+  if (facts.pr) recordPrEvidence(db, facts.run.id, prEvidenceFrom(facts.pr, facts.checks, now, facts.local?.notStarted), now);
 }

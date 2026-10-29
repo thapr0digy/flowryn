@@ -9,7 +9,7 @@ import { explainHumanWaits } from "../../src/attention/human-waits.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import type { ChecksSummary, PullRequest } from "../../src/forge/types.ts";
-import { deliveredOf } from "../../src/lifecycle/delivery.ts";
+import { deliveredOf, prEvidenceFrom } from "../../src/lifecycle/delivery.ts";
 import { LEADER_RUN_VERBS } from "../../src/lifecycle/leader-verbs.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
@@ -96,8 +96,8 @@ function deliver(opts: { at?: number; gateAt?: number } = {}): void {
   db.query("INSERT INTO gates (id, run_id, stage, kind, state, opened_at) VALUES ('g9', 'r1', 'ship', 'merge', 'open', ?1)").run(opts.gateAt ?? NOW - 120 * MIN);
 }
 
-function checks(red: string[], pending: string[], head = HEAD): void {
-  const value = { url: PR, number: 7, title: "t", state: "open", draft: false, head, head_ref: "b", merge_sha: null, checks: { state: red.length ? "red" : pending.length ? "pending" : "green", line: "-", red, pending, total: red.length + pending.length + 1 }, observed_at: now };
+function checks(red: string[], pending: string[], head = HEAD, notStarted: string[] = []): void {
+  const value = { url: PR, number: 7, title: "t", state: "open", draft: false, head, head_ref: "b", merge_sha: null, checks: { state: red.length ? "red" : pending.length ? "pending" : "green", line: "-", red, pending, total: red.length + pending.length + 1, not_started: notStarted }, observed_at: now };
   db.query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, ?2)").run(JSON.stringify(value), now);
 }
 
@@ -115,12 +115,12 @@ function verification(id: string, state: string, opts: { started?: number; finis
 const pr = (): PullRequest => ({ number: 7, url: PR, title: "t", state: "open", draft: false, headSha: HEAD, headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null }) as PullRequest;
 const summary = (red: string[], pending: string[]): ChecksSummary => ({
   state: red.length ? "red" : pending.length ? "pending" : "green",
-  checks: [...red.map((name) => ({ name, state: "red" as const, detail: "failure" })), ...pending.map((name) => ({ name, state: "pending" as const, detail: "queued" })), { name: "ok", state: "green" as const, detail: "success" }],
+  checks: [...red.map((name, i) => ({ name, id: i + 1, state: "red" as const, detail: "failure" })), ...pending.map((name) => ({ name, state: "pending" as const, detail: "queued" })), { name: "ok", state: "green" as const, detail: "success" }],
 });
 const ctx = (): ReadCtx => ({ db, config: parseConfig("", HOME), now, caller: { role: "human", runId: null, taskId: null } });
 const briefing = () => composeBriefing(db, { session: null, now, morningHour: 99, ageMs: 3_600_000, markMorning: false }).text;
 
-function gateCode(config: FlowrynConfig, red: string[], pending: string[]): string {
+function gateCode(config: FlowrynConfig, red: string[], pending: string[], notStarted: string[] = []): string {
   const run = getRunWithPolicy(db, "r1")!;
   const project = getProject(db, "web")!;
   const delivered = deliveredOf(db, "t1")!;
@@ -140,7 +140,7 @@ function gateCode(config: FlowrynConfig, red: string[], pending: string[]): stri
     primaryBranch: null,
     primaryDirty: false,
     fastForward: false,
-    ...(p ? { local: { notStarted: [], policy: p, atHead: atHead ? { ...(atHead as object), steps: [], tests: null } as never : null, otherPolicyAtHead: null, lastPassed: null } } : {}),
+    ...(p ? { local: { notStarted: notStarted.map((name) => red.indexOf(name) + 1), policy: p, atHead: atHead ? { ...(atHead as object), steps: [], tests: null } as never : null, otherPolicyAtHead: null, lastPassed: null } } : {}),
   };
   try {
     checkGate(facts, chooseApproval(db, facts, { caller: { role: "human", runId: null, taskId: null } }, "merge", now));
@@ -308,6 +308,12 @@ describe("merges", () => {
     expect(unblock(only())[0]!.by).toBe("flowryn");
   });
 
+  test("the evidence names the red checks GitHub never started, by the ids the gate read", () => {
+    const evidence = prEvidenceFrom(pr(), summary(["lint", "test"], ["e2e"]), now, [2]);
+    expect(evidence.checks!.red).toEqual(["lint", "test"]);
+    expect(evidence.checks!.not_started).toEqual(["test"]);
+  });
+
   test("evidence for another head is not read as this head's checks", () => {
     deliver();
     checks(["lint"], [], "ffff");
@@ -391,9 +397,12 @@ describe("assumption: the merge rules agree with the merge gate on the same fact
   /** checkGate's refusal code for each state, against the rule the writer records for it. */
 
 
-  const cases: { name: string; config: string; yolo: number; red: string[]; pending: string[]; verified: boolean; waived?: string; code: string; rule: string }[] = [
+  const cases: { name: string; config: string; yolo: number; red: string[]; pending: string[]; verified: boolean; waived?: string; notStarted?: string[]; code: string; rule: string }[] = [
     { name: "a red check", config: "", yolo: 1, red: ["lint"], pending: [], verified: false, code: "red_checks", rule: "merge.checks_red" },
     { name: "a red check you waived", config: "", yolo: 0, red: ["lint"], pending: [], verified: false, waived: "lint", code: "pass", rule: "merge.ready" },
+    { name: "checks GitHub never started, no verify yet", config: VERIFY, yolo: 1, red: ["lint"], pending: [], verified: false, notStarted: ["lint"], code: "verify_required", rule: "merge.verify" },
+    { name: "checks GitHub never started, covered by a passing verify", config: VERIFY, yolo: 1, red: ["lint"], pending: [], verified: true, notStarted: ["lint"], code: "pass", rule: "merge.ready" },
+    { name: "a check GitHub never started beside one that failed", config: VERIFY, yolo: 1, red: ["lint", "test"], pending: [], verified: true, notStarted: ["lint"], code: "red_checks", rule: "merge.checks_red" },
     { name: "no verify yet", config: VERIFY, yolo: 1, red: [], pending: [], verified: false, code: "verify_required", rule: "merge.verify" },
     { name: "checks still running", config: VERIFY, yolo: 1, red: [], pending: ["test"], verified: true, code: "checks_pending", rule: "merge.checks_pending" },
     { name: "no approval", config: "", yolo: 0, red: [], pending: [], verified: false, code: "approval_required", rule: "merge.approval" },
@@ -403,12 +412,12 @@ describe("assumption: the merge rules agree with the merge gate on the same fact
     test(c.name, () => {
       db.query("UPDATE task_policy SET yolo = ?1 WHERE task_id = 't1'").run(c.yolo);
       deliver();
-      checks(c.red, c.pending);
+      checks(c.red, c.pending, HEAD, c.notStarted);
       if (c.verified) verification("v1", "passed");
       if (c.waived) {
         db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at) VALUES ('ap1', 't1', ?1, ?2, 'cli-tty', 'me', 'merge', ?3, ?4, ?5)").run(PR, HEAD, c.waived, now, now + 60 * MIN);
       }
-      expect(gateCode(parseConfig(c.config, HOME), c.red, c.pending)).toBe(c.code);
+      expect(gateCode(parseConfig(c.config, HOME), c.red, c.pending, c.notStarted)).toBe(c.code);
       pass(c.config);
       expect(only().rule).toBe(c.rule);
     });

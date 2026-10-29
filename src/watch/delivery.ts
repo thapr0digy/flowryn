@@ -10,7 +10,7 @@ import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { deliveryBasis, deliveryTransition, type BasisPart } from "../lifecycle/observed.ts";
 import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
-import { latestMerge, proveLocal, recordMergeResult } from "../policy/merge.ts";
+import { latestMerge, notStartedChecks, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
 import { cleanMainMerge, type CleanMerge } from "../policy/clean-merge.ts";
@@ -205,6 +205,7 @@ export class DeliveryWatcher {
       try {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
+        const notStarted = checks?.state === "red" ? await notStartedChecks(forge, ref, checks) : [];
         const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
         const autoMerge = this.deps.autoMerge;
         const carry =
@@ -218,7 +219,7 @@ export class DeliveryWatcher {
         tx(db, () => noteForgeUp(db, "github", now()));
         const mergeSha = pr.state === "merged" ? pr.mergeSha : null;
         const observed = deliveryTransition(db, seen, mergeSha ? MERGED_PARTS : PR_PARTS, "pr_observation", "github", now(), (current) =>
-          applyPrObservation(db, current, delivered, { pr, checks }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history, ...(carry ? { carry } : {}) }),
+          applyPrObservation(db, current, delivered, { pr, checks, notStarted }, this.deps.inFlight, now(), { nudgeConflicts: this.deps.nudgeConflicts(), history, ...(carry ? { carry } : {}) }),
         );
         if (!observed.applied && mergeSha && !observed.changed.delivered) this.keepLateMerge(run.id, delivered, mergeSha, "github");
         const applied = observed.applied ? observed.value : { landed: false, nudged: false };

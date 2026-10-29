@@ -158,7 +158,8 @@ function parseOptions(raw: string): string[] {
 /**
  * What a delivered run's merge waits on, from stored facts only, in the merge
  * gate's own order (src/policy/merge.ts `checkGate`): red checks (one you
- * waived at this head passes), the local
+ * waived at this head passes, and so do ones GitHub never started when the
+ * project has verify steps), the local
  * verify, pending checks, an approval; else only the merge itself is left. A
  * live auto-merge is Flowryn's own wait; a held one names the command its
  * item names. None when no merge gate is open.
@@ -180,13 +181,6 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   const checks = evidence && evidence.head === head ? evidence.checks : null;
   if (evidence && evidence.head === head && evidence.state !== "open") return null;
   const checksAt = evidence?.observed_at ?? null;
-  const red = checks?.red ?? [];
-  const waiver = red.length === 1 ? findHumanApproval(db, { task, action: "merge", ref, head, now, allowRed: red[0]! }) : null;
-  if (red.length > 0 && !waiver) {
-    const unblock: Unblock[] = [{ by: "leader", action: `steer the worker to fix ${red.join(", ")}: flowryn steer ${task} --body-file -` }];
-    if (red.length === 1) unblock.push({ by: "captain", action: `waive it in your shell: flowryn approve ${task} --allow-red ${shellWord(red[0]!)}` });
-    return { rule: "merge.checks_red", reason: `merge waits: ${red.length} red check${red.length === 1 ? "" : "s"} (${red.join(", ")})`, facts: [headFact, { name: "red checks", value: red.join(", "), at: checksAt }], unblock, since: base };
-  }
   let policy: string | null;
   try {
     const verify = verifyConfig(config, run.project_id);
@@ -194,6 +188,15 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   } catch {
     // A broken [projects.<id>] table refuses the merge itself; say nothing rather than guess.
     return null;
+  }
+  const red = checks?.red ?? [];
+  const notStarted = checks?.not_started ?? [];
+  const coveredByVerify = policy !== null && red.every((name) => notStarted.includes(name));
+  const waiver = red.length === 1 ? findHumanApproval(db, { task, action: "merge", ref, head, now, allowRed: red[0]! }) : null;
+  if (red.length > 0 && !waiver && !coveredByVerify) {
+    const unblock: Unblock[] = [{ by: "leader", action: `steer the worker to fix ${red.join(", ")}: flowryn steer ${task} --body-file -` }];
+    if (red.length === 1) unblock.push({ by: "captain", action: `waive it in your shell: flowryn approve ${task} --allow-red ${shellWord(red[0]!)}` });
+    return { rule: "merge.checks_red", reason: `merge waits: ${red.length} red check${red.length === 1 ? "" : "s"} (${red.join(", ")})`, facts: [headFact, { name: "red checks", value: red.join(", "), at: checksAt }], unblock, since: base };
   }
   let verifiedAt = base;
   if (policy !== null) {
