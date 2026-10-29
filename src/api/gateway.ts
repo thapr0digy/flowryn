@@ -122,6 +122,7 @@ export class Gateway {
       const prepared = spec.prepare ? await spec.prepare(ctx, args) : undefined;
       const applied = this.applyTx(() => spec.apply!(ctx, args, prepared));
       services.journal.kick();
+      services.sched.explainWaits();
       const settled = spec.settle ? await spec.settle(ctx, applied) : applied;
       return okReply(settled.data, settled.hints);
     }
@@ -146,6 +147,7 @@ export class Gateway {
     });
     if ("stored" in result) return this.settleStored(spec, ctx, result.stored);
     services.journal.kick();
+    services.sched.explainWaits();
     const settled = spec.settle ? await spec.settle(ctx, result.applied) : result.applied;
     return okReply(settled.data, settled.hints);
   }

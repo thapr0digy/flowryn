@@ -842,6 +842,32 @@ ALTER TABLE gates ADD COLUMN revive_requested_at INTEGER;
 ALTER TABLE gates ADD COLUMN replaced_by TEXT;
 `;
 
+/**
+ * Migration 41 (docs/notes/2026-10-29-why-waiting-covers-fy.md): wait explanations for reviews,
+ * decisions and merges. SQLite cannot widen a CHECK, so the table is rebuilt with its ids and its
+ * AUTOINCREMENT sequence kept (events name rows as x<N>), and gains `subject`: what a wait is about
+ * (a gate id, a decision id, `merge`), so a run's two open questions are two rows. A held
+ * auto-merge keeps the command its item line names (`next`).
+ */
+const HUMAN_WAITS_SQL = /* sql */ `
+CREATE TABLE explanations_v41 (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL, task_id TEXT NOT NULL, stage TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('dialog','capacity','resume','gate','decision','merge')),
+  rule TEXT NOT NULL, reason TEXT NOT NULL, facts TEXT NOT NULL, unblock TEXT NOT NULL,
+  signature TEXT NOT NULL, item_id TEXT, operation TEXT, event_seq INTEGER NOT NULL,
+  opened_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT, subject TEXT);
+INSERT INTO explanations_v41 (id, run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, operation, event_seq, opened_at, closed_at, closed_by)
+  SELECT id, run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, operation, event_seq, opened_at, closed_at, closed_by FROM explanations;
+DELETE FROM sqlite_sequence WHERE name = 'explanations_v41';
+INSERT INTO sqlite_sequence (name, seq) SELECT 'explanations_v41', seq FROM sqlite_sequence WHERE name = 'explanations';
+DROP TABLE explanations;
+ALTER TABLE explanations_v41 RENAME TO explanations;
+CREATE INDEX explanations_open ON explanations(run_id) WHERE closed_at IS NULL;
+CREATE INDEX explanations_task ON explanations(task_id, id);
+ALTER TABLE auto_merges ADD COLUMN next TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -883,6 +909,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
   { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
+  { version: 41, name: "human-waits", sql: HUMAN_WAITS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

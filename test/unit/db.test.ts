@@ -117,6 +117,31 @@ describe("migrations", () => {
     db.close();
   });
 
+  test("migration 41 rebuilds explanations for the review, decision and merge kinds, keeping ids and the id sequence; a held auto-merge gets next", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 40));
+    const row = (kind: string, closed: string) =>
+      `INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, event_seq, opened_at, closed_at)
+       VALUES ('r1', 't1', 'build', '${kind}', 'x', 'a wait', '[]', '[]', 's', 1, 2, ${closed})`;
+    db.exec(`${row("dialog", "NULL")}; ${row("capacity", "3")}; ${row("resume", "NULL")}`);
+    db.exec("DELETE FROM explanations WHERE id = 3");
+    db.exec(`INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, reason, detail, created_at, state_since, updated_at)
+      VALUES ('am1', 'r1', 't1', 'p', 'https://example.test/pull/1', 'abc', 'held', 'verify_failed', 'bun test', 1, 1, 1)`);
+    expect(migrate(db, MIGRATIONS.slice(0, 41))).toEqual([41]);
+    expect(db.query("SELECT id, kind, closed_at, subject FROM explanations ORDER BY id").all()).toEqual([
+      { id: 1, kind: "dialog", closed_at: null, subject: null },
+      { id: 2, kind: "capacity", closed_at: 3, subject: null },
+    ]);
+    // The pruned row's id is never handed out again: events name rows as x<N>.
+    db.exec(`${row("gate", "NULL")}`);
+    expect(db.query("SELECT MAX(id) AS id FROM explanations").get()).toEqual({ id: 4 });
+    expect(() => db.exec(row("other", "NULL"))).toThrow();
+    expect(db.query("SELECT next FROM auto_merges WHERE id = 'am1'").get()).toEqual({ next: null });
+    const indexes = (db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'explanations' ORDER BY name").all() as { name: string }[]).map((i) => i.name);
+    expect(indexes).toEqual(["explanations_open", "explanations_task"]);
+    db.close();
+  });
+
   test("migration 38 adds the task's own model and effort to runs and plan phases, null for the rows already there", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 37));

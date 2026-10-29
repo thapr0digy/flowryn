@@ -11,7 +11,9 @@ import { sanitizeLine } from "../util/sanitize.ts";
  * these rows and recomputes nothing from the live state.
  */
 
-export type ExplanationKind = "dialog" | "capacity" | "resume";
+export type ExplanationKind = "dialog" | "capacity" | "resume" | "gate" | "decision" | "merge";
+/** The kinds a rule writes where it decides (a dialog, a capacity refusal, a resume); the others are the waits on you or the leader (src/attention/human-waits.ts). */
+export const RUN_HOLD_KINDS: readonly ExplanationKind[] = ["dialog", "capacity", "resume"];
 /** Who can end a wait: you (your terminal, the worker's pane), the leader, or an event Flowryn acts on by itself. */
 export type Actor = "captain" | "leader" | "flowryn";
 
@@ -48,6 +50,10 @@ export interface NewExplanation {
   settled?: string;
   /** The launch, resume or cancel this decision belongs to (src/lifecycle/operations.ts). */
   operation?: string | null;
+  /** What the wait is about (a gate id, a decision id, `merge`): a run has one open row per kind and subject. */
+  subject?: string | null;
+  /** When the wait began, when that is earlier than this decision (a review opened before the pass that explains it). */
+  since?: number;
 }
 
 export interface ExplanationRow {
@@ -63,6 +69,7 @@ export interface ExplanationRow {
   signature: string;
   item_id: string | null;
   operation: string | null;
+  subject: string | null;
   event_seq: number;
   opened_at: number;
   closed_at: number | null;
@@ -79,7 +86,7 @@ function signatureOf(x: NewExplanation, reason: string, facts: Fact[], unblock: 
 
 /**
  * Record a decision about a run. Call inside the deciding transaction. When
- * the run already has an open explanation of this kind with the same rule,
+ * the run already has an open explanation of this kind and subject with the same rule,
  * reason, facts and unblock, no row is written (null), though a new item for
  * the same wait (one opened after a dismissal) takes over its link; a
  * different one is closed as superseded. Returns the new row's id.
@@ -89,7 +96,9 @@ export function explain(db: Db, x: NewExplanation): number | null {
   const facts = x.facts.map((f) => ({ name: f.name, value: sanitizeLine(f.value, MAX_VALUE_CHARS), at: f.at }));
   const unblock = x.unblock.map((u) => ({ by: u.by, action: sanitizeLine(u.action, MAX_VALUE_CHARS) }));
   const signature = signatureOf(x, reason, x.facts.map((f, i) => ({ ...facts[i]!, value: f.same ?? facts[i]!.value })), unblock);
-  const open = db.query("SELECT id, signature, item_id FROM explanations WHERE run_id = ?1 AND kind = ?2 AND closed_at IS NULL ORDER BY id").all(x.run.id, x.kind) as {
+  const open = db
+    .query("SELECT id, signature, item_id FROM explanations WHERE run_id = ?1 AND kind = ?2 AND subject IS ?3 AND closed_at IS NULL ORDER BY id")
+    .all(x.run.id, x.kind, x.subject ?? null) as {
     id: number;
     signature: string;
     item_id: string | null;
@@ -104,8 +113,8 @@ export function explain(db: Db, x: NewExplanation): number | null {
   const event = appendEvent(db, { source: x.source, kind: "run.explained", runId: x.run.id, taskId: x.run.task_id, payload: { kind: x.kind, rule: x.rule }, ts: x.now });
   const result = db
     .query(
-      `INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, event_seq, opened_at, closed_at, closed_by, operation)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+      `INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, event_seq, opened_at, closed_at, closed_by, operation, subject)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
     )
     .run(
       x.run.id,
@@ -119,10 +128,11 @@ export function explain(db: Db, x: NewExplanation): number | null {
       signature,
       x.itemId ?? null,
       event.seq,
-      x.now,
+      Math.min(x.since ?? x.now, x.now),
       x.settled ? x.now : null,
       x.settled ?? null,
       x.operation ?? null,
+      x.subject ?? null,
     );
   const id = Number(result.lastInsertRowid);
   for (const row of open) db.query("UPDATE explanations SET closed_at = ?2, closed_by = ?3 WHERE id = ?1").run(row.id, x.now, `superseded by x${id}`);
@@ -167,7 +177,8 @@ export function closeDismissedPromptExplanations(db: Db, runId: string, by: stri
  * whose item resolved by any path, one whose item was dismissed and whose
  * condition is gone (a trust dialog row off `blocked_dialog`, a resume row off
  * `dead`; a dismissed prompt's row waits for its dialog-gone signal,
- * `closeDismissedPromptExplanations`), and one with no item whose run the scheduler no longer considers
+ * `closeDismissedPromptExplanations`), a review's row once its gate is not open, a decision's
+ * once it is answered or dismissed, and one with no item whose run the scheduler no longer considers
  * for a grant (its `candidates()` filter). One event when anything closed. Runs in its own
  * transaction (the scheduler, each pass).
  */
@@ -176,12 +187,18 @@ export function sweepExplanations(db: Db, now: number): number {
     .query(
       `SELECT x.id, CASE
            WHEN r.id IS NULL OR r.state IN ('cleaned','failed','cancelled') THEN 'run ended'
+           WHEN x.kind = 'gate' THEN 'gate ' || COALESCE(g.state, 'gone')
+           WHEN x.kind = 'decision' THEN CASE WHEN d.state = 'answered' THEN 'answered by ' || COALESCE(d.answered_by, d.answered_via, '-') ELSE COALESCE(d.state, 'gone') END
            WHEN i.state = 'resolved' THEN COALESCE(i.resolved_by, 'item resolved')
            WHEN i.state = 'dismissed' THEN 'item dismissed; no longer waiting'
            ELSE 'no longer waiting' END AS why
        FROM explanations x LEFT JOIN runs r ON r.id = x.run_id LEFT JOIN items i ON i.id = x.item_id
+         LEFT JOIN gates g ON x.kind = 'gate' AND g.id = x.subject
+         LEFT JOIN decisions d ON x.kind = 'decision' AND d.id = x.subject
        WHERE x.closed_at IS NULL AND (
          r.id IS NULL OR r.state IN ('cleaned','failed','cancelled')
+         OR (x.kind = 'gate' AND (g.id IS NULL OR g.state != 'open'))
+         OR (x.kind = 'decision' AND (d.id IS NULL OR d.state != 'open'))
          OR i.state = 'resolved'
          OR (i.state = 'dismissed' AND (
               (x.kind = 'dialog' AND i.kind = 'trust_dialog' AND r.liveness != 'blocked_dialog')
@@ -279,15 +296,21 @@ export interface WaitingRun {
   more: number;
 }
 
-/** Every run not ended with an open explanation, longest waiting first, with its newest open row. */
-export function waitingRuns(db: Db): WaitingRun[] {
-  const rows = db
-    .query(
-      `SELECT x.* FROM explanations x JOIN runs r ON r.id = x.run_id
-       WHERE x.closed_at IS NULL AND r.state NOT IN ('cleaned','failed','cancelled')
-       ORDER BY x.id DESC`,
-    )
-    .all() as ExplanationRow[];
+/**
+ * Every run not ended with an open explanation, longest waiting first, with
+ * its newest open row; `kinds` limits it to those kinds (the briefing leaves
+ * out the waits its "Needs you" already lists).
+ */
+export function waitingRuns(db: Db, kinds: readonly ExplanationKind[] | null = null): WaitingRun[] {
+  const rows = (
+    db
+      .query(
+        `SELECT x.* FROM explanations x JOIN runs r ON r.id = x.run_id
+         WHERE x.closed_at IS NULL AND r.state NOT IN ('cleaned','failed','cancelled')
+         ORDER BY x.opened_at DESC, x.id DESC`,
+      )
+      .all() as ExplanationRow[]
+  ).filter((row) => kinds === null || kinds.includes(row.kind));
   const byRun = new Map<string, { row: ExplanationRow; count: number; since: number }>();
   for (const row of rows) {
     const seen = byRun.get(row.run_id);

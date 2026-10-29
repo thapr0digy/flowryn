@@ -16,7 +16,7 @@ import { activeAutoAttempt } from "../lifecycle/harness-gate.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { HARNESS_IDS } from "../harness/types.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
-import { waitingPointer, waitingRuns } from "./explanations.ts";
+import { RUN_HOLD_KINDS, waitingPointer, waitingRuns } from "./explanations.ts";
 import { openActionable, type RankedItem } from "./router.ts";
 
 /**
@@ -170,7 +170,8 @@ function needsLines(db: Db, now: number, ageMs: number, heading: string, lens: S
 
 /** Why each waiting run waits, from its recorded explanation; no section when nothing waits (docs/notes/2026-10-13-next-steps-md-wq.md). */
 function waitingLines(db: Db, lens: ScopeLens): string[] {
-  const held = waitingRuns(db).filter((w) => lens.task(w.task_id));
+  // Reviews, decisions and merges are left out: "Needs you" lists them already (docs/notes/2026-10-29-why-waiting-covers-fy.md).
+  const held = waitingRuns(db, RUN_HOLD_KINDS).filter((w) => lens.task(w.task_id));
   if (held.length === 0) return [];
   const lines = [`Waiting (${held.length}):`];
   for (const w of held.slice(0, MAX_WAITING_LINES)) {
