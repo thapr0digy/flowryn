@@ -23,7 +23,7 @@ Refused (`bad_args`, exit 3): a scout (it opens no PR); a project or a `--mode` 
 
 ## Data
 
-Migration 42 (`base-branch`): `task_policy.base_branch` (what the task was filed with) and `runs.base_branch` (the branch the run's PR targets now; phase 2's retarget changes it during a run). Null is the project's default branch. `runBase(run, project)` (`src/lifecycle/runs.ts`) is the one place that resolves it. `flowryn home adopt` copies `task_policy.base_branch` with the rest of a policy row.
+Migration 43 (`base-branch`): `task_policy.base_branch` (what the task was filed with) and `runs.base_branch` (the branch the run's PR targets now; phase 2's retarget changes it during a run). Null is the project's default branch. `runBase(run, project)` (`src/lifecycle/runs.ts`) is the one place that resolves it. `flowryn home adopt` copies `task_policy.base_branch` with the rest of a policy row.
 
 ## Choices
 

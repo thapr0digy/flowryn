@@ -156,6 +156,25 @@ export function awayConfig(config: FlowrynConfig): AwayConfig {
   return out;
 }
 
+/** [learnings]: the leader's lessons (`flowryn learn`, docs/notes/2026-10-29-leader-learnings-file-j6.md). */
+export interface LearningsConfig {
+  /** Active lessons kept per scope; past it the least recently confirmed one is set aside. */
+  max: number;
+}
+
+export const DEFAULT_LEARNINGS: LearningsConfig = { max: 25 };
+export const MAX_LEARNINGS_CAP = 200;
+
+export function learningsConfig(config: FlowrynConfig): LearningsConfig {
+  const raw = table(config.extra.learnings, "[learnings]");
+  for (const key of Object.keys(raw)) {
+    if (!(key in DEFAULT_LEARNINGS)) throw new FlowrynError("config_invalid", `[learnings] ${key} is not a known setting`);
+  }
+  const out = positiveInts(raw, DEFAULT_LEARNINGS, "[learnings]", ["max"]);
+  if (out.max > MAX_LEARNINGS_CAP) throw new FlowrynError("config_invalid", `[learnings] max must be at most ${MAX_LEARNINGS_CAP}`);
+  return out;
+}
+
 /** [grants]: chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md). */
 export interface GrantsConfig {
   /** Claude's projects directory, where a leader's transcript must live for its chat answers to count. */

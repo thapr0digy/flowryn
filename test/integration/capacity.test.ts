@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
-import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { makeFleetEnv, makeRepo, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 
 /**
@@ -294,6 +294,38 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       release(e, aTask, "go");
       await e.waitRun(aRun, (r) => r.stage === "ship" && r.stage_state === "active", "A shipping");
       expect(e.run(bRun).pending_launch).toBe("fresh");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "[projects.web] max_workers = 1: a second web task waits with the project's reason, another project starts past it, and the first ending starts it",
+    async () => {
+      env = await makeFleetEnv({ extraConfig: "[projects.web]\nmax_workers = 1\n" });
+      const e = env;
+      const dispatch = async (project: string, title: string) => {
+        const r = await e.json(["dispatch", project, "--kind", "ship", "--body-file", "-"], { stdin: `${title}\nFAKE: sleep 600000` });
+        expect(r.code).toBe(0);
+        return r.reply.data as { run: string; task: string; state: string };
+      };
+      const first = await dispatch("web", "First");
+      await e.waitRun(first.run, (r) => r.proc_pid !== null, "the first web worker");
+      const second = await dispatch("web", "Second");
+      expect(second.state).toBe("waiting for capacity");
+
+      // Another project has no limit: it starts while web's second task waits.
+      const apiRepo = makeRepo(join(e.h.home, "api-repo"));
+      expect((await e.json(["project", "add", apiRepo, "--id", "api", "--mode", "local-only"], { env: { FLOWRYN_TOKEN: e.leader } })).code).toBe(0);
+      const other = await dispatch("api", "Other");
+      await e.waitRun(other.run, (r) => r.proc_pid !== null, "the api worker");
+      expect(e.run(second.run).pending_launch).toBe("fresh");
+
+      const view = await e.json(["capacity"]);
+      expect(view.reply.data).toMatchObject({ projects: [{ project: "web", workers: 1, max: 1 }], waiting: [{ task: second.task, why: "project web at its worker limit (1/1)" }] });
+      expect(query<{ rule: string }>(e, "SELECT rule FROM explanations WHERE run_id = ?1 AND closed_at IS NULL", second.run)).toEqual([{ rule: "capacity.project_full" }]);
+
+      expect((await e.json(["cancel", first.task])).code).toBe(0);
+      await e.waitRun(second.run, (r) => r.proc_pid !== null, "the second web worker once the first ended");
     },
     { timeout: 90_000 },
   );

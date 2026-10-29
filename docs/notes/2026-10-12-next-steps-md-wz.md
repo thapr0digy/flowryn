@@ -50,7 +50,7 @@ An index on `(run_id) WHERE closed_at IS NULL` and one on `(task_id, id)`. Exist
 
 The trust rule runs on every pass while the worker has not started; dedupe keeps it to one row.
 
-**`capacity`** (a run with `stage_state = waiting` or a `pending_launch`), written by the scheduler's `tryGrant` at the check that refused it, in its own order: the usage pause, the quota floor, the harness gate, the host check, the pools (a refusal from `activateStage`'s `OverCapacity` is the pools rule). Closed by the grant itself (`closed_by = granted`, in the activation transaction), or by the sweep:
+**`capacity`** (a run with `stage_state = waiting` or a `pending_launch`), written by the scheduler's `tryGrant` at the check that refused it, in its own order: the usage pause, the quota floor, the harness gate, the host check, the pools, the project's worker limit (a refusal from `activateStage`'s `OverCapacity` is the pools rule, its `ProjectAtLimit` the project rule). Closed by the grant itself (`closed_by = granted`, in the activation transaction), or by the sweep:
 
 | rule | facts | unblock |
 |---|---|---|
@@ -59,6 +59,7 @@ The trust rule runs on every pass while the worker has not started; dedupe keeps
 | `capacity.harness_unverified` | harness and version, or why it is missing | flowryn: an automatic contract check is running/queued (when one is); captain: `flowryn doctor --contracts --harness H` (or `flowryn init` for a missing harness) |
 | `capacity.host_check` | the host verdict's reason, free memory and load (as recorded when it flipped) | flowryn: grants once the host check passes (its thresholds) |
 | `capacity.pools_full` | each full pool: used/cap and what holds it (tasks, and jobs such as `verify v3`) | flowryn: grants when a slot in the pool frees (a holder's stage, run or job ends); captain: raise `[capacity] <pool>` in config.toml |
+| `capacity.project_full` | the project's workers, used/max and the tasks holding them | flowryn: grants when one of the project's workers ends; captain: raise `[projects.<id>] max_workers` in config.toml (docs/notes/2026-10-26-a-cap-on-dt.md) |
 
 A pool's holders are facts, so a new holder is a new row: that is a changed input, written once per change.
 

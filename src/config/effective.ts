@@ -4,12 +4,12 @@ import { autoMergeEnabled, verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
-import { awayConfig, grantsConfig, leaderTiming, notifyConfig, reviewConfig } from "./leader.ts";
+import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
 import { policyMode } from "./policy.ts";
 import { upkeepConfig } from "./upkeep.ts";
 import { validationConfig } from "./validation.ts";
 import { herdrConfig, timingConfig, workersConfig } from "./workers.ts";
-import { capacityConfig, defaultAutonomy, DEFAULT_WORKFLOWS, schedTiming, styleBlock, workflowsConfig } from "./workflows.ts";
+import { capacityConfig, defaultAutonomy, DEFAULT_WORKFLOWS, projectMaxWorkers, schedTiming, styleBlock, workflowsConfig } from "./workflows.ts";
 
 /**
  * The effective configuration (docs/notes/2026-10-12-next-steps-md-it.md):
@@ -46,7 +46,8 @@ function projectsView(config: FlowrynConfig): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const id of Object.keys(table(config.extra.projects, "[projects]"))) {
     const verify = verifyConfig(config, id);
-    out[id] = verify ? { ...verify, ...(autoMergeEnabled(config, id) ? { auto_merge: true } : {}) } : { verify: "none" };
+    const maxWorkers = projectMaxWorkers(config, id);
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeEnabled(config, id) ? { auto_merge: true } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}) };
   }
   return out;
 }
@@ -62,6 +63,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   leader: leaderTiming,
   notify: notifyConfig,
   away: awayConfig,
+  learnings: learningsConfig,
   grants: grantsConfig,
   review: reviewConfig,
   github: githubConfig,

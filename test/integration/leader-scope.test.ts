@@ -179,6 +179,27 @@ describe("a leader per scope", () => {
     expect(workRead.denied).toBe(false);
   }, 60_000);
 
+  test("a work leader's lesson reaches a new work session's start, never the personal leader", async () => {
+    const learned = await cliJson(env.h, ["learn", "--project", "api", "--body-file", "-"], { env: { FLOWRYN_TOKEN: work.token }, stdin: `${MARK} api needs the VPN` });
+    expect(learned.code).toBe(0);
+    const lesson = (learned.reply.data as { lesson: string }).lesson;
+    const list = await cliJson(env.h, ["learnings"], { env: { FLOWRYN_TOKEN: personal.token } });
+    expect(list.code).toBe(0);
+    expect(JSON.stringify(list.reply)).not.toContain(MARK);
+    const unlearned = await cliJson(env.h, ["unlearn", lesson], { env: { FLOWRYN_TOKEN: personal.token } });
+    expect((unlearned.reply.error as { code: string }).code).toBe("scope_refused");
+    const later = await lead("claude-work");
+    const otherSide = await lead("claude-personal");
+    await later.fake.start();
+    await otherSide.fake.start();
+    expect(await later.fake.saw("Flowryn learnings")).toBe(1);
+    expect(await later.fake.saw(`${MARK} api needs the VPN`)).toBe(1);
+    expect(await otherSide.fake.saw("Flowryn learnings")).toBe(0);
+    expect(await otherSide.fake.saw(MARK)).toBe(0);
+    later.fake.kill();
+    otherSide.fake.kill();
+  }, 60_000);
+
   test("a leader whose transcript is under another login leads nothing and sees nothing", async () => {
     const crossed = await lead("claude-work", "claude-personal");
     await crossed.fake.start();

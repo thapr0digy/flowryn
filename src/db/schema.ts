@@ -857,8 +857,17 @@ CREATE INDEX watches_state ON watches(state);
 CREATE INDEX watches_waiter ON watches(waiter_task);
 `;
 
+// The leader's lessons (docs/notes/2026-10-29-leader-learnings-file-j6.md): rows are set aside, never deleted.
+const LEARNINGS_SQL = /* sql */ `
+CREATE TABLE learnings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, project TEXT, text TEXT NOT NULL, norm TEXT NOT NULL,
+  created_at INTEGER NOT NULL, reinforced_at INTEGER NOT NULL, until TEXT,
+  archived_at INTEGER, archive_reason TEXT CHECK (archive_reason IN ('cap','expired','unlearned','replaced')), replaced_by INTEGER);
+CREATE INDEX learnings_scope ON learnings(scope, archived_at, reinforced_at);
+`;
+
 /**
- * Migration 42 (docs/notes/2026-10-27-stack-a-plan-4y.md): a task's base branch, the branch it
+ * Migration 43 (docs/notes/2026-10-27-stack-a-plan-4y.md): a task's base branch, the branch it
  * starts from and its PR targets (`dispatch --base`); null is the project's default branch. The
  * task keeps what was asked; the run keeps the branch its PR targets now.
  */
@@ -909,7 +918,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
   { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
   { version: 41, name: "watches", sql: WATCHES_SQL },
-  { version: 42, name: "base-branch", sql: BASE_BRANCH_SQL },
+  { version: 42, name: "learnings", sql: LEARNINGS_SQL },
+  { version: 43, name: "base-branch", sql: BASE_BRANCH_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

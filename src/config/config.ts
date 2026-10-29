@@ -98,6 +98,7 @@ export const CONFIG_SECTIONS = [
   "leader",
   "notify",
   "away",
+  "learnings",
   "grants",
   "review",
   "github",
