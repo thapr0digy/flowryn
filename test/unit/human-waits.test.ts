@@ -370,6 +370,23 @@ describe("merges", () => {
     expect(unblock(only())[0]!.action).toBe("flowryn show t1");
   });
 
+  test("a merge already requested waits on Flowryn, not on the approval it used up", () => {
+    db.query("UPDATE task_policy SET yolo = 0 WHERE task_id = 't1'").run();
+    deliver();
+    checks([], []);
+    db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('ap1', 't1', ?1, ?2, 'cli-tty', 'me', 'merge', ?3, ?4)").run(PR, HEAD, now, now + 60 * MIN);
+    pass();
+    expect(only().rule).toBe("merge.ready");
+    db.query("UPDATE approvals SET consumed_at = ?1").run(now);
+    db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('mg1', 't1', ?1, ?2, 'ap1', ?3, 'requested')").run(PR, HEAD, now);
+    db.query("UPDATE runs SET state = 'merging' WHERE id = 'r1'").run();
+    pass();
+    const row = only();
+    expect([row.rule, row.reason]).toEqual(["merge.merging", "merge mg1 requested; waiting for its result"]);
+    expect(unblock(row)[0]!.by).toBe("flowryn");
+    expect(taskExplanations(db, "t1").map((r) => r.rule)).toEqual(["merge.ready", "merge.merging"]);
+  });
+
   test("the row closes when the merge gate closes: merged, or sent back", () => {
     deliver();
     pass();

@@ -7,6 +7,7 @@ import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import type { RunWithPolicy } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
 import { findHumanApproval } from "../policy/approvals.ts";
+import { latestMerge } from "../policy/merge.ts";
 import { latestAutoMerge, LIVE_AUTO_MERGE_STATES, type AutoMergeRow } from "../verify/auto-merge.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
@@ -161,8 +162,9 @@ function parseOptions(raw: string): string[] {
  * waived at this head passes, and so do ones GitHub never started when the
  * project has verify steps), the local
  * verify, pending checks, an approval; else only the merge itself is left. A
- * live auto-merge is Flowryn's own wait; a held one names the command its
- * item names. None when no merge gate is open.
+ * live auto-merge, and a merge already requested (the run is merging; its
+ * approval is used up), are Flowryn's own wait; a held auto-merge names the
+ * command its item names. None when no merge gate is open.
  */
 export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: number): Explained | null {
   const gate = db.query("SELECT * FROM gates WHERE run_id = ?1 AND kind = 'merge' AND state = 'open' ORDER BY opened_at DESC LIMIT 1").get(run.id) as GateRow | null;
@@ -177,6 +179,7 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   const auto = latestAutoMerge(db, run.id);
   if (auto && auto.head_sha === head && auto.state === "held") return heldWait(auto, task, headFact);
   if (auto && auto.head_sha === head && LIVE_AUTO_MERGE_STATES.includes(auto.state)) return autoWait(auto, headFact);
+  if (run.state === "merging") return mergingWait(db, task, headFact, base);
   const evidence = delivered.kind === "pr" ? prEvidence(db, run.id) : null;
   const checks = evidence && evidence.head === head ? evidence.checks : null;
   if (evidence && evidence.head === head && evidence.state !== "open") return null;
@@ -311,6 +314,18 @@ function autoWait(auto: AutoMergeRow, headFact: Fact): Explained {
     facts: [headFact, { name: "auto-merge", value: `${auto.id} ${auto.state}`, at: auto.state_since }],
     unblock: [{ by: "flowryn", action: "merges once the verify passes and the checks are green (holds it after 6 h of pending checks)" }],
     since: auto.state_since,
+  };
+}
+
+function mergingWait(db: Db, task: string, headFact: Fact, base: number): Explained {
+  const merge = latestMerge(db, task);
+  const id = merge?.id ?? "-";
+  return {
+    rule: "merge.merging",
+    reason: `merge ${id} requested; waiting for its result`,
+    facts: [headFact, { name: "merge", value: `${id} ${merge?.state ?? "-"}`, at: merge?.requested_at ?? null }],
+    unblock: [{ by: "flowryn", action: "records the merge's result, or reads the PR again on its next delivery pass" }],
+    since: merge?.requested_at ?? base,
   };
 }
 
