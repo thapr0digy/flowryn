@@ -167,6 +167,10 @@ export function applyPrObservation(
     const merge = latestMerge(db, run.task_id);
     if (merge && (merge.state === "requested" || merge.state === "unproven") && !inFlight.has(merge.id)) {
       if (pr.state === "merged" && pr.mergeSha) {
+        if (mergedOffBase(db, run, pr, now)) {
+          recordMergeResult(db, run, merge.id, { state: "refused", detail: `the PR was merged into ${pr.baseRef}, not the run's base` }, now);
+          return { landed: false };
+        }
         recordMergeResult(db, run, merge.id, { state: "merged", sha: pr.mergeSha, detail: `the watcher read the PR merged at ${pr.mergeSha.slice(0, 8)}` }, now);
         return { landed: true };
       }

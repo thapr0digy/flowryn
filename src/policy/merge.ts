@@ -352,7 +352,11 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   const task = run.task_id;
   // 1 · the canonical PR for the task, at the head that was delivered.
   if (pr) {
-    if (pr.state === "merged") return { waived: null, alreadyMerged: true, localGreen: null };
+    if (pr.state === "merged") {
+      const base = runBase(run, project);
+      if (pr.baseRef !== base) throw new FlowrynError("base_mismatch", `merge refused: ${delivered.ref} was merged into ${pr.baseRef}, not its base ${base}`, `settle the divergence the watcher opens for it: flowryn show ${task}`);
+      return { waived: null, alreadyMerged: true, localGreen: null };
+    }
     if (pr.state === "closed") throw new FlowrynError("pr_closed", `${delivered.ref} was closed without being merged`, `flowryn show ${task}`);
   }
   if (facts.head !== delivered.head) {

@@ -67,6 +67,18 @@ describe("a PR merged into a branch other than the run's base", () => {
     expect(getRun(db, "r1")!.state).toBe("landed");
   });
 
+  test("a merge in flight read merged into main is refused and diverges, not landed", () => {
+    tx(db, () => {
+      db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a1', 't1', ?1, ?2, 'cli-tty', 'me', ?3, ?4)").run(delivered.ref, HEAD, now, now + 60_000);
+      db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('mg1', 't1', ?1, ?2, 'a1', ?3, 'requested')").run(delivered.ref, HEAD, now);
+      db.query("UPDATE runs SET state = 'merging' WHERE id = 'r1'").run();
+    });
+    expect(observe("main")).toBe(false);
+    expect(db.query("SELECT state FROM merges WHERE id = 'mg1'").get()).toEqual({ state: "refused" });
+    expect(getRun(db, "r1")!.state).toBe("ready");
+    expect(divergences().map((d) => d.summary)).toEqual([`the delivered PR ${delivered.ref} was merged into main, not its base release/2`]);
+  });
+
   test("merged into its own base lands with no divergence", () => {
     expect(observe("release/2")).toBe(true);
     expect(divergences()).toHaveLength(0);

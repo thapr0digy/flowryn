@@ -124,6 +124,17 @@ describe("dispatch --base", () => {
       expect(refused.code).toBe(2);
       expect(errorOf(refused.reply)).toMatchObject({ code: "base_mismatch" });
       expect(errorOf(refused.reply).message).toContain("targets main, not its base release/2");
+
+      const pr = e.github.pr("acme/web", 1);
+      pr.state = "closed";
+      pr.merged = true;
+      pr.mergeSha = "b".repeat(40);
+      pr.mergedAt = new Date().toISOString();
+      const mergedElsewhere = await e.fleet.json(["merge", task]);
+      expect(mergedElsewhere.code).toBe(2);
+      expect(errorOf(mergedElsewhere.reply)).toMatchObject({ code: "base_mismatch" });
+      expect(errorOf(mergedElsewhere.reply).message).toContain("was merged into main, not its base release/2");
+      expect(e.fleet.run(run).state).not.toBe("landed");
     },
     { timeout: 60_000 },
   );
