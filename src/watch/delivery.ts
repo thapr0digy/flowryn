@@ -9,7 +9,7 @@ import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, st
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { deliveryBasis, deliveryTransition, type BasisPart } from "../lifecycle/observed.ts";
-import { getRun, getRunWithPolicy, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { getRun, getRunWithPolicy, runBase, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { latestMerge, notStartedChecks, proveLocal, recordMergeResult } from "../policy/merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
@@ -317,15 +317,16 @@ export class DeliveryWatcher {
 
   /**
    * Whether a delivered head that moved by commits on top moved only by clean
-   * merges of the project's default branch (docs/notes/2026-10-23-a-clean-merge-fm.md),
+   * merges of the run's base (docs/notes/2026-10-23-a-clean-merge-fm.md),
    * asked of git where headHistoryOf asked; never a yes when git cannot say.
    */
   private async cleanMergeOf(run: RunWithPolicy, delivered: string, head: string, prBase: string): Promise<CleanMerge> {
     const project = getProject(this.deps.db, run.project_id);
     if (!project) return { ok: false, why: `project ${run.project_id} is not registered` };
-    if (prBase !== project.default_branch) return { ok: false, why: `the PR's base is ${prBase}, not ${project.default_branch}` };
+    const base = runBase(run, project);
+    if (prBase !== base) return { ok: false, why: `the PR's base is ${prBase}, not ${base}` };
     const cwd = existsSync(run.worktree_path) ? run.worktree_path : project.path;
-    return cleanMainMerge(this.deps.git, cwd, { from: delivered, to: head, base: project.default_branch, fetchGit: this.deps.headFetchGit ?? this.deps.git }).catch(
+    return cleanMainMerge(this.deps.git, cwd, { from: delivered, to: head, base, fetchGit: this.deps.headFetchGit ?? this.deps.git }).catch(
       (error: unknown) => ({ ok: false, why: `git could not say: ${(error as Error).message}` }) as const,
     );
   }
@@ -509,11 +510,11 @@ export class DeliveryWatcher {
     if (checks === null || checks > 0) return;
     const project = getProject(db, run.project_id);
     if (!project) return;
-    const facts = await readBranchFacts(this.deps.git, run.worktree_path, project.default_branch);
+    const facts = await readBranchFacts(this.deps.git, run.worktree_path, runBase(run, project));
     const observed = deliveryTransition(db, seen, CI_WAIT_PARTS, "ci_wait", "nomistakes", now(), (current) => {
       if (current.state !== "validating" && current.state !== "running") return null;
       if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return null;
-      const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: project.default_branch }, facts, alert, now());
+      const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: runBase(run, project) }, facts, alert, now());
       yieldToCiWait(db, current, nm, now());
       return id;
     });

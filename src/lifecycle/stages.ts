@@ -121,7 +121,7 @@ export function stageTextContext(db: Db, config: FlowrynConfig, run: RunWithPoli
   const project = getProject(db, run.project_id);
   return {
     stateDir: config.state_dir,
-    delivery: { kind: run.kind, mode: run.delivery_mode as ContractDelivery["mode"], defaultBranch: project?.default_branch ?? "main", lastStage: lastStageOf(db, run), harness: run.harness },
+    delivery: { kind: run.kind, mode: run.delivery_mode as ContractDelivery["mode"], defaultBranch: project?.default_branch ?? "main", base: run.base_branch, lastStage: lastStageOf(db, run), harness: run.harness },
   };
 }
 

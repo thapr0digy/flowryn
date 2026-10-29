@@ -43,6 +43,8 @@ export interface RunRow {
   worktree_path: string;
   branch: string;
   base_sha: string;
+  /** The branch the run started from and its PR targets; null: the project's default branch. */
+  base_branch: string | null;
   proc_pid: number | null;
   proc_start: number | null;
   proc_exe: string | null;
@@ -95,6 +97,11 @@ export function isTerminal(state: RunState): boolean {
 
 export function getRun(db: Db, id: string): RunRow | null {
   return db.query("SELECT * FROM runs WHERE id = ?1").get(id) as RunRow | null;
+}
+
+/** The branch a run started from and its PR targets: its own base (`dispatch --base`), else the project's default. */
+export function runBase(run: { base_branch: string | null }, project: { default_branch: string }): string {
+  return run.base_branch ?? project.default_branch;
 }
 
 export function getRunWithPolicy(db: Db, id: string): RunWithPolicy | null {

@@ -60,13 +60,14 @@ export interface QueuedPolicy {
   auto: number;
   created_at: number;
   import_source: string | null;
+  base_branch: string | null;
 }
 
 const STATUS_RANK: Record<QueuedStatus, number> = { ready: 0, waiting: 1, held: 2 };
 
 function policyOf(db: Db, taskId: string): QueuedPolicy | null {
   return db
-    .query("SELECT project_id, kind, delivery_mode, mode_reason, workflow, auto, created_at, import_source FROM task_policy WHERE task_id = ?1")
+    .query("SELECT project_id, kind, delivery_mode, mode_reason, workflow, auto, created_at, import_source, base_branch FROM task_policy WHERE task_id = ?1")
     .get(taskId) as QueuedPolicy | null;
 }
 

@@ -892,6 +892,16 @@ CREATE INDEX explanations_task ON explanations(task_id, id);
 ALTER TABLE auto_merges ADD COLUMN next TEXT;
 `;
 
+/**
+ * Migration 44 (docs/notes/2026-10-27-stack-a-plan-4y.md): a task's base branch, the branch it
+ * starts from and its PR targets (`dispatch --base`); null is the project's default branch. The
+ * task keeps what was asked; the run keeps the branch its PR targets now.
+ */
+const BASE_BRANCH_SQL = /* sql */ `
+ALTER TABLE task_policy ADD COLUMN base_branch TEXT;
+ALTER TABLE runs ADD COLUMN base_branch TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -936,6 +946,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 41, name: "watches", sql: WATCHES_SQL },
   { version: 42, name: "learnings", sql: LEARNINGS_SQL },
   { version: 43, name: "human-waits", sql: HUMAN_WAITS_SQL },
+  { version: 44, name: "base-branch", sql: BASE_BRANCH_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

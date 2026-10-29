@@ -11,7 +11,7 @@ import { isRoutineMerge, voidApprovals } from "../policy/approvals.ts";
 import type { CleanMergeStep } from "../policy/clean-merge.ts";
 import { closeDivergence, openDivergence, type DivergenceRow } from "../reconcile/divergence.ts";
 import type { ProjectRow } from "./projects.ts";
-import { recordEvidence, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { recordEvidence, runBase, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { queueCarriedVerify } from "../verify/queue.ts";
 
 /**
@@ -172,7 +172,8 @@ export async function verifyPrDelivery(deps: DeliveryDeps, run: RunWithPolicy, p
     throw new FlowrynError("pr_draft", `${url} is a draft`, "mark it ready for review, then deliver again");
   }
   if (pr.headRef !== run.branch) refuse(`${url} is from branch ${pr.headRef}, not this run's ${run.branch}`);
-  if (pr.baseRef !== project.default_branch) refuse(`${url} targets ${pr.baseRef}, not ${project.default_branch}`);
+  const base = runBase(run, project);
+  if (pr.baseRef !== base) refuse(`${url} targets ${pr.baseRef}, not ${base}`, run.base_branch ? `open it into ${base}: this task's base` : undefined);
   if (pr.state === "open") {
     const onRemote = await remoteHead(deps.git, run.worktree_path, pr.headRef);
     if (onRemote !== pr.headSha) {

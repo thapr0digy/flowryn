@@ -20,6 +20,8 @@ export interface ContractDelivery {
   kind: "ship" | "scout";
   mode: "no-mistakes" | "direct-PR" | "local-only";
   defaultBranch: string;
+  /** The task's own base branch (`dispatch --base`), when it is not the default: the branch its PR targets. */
+  base?: string | null;
   /** The stage the delivery ends (the run's last): a no-mistakes ship starts it before its pipeline. */
   lastStage?: { id: string; pools: string[] };
   /** The text is that stage's own, which has already started. */
@@ -50,20 +52,31 @@ function beginLines(d: ContractDelivery): string[] {
   return [`  Before the pipeline: $FLOWRYN_BIN stage begin ${id}${slot}.`, ...wait];
 }
 
+/** The branch the worker's PR targets and takes in with a merge: its base, else the default branch. */
+function targetOf(d: ContractDelivery): string {
+  return d.base ?? d.defaultBranch;
+}
+
+/** A named base: no-mistakes must be told, or it rebases onto, opens its PR against and watches CI for the default. */
+function baseLines(d: ContractDelivery): string[] {
+  return d.base ? [`  This task's base is ${d.base}, not ${d.defaultBranch}: pass --base-branch ${d.base} on every no-mistakes axi run that starts a run.`] : [];
+}
+
 /** The "finished" lines: how this worker delivers, and that it is verified. */
 export function deliveryLines(d: ContractDelivery): string[] {
   if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
   if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", "  Finished: $FLOWRYN_BIN deliver --local. It is verified."];
   if (d.mode === "direct-PR") {
-    return [`- Ship: commit, git push origin HEAD, open a PR into ${d.defaultBranch} (gh-axi pr create).`, "  Finished: $FLOWRYN_BIN deliver --pr <url>. Verified: your HEAD must be the PR head."];
+    return [`- Ship: commit, git push origin HEAD, open a PR into ${targetOf(d)} (gh-axi pr create).`, "  Finished: $FLOWRYN_BIN deliver --pr <url>. Verified: your HEAD must be the PR head."];
   }
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
+    ...baseLines(d),
     ...beginLines(d),
     ...waitLines(d),
     "  An ask-user finding: $FLOWRYN_BIN ask --nomistakes --options <its choices> --blocks <what waits> --body-file - with it; never answer it yourself.",
     "  A rule may settle it at once: then act on the steer it names.",
-    `  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/${d.defaultBranch}, resolve, commit, plain git push, then run the pipeline again.`,
+    `  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/${targetOf(d)}, resolve, commit, plain git push, then run the pipeline again.`,
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",
   ];
@@ -92,7 +105,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     "  Only when you truly cannot proceed: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
     "  It returns at once; end your turn. The answer arrives as a steer.",
     "- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.",
-    "  To take main: new commits, git merge origin/main, a plain git push.",
+    delivery.base ? `  To take your base: new commits, git merge origin/${delivery.base}, a plain git push.` : "  To take main: new commits, git merge origin/main, a plain git push.",
     '- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.',
     "- Keep scratch files in $TMPDIR: your run's own, the same path in and out of the sandbox.",
     "- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.",

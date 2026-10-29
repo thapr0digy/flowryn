@@ -5,7 +5,8 @@ import type { ChecksSummary, PullRequest } from "../forge/types.ts";
 import { carryDelivery, deliveredOf, prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
 import { askedCiWait } from "../lifecycle/ci-wait.ts";
-import { isTerminal, recordEvidence, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { isTerminal, recordEvidence, runBase, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { getProject } from "../lifecycle/projects.ts";
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
 import { holdsLease } from "../sched/pools.ts";
 import { latestMerge, recordMergeResult } from "../policy/merge.ts";
@@ -134,6 +135,22 @@ function nudgeConflict(db: Db, run: RunWithPolicy, delivered: Delivered, pr: Pul
   return true;
 }
 
+/**
+ * A PR merged on GitHub into a branch other than the run's base (retargeted
+ * by hand, then merged): a divergence, not a landing, since the work is not
+ * where the run said it would go. Keeping the run (keep-run) lands it as merged.
+ */
+function mergedOffBase(db: Db, run: RunWithPolicy, pr: PullRequest, now: number): boolean {
+  const project = getProject(db, run.project_id);
+  if (!project || !pr.baseRef) return false;
+  const base = runBase(run, project);
+  if (pr.baseRef === base) return false;
+  const summary = `the delivered PR ${pr.url} was merged into ${pr.baseRef}, not its base ${base}`;
+  if (db.query("SELECT 1 FROM divergences WHERE run_id = ?1 AND summary = ?2 AND resolution = 'keep-run'").get(run.id, summary)) return false;
+  openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary }, now);
+  return true;
+}
+
 /** Apply one observation of a run's PR. Call inside a transaction. */
 export function applyPrObservation(
   db: Db,
@@ -152,6 +169,10 @@ export function applyPrObservation(
     const merge = latestMerge(db, run.task_id);
     if (merge && (merge.state === "requested" || merge.state === "unproven") && !inFlight.has(merge.id)) {
       if (pr.state === "merged" && pr.mergeSha) {
+        if (mergedOffBase(db, run, pr, now)) {
+          recordMergeResult(db, run, merge.id, { state: "refused", detail: `the PR was merged into ${pr.baseRef}, not the run's base` }, now);
+          return { landed: false };
+        }
         recordMergeResult(db, run, merge.id, { state: "merged", sha: pr.mergeSha, detail: `the watcher read the PR merged at ${pr.mergeSha.slice(0, 8)}` }, now);
         return { landed: true };
       }
@@ -166,6 +187,7 @@ export function applyPrObservation(
   if (run.state !== "ready") return { landed: false };
 
   if (pr.state === "merged" && pr.mergeSha) {
+    if (mergedOffBase(db, run, pr, now)) return { landed: false };
     landRun(db, run, { mergeSha: pr.mergeSha, how: "merged_elsewhere", by: "other" }, now);
     return { landed: true };
   }

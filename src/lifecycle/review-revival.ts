@@ -46,8 +46,8 @@ export interface Revival {
   /** The changes the leader sent, when it was `gate changes`. */
   words: string | null;
   account: Account;
-  /** What checkStart found: the harness version and the base commit. */
-  start: { version: string; base: string };
+  /** What checkStart found: the harness version, the base commit and the task's base branch (null: the default). */
+  start: { version: string; base: string; baseBranch?: string | null };
   /** The stage the new run starts at (default: the gated stage). */
   stage?: string;
   now: number;
@@ -106,6 +106,7 @@ export function reviveReview(db: Db, config: FlowrynConfig, r: Revival): Revived
     pins: { model: run.model_pin, effort: run.effort_pin },
     version: r.start.version,
     base: r.start.base,
+    baseBranch: r.start.baseBranch ?? null,
     workflow: runWorkflow(db, run, run.kind),
     sensitive: false,
     existing: true,

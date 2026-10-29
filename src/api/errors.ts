@@ -35,6 +35,8 @@ export const ERROR_CODES = {
   bad_args: EXIT.validation,
   bad_envelope: EXIT.validation,
   bad_token: EXIT.role,
+  // a PR that targets another branch than its run's base (docs/notes/2026-10-27-stack-a-plan-4y.md)
+  base_mismatch: EXIT.policy,
   binary_broken: EXIT.policy,
   blockers_not_landed: EXIT.policy,
   challenge_failed: EXIT.validation,

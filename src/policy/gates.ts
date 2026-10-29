@@ -184,7 +184,7 @@ const gateChanges: VerbSpec = {
     const project = getProject(ctx.db, run.project_id);
     if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
     const account = runAccount(ctx.config(), project, run.account, run.harness);
-    return { grant, revival: { gate: gate.id, account, start: await checkStart(startDepsOf(ctx), project, account) } };
+    return { grant, revival: { gate: gate.id, account, start: await checkStart(startDepsOf(ctx), project, account, run.base_branch) } };
   },
   apply(ctx, args, prepared) {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);

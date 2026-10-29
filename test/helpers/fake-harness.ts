@@ -29,7 +29,8 @@
  *   FAKE: commit <file> <text...>    write <file> in the worktree and commit it
  *   FAKE: scratch <file> <text...>   write <file> in the worktree and leave it uncommitted
  *   FAKE: push                       git push origin HEAD (the run branch)
- *   FAKE: pr <api> <owner/repo> [draft]  open a PR for the run branch on a fake GitHub
+ *   FAKE: pr <api> <owner/repo> [draft] [base:<branch>]  open a PR for the run branch on a fake GitHub (into main
+ *                                    unless base: names another branch)
  *   FAKE: deliver-pr                 deliver --pr <the PR it opened>; the reply goes to fake-replies.jsonl
  *   FAKE: deliver-local              deliver --local; the reply goes to fake-replies.jsonl
  *   FAKE: wait-file <name>           wait until $FLOWRYN_REPORT_DIR/<name> exists (the test sequences a step)
@@ -395,10 +396,11 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       });
       return "continue";
     case "pr": {
-      const [api = "", repo = "", draft] = rest;
+      const [api = "", repo = "", ...options] = rest;
+      const base = options.find((o) => o.startsWith("base:"))?.slice("base:".length) ?? "main";
       await tool(async () => {
         const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).stdout;
-        const response = await fetch(`${api}/repos/${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: `fake PR for ${branch}`, head: branch, base: "main", draft: draft === "draft" }) });
+        const response = await fetch(`${api}/repos/${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: `fake PR for ${branch}`, head: branch, base, draft: options.includes("draft") }) });
         const body = (await response.json()) as { html_url?: string };
         log(`pr -> ${response.status} ${body.html_url ?? ""}`);
         const dir = env.FLOWRYN_REPORT_DIR ?? ".";

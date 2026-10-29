@@ -25,7 +25,7 @@ import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
 import { dropRecord } from "./drop.ts";
 import { watchById, watchLabel, watchOfTask, type WatchRow } from "./watches.ts";
-import { planView } from "./dispatch.ts";
+import { planView, storedBase } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
@@ -553,6 +553,7 @@ function queuedView(ctx: ReadCtx, q: QueuedTask, text: ShowText): { data: Record
       waits: q.waits.map((id, i) => (q.waitLabels[i] === id ? id : `${q.waitLabels[i]} (${id})`)),
       hold: text.line(hold, 120),
       ...(q.plan ? { plan: `${q.plan.id} phase ${q.plan.phase} of ${q.plan.of}: ${text.line(q.plan.title, 80)}` } : {}),
+      ...(policy?.base_branch ? { base: policy.base_branch } : {}),
       filed: filedLine(ctx, q),
       body: text.block(q.body, QUEUED_BODY_LINES, 120),
       runs,
@@ -798,7 +799,10 @@ const show: VerbSpec = {
       const queued = queuedTask(ctx.db, target);
       if (queued) return queuedView(ctx, queued, text);
       const phase = phaseOfTask(ctx.db, target);
-      if (phase) return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...planView(ctx.db, phase.plan_id, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
+      if (phase) {
+        const base = storedBase(ctx.db, target);
+        return { data: { task: target, title: phase.title, plan: `${phase.plan_id} phase ${phase.phase_no} of ${phase.phases}`, ...(base ? { base } : {}), ...planView(ctx.db, phase.plan_id, text.full) }, hints: [`flowryn show ${phase.plan_id}`] };
+      }
       throw new FlowrynError("not_found", `no task, run, item or plan ${target}`, "flowryn fleet");
     }
     const policy = ctx.db.query("SELECT project_id, kind, delivery_mode, mode_reason FROM task_policy WHERE task_id = ?1").get(run.task_id) as {
@@ -859,6 +863,7 @@ const show: VerbSpec = {
         resumes: run.resume_count,
         worktree: run.worktree_path,
         branch: run.branch,
+        ...(run.base_branch ? { base: run.base_branch } : {}),
         artifacts,
         ...(deliveryView(ctx, run) ? { delivery: deliveryView(ctx, run) } : {}),
         steers,
