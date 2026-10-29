@@ -63,8 +63,8 @@ One helper replaces the eight copies; each keeps its own signature and result sh
 ### Left open
 
 - `lavish-axi poll` (`src/lavish/poller.ts`): long-lived by design, with an owner (the poller), a pid file per gate and a startup sweep; its halt sends SIGTERM only, with no SIGKILL escalation.
-- `ps` (`psRunnerAt`, `src/runtime/proc.ts`) has no deadline, and a failing ps reads as "process gone". It is local and does not fork; making its failure unknown changes every liveness reader (the reconciler, `terminate`, the lease), which is its own change.
-- `spawnSync` calls with no timeout: the Claude trust check's `git rev-parse` (`src/harness/claude/trust.ts`) and the poller's sweep `ps`; both local and blocking, both to get a `timeout` option.
+- `ps` (`psRunnerAt`, `src/runtime/proc.ts`) had no deadline, and a failing ps read as "process gone". Done in docs/notes/2026-10-29-ps-calls-get-7p.md: every ps call is bounded and a failure is unknown.
+- `spawnSync` calls with no timeout: the Claude trust check's `git rev-parse` (`src/harness/claude/trust.ts`), local and blocking, to get a `timeout` option. (The poller's sweep `ps` moved to `runBounded` in docs/notes/2026-10-29-ps-calls-get-7p.md.)
 - Leaf tools with a pid-only timer: `osascript`, `/usr/bin/open`, `<harness> --version`, `herdr session list`, the `[sched] probe`. None forks in practice; they move to `runBounded` when touched.
 - The detached `flowryn daemon relaunch` of a restart (a `launchctl kickstart -k` before docs/notes/2026-10-23-automatic-daemon-restart-fh.md): meant to outlive the daemon, and bounded by its own waits.
 - A descendant that outlives its leader across a daemon force-kill is not recovered: once the leader is gone no identity proves the group is ours.
