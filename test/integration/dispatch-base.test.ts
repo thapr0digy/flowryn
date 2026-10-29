@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
+import { readSnapshot } from "../../src/journal/snapshot.ts";
 import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
@@ -225,7 +226,7 @@ describe("dispatch --base", () => {
     { timeout: 90_000 },
   );
 
-  test("a queued ship keeps its base; starting a queued task refuses a new --base", async () => {
+  test("a queued ship keeps its base and shows it; starting a queued task refuses a new --base", async () => {
     const env = await makeFleetEnv({ mode: "no-mistakes", origin: true });
     fleets.push(env);
     pushReleaseBranch(env.origin!);
@@ -237,8 +238,14 @@ describe("dispatch --base", () => {
     const task = (queued.reply.data as { task: string }).task;
     const db = env.h.db();
     const policy = db.query("SELECT base_branch FROM task_policy WHERE task_id = ?1").get(task) as { base_branch: string | null };
-    db.close();
     expect(policy.base_branch).toBe("release/2");
+    try {
+      await waitUntil(() => (readSnapshot(db, "backlog")?.tasks ?? []).some((t) => t.id === task), 10_000, "the queued task in the snapshot");
+    } finally {
+      db.close();
+    }
+    const shown = await env.json(["show", task]);
+    expect(shown.reply.data).toMatchObject({ state: "queued", base: "release/2" });
     const restart = await env.json(["dispatch", "web", "--task", task, "--base", "main"]);
     expect(restart.code).toBe(3);
     expect(errorOf(restart.reply).message).toContain("--base is set when a task is filed");
