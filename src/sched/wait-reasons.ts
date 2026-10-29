@@ -3,7 +3,7 @@ import type { HostCheckConfig } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { harnessFacts, harnessUnblock, harnessWaitReason, type AutoAttempt, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { OperationRow } from "../lifecycle/operations.ts";
-import { liveCounts } from "./pools.ts";
+import { liveCounts, projectWorkerHolders, type ProjectLimit } from "./pools.ts";
 import { quotaState } from "./quota.ts";
 import type { HostState } from "./scheduler.ts";
 import { resumeCommand, usagePause } from "./usage.ts";
@@ -125,6 +125,19 @@ export function poolsRefusal(db: Db, caps: Record<string, number>, full: readonl
     unblock: [
       { by: "flowryn", action: `grants when a slot in ${full.join(", ")} frees (a holder's stage, run or job ends)` },
       { by: "captain", action: `raise [capacity] ${full[0]} in config.toml` },
+    ],
+  };
+}
+
+export function projectLimitRefusal(db: Db, limit: ProjectLimit, now: number): Refusal {
+  const holders = projectWorkerHolders(db, limit.project);
+  return {
+    rule: "capacity.project_full",
+    reason: `project ${limit.project} is at its worker limit (${holders.length}/${limit.max})`,
+    facts: [{ name: `project ${limit.project} workers`, value: `${holders.length}/${limit.max} held by ${holders.join(", ") || "-"}`, at: now }],
+    unblock: [
+      { by: "flowryn", action: `grants when one of project ${limit.project}'s workers ends` },
+      { by: "captain", action: `raise [projects.${limit.project}] max_workers in config.toml` },
     ],
   };
 }
