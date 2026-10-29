@@ -1,12 +1,12 @@
 import { FlowrynError } from "../api/errors.ts";
 import { unresolvedLine } from "../attention/explanations.ts";
 import { stringArg, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
-import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
+import { capacityConfig, projectWorkerLimits, WORKER_POOL } from "../config/workflows.ts";
 import { taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { unverifiedVersion } from "../lifecycle/harness-gate.ts";
-import { neededPools, positionOf } from "../lifecycle/stages.ts";
+import { neededPools, positionOf, projectLimit } from "../lifecycle/stages.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { fullPools, liveCounts, liveJobLeases } from "./pools.ts";
+import { fullPools, liveCounts, liveJobLeases, projectAtLimit, projectWorkerHolders } from "./pools.ts";
 import { hostState } from "./scheduler.ts";
 import { overrideQuota, quotaHolds, quotaLine, quotaState, quotaStates, type QuotaState } from "./quota.ts";
 import { clearUsageLimit, resumeCommand, usageGate, usagePause, usagePauses, type UsagePause } from "./usage.ts";
@@ -40,13 +40,16 @@ function waitReason(ctx: ReadCtx, run: RunWithPolicy, needs: string[], caps: Rec
   if (needs.length === 0) return "next pass";
   const full = fullPools(ctx.db, caps, needs);
   if (full.length > 0) return `full: ${full.join(", ")}`;
+  const limit = projectLimit(ctx.config, run.project_id);
+  if (projectAtLimit(ctx.db, limit, needs)) return `project ${limit!.project} at its worker limit (${projectWorkerHolders(ctx.db, limit!.project).length}/${limit!.max})`;
   if (!hostOk) return "host check";
   return "next pass";
 }
 
 /**
  * `flowryn capacity` (design section 11): each pool's live leases against its
- * cap (a run's and a job's, such as a verify), the jobs holding slots, the host
+ * cap (a run's and a job's, such as a verify), each project's workers against
+ * its `max_workers`, the jobs holding slots, the host
  * check, each account's usage-limit pause and quota floor, the verifies
  * queued for a validation slot, and the runs waiting for a grant in the order
  * the scheduler grants them.
@@ -74,8 +77,9 @@ const capacity: VerbSpec = {
            AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')`,
       )
       .all() as (RunWithPolicy & { priority: number })[];
-    // A scoped leader sees its own scope's waiting runs; pools and accounts are shared and name no task.
+    // A scoped leader sees its own scope's waiting runs and project limits; pools and accounts are shared and name no task.
     const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+    const limits = projectWorkerLimits(ctx.config).filter((l) => lens.project(l.project));
     const waiting = rows
       .filter((run) => lens.task(run.task_id))
       .map((run) => {
@@ -93,6 +97,7 @@ const capacity: VerbSpec = {
       }));
     const data: Record<string, unknown> = {
       pools: Object.entries(cfg.pools).map(([pool, cap]) => ({ pool, used: counts[pool] ?? 0, cap })),
+      ...(limits.length > 0 ? { projects: limits.map((l) => ({ project: l.project, workers: projectWorkerHolders(ctx.db, l.project).length, max: l.max })) } : {}),
       host: host
         ? `${host.ok ? "ok" : `blocked: ${host.reason}`} (since ${age(ctx.now, host.since)} ago; needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`
         : `not checked yet (needs ${cfg.host.min_free_mem_gb} GB free, load per core under ${cfg.host.max_load_per_core})`,
