@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
@@ -6,6 +6,7 @@ import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
 import { gateQuestions, gatesToPoll, gatesWithWidget, readsAsPass, recordGateComment, recordGateNotes, recordLavishEnded, requestGatePass, widgetState, type PassRequest } from "../lifecycle/gate-questions.ts";
 import { routedReply, routePageBatch, summarizeReview, type Routed, type UserMessage } from "../lifecycle/review-chat.ts";
 import { runBounded } from "../runtime/bounded.ts";
+import { PS_TIMEOUT_MS, PsUnavailable, psAnswer } from "../runtime/proc.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { DEFAULT_CHANNEL_ALERT_MS } from "../config/leader.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
@@ -50,6 +51,8 @@ export interface PollerDeps {
    * nothing reading them: the next daemon kills those before it polls.
    */
   pidDir?: string;
+  /** The ps that reads a leftover poll's command line (default /bin/ps; tests pass one that fails). */
+  ps?: string;
   /** Opens a gate's page in your browser once its poll runs (src/lavish/opener.ts). */
   opener?: { offer(gate: string): void };
   /** `[review] channel_alert_ms`: how long a gate's polls fail before its review_channel item opens. */
@@ -59,6 +62,9 @@ export interface PollerDeps {
   /** After a batch went to a run: deliver its steer now, and start the scheduler's pass when it asked for a resume or a new run. */
   routed?(runId: string, resumed: boolean): void;
 }
+
+/** A leftover poll's record that ps could not check, kept beside the gate's own `<gate>.json`. */
+const UNCHECKED_SUFFIX = ".unchecked.json";
 
 interface Running {
   page: string;
@@ -113,7 +119,9 @@ export class LavishPoller {
   private retry: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
-  private swept = false;
+  /** The sweep of an earlier daemon's polls: started by the first pass, and no poll starts until it is done. */
+  private sweep: Promise<void> | null = null;
+  private sweepDone = false;
 
   constructor(private readonly deps: PollerDeps) {}
 
@@ -130,12 +138,9 @@ export class LavishPoller {
   pass(): void {
     if (this.closed) return;
     try {
-      if (!this.swept) {
-        this.swept = true;
-        this.sweepOrphans();
-      }
+      this.sweep ??= this.startSweep();
       this.writeWidgets();
-      this.followGates();
+      if (this.sweepDone) this.followGates();
     } catch (error) {
       this.deps.log(`lavish: pass failed: ${(error as Error).stack ?? String(error)}`);
     }
@@ -424,25 +429,89 @@ export class LavishPoller {
     }
   }
 
-  /** Kill the polls an earlier daemon left running: a recorded pid whose command line is still that poll. */
-  private sweepOrphans(): void {
+  /** The sweep of an earlier daemon's polls, once the first pass started it (tests wait on it). */
+  swept(): Promise<void> {
+    return this.sweep ?? Promise.resolve();
+  }
+
+  /** Start the sweep; with no records it is done at once, so the first pass polls without waiting. */
+  private startSweep(): Promise<void> {
+    const records = this.leftoverRecords();
+    if (records.length === 0) {
+      this.sweepDone = true;
+      return Promise.resolve();
+    }
+    return this.sweepOrphans(records)
+      .catch((error: unknown) => this.deps.log(`lavish: the sweep of leftover polls failed: ${(error as Error).message}`))
+      .finally(() => {
+        this.sweepDone = true;
+        this.kick();
+      });
+  }
+
+  private leftoverRecords(): { file: string; text: string }[] {
     const dir = this.deps.pidDir;
-    if (!dir || !existsSync(dir)) return;
+    if (!dir || !existsSync(dir)) return [];
+    const records: { file: string; text: string }[] = [];
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(".json")) continue;
       const file = join(dir, name);
       try {
-        const { pid, page } = JSON.parse(readFileSync(file, "utf8")) as { pid: number; page: string };
-        const ps = Bun.spawnSync(["/bin/ps", "-o", "command=", "-p", String(pid)], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-        const command = ps.stdout.toString().trim();
-        if (Number.isInteger(pid) && pid > 1 && command.includes(" poll ") && command.includes(page)) {
-          process.kill(pid, "SIGTERM");
-          this.deps.log(`lavish: stopped a poll an earlier daemon left running (pid ${pid}, ${page})`);
+        records.push({ file, text: readFileSync(file, "utf8") });
+      } catch (error) {
+        this.deps.log(`lavish: cannot read the leftover poll record ${file}: ${(error as Error).message}`);
+      }
+    }
+    return records;
+  }
+
+  /**
+   * Kill the polls an earlier daemon left running: a recorded pid whose command
+   * line is still that poll. No poll starts until this is done, and a record is
+   * removed only while it still reads as it did. A record ps cannot check is
+   * kept and logged, so the next start checks it again: a failed ps is never "gone".
+   */
+  private async sweepOrphans(records: { file: string; text: string }[]): Promise<void> {
+    const ps = this.deps.ps ?? "/bin/ps";
+    for (const { file, text } of records) {
+      try {
+        const { pid, page } = JSON.parse(text) as { pid: number; page: string };
+        if (Number.isInteger(pid) && pid > 1) {
+          const read = await runBounded([ps, "-o", "command=", "-p", String(pid)], { label: "ps", timeoutMs: PS_TIMEOUT_MS, stderr: "pipe" });
+          const command = psAnswer(ps, read).trim();
+          if (command.includes(" poll ") && command.includes(page)) {
+            process.kill(pid, "SIGTERM");
+            this.deps.log(`lavish: stopped a poll an earlier daemon left running (pid ${pid}, ${page})`);
+          }
         }
       } catch (error) {
+        if (error instanceof PsUnavailable) {
+          this.deps.log(`lavish: cannot check the leftover poll in ${file}; its record is kept for the next start: ${error.message}`);
+          this.setAside(file);
+          continue;
+        }
         this.deps.log(`lavish: cannot check the leftover poll in ${file}: ${(error as Error).message}`);
       }
-      rmSync(file, { force: true });
+      this.forgetRecord(file, text);
+    }
+  }
+
+  /** Keep an unchecked record under a name no poll of this daemon writes (a new poll of the gate rewrites `<gate>.json`). */
+  private setAside(file: string): void {
+    if (file.endsWith(UNCHECKED_SUFFIX)) return;
+    try {
+      renameSync(file, `${file.slice(0, -".json".length)}.${Date.now()}${UNCHECKED_SUFFIX}`);
+    } catch (error) {
+      this.deps.log(`lavish: cannot keep the unchecked poll record ${file}: ${(error as Error).message}`);
+    }
+  }
+
+  /** Remove a leftover record unless a poll of this daemon has rewritten it since. */
+  private forgetRecord(file: string, text: string): void {
+    try {
+      if (readFileSync(file, "utf8") === text) rmSync(file, { force: true });
+    } catch {
+      // already gone
     }
   }
 }

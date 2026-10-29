@@ -577,6 +577,7 @@ describe("a gate's questions as decisions", () => {
     poller.pass();
     const code = await Promise.race([orphan.exited, Bun.sleep(5_000).then(() => "still running")]);
     expect(code).not.toBe("still running");
+    await poller.swept();
     expect(logs.some((l) => l.includes(`stopped a poll an earlier daemon left running (pid ${orphan.pid}`))).toBe(true);
     expect(existsSync(join(pidDir, "g1.json"))).toBe(false);
     expect(existsSync(join(pidDir, "g2.json"))).toBe(false);

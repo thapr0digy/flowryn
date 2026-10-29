@@ -29,6 +29,7 @@ import { inertDelivery } from "../../src/policy/services.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
 import { HerdrError } from "../../src/runtime/herdr/client.ts";
 import type { HerdrRuntime, PaneProcesses } from "../../src/runtime/herdr/runtime.ts";
+import { PsUnavailable } from "../../src/runtime/proc.ts";
 import { inertSched } from "../../src/sched/services.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
@@ -50,6 +51,8 @@ let db: Db;
 let leaderToken: string;
 /** The worker's process, as the fake ps sees it. */
 let workerAlive: boolean;
+/** The fake ps cannot answer (it fails or hangs). */
+let psFails: boolean;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "fw-ops-"));
@@ -57,6 +60,7 @@ beforeEach(() => {
   migrate(db);
   leaderToken = mintToken("leader");
   workerAlive = true;
+  psFails = false;
   const now = Date.now();
   tx(db, () => {
     db.query("INSERT INTO leader_lease (id, epoch, token_hash) VALUES (1, 1, ?1)").run(hashToken(leaderToken));
@@ -117,6 +121,7 @@ interface Daemon {
 
 /** The fake ps: the worker's line while it is alive, and any other pid asked about as alive. */
 function ps(pids: number[]): Promise<string> {
+  if (psFails) return Promise.reject(new PsUnavailable("/bin/ps exited 124: ps did not finish within 5000 ms"));
   return Promise.resolve(pids.includes(PID) && workerAlive ? PS_LINE(PID) : pids.filter((p) => p !== PID).map((p) => PS_LINE(p)).join(""));
 }
 
@@ -451,6 +456,19 @@ describe("an issued launch with no launcher is judged against its recorded candi
     expect([run.state, run.proc_pid, run.proc_start]).toEqual(["running", PID, START]);
     expect(getOperation(db, op.id)).toMatchObject({ phase: "confirmed", proc_pid: PID });
     expect(d.launches).toEqual([]);
+  });
+
+  test("a candidate ps cannot read is unknown: neither adopted, escalated nor started again", async () => {
+    const op = issuedLaunch(START - 500);
+    const d = daemon({ processes: harness(PID) });
+    psFails = true;
+    await d.reconciler.reconcileRun(getRun(db, "r1")!, "startup");
+    expect(getRun(db, "r1")!.proc_pid).toBeNull();
+    expect(getOperation(db, op.id)!.phase).toBe("effect_issued");
+    expect(d.launches).toEqual([]);
+    psFails = false;
+    await d.reconciler.reconcileRun(getRun(db, "r1")!, "steady");
+    expect(getOperation(db, op.id)).toMatchObject({ phase: "confirmed", proc_pid: PID });
   });
 
   test("a harness that started before the launch was issued is not ours: escalated, never adopted", async () => {

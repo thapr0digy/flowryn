@@ -7,7 +7,7 @@ import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { attachProcess, claim, closeSession, getLease, getSession, heartbeat, leaseState, openSession, release } from "../../src/lease/lease.ts";
-import type { PsRunner } from "../../src/runtime/proc.ts";
+import { PsUnavailable, type PsRunner } from "../../src/runtime/proc.ts";
 import { makeHome, seedRun, type TestHome } from "../helpers/harness.ts";
 
 let h: TestHome;
@@ -100,6 +100,8 @@ describe("the lease (design section 10)", () => {
     expect((await leaseState(db, b.session, 1_000 + staleMs, staleMs, ps(true))).state).toBe("held");
     expect(await leaseState(db, b.session, 1_000 + staleMs, staleMs, ps(false))).toEqual({ state: "stale", epoch: 1 });
     expect((await leaseState(db, a.session, 1_000 + staleMs, staleMs, ps(false))).state).toBe("mine");
+    // ps cannot answer: the holder is not proven gone.
+    expect(await leaseState(db, b.session, 1_000 + staleMs, staleMs, () => Promise.reject(new PsUnavailable("/bin/ps exited 124: ps did not finish within 5000 ms")))).toEqual({ state: "held", epoch: 1 });
     tx(db, () => closeSession(db, a.session, "quit", 5));
     expect((await leaseState(db, b.session, 6, staleMs, ps(true))).state).toBe("vacant");
   });

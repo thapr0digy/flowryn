@@ -6,7 +6,7 @@ import { appendEvent } from "../db/events.ts";
 import { adapterFor } from "../harness/registry.ts";
 import type { Verified } from "../harness/types.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
-import { isAlive, terminate, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
+import { aliveOrUnknown, terminate, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
 import { findOpenRunItem } from "../attention/items.ts";
 import { getRun, type RunRow } from "./runs.ts";
 import { markLost, type SteerBus } from "./steers.ts";
@@ -48,6 +48,7 @@ export async function exitRun(deps: ControlDeps, runId: string): Promise<Verifie
   tx(deps.db, () =>
     appendEvent(deps.db, { source: "daemon", kind: "run.exited", runId, taskId: run.task_id, payload: { pid: identity.pid, ok: result.ok, signal: result.signal, evidence: result.evidence }, ts: deps.now() }),
   );
+  if (result.evidence === "unknown") return { ok: false, evidence: "process", detail: `${result.signal}; ps cannot read the process table, so its exit is unverified` };
   return { ok: result.ok, evidence: result.evidence === "timeout" ? "timeout" : "process", detail: result.signal };
 }
 
@@ -145,7 +146,9 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
   const run = getRun(deps.db, runId);
   if (!run) return { ok: false, evidence: "timeout", detail: "no such run" };
   const identity = identityOf(run);
-  if (!identity || !(await isAlive(identity, deps.ps))) return { ok: false, evidence: "process", detail: "the worker is not running" };
+  const alive = identity ? await aliveOrUnknown(identity, deps.ps) : false;
+  if (alive === null) return { ok: false, evidence: "process", detail: "ps cannot read the process table, so whether the worker runs is unknown" };
+  if (!alive) return { ok: false, evidence: "process", detail: "the worker is not running" };
   const adapter = adapterFor(run.harness);
   const started = deps.now();
   const deadline = started + waitMs;

@@ -1,5 +1,5 @@
 import { HerdrError, type HerdrEvent, type HerdrTransport, type Subscription } from "./client.ts";
-import { psRunner, readIdentity, type ProcIdentity, type PsRunner } from "../proc.ts";
+import { PsUnavailable, psRunner, readIdentity, type ProcIdentity, type PsRunner } from "../proc.ts";
 
 /**
  * The Herdr runtime (design section 4, src/runtime/herdr): workspace, pane and
@@ -194,21 +194,31 @@ export class HerdrRuntime {
    * The harness running in a pane: the leader of the foreground process group
    * when that is not the shell and `matches` accepts it, with its start time
    * from ps (Herdr does not report one). Polls up to `waitMs`, through reads
-   * with no foreground group yet.
+   * with no foreground group yet, and through a ps that cannot answer: one
+   * still failing at the deadline is thrown, never read as no process.
    */
   async harnessProcess(paneId: string, matches: (p: PaneProcess) => boolean, waitMs = 0): Promise<HarnessProcess | null> {
     const deadline = Date.now() + waitMs;
     for (;;) {
       const info = await this.processes(paneId);
       if (!info) return null;
+      let psFailure: PsUnavailable | null = null;
       if (info.foregroundGroup !== null && info.foregroundGroup !== 0 && info.foregroundGroup !== info.shellPid) {
         const leader = info.processes.find((p) => p.pid === info.foregroundGroup);
         if (leader && matches(leader)) {
-          const identity = await readIdentity(leader.pid, this.ps);
-          if (identity) return { identity, process: leader };
+          try {
+            const identity = await readIdentity(leader.pid, this.ps);
+            if (identity) return { identity, process: leader };
+          } catch (error) {
+            if (!(error instanceof PsUnavailable)) throw error;
+            psFailure = error;
+          }
         }
       }
-      if (Date.now() >= deadline) return null;
+      if (Date.now() >= deadline) {
+        if (psFailure) throw psFailure;
+        return null;
+      }
       await Bun.sleep(this.pollMs);
     }
   }

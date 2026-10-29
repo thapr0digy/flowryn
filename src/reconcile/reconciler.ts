@@ -11,7 +11,7 @@ import { claimAutoResume, deathFacts, deferAutoResume } from "../lifecycle/auto-
 import { flagUnackedSteers, unackedSteers, type SteerBus } from "../lifecycle/steers.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
-import { isAlive, type PsRunner } from "../runtime/proc.ts";
+import { aliveOrUnknown, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
 import { clearPrompt, idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
 import { idleAlertDue, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
@@ -281,7 +281,12 @@ export class Reconciler {
       }
       throw error;
     }
-    const alive = identity ? await isAlive(identity, this.deps.ps) : false;
+    const alive = identity ? await aliveOrUnknown(identity, this.deps.ps) : false;
+    if (alive === null) {
+      // ps could not read the process table: the worker is unknown this pass, never dead.
+      this.setLive(run, "unknown", "unknown", { reason: "ps cannot read the process table" });
+      return "unknown";
+    }
     const leader = identity && panes ? panes.processes.find((p) => p.pid === identity.pid) : undefined;
     const inPane = Boolean(panes && identity && (leader || panes.foregroundGroup === identity.pid));
     const cwdMatches = !leader || leader.cwd === "" || realOrSelf(leader.cwd) === realOrSelf(run.worktree_path);

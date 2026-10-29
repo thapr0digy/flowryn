@@ -4,7 +4,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { loseCarried } from "../attention/presentations.ts";
-import { isAlive, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
+import { aliveOrUnknown, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
 
 /**
  * The lease manager (design section 10): in each scope exactly one leader
@@ -154,7 +154,7 @@ export type LeaseState = "vacant" | "held" | "stale" | "mine";
  * The lease as a session starting up sees it. Stale needs both: no heartbeat
  * for stale_ms and the holder's process proven gone. A live but silent
  * holder (a sleeping laptop) is never taken over automatically, and a holder
- * whose process was never recorded cannot be proven gone.
+ * whose process was never recorded, or that ps cannot read, cannot be proven gone.
  */
 export async function leaseState(db: Db, sessionId: string, now: number, staleMs: number, ps?: PsRunner): Promise<{ state: LeaseState; epoch: number }> {
   const lease = leaseOfSession(db, sessionId);
@@ -166,8 +166,8 @@ export async function leaseState(db: Db, sessionId: string, now: number, staleMs
   const silent = lease.heartbeat_at === null || now - lease.heartbeat_at >= staleMs;
   if (!silent) return { state: "held", epoch: lease.epoch };
   if (holder.proc_pid === null || holder.proc_start === null || holder.proc_exe === null) return { state: "held", epoch: lease.epoch };
-  const alive = await isAlive({ pid: holder.proc_pid, start: holder.proc_start, exe: holder.proc_exe }, ps);
-  return { state: alive ? "held" : "stale", epoch: lease.epoch };
+  const alive = await aliveOrUnknown({ pid: holder.proc_pid, start: holder.proc_start, exe: holder.proc_exe }, ps);
+  return { state: alive === false ? "stale" : "held", epoch: lease.epoch };
 }
 
 export interface Claimed {
