@@ -122,14 +122,14 @@ describe("migrations", () => {
     db.close();
   });
 
-  test("migration 42 rebuilds explanations for the review, decision and merge kinds, keeping ids and the id sequence; a held auto-merge gets next", () => {
+  test("migration 43 rebuilds explanations for the review, decision and merge kinds, keeping ids and the id sequence; a held auto-merge gets next", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
-    migrate(db, MIGRATIONS.slice(0, 41));
+    migrate(db, MIGRATIONS.slice(0, 42));
     db.exec(`${explanationRow("dialog", "NULL")}; ${explanationRow("capacity", "3")}; ${explanationRow("resume", "NULL")}`);
     db.exec("DELETE FROM explanations WHERE id = 3");
     db.exec(`INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, reason, detail, created_at, state_since, updated_at)
       VALUES ('am1', 'r1', 't1', 'p', 'https://example.test/pull/1', 'abc', 'held', 'verify_failed', 'bun test', 1, 1, 1)`);
-    expect(migrate(db, MIGRATIONS.slice(0, 42))).toEqual([42]);
+    expect(migrate(db, MIGRATIONS.slice(0, 43))).toEqual([43]);
     expect(db.query("SELECT id, kind, closed_at, subject FROM explanations ORDER BY id").all()).toEqual([
       { id: 1, kind: "dialog", closed_at: null, subject: null },
       { id: 2, kind: "capacity", closed_at: 3, subject: null },

@@ -4,7 +4,7 @@ import { autoMergeEnabled, verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
-import { awayConfig, grantsConfig, leaderTiming, notifyConfig, reviewConfig } from "./leader.ts";
+import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
 import { policyMode } from "./policy.ts";
 import { upkeepConfig } from "./upkeep.ts";
 import { validationConfig } from "./validation.ts";
@@ -63,6 +63,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   leader: leaderTiming,
   notify: notifyConfig,
   away: awayConfig,
+  learnings: learningsConfig,
   grants: grantsConfig,
   review: reviewConfig,
   github: githubConfig,

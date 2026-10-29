@@ -67,7 +67,7 @@ export interface AutoMergeRow {
   /** held: a code (verify_failed, verify_timeout, verify_error, verify_cancelled, checks_timeout, or the gate's); superseded: why. */
   reason: string | null;
   detail: string | null;
-  /** held: the command its auto_merge_held item names (NULL on a row held before migration 42). */
+  /** held: the command its auto_merge_held item names (NULL on a row held before migration 43). */
   next?: string | null;
   created_at: number;
   state_since: number;
