@@ -1,7 +1,7 @@
 # Why is this waiting: fleet, briefing, retention and export
 
 - Status: partial
-- Open: decisions, gates and merges as explanation kinds
+- Open: unnecessary interventions are not measured (decisions, gates and merges as explanation kinds: `2026-10-29-why-waiting-covers-fy.md`)
 - Config: `[upkeep] explanations_keep_days`, `[upkeep] explanations_keep_per_run`
 
 `docs/next_steps.md` package 3, its third slice, on top of the explanations table of the first (`2026-10-12-next-steps-md-wz.md`): the terse "waiting: … · next: …" pointer in `flowryn fleet` and the leader briefing, a bounded retention for closed rows, an opt-in redacted diagnostic export, and a count of unresolved waiting time per kind in `flowryn capacity`. No model: every line is read from the table.

@@ -1,7 +1,8 @@
 # Why is this waiting?
 
-- Status: partial
-- Open: other decision kinds (gates, approvals, merges). The briefing and `fleet` reuse, retention and the redacted diagnostic export are `2026-10-13-next-steps-md-wq.md`
+- Status: done
+
+Later slices: the briefing and `fleet` reuse, retention and the redacted diagnostic export are `2026-10-13-next-steps-md-wq.md`; reviews, decisions and merges as explanation kinds are `2026-10-29-why-waiting-covers-fy.md`.
 
 `docs/next_steps.md` package 3, its first slice: when Flowryn holds a run on a dialog, refuses it capacity, or resumes it after a death (or refuses to), it records why, durably and compactly, and `flowryn show` says so. Before this, the answer was spread over `runs.liveness`, `run_evidence` (one latest row per source, overwritten every pass), the open items, `meta` and the event payloads, and the scheduler's capacity refusals were written nowhere at all: `flowryn capacity` recomputes a reason from the current state, in a different order from the scheduler's own checks.
 
@@ -15,7 +16,7 @@ One new table, `explanations` (migration 22, `explanations`). A row is one decis
 |---|---|
 | `id` | integer, shown as `x<N>` |
 | `run_id`, `task_id`, `stage` | the run and the stage it was in |
-| `kind` | `dialog`, `capacity` or `resume` |
+| `kind` | `dialog`, `capacity` or `resume` (migration 43 adds `gate`, `decision` and `merge`, and a `subject` that dedupe keys on: `2026-10-29-why-waiting-covers-fy.md`) |
 | `rule` | the rule that decided, below (`capacity.pools_full`, …) |
 | `reason` | one sanitized line, at most 160 characters, what the operator reads |
 | `facts` | JSON array of `{name, value, at}`: each observation the rule used, with the time it was observed (`at`, ms; `null` when the source carries none) |

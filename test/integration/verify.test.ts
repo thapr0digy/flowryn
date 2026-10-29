@@ -263,6 +263,21 @@ describe("flowryn verify", () => {
   );
 
   test(
+    "the watcher names the checks GitHub never started for the merge explanation, and annotations it cannot read only leave them unnamed",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: `${VERIFY_CONFIG}[sched]\npass_ms = 300\n` });
+      const e = env;
+      const { run } = await unstartedShip(e, "explained");
+      const mergeRule = () => query<{ rule: string }>(e, "SELECT rule FROM explanations WHERE run_id = ?1 AND kind = 'merge' AND closed_at IS NULL", run)[0]?.rule;
+      await waitUntil(() => mergeRule() === "merge.verify", 20_000, "the merge to wait on the local verify");
+      e.github.annotationsDown = true;
+      await waitUntil(() => mergeRule() === "merge.checks_red", 20_000, "the merge to wait on its red check");
+      expect(query(e, "SELECT value FROM meta WHERE key = 'forge_down_since'")).toEqual([]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
     "assumption: two verifies in one repository run at once, up to the validation pool: the same PR and head attaches to the running job, another PR starts beside it, and both pass",
     async () => {
       const slow = `[projects.web]\nverify = ${JSON.stringify(["sleep 3", ...STEPS])}\nverify_binary = "dist/flowryn"\n`;

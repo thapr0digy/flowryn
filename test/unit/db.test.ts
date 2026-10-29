@@ -57,6 +57,11 @@ async function installedVersion(harness: string): Promise<string> {
   return harness === "claude" ? "2.1.300" : "0.90.0";
 }
 
+function explanationRow(kind: string, closed: string): string {
+  return `INSERT INTO explanations (run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, event_seq, opened_at, closed_at)
+    VALUES ('r1', 't1', 'build', '${kind}', 'x', 'a wait', '[]', '[]', 's', 1, 2, ${closed})`;
+}
+
 describe("migrations", () => {
   test("a fresh database gets every section 13 table, in WAL mode with foreign keys", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
@@ -114,6 +119,28 @@ describe("migrations", () => {
     expect(migrate(db, MIGRATIONS.slice(0, 37), () => 5)).toEqual([37]);
     expect(db.query("SELECT carried_from FROM artifacts WHERE id = 'a1'").get()).toEqual({ carried_from: null });
     expect(db.query("SELECT name FROM schema_migrations WHERE version = 37").get()).toEqual({ name: "artifact-carried-from" });
+    db.close();
+  });
+
+  test("migration 43 rebuilds explanations for the review, decision and merge kinds, keeping ids and the id sequence; a held auto-merge gets next", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 42));
+    db.exec(`${explanationRow("dialog", "NULL")}; ${explanationRow("capacity", "3")}; ${explanationRow("resume", "NULL")}`);
+    db.exec("DELETE FROM explanations WHERE id = 3");
+    db.exec(`INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, reason, detail, created_at, state_since, updated_at)
+      VALUES ('am1', 'r1', 't1', 'p', 'https://example.test/pull/1', 'abc', 'held', 'verify_failed', 'bun test', 1, 1, 1)`);
+    expect(migrate(db, MIGRATIONS.slice(0, 43))).toEqual([43]);
+    expect(db.query("SELECT id, kind, closed_at, subject FROM explanations ORDER BY id").all()).toEqual([
+      { id: 1, kind: "dialog", closed_at: null, subject: null },
+      { id: 2, kind: "capacity", closed_at: 3, subject: null },
+    ]);
+    // The pruned row's id is never handed out again: events name rows as x<N>.
+    db.exec(`${explanationRow("gate", "NULL")}`);
+    expect(db.query("SELECT MAX(id) AS id FROM explanations").get()).toEqual({ id: 4 });
+    expect(() => db.exec(explanationRow("other", "NULL"))).toThrow();
+    expect(db.query("SELECT next FROM auto_merges WHERE id = 'am1'").get()).toEqual({ next: null });
+    const indexes = (db.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'explanations' ORDER BY name").all() as { name: string }[]).map((i) => i.name);
+    expect(indexes).toEqual(["explanations_open", "explanations_task"]);
     db.close();
   });
 

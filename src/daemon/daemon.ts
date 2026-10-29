@@ -577,6 +577,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick() });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
+      explainWaits: () => scheduler?.kickWaits(),
       passNow: async () => scheduler?.passNow(),
       grantNow: async (runId) => (await scheduler?.grantNow(runId)) ?? false,
       host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
