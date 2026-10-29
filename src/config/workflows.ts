@@ -185,6 +185,29 @@ export function capacityConfig(config: FlowrynConfig): CapacityConfig {
   };
 }
 
+/**
+ * `[projects.<id>] max_workers` (docs/notes/2026-10-26-a-cap-on-dt.md): at most
+ * this many of the project's runs hold a worker slot at once; null without the
+ * key, so only `[capacity] worker` binds. A positive integer, else config_invalid.
+ */
+export function projectMaxWorkers(config: FlowrynConfig, projectId: string): number | null {
+  const projects = table(config.extra.projects, "[projects]");
+  const value = table(projects[projectId], `[projects.${projectId}]`).max_workers;
+  if (value === undefined) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw new FlowrynError("config_invalid", `[projects.${projectId}] max_workers must be a positive integer`);
+  return value;
+}
+
+/** Every project's worker limit that is set, in config order. */
+export function projectWorkerLimits(config: FlowrynConfig): { project: string; max: number }[] {
+  const out: { project: string; max: number }[] = [];
+  for (const project of Object.keys(table(config.extra.projects, "[projects]"))) {
+    const max = projectMaxWorkers(config, project);
+    if (max !== null) out.push({ project, max });
+  }
+  return out;
+}
+
 function parseStage(raw: unknown, where: string, pools: Record<string, number>): StageDef {
   const t = table(raw, where);
   unknownKeys(t, ["id", "skill", "gate", "pools", "fresh"], where);

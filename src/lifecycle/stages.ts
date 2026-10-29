@@ -6,12 +6,12 @@ import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { reviewConfig } from "../config/leader.ts";
-import { capacityConfig, DEFAULT_WORKFLOWS, WORKER_POOL, type StageDef, type WorkflowDef } from "../config/workflows.ts";
+import { capacityConfig, DEFAULT_WORKFLOWS, projectMaxWorkers, WORKER_POOL, type StageDef, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines, type ContractDelivery } from "../harness/contract-text.ts";
-import { grantLeases, holdsLease, releaseLeases, runLeases } from "../sched/pools.ts";
+import { grantLeases, holdsLease, releaseLeases, runLeases, type ProjectLimit } from "../sched/pools.ts";
 import { DESIGN_TEMPLATE_FILE, designPageProblems } from "../skills/design-template.ts";
 import { QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaPageProblems } from "../skills/qa-template.ts";
 import { skillPath } from "../skills/stages.ts";
@@ -146,6 +146,12 @@ export function requestStage(db: Db, run: RunRow, def: WorkflowDef, index: numbe
   run.pending_launch = launch;
 }
 
+/** The project's worker limit, `[projects.<id>] max_workers`, or null when it has none. */
+export function projectLimit(config: FlowrynConfig, projectId: string): ProjectLimit | null {
+  const max = projectMaxWorkers(config, projectId);
+  return max === null ? null : { project: projectId, max };
+}
+
 /** The pools a run needs granted now: its stage's (while the stage waits), and a worker slot for a launch it has none for. */
 export function neededPools(db: Db, run: RunRow, pos: StagePos): string[] {
   const needs = run.stage_state === "waiting" ? [...pos.stage.pools] : [];
@@ -165,13 +171,14 @@ export interface Activated {
  * a live worker carries on, steer it with the stage's instructions (unless
  * `steer: false`: the worker is waiting on the reply that says it started). A
  * launch the grant starts gets the instructions in its task file instead. Throws
- * OverCapacity (taking nothing) when a pool filled meanwhile. Call inside a
+ * OverCapacity (taking nothing) when a pool filled meanwhile, or ProjectAtLimit
+ * when the project's worker limit did. Call inside a
  * transaction.
  */
 export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy, now: number, opts: { steer?: boolean } = {}): Activated {
   const pos = positionOf(db, run, run.kind);
   const caps = capacityConfig(config).pools;
-  grantLeases(db, run.id, run.task_id, pos.stage.id, neededPools(db, run, pos), caps, now);
+  grantLeases(db, run.id, run.task_id, pos.stage.id, neededPools(db, run, pos), caps, now, projectLimit(config, run.project_id));
   const launch = run.pending_launch;
   const starting = run.stage_state === "waiting";
   // A fresh launch reads its stage from the task file, and a fresh stage worker or a relaunched one its note too: the launcher clears it.
