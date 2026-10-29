@@ -46,8 +46,7 @@ describe("waits on you or the leader", () => {
       expect(question.reason).toBe("waiting for the leader to answer q1 (the worker is blocked)");
       expect(question.unblock[0]).toBe("leader: flowryn decide q1 <choice> --rationale -");
       expect((await env.json(["answer", "q1", "sqlite"])).code).toBe(0);
-      let lines: string[] = [];
-      await waitUntil(async () => (lines = await timeline(env, asking.task)).some((l) => l.includes("decision.leader") && l.includes("→ answered by ")), 20_000, "the question row closed");
+      await waitUntil(async () => (await timeline(env, asking.task)).some((l) => l.includes("decision.leader") && l.includes("→ answered by ")), 20_000, "the question row closed");
       expect(await why(env, asking.task)).toEqual([]);
 
       await waitUntil(async () => (waits = await why(env, reviewing.task)).some((w) => w.rule === "gate.review"), 20_000, "the review explained");
@@ -56,7 +55,7 @@ describe("waits on you or the leader", () => {
       expect(review.unblock[0]).toMatch(/^captain: answer on the review page http:\/\/127\.0\.0\.1:4387\/session\//);
       expect(review.unblock[1]).toBe(`captain: in your shell: flowryn approve ${reviewing.task} --gate design, or flowryn gate changes ${reviewing.task} --body-file -`);
       expect((await env.json(["gate", "changes", reviewing.task, "--body-file", "-"], { stdin: "Use postgres after all" })).code).toBe(0);
-      await waitUntil(async () => (lines = await timeline(env, reviewing.task)).some((l) => l.includes("gate.review") && l.includes("→ gate changes")), 20_000, "the review row closed");
+      await waitUntil(async () => (await timeline(env, reviewing.task)).some((l) => l.includes("gate.review") && l.includes("→ gate changes")), 20_000, "the review row closed");
     },
     { timeout: 60_000 },
   );

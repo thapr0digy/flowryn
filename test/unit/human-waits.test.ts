@@ -112,6 +112,46 @@ function verification(id: string, state: string, opts: { started?: number; finis
   ).run(id, PR, HEAD, state, opts.started ?? NOW - 40 * MIN, opts.finished === undefined ? (state === "running" ? null : NOW - 20 * MIN) : opts.finished, policy());
 }
 
+const pr = (): PullRequest => ({ number: 7, url: PR, title: "t", state: "open", draft: false, headSha: HEAD, headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null }) as PullRequest;
+const summary = (red: string[], pending: string[]): ChecksSummary => ({
+  state: red.length ? "red" : pending.length ? "pending" : "green",
+  checks: [...red.map((name) => ({ name, state: "red" as const, detail: "failure" })), ...pending.map((name) => ({ name, state: "pending" as const, detail: "queued" })), { name: "ok", state: "green" as const, detail: "success" }],
+});
+const ctx = (): ReadCtx => ({ db, config: parseConfig("", HOME), now, caller: { role: "human", runId: null, taskId: null } });
+const briefing = () => composeBriefing(db, { session: null, now, morningHour: 99, ageMs: 3_600_000, markMorning: false }).text;
+
+function gateCode(config: FlowrynConfig, red: string[], pending: string[]): string {
+  const run = getRunWithPolicy(db, "r1")!;
+  const project = getProject(db, "web")!;
+  const delivered = deliveredOf(db, "t1")!;
+  const verify = verifyConfig(config, "web");
+  const p = verify ? verifyPolicyId(verify) : null;
+  const atHead = p ? (db.query("SELECT * FROM verifications WHERE head_sha = ?1 AND state <> 'running' ORDER BY started_at DESC LIMIT 1").get(HEAD) as never) : null;
+  const facts: MergeFacts = {
+    run,
+    project,
+    delivered,
+    ref: PR,
+    head: HEAD,
+    title: "t",
+    pr: pr(),
+    checks: summary(red, pending),
+    remote: HEAD,
+    primaryBranch: null,
+    primaryDirty: false,
+    fastForward: false,
+    ...(p ? { local: { notStarted: [], policy: p, atHead: atHead ? { ...(atHead as object), steps: [], tests: null } as never : null, otherPolicyAtHead: null, lastPassed: null } } : {}),
+  };
+  try {
+    checkGate(facts, chooseApproval(db, facts, { caller: { role: "human", runId: null, taskId: null } }, "merge", now));
+    return "pass";
+  } catch (error) {
+    return (error as { code: string }).code;
+  }
+}
+
+const read = (verbs: { name: string; read?: (c: ReadCtx, a: Args) => { data: Record<string, unknown> } }[], name: string): Record<string, unknown> => verbs.find((v) => v.name === name)!.read!(ctx(), {}).data;
+
 describe("reviews", () => {
   test("an open review gate is one row across many passes, dated when the gate opened, naming you and the page first", () => {
     openReview();
@@ -341,41 +381,7 @@ describe("merges", () => {
 
 describe("assumption: the merge rules agree with the merge gate on the same facts", () => {
   /** checkGate's refusal code for each state, against the rule the writer records for it. */
-  const pr = (): PullRequest => ({ number: 7, url: PR, title: "t", state: "open", draft: false, headSha: HEAD, headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null }) as PullRequest;
-  const summary = (red: string[], pending: string[]): ChecksSummary => ({
-    state: red.length ? "red" : pending.length ? "pending" : "green",
-    checks: [...red.map((name) => ({ name, state: "red" as const, detail: "failure" })), ...pending.map((name) => ({ name, state: "pending" as const, detail: "queued" })), { name: "ok", state: "green" as const, detail: "success" }],
-  });
 
-  function gateCode(config: FlowrynConfig, red: string[], pending: string[]): string {
-    const run = getRunWithPolicy(db, "r1")!;
-    const project = getProject(db, "web")!;
-    const delivered = deliveredOf(db, "t1")!;
-    const verify = verifyConfig(config, "web");
-    const p = verify ? verifyPolicyId(verify) : null;
-    const atHead = p ? (db.query("SELECT * FROM verifications WHERE head_sha = ?1 AND state <> 'running' ORDER BY started_at DESC LIMIT 1").get(HEAD) as never) : null;
-    const facts: MergeFacts = {
-      run,
-      project,
-      delivered,
-      ref: PR,
-      head: HEAD,
-      title: "t",
-      pr: pr(),
-      checks: summary(red, pending),
-      remote: HEAD,
-      primaryBranch: null,
-      primaryDirty: false,
-      fastForward: false,
-      ...(p ? { local: { notStarted: [], policy: p, atHead: atHead ? { ...(atHead as object), steps: [], tests: null } as never : null, otherPolicyAtHead: null, lastPassed: null } } : {}),
-    };
-    try {
-      checkGate(facts, chooseApproval(db, facts, { caller: { role: "human", runId: null, taskId: null } }, "merge", now));
-      return "pass";
-    } catch (error) {
-      return (error as { code: string }).code;
-    }
-  }
 
   const cases: { name: string; config: string; yolo: number; red: string[]; pending: string[]; verified: boolean; code: string; rule: string }[] = [
     { name: "a red check", config: "", yolo: 1, red: ["lint"], pending: [], verified: false, code: "red_checks", rule: "merge.checks_red" },
@@ -398,9 +404,6 @@ describe("assumption: the merge rules agree with the merge gate on the same fact
 });
 
 describe("the views and the run's end", () => {
-  const ctx = (): ReadCtx => ({ db, config: parseConfig("", HOME), now, caller: { role: "human", runId: null, taskId: null } });
-  const read = (verbs: { name: string; read?: (c: ReadCtx, a: Args) => { data: Record<string, unknown> } }[], name: string): Record<string, unknown> => verbs.find((v) => v.name === name)!.read!(ctx(), {}).data;
-  const briefing = () => composeBriefing(db, { session: null, now, morningHour: 99, ageMs: 3_600_000, markMorning: false }).text;
 
   test("fleet and capacity list a review wait; the briefing leaves it to Needs you", () => {
     openReview("g1", NOW - 45 * MIN);
