@@ -9,6 +9,8 @@ import type { HostVerdict } from "./host.ts";
 export interface SchedServices {
   /** Look at the queue soon (debounced). */
   kick(): void;
+  /** Record the waits on you or the leader soon (debounced), without a whole pass: after any mutation (src/attention/human-waits.ts). */
+  explainWaits(): void;
   /** One pass now, serialized with every other. */
   passNow(): Promise<void>;
   /**
@@ -22,5 +24,5 @@ export interface SchedServices {
 }
 
 export function inertSched(overrides: Partial<SchedServices> = {}): SchedServices {
-  return { kick: () => {}, passNow: async () => {}, grantNow: async () => false, host: async () => ({ ok: true, sample: null, reason: "ok" }), ...overrides };
+  return { kick: () => {}, explainWaits: () => {}, passNow: async () => {}, grantNow: async () => false, host: async () => ({ ok: true, sample: null, reason: "ok" }), ...overrides };
 }

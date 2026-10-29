@@ -64,11 +64,12 @@ export interface PrEvidence {
   head: string;
   head_ref: string;
   merge_sha: string | null;
-  checks: { state: ChecksSummary["state"]; line: string; red: string[]; pending: string[]; total: number } | null;
+  /** `not_started`: the red checks GitHub never started (absent in evidence recorded before it was kept). */
+  checks: { state: ChecksSummary["state"]; line: string; red: string[]; pending: string[]; total: number; not_started?: string[] } | null;
   observed_at: number;
 }
 
-export function prEvidenceFrom(pr: PullRequest, checks: ChecksSummary | null, now: number): PrEvidence {
+export function prEvidenceFrom(pr: PullRequest, checks: ChecksSummary | null, now: number, notStarted: readonly number[] = []): PrEvidence {
   return {
     url: pr.url,
     number: pr.number,
@@ -85,6 +86,7 @@ export function prEvidenceFrom(pr: PullRequest, checks: ChecksSummary | null, no
           red: checks.checks.filter((c) => c.state === "red").map((c) => c.name),
           pending: checks.checks.filter((c) => c.state === "pending").map((c) => c.name),
           total: checks.checks.length,
+          not_started: checks.checks.filter((c) => c.state === "red" && c.id !== undefined && notStarted.includes(c.id)).map((c) => c.name),
         }
       : null,
     observed_at: now,

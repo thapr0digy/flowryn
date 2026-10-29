@@ -67,6 +67,8 @@ export interface AutoMergeRow {
   /** held: a code (verify_failed, verify_timeout, verify_error, verify_cancelled, checks_timeout, or the gate's); superseded: why. */
   reason: string | null;
   detail: string | null;
+  /** held: the command its auto_merge_held item names (NULL on a row held before migration 43). */
+  next?: string | null;
   created_at: number;
   state_since: number;
   updated_at: number;
@@ -136,14 +138,15 @@ interface MoveFields {
   merge_id?: string | null;
   reason?: string | null;
   detail?: string | null;
+  next?: string | null;
 }
 
 /** Move a row to `to` with its `auto_merge.<to>` event. Call inside a transaction. */
 function move(db: Db, row: AutoMergeRow, to: AutoMergeState, fields: MoveFields, now: number, source: EventSource = "daemon"): { row: AutoMergeRow; seq: number } {
   const next: AutoMergeRow = { ...row, ...fields, state: to, state_since: to === row.state ? row.state_since : now, updated_at: now };
   db.query(
-    `UPDATE auto_merges SET state = ?2, request_id = ?3, verification_id = ?4, merge_id = ?5, reason = ?6, detail = ?7, state_since = ?8, updated_at = ?9 WHERE id = ?1`,
-  ).run(row.id, to, next.request_id, next.verification_id, next.merge_id, next.reason, next.detail, next.state_since, now);
+    `UPDATE auto_merges SET state = ?2, request_id = ?3, verification_id = ?4, merge_id = ?5, reason = ?6, detail = ?7, state_since = ?8, updated_at = ?9, next = ?10 WHERE id = ?1`,
+  ).run(row.id, to, next.request_id, next.verification_id, next.merge_id, next.reason, next.detail, next.state_since, now, to === "held" ? (next.next ?? null) : null);
   const event = appendEvent(db, {
     source,
     kind: `auto_merge.${to}`,
@@ -393,7 +396,7 @@ export class AutoMerger {
   /** Hold the row and open auto_merge_held for the leader. Call inside a transaction. */
   private hold(row: AutoMergeRow, reason: string, detail: string, next: string, now: number): AutoMergeRow {
     const { db } = this.deps;
-    const held = move(db, row, "held", { reason, detail }, now);
+    const held = move(db, row, "held", { reason, detail, next }, now);
     if (!findOpenRunItem(db, "auto_merge_held", row.run_id)) {
       openItem(db, { kind: "auto_merge_held", eventSeq: held.seq, taskId: row.task_id, runId: row.run_id, line: `Auto-merge held: ${taskTitle(db, row.task_id)} (${row.task_id}): ${sanitizeLine(detail, HELD_DETAIL_CHARS)}; ${next}`, now });
     }

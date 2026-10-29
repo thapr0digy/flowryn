@@ -19,6 +19,7 @@ import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { activateStage, neededPools, positionOf, projectLimit, type StagePos } from "../lifecycle/stages.ts";
+import { explainHumanWaits } from "../attention/human-waits.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity, projectAtLimit, ProjectAtLimit } from "./pools.ts";
 import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
@@ -97,6 +98,7 @@ export function hostState(db: Db): HostState | null {
 export class Scheduler {
   private readonly deps: SchedulerDeps;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private waitsTimer: ReturnType<typeof setTimeout> | null = null;
   private steady: ReturnType<typeof setInterval> | null = null;
   /** Passes and single-run grants run one at a time, in order. */
   private chain: Promise<unknown> = Promise.resolve();
@@ -134,8 +136,10 @@ export class Scheduler {
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.waitsTimer) clearTimeout(this.waitsTimer);
     if (this.steady) clearInterval(this.steady);
     this.timer = null;
+    this.waitsTimer = null;
     this.steady = null;
     await this.chain;
   }
@@ -147,6 +151,25 @@ export class Scheduler {
       this.timer = null;
       void this.passNow();
     }, 25);
+  }
+
+  /**
+   * Record the waits on you or the leader soon (debounced), without a whole
+   * pass: a mutation that opens or answers a question or closes a review is
+   * explained in moments, not at the next steady pass.
+   */
+  kickWaits(): void {
+    if (this.stopped || this.waitsTimer) return;
+    this.waitsTimer = setTimeout(() => {
+      this.waitsTimer = null;
+      if (!this.stopped) void this.exclusive(() => this.explainWaits());
+    }, 25);
+  }
+
+  /** The waits on you or the leader, then the sweep that closes what ended; its own step, so a throw never stops a pass. */
+  private async explainWaits(): Promise<void> {
+    await this.step("human-waits", async () => void tx(this.deps.db, () => explainHumanWaits(this.deps.db, this.deps.config(), this.deps.now())));
+    tx(this.deps.db, () => sweepExplanations(this.deps.db, this.deps.now()));
   }
 
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -352,7 +375,8 @@ export class Scheduler {
     // Drain before fill: a queued verify is nearer shipping than any stage, so it takes a free validation slot first.
     if (this.deps.drainVerifies && !this.stopped) await this.step("verify-queue", async () => void (await this.deps.drainVerifies!(() => this.stopped)));
     const config = this.deps.config();
-    tx(this.deps.db, () => sweepExplanations(this.deps.db, this.deps.now()));
+    // Reviews, decisions and merges waiting on you or the leader (docs/notes/2026-10-29-why-waiting-covers-fy.md), then the sweep.
+    await this.explainWaits();
     const pass = newPass();
     this.forgetDroppedAccounts(config);
     // A low reading or a signed-out login is checked again while nothing waits on it, so a reset or a sign-in lifts it.

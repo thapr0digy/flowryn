@@ -30,6 +30,8 @@ import { sendBack } from "../lifecycle/send-back.ts";
 export interface PrObservation {
   pr: PullRequest;
   checks: ChecksSummary | null;
+  /** The ids of the red check runs GitHub never started. */
+  notStarted?: number[];
 }
 
 export interface Applied {
@@ -160,7 +162,7 @@ export function applyPrObservation(
   opts: ObservationOptions = { nudgeConflicts: false },
 ): Applied {
   const { pr, checks } = obs;
-  recordPrEvidence(db, run.id, prEvidenceFrom(pr, checks, now), now);
+  recordPrEvidence(db, run.id, prEvidenceFrom(pr, checks, now, obs.notStarted), now);
   const title = taskTitle(db, run.task_id);
 
   if (run.state === "merging") {
