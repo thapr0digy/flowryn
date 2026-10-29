@@ -402,12 +402,16 @@ export function runAccount(config: FlowrynConfig, project: ScopedProject, record
   return account;
 }
 
-/** `[workers]` as one account launches it: the account's login, model and effort over the harness's own settings. */
-export function workersFor(workers: WorkersConfig, account: Account): WorkersConfig {
+/**
+ * `[workers]` as one account launches it: the account's login over the harness's own settings, and
+ * the model and effort the run resolved (src/config/model-choice.ts), else the account's.
+ */
+export function workersFor(workers: WorkersConfig, account: Account, choice: { model: string | null; effort: string | null } = account): WorkersConfig {
+  const { model, effort } = choice;
   if (account.harness === "claude") {
-    return { ...workers, claude: { ...workers.claude, model: account.model, effort: account.effort, config_dir: account.config_dir, pin_login: account.declared || account.config_dir !== null } };
+    return { ...workers, claude: { ...workers.claude, model, effort, config_dir: account.config_dir, pin_login: account.declared || account.config_dir !== null } };
   }
-  return { ...workers, pi: { ...workers.pi, model: account.model, effort: account.effort, agent_dir: account.agent_dir, provider: account.provider } };
+  return { ...workers, pi: { ...workers.pi, model, effort, agent_dir: account.agent_dir, provider: account.provider } };
 }
 
 /** The resolved view for `flowryn config` and doctor. */

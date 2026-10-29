@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { FlowrynError } from "../api/errors.ts";
 import { STYLE_BLOCK } from "../harness/contract-text.ts";
+import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import type { FlowrynConfig } from "./config.ts";
+import { checkEffort, checkModelName, type ModelPins } from "./model-choice.ts";
 import { toAbsolute } from "./paths.ts";
 
 /**
@@ -29,6 +31,8 @@ export interface StageDef {
 export interface WorkflowDef {
   id: string;
   stages: StageDef[];
+  /** `[workflows.<id>.<harness>] model/effort`: the defaults a run of this workflow starts with (src/config/model-choice.ts). */
+  models?: Partial<Record<HarnessId, ModelPins>>;
   /**
    * Frozen by migration 5 for a run already open before M5: its worker has
    * M4's contract (pipeline, then deliver), so its ship slot is granted at
@@ -238,7 +242,33 @@ export function checkWorkflow(wf: WorkflowDef): void {
   });
 }
 
-/** Every workflow: the built-in ones, replaced or extended by [workflows.<id>] tables. */
+function parseModels(t: Record<string, unknown>, id: string): Partial<Record<HarnessId, ModelPins>> | undefined {
+  const out: Partial<Record<HarnessId, ModelPins>> = {};
+  for (const harness of HARNESS_IDS) {
+    if (t[harness] === undefined) continue;
+    const where = `[workflows.${id}.${harness}]`;
+    const raw = table(t[harness], where);
+    unknownKeys(raw, ["model", "effort"], where);
+    const text = (value: unknown, key: string): string | null => {
+      if (value === undefined) return null;
+      if (typeof value !== "string" || value.length === 0) throw new FlowrynError("config_invalid", `${where} ${key} must be a non-empty string`);
+      return value;
+    };
+    const model = text(raw.model, "model");
+    const effort = text(raw.effort, "effort");
+    out[harness] = {
+      model: model === null ? null : checkModelName(model, `${where} model`, "config_invalid"),
+      effort: effort === null ? null : checkEffort(effort, harness, `${where} effort`, "config_invalid"),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Every workflow: the built-in ones, replaced or extended by [workflows.<id>]
+ * tables. A table without stages on a built-in id keeps its stages and only
+ * sets the model and effort defaults.
+ */
 export function workflowsConfig(config: FlowrynConfig): Record<string, WorkflowDef> {
   const pools = capacityConfig(config).pools;
   const raw = table(config.extra.workflows, "[workflows]");
@@ -246,13 +276,24 @@ export function workflowsConfig(config: FlowrynConfig): Record<string, WorkflowD
   for (const [id, value] of Object.entries(raw)) {
     if (!WORKFLOW_ID.test(id)) throw new FlowrynError("config_invalid", `[workflows.${id}]: a workflow id is lowercase letters, digits and dashes`);
     const t = table(value, `[workflows.${id}]`);
-    unknownKeys(t, ["stages"], `[workflows.${id}]`);
+    unknownKeys(t, ["stages", ...HARNESS_IDS], `[workflows.${id}]`);
+    const models = parseModels(t, id);
+    const builtIn = DEFAULT_WORKFLOWS[id];
+    if (t.stages === undefined && builtIn) {
+      out[id] = models ? { ...builtIn, models } : builtIn;
+      continue;
+    }
     if (!Array.isArray(t.stages)) throw new FlowrynError("config_invalid", `[workflows.${id}] stages must be a list of stage tables`);
-    const wf: WorkflowDef = { id, stages: t.stages.map((s, i) => parseStage(s, `[workflows.${id}] stage ${i + 1}`, pools)) };
+    const wf: WorkflowDef = { id, stages: t.stages.map((s, i) => parseStage(s, `[workflows.${id}] stage ${i + 1}`, pools)), ...(models ? { models } : {}) };
     checkWorkflow(wf);
     out[id] = wf;
   }
   return out;
+}
+
+/** A workflow as config has it now, for its model and effort defaults; null when config no longer has it. */
+export function currentWorkflow(config: FlowrynConfig, id: string): WorkflowDef | null {
+  return workflowsConfig(config)[id] ?? null;
 }
 
 /** The workflow a task of this kind may run: a ship's ends in the merge gate, a scout's does not. */

@@ -3,7 +3,13 @@ import { hashToken } from "../api/auth.ts";
 import { stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import type { Db } from "../db/db.ts";
 import { getSession, leaseOfSession } from "../lease/lease.ts";
+import type { Account } from "../config/accounts.ts";
+import { runAccount } from "../config/accounts.ts";
+import { checkStart, startDepsOf } from "../lifecycle/dispatch.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
+import { getProject } from "../lifecycle/projects.ts";
+import { goneForGood } from "../lifecycle/review-chat.ts";
+import { revivalTarget, reviveReview } from "../lifecycle/review-revival.ts";
 import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { openUserActed } from "../attention/follow-up.ts";
 import { changesTarget, openGate, passReviewGate, positionOf, sendBack, type GateRow } from "../lifecycle/stages.ts";
@@ -20,7 +26,9 @@ import { runAndProject } from "./verbs.ts";
  * the Pi leader's flowryn_gate_pass confirm. A worker saying "you approved it
  * in Lavish" is never a pass, and yolo never passes a review gate.
  * `flowryn gate changes` sends the run back with your words; it needs no
- * approval, since it only holds work back. A gate that carries the worker's
+ * approval, since it only holds work back. On a run gone for good (failed, its
+ * worktree cleaned up) a new run of the task carries the review on with your
+ * words (src/lifecycle/review-revival.ts); a cancelled run's review is refused. A gate that carries the worker's
  * questions passes only once each is answered (gate-questions.ts); changes
  * close the ones still open.
  */
@@ -166,14 +174,24 @@ const gateChanges: VerbSpec = {
   kind: "mutation",
   roles: ["leader", "human"],
   scope: { kind: "ref", arg: "task" },
-  async prepare(ctx, args) {
+  async prepare(ctx, args): Promise<ChangesPrepared> {
     // Changes need no word from you; a chat answer is still taken (and a "Pass" answer refuses them).
-    const { gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
-    return { grant: prepareCaptainGrant(ctx, args, { item: gate.id, choice: "changes" }, null) };
+    const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
+    if (run.state === "cancelled" || goneForGood(run)) revivalTarget(ctx.db, gate.id);
+    const grant = prepareCaptainGrant(ctx, args, { item: gate.id, choice: "changes" }, null);
+    if (!goneForGood(run)) return { grant, revival: null };
+    // Its run ended for good: a new run carries the review on, checked as a dispatch is.
+    const project = getProject(ctx.db, run.project_id);
+    if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
+    const account = runAccount(ctx.config(), project, run.account, run.harness);
+    return { grant, revival: { gate: gate.id, account, start: await checkStart(startDepsOf(ctx), project, account) } };
   },
   apply(ctx, args, prepared) {
     const { run, gate } = openReviewGate(ctx.db, stringArg(args, "task")!);
-    const grantId = (prepared as { grant: string | null } | undefined)?.grant ?? null;
+    const ready = prepared as ChangesPrepared | undefined;
+    if (run.state === "cancelled" || goneForGood(run)) revivalTarget(ctx.db, gate.id);
+    if (goneForGood(run) && ready?.revival?.gate !== gate.id) throw new FlowrynError("not_ready", `${run.task_id} changed meanwhile`, "send the changes again");
+    const grantId = ready?.grant ?? null;
     const used = grantId ? takeGrant(ctx.db, grantId, `gate changes ${gate.id}`, ctx.now()) : null;
     const leaderWords = (stringArg(args, "body") ?? "").trim();
     // Free text the user typed as their answer is their words; the leader's relay comes after it.
@@ -188,14 +206,28 @@ const gateChanges: VerbSpec = {
       target = pos.def.stages.findIndex((s) => s.id === to);
       if (target < 0 || target > gateIndex) throw new FlowrynError("bad_args", `--to must name ${gate.stage} or a stage before it: ${pos.def.stages.slice(0, gateIndex + 1).map((s) => s.id).join(", ")}`);
     }
-    const stage = sendBack(ctx.db, run, gate, words, target, used ? grantActor(used) : ctx.caller.role, ctx.now());
+    const by = used ? grantActor(used) : ctx.caller.role;
+    if (ready?.revival) {
+      // The new run starts at the gated stage unless --to names another.
+      const revived = reviveReview(ctx.db, ctx.config(), { gateId: gate.id, by, words, account: ready.revival.account, start: ready.revival.start, stage: to ? pos.def.stages[target]!.id : gate.stage, now: ctx.now() });
+      openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: revived.run, line: `The user sent ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) back from its ${gate.stage} review outside this session; its run had ended for good, so a new run ${revived.run} started at ${revived.stage} with their words`, now: ctx.now() });
+      return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "replaced", to: revived.stage, run: revived.run, replaced: revived.oldRun, ...(used ? { grant: used.id } : {}) }, hints: [`flowryn show ${run.task_id}`] };
+    }
+    const stage = sendBack(ctx.db, run, gate, words, target, by, ctx.now());
     openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: run.id, line: `The user sent ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) back from its ${gate.stage} review to ${stage} outside this session; the worker got their words`, now: ctx.now() });
     return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "changes", to: stage, ...(used ? { grant: used.id } : {}) }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
+    ctx.journal.kick();
     ctx.lavish.kick();
     return stageStartedReply(ctx, result);
   },
 };
+
+interface ChangesPrepared {
+  grant: string | null;
+  /** The new run's start, when the gate's run ended for good (src/lifecycle/review-revival.ts). */
+  revival: { gate: string; account: Account; start: { version: string; base: string } } | null;
+}
 
 export const GATE_VERBS: VerbSpec[] = [gatePass, gateChanges];

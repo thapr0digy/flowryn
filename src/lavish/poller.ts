@@ -3,8 +3,10 @@ import { dirname, join } from "node:path";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
-import { gatesToPoll, gatesWithWidget, openGateFeedback, readsAsPass, recordGateComment, recordGateNotes, recordLavishEnded, requestGatePass, widgetState, type PassRequest } from "../lifecycle/gate-questions.ts";
-import { sanitizeBlock } from "../util/sanitize.ts";
+import { gateQuestions, gatesToPoll, gatesWithWidget, readsAsPass, recordGateComment, recordGateNotes, recordLavishEnded, requestGatePass, widgetState, type PassRequest } from "../lifecycle/gate-questions.ts";
+import { routedReply, routePageBatch, summarizeReview, type Routed, type UserMessage } from "../lifecycle/review-chat.ts";
+import { runBounded } from "../runtime/bounded.ts";
+import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { DEFAULT_CHANNEL_ALERT_MS } from "../config/leader.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
 import { parsePollOutput, type PollOutput } from "./poll-output.ts";
@@ -19,10 +21,13 @@ import { requirePageDir, writeWidget } from "./widget.ts";
  * "anything else" (recordGateComment) and its pass request (requestGatePass,
  * a P1 for the leader: the page never passes a gate), all in one transaction;
  * any other prompts (annotations, chat), and each Send's "anything else" in
- * full, are kept in `lavish-notes-<gate>.txt` beside the page for the verdict
- * steer to point at, what arrived opens one review_feedback item that wakes
- * the leader with the worker questions, and the poll starts again. A poll
- * Flowryn kills loses nothing: Lavish
+ * full, are kept in `lavish-notes-<gate>.txt` beside the page, and the user's
+ * words go to the worker that owns the gate as one steer (routePageBatch,
+ * src/lifecycle/review-chat.ts), which answers with `review reply`, shown in
+ * the page by `lavish-axi reply` (reply). Flowryn's own reply says where the
+ * words went. The leader is not woken per message: the session's end (or the
+ * gate's close) gives it one summary (summarizeReview). The poll starts again.
+ * A poll Flowryn kills loses nothing: Lavish
  * keeps queued feedback until a poll delivers it. A poll that fails backs off
  * (2 s doubling to a minute, counted from the failures kept on the gate); one
  * that reports the user ended the session stops for good. Each failure, and a
@@ -51,6 +56,8 @@ export interface PollerDeps {
   channelAlertMs?(): number;
   /** How long a poll must keep running to count as listening (default STEADY_MS; tests shorten it). */
   steadyMs?: number;
+  /** After a batch went to a run: deliver its steer now, and start the scheduler's pass when it asked for a resume or a new run. */
+  routed?(runId: string, resumed: boolean): void;
 }
 
 interface Running {
@@ -65,6 +72,8 @@ interface Running {
 
 /** How long the last poll that carries a reply waits for anything else the user sends. */
 const FINAL_POLL_MS = 1_500;
+/** How long `lavish-axi reply` may take: it exits once the server accepts the reply, within its own 10 s. */
+const REPLY_TIMEOUT_MS = 15_000;
 
 /**
  * Append to a gate's notes beside its page, never through a symlink: the
@@ -98,6 +107,8 @@ export class LavishPoller {
   private readonly warned = new Set<string>();
   /** What Flowryn recorded, shown in Lavish's conversation with the next poll (--agent-reply). */
   private readonly replies = new Map<string, { page: string; text: string }>();
+  /** Gates whose next poll displaces a listener Lavish may still hold (a reply that fell back to a poll restart). */
+  private readonly takeover = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -128,6 +139,30 @@ export class LavishPoller {
     } catch (error) {
       this.deps.log(`lavish: pass failed: ${(error as Error).stack ?? String(error)}`);
     }
+  }
+
+  /**
+   * Show a worker's reply in a gate's page with `lavish-axi reply`, beside the
+   * running poll (measured on lavish-axi 0.1.88: the poll keeps listening). A
+   * reply Lavish refuses waits for the next poll's --agent-reply instead: the
+   * running poll is stopped and started again with it, displacing the old
+   * listener (--takeover).
+   */
+  async reply(gate: string, page: string, text: string): Promise<"shown" | "queued" | "off"> {
+    const lavish = this.deps.lavish();
+    if (!lavish || this.closed) return "off";
+    const result = await runBounded([lavish, "reply", page, "--agent-reply-file", "-"], { label: "lavish-axi reply", timeoutMs: REPLY_TIMEOUT_MS, stdin: text, env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
+    if (result.code === 0) return "shown";
+    this.deps.log(`lavish: the reply on gate ${gate}'s page was refused (${pollFailureReason(result.code, result.stdout, result.stderr)}); the next poll carries it`);
+    const queued = this.replies.get(gate);
+    this.replies.set(gate, { page, text: queued ? `${queued.text}\n\n${text}` : text });
+    const entry = this.running.get(gate);
+    if (entry && !entry.final) {
+      this.takeover.add(gate);
+      this.halt(gate);
+    }
+    this.kick();
+    return "queued";
   }
 
   /** The gates a poll runs for now (tests). */
@@ -219,7 +254,8 @@ export class LavishPoller {
   private start(lavish: string, gate: string, page: string, final: boolean): void {
     const reply = this.replies.get(gate)?.text;
     this.replies.delete(gate);
-    const args = [lavish, "poll", page, ...(reply ? ["--agent-reply", reply] : []), ...(final ? ["--timeout-ms", String(FINAL_POLL_MS)] : [])];
+    const takeover = this.takeover.delete(gate);
+    const args = [lavish, "poll", page, ...(reply ? ["--agent-reply", reply] : []), ...(takeover ? ["--takeover"] : []), ...(final ? ["--timeout-ms", String(FINAL_POLL_MS)] : [])];
     let proc: ReturnType<typeof Bun.spawn>;
     try {
       proc = Bun.spawn(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
@@ -307,41 +343,56 @@ export class LavishPoller {
       }
     }
     const ctx = { db: this.deps.db, now: this.deps.now };
-    const { outcomes, comments, passes } = tx(this.deps.db, () => {
+    // What goes to the worker: the user's own words (chat, annotations) and each Send's "anything else" for this gate.
+    const words: UserMessage[] = [...out.messages, ...said.map((c) => ({ said: c, on: null }))];
+    const { outcomes, comments, passes, routed, summary } = tx(this.deps.db, () => {
       const results = out.answers.map((a) => ({ decision: a.decision, outcome: lavishAnswer(ctx, a) }));
       // A Send names its gate; one for another gate (a stale page) is recorded against that gate's own rules.
       const kept = out.sends.filter((s) => s.comment !== null).map((s) => recordGateComment(this.deps.db, s.gate, s.comment!, this.deps.now()));
       const asked = out.sends.filter((s) => s.pass).map((s) => requestGatePass(this.deps.db, s.gate, this.deps.now()));
       if (notes) recordGateNotes(this.deps.db, gate, notes, out.otherPrompts + out.malformed, this.deps.now());
-      const recorded = results.filter((r) => r.outcome === "recorded").map((r) => r.decision);
-      openGateFeedback(this.deps.db, gate, { recorded, feedback: out.feedback, notes }, this.deps.now());
-      if (out.ended) recordLavishEnded(this.deps.db, gate, this.deps.now());
-      return { outcomes: results, comments: kept, passes: asked };
+      const answers = gateQuestions(this.deps.db, gate)
+        .filter((d) => d.state === "answered")
+        .map((d) => `${d.id} = ${sanitizeLine(d.answer ?? "-", 200)}`);
+      const sent = routePageBatch(this.deps.db, gate, { messages: words, answers, ended: out.ended }, this.deps.now());
+      let item: string | null = null;
+      if (out.ended) {
+        recordLavishEnded(this.deps.db, gate, this.deps.now());
+        item = summarizeReview(this.deps.db, gate, "ended", this.deps.now(), this.deps.log);
+      }
+      return { outcomes: results, comments: kept, passes: asked, routed: sent, summary: item };
     });
-    const othersKept = notes !== null && others;
+    if (routed && routed.to !== "nobody") {
+      const run = (this.deps.db.query("SELECT run_id FROM gates WHERE id = ?1").get(gate) as { run_id: string } | null)?.run_id;
+      if (run) this.deps.routed?.(run, routed.to === "resumed" || routed.to === "new_run");
+    }
     const recorded = outcomes.length > 0 || comments.length > 0 || passes.length > 0;
-    if (!out.ended && (recorded || othersKept)) this.replies.set(gate, { page, text: this.replyText(gate, outcomes, othersKept, comments, passes, out.feedback.some(readsAsPass)) });
+    if (!out.ended && (recorded || routed)) {
+      const text = this.replyText(gate, outcomes, routed, comments, passes, out.feedback.some(readsAsPass));
+      const queued = this.replies.get(gate);
+      this.replies.set(gate, { page, text: queued ? `${queued.text}\n\n${text}` : text });
+    }
     const extra = [comments.length > 0 ? `comment ${comments.join(", ")}` : null, passes.length > 0 ? `pass ${passes.map((p) => p.outcome).join(", ")}` : null].filter(Boolean);
-    this.deps.log(`lavish: gate ${gate}: ${outcomes.length > 0 ? outcomes.map((o) => `${o.decision} ${o.outcome}`).join(", ") : "no answers"}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}${othersKept ? `, ${out.otherPrompts + out.malformed} other prompt(s) kept` : ""}${notes && said.length > 0 ? `, ${said.length} comment(s) kept in ${notes}` : ""}${out.ended ? ", the user ended the session" : ""}`);
+    const to = routed ? `, ${words.length} message(s) ${routed.to === "nobody" ? `kept (${routed.why})` : `to the worker (${routed.to})`}` : "";
+    this.deps.log(`lavish: gate ${gate}: ${outcomes.length > 0 ? outcomes.map((o) => `${o.decision} ${o.outcome}`).join(", ") : "no answers"}${extra.length > 0 ? `, ${extra.join(", ")}` : ""}${to}${out.ended ? `, the user ended the session${summary ? ` (summary ${summary})` : ""}` : ""}`);
   }
 
-  /** The reply Lavish shows the user: what was recorded, what was not and why, and what comes next. */
-  private replyText(gate: string, outcomes: { decision: string; outcome: string }[], notes: boolean, comments: string[] = [], passes: PassRequest[] = [], passWords = false): string {
+  /** The reply Lavish shows the user: what was recorded, where their words went, and what comes next. */
+  private replyText(gate: string, outcomes: { decision: string; outcome: string }[], routed: Routed | null, comments: string[] = [], passes: PassRequest[] = [], passWords = false): string {
     const said = (outcome: string) => outcomes.filter((o) => o.outcome === outcome).map((o) => o.decision);
     const parts: string[] = [];
     if (said("recorded").length > 0) parts.push(`Flowryn recorded your answer to ${said("recorded").join(", ")}.`);
     if (said("late").length > 0) parts.push(`${said("late").join(", ")} already had an answer; it stands.`);
     if (said("invalid").length > 0) parts.push(`${said("invalid").join(", ")}: the choice was not one the question offers; answer again.`);
     if (said("stale").length > 0) parts.push("An answer from an earlier version of this page was ignored.");
-    if (comments.includes("recorded")) parts.push("Your note for the worker is kept; it reaches the worker with the verdict.");
     if (comments.includes("late")) parts.push("The review had already closed, so your note for the worker was not kept.");
-    if (notes) parts.push("Your leader has your notes now, and they reach the worker with the verdict.");
+    if (routed) parts.push(routedReply(routed));
     const pass = passes[passes.length - 1];
     if (pass?.outcome === "questions_open") parts.push(`Pass not requested: ${pass.open.join(", ")} still open; answer ${pass.open.length === 1 ? "it" : "them"} first.`);
     const asked = pass?.outcome === "requested" || pass?.outcome === "already";
     if (asked) parts.push("Pass requested. This page cannot pass the review: your leader asks you to confirm it, or you run flowryn approve in your terminal.");
     if (pass?.outcome === "late") parts.push("The review had already closed.");
-    if (passWords && !asked) parts.push("If you meant to pass the review, your leader will ask you to confirm it in Flowryn.");
+    if (passWords && !asked) parts.push("If you meant to pass the review: only you can, outside this page; tell your leader, or run flowryn approve in your terminal.");
     const { total, open } = this.deps.db.query("SELECT COUNT(*) AS total, COALESCE(SUM(state = 'open'), 0) AS open FROM decisions WHERE gate_id = ?1").get(gate) as { total: number; open: number };
     if (open > 0) parts.push(`${open} question${open === 1 ? "" : "s"} still open.`);
     else if (total > 0 && !asked) parts.push("Every question is answered; the review now waits for your pass in Flowryn.");

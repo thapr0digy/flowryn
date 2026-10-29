@@ -13,7 +13,7 @@ import { basename, shellCommands, type Command } from "./shell.ts";
  * a URL host or a file path; no model is involved.
  */
 
-export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths"] as const;
+export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths", "review-page"] as const;
 export type ToolkitRule = (typeof TOOLKIT_RULES)[number];
 
 export interface ToolkitVerdict {
@@ -91,6 +91,7 @@ const TOOL_FOR: Record<Exclude<ToolkitRule, "leader-shell">, string> = {
   "flowryn-tasks": "flowryn",
   pipeline: "no-mistakes axi run --wait",
   "scope-paths": "flowryn",
+  "review-page": "$FLOWRYN_BIN review reply",
 };
 
 /** The verdict for one tool call: the first rule it breaks, or null. Never throws. */
@@ -170,6 +171,8 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
         : "Flowryn owns this backlog; use the flowryn verbs (dispatch, plan, todo add, decision add, ...).";
     case "scope-paths":
       return "it holds another scope's work, or every scope's tasks; this leader sees its own scope through the flowryn verbs (fleet, show, brief).";
+    case "review-page":
+      return "Flowryn listens on your review page and hands you the user's words as a steer; answer them with $FLOWRYN_BIN review reply --body-file -.";
   }
 }
 
@@ -336,6 +339,8 @@ function commandVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolki
     const hit = tasksAxiVerdict(c, call, paths);
     if (hit) return hit;
   }
+  // A worker's own poll would take the user's words from the daemon, the review page's one listener (hosting a page is fine).
+  if (c.name === "lavish-axi" && call.role === "worker" && (args[0] === "poll" || args[0] === "reply")) return deny("review-page", call, `\`lavish-axi ${args[0]}\``);
   for (const target of writtenFiles(c)) {
     const hit = fileVerdict(target, call, paths, `writing ${target} from the shell`);
     if (hit) return hit;

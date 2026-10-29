@@ -9,6 +9,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
 import { releaseLeases } from "../sched/pools.ts";
 import { dismissRunQuestions } from "./gate-questions.ts";
 import { endRunOperations } from "./operations.ts";
+import { choiceLine } from "../config/model-choice.ts";
 
 /** Design section 13: runs.state, owned by the lifecycle engine. */
 export const RUN_STATES = ["launching", "running", "validating", "ready", "merging", "landed", "cleaned", "failed", "cancelled"] as const;
@@ -26,8 +27,12 @@ export interface RunRow {
   harness_version: string;
   /** The account the run started on (src/config/accounts.ts); its resumes stay on it. */
   account: string | null;
+  /** What the last launch used (src/config/model-choice.ts); set from the account at dispatch. */
   model: string | null;
   effort: string | null;
+  /** The task's own choice (dispatch --model/--effort, a phase's lines); null: not chosen. */
+  model_pin: string | null;
+  effort_pin: string | null;
   state: RunState;
   liveness: Liveness;
   workflow: string;
@@ -192,4 +197,19 @@ export function cancelRun(db: Db, run: RunRow, reason: string, source: EventSour
   endRunOperations(db, run.id, "cancelled", source, now);
   run.state = "cancelled";
   run.liveness = "dead";
+}
+
+/**
+ * The run's model and effort as its last launch used them (dispatch's lookup before the first),
+ * each with where it came from: the newest dispatch, overflow or launch event that recorded it.
+ */
+export function modelView(db: Db, run: Pick<RunRow, "id" | "model" | "effort">): { model: string; effort: string } {
+  const row = db
+    .query(
+      `SELECT json_extract(payload, '$.model_source') AS model_source, json_extract(payload, '$.effort_source') AS effort_source FROM events
+       WHERE run_id = ?1 AND kind IN ('run.dispatched', 'run.launched', 'sched.overflow') AND json_extract(payload, '$.model_source') IS NOT NULL
+       ORDER BY seq DESC LIMIT 1`,
+    )
+    .get(run.id) as { model_source: string; effort_source: string } | null;
+  return { model: choiceLine(run.model, row?.model_source ?? "recorded"), effort: choiceLine(run.effort, row?.effort_source ?? "recorded") };
 }

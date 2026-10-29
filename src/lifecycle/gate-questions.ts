@@ -8,6 +8,7 @@ import { OTHER_ANSWER, type GateQuestions } from "../lavish/questions.ts";
 import { MOUNT_SNIPPET, pageMountsWidget, type WidgetState } from "../lavish/widget.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { nextRunDecisionId, type DecisionRow } from "./decisions.ts";
+import { conversationPath } from "./review-chat.ts";
 import { taskTitle, type RunRow } from "./runs.ts";
 
 /**
@@ -122,7 +123,11 @@ export function gateQuestionsLine(db: Db, gateId: string): string | null {
   return `answers ${all.map((d) => `${d.id} = ${sanitizeLine(d.answer ?? "-", 60)}`).join("; ")}`;
 }
 
-/** The answers the verdict steer carries to the worker (held while the gate was open). */
+/**
+ * The answers the verdict steer carries to the worker (held while the gate was
+ * open), and the page's conversation: a pointer to its file once the review
+ * had one (the worker saw each message as it came), else the user's comment.
+ */
 export function gateAnswersNote(db: Db, gateId: string): string | null {
   const all = gateQuestions(db, gateId);
   const notes = (db.query("SELECT notes_path FROM gates WHERE id = ?1").get(gateId) as { notes_path: string | null } | null)?.notes_path ?? null;
@@ -137,6 +142,12 @@ export function gateAnswersNote(db: Db, gateId: string): string | null {
   }
   const dismissed = all.filter((d) => d.state === "dismissed").map((d) => d.id);
   if (dismissed.length > 0) parts.push(`Closed unanswered: ${dismissed.join(", ")}.`);
+  const conversation = conversationPath(db, gateId);
+  if (conversation) {
+    parts.push(`The review page's conversation with you is in ${conversation}.`);
+    if (notes) parts.push(`Everything the page sent, in full: read ${notes}.`);
+    return parts.join(" ");
+  }
   const comment = (db.query("SELECT comment FROM gates WHERE id = ?1").get(gateId) as { comment: string | null } | null)?.comment ?? null;
   if (comment && comment.length > MAX_QUOTED_COMMENT) {
     const rest = notes ? `the full text is in ${notes}` : "the rest was not kept";
@@ -296,18 +307,27 @@ export interface PolledGate {
 }
 
 export const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
+/** The review of run `r` has not moved on: no later run of its task started, and the task was not dropped. */
+export const TASK_STILL_ON_RUN =
+  "NOT EXISTS (SELECT 1 FROM runs later WHERE later.task_id = r.task_id AND (later.started_at > r.started_at OR (later.started_at = r.started_at AND later.rowid > r.rowid))) AND NOT EXISTS (SELECT 1 FROM drops dropped WHERE dropped.task_id = r.task_id)";
+/** A run a review page can still bring back: live, or failed (resumed while its worktree remains, else carried on by a new run while the task is still on it). */
+const PAGE_RUN = `r.state NOT IN ('cleaned','cancelled') AND (r.state != 'failed' OR COALESCE(r.cleanup, '') != 'done' OR (${TASK_STILL_ON_RUN}))`;
 
 /**
  * Gates whose page the daemon polls: open on a live run with a known page,
  * and the user has not ended the session. Every review page is listened to
  * while its gate is open, with or without questions, so Lavish never shows
- * the page's agent as not listening while the review waits.
+ * the page's agent as not listening while the review waits. A failed run's
+ * page is listened to as well: a message there resumes its worker while its
+ * worktree remains, else starts a new run of the task at the gated stage
+ * (src/lifecycle/review-chat.ts) unless a later run or a drop moved the task
+ * on. A cancelled run's page is not.
  */
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
     .query(
       `SELECT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id
-       WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
+       WHERE g.state = 'open' AND ${PAGE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
     )
     .all() as PolledGate[];
 }
@@ -319,46 +339,6 @@ const CHANGES_CLAUSE = /\b(but|once|except|until|after)\b/i;
 
 export function readsAsPass(text: string): boolean {
   return PASS_WORDS.test(text) && !CHANGES_CLAUSE.test(text);
-}
-
-export interface GateFeedback {
-  /** Answers the poll recorded, as decision ids. */
-  recorded: string[];
-  /** The user's own words from the page, one per prompt that is not an answer. */
-  feedback: string[];
-  /** Where the raw feedback was kept, if it was. */
-  notes: string | null;
-}
-
-/**
- * What the user sent from a gate's review page, as one item for the leader
- * (review_feedback, batched with worker questions so it wakes the leader).
- * A pass in their words is named as one, for the leader to put to them; the
- * gate still passes only through a human channel. Call inside a transaction.
- */
-export function openGateFeedback(db: Db, gateId: string, input: GateFeedback, now: number): string | null {
-  if (input.recorded.length === 0 && input.feedback.length === 0 && input.notes === null) return null;
-  const gate = db.query("SELECT g.stage, r.id AS run_id, r.task_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gateId) as { stage: string; run_id: string; task_id: string } | null;
-  if (!gate) return null;
-  const parts: string[] = [];
-  if (input.recorded.length > 0) {
-    const answers = input.recorded.map((id) => {
-      const answer = (db.query("SELECT answer FROM decisions WHERE id = ?1").get(id) as { answer: string | null } | null)?.answer ?? "-";
-      return `${id} = ${sanitizeLine(answer, 40)}`;
-    });
-    parts.push(`answered ${answers.join(", ")}`);
-  }
-  if (input.feedback.length > 0) {
-    const more = input.feedback.length > 1 ? ` (+${input.feedback.length - 1} more)` : "";
-    parts.push(`wrote "${sanitizeLine(input.feedback[0]!, 60)}"${more}`);
-  }
-  // An item line is one short line: the task id, not its title, and the pass first, so a long quote is what gets cut.
-  const pass = input.feedback.some(readsAsPass) ? " may read as a pass (ask the user; only flowryn gate pass passes it)" : "";
-  const notes = input.notes ? (parts.length > 0 ? "; notes beside the page" : "") : "";
-  if (parts.length === 0) parts.push("left notes beside the page");
-  const line = `Review feedback on ${gate.task_id} (${gate.stage} gate ${gateId})${pass}: the user ${parts.join(" and ")}${notes}`;
-  const event = appendEvent(db, { source: "daemon", kind: "gate.feedback", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, recorded: input.recorded, prompts: input.feedback.length, pass: pass.length > 0 }, ts: now });
-  return openItem(db, { kind: "review_feedback", eventSeq: event.seq, taskId: gate.task_id, runId: gate.run_id, line, now });
 }
 
 /** Gates with a widget (a page carrying questions) whose state may still change, for the widget writer. */

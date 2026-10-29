@@ -37,7 +37,8 @@ exit 0
 `;
 
 /**
- * The test homes' lavish-axi: every call is logged to $FLOWRYN_HOME/lavish-calls.log; `poll` waits for
+ * The test homes' lavish-axi: every call is logged to $FLOWRYN_HOME/lavish-calls.log; `reply` appends its
+ * stdin to $FLOWRYN_HOME/lavish-replies.log (or fails while $FLOWRYN_HOME/lavish-reply-fail exists); `poll` waits for
  * the first file in $FLOWRYN_HOME/lavish-queue/*.out (a test writes what the user "sent", in the poll's
  * own output format), claims it by renaming and prints it, or prints `status: waiting` once its
  * --timeout-ms runs out; a queued file named *.fail.out makes the poll
@@ -45,6 +46,11 @@ exit 0
  */
 const FAKE_LAVISH = `#!/bin/sh
 echo "$*" >> "$FLOWRYN_HOME/lavish-calls.log"
+if [ "$1" = "reply" ]; then
+  [ -e "$FLOWRYN_HOME/lavish-reply-fail" ] && exit 1
+  { cat; echo; } >> "$FLOWRYN_HOME/lavish-replies.log"
+  exit 0
+fi
 [ "$1" = "poll" ] || exit 0
 q="$FLOWRYN_HOME/lavish-queue"
 mkdir -p "$q"

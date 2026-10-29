@@ -2,15 +2,17 @@ import { randomUUID } from "node:crypto";
 import { FlowrynError } from "../api/errors.ts";
 import { findOpenItem, findOpenRunItem, openItem, resolveItems, resolveRunItems } from "../attention/items.ts";
 import { existsSync } from "node:fs";
-import { accountsConfig, capacityAccount, resolveAccount, type Account } from "../config/accounts.ts";
+import { accountsConfig, capacityAccount, resolveAccount, runAccount, type Account } from "../config/accounts.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
-import { capacityConfig, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
+import { capacityConfig, currentWorkflow, schedTiming, workflowFor, type HostCheckConfig, type WorkflowDef } from "../config/workflows.ts";
+import { checkPins, modelFits, resolveModelChoice } from "../config/model-choice.ts";
 import { tx, type Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, signInOf, type StartDeps } from "../lifecycle/dispatch.ts";
+import { reviveReview, revivalBlocked, revivalsDue } from "../lifecycle/review-revival.ts";
 import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
@@ -189,6 +191,9 @@ export class Scheduler {
     await this.step("auto-dispatch", async () => {
       if ((await this.autoDispatch()) > 0) this.deps.kickJournal();
     });
+    await this.step("review revivals", async () => {
+      if ((await this.reviveReviews()) > 0) this.deps.kickJournal();
+    });
     await this.step("grant", () => this.grant());
     await this.step("alerts", async () => this.alerts());
   }
@@ -306,10 +311,12 @@ export class Scheduler {
    * `overflow` list that is not paused at all, whose quota is not low and
    * that is signed in. One level: a target's own list is not followed.
    */
-  private async overflowTarget(account: Account, config: FlowrynConfig, pass: GrantPass): Promise<Account | null> {
+  private async overflowTarget(account: Account, config: FlowrynConfig, pass: GrantPass, model: string | null): Promise<Account | null> {
     for (const id of account.overflow) {
       const target = capacityAccount(config, id, account.harness);
       if (!target) continue;
+      // A task's own Pi model goes with it, so a target that spends another provider cannot take the run.
+      if (model !== null && !modelFits(model, target)) continue;
       if (usageGate(this.deps.db, this.deps.now(), target.id, null) !== "open") continue;
       if (await this.quotaHeld(target)) continue;
       if (await this.signedOut(target, pass)) continue;
@@ -409,7 +416,7 @@ export class Scheduler {
       const hold = await this.accountHold(account, c.run.id, firstLaunch);
       if (hold.refusal) {
         // Overflow moves only a run's first launch: a resume, a relaunch or a fresh stage keeps its account's session store.
-        const target = firstLaunch && account.overflow.length > 0 ? await this.overflowTarget(account, config, pass) : null;
+        const target = firstLaunch && account.overflow.length > 0 ? await this.overflowTarget(account, config, pass, c.run.model_pin) : null;
         if (!target) return this.refuse(c, hold.refusal(firstLaunch && account.overflow.length > 0 ? `no overflow account is free (${account.overflow.join(", ")})` : null));
         moved = { from: account.id, why: hold.refusal(null).rule };
         account = target;
@@ -441,7 +448,7 @@ export class Scheduler {
         if (moved && account) {
           // Re-read in the transaction: the run must still be on its first launch, on the account that was held.
           if (fresh.pending_launch !== "fresh" || (fresh.account ?? fresh.harness) !== moved.from) return null;
-          overflowRun(db, fresh, moved.from, account, moved.why, now());
+          overflowRun(db, config, fresh, moved.from, account, moved.why, now());
         }
         const row = moved ? getRunWithPolicy(db, fresh.id)! : fresh;
         const started = activateStage(db, config, row, now(), { steer });
@@ -604,7 +611,7 @@ export class Scheduler {
     const config = this.deps.config();
     const phases = db
       .query(
-        `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT COUNT(*) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
+        `SELECT ph.*, pl.title AS plan_title, pl.project_id, pl.source_task, (SELECT MAX(x.phase_no) FROM plan_phases x WHERE x.plan_id = ph.plan_id) AS phases
          FROM plan_phases ph JOIN plans pl ON pl.id = ph.plan_id JOIN task_policy tp ON tp.task_id = ph.task_id
          WHERE pl.state = 'approved' AND tp.auto = 1 AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ph.task_id)
          ORDER BY pl.created_at, ph.phase_no`,
@@ -622,8 +629,10 @@ export class Scheduler {
       if (!task || task.state !== "queued" || task.hold) continue;
       if (waitingOn(db, phase.task_id, backlog, JSON.parse(phase.blocked_by) as string[]).length > 0) continue;
       let account: Account;
+      const pins = { model: phase.model, effort: phase.effort };
       try {
         account = resolveAccount(config, project, { account: phase.account, harness: phase.harness as HarnessId | null });
+        checkPins(pins, account, `plan phase "${phase.title}"`);
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
         else throw error;
@@ -634,7 +643,7 @@ export class Scheduler {
       let usage: "open" | "probe" = "open";
       let moved: { from: string; why: string } | null = null;
       if (hold.refusal) {
-        const target = account.overflow.length > 0 ? await this.overflowTarget(account, config, pass) : null;
+        const target = account.overflow.length > 0 ? await this.overflowTarget(account, config, pass, pins.model) : null;
         if (!target) continue;
         moved = { from: account.id, why: hold.refusal(null).rule };
         account = target;
@@ -657,6 +666,35 @@ export class Scheduler {
     return started;
   }
 
+  /**
+   * A message on the review page of a run gone for good (failed, worktree
+   * cleaned) asked for a new run (src/lifecycle/review-revival.ts): start it
+   * on the old run's account once a start checks, as a dispatch would. One
+   * that cannot start yet tells the leader once and is tried again next pass.
+   */
+  private async reviveReviews(): Promise<number> {
+    const { db, now } = this.deps;
+    let started = 0;
+    for (const due of revivalsDue(db)) {
+      const config = this.deps.config();
+      try {
+        const run = getRunWithPolicy(db, due.run);
+        const project = run ? getProject(db, run.project_id) : null;
+        if (!run || !project) continue;
+        const account = runAccount(config, project, run.account, run.harness);
+        const start = await checkStart(this.deps.startDeps, project, account);
+        const revived = tx(db, () => (revivalsDue(db).some((d) => d.gate === due.gate) ? reviveReview(db, config, { gateId: due.gate, by: "review page", words: null, account, start, now: now(), log: this.deps.log }) : null));
+        if (!revived) continue;
+        started++;
+        this.deps.log(`sched: gate ${due.gate}'s review page started ${revived.run} for ${revived.task} at stage ${revived.stage} (${revived.oldRun} had ended for good)`);
+      } catch (error) {
+        if (error instanceof FlowrynError) tx(db, () => revivalBlocked(db, due.gate, error.message, now()));
+        else this.deps.log(`sched: gate ${due.gate}'s new run failed to start: ${(error as Error).stack ?? String(error)}`);
+      }
+    }
+    return started;
+  }
+
   /** One phase's run, its backlog start and its P3, in one transaction; null when a run appeared meanwhile. */
   private startPhase(
     phase: PhaseRow & { plan_title: string; source_task: string | null; phases: number },
@@ -672,7 +710,7 @@ export class Scheduler {
     const config = this.deps.config();
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
-      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, account.id, runId, t);
       if (moved) appendEvent(db, { source: "daemon", kind: "sched.overflow", runId, taskId: phase.task_id, payload: { from: moved.from, to: account.id, why: moved.why, at: "phase start" }, ts: t });
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
@@ -754,9 +792,11 @@ function newPass(): GrantPass {
 
 /**
  * A held fresh launch moves to an overflow account: the run's account, and
- * the model and effort that came with it. Call inside the grant's transaction.
+ * the model and effort looked up again on it (the task's own choice goes
+ * with the run). Call inside the grant's transaction.
  */
-function overflowRun(db: Db, run: RunWithPolicy, from: string, to: Account, why: string, now: number): void {
-  db.query("UPDATE runs SET account = ?2, model = ?3, effort = ?4, updated_at = ?5 WHERE id = ?1").run(run.id, to.id, to.model, to.effort, now);
-  appendEvent(db, { source: "daemon", kind: "sched.overflow", runId: run.id, taskId: run.task_id, payload: { from, to: to.id, why, at: "grant" }, ts: now });
+function overflowRun(db: Db, config: FlowrynConfig, run: RunWithPolicy, from: string, to: Account, why: string, now: number): void {
+  const choice = resolveModelChoice(config, { pins: { model: run.model_pin, effort: run.effort_pin }, workflow: currentWorkflow(config, run.workflow), account: to });
+  db.query("UPDATE runs SET account = ?2, model = ?3, effort = ?4, updated_at = ?5 WHERE id = ?1").run(run.id, to.id, choice.model, choice.effort, now);
+  appendEvent(db, { source: "daemon", kind: "sched.overflow", runId: run.id, taskId: run.task_id, payload: { from, to: to.id, why, at: "grant", ...choice }, ts: now });
 }

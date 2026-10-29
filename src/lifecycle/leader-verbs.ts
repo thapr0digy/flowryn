@@ -15,7 +15,7 @@ import { wakeLineFor } from "../leader/wake-state.ts";
 import { lensFor } from "../leader/scope.ts";
 import { pinHistory } from "../lease/repin.ts";
 import { getDecision } from "./decisions.ts";
-import { findRun, isTerminal, taskTitle, type RunRow } from "./runs.ts";
+import { findRun, isTerminal, modelView, taskTitle, type RunRow } from "./runs.ts";
 import { createSteer, recentSteers, steerBrief, steerStatus } from "./steers.ts";
 import { openActionable } from "../attention/router.ts";
 import { leaderTiming } from "../config/leader.ts";
@@ -226,7 +226,7 @@ const resume: VerbSpec = {
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
-    resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated"], "run.resume_requested", now);
+    resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated", "review_worker_gone"], "run.resume_requested", now);
     appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler } });
     return { data: { run: run.id, task: run.task_id, state: "resuming", operation: op.id }, hints: [`flowryn show ${run.task_id}`] };
   },
@@ -344,7 +344,7 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
 function gatesView(ctx: ReadCtx, runId: string): string[] | null {
   const gates = gatesOf(ctx.db, runId);
   if (gates.length === 0) return null;
-  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}${g.state === "open" ? browserView(g) : ""}${g.state === "open" && g.page_path ? channelView(g, (item) => itemIsOpen(ctx.db, item)) : ""}`);
+  return gates.slice(-5).map((g) => `${g.id} ${g.kind} ${g.stage}: ${g.replaced_by ? `replaced by ${g.replaced_by}` : g.state}${g.review_url ? ` ${sanitizeLine(g.review_url, 100)}` : ""}${g.page_path && g.state === "open" ? ` page ${sanitizeLine(g.page_path, 200)}` : ""}${g.feedback ? ` ("${sanitizeLine(g.feedback, 60)}")` : ""}${g.state === "open" ? browserView(g) : ""}${g.state === "open" && g.page_path ? channelView(g, (item) => itemIsOpen(ctx.db, item)) : ""}`);
 }
 
 function itemIsOpen(db: Db, itemId: string): boolean {
@@ -819,6 +819,7 @@ const show: VerbSpec = {
         project: policy.project_id,
         mode: policy.mode_reason ? `${policy.delivery_mode} (${policy.mode_reason})` : policy.delivery_mode,
         harness: `${run.harness} ${run.harness_version}`,
+        ...modelView(ctx.db, run),
         // Only a declared account: the implicit one is named after its harness, already shown.
         ...(run.account && run.account !== run.harness ? { account: run.account } : {}),
         state: run.state,
