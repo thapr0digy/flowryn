@@ -16,7 +16,7 @@ One new table, `explanations` (migration 22, `explanations`). A row is one decis
 |---|---|
 | `id` | integer, shown as `x<N>` |
 | `run_id`, `task_id`, `stage` | the run and the stage it was in |
-| `kind` | `dialog`, `capacity` or `resume` (migration 42 adds `gate`, `decision` and `merge`, and a `subject` that dedupe keys on: `2026-10-29-why-waiting-covers-fy.md`) |
+| `kind` | `dialog`, `capacity` or `resume` (migration 43 adds `gate`, `decision` and `merge`, and a `subject` that dedupe keys on: `2026-10-29-why-waiting-covers-fy.md`) |
 | `rule` | the rule that decided, below (`capacity.pools_full`, …) |
 | `reason` | one sanitized line, at most 160 characters, what the operator reads |
 | `facts` | JSON array of `{name, value, at}`: each observation the rule used, with the time it was observed (`at`, ms; `null` when the source carries none) |

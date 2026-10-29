@@ -6,8 +6,10 @@ import type { Args, ReadCtx } from "../../src/api/verbs.ts";
 import { composeBriefing } from "../../src/attention/briefing.ts";
 import { explanationDetail, openExplanations, sweepExplanations, taskExplanations, type ExplanationRow } from "../../src/attention/explanations.ts";
 import { explainHumanWaits } from "../../src/attention/human-waits.ts";
+import { openItem } from "../../src/attention/items.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import type { ChecksSummary, PullRequest } from "../../src/forge/types.ts";
 import { deliveredOf, prEvidenceFrom } from "../../src/lifecycle/delivery.ts";
 import { LEADER_RUN_VERBS } from "../../src/lifecycle/leader-verbs.ts";
@@ -94,6 +96,11 @@ function addDecision(id: string, opts: { reserved?: string; defer?: string; gate
 function deliver(opts: { at?: number; gateAt?: number } = {}): void {
   db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'pr', ?1, ?2, ?3)").run(PR, HEAD, opts.at ?? NOW - 120 * MIN);
   db.query("INSERT INTO gates (id, run_id, stage, kind, state, opened_at) VALUES ('g9', 'r1', 'ship', 'merge', 'open', ?1)").run(opts.gateAt ?? NOW - 120 * MIN);
+}
+
+function holdItem(at: number): void {
+  const { seq } = appendEvent(db, { source: "daemon", kind: "auto_merge.held", runId: "r1", taskId: "t1", ts: at });
+  openItem(db, { kind: "auto_merge_held", eventSeq: seq, taskId: "t1", runId: "r1", line: "Auto-merge held", now: at });
 }
 
 function checks(red: string[], pending: string[], head = HEAD, notStarted: string[] = []): void {
@@ -359,6 +366,7 @@ describe("merges", () => {
     expect(only().reason).toBe("auto-merge am1: verify v1 is running");
     expect(unblock(only())[0]!.by).toBe("flowryn");
     db.query("UPDATE auto_merges SET state = 'held', reason = 'verify_timeout', detail = 'bun test hung', next = 'flowryn verify t1, then flowryn merge t1', state_since = ?1").run(NOW - 3 * MIN);
+    holdItem(NOW - 3 * MIN);
     pass(VERIFY);
     expect(only().rule).toBe("merge.held");
     expect(unblock(only())).toEqual([
@@ -368,6 +376,25 @@ describe("merges", () => {
     db.query("UPDATE auto_merges SET next = NULL").run();
     pass(VERIFY);
     expect(unblock(only())[0]!.action).toBe("flowryn show t1");
+  });
+
+  test("a held auto-merge the leader took over by hand moves on to the merge's own steps", () => {
+    deliver();
+    db.query(
+      `INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, reason, created_at, state_since, updated_at)
+       VALUES ('am1', 'r1', 't1', 'web', ?1, ?2, 'held', 'verify_timeout', ?3, ?3, ?3)`,
+    ).run(PR, HEAD, NOW - 15 * MIN);
+    holdItem(NOW - 15 * MIN);
+    pass(VERIFY);
+    expect(only().rule).toBe("merge.held");
+    const { state } = db.query("SELECT state FROM runs WHERE id = 'r1'").get() as { state: string };
+    db.query("UPDATE runs SET state = 'merging' WHERE id = 'r1'").run();
+    pass(VERIFY);
+    expect(only().rule).toBe("merge.merging");
+    db.query("UPDATE runs SET state = ?1 WHERE id = 'r1'").run(state);
+    db.query("UPDATE items SET state = 'resolved', resolved_at = ?1 WHERE kind = 'auto_merge_held'").run(NOW);
+    pass(VERIFY);
+    expect(only().rule).toBe("merge.verify");
   });
 
   test("a merge already requested waits on Flowryn, not on the approval it used up", () => {

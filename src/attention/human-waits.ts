@@ -13,6 +13,7 @@ import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { findQueued } from "../verify/queue.ts";
 import { finishedAtHead, type Verification, type VerificationRow } from "../verify/store.ts";
+import { findOpenRunItem } from "./items.ts";
 import { explain, type ExplanationKind, type Fact, type Unblock } from "./explanations.ts";
 
 /**
@@ -164,7 +165,7 @@ function parseOptions(raw: string): string[] {
  * verify, pending checks, an approval; else only the merge itself is left. A
  * live auto-merge, and a merge already requested (the run is merging; its
  * approval is used up), are Flowryn's own wait; a held auto-merge names the
- * command its item names. None when no merge gate is open.
+ * command its item names while that item is open. None when no merge gate is open.
  */
 export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: number): Explained | null {
   const gate = db.query("SELECT * FROM gates WHERE run_id = ?1 AND kind = 'merge' AND state = 'open' ORDER BY opened_at DESC LIMIT 1").get(run.id) as GateRow | null;
@@ -177,9 +178,9 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   const base = Math.max(gate.opened_at, delivered.at);
   const headFact: Fact = { name: "head", value: head.slice(0, 12), at: delivered.at };
   const auto = latestAutoMerge(db, run.id);
-  if (auto && auto.head_sha === head && auto.state === "held") return heldWait(auto, task, headFact);
-  if (auto && auto.head_sha === head && LIVE_AUTO_MERGE_STATES.includes(auto.state)) return autoWait(auto, headFact);
   if (run.state === "merging") return mergingWait(db, task, headFact, base);
+  if (auto && auto.head_sha === head && auto.state === "held" && findOpenRunItem(db, "auto_merge_held", run.id)) return heldWait(auto, task, headFact);
+  if (auto && auto.head_sha === head && LIVE_AUTO_MERGE_STATES.includes(auto.state)) return autoWait(auto, headFact);
   const evidence = delivered.kind === "pr" ? prEvidence(db, run.id) : null;
   const checks = evidence && evidence.head === head ? evidence.checks : null;
   if (evidence && evidence.head === head && evidence.state !== "open") return null;
