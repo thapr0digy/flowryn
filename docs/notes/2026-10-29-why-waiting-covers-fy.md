@@ -29,7 +29,7 @@ A wait already open at upgrade is explained on the first pass, dated by its sour
 | decision | `decision.deferred` | `defer_until` after today | Flowryn: shows it again on that date |
 | merge | `merge.auto` | a live auto-merge (queued, verifying, waiting on checks, merging) | Flowryn |
 | merge | `merge.merging` | a merge already requested (the run is merging; `flowryn merge` used the approval up before its GitHub call) | Flowryn: records the result, or the delivery watcher reads the PR |
-| merge | `merge.held` | a held auto-merge | the leader: the command its `auto_merge_held` item names |
+| merge | `merge.held` | a held auto-merge at the head, while its `auto_merge_held` item is open (once resolved, the steps below apply) | the leader: the command its `auto_merge_held` item names |
 | merge | `merge.checks_red` | stored GitHub evidence at the delivered head has red checks, and you have not waived the only one at this head, nor are they all checks GitHub never started in a project with verify steps (those wait on the local verify) | the leader: steer the worker; you: waive exactly one |
 | merge | `merge.verify` / `merge.verify_failed` | the project has verify steps and no passing verify at the head | Flowryn while one runs or is queued; else the leader: `flowryn verify <task>` |
 | merge | `merge.checks_pending` | checks still running at the head | Flowryn (GitHub) |
