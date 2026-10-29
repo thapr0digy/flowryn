@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { HerdrClient, HerdrError, type HerdrTransport } from "../../src/runtime/herdr/client.ts";
 import { HerdrRuntime, eventPaneId } from "../../src/runtime/herdr/runtime.ts";
 import { resolveHerdrSocket } from "../../src/runtime/herdr/socket.ts";
-import { descendantCommands, isAlive, parseLstart, parseProcessTable, parsePsLine, readIdentity, readProcessTable, sameProcess, terminate, type PsRunner } from "../../src/runtime/proc.ts";
+import { descendantCommands, isAlive, parseLstart, parseProcessTable, parsePsLine, PsUnavailable, readIdentity, readProcessTable, sameProcess, terminate, type PsRunner } from "../../src/runtime/proc.ts";
 import { defaultConfig } from "../../src/config/config.ts";
 import { FakeHerdr } from "../helpers/fake-herdr.ts";
 
@@ -326,6 +326,22 @@ describe("Herdr runtime", () => {
     const found = await runtime.harnessProcess("w1:p2", (p) => p.argv0 === "claude", 0);
     expect(found?.identity.pid).toBe(process.pid);
     expect(await runtime.harnessProcess("w1:p2", (p) => p.argv0 === "pi", 0)).toBeNull();
+  });
+
+  test("a ps that cannot answer is waited through and, still failing at the deadline, thrown: never read as no harness", async () => {
+    const transport = scriptedTransport({
+      "pane.process_info": () => ({
+        process_info: { pane_id: "w1:p2", shell_pid: 100, foreground_process_group_id: process.pid, foreground_processes: [{ pid: process.pid, name: "2.1.281", argv0: "claude", argv: ["claude"], cwd: "/w" }] },
+      }),
+    });
+    let failures = 2;
+    const flaky: PsRunner = async (pids) => {
+      if (failures-- > 0) throw new PsUnavailable("/bin/ps exited 124: ps did not finish within 5000 ms");
+      return pids.includes(process.pid) ? `${process.pid} Wed Sep 23 22:48:39 2026 claude\n` : "";
+    };
+    const found = await new HerdrRuntime(transport, { pollMs: 5, ps: flaky }).harnessProcess("w1:p2", (p) => p.argv0 === "claude", 1_000);
+    expect(found?.identity.pid).toBe(process.pid);
+    await expect(new HerdrRuntime(transport, { pollMs: 5, ps: () => Promise.reject(new PsUnavailable("/bin/ps exited 1: ps: boom")) }).harnessProcess("w1:p2", (p) => p.argv0 === "claude", 50)).rejects.toBeInstanceOf(PsUnavailable);
   });
 
   test("a missing pane reads as null, not an error", async () => {

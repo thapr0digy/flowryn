@@ -11,6 +11,7 @@ import type { SteerBus } from "../../src/lifecycle/steers.ts";
 import { herdrEpisode, noteHerdrDown } from "../../src/reconcile/herdr-health.ts";
 import { Reconciler } from "../../src/reconcile/reconciler.ts";
 import type { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
+import { PsUnavailable } from "../../src/runtime/proc.ts";
 
 const dirs: string[] = [];
 const dbs: Db[] = [];
@@ -98,6 +99,34 @@ describe("reconciler", () => {
     expect(outcome).toBe("unknown");
     expect(db.query("SELECT liveness FROM runs WHERE id = 'r1'").get()).toEqual({ liveness: "unknown" });
     expect(db.query("SELECT COUNT(*) AS n FROM divergences").get()).toEqual({ n: 0 });
+    expect(launches).toEqual([]);
+  });
+
+  test("a ps that cannot answer leaves a run unknown for the pass, never dead and resumed", async () => {
+    const db = deadRunDb();
+    const launches: string[] = [];
+    const runtime = {
+      processes: (paneId: string) => Promise.resolve({ paneId, shellPid: 1, foregroundGroup: 999999, processes: [{ pid: 999999, argv0: "claude", argv: ["claude"], name: "claude", cwd: "" }] }),
+      snapshotPanes: () => Promise.resolve([]),
+      agentStatus: () => Promise.resolve(null),
+    } as unknown as HerdrRuntime;
+    const reconciler = new Reconciler({
+      db,
+      runtime: () => runtime,
+      launch: (runId, mode) => launches.push(`${runId}:${mode}`),
+      isLaunching: () => false,
+      bus: { notify() {} } as unknown as SteerBus,
+      timing: () => DEFAULT_TIMING,
+      log: () => {},
+      now: Date.now,
+      ps: () => Promise.reject(new PsUnavailable("/bin/ps exited 124: ps did not finish within 5000 ms")),
+    });
+
+    const outcome = await reconciler.reconcileRun(getRun(db, "r1")!, "steady");
+    reconciler.stop();
+
+    expect(outcome).toBe("unknown");
+    expect(db.query("SELECT state, liveness, resume_count FROM runs WHERE id = 'r1'").get()).toEqual({ state: "running", liveness: "unknown", resume_count: 0 });
     expect(launches).toEqual([]);
   });
 
