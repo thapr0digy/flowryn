@@ -39,7 +39,7 @@ Every leader step also names you, with the same command for your terminal (`deci
 
 A review's own questions (`--questions-file`) are a fact of the gate row, not rows of their own: one wait, one answer place. Standalone decisions (`k<N>`) have no run and stay in "Needs you" only.
 
-### Data: migration 41 (`human-waits`)
+### Data: migration 42 (`human-waits`)
 
 - `explanations` is rebuilt (SQLite cannot widen a CHECK): `kind` adds `gate`, `decision` and `merge`, and a nullable `subject` names what a wait is about (`g12`, `q7`, `merge`). Ids and the AUTOINCREMENT sequence are kept, so a pruned row's id is never handed out again (events name rows as `x<N>`).
 - `explain` dedupes per run, kind and subject (`subject IS ?`, so the old kinds behave as before): two open questions on one run are two rows. `NewExplanation` gains `subject` and `since`.
@@ -57,4 +57,4 @@ A review's own questions (`--questions-file`) are a fact of the gate row, not ro
 
 ## Tests
 
-`test/unit/human-waits.test.ts` (each rule; one row across many passes; a changed page-failure wording is no new wait; two questions stay two rows and close separately; each close path; the merge steps superseding one another; held and live auto-merges; evidence for another head; the merge rules against `checkGate` on the same facts; fleet, capacity and the briefing; a run's end), `test/unit/db.test.ts` (migration 41 keeps ids and the sequence, adds `subject` and `next`, refuses an unknown kind), `test/integration/human-waits.test.ts` (the real daemon and CLI: a worker's question and a design review explained within moments of the verbs, with who acts and the command, and closed by `answer` and `gate changes`).
+`test/unit/human-waits.test.ts` (each rule; one row across many passes; a changed page-failure wording is no new wait; two questions stay two rows and close separately; each close path; the merge steps superseding one another; held and live auto-merges; evidence for another head; the merge rules against `checkGate` on the same facts; fleet, capacity and the briefing; a run's end), `test/unit/db.test.ts` (migration 42 keeps ids and the sequence, adds `subject` and `next`, refuses an unknown kind), `test/integration/human-waits.test.ts` (the real daemon and CLI: a worker's question and a design review explained within moments of the verbs, with who acts and the command, and closed by `answer` and `gate changes`).

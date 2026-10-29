@@ -159,6 +159,11 @@ describe("a task's scope is its project's", () => {
     expect(refScope(db, config, "p1")).toBe("personal");
     expect(refScope(db, config, "merge:api-w1")).toBe("work");
     expect(refScope(db, config, "nothing-here")).toBeUndefined();
+    // An event wait's task is its project's from the moment it is filed, before the backlog lists it.
+    db.query("INSERT INTO watches (id, task_id, waiter_task, project_id, kind, target, created_at) VALUES ('w1', 'after-pr-9-a1', 'api-w2', 'api', 'pr', '9', 1)").run();
+    expect(taskScope(db, config, "after-pr-9-a1")).toBe("work");
+    expect(refScope(db, config, "after-pr-9-a1")).toBe("work");
+    expect(refScope(db, config, "w1")).toBe("work");
     // An item about no task (a key like a contract record's) belongs to every scope.
     expect(taskScope(db, config, "harness:claude")).toBe("global");
   });

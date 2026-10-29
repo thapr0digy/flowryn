@@ -843,26 +843,41 @@ ALTER TABLE gates ADD COLUMN replaced_by TEXT;
 `;
 
 /**
- * Migration 41 (docs/notes/2026-10-29-why-waiting-covers-fy.md): wait explanations for reviews,
+ * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
+ * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
+ * it when the event happens (fired), or when nothing waits for it any more (closed).
+ */
+const WATCHES_SQL = /* sql */ `
+CREATE TABLE watches (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, waiter_task TEXT NOT NULL, project_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('pr','report')), target TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','fired','closed')),
+  detail TEXT, checked_at INTEGER, created_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX watches_state ON watches(state);
+CREATE INDEX watches_waiter ON watches(waiter_task);
+`;
+
+/**
+ * Migration 42 (docs/notes/2026-10-29-why-waiting-covers-fy.md): wait explanations for reviews,
  * decisions and merges. SQLite cannot widen a CHECK, so the table is rebuilt with its ids and its
  * AUTOINCREMENT sequence kept (events name rows as x<N>), and gains `subject`: what a wait is about
  * (a gate id, a decision id, `merge`), so a run's two open questions are two rows. A held
  * auto-merge keeps the command its item line names (`next`).
  */
 const HUMAN_WAITS_SQL = /* sql */ `
-CREATE TABLE explanations_v41 (
+CREATE TABLE explanations_v42 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL, task_id TEXT NOT NULL, stage TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('dialog','capacity','resume','gate','decision','merge')),
   rule TEXT NOT NULL, reason TEXT NOT NULL, facts TEXT NOT NULL, unblock TEXT NOT NULL,
   signature TEXT NOT NULL, item_id TEXT, operation TEXT, event_seq INTEGER NOT NULL,
   opened_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT, subject TEXT);
-INSERT INTO explanations_v41 (id, run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, operation, event_seq, opened_at, closed_at, closed_by)
+INSERT INTO explanations_v42 (id, run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, operation, event_seq, opened_at, closed_at, closed_by)
   SELECT id, run_id, task_id, stage, kind, rule, reason, facts, unblock, signature, item_id, operation, event_seq, opened_at, closed_at, closed_by FROM explanations;
-DELETE FROM sqlite_sequence WHERE name = 'explanations_v41';
-INSERT INTO sqlite_sequence (name, seq) SELECT 'explanations_v41', seq FROM sqlite_sequence WHERE name = 'explanations';
+DELETE FROM sqlite_sequence WHERE name = 'explanations_v42';
+INSERT INTO sqlite_sequence (name, seq) SELECT 'explanations_v42', seq FROM sqlite_sequence WHERE name = 'explanations';
 DROP TABLE explanations;
-ALTER TABLE explanations_v41 RENAME TO explanations;
+ALTER TABLE explanations_v42 RENAME TO explanations;
 CREATE INDEX explanations_open ON explanations(run_id) WHERE closed_at IS NULL;
 CREATE INDEX explanations_task ON explanations(task_id, id);
 ALTER TABLE auto_merges ADD COLUMN next TEXT;
@@ -909,7 +924,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
   { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
-  { version: 41, name: "human-waits", sql: HUMAN_WAITS_SQL },
+  { version: 41, name: "watches", sql: WATCHES_SQL },
+  { version: 42, name: "human-waits", sql: HUMAN_WAITS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
