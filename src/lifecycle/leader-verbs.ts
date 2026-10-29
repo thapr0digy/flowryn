@@ -24,6 +24,7 @@ import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
 import { dropRecord } from "./drop.ts";
+import { watchById, watchLabel, watchOfTask, type WatchRow } from "./watches.ts";
 import { planView } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
@@ -491,6 +492,24 @@ function filedLine(ctx: ReadCtx, q: QueuedTask): string {
 
 /** `show` for a Queued task no run has started: what it is, what it waits for, and what starts it. */
 /** A task `flowryn drop` removed: gone from the backlog, so its drop record says what it was and why. */
+/** A `dispatch --after` watch: what it waits for, for which task, and where it is. */
+function watchView(w: WatchRow, now: number): { data: Record<string, unknown>; hints: string[] } {
+  const ended = w.ended_at === null ? "" : ` ${new Date(w.ended_at).toISOString()}`;
+  return {
+    data: {
+      watch: w.id,
+      task: w.task_id,
+      waits_for: watchLabel(w),
+      waiter: w.waiter_task || "-",
+      state: `${w.state}${ended}`,
+      detail: w.detail ?? "-",
+      opened: `${age(now, w.created_at)} ago`,
+      checked: w.checked_at === null ? "-" : `${age(now, w.checked_at)} ago`,
+    },
+    hints: w.waiter_task ? [`flowryn show ${w.waiter_task}`] : ["flowryn fleet"],
+  };
+}
+
 function droppedView(ctx: ReadCtx, d: NonNullable<ReturnType<typeof dropRecord>>, text: ShowText): { data: Record<string, unknown>; hints: string[] } {
   const runs = (ctx.db.query("SELECT id, state FROM runs WHERE task_id = ?1 ORDER BY started_at").all(d.task_id) as { id: string; state: string }[]).map((r) => `${r.id} ${r.state}`);
   const unblocked = JSON.parse(d.unblocked) as string[];
@@ -531,7 +550,7 @@ function queuedView(ctx: ReadCtx, q: QueuedTask, text: ShowText): { data: Record
       priority: q.priority ?? "-",
       auto: q.auto,
       blocked_by: q.blockedBy,
-      waits: q.waits,
+      waits: q.waits.map((id, i) => (q.waitLabels[i] === id ? id : `${q.waitLabels[i]} (${id})`)),
       hold: text.line(hold, 120),
       ...(q.plan ? { plan: `${q.plan.id} phase ${q.plan.phase} of ${q.plan.of}: ${text.line(q.plan.title, 80)}` } : {}),
       filed: filedLine(ctx, q),
@@ -774,6 +793,8 @@ const show: VerbSpec = {
         const shown = lensFor(ctx.db, ctx.config, ctx.caller.scope).redact({ ...item, id: target });
         return { data: { item: target, lane: shown.lane, state: shown.state, line: text.stored(shown.line, shown.full_line, Number.POSITIVE_INFINITY), ...text.pointer(asked) } };
       }
+      const watch = /^w\d+$/.test(target) ? watchById(ctx.db, target) : watchOfTask(ctx.db, target);
+      if (watch) return watchView(watch, ctx.now);
       const queued = queuedTask(ctx.db, target);
       if (queued) return queuedView(ctx, queued, text);
       const phase = phaseOfTask(ctx.db, target);

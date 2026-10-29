@@ -842,6 +842,21 @@ ALTER TABLE gates ADD COLUMN revive_requested_at INTEGER;
 ALTER TABLE gates ADD COLUMN replaced_by TEXT;
 `;
 
+/**
+ * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
+ * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
+ * it when the event happens (fired), or when nothing waits for it any more (closed).
+ */
+const WATCHES_SQL = /* sql */ `
+CREATE TABLE watches (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, waiter_task TEXT NOT NULL, project_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('pr','report')), target TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','fired','closed')),
+  detail TEXT, checked_at INTEGER, created_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX watches_state ON watches(state);
+CREATE INDEX watches_waiter ON watches(waiter_task);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -883,6 +898,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
   { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
+  { version: 41, name: "watches", sql: WATCHES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

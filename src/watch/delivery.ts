@@ -3,7 +3,8 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
 import { ForgeError, type Forge, type PullRequest } from "../forge/types.ts";
-import { deliveredOf, type Delivered } from "../lifecycle/delivery.ts";
+import { deliveredOf, projectRepo, type Delivered } from "../lifecycle/delivery.ts";
+import { applyVerdict, backlogTasks, closeWatch, openWatches, orphanReason, ownPrVerdict, pendingTaskIds, prUrlOf, prVerdict, reportVerdict, watchOfTask, type WatchVerdict } from "../lifecycle/watches.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
 import { getProject } from "../lifecycle/projects.ts";
@@ -171,6 +172,7 @@ export class DeliveryWatcher {
       await this.watchNoMistakes();
       this.landDeliveredScouts();
       this.resumeCleanups();
+      await this.settleWatches();
     } catch (error) {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
@@ -324,6 +326,57 @@ export class DeliveryWatcher {
       return run ? noteMergedAfterEnd(db, run, delivered, { mergeSha, source }, now()) : false;
     });
     if (kept) this.deps.log(`delivery watcher: ${delivered.ref} merged at ${mergeSha.slice(0, 8)} after its run ended; a divergence asks you`);
+  }
+
+  /**
+   * The event waits of `dispatch --after` (src/lifecycle/watches.ts): close a
+   * watch nothing waits for, fire one whose event happened (a scout's report,
+   * a PR Flowryn delivered that landed, else GitHub's word on the PR), and
+   * kick the scheduler when one fired. GitHub is skipped while it is quiet
+   * after a failure; Flowryn's own records still decide.
+   */
+  private async settleWatches(): Promise<void> {
+    const { db, now } = this.deps;
+    let fired = false;
+    for (const watch of openWatches(db)) {
+      if (this.stopped) return;
+      const pending = pendingTaskIds(db);
+      const orphan = orphanReason(db, watch, backlogTasks(db), pending);
+      if (orphan) {
+        tx(db, () => closeWatch(db, watch, orphan.why, orphan.removeTask, now()));
+        continue;
+      }
+      // Fire only once the backlog holds the waiting task and its edge, so the scheduler kicked below can start it at once.
+      if (pending.has(watch.task_id) || pending.has(watch.waiter_task)) continue;
+      let verdict: WatchVerdict | null = null;
+      if (watch.kind === "report") verdict = reportVerdict(db, watch.target);
+      else {
+        const project = getProject(db, watch.project_id);
+        const repo = project ? projectRepo(project, this.deps.webUrl()) : null;
+        if (!repo) verdict = { stuck: project ? `project ${watch.project_id} has no GitHub remote` : `project ${watch.project_id} is gone` };
+        else {
+          const ref = { ...repo, number: Number(watch.target) };
+          verdict = ownPrVerdict(db, prUrlOf(repo, ref.number, this.deps.webUrl()));
+          if (!verdict) {
+            if (now() < this.forgeQuietUntil) continue;
+            try {
+              verdict = prVerdict((await this.deps.forge().pull(ref)).state);
+              tx(db, () => noteForgeUp(db, "github", now()));
+            } catch (error) {
+              if (error instanceof ForgeError && error.kind === "not_found") verdict = { stuck: "GitHub does not find it" };
+              else {
+                this.forgeFailed(error);
+                continue;
+              }
+            }
+          }
+        }
+      }
+      const current = verdict;
+      // The watch may have closed or fired while GitHub was read.
+      if (tx(db, () => (watchOfTask(db, watch.task_id)?.state === "open" ? applyVerdict(db, watch, current, now()) : false))) fired = true;
+    }
+    if (fired) this.deps.kickScheduler();
   }
 
   /** GitHub failed: back off (to a rate limit's own end when it names one), never retrying in a tight loop. */
