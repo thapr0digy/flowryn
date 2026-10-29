@@ -23,6 +23,7 @@ import { DIAG_VERBS } from "../lifecycle/diag.ts";
 import { STATS_VERBS } from "../attention/stats.ts";
 import { ACCOUNT_VERBS } from "../lifecycle/account-verbs.ts";
 import { HOME_VERBS } from "../lifecycle/home-adopt.ts";
+import { LEARNING_VERBS } from "../leader/learning-verbs.ts";
 import type { VerbSpec } from "./verbs.ts";
 
 /** Every verb the daemon serves over the socket. The CLI adds its local verbs on top. */
@@ -52,6 +53,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...STATS_VERBS,
   ...ACCOUNT_VERBS,
   ...HOME_VERBS,
+  ...LEARNING_VERBS,
   ...systemVerbs(),
 ];
 

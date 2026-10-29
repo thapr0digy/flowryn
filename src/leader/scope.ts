@@ -7,6 +7,7 @@ import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { LEGACY_SCOPE, UNCONFIRMED_SCOPE } from "../lease/lease.ts";
+import { adoptLegacyLessons } from "./learnings.ts";
 import type { HarnessId } from "../harness/types.ts";
 
 /**
@@ -174,6 +175,10 @@ export function refScope(db: Db, config: FlowrynConfig, ref: string): ThingScope
   if (/^w\d+$/.test(ref)) {
     const w = db.query("SELECT task_id FROM watches WHERE id = ?1").get(ref) as { task_id: string } | null;
     if (w) return ofTask(w.task_id);
+  }
+  if (/^l\d+$/.test(ref)) {
+    const l = db.query("SELECT scope FROM learnings WHERE id = ?1").get(Number(ref.slice(1))) as { scope: string } | null;
+    if (l) return l.scope;
   }
   if (ref.startsWith("merge:")) return ofTask(ref.slice("merge:".length));
   const run = db.query("SELECT task_id FROM runs WHERE id = ?1").get(ref) as { task_id: string } | null;
@@ -362,6 +367,7 @@ export function adoptLegacyScope(db: Db, config: FlowrynConfig, now: number): nu
     else db.query("DELETE FROM leader_lease WHERE scope = ?1").run(LEGACY_SCOPE);
   }
   moved += db.query("UPDATE leader_sessions SET scope = ?2 WHERE scope = ?1").run(LEGACY_SCOPE, target).changes;
+  moved += adoptLegacyLessons(db, LEGACY_SCOPE, target);
   if (moved > 0) appendEvent(db, { source: "daemon", kind: "leader.scope_adopted", payload: { from: LEGACY_SCOPE, to: target, rows: moved }, ts: now });
   return moved;
 }

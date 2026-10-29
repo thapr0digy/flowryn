@@ -46,6 +46,7 @@ import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event
 import { sanitizeLine } from "../util/sanitize.ts";
 import { readShellWords } from "../util/shell-word.ts";
 import { rewakesLastHour } from "./wake-state.ts";
+import { learningsBlock } from "./learnings.ts";
 
 /**
  * The leader side of the hook verbs (design sections 5, 9 and 10). The
@@ -361,6 +362,9 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
     listed = briefing.listed;
     context = briefing.text;
   }
+  // What earlier leader sessions of this scope learned (src/leader/learnings.ts), after the briefing or banner.
+  const lessons = loginProblem || s.scope === UNCONFIRMED_SCOPE ? null : learningsBlock(ctx.db, sessionLens(ctx.db, ctx.config(), s.session_id), now);
+  if (lessons) context = `${context}\n\n${lessons}`;
   const epoch = s.scope === UNCONFIRMED_SCOPE ? 0 : getLease(ctx.db, s.scope).epoch;
   appendEvent(ctx.db, { source: "hook", kind: "leader.session_started", payload: { session: s.session_id, source, holder, epoch, listed, claimed: claimed !== null, scope: s.scope }, ts: now });
   const data: Record<string, unknown> = { session: s.session_id, holder, epoch, context };
