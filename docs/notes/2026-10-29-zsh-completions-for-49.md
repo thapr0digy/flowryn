@@ -33,7 +33,7 @@ A saved file is what that build printed: after upgrading flowryn, print it again
 
 `FlagSpec` and `PositionalSpec` take two optional fields (`CompletionHint` in `src/api/verbs.ts`):
 
-- `values`: the fixed set the value comes from. It points at the list the handler already checks against (`TASK_KINDS`, `HARNESS_IDS`, `DELIVERY_MODES`, `AUTONOMY`, `EFFORT_CHOICES`, `RESOLUTIONS`, `ON_OFF`, `DUE_FILTERS`, `REPORT_STATUSES`). It is a hint only: `validateArgs` does not enforce it, and the handler's own check and message stay as they were.
+- `values`: the fixed set the value comes from. It points at the list the handler already checks against (`TASK_KINDS`, `HARNESS_IDS`, `HARNESSES`, `DELIVERY_MODES`, `AUTONOMY`, `EFFORT_CHOICES`, `RESOLUTIONS`, `ON_OFF`, `DUE_FILTERS`, `REPORT_STATUSES`). It is a hint only: `validateArgs` does not enforce it, and the handler's own check and message stay as they were.
 - `complete`: the id source looked up on Tab (`COMPLETION_SOURCES`).
 
 A new verb or flag completes the moment it is in the registry. A new fixed set or id argument completes once its spec carries the hint.
