@@ -28,6 +28,15 @@ export interface LeaseRow {
 
 export class OverCapacity extends Error {}
 
+/** A grant refused by the project's own worker limit, `[projects.<id>] max_workers`, not by a shared pool. */
+export class ProjectAtLimit extends OverCapacity {}
+
+/** A project's worker limit as a grant applies it. */
+export interface ProjectLimit {
+  project: string;
+  max: number;
+}
+
 /** Live leases per pool: runs' and jobs' alike, since both count against the same caps. */
 export function liveCounts(db: Db): Record<string, number> {
   const rows = db
@@ -49,6 +58,22 @@ export function holdsLease(db: Db, runId: string, pool: string): boolean {
   return db.query("SELECT 1 FROM pool_leases WHERE run_id = ?1 AND pool = ?2 AND released_at IS NULL").get(runId, pool) !== null;
 }
 
+/** The project's runs that hold a live worker slot, oldest grant first: scouts and ships alike; a job (a verify) is never a worker. */
+export function projectWorkerHolders(db: Db, projectId: string): string[] {
+  const rows = db
+    .query(
+      `SELECT r.task_id FROM pool_leases l JOIN runs r ON r.id = l.run_id JOIN task_policy tp ON tp.task_id = r.task_id
+       WHERE l.pool = ?1 AND l.released_at IS NULL AND tp.project_id = ?2 ORDER BY l.granted_at, l.id`,
+    )
+    .all(WORKER_POOL, projectId) as { task_id: string }[];
+  return rows.map((r) => r.task_id);
+}
+
+/** Whether a grant that takes a worker slot for one of the project's runs is over its limit now. */
+export function projectAtLimit(db: Db, limit: ProjectLimit | null, wanted: readonly string[]): boolean {
+  return limit !== null && wanted.includes(WORKER_POOL) && projectWorkerHolders(db, limit.project).length >= limit.max;
+}
+
 /** The pools among `wanted` that cannot take one more lease now. */
 export function fullPools(db: Db, caps: Record<string, number>, wanted: readonly string[]): string[] {
   const counts = liveCounts(db);
@@ -57,13 +82,15 @@ export function fullPools(db: Db, caps: Record<string, number>, wanted: readonly
 
 /**
  * Take one slot of each pool for the run's stage. Call inside a transaction;
- * throws OverCapacity (and takes nothing) when any pool is full.
+ * throws OverCapacity (and takes nothing) when any pool is full, and
+ * ProjectAtLimit when a worker slot would put the run's project over its limit.
  */
-export function grantLeases(db: Db, runId: string, taskId: string, stage: string, pools: readonly string[], caps: Record<string, number>, now: number): void {
+export function grantLeases(db: Db, runId: string, taskId: string, stage: string, pools: readonly string[], caps: Record<string, number>, now: number, limit: ProjectLimit | null = null): void {
   const wanted = pools.filter((pool) => !holdsLease(db, runId, pool));
   if (wanted.length === 0) return;
   const full = fullPools(db, caps, wanted);
   if (full.length > 0) throw new OverCapacity(`no free slot in ${full.join(", ")}`);
+  if (projectAtLimit(db, limit, wanted)) throw new ProjectAtLimit(`project ${limit!.project} is at its worker limit (${limit!.max})`);
   for (const pool of wanted) {
     db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES (?1, ?2, ?3, ?4)").run(pool, runId, stage, now);
   }
