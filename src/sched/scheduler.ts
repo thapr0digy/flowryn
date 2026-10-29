@@ -18,10 +18,10 @@ import type { LaunchMode } from "../lifecycle/launcher.ts";
 import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
-import { activateStage, neededPools, positionOf, type StagePos } from "../lifecycle/stages.ts";
+import { activateStage, neededPools, positionOf, projectLimit, type StagePos } from "../lifecycle/stages.ts";
 import { explainHumanWaits } from "../attention/human-waits.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
-import { fullPools, OverCapacity } from "./pools.ts";
+import { fullPools, OverCapacity, projectAtLimit, ProjectAtLimit } from "./pools.ts";
 import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
 import { claimProbe, clearUsageLimit, pausedAccounts, usageGate, usagePauses } from "./usage.ts";
 import { moveLegacyCapacity } from "./legacy.ts";
@@ -29,7 +29,7 @@ import { forgetSignedOut, noteSignedIn, noteSignedOut, signedOutAccounts } from 
 import { loginCommand } from "../harness/sign-in.ts";
 import { closeExplanations, explain, sweepExplanations } from "../attention/explanations.ts";
 import { ensureLaunchOperation, getOperation, heldByEscalation, openOperation } from "../lifecycle/operations.ts";
-import { harnessRefusalOf, hostRefusal, operationModeRefusal, poolsRefusal, quotaRefusal, signedOutRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
+import { harnessRefusalOf, hostRefusal, operationModeRefusal, poolsRefusal, projectLimitRefusal, quotaRefusal, signedOutRefusal, usageRefusal, type Refusal } from "./wait-reasons.ts";
 
 /**
  * The scheduler (design sections 4 and 11): it grants stage starts against the
@@ -420,12 +420,14 @@ export class Scheduler {
   /**
    * One grant: the account's sign-in, its usage pause (or its one probe) and
    * quota floor, with overflow for a held fresh launch, the host check (once
-   * per pass) and the pools, then the stage start. Whether it started.
+   * per pass), the pools and the project's worker limit, then the stage
+   * start. Whether it started.
    */
   private async tryGrant(c: Candidate, config: FlowrynConfig, pass: GrantPass, steer: boolean): Promise<boolean> {
     const { db, now } = this.deps;
     const capacity = capacityConfig(config);
     const firstLaunch = c.run.pending_launch === "fresh";
+    const limit = projectLimit(config, c.run.project_id);
     let account = capacityAccount(config, c.run.account, c.run.harness);
     // An account config no longer has: the launch refuses it with why, so nothing is held here.
     let usage: "open" | "probe" = "open";
@@ -454,6 +456,8 @@ export class Scheduler {
       if (!pass.host.ok) return this.refuse(c, hostRefusal(hostState(db), capacity.host, pass.host.reason, now()));
       const full = fullPools(db, capacity.pools, c.needs);
       if (full.length > 0) return this.refuse(c, poolsRefusal(db, capacity.pools, full, now()));
+      // A worker slot also counts against the project's own limit; a live worker's next stage keeps its slot, so it is never held here.
+      if (limit && projectAtLimit(db, limit, c.needs)) return this.refuse(c, projectLimitRefusal(db, limit, now()));
     }
     let activated;
     try {
@@ -479,6 +483,7 @@ export class Scheduler {
         return started ? { ...started, operation } : null;
       });
     } catch (error) {
+      if (error instanceof ProjectAtLimit && limit) return this.refuse(c, projectLimitRefusal(db, limit, now()));
       if (error instanceof OverCapacity) return this.refuse(c, poolsRefusal(db, capacity.pools, fullPools(db, capacity.pools, c.needs), now()));
       throw error;
     }
