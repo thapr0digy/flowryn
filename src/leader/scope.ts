@@ -110,7 +110,7 @@ function isKey(taskId: string): boolean {
 
 /**
  * A task's scope: the one recorded when a scoped leader created it without a project, else its
- * project's (Flowryn's policy row, the backlog's repo, its plan's project), else the default scope
+ * project's (Flowryn's policy row or watch, the backlog's repo, its plan's project), else the default scope
  * (your terminal's to-dos, one from before scopes, a hand-added task).
  */
 export function taskScope(db: Db, config: FlowrynConfig, taskId: string): ThingScope {
@@ -122,10 +122,12 @@ export function taskScope(db: Db, config: FlowrynConfig, taskId: string): ThingS
   return defaultScope(config);
 }
 
-/** The project a task belongs to, by what Flowryn recorded, then the backlog and to-do snapshots, then its plan. */
+/** The project a task belongs to, by what Flowryn recorded (a policy row, a watch), then the backlog and to-do snapshots, then its plan. */
 export function taskProject(db: Db, taskId: string): string | null {
   const policy = db.query("SELECT project_id FROM task_policy WHERE task_id = ?1").get(taskId) as { project_id: string } | null;
   if (policy) return policy.project_id;
+  const watch = db.query("SELECT project_id FROM watches WHERE task_id = ?1").get(taskId) as { project_id: string } | null;
+  if (watch) return watch.project_id;
   for (const file of ["backlog", "todos"] as const) {
     const task = readSnapshot(db, file)?.tasks.find((t) => t.id === taskId);
     if (task?.repo) return task.repo;
@@ -169,6 +171,10 @@ export function refScope(db: Db, config: FlowrynConfig, ref: string): ThingScope
     const v = db.query(`SELECT project_id, task_id FROM ${ref.startsWith("vq") ? "verify_queue" : "verifications"} WHERE id = ?1`).get(ref) as { project_id: string; task_id: string | null } | null;
     if (v) return v.task_id ? ofTask(v.task_id) : projectScopeById(db, config, v.project_id);
   }
+  if (/^w\d+$/.test(ref)) {
+    const w = db.query("SELECT task_id FROM watches WHERE id = ?1").get(ref) as { task_id: string } | null;
+    if (w) return ofTask(w.task_id);
+  }
   if (ref.startsWith("merge:")) return ofTask(ref.slice("merge:".length));
   const run = db.query("SELECT task_id FROM runs WHERE id = ?1").get(ref) as { task_id: string } | null;
   if (run) return ofTask(run.task_id);
@@ -177,7 +183,7 @@ export function refScope(db: Db, config: FlowrynConfig, ref: string): ThingScope
 }
 
 function taskKnown(db: Db, taskId: string): boolean {
-  if (db.query("SELECT 1 FROM task_policy WHERE task_id = ?1 UNION SELECT 1 FROM task_scopes WHERE task_id = ?1 UNION SELECT 1 FROM plan_phases WHERE task_id = ?1 UNION SELECT 1 FROM drops WHERE task_id = ?1").get(taskId)) return true;
+  if (db.query("SELECT 1 FROM task_policy WHERE task_id = ?1 UNION SELECT 1 FROM task_scopes WHERE task_id = ?1 UNION SELECT 1 FROM plan_phases WHERE task_id = ?1 UNION SELECT 1 FROM drops WHERE task_id = ?1 UNION SELECT 1 FROM watches WHERE task_id = ?1").get(taskId)) return true;
   return (["backlog", "todos"] as const).some((file) => readSnapshot(db, file)?.tasks.some((t) => t.id === taskId) ?? false);
 }
 

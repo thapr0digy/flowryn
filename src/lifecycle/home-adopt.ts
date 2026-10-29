@@ -308,9 +308,9 @@ function insertAdoptedProject(db: Db, p: ProjectRow & { import_source?: string |
 
 function insertPolicy(db: Db, row: Row): void {
   db.query(
-    `INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, auto, reason, created_at, import_source, mode_reason)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
-  ).run(row.task_id!, row.project_id!, row.kind!, row.delivery_mode!, row.yolo!, row.sensitive ?? 0, row.workflow!, row.auto ?? 0, row.reason ?? null, row.created_at!, row.import_source ?? null, row.mode_reason ?? null);
+    `INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, auto, reason, created_at, import_source, mode_reason, base_branch)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+  ).run(row.task_id!, row.project_id!, row.kind!, row.delivery_mode!, row.yolo!, row.sensitive ?? 0, row.workflow!, row.auto ?? 0, row.reason ?? null, row.created_at!, row.import_source ?? null, row.mode_reason ?? null, row.base_branch ?? null);
 }
 
 /**

@@ -42,7 +42,7 @@ const project: ProjectRow = { id: "api", repo_url: "", path: join(WORK, "api"), 
 
 function oldHome(backlog: BacklogTask[], phases: PhaseRow[] = []): OldHome {
   const plans: PlanRow[] = phases.length > 0 ? [{ id: "p1", project_id: "api", title: "plan", state: "approved", source_task: null, gate_id: null, filed_by: "worker", created_at: 1, approved_at: 1, approved_via: "tty" }] : [];
-  const policies = backlog.map((t) => ({ task_id: t.id, project_id: "api", kind: "ship", delivery_mode: "local-only", yolo: 0, sensitive: 0, workflow: "fix", auto: 1, reason: null, created_at: 1, import_source: null, mode_reason: null }));
+  const policies = backlog.map((t) => ({ task_id: t.id, project_id: "api", kind: "ship", delivery_mode: "local-only", yolo: 0, sensitive: 0, workflow: "fix", auto: 1, reason: null, created_at: 1, import_source: null, mode_reason: null, base_branch: null }));
   return {
     home: join(root, "old"),
     config: parseConfig(`[workers.claude]\nconfig_dir = ${JSON.stringify(CLAUDE_WORK)}\n`, join(root, "old")),
@@ -129,7 +129,7 @@ describe("home adopt assumptions", () => {
   test("an adopted task's policy row keeps every column", () => {
     const { db, config } = mainDb();
     const old = oldHome([task("policy-x1", "queued")]);
-    old.policies = [{ ...old.policies[0]!, sensitive: 1, auto: 0, reason: "why", import_source: "legacy:7", mode_reason: "mode" }];
+    old.policies = [{ ...old.policies[0]!, sensitive: 1, auto: 0, reason: "why", import_source: "legacy:7", mode_reason: "mode", base_branch: "release/2" }];
     tx(db, () => adoptHome(db, config, old, undefined, 1));
     expect(db.query("SELECT * FROM task_policy").all()).toEqual(old.policies);
   });

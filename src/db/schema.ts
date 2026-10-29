@@ -843,7 +843,22 @@ ALTER TABLE gates ADD COLUMN replaced_by TEXT;
 `;
 
 /**
- * Migration 41 (docs/notes/2026-10-27-stack-a-plan-4y.md): a task's base branch, the branch it
+ * Event waits (docs/notes/2026-10-25-when-x-then-yv.md): `dispatch --after pr:<n>|report:<task>`.
+ * Each row backs a held backlog task that the queued task is blocked by; the daemon completes
+ * it when the event happens (fired), or when nothing waits for it any more (closed).
+ */
+const WATCHES_SQL = /* sql */ `
+CREATE TABLE watches (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE, waiter_task TEXT NOT NULL, project_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('pr','report')), target TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','fired','closed')),
+  detail TEXT, checked_at INTEGER, created_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX watches_state ON watches(state);
+CREATE INDEX watches_waiter ON watches(waiter_task);
+`;
+
+/**
+ * Migration 42 (docs/notes/2026-10-27-stack-a-plan-4y.md): a task's base branch, the branch it
  * starts from and its PR targets (`dispatch --base`); null is the project's default branch. The
  * task keeps what was asked; the run keeps the branch its PR targets now.
  */
@@ -893,7 +908,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 38, name: "model-choice", sql: MODEL_CHOICE_SQL },
   { version: 39, name: "review-chat", sql: REVIEW_CHAT_SQL },
   { version: 40, name: "review-revival", sql: REVIEW_REVIVAL_SQL },
-  { version: 41, name: "base-branch", sql: BASE_BRANCH_SQL },
+  { version: 41, name: "watches", sql: WATCHES_SQL },
+  { version: 42, name: "base-branch", sql: BASE_BRANCH_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

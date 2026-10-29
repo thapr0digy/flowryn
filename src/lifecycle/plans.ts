@@ -151,9 +151,9 @@ export function nextPlanId(db: Db): string {
 export function takenIds(db: Db): (id: string) => boolean {
   const ids = new Set<string>();
   // drops is included so a dropped task's id, gone from the backlog, is never re-minted.
-  // decisions is included so a pruned Done decision task's id is never re-minted: a standalone
-  // decision's task has no task_policy row, and a Done task eventually drops out of the backlog.
-  for (const row of db.query("SELECT task_id FROM task_policy UNION SELECT task_id FROM plan_phases UNION SELECT task_id FROM decisions UNION SELECT task_id FROM drops").all() as { task_id: string }[]) ids.add(row.task_id);
+  // decisions and watches are included so a pruned Done decision or watch task's id is never
+  // re-minted: neither task has a task_policy row, and a Done task eventually drops out of the backlog.
+  for (const row of db.query("SELECT task_id FROM task_policy UNION SELECT task_id FROM plan_phases UNION SELECT task_id FROM decisions UNION SELECT task_id FROM drops UNION SELECT task_id FROM watches").all() as { task_id: string }[]) ids.add(row.task_id);
   for (const task of readSnapshot(db, "backlog")?.tasks ?? []) ids.add(task.id);
   for (const row of db.query("SELECT task_id FROM intents WHERE state = 'pending' AND task_id IS NOT NULL").all() as { task_id: string }[]) ids.add(row.task_id);
   return (id) => ids.has(id);
@@ -343,9 +343,12 @@ export function getPlan(db: Db, id: string): PlanRow | null {
  * latest run counts: a scout promoted to a ship keeps its cleaned scout run,
  * whose report landed, but the promotion starts the ship run in the same
  * transaction, so the task has landed only once that ship run lands. A task
- * Flowryn never ran has landed when the backlog shows it done.
+ * Flowryn never ran has landed when the backlog shows it done; a watch
+ * (src/lifecycle/watches.ts) as soon as it fires, before its done reaches
+ * the backlog.
  */
 export function hasLanded(db: Db, taskId: string, backlog: BacklogTask[] | null): boolean {
+  if (db.query("SELECT 1 FROM watches WHERE task_id = ?1 AND state = 'fired'").get(taskId)) return true;
   const latest = db.query("SELECT state FROM runs WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as { state: string } | null;
   if (latest) return latest.state === "cleaned";
   if (db.query("SELECT 1 FROM task_policy WHERE task_id = ?1").get(taskId)) return false;
