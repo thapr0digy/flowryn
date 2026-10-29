@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { sep } from "node:path";
-import { readIdentity, type PsRunner } from "../runtime/proc.ts";
+import { PsUnavailable, readIdentity, type PsRunner } from "../runtime/proc.ts";
 import { runCommand } from "./command.ts";
 
 /**
@@ -74,8 +74,18 @@ function send(kill: ReapOptions["kill"], pid: number, signal: NodeJS.Signals): v
   }
 }
 
+/** Reap leaked processes under the roots. A ps that cannot answer leaves their identity unverified: nothing more is signalled. */
 export async function reapUnder(roots: string[], opts: ReapOptions): Promise<ReapResult> {
   const reaped: number[] = [];
+  try {
+    return await reapPasses(roots, opts, reaped);
+  } catch (error) {
+    if (!(error instanceof PsUnavailable)) throw error;
+    return { ok: false, reason: "identity_unverified", detail: `cannot verify leaked processes' identity under ${roots.join(", ")} (${error.message})`, reaped };
+  }
+}
+
+async function reapPasses(roots: string[], opts: ReapOptions, reaped: number[]): Promise<ReapResult> {
   if (!opts.lsof) {
     opts.log("lsof is missing: cannot look for leaked processes; the worker's own process group was already stopped");
     return { ok: true, reaped, skipped: "lsof missing" };

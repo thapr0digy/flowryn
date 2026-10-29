@@ -8,7 +8,7 @@ import { interruptRun, type ControlDeps } from "../../src/lifecycle/control.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { getRun } from "../../src/lifecycle/runs.ts";
 import { createSteer, dueSteers, getMessage, markRung, SteerBus } from "../../src/lifecycle/steers.ts";
-import { parsePsLine } from "../../src/runtime/proc.ts";
+import { parsePsLine, PsUnavailable } from "../../src/runtime/proc.ts";
 import type { HerdrRuntime } from "../../src/runtime/herdr/runtime.ts";
 
 /**
@@ -77,6 +77,15 @@ function refusals(): string[] {
 }
 
 describe("the Claude interrupt key never answers a dialog", () => {
+  test("a ps that cannot answer is not read as the worker gone: refused as unknown, no key", async () => {
+    const failing = { ...deps(), ps: () => Promise.reject(new PsUnavailable("/bin/ps exited 124: ps did not finish within 5000 ms")) };
+    const result = await interruptRun(failing, "r1", 1_000);
+    expect(result).toMatchObject({ ok: false, evidence: "process" });
+    expect(result.detail).toContain("unknown");
+    expect(result.detail).not.toContain("not running");
+    expect(keys).toEqual([]);
+  });
+
   test("Herdr reading blocked refuses the interrupt and sends no key", async () => {
     status = "blocked";
     const result = await interruptRun(deps(), "r1", 1_000);

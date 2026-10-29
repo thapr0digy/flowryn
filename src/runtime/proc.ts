@@ -1,3 +1,5 @@
+import { runBounded, type BoundedResult } from "./bounded.ts";
+
 /**
  * Process identity from the process table (design sections 5 and 6, M0 h02):
  * Herdr's pane.process_info gives the pid and executable but no start time,
@@ -40,37 +42,59 @@ export function parsePsLine(line: string): ProcIdentity | null {
   return { pid: Number(match[1]), start, exe };
 }
 
+/**
+ * Reads `ps -o pid=,lstart=,comm=` rows for the given pids: the rows of those
+ * alive, or "" when none is. Throws PsUnavailable when ps cannot answer, so a
+ * failed or hung ps never reads as "every process gone".
+ */
 export type PsRunner = (pids: number[]) => Promise<string>;
 
-/** A process table read through the given ps. LC_ALL=C keeps lstart parseable. */
-export function psRunnerAt(ps: string): PsRunner {
+/** ps could not answer: whether the processes asked about are alive is unknown, never "gone". */
+export class PsUnavailable extends Error {
+  override name = "PsUnavailable";
+}
+
+/** A local ps answers in milliseconds; this is for one that hangs. */
+export const PS_TIMEOUT_MS = 5_000;
+
+/**
+ * What a bounded ps call says: its output when it exited 0, "" when it exited
+ * 1 having printed nothing (macOS and procps both mean "none of these pids"),
+ * and PsUnavailable otherwise (cannot spawn, timed out, overflowed, an error).
+ */
+export function psAnswer(ps: string, result: BoundedResult): string {
+  if (result.code === 0) return result.stdout;
+  if (result.code === 1 && result.stdout.trim() === "" && result.stderr.trim() === "") return "";
+  throw new PsUnavailable(`${ps} exited ${result.code}: ${result.stderr.trim() || "no stderr"}`);
+}
+
+/** A process table read through the given ps, bounded by `timeoutMs`. LC_ALL=C keeps lstart parseable. */
+export function psRunnerAt(ps: string, timeoutMs = PS_TIMEOUT_MS): PsRunner {
   return async (pids) => {
-    const proc = Bun.spawn([ps, "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-      env: { ...process.env, LC_ALL: "C" },
-    });
-    const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    return out;
+    const result = await runBounded([ps, "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], { label: "ps", timeoutMs, env: { ...process.env, LC_ALL: "C" } });
+    return psAnswer(ps, result);
   };
 }
 
 /** The real process table. */
 export const psRunner: PsRunner = psRunnerAt("/bin/ps");
 
-/** Identities of the given pids that are alive now (missing pids are simply absent). */
+/** Identities of the given pids that are alive now (missing pids are simply absent). Throws PsUnavailable when ps cannot say. */
 export async function readIdentities(pids: number[], ps: PsRunner = psRunner): Promise<Map<number, ProcIdentity>> {
   const found = new Map<number, ProcIdentity>();
   const wanted = pids.filter((p) => Number.isInteger(p) && p > 0);
   if (wanted.length === 0) return found;
   for (const line of (await ps(wanted)).split("\n")) {
+    if (line.trim() === "") continue;
     const identity = parsePsLine(line);
-    if (identity) found.set(identity.pid, identity);
+    // A row that does not read could be any of the pids asked about: none of them may read as gone.
+    if (!identity) throw new PsUnavailable(`ps printed a row that does not parse: ${JSON.stringify(line)}`);
+    found.set(identity.pid, identity);
   }
   return found;
 }
 
+/** The pid's identity, or null when it is not running. Throws PsUnavailable when ps cannot say. */
 export async function readIdentity(pid: number, ps: PsRunner = psRunner): Promise<ProcIdentity | null> {
   return (await readIdentities([pid], ps)).get(pid) ?? null;
 }
@@ -80,16 +104,33 @@ export function sameProcess(a: ProcIdentity, b: ProcIdentity): boolean {
   return a.pid === b.pid && Math.abs(a.start - b.start) < 1_000 && a.exe === b.exe;
 }
 
-/** Is the recorded process still the one running under its pid? `execs`: it may have exec'd since, so its executable is not compared. */
+/**
+ * Is the recorded process still the one running under its pid? `execs`: it may
+ * have exec'd since, so its executable is not compared. Throws PsUnavailable
+ * when ps cannot say.
+ */
 export async function isAlive(identity: ProcIdentity, ps: PsRunner = psRunner, execs = false): Promise<boolean> {
   const now = await readIdentity(identity.pid, ps);
   return now !== null && sameProcess(now, execs ? { ...identity, exe: now.exe } : identity);
 }
 
+/** isAlive, with null for "ps cannot say". */
+export async function aliveOrUnknown(identity: ProcIdentity, ps: PsRunner = psRunner, execs = false): Promise<boolean | null> {
+  try {
+    return await isAlive(identity, ps, execs);
+  } catch (error) {
+    if (error instanceof PsUnavailable) return null;
+    throw error;
+  }
+}
+
 export interface TerminateResult {
   ok: boolean;
-  /** "process": verified gone; "timeout": still alive after SIGKILL; "absent": was not running. */
-  evidence: "process" | "timeout" | "absent";
+  /**
+   * "process": verified gone; "timeout": still alive after SIGKILL; "absent": was not running;
+   * "unknown": ps could not say, so it was not signalled further (a pid is never signalled unverified).
+   */
+  evidence: "process" | "timeout" | "absent" | "unknown";
   signal: "none" | "SIGTERM" | "SIGKILL";
 }
 
@@ -114,14 +155,19 @@ export interface TerminateOptions {
 
 /**
  * SIGTERM the process if it is still the recorded one, wait `graceMs` (10 s by
- * design), then SIGKILL, and verify it is gone. A reused pid is never signalled.
+ * design), then SIGKILL, and verify it is gone. A reused pid is never
+ * signalled, and neither is a pid ps cannot vouch for: when ps fails before a
+ * signal the result is "unknown", and while waiting a failed read just waits on.
  */
 export async function terminate(identity: ProcIdentity, options: TerminateOptions = {}): Promise<TerminateResult> {
   const ps = options.ps ?? psRunner;
   const kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
   const graceMs = options.graceMs ?? 10_000;
   const pollMs = options.pollMs ?? 100;
-  if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "absent", signal: "none" };
+  const alive = () => aliveOrUnknown(identity, ps, options.execs);
+  const first = await alive();
+  if (first === null) return { ok: false, evidence: "unknown", signal: "none" };
+  if (!first) return { ok: true, evidence: "absent", signal: "none" };
   const target = options.group ? -identity.pid : identity.pid;
   const send = (signal: NodeJS.Signals) => {
     try {
@@ -134,16 +180,21 @@ export async function terminate(identity: ProcIdentity, options: TerminateOption
   const deadline = Date.now() + graceMs;
   while (Date.now() < deadline) {
     await Bun.sleep(pollMs);
-    if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "process", signal: "SIGTERM" };
+    if ((await alive()) === false) return { ok: true, evidence: "process", signal: "SIGTERM" };
   }
   // Re-check right before escalating, so SIGKILL never reaches a pid that exited and was reused.
-  if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "process", signal: "SIGTERM" };
+  const before = await alive();
+  if (before === false) return { ok: true, evidence: "process", signal: "SIGTERM" };
+  if (before === null) return { ok: false, evidence: "unknown", signal: "SIGTERM" };
   send("SIGKILL");
+  let known = true;
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(pollMs);
-    if (!(await isAlive(identity, ps, options.execs))) return { ok: true, evidence: "process", signal: "SIGKILL" };
+    const now = await alive();
+    if (now === false) return { ok: true, evidence: "process", signal: "SIGKILL" };
+    known = now !== null;
   }
-  return { ok: false, evidence: "timeout", signal: "SIGKILL" };
+  return { ok: false, evidence: known ? "timeout" : "unknown", signal: "SIGKILL" };
 }
 
 /** One row of `ps -A -o pid=,ppid=,command=`: the command is its argv joined by spaces. */
@@ -180,10 +231,9 @@ export function descendantCommands(rows: ProcRow[], root: number): string[] {
   return commands;
 }
 
-/** The whole process table, read through the given ps. */
-export async function readProcessTable(ps = "/bin/ps"): Promise<ProcRow[]> {
-  const proc = Bun.spawn([ps, "-A", "-o", "pid=,ppid=,command="], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LC_ALL: "C" } });
-  const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-  if (code !== 0) throw new Error(`${ps} exited ${code} reading the process table: ${err.trim() || "no stderr"}`);
-  return parseProcessTable(out);
+/** The whole process table, read through the given ps; throws PsUnavailable when ps cannot answer. */
+export async function readProcessTable(ps = "/bin/ps", timeoutMs = PS_TIMEOUT_MS): Promise<ProcRow[]> {
+  const result = await runBounded([ps, "-A", "-o", "pid=,ppid=,command="], { label: "ps", timeoutMs, env: { ...process.env, LC_ALL: "C" } });
+  if (result.code !== 0) throw new PsUnavailable(`${ps} exited ${result.code} reading the process table: ${result.stderr.trim() || "no stderr"}`);
+  return parseProcessTable(result.stdout);
 }

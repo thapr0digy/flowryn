@@ -5,7 +5,7 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import type { HarnessId, Verified } from "../harness/types.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import type { HerdrRuntime, PaneProcess } from "../runtime/herdr/runtime.ts";
-import { readIdentity, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
+import { PsUnavailable, readIdentity, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
 import { cancelRun, getRun, isTerminal, type RunRow } from "./runs.ts";
 import {
   confirmOperation,
@@ -182,7 +182,13 @@ export class Operations {
       const leader = info.processes.find((p) => p.pid === info.foregroundGroup);
       const matches = this.deps.matchesHarness(run.harness);
       if (leader && matches?.(leader)) {
-        const identity = await readIdentity(leader.pid, this.deps.ps);
+        let identity: ProcIdentity | null;
+        try {
+          identity = await readIdentity(leader.pid, this.deps.ps);
+        } catch (error) {
+          if (error instanceof PsUnavailable) return "unknown";
+          throw error;
+        }
         if (!identity) return "unknown";
         if (run.pane_id === op.pane_id && identity.start >= (op.issued_at ?? 0) - START_SLACK_MS) return this.adopt(op, identity);
         return this.escalate(op, `a ${run.harness} process (pid ${leader.pid}) in pane ${op.pane_id} started before the ${op.kind} was issued, or the run moved to another pane; it is not adopted`);

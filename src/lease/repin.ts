@@ -5,7 +5,7 @@ import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { runCommand } from "../policy/command.ts";
 import { claudeProjectSlug, tailLines, TRANSCRIPT_TAIL_BYTES, voidSessionGrants } from "../policy/grants.ts";
-import { isAlive, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
+import { aliveOrUnknown, type ProcIdentity, type PsRunner } from "../runtime/proc.ts";
 import { allLeases, getSession, isHolder } from "./lease.ts";
 
 /**
@@ -187,7 +187,7 @@ export function pinHistory(db: Db, session: string, opened: { cwd: string | null
  * or cannot be read. `lsof` is the daemon's resolved path (launchd's PATH may not reach /usr/sbin).
  */
 export async function processCwd(identity: ProcIdentity | null, lsof: string | null, ps?: PsRunner): Promise<string | null> {
-  if (!identity || !(await isAlive(identity, ps))) return null;
+  if (!identity || (await aliveOrUnknown(identity, ps)) !== true) return null;
   if (process.platform === "linux") {
     try {
       return readlinkSync(`/proc/${identity.pid}/cwd`);
