@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
-import { ForgeError, type Forge, type PullRequest } from "../forge/types.ts";
+import { ForgeError, type ChecksSummary, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
 import { deliveredOf, projectRepo, type Delivered } from "../lifecycle/delivery.ts";
 import { applyVerdict, backlogTasks, closeWatch, openWatches, orphanReason, ownPrVerdict, pendingTaskIds, prUrlOf, prVerdict, reportVerdict, watchOfTask, type WatchVerdict } from "../lifecycle/watches.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
@@ -205,7 +205,7 @@ export class DeliveryWatcher {
       try {
         const pr = await forge.pull(ref);
         const checks = pr.state === "open" ? await forge.checks(ref, pr.headSha) : null;
-        const notStarted = checks?.state === "red" ? await notStartedChecks(forge, ref, checks) : [];
+        const notStarted = checks?.state === "red" ? await this.notStartedOf(forge, ref, checks, run.project_id, delivered.ref) : [];
         const history = await this.headHistoryOf(run, delivered.head, pr.headSha, pr.state === "open", ref.number);
         const autoMerge = this.deps.autoMerge;
         const carry =
@@ -234,6 +234,17 @@ export class DeliveryWatcher {
         this.forgeFailed(error);
         return;
       }
+    }
+  }
+
+  /** The red checks GitHub never started, for the merge explanation only (it reads them only with verify steps); an unreadable answer names none. */
+  private async notStartedOf(forge: Forge, ref: PrRef, checks: ChecksSummary, projectId: string, url: string): Promise<number[]> {
+    try {
+      if (!this.deps.verifyPolicy?.(projectId)) return [];
+      return await notStartedChecks(forge, ref, checks);
+    } catch (error) {
+      this.deps.log(`delivery watcher: cannot tell which red checks of ${url} GitHub never started (${(error as Error).message})`);
+      return [];
     }
   }
 
