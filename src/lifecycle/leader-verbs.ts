@@ -864,6 +864,7 @@ const show: VerbSpec = {
         worktree: run.worktree_path,
         branch: run.branch,
         ...(run.base_branch ? { base: run.base_branch } : {}),
+        ...(run.stacked_on ? { stacked_on: `${run.stacked_on} (merges after it lands)` } : {}),
         artifacts,
         ...(deliveryView(ctx, run) ? { delivery: deliveryView(ctx, run) } : {}),
         steers,

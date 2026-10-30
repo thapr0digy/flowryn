@@ -112,6 +112,8 @@ export const ERROR_CODES = {
   run_not_active: EXIT.validation,
   // a leader reaching another scope's task, or a session whose login is unconfirmed (docs/notes/2026-10-24-leader-scoping-and-vj.md)
   scope_refused: EXIT.role,
+  // a stacked run's merge while the task beneath it has not landed (docs/notes/2026-10-27-stack-a-plan-4y.md)
+  stack_not_landed: EXIT.policy,
   stage_waiting: EXIT.policy,
   // flowryn drop: the task has landed
   task_landed: EXIT.policy,

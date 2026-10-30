@@ -25,6 +25,7 @@ import { reserveDecision } from "./decisions.ts";
 import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
 import { gateHarness, harnessRefusal } from "./harness-gate.ts";
 import { checkPhaseAccounts, getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
+import { inStackedPlan, phaseReadiness, type StackBase } from "./stacks.ts";
 import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
 import { queuedTaskOf } from "./queued.ts";
 import { modelView, openRunForTask } from "./runs.ts";
@@ -191,6 +192,14 @@ async function baseFlag(deps: StartDeps, args: Record<string, unknown>, project:
   return base;
 }
 
+/**
+ * A stacked phase starts from exactly what the task beneath it delivered: a
+ * branch that moved since (pushed, not yet delivered) waits for its delivery.
+ */
+export function checkStackHead(stack: StackBase, tip: string): void {
+  if (tip !== stack.head) throw new FlowrynError("not_ready", `${stack.branch} is at ${tip.slice(0, 8)} on origin, not ${stack.task}'s delivered head ${stack.head.slice(0, 8)}`, `wait for ${stack.task} to deliver again`);
+}
+
 /** The base a Queued task was filed with (`dispatch --blocked-by … --base`); null: the default. */
 export function storedBase(db: Db, taskId: string): string | null {
   return (db.query("SELECT base_branch FROM task_policy WHERE task_id = ?1").get(taskId) as { base_branch: string | null } | null)?.base_branch ?? null;
@@ -209,6 +218,8 @@ export interface NewRun {
   base: string;
   /** The task's own base branch (`dispatch --base`); null or absent: the project's default. */
   baseBranch?: string | null;
+  /** A stacked phase: the task whose branch is its base until that task lands (src/lifecycle/stacks.ts). */
+  stackedOn?: string | null;
   workflow: WorkflowDef;
   sensitive: boolean;
   /** An existing Queued task (a plan phase): started in the backlog, not added. */
@@ -249,9 +260,9 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, model, effort, state, liveness, workflow, stage,
        agent_session, worktree_path, branch, base_sha, token_hash, started_at, updated_at,
-       stage_state, waiting_since, pending_launch, account, model_pin, effort_pin, base_branch)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'launching', 'starting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'waiting', ?14, 'fresh', ?15, ?16, ?17, ?18)`,
-  ).run(runId, r.taskId, harness, r.version, choice.model, choice.effort, r.workflow.id, first.id, randomUUID(), worktree, `${workers.branch_prefix}${r.taskId}`, r.base, hashToken(mintToken("run")), r.now, r.account.id, pins.model, pins.effort, r.baseBranch ?? null);
+       stage_state, waiting_since, pending_launch, account, model_pin, effort_pin, base_branch, stacked_on)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'launching', 'starting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, 'waiting', ?14, 'fresh', ?15, ?16, ?17, ?18, ?19)`,
+  ).run(runId, r.taskId, harness, r.version, choice.model, choice.effort, r.workflow.id, first.id, randomUUID(), worktree, `${workers.branch_prefix}${r.taskId}`, r.base, hashToken(mintToken("run")), r.now, r.account.id, pins.model, pins.effort, r.baseBranch ?? null, r.stackedOn ?? null);
   const source: EventSource = r.by === "scheduler" ? "daemon" : "cli";
   dismissEarlierRunsQuestions(db, r.taskId, runId, r.now, source);
   const intent = r.existing
@@ -274,6 +285,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
       body: r.body,
       base: r.base,
       ...(r.baseBranch ? { base_branch: r.baseBranch } : {}),
+      ...(r.stackedOn ? { stacked_on: r.stackedOn } : {}),
       worktree,
       intent: intent.id,
       by: r.by,
@@ -296,7 +308,7 @@ export interface ModeOverride {
 
 type DispatchPlan = { pins: ModelPins } & (
   | { mode: "now"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; override: ModeOverride | null }
-  | { mode: "task"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; taskId: string; override: ModeOverride | null }
+  | { mode: "task"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; taskId: string; stackedOn: string | null; override: ModeOverride | null }
   | { mode: "queued"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
   | { mode: "queue"; project: ProjectRow; account: Account; blockedBy: string[]; events: AfterEvent[]; prHint: string | null; baseBranch: string | null; override: ModeOverride | null }
 );
@@ -394,12 +406,18 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     if (!phase || phase.project_id !== project.id) throw new FlowrynError("not_found", `${taskId} is not a queued task of project ${project.id}`, "flowryn show <plan id>");
     if (phase.plan_state !== "approved") throw new FlowrynError("not_ready", `${taskId} belongs to plan ${phase.plan_id}, which is ${phase.plan_state}`);
     if (openRunForTask(ctx.db, taskId)) throw new FlowrynError("already_exists", `${taskId} already has a run`, `flowryn show ${taskId}`);
-    const waiting = waitingOn(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, JSON.parse(phase.blocked_by) as string[]);
-    if (waiting.length > 0) throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${waiting.join(", ")} to land`, "a phase starts only after its blockers have landed, never on an open PR");
+    const ready = phaseReadiness(ctx.db, taskId, readSnapshot(ctx.db, "backlog")?.tasks ?? null, JSON.parse(phase.blocked_by) as string[]);
+    if (!ready.ready) {
+      const hint = ready.why ? `it stacks on ${ready.waiting[0]} once that can be stacked on: ${ready.why}` : inStackedPlan(ctx.db, taskId) ? "a stacked phase starts once all its blockers but one have landed and that one has delivered its PR" : "a phase starts only after its blockers have landed, never on an open PR";
+      throw new FlowrynError("blockers_not_landed", `${taskId} waits for ${ready.waiting.join(", ")} to land`, hint);
+    }
     const account = accountFor(ctx.config(), project, args, { account: phase.account, harness: phase.harness as HarnessId | null });
     // --model and --effort win over the phase's own lines, each on its own.
     const pins = pinsFor(args, account, { model: phase.model, effort: phase.effort });
-    return { mode: "task", project, account, pins, taskId, override, ...(await checkStart(startDepsOf(ctx), project, account, storedBase(ctx.db, taskId))) };
+    if (!ready.stack) return { mode: "task", project, account, pins, taskId, stackedOn: null, override, ...(await checkStart(startDepsOf(ctx), project, account, storedBase(ctx.db, taskId))) };
+    const start = await checkStart(startDepsOf(ctx), project, account, ready.stack.branch);
+    checkStackHead(ready.stack, start.base);
+    return { mode: "task", project, account, pins, taskId, stackedOn: ready.stack.task, override, ...start };
   }
   const kind = stringArg(args as never, "kind");
   if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship or scout");
@@ -502,9 +520,9 @@ export const dispatchVerb: VerbSpec = {
     if (plan.mode === "task") {
       const phase = phaseOfTask(ctx.db, plan.taskId)!;
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? phase.workflow, "ship");
-      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", account: plan.account, pins: plan.pins, version: plan.version, base: plan.base, baseBranch: plan.baseBranch, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
+      const runId = createRun(ctx.db, config, { taskId: plan.taskId, title: phase.title, body: phase.body, project: plan.project, kind: "ship", account: plan.account, pins: plan.pins, version: plan.version, base: plan.base, baseBranch: plan.baseBranch, stackedOn: plan.stackedOn, workflow, sensitive: boolArg(args, "sensitive"), existing: true, by: ctx.caller.role, override: plan.override, now });
       applyModeOverride(ctx.db, plan.taskId, plan.override);
-      return { data: { task: plan.taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, ...choiceOf(ctx.db, runId), workflow: workflow.id, state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
+      return { data: { task: plan.taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, ...choiceOf(ctx.db, runId), workflow: workflow.id, ...(plan.stackedOn ? { stacked_on: plan.stackedOn, base: plan.baseBranch } : {}), state: "launching" }, hints: [`flowryn show ${plan.taskId}`, "flowryn fleet"] };
     }
     if (plan.mode === "queued") {
       const workflow = workflowFor(config, stringArg(args, "workflow") ?? (plan.kind === "scout" ? "scout" : plan.project.workflow), plan.kind);
@@ -608,6 +626,7 @@ export const planVerb: VerbSpec = {
     account: { type: "string", help: "the phases' account (default: the project's, else its scope's; a phase's account: line wins)", placeholder: "id" },
     model: { type: "string", help: "the phases' model (a phase's model: line wins; default: the workflow's, else the account's)", placeholder: "model" },
     effort: { type: "string", help: "the phases' effort (a phase's effort: line wins; default: the workflow's, else the account's)", placeholder: "level" },
+    stack: { type: "boolean", help: "stack the plan: a phase starts on the open PR of the one task it still waits for (same as a stack: on line)" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -627,11 +646,13 @@ export const planVerb: VerbSpec = {
     workflowFor(config, workflow, "ship");
     const now = ctx.now();
     const title = stringArg(args, "title") ?? parsed.title ?? parsed.phases[0]!.title;
-    const filed = recordPlan(ctx.db, { project, title, phases: parsed.phases, sourceTask: null, gateId: null, workflow, harness, account, model, effort, filedBy: ctx.caller.role, state: "approved", now });
+    const stack = parsed.stack || boolArg(args, "stack");
+    const filed = recordPlan(ctx.db, { project, title, phases: parsed.phases, stack, sourceTask: null, gateId: null, workflow, harness, account, model, effort, filedBy: ctx.caller.role, state: "approved", now });
     return {
       data: {
         plan: filed.id,
         title,
+        ...(stack ? { stack: "on" } : {}),
         autonomy: project.autonomy,
         phases: phasesOf(ctx.db, filed.id).map((p) => ({ phase: p.phase_no, task: p.task_id, title: p.title, workflow: p.workflow, blocked_by: (JSON.parse(p.blocked_by) as string[]).join(" ") || "-" })),
       },
@@ -645,6 +666,13 @@ export const planVerb: VerbSpec = {
   },
 };
 
+/** Where a queued phase stands: ready (stacked on a delivered PR, or not), or what it waits for. */
+function queuedLine(db: Db, stacked: boolean, ready: ReturnType<typeof phaseReadiness>): string {
+  if (ready.ready) return ready.stack ? `queued, ready to stack on ${blockerLabel(db, ready.stack.task)} (${ready.stack.ref})` : "queued, ready";
+  const waits = `queued, waits for ${ready.waiting.map((dep) => blockerLabel(db, dep)).join(", ")}`;
+  return stacked && ready.waiting.length === 1 ? `${waits} to deliver its PR${ready.why ? ` (${ready.why})` : ""}` : waits;
+}
+
 /** `flowryn show <plan>`: the plan's phases and where each is; with --full (`bodies`), each phase's body too. */
 export function planView(db: Db, planId: string, bodies = false): Record<string, unknown> | null {
   const plan = getPlan(db, planId);
@@ -655,15 +683,16 @@ export function planView(db: Db, planId: string, bodies = false): Record<string,
     title: plan.title,
     project: plan.project_id,
     state: plan.state,
+    ...(plan.stack ? { stack: "on" } : {}),
     from: plan.source_task ? `${plan.source_task}${plan.gate_id ? ` (gate ${plan.gate_id})` : ""}` : `filed by ${plan.filed_by}`,
     phases: phasesOf(db, planId).map((p) => {
-      const run = db.query("SELECT state, stage, stage_state FROM runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT 1").get(p.task_id) as { state: string; stage: string; stage_state: string } | null;
-      const waiting = run ? [] : waitingOn(db, p.task_id, backlog, JSON.parse(p.blocked_by) as string[]);
+      const run = db.query("SELECT state, stage, stage_state, stacked_on FROM runs WHERE task_id = ?1 ORDER BY started_at DESC LIMIT 1").get(p.task_id) as { state: string; stage: string; stage_state: string; stacked_on: string | null } | null;
+      const ready = run ? null : phaseReadiness(db, p.task_id, backlog, JSON.parse(p.blocked_by) as string[]);
       return {
         phase: p.phase_no,
         task: p.task_id,
         title: p.title,
-        at: run ? `${run.state} · ${run.stage} ${run.stage_state}` : plan.state !== "approved" ? plan.state : waiting.length > 0 ? `queued, waits for ${waiting.map((dep) => blockerLabel(db, dep)).join(", ")}` : "queued, ready",
+        at: run ? `${run.state} · ${run.stage} ${run.stage_state}${run.stacked_on ? ` · stacked on ${blockerLabel(db, run.stacked_on)}` : ""}` : plan.state !== "approved" ? plan.state : queuedLine(db, plan.stack === 1, ready!),
         ...(bodies ? { body: sanitizeBlock(p.body) } : {}),
       };
     }),

@@ -144,8 +144,11 @@ function mergedOffBase(db: Db, run: RunWithPolicy, pr: PullRequest, now: number)
   const project = getProject(db, run.project_id);
   if (!project || !pr.baseRef) return false;
   const base = runBase(run, project);
-  if (pr.baseRef === base) return false;
-  const summary = `the delivered PR ${pr.url} was merged into ${pr.baseRef}, not its base ${base}`;
+  // A stacked PR merged into the branch beneath it before that branch landed is not where the run said it would go either.
+  if (pr.baseRef === base && !run.stacked_on) return false;
+  const summary = run.stacked_on
+    ? `the delivered PR ${pr.url} was merged into ${pr.baseRef}, the branch of ${run.stacked_on}, before ${run.stacked_on} landed`
+    : `the delivered PR ${pr.url} was merged into ${pr.baseRef}, not its base ${base}`;
   if (db.query("SELECT 1 FROM divergences WHERE run_id = ?1 AND summary = ?2 AND resolution = 'keep-run'").get(run.id, summary)) return false;
   openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary }, now);
   return true;
