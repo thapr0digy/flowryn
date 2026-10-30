@@ -102,7 +102,7 @@ Goal: one file of prose (a plan, a note, a comparison, a letter) that the user r
 4. Questions for the user: only what you truly cannot proceed without; decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/draft/questions.json\` in the flowryn-design skill's shape (at most 5, each with options, a recommendation and what it blocks; recorded choices under "decided"). The page already mounts the question widget; never list questions in the file as text.
 5. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/draft/draft.html\` prints its URL; pass it as it is. lavish-axi's \`status: opened\` is its session, not a browser tab.
 6. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/draft/draft.html [--questions-file $FLOWRYN_REPORT_DIR/draft/questions.json]\`, then end your turn. Flowryn listens on the page; do not hold a \`lavish-axi poll\` open. A steer brings the verdict: changes with the user's words (edit the file, render again, host it again, stage done again), or approved.
-7. After approval (the final stage): commit the file exactly as approved and \`$FLOWRYN_BIN deliver --local\`. A file that differs from the approved one is refused; a change needs a new review.
+7. After approval (the final stage): commit the file exactly as approved and \`$FLOWRYN_BIN deliver --local\`. A file that differs from the approved one, or any other file your branch changes, is refused; a change needs a new review.
 
 Rules:
 - Only the user passes a review gate. Never say or assume the draft was approved until the steer says so.
