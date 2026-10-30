@@ -433,6 +433,27 @@ describe("the watcher after the queue's push", () => {
     expect(liveAutoMerge(db, first.run)).toMatchObject({ head_sha: pushed });
   });
 
+  test("a merge of main made on GitHub and carried by the watcher: the worktree catches up and the entry lands at it", async () => {
+    const s = ship(1, "one.txt", "one\n");
+    tx(db, () => enqueueLanding(db, s.get(), deliveredOf(db, s.task)!, null, now));
+    mergeOnOrigin(repos.other, "main.txt", "main moved\n");
+    sh(repos.other, ["fetch", "-q", "origin"]);
+    sh(repos.other, ["checkout", "-q", "-B", s.branch, `origin/${s.branch}`]);
+    sh(repos.other, ["merge", "-q", "--no-ff", "--no-edit", "origin/main"]);
+    sh(repos.other, ["push", "-q", "origin", `HEAD:refs/heads/${s.branch}`]);
+    const updated = sh(repos.other, ["rev-parse", "HEAD"]);
+    const proof = await cleanMainMerge(git, repos.other, { from: s.head, to: updated, base: "main" });
+    sh(repos.other, ["checkout", "-q", "main"]);
+    const pr = { number: 1, url: s.url, title: s.task, state: "open" as const, draft: false, headSha: updated, headRef: s.branch, headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: true };
+    const autoMerge = (r: RunWithPolicy, moved: { headSha: string }, at: number) => void deliveredToQueue(db, config(), r, moved.headSha, at);
+    tx(db, () => applyPrObservation(db, s.get(), deliveredOf(db, s.task)!, { pr, checks: null }, new Set(), now, { nudgeConflicts: true, history: "descends", carry: { proof, verifyPolicy: null, autoMerge } }));
+    expect(sh(s.wt, ["rev-parse", "HEAD"])).toBe(s.head);
+    await queue().lq.pass();
+    expect(entries()).toEqual([{ task_id: s.task, state: "landing", reason: null, integrations: 0 }]);
+    expect(sh(s.wt, ["rev-parse", "HEAD"])).toBe(updated);
+    expect(liveAutoMerge(db, s.run)).toMatchObject({ head_sha: updated });
+  });
+
   test("routine work the watcher carried first starts landing at the carried head", async () => {
     const s = ship(1, "one.txt", "one\n");
     mergeOnOrigin(repos.other, "main.txt", "main moved\n");

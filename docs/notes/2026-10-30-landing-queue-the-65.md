@@ -41,7 +41,7 @@ An approval carries across the queue's own clean merge of the base, unless the w
 
 An entry is `landed` when its run lands, or `left` with a reason: `conflict`, `sent_back` (a verify failure or a decline), `redelivered` (it rejoins at the back once delivered again), `held:<code>` (its auto-merge was held), `landing_blocked` (busy worker or changed worktree for over 30 min), `push_refused`, `merge_failed`, `not_clean`, `no_worktree`, `approval_needed`, `base_moving`, `landing_off` (the project left the queue), or the run's end. Holds open `auto_merge_held` (`Landing held: …; <next command>`), which wakes the leader. An entry is never taken again at the head it left at; a new delivery, or the leader's `flowryn merge`, puts it back.
 
-A head of line whose worker is busy, shows a dialog, or whose worktree has uncommitted changes is skipped for the next entry that can go (`landing.blocked`), and keeps its place. Its 30 minutes restart when another entry starts landing, so only time spent being tried counts.
+A head of line whose worker is busy, shows a dialog, or whose worktree has uncommitted changes is skipped for the next entry that can go (`landing.blocked`), and keeps its place. Its 30 minutes restart when another entry starts landing, so only time spent being tried counts. A clean worktree that is only behind the entry's head (a merge of main made on GitHub, carried by the watcher) is fast-forwarded to it first (`git fetch origin <branch>`, `git merge --ff-only`).
 
 ## Where it lives
 

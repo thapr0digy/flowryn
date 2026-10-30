@@ -375,8 +375,19 @@ export class LandingQueue implements LandingHooks {
       this.deps.log(`landing queue ${row.id}: fetch origin ${base} failed: ${fetched.stderr.trim()}`);
       return "blocked";
     }
+    const headRef = prEvidence(db, run.id)?.head_ref || run.branch;
     let head = (await git(["rev-parse", "HEAD"], wt)).stdout.trim();
     let merged = false;
+    if (head !== row.head_sha) {
+      // A delivery carried on GitHub (a merge of main made there) leaves a clean worktree behind it: catch up first.
+      const fetchedHead = await netGit(["fetch", "--quiet", "--no-tags", "origin", headRef], wt);
+      const behind = fetchedHead.code === 0 ? await git(["merge-base", "--is-ancestor", "HEAD", row.head_sha], wt) : fetchedHead;
+      if (behind.code === 0) {
+        const forwarded = await git(["merge", "--ff-only", "--quiet", row.head_sha], wt);
+        if (forwarded.code !== 0) return this.blocked(row, `git could not fast-forward the worktree to ${row.head_sha.slice(0, 8)}: ${forwarded.stderr.trim()}`);
+        head = row.head_sha;
+      }
+    }
     if (head !== row.head_sha) {
       // A merge of ours that a stop cut off before its push is pushed now, if it still proves clean; anything else is someone's work.
       const proof = await cleanMainMerge(git, wt, { from: row.head_sha, to: head, base });
@@ -393,7 +404,7 @@ export class LandingQueue implements LandingHooks {
       }
     }
     if (merged) {
-      const pushed = await netGit(["push", "origin", `HEAD:refs/heads/${prEvidence(db, run.id)?.head_ref || run.branch}`], wt);
+      const pushed = await netGit(["push", "origin", `HEAD:refs/heads/${headRef}`], wt);
       if (pushed.code !== 0) return this.held(row, "push_refused", `git push refused the merge of origin/${base}: ${pushed.stderr.trim().split("\n").at(-1) ?? ""}`, `flowryn show ${run.task_id}`);
       const proof = await cleanMainMerge(git, wt, { from: row.head_sha, to: head, base });
       if (!proof.ok) return this.held(row, "not_clean", `the pushed merge did not prove clean: ${proof.why}`, `flowryn show ${run.task_id}`);
