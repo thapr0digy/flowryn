@@ -69,7 +69,7 @@ describe("syncPrimary", () => {
     expect(sh(repos.primary, ["rev-parse", "HEAD"])).toBe(before);
     expect(sh(repos.primary, ["status", "--porcelain"])).toBe("M a.txt");
     await syncAndRecord();
-    expect(openUnsynced()).toEqual(["Primary checkout of web not synced with origin/main: it has uncommitted changes; new runs branch from it as it is"]);
+    expect(openUnsynced()).toEqual(["Primary checkout of web not synced with origin/main: it has uncommitted changes; new runs branch from it as it is; tell the user"]);
   });
 
   test("an untracked file alone does not stop a sync that does not touch it", async () => {

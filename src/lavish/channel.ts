@@ -101,9 +101,9 @@ export function recordChannelFailure(db: Db, gateId: string, failure: ChannelFai
     if (!degraded || gate.channel_item != null) return null;
     const event = appendEvent(db, { source: "daemon", kind: "gate.channel_degraded", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, since, failures, reason: failure.reason }, ts: failure.now });
     const line =
-      `Review page not delivering answers: ${channelHint(failure.reason, gate.page_path)}. ` +
+      `Review page not delivering answers (tell the user and relay the fix): ${channelHint(failure.reason, gate.page_path)}. ` +
       `${gate.task_id} (${gate.stage} gate ${gateId}) since ${clock(since)}, ${failures} failed polls: ${failure.reason}; ` +
-      `Flowryn retries by itself. Until then answer through the leader (flowryn decide)`;
+      `Flowryn retries by itself and it never passes the gate. Until then take their answers in chat (flowryn decide)`;
     const item = openItem(db, { kind: "review_channel", eventSeq: event.seq, taskId: gate.task_id, runId: gate.run_id, line, now: failure.now });
     db.query("UPDATE gates SET channel_item = ?2 WHERE id = ?1").run(gateId, item);
     return item;

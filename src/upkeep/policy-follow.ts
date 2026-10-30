@@ -140,7 +140,7 @@ export function followPolicy(db: Db, runId: string, change: PolicyTip & { files:
       eventSeq: event.seq,
       taskId: run.task_id,
       runId: run.id,
-      line: `Delivered behind ${change.branch}'s policy change (${fileList(change.files)}) it was told to merge: ${title} (${run.project_id}); merge as is, steer it, or flowryn decline ${run.task_id}`,
+      line: `Delivered behind ${change.branch}'s policy change (${fileList(change.files)}) it was told to merge: ${title} (${run.project_id}); tell the user before merging as is, steer it, or flowryn decline ${run.task_id}`,
       now,
     });
     return "behind";

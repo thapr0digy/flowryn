@@ -670,6 +670,29 @@ describe("a gate's questions as decisions", () => {
     expect(body.endsWith(stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run)))).toBe(true);
   });
 
+  test("assumption: a live worker's task file names the stage that just started, so the contract can point at it", () => {
+    db.query("UPDATE runs SET workflow = 'feature', stage = 'build', stage_state = 'waiting', stage_note = 'Go on from the design.', pending_launch = NULL WHERE id = ?1").run(runId);
+    const config = { ...defaultConfig(h.home), state_dir: h.home };
+    const taskFile = join(h.home, "runs", runId, "task.md");
+    mkdirSync(join(h.home, "runs", runId), { recursive: true });
+    writeFileSync(taskFile, "Flowryn stage design (stale)");
+    const steer = tx(db, () => activateStage(db, config, getRunWithPolicy(db, runId)!, NOW).steer);
+    expect(steer).not.toBeNull();
+    const run = getRunWithPolicy(db, runId)!;
+    const text = readFileSync(taskFile, "utf8");
+    expect(text.startsWith(stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run)))).toBe(true);
+    expect(text).toContain("Flowryn stage build (2 of 3");
+    expect(text).toContain("Go on from the design.");
+    expect(text).not.toContain("(stale)");
+  });
+
+  test("a stage start for a run never launched writes no task file", () => {
+    db.query("UPDATE runs SET workflow = 'feature', stage = 'build', stage_state = 'waiting', stage_note = 'x', pending_launch = NULL WHERE id = ?1").run(runId);
+    const config = { ...defaultConfig(h.home), state_dir: h.home };
+    tx(db, () => activateStage(db, config, getRunWithPolicy(db, runId)!, NOW));
+    expect(existsSync(join(h.home, "runs", runId))).toBe(false);
+  });
+
   test("a cut comment with no notes file kept says the rest was not kept", async () => {
     open();
     symlinkSync(join(h.home, "victim.txt"), join(reportDir, "design", "lavish-notes-g1.txt"));
@@ -943,7 +966,7 @@ describe("review-channel health", () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ lane: "P1", class: "actionable", state: "open" });
     const line = items[0]!.full_line ?? items[0]!.line;
-    expect(line).toStartWith("Review page not delivering answers: restart Lavish (lavish-axi server --verbose; its log is ~/.lavish-axi/server.log).");
+    expect(line).toStartWith("Review page not delivering answers (tell the user and relay the fix): restart Lavish (lavish-axi server --verbose; its log is ~/.lavish-axi/server.log).");
     expect(line).toContain(`${taskId} (design gate g1) since `);
     expect(line).toContain(`3 failed polls: ${SERVER_ERROR} (exit 1)`);
     expect(line).toContain("answer through the leader (flowryn decide)");

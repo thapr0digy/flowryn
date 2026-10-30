@@ -234,7 +234,7 @@ export function noteHarnessCheck(db: Db, check: HarnessCheck, source: EventSourc
 
 function unverifiedLine(harness: HarnessId, version: string, revision: number, stale: number[]): string {
   const why = stale.length === 0 ? `${harness} ${version} has no passing contract run` : unverifiedReason(harness, version, revision, stale);
-  return `${why}, so dispatch and resume on ${harness} are refused until it passes: ${contractsCommand(harness)}`;
+  return `${why}, so dispatch and resume on ${harness} are refused until it passes: ${contractsCommand(harness)} (needs Herdr: outside the Bash sandbox)`;
 }
 
 /**

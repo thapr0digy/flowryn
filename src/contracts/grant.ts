@@ -30,7 +30,7 @@ export function recordGrant(input: GrantInput): void {
   const { role, mode, callerBuild, daemonBuild } = input;
   if (role === "human") return;
   if (role === "worker") throw new FlowrynError("worker_token", "a worker token cannot record a contract pass", "doctor --contracts --verify-only runs the suite without recording");
-  if (role !== "leader") throw new FlowrynError("human_only", "only your own terminal or the leader records a contract pass", "doctor --contracts --verify-only runs the suite without recording");
+  if (role !== "leader") throw new FlowrynError("human_only", "only your own terminal or the leader records a contract pass", "ask the user to run flowryn doctor --contracts in their own terminal; --verify-only runs the suite without recording");
   if (mode === "strict") {
     throw new FlowrynError(
       "human_only",

@@ -7,7 +7,7 @@ import { defaultConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING, timingConfig, workersConfig } from "../../src/config/workers.ts";
 import { claudeAdapter, workerSettings } from "../../src/harness/claude/adapter.ts";
 import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude/trust.ts";
-import { type ContractDelivery, promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
+import { type ContractDelivery, deliveryLines, promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
 import { TOOL_MAP } from "../../src/policy/toolkit.ts";
 import { shipGitAccess } from "../../src/harness/git-access.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
@@ -152,61 +152,65 @@ describe("pi adapter", () => {
 });
 
 describe("worker contract text", () => {
+  /** Flowryn's own lines: what follows the shared style block and tool map. */
+  const ownLines = (text: string) => text.slice(text.indexOf(TOOL_MAP) + TOOL_MAP.length).split("\n").filter((l) => l.length > 0);
+
   test("names the mid-turn steer channel (M0 c07) and carries the style block when terse", () => {
     const text = workerContract("claude", STYLE_BLOCK);
-    expect(text).toContain('arrive mid-turn as hook context starting "Flowryn steer [<id>]:"');
+    expect(text).toContain('- "Flowryn steer [<id>]:" lines (mid-turn as hook context, or after a pointer) are your leader\'s: act on them, then $FLOWRYN_BIN ack <id>.');
+    expect(workerContract("pi", null)).toContain("(mid-turn as a message, or after a pointer)");
     expect(text).toContain("Reply in the fewest words");
     expect(workerContract("pi", null)).not.toContain("fewest words");
-    // The style block leads the instructions (design section 11).
+    // The style block leads the instructions (design section 11), then the toolkit's tool map.
     expect(text.startsWith("Reply in the fewest words")).toBe(true);
-    expect(text).toContain("$FLOWRYN_BIN stage done [--review <lavish url>]");
-    // The budget grew by the toolkit's tool map (src/policy/toolkit.ts TOOL_MAP), which follows the style block, then by the review-page line and the run's own $TMPDIR line.
-    expect(text.split("\n").length).toBeLessThan(39);
     expect(text).toContain(TOOL_MAP);
     expect(workerContract("pi", null).startsWith(TOOL_MAP)).toBe(true);
     expect(text.indexOf(TOOL_MAP)).toBeGreaterThan(text.indexOf("Reply in the fewest words"));
+    expect(text).toContain("Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.");
   });
 
-  test("the worker contract forbids history rewrites and unguarded rm, and says what to do at a prompt", () => {
-    const text = workerContract("claude", null, { kind: "ship", mode: "direct-PR", defaultBranch: "main" });
-    expect(text).toContain("- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.");
-    expect(text).toContain("  To take main: new commits, git merge origin/main, a plain git push.");
-    expect(text).toContain('- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.');
+  test("assumption: the contract stays within the design's budget (about 10 own lines), in every harness and base", () => {
     for (const harness of ["claude", "pi"] as const) {
-      expect(workerContract(harness, null)).toContain("- Keep scratch files in $TMPDIR: your run's own, the same path in and out of the sandbox.");
+      for (const base of [null, "release/2"]) {
+        const text = workerContract(harness, STYLE_BLOCK, { base });
+        const own = ownLines(text);
+        expect(own.length).toBeLessThanOrEqual(10);
+        // About 4 characters a token: Flowryn's own lines under 250 tokens, the whole contract (shared blocks included) under 400.
+        expect(own.join("\n").length).toBeLessThanOrEqual(1_000);
+        expect(text.length).toBeLessThanOrEqual(1_600);
+      }
     }
-    expect(text).toContain("- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.");
   });
 
-  test("assumption: a task with no base gets the same contract text as before, byte for byte", () => {
-    for (const mode of ["direct-PR", "no-mistakes", "local-only"] as const) {
-      const before: ContractDelivery = { kind: "ship", mode, defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] } };
-      expect(workerContract("claude", STYLE_BLOCK, { ...before, base: null })).toBe(workerContract("claude", STYLE_BLOCK, before));
-    }
+  test("the worker contract forbids history rewrites, unguarded rm and approvals, and says what to do at a prompt", () => {
+    const text = workerContract("claude", null);
+    expect(text).toContain("- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take main by git merge origin/main, plain push.");
+    expect(text).toContain('- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.');
+    expect(text).toContain("- Never merge, clean up or approve. Exit 75: spooled, do not retry.");
+    for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null)).toContain("scratch goes in $TMPDIR");
+    expect(text).toContain("- A confirmation prompt: never answer it; ask --blocking naming it.");
+    expect(text).toContain("fail --body-file -) or on your own background job.");
+  });
+
+  test("assumption: a task with no base gets the same contract text as one with no delivery at all", () => {
+    expect(workerContract("claude", STYLE_BLOCK, { base: null })).toBe(workerContract("claude", STYLE_BLOCK));
   });
 
   test("a task's base (dispatch --base) is its PR target, the branch it takes in, and no-mistakes' --base-branch", () => {
-    const direct = workerContract("claude", null, { kind: "ship", mode: "direct-PR", defaultBranch: "main", base: "release/2" });
+    expect(workerContract("claude", null, { base: "release/2" })).toContain("take release/2 by git merge origin/release/2, plain push.");
+    expect(workerContract("claude", null, { base: "release/2" })).not.toContain("take main");
+    const direct = deliveryLines({ kind: "ship", mode: "direct-PR", defaultBranch: "main", base: "release/2" }).join("\n");
     expect(direct).toContain("open a PR into release/2 (gh-axi pr create)");
-    expect(direct).toContain("  To take your base: new commits, git merge origin/release/2, a plain git push.");
-    expect(direct).not.toContain("To take main");
-    const nm = workerContract("claude", null, { kind: "ship", mode: "no-mistakes", defaultBranch: "main", base: "release/2", lastStage: { id: "ship", pools: ["validation"] } });
+    const nm = deliveryLines({ kind: "ship", mode: "no-mistakes", defaultBranch: "main", base: "release/2", lastStage: { id: "ship", pools: ["validation"] } });
     expect(nm).toContain("  This task's base is release/2, not main: pass --base-branch release/2 on every no-mistakes axi run that starts a run.");
-    expect(nm).toContain("never respond (its fix rebases); git merge origin/release/2, resolve");
-    expect(workerContract("claude", null, { kind: "ship", mode: "no-mistakes", defaultBranch: "main" })).not.toContain("--base-branch");
+    expect(nm.join("\n")).toContain("never respond (its fix rebases); git merge origin/release/2, resolve");
+    expect(deliveryLines({ kind: "ship", mode: "no-mistakes", defaultBranch: "main" }).join("\n")).not.toContain("--base-branch");
   });
 
-  test("every ask the contract shows carries the flags ask requires, in every delivery mode", () => {
-    const deliveries: ContractDelivery[] = [
-      { kind: "scout", mode: "local-only", defaultBranch: "main" },
-      { kind: "ship", mode: "local-only", defaultBranch: "main" },
-      { kind: "ship", mode: "direct-PR", defaultBranch: "main" },
-      { kind: "ship", mode: "no-mistakes", defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] } },
-    ];
-    for (const delivery of deliveries) {
-      const text = workerContract("claude", STYLE_BLOCK, delivery);
-      const asks = text.split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"));
-      expect(asks.length).toBeGreaterThan(0);
+  test("every ask the contract shows carries the flags ask requires, in every harness", () => {
+    for (const harness of ["claude", "pi"] as const) {
+      const asks = workerContract(harness, STYLE_BLOCK).split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"));
+      expect(asks).toHaveLength(1);
       for (const line of asks) {
         const call = line.slice(line.indexOf("$FLOWRYN_BIN ask"));
         expect(call).toMatch(/--blocks \S/);
@@ -214,27 +218,36 @@ describe("worker contract text", () => {
         expect(call).toContain("--body-file -");
       }
     }
-    expect(workerContract("pi", null, deliveries[3]).split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"))).toHaveLength(3);
+    const nmAsk = deliveryLines({ kind: "ship", mode: "no-mistakes", defaultBranch: "main" }).find((l) => l.includes("$FLOWRYN_BIN ask"))!;
+    expect(nmAsk).toMatch(/--blocks \S/);
+    expect(nmAsk).toMatch(/--options \S/);
+  });
+
+  test("assumption: the contract carries no delivery or stage steps: those are the task file's, in every delivery mode", () => {
+    for (const harness of ["claude", "pi"] as const) {
+      const text = workerContract(harness, STYLE_BLOCK);
+      for (const gone of ["no-mistakes", "deliver --", "stage begin", "--wait", "review reply"]) expect(text).not.toContain(gone);
+    }
   });
 
   test("a no-mistakes ship merges its base on a conflict-only ci gate, never responds to it; other modes do not carry the line", () => {
     const line = "  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/trunk, resolve, commit, plain git push, then run the pipeline again.";
     const nm: ContractDelivery = { kind: "ship", mode: "no-mistakes", defaultBranch: "trunk", lastStage: { id: "ship", pools: ["validation"] } };
-    for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, STYLE_BLOCK, nm).split("\n")).toContain(line);
-    for (const mode of ["direct-PR", "local-only"] as const) expect(workerContract("claude", STYLE_BLOCK, { kind: "ship", mode, defaultBranch: "trunk" })).not.toContain("merge conflicts");
+    for (const harness of ["claude", "pi"] as const) expect(deliveryLines({ ...nm, harness })).toContain(line);
+    for (const mode of ["direct-PR", "local-only"] as const) expect(deliveryLines({ kind: "ship", mode, defaultBranch: "trunk" }).join("\n")).not.toContain("merge conflicts");
   });
 
   test("a no-mistakes ship drives the pipeline with one foreground --wait call, with its harness's shell timeout; other modes do not carry it", () => {
     const nm: ContractDelivery = { kind: "ship", mode: "no-mistakes", defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] } };
     const drive = (timeout: string) => `  Drive it with ONE foreground no-mistakes axi run --wait per call (${timeout}); never background it or poll axi status.`;
-    expect(workerContract("claude", STYLE_BLOCK, { ...nm, harness: "claude" }).split("\n")).toContain(drive("Bash timeout 600000"));
-    expect(workerContract("pi", null, { ...nm, harness: "pi" }).split("\n")).toContain(drive("bash timeout 600"));
-    expect(workerContract("claude", null, nm).split("\n")).toContain(drive("a 10-minute shell timeout"));
-    expect(workerContract("claude", null, nm)).toContain("run the same call again at once. After respond, reattach with axi run --wait.");
+    expect(deliveryLines({ ...nm, harness: "claude" })).toContain(drive("Bash timeout 600000"));
+    expect(deliveryLines({ ...nm, harness: "pi" })).toContain(drive("bash timeout 600"));
+    expect(deliveryLines(nm)).toContain(drive("a 10-minute shell timeout"));
+    expect(deliveryLines(nm).join("\n")).toContain("run the same call again at once. After respond, reattach with axi run --wait.");
     // The wait follows the stage begin, so the pipeline it drives already holds its slot.
-    const lines = workerContract("claude", null, nm).split("\n");
+    const lines = deliveryLines(nm);
     expect(lines.findIndex((l) => l.includes("Drive it with ONE"))).toBeGreaterThan(lines.findIndex((l) => l.includes("stage begin ship")));
-    for (const mode of ["direct-PR", "local-only"] as const) expect(workerContract("claude", null, { kind: "ship", mode, defaultBranch: "main" })).not.toContain("--wait");
+    for (const mode of ["direct-PR", "local-only"] as const) expect(deliveryLines({ kind: "ship", mode, defaultBranch: "main" }).join("\n")).not.toContain("--wait");
   });
 
   test("the prompt line is one short line that points at the full task", () => {
