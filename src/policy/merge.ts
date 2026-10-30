@@ -17,6 +17,7 @@ import {
   consumeApproval,
   findAttempt,
   findHumanApproval,
+  findLandingApproval,
   insertApproval,
   matchAttempt,
   staleApprovals,
@@ -244,6 +245,9 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
   const allowRed = ask.allowRed ?? null;
   const row = findHumanApproval(db, { task, action, ref: facts.ref, head: facts.head, now, allowRed });
   if (row) return { choice: { kind: "row", row }, why: "" };
+  // The landing queue merges an approved PR under the approval it was queued with.
+  const queued = ask.caller.role === "daemon" && action === "merge" && allowRed === null ? findLandingApproval(db, { task, ref: facts.ref, head: facts.head, now }) : null;
+  if (queued) return { choice: { kind: "row", row: queued }, why: "" };
   const reasons: string[] = [];
   // A head you confirmed is a precondition: another head is never merged in its place, not even under yolo.
   if (ask.head && ask.head !== facts.head) return { choice: null, why: `the head moved from ${ask.head.slice(0, 8)} since you confirmed; it is now ${facts.head.slice(0, 8)}` };
@@ -456,6 +460,32 @@ export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, 
   const row = insertApproval(db, { task, ref: facts.ref, head: facts.head, channel: channelOf(choice), actor, action, allowRed: waiverOf(choice), now });
   consumeApproval(db, row.id, now, `${action} ${task}`);
   return row.id;
+}
+
+/**
+ * The approval a merge on a landing-queue project leaves standing for the
+ * queue (src/verify/landing-queue.ts), rather than using it up now: your
+ * standing record as it is, or the harness channel (Claude's prompt, a chat
+ * answer, Pi's confirm) turned into a record bound to this head. Null under
+ * the yolo posture, which needs no record. Call inside a transaction.
+ */
+export function standingApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, now: number): string | null {
+  const task = facts.run.task_id;
+  if (choice.kind === "yolo") return null;
+  if (choice.kind === "row") {
+    const fresh = db.query("SELECT consumed_at FROM approvals WHERE id = ?1").get(choice.row.id) as { consumed_at: number | null } | null;
+    if (!fresh || fresh.consumed_at !== null) throw new FlowrynError("approval_required", `approval ${choice.row.id} was just used by another merge`);
+    return choice.row.id;
+  }
+  if (choice.kind === "attempt") {
+    const fresh = db.query("SELECT matched_at FROM approval_attempts WHERE id = ?1").get(choice.attempt.id) as { matched_at: number | null } | null;
+    if (!fresh || fresh.matched_at !== null) throw new FlowrynError("approval_required", "that Claude prompt was already used");
+    matchAttempt(db, choice.attempt.id, now);
+  }
+  const used = choice.kind === "grant" ? takeGrant(db, choice.grant, `merge ${task} (landing queue)`, now) : null;
+  voidItemGrants(db, `merge:${task}`, "the merge was queued for landing", now);
+  const actor = used ? grantActor(used) : choice.kind === "attempt" ? `${user()} (Claude prompt, leader ${choice.session})` : `${user()} (Pi confirm, leader ${choice.session})`;
+  return insertApproval(db, { task, ref: facts.ref, head: facts.head, channel: channelOf(choice), actor, action: "merge", allowRed: waiverOf(choice), now }).id;
 }
 
 export interface MergeRow {

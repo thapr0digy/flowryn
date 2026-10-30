@@ -950,6 +950,24 @@ CREATE INDEX asks_open ON asks(state, created_at) WHERE state IN ('queued','runn
 CREATE INDEX asks_project ON asks(project_id, created_at);
 `;
 
+/**
+ * Migration 48 (docs/notes/2026-10-30-landing-queue-the-65.md): the landing queue. One row per
+ * time a delivered PR joins its project's line, driven by src/verify/landing-queue.ts from
+ * waiting through landing (its auto_merges row) to landed, or left with a reason. A run has at
+ * most one live row; `approval_id` is the human approval it waits to merge under (null: routine).
+ */
+const LANDING_QUEUE_SQL = /* sql */ `
+CREATE TABLE landing_queue (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL,
+  ref TEXT NOT NULL, entered_head TEXT NOT NULL, head_sha TEXT NOT NULL, approval_id TEXT,
+  state TEXT NOT NULL CHECK (state IN ('waiting','landing','landed','left')),
+  auto_merge_id TEXT, integrations INTEGER NOT NULL DEFAULT 0,
+  reason TEXT, detail TEXT, blocked_since INTEGER,
+  enqueued_at INTEGER NOT NULL, state_since INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX landing_queue_live ON landing_queue(run_id) WHERE state IN ('waiting','landing');
+CREATE INDEX landing_queue_project ON landing_queue(project_id, state, enqueued_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -998,6 +1016,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 45, name: "stacked-plans", sql: STACKED_PLANS_SQL },
   { version: 46, name: "page-channel", sql: PAGE_CHANNEL_SQL, rebuildsReferencedTable: true },
   { version: 47, name: "asks", sql: ASKS_SQL },
+  { version: 48, name: "landing-queue", sql: LANDING_QUEUE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

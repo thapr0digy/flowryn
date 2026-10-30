@@ -1,6 +1,6 @@
 import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { accountsConfig, accountsView } from "./accounts.ts";
-import { autoMergeEnabled, verifyConfig } from "../verify/config.ts";
+import { autoMergeEnabled, landingMode, verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
@@ -48,7 +48,7 @@ function projectsView(config: FlowrynConfig): Record<string, unknown> {
   for (const id of Object.keys(table(config.extra.projects, "[projects]"))) {
     const verify = verifyConfig(config, id);
     const maxWorkers = projectMaxWorkers(config, id);
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeEnabled(config, id) ? { auto_merge: true } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}) };
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeEnabled(config, id) ? { auto_merge: true } : {}), ...(landingMode(config, id) === "queue" ? { landing: "queue" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}) };
   }
   return out;
 }

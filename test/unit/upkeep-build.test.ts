@@ -9,7 +9,7 @@ import { BuildWatcher, type GitResult } from "../../src/daemon/build-watch.ts";
 import { RestartController, buildIdOfBytes, readPending, restartGuards, type Supervisor } from "../../src/daemon/restart.ts";
 import { insertProject } from "../../src/lifecycle/projects.ts";
 import { gitRunner } from "../../src/policy/git.ts";
-import { MergeBuilder, STAGING_DIR, readAttempt, runStep, type StepRunner } from "../../src/upkeep/build.ts";
+import { LANDING_HOLD_MS, MergeBuilder, STAGING_DIR, readAttempt, runStep, type StepRunner } from "../../src/upkeep/build.ts";
 import { GIT_ENV, mergeOnOrigin, projectAt, scratchRepos, sh } from "../helpers/scratch-git.ts";
 
 /**
@@ -75,13 +75,14 @@ interface Knobs {
   run?: StepRunner;
   stepTimeoutMs?: number;
   bun?: string | null;
+  now?: () => number;
 }
 
 function builder(k: Knobs = {}): MergeBuilder {
   return new MergeBuilder({
     db,
     env: { ...process.env, ...GIT_ENV },
-    now: Date.now,
+    now: k.now ?? Date.now,
     log: () => {},
     git,
     running: () => ({ build: k.build === undefined ? "aaaaaaaaaaaa" : k.build, commit: k.commit ?? null }),
@@ -258,5 +259,44 @@ describe("the build after a Flowryn merge", () => {
     expect(readFileSync(join(worktree, "a.txt"), "utf8")).toBe("one\n");
     expect(existsSync(join(worktree, "node_modules", "dep", "index.js"))).toBe(true);
     expect(lstatSync(join(worktree, ".git")).isFile()).toBe(true);
+  });
+});
+
+describe("the build after a Flowryn merge, with Flowryn's landing queue", () => {
+  /** A PR of Flowryn's own project in its landing queue, its run in `state`. */
+  function inLine(state: string): void {
+    tx(db, () => {
+      db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, created_at) VALUES ('t1', 'flowryn', 'ship', 'direct-PR', 1, 0, 'fix', 0)").run();
+      db.query(
+        `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, stage_state, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+         VALUES ('r1', 't1', 'claude', '2.1.281', ?1, 'idle', 'fix', 'ship', 'done', '/tmp/wt', 'flowryn/t1', 'abc', 'x', 1, 1)`,
+      ).run(state);
+      db.query("INSERT INTO landing_queue (id, project_id, run_id, task_id, ref, entered_head, head_sha, state, enqueued_at, state_since, updated_at) VALUES ('lq1', 'flowryn', 'r1', 't1', 'u', 'h', 'h', 'waiting', 1, 1, 1)").run();
+    });
+  }
+
+  test("a merge while the queue still has PRs to land waits, so the daemon rebuilds once the line is empty", async () => {
+    inLine("ready");
+    let clock = 1_000_000;
+    const held = await builder({ now: () => clock }).pass();
+    expect(held).toMatchObject({ outcome: "skipped" });
+    expect((held as { reason: string }).reason).toContain("landing queue has 1 PR(s) to land");
+    expect(readFileSync(target, "utf8")).toBe(OLD_BINARY);
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'upkeep.build_held'").get()).toEqual({ n: 1 });
+    // Still held a while later: one event for the whole wait.
+    clock += 60_000;
+    expect(await builder({ now: () => clock }).pass()).toMatchObject({ outcome: "skipped" });
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'upkeep.build_held'").get()).toEqual({ n: 1 });
+    // The last PR landed (its entry not yet settled): the build goes.
+    db.query("UPDATE runs SET state = 'landed' WHERE id = 'r1'").run();
+    expect(await builder({ now: () => clock }).pass()).toMatchObject({ outcome: "built", commit: tip() });
+  });
+
+  test("a line that does not drain holds the build for at most LANDING_HOLD_MS", async () => {
+    inLine("ready");
+    let clock = 1_000_000;
+    expect(await builder({ now: () => clock }).pass()).toMatchObject({ outcome: "skipped" });
+    clock += LANDING_HOLD_MS + 1;
+    expect(await builder({ now: () => clock }).pass()).toMatchObject({ outcome: "built", commit: tip() });
   });
 });

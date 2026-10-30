@@ -45,7 +45,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   verify = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"]
   auto_merge = true
   ```
-- **Trigger** (`startAutoMerge`, in the `deliver` verb's transaction, after `recordDelivery`). A live row of the run is superseded (`redelivered`). Then, if the task is a yolo ship, not sensitive, and its project opts in, a new `auto_merges` row starts. It follows the first of these that applies:
+- **Trigger** (`startAutoMerge`, in the `deliver` verb's transaction, after `recordDelivery`). A live row of the run is superseded (`redelivered`). Then, if the task is a yolo ship, not sensitive, and its project opts in, a new `auto_merges` row starts (on a `landing = "queue"` project the PR joins the landing queue instead: docs/notes/2026-10-30-landing-queue-the-65.md). It follows the first of these that applies:
   - a passed verify of this head under today's policy (`waiting_checks`);
   - a running one (`verifying`);
   - a queued request (`queued`);
@@ -68,7 +68,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   | merging | its merge is proven | merged |
   | merging | its merge was refused | held (`merge_refused`) |
   | merging | unproven | stays; the existing `unproven_merge` P1 covers it |
-  | any live | run sent back, cancelled or failed; merged by hand; redelivered; auto_merge turned off | superseded |
+  | any live | run sent back, cancelled or failed; merged by hand; redelivered; auto_merge turned off (not a landing-queue entry's row: docs/notes/2026-10-30-landing-queue-the-65.md) | superseded |
 
 - **The merge** is the `merge` verb's own path, `src/policy/merge-path.ts`. `mergeable`, `applyMerge` and `settleMerge` are shared with the verb, and `prepareDaemonMerge` is the verb's prepare without a harness channel. The caller is `DAEMON_CALLER` (`{ role: "daemon" }`, a type only the daemon process constructs, not a `Role`), so `chooseApproval` finds no leader channel and uses a standing human approval (`flowryn approve`) if there is one, else the yolo posture: channel `yolo`. `checkGate` is unchanged. `merge.requested` has source `daemon` and `by: auto` (the verb's carry `by: leader` or `human`). Under channel `yolo` the run lands `by: auto` whoever proves the merge, its own settle or the watcher after a restart (`recordMergeResult` looks the merge up in `auto_merges`); one that used a standing human approval lands `by: other`, so a `landed` item reports it.
 - **Gate refusals.** `checks_pending`, `forge_unavailable`, `merge_in_flight`, `not_ready` and `head_moved` mean "not yet": the next pass tries again, and `head_moved` holds after 6 h. A stale read is recorded as the verb's is and tried again. Any other code holds with the gate's message and its help as the next command (`red_checks` names the `--allow-red` waiver).

@@ -3,6 +3,7 @@ import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
 import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
+import { landingProgress, latestLanding } from "../verify/landing-queue.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
@@ -327,6 +328,8 @@ function deliveryView(ctx: ReadCtx, run: FleetRow): Record<string, unknown> | un
   if (verified) view.verified = verificationLine(verified);
   const auto = latestAutoMerge(ctx.db, run.id);
   if (auto) view.auto_merge = autoMergeLine(ctx.db, auto);
+  const landing = latestLanding(ctx.db, run.id);
+  if (landing) view.landing = landingProgress(ctx.db, landing);
   const merge = latestMerge(ctx.db, run.task_id);
   if (merge) {
     const approval = ctx.db.query("SELECT channel, actor FROM approvals WHERE id = ?1").get(merge.approval_id) as { channel: string; actor: string } | null;
