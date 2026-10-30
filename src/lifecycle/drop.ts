@@ -227,7 +227,7 @@ export function dropRecord(db: Db, taskId: string): { task_id: string; plan_id: 
 const drop: VerbSpec = {
   name: "drop",
   summary: "Remove work that never started: a Queued task, or a plan none of whose phases has started (deleted from the backlog; the reason is kept)",
-  positionals: [{ name: "target", required: true, help: "task id, or plan id (p<N>)" }],
+  positionals: [{ name: "target", required: true, help: "task id, or plan id (p<N>)", complete: "task" }],
   flags: {
     "body-file": { type: "string", help: "why it is dropped, from a file or - for stdin (required)", fileFor: "body" },
     unblock: { type: "boolean", help: "also clear the blocked-by edges of open tasks that wait for it, rather than refuse" },

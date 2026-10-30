@@ -156,7 +156,7 @@ const todoAdd: VerbSpec = {
 const todoDone: VerbSpec = {
   name: "todo done",
   summary: "Mark a to-do done",
-  positionals: [{ name: "id", required: true, help: "to-do id" }],
+  positionals: [{ name: "id", required: true, help: "to-do id", complete: "todo" }],
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
@@ -176,7 +176,7 @@ const todoDue: VerbSpec = {
   name: "todo due",
   summary: "Set or clear a to-do's due date",
   positionals: [
-    { name: "id", required: true, help: "to-do id" },
+    { name: "id", required: true, help: "to-do id", complete: "todo" },
     { name: "date", required: true, help: "YYYY-MM-DD, today, tomorrow, +Nd or none" },
   ],
   flags: {},
@@ -203,7 +203,7 @@ const todoDue: VerbSpec = {
 const todoEdit: VerbSpec = {
   name: "todo edit",
   summary: "Change a to-do's title or notes (its due date stays; use todo due for that)",
-  positionals: [{ name: "id", required: true, help: "to-do id" }],
+  positionals: [{ name: "id", required: true, help: "to-do id", complete: "todo" }],
   flags: {
     title: { type: "string", help: "the new title, one line", placeholder: "text" },
     "body-file": { type: "string", help: "new notes, from a file or - for stdin", fileFor: "body" },
@@ -238,7 +238,7 @@ const todoEdit: VerbSpec = {
 const todoRm: VerbSpec = {
   name: "todo rm",
   summary: "Remove a to-do",
-  positionals: [{ name: "id", required: true, help: "to-do id" }],
+  positionals: [{ name: "id", required: true, help: "to-do id", complete: "todo" }],
   flags: {},
   kind: "mutation",
   roles: ["leader", "human"],
@@ -254,12 +254,14 @@ const todoRm: VerbSpec = {
   settle: settleIntent,
 };
 
-type DueFilter = "today" | "overdue";
+/** The filters `todo list --due` takes. */
+export const DUE_FILTERS = ["today", "overdue"] as const;
+type DueFilter = (typeof DUE_FILTERS)[number];
 
 function listTodos(ctx: ReadCtx, args: Args): HandlerResult {
   const today = localDate(new Date(ctx.now));
   const filter = stringArg(args, "due") as DueFilter | undefined;
-  if (filter && filter !== "today" && filter !== "overdue") throw new FlowrynError("bad_args", "--due must be today or overdue");
+  if (filter && !(DUE_FILTERS as readonly string[]).includes(filter)) throw new FlowrynError("bad_args", "--due must be today or overdue");
   const all = boolArg(args, "all");
   const when = (due: string | null) => (due === null ? "-" : due < today ? "overdue" : due === today ? "today" : "later");
   const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
@@ -290,7 +292,7 @@ const todoList: VerbSpec = {
   positionals: [],
   flags: {
     all: { type: "boolean", help: "include done to-dos" },
-    due: { type: "string", help: "only today (due today or earlier) or overdue", placeholder: "today|overdue" },
+    due: { type: "string", help: "only today (due today or earlier) or overdue", placeholder: "today|overdue", values: DUE_FILTERS },
   },
   kind: "read",
   roles: ["leader", "reader", "human"],

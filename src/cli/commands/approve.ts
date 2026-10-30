@@ -120,11 +120,11 @@ function print(io: CliIo, reply: Reply): number {
 const approve: VerbSpec = {
   name: "approve",
   summary: "Approve a merge, a discard or a review gate in your own terminal: shows what you approve, reads a code from /dev/tty",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: {
     "allow-red": { type: "string", help: "waive exactly one failing check; every other check must be green", placeholder: "check" },
     discard: { type: "boolean", help: "approve discarding the task's unlanded work (flowryn cleanup --discard)" },
-    gate: { type: "string", help: "pass the task's open review gate of this stage (design, qa, ...)", placeholder: "stage" },
+    gate: { type: "string", help: "pass the task's open review gate of this stage (design, qa, ...)", placeholder: "stage", complete: "stage" },
   },
   kind: "local",
   roles: ["human"],
