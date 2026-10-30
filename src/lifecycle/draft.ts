@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type VerbSpec } from "../api/verbs.ts";
@@ -137,7 +137,9 @@ export function draftPathOfPage(html: string): string | null {
  * as the file in the worktree renders now. Returns the file it showed.
  */
 export async function checkDraftPage(git: GitRunner, worktree: string, page: string, reportDir: string): Promise<DraftFile> {
-  const expected = realpathSync(draftPagePath(reportDir));
+  const rendered = draftPagePath(reportDir);
+  if (!existsSync(rendered)) throw new FlowrynError("draft_page_invalid", `no draft page at ${rendered}`, "$FLOWRYN_BIN draft render <file>, host that page, then stage done");
+  const expected = realpathSync(rendered);
   if (realpathSync(page) !== expected) throw new FlowrynError("draft_page_invalid", `a draft's review page is ${expected}`, "$FLOWRYN_BIN draft render <file>, host that page, then stage done");
   const html = readFileSync(expected, "utf8");
   const path = draftPathOfPage(html);

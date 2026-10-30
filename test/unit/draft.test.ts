@@ -118,6 +118,10 @@ describe("the draft page", () => {
     const other = join(reports, "draft", "other.html");
     writeFileSync(other, renderDraftPage(await readDraft(git, wt, "note.md")));
     expect((await failure(checkDraftPage(git, wt, other, reports))).message).toContain("a draft's review page is");
+
+    rmSync(page);
+    const unrendered = await failure(checkDraftPage(git, wt, other, reports));
+    expect(unrendered).toMatchObject({ code: "draft_page_invalid", message: expect.stringContaining("no draft page") });
   });
 
   test("a gate passes only while its page is the one stage done checked", async () => {
