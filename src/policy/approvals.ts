@@ -28,8 +28,10 @@ export const ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 /** A review page's pass code must be typed back this soon. */
 export const PAGE_CODE_TTL_MS = 10 * 60 * 1000;
-/** Wrong tries a pass code survives; the next wrong one voids it. */
+/** Wrong tries a gate's pass codes survive between them; the next wrong one voids the code held. */
 export const PAGE_CODE_TRIES = 3;
+/** Pass codes one gate may mint in the daemon's life; a pass asked for after that opens the leader's request only. */
+export const PAGE_CODE_MINTS = 5;
 
 export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "page" | "yolo";
 export type ApprovalAction = "merge" | "discard" | "gate" | "decide";
@@ -292,7 +294,6 @@ export interface PageCode {
   /** The worktree's HEAD when the code was minted: a pass from another HEAD is refused. */
   head: string;
   expiresAt: number;
-  wrong: number;
 }
 
 export type PageCodeCheck = "ok" | "none" | "expired" | "wrong" | "voided" | "moved";
@@ -303,17 +304,26 @@ export type PageCodeCheck = "ok" | "none" | "expired" | "wrong" | "voided" | "mo
  * database, a log, an event, an item or a page reply, all of which a worker
  * can read. One code per gate, sent to your notifications when the page asks
  * for a pass without one; typed back into the page, it passes the gate once.
- * A restart forgets them; you ask again.
+ * The wrong tries and the codes minted are counted per gate, not per code, so
+ * asking for a new code never buys more guesses. A restart forgets them; you
+ * ask again.
  */
 export class PageCodeStore {
   private readonly codes = new Map<string, PageCode>();
+  private readonly tally = new Map<string, { mints: number; wrong: number }>();
 
-  /** A fresh code for the gate, replacing any earlier one. */
-  mint(gate: string, head: string, now: number): PageCode {
+  /** A fresh code for the gate, replacing any earlier one; null once the gate has minted PAGE_CODE_MINTS. */
+  mint(gate: string, head: string, now: number): PageCode | null {
     for (const [id, old] of this.codes) if (old.expiresAt <= now) this.codes.delete(id);
+    const tally = this.tallyOf(gate);
+    if (tally.mints >= PAGE_CODE_MINTS) {
+      this.codes.delete(gate);
+      return null;
+    }
+    tally.mints += 1;
     let code = "";
     for (let i = 0; i < 4; i++) code += CODE_LETTERS[randomInt(CODE_LETTERS.length)];
-    const minted: PageCode = { gate, code, head, expiresAt: now + PAGE_CODE_TTL_MS, wrong: 0 };
+    const minted: PageCode = { gate, code, head, expiresAt: now + PAGE_CODE_TTL_MS };
     this.codes.set(gate, minted);
     return minted;
   }
@@ -325,9 +335,10 @@ export class PageCodeStore {
   }
 
   /**
-   * Check a typed code. Right: used up ("ok"). Wrong: counted, and the
-   * PAGE_CODE_TRIES-th wrong try voids it ("voided"). Expired, or a HEAD
-   * that moved since it was minted: voided.
+   * Check a typed code. Right: used up ("ok"). Wrong: counted against the
+   * gate, and from its PAGE_CODE_TRIES-th wrong try on, a wrong try voids the
+   * code held ("voided"). Expired, or a HEAD that moved since it was minted:
+   * voided.
    */
   check(gate: string, typed: string, head: string, now: number): PageCodeCheck {
     const held = this.codes.get(gate);
@@ -337,8 +348,9 @@ export class PageCodeStore {
       return "expired";
     }
     if (held.code !== typed.trim().toUpperCase()) {
-      held.wrong += 1;
-      if (held.wrong < PAGE_CODE_TRIES) return "wrong";
+      const tally = this.tallyOf(gate);
+      tally.wrong += 1;
+      if (tally.wrong < PAGE_CODE_TRIES) return "wrong";
       this.codes.delete(gate);
       return "voided";
     }
@@ -346,8 +358,17 @@ export class PageCodeStore {
     return held.head === head ? "ok" : "moved";
   }
 
-  /** Forget a gate's code (it closed). */
+  /** Forget a gate's code; its tally stands. */
   drop(gate: string): void {
     this.codes.delete(gate);
+  }
+
+  private tallyOf(gate: string): { mints: number; wrong: number } {
+    let tally = this.tally.get(gate);
+    if (!tally) {
+      tally = { mints: 0, wrong: 0 };
+      this.tally.set(gate, tally);
+    }
+    return tally;
   }
 }

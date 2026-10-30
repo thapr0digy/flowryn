@@ -317,7 +317,7 @@ describe("passing a review from its page with a pass code (docs/notes/2026-10-30
       queueSend(f, 1, gate.id, answers, null, true);
       const notified = join(f.h.home, "notified.jsonl");
       await waitUntil(() => existsSync(notified) && readFileSync(notified, "utf8").includes("Flowryn pass code"), 10_000, "the pass code notification");
-      const code = /Flowryn pass code: ([A-Z]{4})/.exec(readFileSync(notified, "utf8"))![1]!;
+      const code = /Type ([A-Z]{4}) on the review page/.exec(readFileSync(notified, "utf8"))![1]!;
       expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open" });
       expect(one(f, "SELECT 1 FROM items WHERE kind = 'pass_requested' AND run_id = ?1 AND state = 'open'", run)).not.toBeNull();
       await waitUntil(() => readFileSync(calls, "utf8").includes("A pass code went to your notifications"), 10_000, "the reply naming the code");

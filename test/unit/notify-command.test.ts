@@ -326,11 +326,12 @@ describe("a review page's pass code (docs/notes/2026-10-30-pass-a-review-c6.md)"
     const rec = recorder(h, 'echo "$stdin" >&2');
     const log: string[] = [];
     const p = pump(h, db, { now: 1_000 }, `command = "${rec.command}"`, { log });
-    expect(await p.sendPassCode("g1", "Flowryn pass code: WXYZ", "Type WXYZ on the review page to pass the design review of web-x")).toEqual(["command"]);
+    expect(await p.sendPassCode("g1", "Flowryn pass code", "Type WXYZ on the review page to pass the design review of web-x")).toEqual(["command"]);
     const [run] = rec.runs();
     expect(run!.stdin).toContain("Type WXYZ on the review page");
     expect(run!.env.FLOWRYN_NOTIFY_KIND).toBe("pass_code");
-    expect(run!.env.FLOWRYN_NOTIFY_TITLE).toBe("Flowryn pass code: WXYZ");
+    expect(run!.env.FLOWRYN_NOTIFY_TITLE).toBe("Flowryn pass code");
+    expect(JSON.stringify(run!.env)).not.toContain("WXYZ");
     expect(commandEvents(db)).toEqual([expect.objectContaining({ kind: "pass_code", ok: true, stderr: "" })]);
     expect(db.query("SELECT COUNT(*) AS n FROM notifications").get()).toEqual({ n: 0 });
     expect(JSON.stringify(db.query("SELECT * FROM events").all())).not.toContain("WXYZ");
@@ -347,8 +348,8 @@ describe("a review page's pass code (docs/notes/2026-10-30-pass-a-review-c6.md)"
     const seen: string[] = [];
     const cfg = parseConfig(`[notify]\nmacos = true\ncommand = "${rec.command}"`, h.home);
     const recording = new NotifyPump({ db, config: () => cfg, runtime: () => null, now: () => 1_000, log: () => {}, off: () => true, macos: async (title) => void seen.push(title), macosRecords: true });
-    expect(await recording.sendPassCode("g1", "Flowryn pass code: ABCD", "x")).toEqual(["macos"]);
-    expect(seen).toEqual(["Flowryn pass code: ABCD"]);
+    expect(await recording.sendPassCode("g1", "Flowryn pass code", "Type ABCD")).toEqual(["macos"]);
+    expect(seen).toEqual(["Flowryn pass code"]);
     expect(rec.runs()).toEqual([]);
   });
 });

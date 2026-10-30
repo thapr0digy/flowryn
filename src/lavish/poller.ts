@@ -144,6 +144,8 @@ export class LavishPoller {
   private readonly replies = new Map<string, { page: string; text: string }>();
   /** Gates whose next poll displaces a listener Lavish may still hold (a reply that fell back to a poll restart). */
   private readonly takeover = new Set<string>();
+  /** Gates whose finished poll is still being recorded: no new poll starts until its reply is queued. */
+  private readonly recording = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -241,7 +243,7 @@ export class LavishPoller {
     }
     let nextRetry: number | null = null;
     for (const [gate, page] of wanted) {
-      if (this.running.has(gate)) continue;
+      if (this.running.has(gate) || this.recording.has(gate)) continue;
       if (!lavish) {
         this.warnOnce(gate, `lavish: lavish-axi is not installed; gate ${gate}'s questions are answered only through the leader`);
         // A file:// page has nothing to listen for: it opens at once.
@@ -264,7 +266,7 @@ export class LavishPoller {
     // A gate whose questions are all answered gets its reply all the same: one short poll carries it,
     // so Lavish's conversation shows what Flowryn recorded instead of waiting on an agent for good.
     for (const [gate, reply] of this.replies) {
-      if (wanted.has(gate) || this.running.has(gate)) continue;
+      if (wanted.has(gate) || this.running.has(gate) || this.recording.has(gate)) continue;
       if (!lavish || !existsSync(reply.page)) {
         this.replies.delete(gate);
         continue;
@@ -294,7 +296,7 @@ export class LavishPoller {
     try {
       proc = Bun.spawn(args, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
     } catch (error) {
-      void this.finished(gate, page, -1, "", `cannot run ${lavish}: ${(error as Error).message}`, final);
+      this.finished(gate, page, -1, "", `cannot run ${lavish}: ${(error as Error).message}`, final).catch((e) => this.deps.log(`lavish: the failed poll of gate ${gate} could not be recorded: ${(e as Error).stack ?? String(e)}`));
       return;
     }
     const entry: Running = { page, proc, stopped: false, final, steady: null };
@@ -302,17 +304,22 @@ export class LavishPoller {
     this.keepPid(gate, proc.pid, page);
     if (!final) entry.steady = setTimeout(() => this.listening(gate, entry), this.deps.steadyMs ?? STEADY_MS);
     void (async () => {
+      let recording = false;
       try {
         const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
         if (entry.steady) clearTimeout(entry.steady);
         this.dropPid(gate, proc.pid);
         if (this.running.get(gate) === entry) this.running.delete(gate);
         if (entry.stopped || this.closed) return;
+        recording = true;
+        this.recording.add(gate);
         await this.finished(gate, page, code, stdout, stderr, final);
       } catch (error) {
         if (entry.steady) clearTimeout(entry.steady);
         if (this.running.get(gate) === entry) this.running.delete(gate);
         this.deps.log(`lavish: the poll of gate ${gate} could not be recorded: ${(error as Error).stack ?? String(error)}`);
+      } finally {
+        if (recording) this.recording.delete(gate);
       }
       this.kick();
     })();
@@ -393,7 +400,8 @@ export class LavishPoller {
         .map((d) => `${d.id} = ${sanitizeLine(d.answer ?? "-", 200)}`);
       const sent = routePageBatch(this.deps.db, gate, { messages: words, answers, ended: out.ended }, this.deps.now());
       // After the words went their way: a pass closes the gate.
-      const asked = out.sends.filter((s) => s.pass).map((s) => this.passSend(s.gate, s.code, heads.get(s.gate) ?? null));
+      const minting = new Set<string>();
+      const asked = out.sends.filter((s) => s.pass).map((s) => this.passSend(s.gate, s.code, heads.get(s.gate) ?? null, minting));
       let item: string | null = null;
       if (out.ended && !asked.some((a) => a.gate === gate && a.page?.outcome === "passed")) {
         recordLavishEnded(this.deps.db, gate, this.deps.now());
@@ -462,9 +470,10 @@ export class LavishPoller {
   /**
    * One Send's pass, in the caller's transaction: with a code, the page passes the gate if the code
    * is right (else the leader's request still opens); with none, the leader's request opens and a
-   * fresh code is minted for you. Without pagePass, only the request.
+   * fresh code is minted for you, at most one per gate in a batch (`minting`) and none past the
+   * gate's PAGE_CODE_MINTS. Without pagePass, only the request.
    */
-  private passSend(gate: string, code: string | null, head: string | null): PassOutcome {
+  private passSend(gate: string, code: string | null, head: string | null, minting: Set<string>): PassOutcome {
     const now = this.deps.now();
     const pagePass = this.deps.pagePass;
     if (pagePass && code !== null && head !== null) {
@@ -475,17 +484,18 @@ export class LavishPoller {
     }
     const request = requestGatePass(this.deps.db, gate, now);
     const asked = request.outcome === "requested" || request.outcome === "already";
-    const minted = pagePass && head !== null && asked ? pagePass.codes.mint(gate, head, now) : null;
+    const minted = pagePass && head !== null && asked && !minting.has(gate) ? pagePass.codes.mint(gate, head, now) : null;
+    minting.add(gate);
     return { gate, page: null, request, minted };
   }
 
-  /** Send a fresh code to you; the log and the event name the channels, never the code. */
+  /** Send a fresh code to you, in the text only (a notify command's title is in its environment); the log and the event name the channels, never the code. */
   private async sendCode(pagePass: NonNullable<PollerDeps["pagePass"]>, gate: string, code: PageCode): Promise<string[]> {
     const row = this.deps.db.query("SELECT g.stage, r.task_id, r.id AS run_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gate) as { stage: string; task_id: string; run_id: string } | null;
     const what = row ? `the ${row.stage} review of ${row.task_id}` : `review gate ${gate}`;
     let reached: string[] = [];
     try {
-      reached = await pagePass.sendCode(gate, `Flowryn pass code: ${code.code}`, `Type ${code.code} on the review page to pass ${what} (good for 10 minutes).`);
+      reached = await pagePass.sendCode(gate, "Flowryn pass code", `Type ${code.code} on the review page to pass ${what} (good for 10 minutes).`);
     } catch (error) {
       this.deps.log(`lavish: gate ${gate}'s pass code was not sent: ${(error as Error).message.replaceAll(code.code, "****")}`);
     }
