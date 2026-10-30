@@ -902,6 +902,18 @@ ALTER TABLE task_policy ADD COLUMN base_branch TEXT;
 ALTER TABLE runs ADD COLUMN base_branch TEXT;
 `;
 
+/**
+ * Migration 45 (docs/notes/2026-10-27-stack-a-plan-4y.md, phase 2): a stacked plan starts a phase
+ * on the open PR of the one task it still waits for. `plans.stack` is the plan's opt-in;
+ * `runs.stacked_on` the task whose branch the run's PR targets until that task lands (null: not
+ * stacked, or retargeted since).
+ */
+const STACKED_PLANS_SQL = /* sql */ `
+ALTER TABLE plans ADD COLUMN stack INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN stacked_on TEXT;
+CREATE INDEX runs_stacked_on ON runs(stacked_on) WHERE stacked_on IS NOT NULL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -947,6 +959,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 42, name: "learnings", sql: LEARNINGS_SQL },
   { version: 43, name: "human-waits", sql: HUMAN_WAITS_SQL },
   { version: 44, name: "base-branch", sql: BASE_BRANCH_SQL },
+  { version: 45, name: "stacked-plans", sql: STACKED_PLANS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -156,6 +156,8 @@ export interface Forge {
   annotations(repo: RepoRef, checkRunId: number): Promise<Annotation[]>;
   /** Merge at exactly `sha`: the forge refuses when the head moved (design section 7: bound to the head). */
   merge(ref: PrRef, sha: string, method: string, title: string): Promise<MergeResult>;
+  /** Point an open PR at another base branch (a stacked PR whose base landed); the PR as GitHub has it after. */
+  setBase(ref: PrRef, base: string): Promise<PullRequest>;
   /** A PR's reviews, inline review comments and conversation comments (src/forge/feedback.ts reads them). */
   feedback(ref: PrRef): Promise<PrFeedback>;
   /** A PR's inline review threads and whether each is resolved: only GitHub's GraphQL API says. */
