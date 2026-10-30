@@ -15,7 +15,9 @@ import { ulid } from "../util/ulid.ts";
  * Pi's ctx.ui.confirm (pi-confirm,
  * carried by the approval key only the extension holds), `flowryn approve`
  * in your shell (cli-tty) and the board (board), both behind a code read
- * from /dev/tty. yolo is a project posture, recorded too so every merge
+ * from /dev/tty, and the review page (page, a gate pass only: the code the
+ * daemon sent to your notifications, typed into the page; PageCodeStore
+ * below). yolo is a project posture, recorded too so every merge
  * names what allowed it.
  */
 
@@ -24,10 +26,16 @@ export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 export const ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 /** A /dev/tty challenge must be answered this soon. */
 export const CHALLENGE_TTL_MS = 2 * 60 * 1000;
+/** A review page's pass code must be typed back this soon. */
+export const PAGE_CODE_TTL_MS = 10 * 60 * 1000;
+/** Wrong tries per gate, across all its codes; this one and every later one voids the code held. */
+export const PAGE_CODE_TRIES = 3;
+/** Pass codes one gate may mint in the daemon's life; a pass asked for after that opens the leader's request only. */
+export const PAGE_CODE_MINTS = 5;
 
-export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "yolo";
+export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "page" | "yolo";
 export type ApprovalAction = "merge" | "discard" | "gate" | "decide";
-export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "claude-chat", "pi-confirm", "cli-tty", "board"];
+export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "claude-chat", "pi-confirm", "cli-tty", "board", "page"];
 
 export interface ApprovalRow {
   id: string;
@@ -93,7 +101,7 @@ export function insertApproval(db: Db, a: NewApproval): ApprovalRow {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
   ).run(id, a.task, a.ref, a.head, a.channel, a.actor, a.action, a.allowRed ?? null, a.now, a.now + APPROVAL_TTL_MS);
   appendEvent(db, {
-    source: a.channel === "cli-tty" || a.channel === "board" ? "cli" : a.channel === "yolo" ? "daemon" : "hook",
+    source: a.channel === "cli-tty" || a.channel === "board" ? "cli" : a.channel === "yolo" || a.channel === "page" ? "daemon" : "hook",
     kind: "approval.recorded",
     taskId: a.task,
     payload: { approval: id, channel: a.channel, actor: a.actor, action: a.action, ref: a.ref, head: a.head, allow_red: a.allowRed ?? null },
@@ -292,5 +300,92 @@ export class ChallengeStore {
     this.pending.delete(id);
     if (challenge.expiresAt <= now) return "expired";
     return challenge.code === code.trim().toUpperCase() ? challenge : "wrong";
+  }
+}
+
+// --- the review page's pass code ----------------------------------------------------------------
+
+export interface PageCode {
+  gate: string;
+  code: string;
+  /** The worktree's HEAD when the code was minted: a pass from another HEAD is refused. */
+  head: string;
+  expiresAt: number;
+}
+
+export type PageCodeCheck = "ok" | "none" | "expired" | "wrong" | "voided" | "moved";
+
+/**
+ * Pass codes for review pages (docs/notes/2026-10-30-pass-a-review-c6.md), in
+ * the daemon's memory only, like the /dev/tty challenge: never in the
+ * database, a log, an event, an item or a page reply, all of which a worker
+ * can read. One code per gate, sent to your notifications when the page asks
+ * for a pass without one; typed back into the page, it passes the gate once.
+ * The wrong tries and the codes minted are counted per gate, not per code, so
+ * asking for a new code never buys more guesses. A restart forgets them; you
+ * ask again.
+ */
+export class PageCodeStore {
+  private readonly codes = new Map<string, PageCode>();
+  private readonly tally = new Map<string, { mints: number; wrong: number }>();
+
+  /** A fresh code for the gate, replacing any earlier one; null once the gate has minted PAGE_CODE_MINTS. */
+  mint(gate: string, head: string, now: number): PageCode | null {
+    for (const [id, old] of this.codes) if (old.expiresAt <= now) this.codes.delete(id);
+    const tally = this.tallyOf(gate);
+    if (tally.mints >= PAGE_CODE_MINTS) {
+      this.codes.delete(gate);
+      return null;
+    }
+    tally.mints += 1;
+    let code = "";
+    for (let i = 0; i < 4; i++) code += CODE_LETTERS[randomInt(CODE_LETTERS.length)];
+    const minted: PageCode = { gate, code, head, expiresAt: now + PAGE_CODE_TTL_MS };
+    this.codes.set(gate, minted);
+    return minted;
+  }
+
+  /** Does the gate hold a live code? (tests and the page's reply) */
+  has(gate: string, now: number): boolean {
+    const held = this.codes.get(gate);
+    return held !== undefined && held.expiresAt > now;
+  }
+
+  /**
+   * Check a typed code. Right: used up ("ok"). Wrong: counted against the
+   * gate, and from its PAGE_CODE_TRIES-th wrong try on, a wrong try voids the
+   * code held ("voided"). Expired, or a HEAD that moved since it was minted:
+   * voided.
+   */
+  check(gate: string, typed: string, head: string, now: number): PageCodeCheck {
+    const held = this.codes.get(gate);
+    if (!held) return "none";
+    if (held.expiresAt <= now) {
+      this.codes.delete(gate);
+      return "expired";
+    }
+    if (held.code !== typed.trim().toUpperCase()) {
+      const tally = this.tallyOf(gate);
+      tally.wrong += 1;
+      if (tally.wrong < PAGE_CODE_TRIES) return "wrong";
+      this.codes.delete(gate);
+      return "voided";
+    }
+    this.codes.delete(gate);
+    return held.head === head ? "ok" : "moved";
+  }
+
+  /** Forget a gate's code; its tally stands. */
+  drop(gate: string): void {
+    this.codes.delete(gate);
+  }
+
+  private tallyOf(gate: string): { mints: number; wrong: number } {
+    let tally = this.tally.get(gate);
+    if (!tally) {
+      tally = { mints: 0, wrong: 0 };
+      this.tally.set(gate, tally);
+    }
+    return tally;
   }
 }

@@ -27,6 +27,11 @@ import { getAway } from "./away.ts";
  * reaches you off the Mac: a shell command of yours, run for every P0 send
  * and, while you are away, for the batched one, with the text on stdin and
  * never in its command line. Each run is a `notification.command` event.
+ *
+ * A review page's pass code (sendPassCode) goes straight to the macOS
+ * notification and the notify command, never through an item, a
+ * notifications row, an event or the log, and never to Herdr: a worker can
+ * read all of those (docs/notes/2026-10-30-pass-a-review-c6.md).
  */
 
 export type MacNotify = (title: string, body: string) => Promise<void>;
@@ -45,6 +50,8 @@ export interface NotifyDeps {
   env?: NodeJS.ProcessEnv;
   /** Where the notify command runs: the Flowryn home. */
   cwd?: string;
+  /** `macos` is a recorder (FLOWRYN_NOTIFIER=record:), which a pass code still reaches with notifications off (the tests' seam). */
+  macosRecords?: boolean;
 }
 
 interface Pending {
@@ -66,7 +73,7 @@ export type NotifyKind = "p0" | "batch";
 
 /** What the notify command is told: one send, or `flowryn notify test`'s sample. */
 export interface CommandMessage {
-  kind: NotifyKind | "test";
+  kind: NotifyKind | "test" | "pass_code";
   notification: string | null;
   away: boolean;
   title: string;
@@ -227,6 +234,39 @@ export class NotifyPump {
     const outcome = await this.runCommand(cfg, message);
     tx(db, () => recordCommandRun(db, message, outcome, this.deps.now()));
     return { message, outcome };
+  }
+
+  /**
+   * Send a review page's pass code to you: the macOS notification (when
+   * `[notify] macos`) and the notify command (when set, whether or not you are
+   * away). Returns the channels it reached; none with notifications off, except
+   * a recorder. The code is in the text only: not logged, not stored.
+   */
+  async sendPassCode(gate: string, title: string, text: string): Promise<string[]> {
+    if (this.deps.off?.()) {
+      if (!this.deps.macosRecords || !this.deps.macos) return [];
+      await this.deps.macos(title, text);
+      return ["macos"];
+    }
+    const cfg = notifyConfig(this.deps.config());
+    const reached: string[] = [];
+    if (cfg.macos) {
+      try {
+        await (this.deps.macos ?? osascriptNotify)(title, text);
+        reached.push("macos");
+      } catch (error) {
+        this.deps.log(`notify: macos failed for gate ${gate}'s pass code: ${(error as Error).message.replace(text, "<text>")}`);
+      }
+    }
+    if (cfg.command !== "") {
+      const message: CommandMessage = { kind: "pass_code", notification: null, away: getAway(this.deps.db, this.deps.now()) !== null, title, items: [{ id: gate, lane: "P1", line: text }] };
+      const outcome = await this.runCommand(cfg, message);
+      // Its stderr is not kept: a command that echoes its input would put the code in an event.
+      tx(this.deps.db, () => recordCommandRun(this.deps.db, message, { ...outcome, stderr: "" }, this.deps.now()));
+      if (outcome.code === 0) reached.push("command");
+      else this.deps.log(`notify: command failed for gate ${gate}'s pass code: ${outcome.timedOut ? "timed out" : `exit ${outcome.code}`}`);
+    }
+    return reached;
   }
 
   /** In one transaction: pick what is due, record it as sent, and return what to deliver. */
