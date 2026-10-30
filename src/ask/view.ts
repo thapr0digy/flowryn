@@ -43,7 +43,8 @@ export function askView(ctx: ReadCtx, ask: AskRow, full: boolean): HandlerResult
     spend: `${usd(ask.cost_usd)} of a ${usd(ask.max_usd)} cap`,
     asked: `${span(ctx.now - ask.created_at)} ago by ${ask.created_by}`,
     ran: ask.attempts > 1 ? `${ran} (attempt ${ask.attempts})` : ran,
-    ...(item ? { item: item.id } : {}),
+    // Not `item`: show's afterRead reads that as the view's own item and would report its state as the ask's.
+    ...(item ? { open_item: item.id } : {}),
     question: text.block(ask.question, QUESTION_LINES, MAX_LINE_CHARS),
   };
   if (ask.reason) data.reason = text.line(ask.reason, MAX_LINE_CHARS);
