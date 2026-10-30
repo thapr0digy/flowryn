@@ -89,6 +89,7 @@ import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 import { adoptLegacyScope } from "../leader/scope.ts";
 import { refreshScopeGuard } from "../leader/scope-guard.ts";
 import { AutoMerger, startAutoMerge } from "../verify/auto-merge.ts";
+import { deliveredToQueue, LANDING_NET_TIMEOUT_MS, LandingQueue } from "../verify/landing-queue.ts";
 
 export interface DaemonOptions {
   env?: NodeJS.ProcessEnv;
@@ -528,7 +529,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
       // What the watcher read (checks, merges) may move a yolo auto-merge on.
       passed: () => autoMerger?.kick(),
-      autoMerge: (run, d, now) => void startAutoMerge(database, config, run, d, now),
+      autoMerge: (run, d, now) => {
+        // A queue project's carried head waits its turn in the landing queue instead.
+        if (!deliveredToQueue(database, config, run, d.head, now)) startAutoMerge(database, config, run, d, now);
+      },
       log,
       now: Date.now,
     });
@@ -588,7 +592,17 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       drainAsks: (isStopped) => drainAsks(askDeps, isStopped),
     });
     // Yolo auto-merge (src/verify/auto-merge.ts): an opted-in project's deliveries verified and merged with no leader turn.
-    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick() });
+    // The landing queue (src/verify/landing-queue.ts): a queue project's PRs brought up to date and landed in turn, inside the auto-merger's pass.
+    const landing = new LandingQueue({
+      db: database,
+      config: () => config,
+      git: deliveryGit,
+      netGit: gitRunner(resolveTool(config, "git") ?? "git", LANDING_NET_TIMEOUT_MS),
+      now: Date.now,
+      log,
+      kickScheduler: () => scheduler?.kick(),
+    });
+    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick(), landing });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
       explainWaits: () => scheduler?.kickWaits(),

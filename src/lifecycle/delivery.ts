@@ -254,7 +254,7 @@ function carryApplies(db: Db, run: RunWithPolicy, previous: Delivered | null, re
 function noteCarried(
   db: Db,
   run: RunWithPolicy,
-  q: { ref: string; pr: PullRequest; carry: Carry; source: "cli" | "github"; via: string },
+  q: { ref: string; pr: Pick<PullRequest, "headSha" | "number" | "headRef">; carry: Carry; source: "cli" | "github" | "daemon"; via: string },
   now: number,
 ): { request: string | null; note: string; seq: number } {
   const to = q.pr.headSha;
@@ -288,6 +288,24 @@ export function carryDelivery(db: Db, run: RunWithPolicy, delivered: Delivered, 
   const { request, note, seq } = noteCarried(db, run, { ref: delivered.ref, pr, carry, source: "github", via: "watcher" }, now);
   const title = taskTitle(db, run.task_id);
   openReadyItem(db, run, seq, `PR ready: ${title} (${run.project_id}), ${checks ? checksLine(checks) : "checks unknown"}; ${note}`, now);
+  return { request };
+}
+
+/**
+ * The landing queue merged the run's base into its delivered head itself and
+ * pushed it (src/verify/landing-queue.ts): the delivery moves to the new head
+ * as the watcher's carry moves it, for any work, since the daemon made the
+ * merge (the queue decides what becomes of a human approval). Standing
+ * records are voided; the new head's verify is queued. Call inside a
+ * transaction, with a proof of exactly delivered.head to pr.headSha.
+ */
+export function carryLanding(db: Db, run: RunWithPolicy, delivered: Delivered, pr: Pick<PullRequest, "headSha" | "number" | "headRef">, carry: Carry, now: number): { request: string | null } {
+  db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES (?1, ?2, 'pr', ?3, ?4, ?5, ?6)").run(artifactId(now), run.task_id, delivered.ref, pr.headSha, now, delivered.head);
+  voidApprovals(db, run.task_id, now, `the landing queue merged the base into it at ${pr.headSha.slice(0, 8)}`);
+  const { request, note, seq } = noteCarried(db, run, { ref: delivered.ref, pr, carry, source: "daemon", via: "landing" }, now);
+  const title = taskTitle(db, run.task_id);
+  const what = run.sensitive ? `Sensitive PR waits for your approval: ${title} (${run.project_id})` : `PR ready: ${title} (${run.project_id})`;
+  openReadyItem(db, run, seq, `${what}; ${note}`, now);
   return { request };
 }
 

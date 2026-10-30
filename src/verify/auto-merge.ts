@@ -122,10 +122,14 @@ function progressOf(db: Db, row: AutoMergeRow): string | null {
 
 /** Keep the run's open pr_ready line ending in the auto-merge's progress; true when it changed. Call inside a transaction. */
 function refreshReadyLine(db: Db, row: AutoMergeRow): boolean {
-  const item = findOpenRunItem(db, "pr_ready", row.run_id);
+  return setReadyProgress(db, row.run_id, progressOf(db, row));
+}
+
+/** End the run's open pr_ready line in `progress` (the auto-merge's, or the landing queue's place), or nothing; true when it changed. Call inside a transaction. */
+export function setReadyProgress(db: Db, runId: string, progress: string | null): boolean {
+  const item = findOpenRunItem(db, "pr_ready", runId);
   if (!item) return false;
   const base = (item.full_line ?? item.line).split(READY_SEPARATOR)[0]!;
-  const progress = progressOf(db, row);
   const lines = itemLines(progress ? `${base}${READY_SEPARATOR}${progress}` : base);
   if (lines.line === item.line && lines.full_line === item.full_line) return false;
   db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(item.id, lines.line, lines.full_line);
@@ -168,6 +172,8 @@ export interface AutoMergeDelivery {
   headRef: string | null;
   /** Local-only work: the worktree whose HEAD is verified. */
   worktree: string | null;
+  /** Who started the row: the deliver verb (cli, the default) or the landing queue (daemon). */
+  source?: EventSource;
 }
 
 function isYolo(db: Db, taskId: string): boolean {
@@ -190,11 +196,27 @@ function optedIn(config: FlowrynConfig, projectId: string): boolean {
  * is queued, or else queuing one (source auto). Returns the new row, if any.
  */
 export function startAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number): AutoMergeRow | null {
-  const live = liveAutoMerge(db, run.id);
-  if (live) move(db, live, "superseded", { reason: "redelivered", detail: `delivered again at ${d.head.slice(0, 8)}` }, now, "cli");
+  supersedeAutoMerge(db, run.id, "redelivered", `delivered again at ${d.head.slice(0, 8)}`, now, "cli");
   if (run.kind !== "ship" || run.sensitive || !isYolo(db, run.task_id) || !optedIn(config, run.project_id)) return null;
   // A stacked run cannot merge until the task beneath it lands; its delivery after the retarget starts one.
   if (run.stacked_on) return null;
+  return createAutoMerge(db, config, run, d, now);
+}
+
+/** Supersede the run's live row, if any. Call inside a transaction. */
+export function supersedeAutoMerge(db: Db, runId: string, reason: string, detail: string, now: number, source: EventSource = "daemon"): void {
+  const live = liveAutoMerge(db, runId);
+  if (live) move(db, live, "superseded", { reason, detail }, now, source);
+}
+
+/**
+ * A new row for the delivered head, whoever asked (a delivery on an opted-in
+ * project, or the landing queue's head of line, approved or routine): it
+ * follows a verify of this head that passed, is running or is queued, or else
+ * queues one (source auto). The caller has superseded any live row. Call
+ * inside a transaction.
+ */
+export function createAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number): AutoMergeRow {
   const policy = verifyPolicyId(verifyConfig(config, run.project_id)!);
   const next = Number(getMeta(db, "next_auto_merge_no") ?? "1");
   setMeta(db, "next_auto_merge_no", String(next + 1));
@@ -232,7 +254,7 @@ export function startAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy
     `INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, request_id, verification_id, created_at, state_since, updated_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10)`,
   ).run(id, run.id, run.task_id, run.project_id, d.ref, d.head, state, requestId, verificationId, now);
-  appendEvent(db, { source: "cli", kind: "auto_merge.started", runId: run.id, taskId: run.task_id, payload: { auto_merge: id, ref: d.ref, head: d.head, state, request: requestId, verification: verificationId, policy }, ts: now });
+  appendEvent(db, { source: d.source ?? "cli", kind: "auto_merge.started", runId: run.id, taskId: run.task_id, payload: { auto_merge: id, ref: d.ref, head: d.head, state, request: requestId, verification: verificationId, policy }, ts: now });
   const row = getAutoMerge(db, id)!;
   refreshReadyLine(db, row);
   return row;
@@ -273,9 +295,18 @@ export function sendBackText(v: Verification, step: VerifyStep): string {
  */
 const RETRY_CODES = new Set(["checks_pending", "forge_unavailable", "merge_in_flight", "not_ready", "head_moved"]);
 
+/** The landing queue as the controller drives it (src/verify/landing-queue.ts). */
+export interface LandingHooks {
+  /** Advance every project's line: before the rows (a new head of line), and after (the next one, once a row merged). */
+  pass(): Promise<void>;
+  /** Whether a row may merge now; false when its base moved past it and the queue sent it back to integrate. */
+  beforeMerge(row: AutoMergeRow): Promise<boolean>;
+}
+
 export interface AutoMergerDeps extends MergeServices {
   /** A sent-back ship's last stage waits for a grant: the scheduler looks now. */
   kickScheduler(): void;
+  landing?: LandingHooks;
   /** The fallback pass interval (AUTO_MERGE_TICK_MS). */
   tickMs?: number;
 }
@@ -322,6 +353,7 @@ export class AutoMerger {
 
   /** One pass over the live rows. Exposed for tests. */
   async pass(): Promise<void> {
+    await this.landingPass();
     for (const row of liveAutoMerges(this.deps.db)) {
       if (this.stopped) return;
       try {
@@ -329,6 +361,16 @@ export class AutoMerger {
       } catch (error) {
         this.deps.log(`auto-merge ${row.id}: ${(error as Error).stack ?? String(error)}`);
       }
+    }
+    await this.landingPass();
+  }
+
+  private async landingPass(): Promise<void> {
+    if (!this.deps.landing || this.stopped) return;
+    try {
+      await this.deps.landing.pass();
+    } catch (error) {
+      this.deps.log(`landing queue: ${(error as Error).stack ?? String(error)}`);
     }
   }
 
@@ -375,6 +417,8 @@ export class AutoMerger {
     if (row.state !== "merging" && run.state !== "ready") return `the run is ${run.state} (sent back)`;
     const delivered = deliveredOf(db, run.task_id);
     if (!delivered || delivered.head !== row.head_sha) return "redelivered";
+    // The landing queue's head of line: the queue ends it when the project leaves the queue.
+    if (db.query("SELECT 1 FROM landing_queue WHERE auto_merge_id = ?1 AND state = 'landing'").get(row.id)) return null;
     let enabled: boolean;
     try {
       enabled = autoMergeEnabled(this.deps.config(), row.project_id);
@@ -477,6 +521,7 @@ export class AutoMerger {
         return tx(db, () => this.hold(row, "checks_timeout", `GitHub's checks have been pending for over ${CHECKS_WAIT_MS / 3_600_000} h (${pr.checks!.pending.join(", ") || pr.checks!.line})`, `flowryn show ${row.task_id}; once they finish: flowryn merge ${row.task_id}`, now));
       }
     }
+    if (this.deps.landing && !(await this.deps.landing.beforeMerge(row))) return getAutoMerge(db, row.id) ?? row;
     return this.merge(row);
   }
 

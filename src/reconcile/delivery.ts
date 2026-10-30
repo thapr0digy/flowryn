@@ -13,7 +13,7 @@ import { latestMerge, recordMergeResult } from "../policy/merge.ts";
 import { isActive, isConflictGate, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
 import type { CleanMerge } from "../policy/clean-merge.ts";
 import type { HeadHistory } from "../policy/head-history.ts";
-import { openDivergence } from "./divergence.ts";
+import { closeDivergence, openDivergence, type DivergenceRow } from "./divergence.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 
 /**
@@ -71,6 +71,13 @@ export function headMoveRecorded(db: Db, runId: string, delivered: string, head:
   );
 }
 
+/** Close the open divergence for exactly this head move: the daemon's own push made it and carried the delivery over. Call inside a transaction. */
+export function settleHeadMove(db: Db, run: RunWithPolicy, delivered: string, head: string, now: number): void {
+  const prefix = headMoveSummary(delivered, head);
+  const open = db.query("SELECT * FROM divergences WHERE run_id = ?1 AND substr(summary, 1, ?3) = ?2 AND resolved_at IS NULL").all(run.id, prefix, prefix.length) as DivergenceRow[];
+  for (const d of open) closeDivergence(db, d, "carried", "landing.carried", "daemon", now);
+}
+
 /** The divergence for a moved head, tagged when its history was rewritten or git could not say. */
 function headMoved(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, history: HeadHistory, notCarried: string | null, now: number): void {
   if (headMoveRecorded(db, run.id, delivered.head, pr.headSha)) return;
@@ -94,36 +101,49 @@ export function conflictAction(nudgedHeads: readonly (string | null)[], head: st
   return nudgedHeads.length >= MAX_CONFLICT_NUDGES || nudgedHeads.includes(head) ? "ask" : "nudge";
 }
 
+/** A conflict with the run's base, as the watcher (GitHub's mergeable) or the landing queue (git merge) saw it. */
+export interface BaseConflict {
+  url: string;
+  base: string;
+  head: string;
+  /** The conflicted paths, when git named them (the landing queue's own merge). */
+  files?: readonly string[];
+  source: "github" | "daemon";
+}
+
 /**
  * A delivered PR GitHub reads as not mergeable (spec 3, phase 3: nudge a ship
- * whose PR conflicts). Once per delivered head, and at most
- * MAX_CONFLICT_NUDGES times per run, the ship goes back to work as `decline`
- * sends it, told to merge its base and deliver again; a P1 info line says so.
- * A head already nudged (the worker delivered it again unchanged), or a run
- * past the limit, opens one `pr_conflict` P1 instead. Call inside a
+ * whose PR conflicts), or whose base the landing queue could not merge in
+ * cleanly. Once per delivered head, and at most MAX_CONFLICT_NUDGES times per
+ * run, the ship goes back to work as `decline` sends it, told to merge its
+ * base and deliver again; a P1 info line says so. A head already nudged (the
+ * worker delivered it again unchanged), or a run past the limit, opens one
+ * `pr_conflict` P1 instead. Returns whether it was sent back. Call inside a
  * transaction.
  */
-function nudgeConflict(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, title: string, now: number): boolean {
+export function sendConflictBack(db: Db, run: RunWithPolicy, delivered: Delivered, conflict: BaseConflict, title: string, now: number): boolean {
   const nudges = (db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'run.conflict_nudged' ORDER BY seq").all(run.id) as { payload: string }[]).map(
     (e) => (JSON.parse(e.payload) as { head?: string | null }).head ?? null,
   );
+  const base = conflict.base || "main";
   if (conflictAction(nudges, delivered.head) === "ask") {
     if (!findOpenRunItem(db, "pr_conflict", run.id)) {
-      const event = appendEvent(db, { source: "github", kind: "pr.conflict", runId: run.id, taskId: run.task_id, payload: { pr: pr.url, head: pr.headSha, nudges: nudges.length }, ts: now });
+      const event = appendEvent(db, { source: conflict.source, kind: "pr.conflict", runId: run.id, taskId: run.task_id, payload: { pr: conflict.url, head: conflict.head, nudges: nudges.length }, ts: now });
       openItem(db, {
         kind: "pr_conflict",
         eventSeq: event.seq,
         taskId: run.task_id,
         runId: run.id,
-        line: `PR still conflicts with ${pr.baseRef} after ${nudges.length} nudge${nudges.length === 1 ? "" : "s"}: ${title} (${run.project_id}) at ${pr.headSha.slice(0, 8)}; steer it or flowryn decline ${run.task_id}`,
+        line: `PR still conflicts with ${base} after ${nudges.length} nudge${nudges.length === 1 ? "" : "s"}: ${title} (${run.project_id}) at ${conflict.head.slice(0, 8)}; steer it or flowryn decline ${run.task_id}`,
         now,
       });
     }
     return false;
   }
-  const base = pr.baseRef || "main";
-  const text = `Your PR ${pr.url} conflicts with ${base}: GitHub reads it as not mergeable at ${pr.headSha.slice(0, 8)}. Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}), resolve the conflicts, run the tests, then ship it again and deliver. Never rebase or force-push.`;
-  const { seq } = sendBack(db, run, { text, feedback: `conflicts with ${base}`, why: "the PR conflicts with its base", event: { source: "github", kind: "run.conflict_nudged", payload: { pr: pr.url, base, nudge: nudges.length + 1 } } }, now);
+  const seen = conflict.source === "github" ? `GitHub reads it as not mergeable at ${conflict.head.slice(0, 8)}` : `the landing queue's merge of origin/${base} into ${conflict.head.slice(0, 8)} conflicted`;
+  const files = conflict.files && conflict.files.length > 0 ? ` Conflicted: ${conflict.files.slice(0, 20).join(", ")}${conflict.files.length > 20 ? ` and ${conflict.files.length - 20} more` : ""}.` : "";
+  const text = `Your PR ${conflict.url} conflicts with ${base}: ${seen}.${files} Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}), resolve the conflicts, run the tests, then ship it again and deliver. Never rebase or force-push.`;
+  const { seq } = sendBack(db, run, { text, feedback: `conflicts with ${base}`, why: "the PR conflicts with its base", event: { source: conflict.source, kind: "run.conflict_nudged", payload: { pr: conflict.url, base, nudge: nudges.length + 1, ...(conflict.files ? { files: conflict.files.slice(0, 20) } : {}) } } }, now);
   openItem(db, {
     kind: "conflict_nudged",
     eventSeq: seq,
@@ -133,6 +153,10 @@ function nudgeConflict(db: Db, run: RunWithPolicy, delivered: Delivered, pr: Pul
     now,
   });
   return true;
+}
+
+function nudgeConflict(db: Db, run: RunWithPolicy, delivered: Delivered, pr: PullRequest, title: string, now: number): boolean {
+  return sendConflictBack(db, run, delivered, { url: pr.url, base: pr.baseRef, head: pr.headSha, source: "github" }, title, now);
 }
 
 /** The base a stacked run's task beneath landed in, or null while it has not landed. */
@@ -222,6 +246,8 @@ export function applyPrObservation(
   }
   let carried = false;
   let current = delivered;
+  // GitHub still shows the head this delivery was carried from: it has not caught up with the push yet.
+  if (pr.headSha !== delivered.head && delivered.carriedFrom === pr.headSha) return { landed: false };
   if (pr.headSha !== delivered.head) {
     const carry = opts.carry;
     if (carry?.proof.ok && carryDelivery(db, run, delivered, pr, checks, { from: delivered.head, steps: carry.proof.steps, verifyPolicy: carry.verifyPolicy }, now)) {
