@@ -23,7 +23,7 @@ The floor is in code (`DEADLINE_FLOOR`, src/attention/decisions-policy.ts). All 
 
 ## How it works
 
-1. **The kind is recorded when a question opens** (`decisions.reserved_class`, migration 46 `reserved-class`). It is never derived from the wording, so a worker cannot word its way in. Older rows are NULL and never qualify.
+1. **The kind is recorded when a question opens** (`decisions.reserved_class`, migration 47 `reserved-class`). It is never derived from the wording, so a worker cannot word its way in. Older rows are NULL and never qualify.
    - The CI-wait watchdog writes `ci-wait`.
    - `ask` writes the keyword class when the reserved reason is one.
    - A `--nomistakes` ask writes:
