@@ -55,6 +55,10 @@ describe("notes projects", () => {
         "FAKE: commit q4.md Something else entirely.",
         "FAKE: deliver-local",
         "FAKE: commit q4.md Ship the notes kind, and more.",
+        // Another file on the branch is refused too: only the approved draft lands.
+        "FAKE: commit other.md Nobody reviewed this.",
+        "FAKE: deliver-local",
+        "FAKE: uncommit other.md",
         "FAKE: deliver-local",
         "FAKE: sleep 120000",
       ].join("\n");
@@ -83,10 +87,12 @@ describe("notes projects", () => {
 
       expect((await e.approve(task, { gate: "draft" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.state === "ready" && r.stage === "final" && r.stage_state === "done", "the delivery");
-      const delivered = (await e.replies(task, 6)).filter((r) => r.args.includes("--local"));
+      const delivered = (await e.replies(task, 7)).filter((r) => r.args.includes("--local"));
       expect(delivered[0]!.code).toBe(2);
       expect((delivered[0]!.reply.error as { code: string }).code).toBe("draft_changed");
-      expect(delivered[1]!.code).toBe(0);
+      expect(delivered[1]!.code).toBe(2);
+      expect(delivered[1]!.reply.error as { code: string; message: string }).toMatchObject({ code: "draft_changed", message: expect.stringContaining("other.md") });
+      expect(delivered[2]!.code).toBe(0);
       // Nothing is held for validation: a draft has nothing to test.
       expect(one(e, "SELECT 1 FROM pool_leases WHERE run_id = ?1 AND pool = 'validation'", run)).toBeNull();
 
@@ -95,6 +101,7 @@ describe("notes projects", () => {
       await f.waitRun(run, (r) => r.state === "cleaned", "cleaned", 30_000);
       expect(sh(project.path, ["show", "main:q4.md"])).toBe("Ship the notes kind, and more.");
       expect(sh(project.path, ["rev-parse", "main:q4.md"])).toBe(gate.draft_blob);
+      expect(sh(project.path, ["ls-tree", "--name-only", "main", "other.md"])).toBe("");
     },
     { timeout: 150_000 },
   );

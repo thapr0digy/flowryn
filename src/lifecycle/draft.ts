@@ -184,18 +184,31 @@ export function approvedDraft(db: Db, runId: string): { gate: string; path: stri
 
 /**
  * At delivery: a run that passed a draft review delivers that file as
- * approved. Its committed blob at HEAD must be the approved one.
+ * approved. Its committed blob at HEAD must be the approved one, and the
+ * branch must change no other path since the run's base.
  */
 export async function requireApprovedDraft(db: Db, git: GitRunner, run: RunWithPolicy): Promise<void> {
   const approved = approvedDraft(db, run.id);
   if (!approved) return;
   const shown = await git(["rev-parse", "--verify", "--quiet", `HEAD:${approved.path}`], run.worktree_path);
   const blob = shown.code === 0 ? shown.stdout.trim() : null;
-  if (blob === approved.blob) return;
+  if (blob === approved.blob) return requireOnlyDraftChanged(git, run, approved);
   throw new FlowrynError(
     "draft_changed",
     blob === null ? `${approved.path}, approved at ${approved.gate}, is not committed on your branch` : `${approved.path} differs from the draft approved at ${approved.gate}`,
     blob === null ? `commit ${approved.path} as approved, then deliver again` : `restore ${approved.path} to the approved text (git blob ${approved.blob.slice(0, 12)}), commit, then deliver again; a change needs a new review`,
+  );
+}
+
+async function requireOnlyDraftChanged(git: GitRunner, run: RunWithPolicy, approved: { gate: string; path: string }): Promise<void> {
+  const diff = await git(["diff", "--name-only", "--no-renames", "-z", run.base_sha, "HEAD"], run.worktree_path);
+  if (diff.code !== 0) throw new FlowrynError("draft_changed", `cannot list what your branch changes since ${run.base_sha.slice(0, 12)}: ${diff.stderr.trim() || `exit ${diff.code}`}`);
+  const others = diff.stdout.split("\0").filter((path) => path !== "" && path !== approved.path);
+  if (others.length === 0) return;
+  throw new FlowrynError(
+    "draft_changed",
+    `your branch changes ${others.join(", ")} besides ${approved.path}, approved at ${approved.gate}; only the approved draft lands`,
+    "drop those changes from your branch (only the approved file may differ from your base), then deliver again; another change needs its own review",
   );
 }
 
