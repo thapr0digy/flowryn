@@ -49,7 +49,7 @@ New: the contract tells a worker to reread `$FLOWRYN_TASK_FILE`, and `activateSt
 | review_recap is informational | its info class |
 | review_worker_gone: `flowryn resume <task>`, or tell the user | both review_worker_gone lines (already) |
 | Gate questions pass only once answered | the `questions_open` refusal ("ask those first") |
-| pass_requested is not an approval | the pass_requested line (already) |
+| pass_requested is not an approval; a pass code went to the user's notifications | the pass_requested line (already) and the page's own reply; the skill keeps "never ask the user for a review page's pass code" |
 | review_channel: tell the user, relay the fix, take answers in chat; it never passes the gate | the review_channel line (new words) |
 | A grant refused for a repin: the user runs `flowryn leader repin` | the grant refusal (`REPIN_HELP`); the skill keeps "never run leader repin" |
 | harness_unverified: run the contracts check outside the Bash sandbox; human_only / not_installed_build: ask the user | the item line (new: "(outside the sandbox)" after its command) and the record refusals (human_only's hint is new) |

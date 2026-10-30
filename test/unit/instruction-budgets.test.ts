@@ -75,6 +75,7 @@ describe("every rule the leader skill no longer carries has a home", () => {
       "doctor --contracts --verify-only",
       "never in a loop",
       "Never: pass a gate, answer a reserved decision or waive a check the user has not",
+      "ask the user for a review page's pass code",
     ]) expect(SKILL_BODY).toContain(phrase);
   });
 });

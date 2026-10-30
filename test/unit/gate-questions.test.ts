@@ -197,7 +197,7 @@ describe("what lavish-axi poll printed", () => {
       { gate: "g4", decision: "q1", choice: ["db"], note: null },
       { gate: "g4", decision: "q2", choice: ["claude", "other"], note: "both, plus codex" },
     ]);
-    expect(out.sends).toEqual([{ gate: "g4", comment: 'line one\nline "two"', pass: true }]);
+    expect(out.sends).toEqual([{ gate: "g4", comment: 'line one\nline "two"', pass: true, code: null }]);
     expect(out).toMatchObject({ malformed: 0, otherPrompts: 1 });
     // The Send's prompt is not the user's own feedback; the chat beside it is.
     expect(out.feedback).toEqual(["chat"]);
@@ -218,8 +218,8 @@ describe("what lavish-axi poll printed", () => {
     const parsed = parsePollOutput(`status: feedback\nprompts[3]:\n  - prompt: "${ANSWER_MARK} ${full}"\n  - prompt: "${ANSWER_MARK} ${late}"\n  - prompt: "flowryn-answer v1 ${v1}"\n`);
     expect(parsed.answers).toHaveLength(50);
     expect(parsed.sends).toEqual([
-      { gate: "g1", comment: null, pass: false },
-      { gate: "g1", comment: "ship it small", pass: true },
+      { gate: "g1", comment: null, pass: false, code: null },
+      { gate: "g1", comment: "ship it small", pass: true, code: null },
     ]);
     expect(parsed).toMatchObject({ malformed: 0, otherPrompts: 0 });
   });
@@ -306,7 +306,7 @@ function runWidget(state: WidgetState) {
     inputs: () => form.all().filter((e) => e.tag === "input" || e.tag === "textarea"),
     field: (name: string, value?: string) => form.all().find((e) => e.attrs.name === name && (value === undefined || e.attrs.value === value))!,
     status: () => form.all().find((e) => e.attrs.role === "status")!.textContent,
-    /** Press Send, or "Send and request pass" (the submitter carries data-pass). */
+    /** Press Send, or "Send and pass" (the submitter carries data-pass). */
     submit: (pass = false) => form.listeners.submit!({ preventDefault() {}, submitter: form.all().find((e) => e.tag === "button" && (pass ? "data-pass" in e.attrs : !("data-pass" in e.attrs))) } as never),
   };
 }
@@ -355,7 +355,7 @@ describe("the question widget", () => {
     expect(mount.all().filter((e) => e.tag === "textarea").map((e) => e.attrs.name)).toEqual(["fq-comment"]);
     expect(mount.text()).toContain("Answered via your leader: no");
     expect(mount.text()).toContain("poller home: src/lavish/poller.ts");
-    expect(mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Send answers", "Send and request pass"]);
+    expect(mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Send answers", "Send and pass"]);
   });
 
   test("assumption: one Send queues one prompt whose token decodes to every answer and the comment, then sends", () => {
@@ -373,7 +373,7 @@ describe("the question widget", () => {
       { gate: "g7", decision: "q1", choice: ["db"], note: "ünïcode note" },
       { gate: "g7", decision: "q2", choice: ["claude", "pi"], note: null },
     ]);
-    expect(parsed.sends).toEqual([{ gate: "g7", comment: "Keep it small.\nThanks", pass: false }]);
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: "Keep it small.\nThanks", pass: false, code: null }]);
     expect(parsed.otherPrompts).toBe(0);
     expect(run.status()).toContain("Still open: q3");
   });
@@ -382,11 +382,11 @@ describe("the question widget", () => {
     const run = runWidget(STATE);
     run.field("fq-comment").value = "Keep it small";
     run.submit();
-    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: "Keep it small", pass: false }]);
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: "Keep it small", pass: false, code: null }]);
     expect(run.field("fq-comment").value).toBe("");
     run.submit();
     expect(run.queued).toHaveLength(2);
-    expect(decodeQueued(run.queued.slice(1)).sends).toEqual([{ gate: "g7", comment: null, pass: false }]);
+    expect(decodeQueued(run.queued.slice(1)).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null }]);
     run.field("fq-comment").value = "Not lost";
     ((globalThis as Record<string, unknown>).window as { lavish: { queuePrompt: () => void } }).lavish.queuePrompt = () => {
       throw new Error("the frame is gone");
@@ -415,11 +415,29 @@ describe("the question widget", () => {
     run.field("q3").attrs.value = "flowryn keys";
     run.submit(true);
     expect(run.queued).toHaveLength(1);
-    expect(run.queued[0]!.text).toContain("Please pass this review.");
+    expect(run.queued[0]!.text).toContain("Please pass this review; send me a pass code.");
     const parsed = decodeQueued(run.queued);
     expect(parsed.answers.map((a) => a.decision)).toEqual(["q1", "q2", "q3"]);
-    expect(parsed.sends).toEqual([{ gate: "g7", comment: null, pass: true }]);
-    expect(run.status()).toContain("a pass request");
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: null, pass: true, code: null }]);
+    expect(run.status()).toContain("a pass request (a code goes to your notifications)");
+  });
+
+  test("the pass code rides Send and pass in the token only, never in the prompt's words, and the field clears", () => {
+    const run = runWidget(STATE);
+    run.field("q3").attrs.value = "flowryn keys";
+    run.field("fq-code").attrs.value = " abcd ";
+    // Send answers alone never carries the code.
+    run.submit();
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null }]);
+    run.field("fq-code").attrs.value = "abcd";
+    run.submit(true);
+    const sent = run.queued[run.queued.length - 1]!;
+    expect(sent.text).toContain("Pass this review (with the pass code).");
+    expect(sent.text.split("\n").filter((l) => !l.startsWith("flowryn-answers v2 ")).join("\n")).not.toContain("ABCD");
+    expect(JSON.stringify(sent.opts)).not.toContain("ABCD");
+    expect(decodeQueued([sent]).sends).toEqual([{ gate: "g7", comment: null, pass: true, code: "ABCD" }]);
+    expect(run.field("fq-code").attrs.value).toBe("");
+    expect(run.status()).toContain("your pass code");
   });
 
   test("a closed gate shows every question locked, with no Send, comment box or pass", () => {
