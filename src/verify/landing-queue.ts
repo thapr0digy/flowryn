@@ -276,6 +276,10 @@ export class LandingQueue implements LandingHooks {
     if (run.state === "merging") return;
     if (run.state !== "ready") return void leave(db, row, "sent_back", `the run is ${run.state}`, now);
     const delivered = deliveredOf(db, run.task_id);
+    if (delivered && delivered.head !== row.head_sha && row.state === "waiting" && delivered.carriedFrom === row.head_sha) {
+      move(db, row, "waiting", { head_sha: delivered.head, detail: `carried to ${delivered.head.slice(0, 8)}` }, now);
+      return;
+    }
     if (!delivered || delivered.head !== row.head_sha) return void leave(db, row, "redelivered", `delivered again at ${delivered?.head.slice(0, 8) ?? "-"}`, now);
     if (row.state !== "landing") return;
     const auto = row.auto_merge_id ? getAutoMerge(db, row.auto_merge_id) : null;

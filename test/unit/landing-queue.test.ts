@@ -408,6 +408,31 @@ describe("the watcher after the queue's push", () => {
     expect(openItems("divergence")).toEqual([]);
   });
 
+  test("routine work the watcher carried after a stop cut off the queue's carry keeps its place in line", async () => {
+    const first = ship(1, "one.txt", "one\n");
+    const second = ship(2, "two.txt", "two\n");
+    tx(db, () => {
+      enqueueLanding(db, first.get(), deliveredOf(db, first.task)!, null, now);
+      enqueueLanding(db, second.get(), deliveredOf(db, second.task)!, null, now);
+    });
+    mergeOnOrigin(repos.other, "main.txt", "main moved\n");
+    sh(first.wt, ["fetch", "-q", "origin", "main"]);
+    sh(first.wt, ["merge", "-q", "--no-ff", "--no-edit", "origin/main"]);
+    sh(first.wt, ["push", "-q", "origin", `HEAD:refs/heads/${first.branch}`]);
+    const pushed = sh(first.wt, ["rev-parse", "HEAD"]);
+    const proof = await cleanMainMerge(git, first.wt, { from: first.head, to: pushed, base: "main" });
+    const pr = { number: 1, url: first.url, title: first.task, state: "open" as const, draft: false, headSha: pushed, headRef: first.branch, headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: true };
+    const autoMerge = (r: RunWithPolicy, moved: { headSha: string }, at: number) => void deliveredToQueue(db, config(), r, moved.headSha, at);
+    tx(db, () => applyPrObservation(db, first.get(), deliveredOf(db, first.task)!, { pr, checks: null }, new Set(), now, { nudgeConflicts: true, history: "descends", carry: { proof, verifyPolicy: null, autoMerge } }));
+    expect(deliveredOf(db, first.task)).toMatchObject({ head: pushed, carriedFrom: first.head });
+    await queue().lq.pass();
+    expect(entries()).toEqual([
+      { task_id: first.task, state: "landing", reason: null, integrations: 0 },
+      { task_id: second.task, state: "waiting", reason: null, integrations: 0 },
+    ]);
+    expect(liveAutoMerge(db, first.run)).toMatchObject({ head_sha: pushed });
+  });
+
   test("routine work the watcher carried first starts landing at the carried head", async () => {
     const s = ship(1, "one.txt", "one\n");
     mergeOnOrigin(repos.other, "main.txt", "main moved\n");
