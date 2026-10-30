@@ -35,6 +35,10 @@ import { withRepoLock } from "../runtime/repo-lock.ts";
  */
 
 const META_KEY = "upkeep_build";
+/** When the build began waiting on Flowryn's own landing queue (empty: not waiting). */
+const HELD_KEY = "upkeep_build_held";
+/** The longest a build waits on Flowryn's own landing queue, from the first merge it held. */
+export const LANDING_HOLD_MS = 2 * 60 * 60_000;
 /** Each step's limit: an install or a compile that hangs is killed and the build fails. */
 export const BUILD_STEP_TIMEOUT_MS = 15 * 60_000;
 /** The staging directory beside the installed binary: the same filesystem, so the rename is atomic. */
@@ -156,6 +160,8 @@ export class MergeBuilder {
     if (!tip) return { outcome: "skipped", reason: `cannot resolve origin/${branch}` };
     if (tip === running.commit) return { outcome: "skipped", reason: "the daemon runs this commit" };
     if (readAttempt(this.deps.db)?.commit === tip) return { outcome: "skipped", reason: `${tip.slice(0, 8)} was tried already` };
+    const held = this.heldForLanding(project, tip);
+    if (held) return { outcome: "skipped", reason: held };
     const target = await this.deps.target();
     if (!target) return { outcome: "skipped", reason: "the supervisor's target is not a single installed binary" };
     const bun = this.deps.bun();
@@ -169,6 +175,37 @@ export class MergeBuilder {
     } finally {
       this.current = null;
     }
+  }
+
+  /**
+   * Flowryn's own landing queue still has PRs to land
+   * (docs/notes/2026-10-30-landing-queue-the-65.md): wait, so the daemon
+   * rebuilds and restarts once the line is empty rather than after each
+   * merge, for at most LANDING_HOLD_MS from the first merge it held. The
+   * reason, or null to build now.
+   */
+  private heldForLanding(project: ProjectRow, tip: string): string | null {
+    const { db } = this.deps;
+    const now = this.deps.now();
+    const live = db
+      .query(
+        `SELECT COUNT(*) AS n FROM landing_queue l JOIN runs r ON r.id = l.run_id
+         WHERE l.project_id = ?1 AND l.state IN ('waiting','landing') AND r.state NOT IN ('landed','cleaned')`,
+      )
+      .get(project.id) as { n: number };
+    const raw = getMeta(db, HELD_KEY);
+    const since = raw ? (JSON.parse(raw) as { since: number }).since : null;
+    if (live.n === 0 || (since !== null && now - since > LANDING_HOLD_MS)) {
+      if (raw) tx(db, () => setMeta(db, HELD_KEY, ""));
+      return null;
+    }
+    if (since === null) {
+      tx(db, () => {
+        setMeta(db, HELD_KEY, JSON.stringify({ since: now, commit: tip }));
+        appendEvent(db, { source: "daemon", kind: "upkeep.build_held", payload: { project: project.id, commit: tip, landing: live.n }, ts: now });
+      });
+    }
+    return `${project.id}'s landing queue has ${live.n} PR(s) to land; one build once it is empty`;
   }
 
   private async build(project: ProjectRow, commit: string, target: string, bun: string): Promise<BuildPass> {

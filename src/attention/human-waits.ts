@@ -9,6 +9,7 @@ import type { GateRow } from "../lifecycle/stages.ts";
 import { findHumanApproval } from "../policy/approvals.ts";
 import { latestMerge } from "../policy/merge.ts";
 import { latestAutoMerge, LIVE_AUTO_MERGE_STATES, type AutoMergeRow } from "../verify/auto-merge.ts";
+import { liveLanding, placeOf, type LandingRow } from "../verify/landing-queue.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { findQueued } from "../verify/queue.ts";
@@ -181,6 +182,8 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   if (run.state === "merging") return mergingWait(db, task, headFact, base);
   if (auto && auto.head_sha === head && auto.state === "held" && findOpenRunItem(db, "auto_merge_held", run.id)) return heldWait(auto, task, headFact);
   if (auto && auto.head_sha === head && LIVE_AUTO_MERGE_STATES.includes(auto.state)) return autoWait(auto, headFact);
+  const landing = liveLanding(db, run.id);
+  if (landing && landing.state === "waiting") return landingWait(db, landing, headFact);
   const evidence = delivered.kind === "pr" ? prEvidence(db, run.id) : null;
   const checks = evidence && evidence.head === head ? evidence.checks : null;
   if (evidence && evidence.head === head && evidence.state !== "open") return null;
@@ -315,6 +318,17 @@ function autoWait(auto: AutoMergeRow, headFact: Fact): Explained {
     facts: [headFact, { name: "auto-merge", value: `${auto.id} ${auto.state}`, at: auto.state_since }],
     unblock: [{ by: "flowryn", action: "merges once the verify passes and the checks are green (holds it after 6 h of pending checks)" }],
     since: auto.state_since,
+  };
+}
+
+function landingWait(db: Db, row: LandingRow, headFact: Fact): Explained {
+  const place = placeOf(db, row);
+  return {
+    rule: "merge.landing",
+    reason: `landing queue ${row.id}: ${place ? `${place.position} of ${place.of}${place.ahead ? `, behind ${place.ahead}` : ""}` : "waiting"}${row.blocked_since !== null && row.detail ? ` (${row.detail})` : ""}`,
+    facts: [headFact, { name: "landing", value: `${row.id} ${row.state}`, at: row.state_since }],
+    unblock: [{ by: "flowryn", action: "merges its base into it, verifies and merges it once the PRs ahead of it have landed" }],
+    since: row.enqueued_at,
   };
 }
 

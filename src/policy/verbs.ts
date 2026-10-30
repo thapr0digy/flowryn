@@ -14,7 +14,11 @@ import { verificationLine } from "../verify/store.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { gateQuestionsLine, requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { openUserActed } from "../attention/follow-up.ts";
-import { checkGate, chooseApproval, gatherFacts, type MergeFacts } from "./merge.ts";
+import { channelOf, checkGate, chooseApproval, gatherFacts, standingApproval, type MergeFacts } from "./merge.ts";
+import { requireDeliveryBasis } from "../lifecycle/observed.ts";
+import { getRunWithPolicy } from "../lifecycle/runs.ts";
+import { landingQueued } from "../verify/config.ts";
+import { enqueueLanding, placeOf, queueable } from "../verify/landing-queue.ts";
 import { applyMerge, mergeable, mergeContext, runAndProject, settleMerge, type MergePrepared } from "./merge-path.ts";
 
 /**
@@ -70,7 +74,7 @@ const merge: VerbSpec = {
   scope: { kind: "ref", arg: "task" },
   // The gate reads GitHub, the merge asks it and reads the proof back.
   replyMs: 120_000,
-  async prepare(ctx, args): Promise<MergePrepared> {
+  async prepare(ctx, args): Promise<MergePrepared | QueuedMerge> {
     const task = stringArg(args, "task")!;
     const allowRed = stringArg(args, "allow-red");
     if (allowRed !== undefined && allowRed.length === 0) throw new FlowrynError("bad_args", "--allow-red needs the name of the one failing check to waive");
@@ -85,16 +89,49 @@ const merge: VerbSpec = {
       const attempt = findAttempt(ctx.db, { session: ctx.caller.session, action: "merge", task, now: ctx.now(), allowRed: allowRed ?? null });
       if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) chosen.choice = { kind: "attempt", attempt, session: ctx.caller.session };
     }
+    // A landing-queue project (src/verify/landing-queue.ts): your word puts the open PR in line; the queue brings it up to date, verifies and merges it.
+    if (facts.pr?.state === "open" && landingQueued(ctx.config(), run.project_id) && queueable(ctx.db, run)) {
+      if (!chosen.choice) throw new FlowrynError("approval_required", `no approval to queue ${run.task_id} for landing: ${chosen.why}`, `the leader runs flowryn merge ${run.task_id} and asks you, or in your shell: flowryn approve ${run.task_id}`);
+      return { facts, gate: { waived: null, alreadyMerged: false, localGreen: null }, chosen, seen, queue: true } satisfies QueuedMerge;
+    }
     const gate = checkGate(facts, chosen);
     return { facts, gate, chosen, seen };
   },
   apply(ctx, _args, prepared) {
+    if ((prepared as QueuedMerge).queue) return queueMerge(ctx, prepared as QueuedMerge);
     return applyMerge(ctx, prepared as MergePrepared, ctx.caller);
   },
-  settle(ctx, result) {
+  async settle(ctx, result) {
+    if (result.data.landing) {
+      ctx.delivery.watch(String(result.data.run));
+      return result;
+    }
     return settleMerge(ctx, result, ctx.caller);
   },
 };
+
+interface QueuedMerge extends MergePrepared {
+  queue: true;
+}
+
+/** The parts a queued merge reads, as a merge does: a redelivery, cancel or merge in between refuses it. */
+const QUEUE_PARTS = ["state", "stage", "stage_state", "delivered", "merge", "operation"] as const;
+
+/** Put the approved PR in its project's landing queue, its approval left standing for the queue's own merge. Call inside a transaction. */
+function queueMerge(ctx: HandlerCtx, prepared: QueuedMerge): HandlerResult {
+  const now = ctx.now();
+  const { facts, chosen, seen } = prepared;
+  requireDeliveryBasis(ctx.db, seen, [...QUEUE_PARTS], "merge", "cli", now, `flowryn merge ${facts.run.task_id} again`);
+  const run = getRunWithPolicy(ctx.db, facts.run.id)!;
+  const delivered = deliveredOf(ctx.db, run.task_id)!;
+  const approval = standingApproval(ctx.db, facts, chosen.choice!, now);
+  const entry = enqueueLanding(ctx.db, run, delivered, approval, now, "cli");
+  const place = placeOf(ctx.db, entry);
+  return {
+    data: { task: run.task_id, run: run.id, landing: entry.id, position: place ? `${place.position} of ${place.of}` : "-", head: facts.head, approval: approval ?? "-", channel: channelOf(chosen.choice!), state: "queued" },
+    hints: [`the landing queue merges origin/${facts.pr?.baseRef ?? "main"} into it, verifies and merges it in turn: flowryn show ${run.task_id}`],
+  };
+}
 
 // --- decline ------------------------------------------------------------------------------------
 

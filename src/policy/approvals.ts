@@ -118,6 +118,23 @@ export function findHumanApproval(db: Db, q: { task: string; action: ApprovalAct
     .get(q.task, q.action, q.ref, q.head, q.now, waiver) as ApprovalRow | null;
 }
 
+/**
+ * The human approval a live landing-queue entry merges under
+ * (src/verify/landing-queue.ts): the record the merge verb stood up when it
+ * queued the PR (any human channel), or your `flowryn approve`, for exactly
+ * this head, unexpired and unused. Only the daemon's own merge looks here.
+ */
+export function findLandingApproval(db: Db, q: { task: string; ref: string; head: string; now: number }): ApprovalRow | null {
+  return db
+    .query(
+      `SELECT a.* FROM approvals a JOIN landing_queue l ON l.approval_id = a.id
+       WHERE l.task_id = ?1 AND l.state IN ('waiting','landing') AND a.action = 'merge' AND a.pr_url = ?2 AND a.head_sha = ?3
+         AND a.consumed_at IS NULL AND a.expires_at > ?4
+       LIMIT 1`,
+    )
+    .get(q.task, q.ref, q.head, q.now) as ApprovalRow | null;
+}
+
 /** Standing records for other heads: the reason a merge after a push asks again. */
 export function staleApprovals(db: Db, q: { task: string; action: ApprovalAction; head: string; now: number }): ApprovalRow[] {
   return db
