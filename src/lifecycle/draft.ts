@@ -6,6 +6,7 @@ import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
+import { sha256Hex } from "../util/hash.ts";
 import { reportDirFor } from "./launcher.ts";
 import { getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 
@@ -57,7 +58,12 @@ export async function readDraft(git: GitRunner, worktree: string, raw: string): 
   const ext = extname(path).toLowerCase();
   if (!MARKDOWN.has(ext) && !PLAIN.has(ext)) throw new FlowrynError("draft_invalid", `${raw} is not a Markdown (.md, .markdown) or text (.txt) file`);
   if (st.size > DRAFT_MAX_BYTES) throw new FlowrynError("draft_invalid", `${raw} is over 1 MB`);
-  const text = readFileSync(real, "utf8");
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(real));
+  } catch {
+    throw new FlowrynError("draft_invalid", `${raw} is not valid UTF-8`, "save the draft as UTF-8, then render it again");
+  }
   const hashed = await git(["hash-object", "--", path], root);
   const blob = hashed.stdout.trim();
   if (hashed.code !== 0 || !/^[0-9a-f]{40,64}$/.test(blob)) throw new FlowrynError("draft_invalid", `git cannot hash ${path}: ${hashed.stderr.trim() || `exit ${hashed.code}`}`);
@@ -143,6 +149,31 @@ export async function checkDraftPage(git: GitRunner, worktree: string, page: str
   return draft;
 }
 
+/** What a draft review gate keeps of the page `stage done` checked. */
+export function draftPageDigest(draft: Pick<DraftFile, "path" | "text" | "blob">): string {
+  return sha256Hex(renderDraftPage(draft));
+}
+
+/**
+ * Before a draft review gate passes: its page must still be the one `stage
+ * done` checked, so the user approved the draft the gate keeps.
+ */
+export function requireDraftPageShown(run: Pick<RunWithPolicy, "task_id">, gate: { id: string; page_path?: string | null; draft_page?: string | null }): void {
+  if (!gate.draft_page) return;
+  let shown: string | null = null;
+  try {
+    if (gate.page_path) shown = sha256Hex(readFileSync(gate.page_path));
+  } catch {
+    shown = null;
+  }
+  if (shown === gate.draft_page) return;
+  throw new FlowrynError(
+    "draft_changed",
+    `the page of gate ${gate.id} no longer shows the draft its review opened with`,
+    `send it back so the worker renders the draft and opens a new review: flowryn gate changes ${run.task_id} --body-file -`,
+  );
+}
+
 /** The draft the run's last passed review gate approved, if any. */
 export function approvedDraft(db: Db, runId: string): { gate: string; path: string; blob: string } | null {
   const row = db
@@ -168,10 +199,14 @@ export async function requireApprovedDraft(db: Db, git: GitRunner, run: RunWithP
   );
 }
 
-function workerRun(db: Db, runId: string | null): RunWithPolicy {
+/** A draft under review stays as the user sees it: a revision waits for the verdict. */
+function draftableRun(db: Db, runId: string | null): RunWithPolicy {
   const run = runId ? getRunWithPolicy(db, runId) : null;
   if (!run) throw new FlowrynError("not_found", "this worker's run is gone");
   if (isTerminal(run.state)) throw new FlowrynError("run_not_active", `run ${run.id} is ${run.state}`);
+  if (run.stage_state === "review") {
+    throw new FlowrynError("wrong_stage", `stage ${run.stage} is under review; its draft page stays as the user sees it`, "answer on the page with $FLOWRYN_BIN review reply --body-file -; once the review sends changes back, edit the file and render it again");
+  }
   return run;
 }
 
@@ -184,11 +219,11 @@ const draftRender: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   async prepare(ctx, args) {
-    const run = workerRun(ctx.db, ctx.caller.runId);
+    const run = draftableRun(ctx.db, ctx.caller.runId);
     return readDraft(ctx.delivery.git, run.worktree_path, stringArg(args, "file")!);
   },
   apply(ctx, _args, prepared) {
-    const run = workerRun(ctx.db, ctx.caller.runId);
+    const run = draftableRun(ctx.db, ctx.caller.runId);
     const draft = prepared as DraftFile;
     const page = draftPagePath(reportDirFor(ctx.config(), run.task_id));
     ensureDir(join(page, ".."), 0o755);

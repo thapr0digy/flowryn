@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { sh } from "../helpers/scratch-git.ts";
 
@@ -72,6 +72,14 @@ describe("notes projects", () => {
       const page = readFileSync(gate.page_path, "utf8");
       expect(page).toContain("Ship the notes kind, and more.");
       expect(page).toContain(gate.draft_blob.slice(0, 12));
+
+      // The page changed under the open review (by hand, or a render of other text): what the user sees is not what the gate keeps.
+      writeFileSync(gate.page_path, page.replace("and more.", "and less."));
+      const tampered = await e.approve(task, { gate: "draft" });
+      expect(tampered.ok).toBe(false);
+      expect((tampered as { error: { code: string } }).error.code).toBe("draft_changed");
+      expect(one(e, "SELECT 1 FROM gates WHERE id = ?1 AND state = 'open'", gate.id)).not.toBeNull();
+      writeFileSync(gate.page_path, page);
 
       expect((await e.approve(task, { gate: "draft" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.state === "ready" && r.stage === "final" && r.stage_state === "done", "the delivery");

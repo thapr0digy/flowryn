@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GitRunner } from "../../src/policy/landed.ts";
-import { checkDraftPage, draftPagePath, draftPathOfPage, readDraft, renderDraftBody, renderDraftPage } from "../../src/lifecycle/draft.ts";
+import { checkDraftPage, draftPageDigest, draftPagePath, draftPathOfPage, readDraft, renderDraftBody, renderDraftPage, requireDraftPageShown } from "../../src/lifecycle/draft.ts";
 import { GIT_ENV, sh } from "../helpers/scratch-git.ts";
 
 /** Notes projects' drafts (docs/notes/2026-10-30-notes-projects-non-8d.md): the file, its page, and the check between them. */
@@ -57,6 +57,7 @@ describe("draft files", () => {
     symlinkSync(join(reports, "outside.md"), join(wt, "link.md"));
     writeFileSync(join(wt, "page.html"), "<p>x</p>");
     writeFileSync(join(wt, "big.md"), "x".repeat(1024 * 1024 + 1));
+    writeFileSync(join(wt, "latin1.md"), Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
     for (const [raw, said] of [
       ["link.md", "symlink"],
       [join(reports, "outside.md"), "outside your worktree"],
@@ -65,6 +66,7 @@ describe("draft files", () => {
       ["page.html", "not a Markdown"],
       ["big.md", "over 1 MB"],
       ["nope.md", "no file"],
+      ["latin1.md", "not valid UTF-8"],
     ] as const) {
       const refused = await failure(readDraft(git, wt, raw));
       expect(refused.code).toBe("draft_invalid");
@@ -116,5 +118,24 @@ describe("the draft page", () => {
     const other = join(reports, "draft", "other.html");
     writeFileSync(other, renderDraftPage(await readDraft(git, wt, "note.md")));
     expect((await failure(checkDraftPage(git, wt, other, reports))).message).toContain("a draft's review page is");
+  });
+
+  test("a gate passes only while its page is the one stage done checked", async () => {
+    const { wt, reports } = worktree();
+    writeFileSync(join(wt, "note.md"), "first\n");
+    const draft = await readDraft(git, wt, "note.md");
+    const page = draftPagePath(reports);
+    mkdirSync(join(reports, "draft"));
+    writeFileSync(page, renderDraftPage(draft));
+    const gate = { id: "g1", page_path: page, draft_page: draftPageDigest(draft) };
+    const run = { task_id: "t1" };
+    expect(() => requireDraftPageShown(run, gate)).not.toThrow();
+    expect(() => requireDraftPageShown(run, { id: "g2", page_path: page, draft_page: null })).not.toThrow();
+
+    writeFileSync(join(wt, "note.md"), "second\n");
+    writeFileSync(page, renderDraftPage(await readDraft(git, wt, "note.md")));
+    expect(() => requireDraftPageShown(run, gate)).toThrow(expect.objectContaining({ code: "draft_changed" }));
+    rmSync(page);
+    expect(() => requireDraftPageShown(run, gate)).toThrow(expect.objectContaining({ code: "draft_changed" }));
   });
 });

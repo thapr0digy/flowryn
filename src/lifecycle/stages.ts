@@ -26,7 +26,7 @@ import { getProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type PendingLaunch, type RunRow, type RunWithPolicy } from "./runs.ts";
 import { summarizeReview } from "./review-chat.ts";
 import { createSteer } from "./steers.ts";
-import { checkDraftPage, DRAFT_SKILL, type DraftFile } from "./draft.ts";
+import { checkDraftPage, DRAFT_SKILL, draftPageDigest, type DraftFile } from "./draft.ts";
 
 /**
  * Workflow stages and gates (design section 11). A run moves through its
@@ -224,6 +224,8 @@ export interface GateRow {
   channel_item?: string | null;
   /** The run that carried this review on after its own run ended for good (src/lifecycle/review-revival.ts). */
   replaced_by?: string | null;
+  /** A draft review's page digest at `stage done` (src/lifecycle/draft.ts): it passes only while the page still shows that. */
+  draft_page?: string | null;
   approval_id: string | null;
   feedback: string | null;
   opened_at: number;
@@ -678,7 +680,7 @@ const stageDone: VerbSpec = {
       // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
       if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
       // A draft review approves this file's exact bytes: the delivery must carry them (src/lifecycle/draft.ts).
-      if (draft) ctx.db.query("UPDATE gates SET draft_path = ?2, draft_blob = ?3 WHERE id = ?1").run(gateId, draft.path, draft.blob);
+      if (draft) ctx.db.query("UPDATE gates SET draft_path = ?2, draft_blob = ?3, draft_page = ?4 WHERE id = ?1").run(gateId, draft.path, draft.blob, draftPageDigest(draft));
       const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, pagePath, questions, now) : [];
       let plan: string | null = null;
       if (planText !== undefined) {

@@ -916,13 +916,15 @@ CREATE INDEX runs_stacked_on ON runs(stacked_on) WHERE stacked_on IS NOT NULL;
 
 /**
  * Migration 46, notes projects (docs/notes/2026-10-30-notes-projects-non-8d.md): a project's
- * kind, and on a draft review gate the file it showed and that file's git blob,
- * so the delivery lands exactly what was approved.
+ * kind, and on a draft review gate the file it showed, that file's git blob and
+ * the digest of the page that showed it, so a pass needs that page unchanged
+ * and the delivery lands exactly what was approved.
  */
 const NOTES_PROJECTS_SQL = /* sql */ `
 ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'code' CHECK (kind IN ('code','notes'));
 ALTER TABLE gates ADD COLUMN draft_path TEXT;
 ALTER TABLE gates ADD COLUMN draft_blob TEXT;
+ALTER TABLE gates ADD COLUMN draft_page TEXT;
 `;
 
 export const MIGRATIONS: readonly Migration[] = [
