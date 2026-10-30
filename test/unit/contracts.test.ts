@@ -76,7 +76,7 @@ describe("contract cleanup", () => {
 });
 
 describe("contract suite", () => {
-  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, (Claude) toolkit, temp dir, exit, resume, deliver", () => {
+  test("walks the design's list in order: launch, session, busy, both deliveries, an urgent cut, interrupt, (Claude) toolkit, temp dir, exit, resume, deliver, ask", () => {
     const pi = contractSteps("pi").map((s) => s.name);
     expect(contractSteps("claude").map((s) => s.name)).toEqual([...pi.slice(0, pi.indexOf("temp dir")), "toolkit", ...pi.slice(pi.indexOf("temp dir"))]);
     expect(pi).toEqual([
@@ -92,6 +92,7 @@ describe("contract suite", () => {
       "exit",
       "resume",
       "deliver",
+      "ask",
     ]);
   });
 
@@ -141,7 +142,7 @@ describe("contract progress", () => {
     expect(contractEstimateSeconds("pi")).toBeGreaterThan(60);
     expect(contractEstimateSeconds("pi")).toBeLessThan(contractEstimateSeconds("claude"));
     const minutes = Math.round((contractEstimateSeconds("claude") + contractEstimateSeconds("pi")) / 60);
-    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 25 steps, about ${minutes} min`);
+    expect(contractPlan(["claude", "pi"])).toStartWith(`contracts: claude, pi; 27 steps, about ${minutes} min`);
     expect(contractPlan([])).toBe("contracts: no harness installed to test");
   });
 });

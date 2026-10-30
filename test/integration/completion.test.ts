@@ -194,7 +194,7 @@ describe.skipIf(!Bun.which("zsh"))("Tab in a real zsh", () => {
   test("sourced: verbs, sub-verbs, flags and fixed values", () => {
     expect(words(complete(scriptFile, "flowryn de").offered)).toEqual(expect.arrayContaining(["decide", "decision", "decline", "deliver"]));
     expect(words(complete(scriptFile, "flowryn decision ").offered)).toEqual(["add", "list", "defer"]);
-    expect(words(complete(scriptFile, "flowryn dispatch web --kind ").offered)).toEqual(["ship", "scout"]);
+    expect(words(complete(scriptFile, "flowryn dispatch web --kind ").offered)).toEqual(["ship", "scout", "ask"]);
     expect(words(complete(scriptFile, "flowryn --json todo list --due ").offered)).toEqual(["today", "overdue"]);
     const flags = words(complete(scriptFile, "flowryn dispatch web --").offered);
     expect(flags).toEqual(expect.arrayContaining(["--kind", "--harness", "--blocked-by", "--json", "--help"]));
