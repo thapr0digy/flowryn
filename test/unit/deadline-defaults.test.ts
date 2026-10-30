@@ -263,10 +263,10 @@ describe("the brief and the undo", () => {
     const d = question(5);
     away();
     pass();
-    const confirmed = tx(db, () => overrideRuleAnswer({ db, now: () => NOW + HOUR }, getDecision(db, d.id)!, { choice: "merge-main", words: "also add a regression test", via: "shell" }));
+    const confirmed = tx(db, () => overrideRuleAnswer({ db, now: () => NOW + HOUR }, getDecision(db, d.id)!, { choice: "merge-main", words: `also add a regression test\n${"then check the flaky job. ".repeat(20).trim()}`, via: "shell" }));
     const body = (db.query("SELECT body FROM messages WHERE id = ?1").get(confirmed.steer) as { body: string }).body;
-    expect(body).toBe(`The user confirmed merge-main for ${d.id}; keep going as you are, nothing to undo or redo. The user's words: "also add a regression test"`);
-    expect(getDecision(db, d.id)).toMatchObject({ answer: "merge-main", answered_by: "captain", rationale: "(confirmed merge-main (deadline))\nalso add a regression test" });
+    expect(body).toBe(`The user confirmed merge-main for ${d.id}; keep going as you are, nothing to undo or redo. also add a regression test\n${"then check the flaky job. ".repeat(20).trim()}`);
+    expect(getDecision(db, d.id)).toMatchObject({ answer: "merge-main", answered_by: "captain", rationale: `(confirmed merge-main (deadline))\nalso add a regression test\n${"then check the flaky job. ".repeat(20).trim()}` });
   });
 
   test("waitedLabel", () => {

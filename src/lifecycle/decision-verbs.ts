@@ -92,8 +92,8 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
  * The user's undo of a rule's answer (docs/notes/2026-10-22-settle-routine-no-2r.md): a decision
  * answered by policy is answered again, by the user, while its run is live. The worker is steered
  * to the new choice and to revert, with new commits, any fix the rule's answer already made; the
- * same choice confirms it and sends no steer. Call inside the verb's transaction, after the captain
- * channel was checked.
+ * same choice confirms it, with no steer unless the user added words, which go on as a note.
+ * Call inside the verb's transaction, after the captain channel was checked.
  */
 export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; via: string }): ReturnType<typeof answerDecision> {
   const run = d.run_id ? getRunWithPolicy(ctx.db, d.run_id) : null;
@@ -107,7 +107,7 @@ export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRo
   appendEvent(ctx.db, { source: "cli", kind: "decision.overridden", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, from: d.answer, rule: d.answered_via, choice: a.choice, by: "captain", via: a.via }, ts: now });
   if (confirmed) {
     if (!a.words) return { steer: null, run: run.id, dependents: [], held: false };
-    const note = `The user confirmed ${a.choice} for ${d.id}; keep going as you are, nothing to undo or redo. The user's words: "${sanitizeLine(a.words, 300)}"`;
+    const note = `The user confirmed ${a.choice} for ${d.id}; keep going as you are, nothing to undo or redo. ${a.words}`;
     return { steer: createSteer(ctx.db, run, note, now, d.id).id, run: run.id, dependents: [], held: false };
   }
   if (d.origin === CI_WAIT_ORIGIN) {
