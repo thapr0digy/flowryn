@@ -90,6 +90,14 @@ describe("recordGrant: who may record a contract pass", () => {
     expect(refusal({ role: "leader", mode: "strict", callerBuild: INSTALLED, daemonBuild: INSTALLED })).toBe("human_only");
   });
 
+  test("a human_only refusal tells the leader to ask the user to record in their own terminal", () => {
+    for (const input of [{ role: "reader", mode: "relaxed" }, { role: "leader", mode: "strict" }] as const) {
+      expect(() => recordGrant({ ...input, callerBuild: INSTALLED, daemonBuild: INSTALLED })).toThrow(
+        expect.objectContaining({ code: "human_only", help: "ask the user to run flowryn doctor --contracts in their own terminal; --verify-only runs the suite without recording" }),
+      );
+    }
+  });
+
   test("relaxed: the leader records only when its build is the daemon's build", () => {
     expect(refusal({ role: "leader", mode: "relaxed", callerBuild: INSTALLED, daemonBuild: INSTALLED })).toBeNull();
     expect(refusal({ role: "leader", mode: "relaxed", callerBuild: PR_BUILD, daemonBuild: INSTALLED })).toBe("not_installed_build");

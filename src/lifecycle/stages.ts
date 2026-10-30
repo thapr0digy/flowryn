@@ -186,7 +186,14 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
   const noteInFile = launch === "fresh" || launch === "stage" || launch === "relaunch";
   let steer: string | null = null;
   // A live worker carries on: its task file now names this stage, so rereading it after a compaction finds the stage's steps.
-  if (starting && !noteInFile) rewriteTaskFile(db, run, config, stageTextContext(db, config, run).delivery);
+  let taskFileError: string | undefined;
+  if (starting && !noteInFile) {
+    try {
+      rewriteTaskFile(db, run, config, stageTextContext(db, config, run).delivery);
+    } catch (error) {
+      taskFileError = (error as Error).message;
+    }
+  }
   if (starting && opts.steer !== false && run.stage_note !== null && !noteInFile) {
     const text = [run.stage_note, stageInstructions(pos, stageTextContext(db, config, run))].filter((t) => t.length > 0).join(" ");
     steer = createSteer(db, run, text, now).id;
@@ -197,7 +204,7 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
        waiting_since = NULL, pending_launch = CASE WHEN ?3 IN ('stage','relaunch') THEN ?3 ELSE NULL END,
        stage_note = CASE WHEN ?4 = 1 THEN stage_note ELSE NULL END, updated_at = ?2 WHERE id = ?1`,
   ).run(run.id, now, launch ?? "", noteInFile ? 1 : 0);
-  if (starting) appendEvent(db, { source: "daemon", kind: "stage.started", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, index: pos.index, pools: pos.stage.pools, steer, launch }, ts: now });
+  if (starting) appendEvent(db, { source: "daemon", kind: "stage.started", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, index: pos.index, pools: pos.stage.pools, steer, launch, ...(taskFileError ? { taskFileError } : {}) }, ts: now });
   return { launch, steer };
 }
 

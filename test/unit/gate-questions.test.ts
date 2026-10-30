@@ -18,6 +18,7 @@ import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycl
 import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
 import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
 import { insertApproval } from "../../src/policy/approvals.ts";
+import { chatForm } from "../../src/policy/chat-questions.ts";
 import { createRun } from "../../src/lifecycle/dispatch.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
 import { defaultConfig } from "../../src/config/config.ts";
@@ -686,6 +687,17 @@ describe("a gate's questions as decisions", () => {
     expect(text).not.toContain("(stale)");
   });
 
+  test("a task file that cannot be written does not stop the stage: it starts, steers, and records why", () => {
+    db.query("UPDATE runs SET workflow = 'feature', stage = 'build', stage_state = 'waiting', stage_note = 'Go on from the design.', pending_launch = NULL WHERE id = ?1").run(runId);
+    const config = { ...defaultConfig(h.home), state_dir: h.home };
+    mkdirSync(join(h.home, "runs", runId, "task.md", "in-the-way"), { recursive: true });
+    const steer = tx(db, () => activateStage(db, config, getRunWithPolicy(db, runId)!, NOW).steer);
+    expect(steer).not.toBeNull();
+    expect(getRun(db, runId)!.stage_state).toBe("active");
+    const started = db.query("SELECT payload FROM events WHERE kind = 'stage.started' AND run_id = ?1 ORDER BY seq DESC LIMIT 1").get(runId) as { payload: string };
+    expect(JSON.parse(started.payload).taskFileError).toBeString();
+  });
+
   test("a stage start for a run never launched writes no task file", () => {
     db.query("UPDATE runs SET workflow = 'feature', stage = 'build', stage_state = 'waiting', stage_note = 'x', pending_launch = NULL WHERE id = ?1").run(runId);
     const config = { ...defaultConfig(h.home), state_dir: h.home };
@@ -714,6 +726,7 @@ describe("a gate's questions as decisions", () => {
   test("a pass request from the page never passes the gate: once every question is answered it opens one P1 for the leader", () => {
     open();
     expect(tx(db, () => requestGatePass(db, "g1", NOW))).toEqual({ outcome: "questions_open", open: ["q1", "q2", "q3"] });
+    expect(() => chatForm(db, "g1")).toThrow(expect.objectContaining({ code: "questions_open", help: "ask those first: flowryn chat-question q1" }));
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
     tx(db, () => {
       lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null });
@@ -725,7 +738,7 @@ describe("a gate's questions as decisions", () => {
     const item = db.query("SELECT lane, line FROM items WHERE kind = 'pass_requested' AND state = 'open'").all() as { lane: string; line: string }[];
     expect(item).toHaveLength(1);
     expect(item[0]!.lane).toBe("P1");
-    expect(item[0]!.line).toContain(`flowryn gate pass ${taskId} --gate-id g1, or the user runs flowryn approve ${taskId} --gate design.`);
+    expect(item[0]!.line).toStartWith(`Pass requested on the review page (not an approval): flowryn gate pass ${taskId} --gate-id g1, or the user runs flowryn approve ${taskId} --gate design.`);
     expect(item[0]!.line).not.toContain("…");
     expect(db.query("SELECT state, approval_id FROM gates WHERE id = 'g1'").get()).toEqual({ state: "open", approval_id: null });
     expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });

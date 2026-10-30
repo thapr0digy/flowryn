@@ -18,7 +18,7 @@ Tokens are estimated at 4 characters each, as `test/unit/qa-template.test.ts` do
 
 The style block (3 lines) and the tool map (6 lines) are unchanged. They lead both the leader's prompt and the worker's word for word, so prompt caching holds, and the toolkit's denials carry the same guidance. The design's draft target for the contract's own lines was 800 characters. They came out at 954, because the ask and history lines need their exact flags. The tests hold them to 1,000 characters, and the whole contract to 1,600.
 
-`test/unit/instruction-budgets.test.ts` fails if the skill grows past 6,000 characters or the contract past 1,600. `test/unit/harness.test.ts` fails if the contract's own lines go past 10 or 1,000 characters. The same file proves that every moved rule is still in its new home.
+`test/unit/instruction-budgets.test.ts` fails if the skill grows past 6,000 characters or the contract past 1,600. `test/unit/harness.test.ts` fails if the contract's own lines go past 10 or 1,000 characters. The same file checks the moved rules whose home is emitted text (stage instructions, the steer and turn-end lines, verb help). A moved rule whose home is an item line or a refusal hint is asserted in the unit or integration test of the code that builds it: the test builds the line or triggers the refusal, then checks the words.
 
 ## Worker contract: where each removed rule lives
 
@@ -38,7 +38,7 @@ The style block (3 lines) and the tool map (6 lines) are unchanged. They lead bo
 
 Kept, in shorter words: call `$FLOWRYN_BIN` only; the steer prefix and its channel (M0 c07); the outcome list including `fail`; decide and record why; `ask` with its flags; never answer a confirmation prompt; `report`; no history rewrites and how to take the base; no `rm` of a maybe-empty variable; never merge, clean up or approve; exit 75.
 
-New: the contract tells a worker to reread `$FLOWRYN_TASK_FILE`, and `activateStage` rewrites that file when a live worker's stage starts (`rewriteTaskFile`, `src/lifecycle/launcher.ts`). Before this change it was rewritten only on a launch, so after a compaction a worker could find only stale stage text on disk.
+New: the contract tells a worker to reread `$FLOWRYN_TASK_FILE`, and `activateStage` rewrites that file when a live worker's stage starts (`rewriteTaskFile`, `src/lifecycle/launcher.ts`). Before this change it was rewritten only on a launch, so after a compaction a worker could find only stale stage text on disk. The rewrite is best effort: a failed write does not stop the stage from starting (the steer carries the stage's instructions), and its message is recorded as `taskFileError` on the `stage.started` event.
 
 ## Leader skill: where each removed piece lives
 

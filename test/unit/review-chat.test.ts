@@ -131,7 +131,7 @@ describe("where a page batch goes", () => {
     const gone = items("review_worker_gone");
     expect(gone).toHaveLength(1);
     expect(gone[0]).toMatchObject({ lane: "P1", class: "actionable" });
-    expect(gone[0]!.line).toContain(`flowryn resume ${taskId}`);
+    expect(gone[0]!.line).toEndWith(`flowryn resume ${taskId}, or tell the user`);
     expect(getRun(db, runId)!.pending_launch).toBeNull();
     expect(db.query("SELECT COUNT(*) AS n FROM messages WHERE run_id = ?1").get(runId)).toEqual({ n: 2 });
   });

@@ -269,11 +269,13 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
 });
 
 describe("stage text", () => {
-  test("a stage's instructions name its skill file, its pools and what ends it", () => {
+  test("a stage's instructions name its skill file, its pools and what ends it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "fw-skills-"));
     dirs.push(dir);
     const files = writeStageSkills(dir);
     for (const skill of STAGE_SKILLS) expect(Bun.file(skillPath(dir, skill.name)!).size).toBeGreaterThan(100);
+    // The pages a human reviews are written plainly: the design page and the QA card each say so in the skill the worker reads.
+    for (const name of ["flowryn-design", "flowryn-visual-qa"]) expect(await Bun.file(skillPath(dir, name)!).text()).toContain("not the terse reply style");
     expect(Bun.file(join(files.claudePlugin, ".claude-plugin", "plugin.json")).size).toBeGreaterThan(10);
     const feature = DEFAULT_WORKFLOWS["feature-ui"]!;
     const delivery = { kind: "ship" as const, mode: "local-only" as const, defaultBranch: "main" };
