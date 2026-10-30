@@ -42,6 +42,8 @@ export interface PlanRow {
   project_id: string;
   title: string;
   state: "pending" | "approved" | "discarded" | "dropped";
+  /** 1: a stacked plan (docs/notes/2026-10-27-stack-a-plan-4y.md): a phase may start on the open PR of the one task it still waits for. */
+  stack: number;
   source_task: string | null;
   gate_id: string | null;
   filed_by: string;
@@ -69,6 +71,7 @@ const MAX_PHASE_BODY = 64_000;
 const MAX_TITLE = 120;
 const DIRECTIVE = /^(workflow|harness|account|model|effort|after):\s*(.+)$/i;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
+const STACK_LINE = /^stack:\s*(.*?)\s*$/i;
 
 function cleanTitle(heading: string): string {
   const title = heading.replace(/^phase\s+\d+\s*[:.\-–—]\s*/i, "").replace(/\s+/g, " ").trim();
@@ -79,11 +82,12 @@ function cleanTitle(heading: string): string {
  * Parse a plan: an optional `# title`, then one `## <phase>` section per
  * phase. A section may start with `workflow: <id>`, `harness: claude|pi`,
  * `account: <id>`, `model: <model>`, `effort: <level>` and `after: <n>[, <n>]` lines; the rest is the phase's task. Each phase waits for
- * the one before it unless `after` says otherwise.
+ * the one before it unless `after` says otherwise. A `stack: on` line before the first `##` stacks the plan.
  */
-export function parsePlan(text: string): { title: string | null; phases: PlanPhase[] } {
+export function parsePlan(text: string): { title: string | null; phases: PlanPhase[]; stack: boolean } {
   const lines = sanitizeBlock(text).split("\n");
   let title: string | null = null;
+  let stack = false;
   const phases: PlanPhase[] = [];
   let current: { heading: string; lines: string[] } | null = null;
   const finish = () => {
@@ -130,6 +134,14 @@ export function parsePlan(text: string): { title: string | null; phases: PlanPha
       current = { heading: h2[1]!, lines: [] };
     } else if (h1 && !current && title === null) title = cleanTitle(h1[1]!);
     else if (current) current.lines.push(line);
+    else {
+      const stackLine = STACK_LINE.exec(line.trim());
+      if (stackLine) {
+        const v = stackLine[1]!.toLowerCase();
+        if (v !== "on" && v !== "off") throw new FlowrynError("bad_args", `the plan's stack line takes on or off, not ${JSON.stringify(stackLine[1])}`);
+        stack = v === "on";
+      }
+    }
   }
   finish();
   if (phases.length === 0) throw new FlowrynError("bad_args", "the plan has no phases: one ## section per phase");
@@ -137,7 +149,7 @@ export function parsePlan(text: string): { title: string | null; phases: PlanPha
   phases.forEach((p, i) => {
     for (const n of p.after ?? []) if (n > i) throw new FlowrynError("bad_args", `plan phase ${i + 1} "${p.title}": after names phase ${n}, which is not an earlier phase`);
   });
-  return { title, phases };
+  return { title, phases, stack };
 }
 
 /** The next free plan id (`p<N>`), reserved as it is read. Call inside a transaction. */
@@ -173,6 +185,8 @@ export interface NewPlan {
   /** The phases' model and effort (plan --model/--effort); a phase's own lines win. */
   model?: string | null;
   effort?: string | null;
+  /** A stacked plan: a phase may start on the open PR of the one task it still waits for. */
+  stack?: boolean;
   /** Extra blockers phase 1 waits for (a dispatch with --blocked-by). */
   blockedBy?: string[];
   /** A dispatch's per-task delivery mode (cutover C3), carried into the plan.filed event. */
@@ -214,8 +228,9 @@ export function checkPhaseAccounts(
 
 /** Record a plan and its phases (task ids minted now, so a replay names the same tasks). Call inside a transaction. */
 export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[] } {
+  if (p.stack) checkStackable(p.project, p.override?.mode ?? p.project.delivery_mode);
   const id = nextPlanId(db);
-  db.query("INSERT INTO plans (id, project_id, title, state, source_task, gate_id, filed_by, created_at) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7)").run(
+  db.query("INSERT INTO plans (id, project_id, title, state, source_task, gate_id, filed_by, created_at, stack) VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?8)").run(
     id,
     p.project.id,
     p.title,
@@ -223,6 +238,7 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
     p.gateId,
     p.filedBy,
     p.now,
+    p.stack ? 1 : 0,
   );
   const taken = takenIds(db);
   const minted: string[] = [];
@@ -249,13 +265,13 @@ export function recordPlan(db: Db, p: NewPlan): { id: string; phases: PhaseRow[]
     );
     rows.push(row);
   });
-  appendEvent(db, { source: "cli", kind: "plan.filed", payload: { plan: id, project: p.project.id, phases: rows.map((r) => r.task_id), source: p.sourceTask, gate: p.gateId, by: p.filedBy, ...(p.override ? { mode: p.override.mode, mode_reason: p.override.reason } : {}) }, ts: p.now });
+  appendEvent(db, { source: "cli", kind: "plan.filed", payload: { plan: id, project: p.project.id, phases: rows.map((r) => r.task_id), source: p.sourceTask, gate: p.gateId, by: p.filedBy, ...(p.stack ? { stack: true } : {}), ...(p.override ? { mode: p.override.mode, mode_reason: p.override.reason } : {}) }, ts: p.now });
   if (p.state === "approved") approvePlan(db, id, p.filedBy, p.now);
   return { id, phases: rows };
 }
 
 /** A worker's plan, pending on its design's review gate. Call inside a transaction. */
-export function fileWorkerPlan(db: Db, config: FlowrynConfig, p: { project: ProjectRow; sourceTask: string; gateId: string; phases: { title: string | null; phases: PlanPhase[] }; workflow: string; now: number }): string {
+export function fileWorkerPlan(db: Db, config: FlowrynConfig, p: { project: ProjectRow; sourceTask: string; gateId: string; phases: { title: string | null; phases: PlanPhase[]; stack?: boolean }; workflow: string; now: number }): string {
   checkPhaseAccounts(config, p.project, p.phases.phases);
   // A new plan for the same gate replaces an earlier one (a worker that ran stage done twice).
   discardPlansOfGate(db, p.gateId, p.now);
@@ -263,6 +279,7 @@ export function fileWorkerPlan(db: Db, config: FlowrynConfig, p: { project: Proj
     project: p.project,
     title: p.phases.title ?? `Phases after ${p.sourceTask}`,
     phases: p.phases.phases,
+    stack: p.phases.stack ?? false,
     sourceTask: p.sourceTask,
     gateId: p.gateId,
     workflow: p.workflow,
@@ -326,11 +343,18 @@ export function phaseOfTask(db: Db, taskId: string): (PhaseRow & { plan_title: s
  * Every gate prompt shows it, since approving the design approves the plan.
  */
 export function pendingPlanLine(db: Db, gateId: string): string | null {
-  const plan = db.query("SELECT id FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gateId) as { id: string } | null;
+  const plan = db.query("SELECT id, stack FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gateId) as { id: string; stack: number } | null;
   if (!plan) return null;
   const phases = phasesOf(db, plan.id);
   const titles = phases.map((p) => p.title).join("; ");
-  return `plan ${plan.id}, ${phases.length} phase${phases.length === 1 ? "" : "s"} that start by themselves once this task lands: ${titles.length > 160 ? `${titles.slice(0, 159)}…` : titles}`;
+  const count = `${phases.length} ${plan.stack ? "stacked " : ""}phase${phases.length === 1 ? "" : "s"}`;
+  const when = plan.stack ? "start by themselves once the task before each delivers its PR" : "start by themselves once this task lands";
+  return `plan ${plan.id}, ${count} that ${when}: ${titles.length > 160 ? `${titles.slice(0, 159)}…` : titles}`;
+}
+
+/** Stacking stacks PRs: refused for work that lands locally (docs/notes/2026-10-27-stack-a-plan-4y.md). */
+export function checkStackable(project: ProjectRow, mode: ProjectRow["delivery_mode"]): void {
+  if (mode === "local-only") throw new FlowrynError("bad_args", `${project.id} ships local-only, which opens no PR to stack on; stack the plan only for a project that delivers PRs`);
 }
 
 export function getPlan(db: Db, id: string): PlanRow | null {

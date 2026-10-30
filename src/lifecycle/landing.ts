@@ -32,7 +32,7 @@ import { dismissRunQuestions } from "./gate-questions.ts";
 export const LANDED_BEFORE_CANCEL = "the run landed before the cancel took effect; the merge stands";
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered", "auto_merge_held"] as const;
+const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered", "auto_merge_held", "stack_base_lost"] as const;
 
 /**
  * Who proved a landing: the leader's own merge call (its reply says it

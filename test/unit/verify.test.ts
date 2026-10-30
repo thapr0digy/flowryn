@@ -756,6 +756,9 @@ function forge(annotations: Record<number, Annotation[]>): Forge & { asked: numb
     merge: async () => ({ merged: false, sha: null, message: "" }),
     feedback: async () => ({ reviews: [], reviewComments: [], issueComments: [] }),
     reviewThreads: async () => [],
+    setBase: async () => {
+      throw new Error("no base changes here");
+    },
     annotations: async (_repo, id) => {
       asked.push(id);
       return annotations[id] ?? [];
