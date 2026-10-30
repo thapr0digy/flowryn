@@ -33,12 +33,16 @@ import { projectRepo } from "./delivery.ts";
 import { blockerLabel, openWatch, parseAfter, setWaiter, watchLabel, watchOfTask, type AfterEvent } from "./watches.ts";
 import { ForgeError } from "../forge/types.ts";
 import { dismissEarlierRunsQuestions } from "./gate-questions.ts";
+import { applyAsk, prepareAsk, withAskState, type AskPlan } from "../ask/dispatch.ts";
 
 /** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
 export { MAX_BACKLOG_BODY };
 
 export const TASK_KINDS = ["ship", "scout"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
+
+/** What `dispatch --kind` takes: a task kind, or an ask (src/ask/: one read-only question, no task). */
+export const DISPATCH_KINDS = [...TASK_KINDS, "ask"] as const;
 
 /** What a task may wait for: a ship lands; a decision lands once answered (its task is done). */
 export const BLOCKER_KINDS = ["ship", "decision"] as const;
@@ -294,7 +298,9 @@ export interface ModeOverride {
   reason: string;
 }
 
-type DispatchPlan = { pins: ModelPins } & (
+type DispatchPlan = AskPlan | TaskDispatchPlan;
+
+type TaskDispatchPlan = { pins: ModelPins } & (
   | { mode: "now"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; override: ModeOverride | null }
   | { mode: "task"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; taskId: string; override: ModeOverride | null }
   | { mode: "queued"; project: ProjectRow; account: Account; version: string; base: string; baseBranch: string | null; taskId: string; kind: TaskKind; title: string; body: string; override: ModeOverride | null }
@@ -374,6 +380,8 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   const projectId = stringArg(args as never, "project")!;
   const project = getProject(ctx.db, projectId);
   if (!project) throw new FlowrynError("not_found", `no project ${projectId}`, "flowryn project list");
+  if (stringArg(args as never, "kind") === "ask") return prepareAsk(ctx, args, project);
+  if (args["max-usd"] !== undefined || boolArg(args as never, "no-promote")) throw new FlowrynError("bad_args", "--max-usd and --no-promote go with --kind ask");
   const override = modeOverride(args, project);
   const taskId = stringArg(args as never, "task");
   if (taskId) {
@@ -402,7 +410,7 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
     return { mode: "task", project, account, pins, taskId, override, ...(await checkStart(startDepsOf(ctx), project, account, storedBase(ctx.db, taskId))) };
   }
   const kind = stringArg(args as never, "kind");
-  if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship or scout");
+  if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship, scout or ask");
   const account = accountFor(ctx.config(), project, args);
   const pins = pinsFor(args, account);
   const baseBranch = await baseFlag(startDepsOf(ctx), args, project, kind, override?.mode ?? project.delivery_mode);
@@ -459,7 +467,7 @@ async function checkAfterEvents(ctx: HandlerCtx, project: ProjectRow, events: Af
 }
 
 /**
- * `flowryn dispatch <project> --kind ship|scout --body-file -` (design section
+ * `flowryn dispatch <project> --kind ship|scout|ask --body-file -` (design section
  * 12): start a worker on a new task. The run waits for its first capacity
  * grant (a worker slot and its first stage's pools), then launches.
  * `--blocked-by <task>` files it Queued instead, starting by itself once
@@ -467,14 +475,15 @@ async function checkAfterEvents(ctx: HandlerCtx, project: ProjectRow, events: Af
  * manual unless you pass --auto); `--task <id>` starts such a Queued task yourself.
  * `--after <event>` files it Queued until each event happens and implies
  * --auto: task:<id> is a blocker like --blocked-by; pr:<n> and report:<task>
- * are watches (src/lifecycle/watches.ts).
+ * are watches (src/lifecycle/watches.ts). `--kind ask` queues a question
+ * instead (src/ask/dispatch.ts): no task, no worktree, an answer item.
  */
 export const dispatchVerb: VerbSpec = {
   name: "dispatch",
-  summary: "Start a worker on a task: a ship (ends in a PR) or a scout (ends in a report); --task starts a Queued one",
+  summary: "Start a worker on a task: a ship (ends in a PR) or a scout (ends in a report), or ask a read-only question (an answer); --task starts a Queued one",
   positionals: [{ name: "project", required: true, help: "project id", complete: "project" }],
   flags: {
-    kind: { type: "string", help: "ship or scout", placeholder: "kind", values: TASK_KINDS },
+    kind: { type: "string", help: "ship, scout or ask", placeholder: "kind", values: DISPATCH_KINDS },
     "body-file": { type: "string", help: "the task, from a file or - for stdin", fileFor: "body" },
     title: { type: "string", help: "backlog title (default: the body's first line)", placeholder: "text" },
     harness: { type: "string", help: "claude or pi (default: the project's)", placeholder: "harness", values: HARNESS_IDS },
@@ -490,6 +499,8 @@ export const dispatchVerb: VerbSpec = {
     mode: { type: "string", help: "this task's delivery mode, overriding the project's: no-mistakes, direct-PR or local-only", placeholder: "mode", values: DELIVERY_MODES },
     "mode-reason": { type: "string", help: "with --mode: why (kept on the task)", placeholder: "text" },
     base: { type: "string", help: "a ship's base branch on origin: it starts from it and its PR targets it (default: the project's default branch); not on local-only", placeholder: "branch" },
+    "max-usd": { type: "string", help: "an ask's spend cap in dollars (default: [ask] max_usd)", placeholder: "dollars" },
+    "no-promote": { type: "boolean", help: "an ask that needs to write answers so instead of becoming a scout" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -497,6 +508,7 @@ export const dispatchVerb: VerbSpec = {
   prepare: (ctx, args) => prepareDispatch(ctx, args),
   apply(ctx, args, prepared) {
     const plan = prepared as DispatchPlan;
+    if (plan.mode === "ask") return applyAsk(ctx, args, plan);
     const now = ctx.now();
     const config = ctx.config();
     if (plan.mode === "task") {
@@ -569,7 +581,7 @@ export const dispatchVerb: VerbSpec = {
     // A watch on a PR that already merged fires on the delivery watcher's next pass: look now.
     if (result.data.waits_for) ctx.delivery.watch();
     await ctx.sched.passNow();
-    return withStartState(ctx, result);
+    return withAskState(ctx, withStartState(ctx, result));
   },
 };
 

@@ -902,6 +902,24 @@ ALTER TABLE task_policy ADD COLUMN base_branch TEXT;
 ALTER TABLE runs ADD COLUMN base_branch TEXT;
 `;
 
+/**
+ * Migration 45 (docs/notes/2026-10-30-ask-a-lightweight-4v.md): asks, the headless question runs.
+ * An ask is not a task: no backlog entry, no run, no worktree. `pgid` names the process group of
+ * its model call while it runs; `answer` holds at most [ask] max_answer_bytes, `answer_path` the
+ * whole reply when it was cut.
+ */
+const ASKS_SQL = /* sql */ `
+CREATE TABLE asks (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, question TEXT NOT NULL,
+  harness TEXT NOT NULL, account TEXT NOT NULL, model_pin TEXT, effort_pin TEXT,
+  max_usd REAL NOT NULL, no_promote INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','promoted','failed','cancelled')),
+  attempts INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  started_at INTEGER, ended_at INTEGER, cost_usd REAL, answer TEXT, answer_path TEXT, reason TEXT, promoted_task TEXT);
+CREATE INDEX asks_open ON asks(state, created_at) WHERE state IN ('queued','running');
+CREATE INDEX asks_project ON asks(project_id, created_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -947,6 +965,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 42, name: "learnings", sql: LEARNINGS_SQL },
   { version: 43, name: "human-waits", sql: HUMAN_WAITS_SQL },
   { version: 44, name: "base-branch", sql: BASE_BRANCH_SQL },
+  { version: 45, name: "asks", sql: ASKS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

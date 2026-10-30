@@ -53,7 +53,7 @@ const RECORDED = { pid: 4242, start: parseLstart("Wed Sep 23 22:48:39 2026")!, e
 const RECORDED_ROW = "  4242 Wed Sep 23 22:48:39 2026     /bin/claude\n";
 
 function result(code: number, stdout = "", stderr = ""): BoundedResult {
-  return { code, stdout, stderr, timedOut: code === TIMED_OUT, incomplete: null, lingering: false, spawnError: null, leftover: false };
+  return { code, stdout, stderr, timedOut: code === TIMED_OUT, aborted: false, incomplete: null, lingering: false, spawnError: null, leftover: false };
 }
 
 async function finishedPid(): Promise<number> {

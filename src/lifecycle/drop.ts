@@ -1,5 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
-import { boolArg, stringArg, type VerbSpec } from "../api/verbs.ts";
+import { boolArg, stringArg, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
+import { abortAsk } from "../ask/runner.ts";
+import { ASK_ID, getAsk, recordCancelled } from "../ask/store.ts";
 import { closeItemExplanations } from "../attention/explanations.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -226,8 +228,8 @@ export function dropRecord(db: Db, taskId: string): { task_id: string; plan_id: 
 
 const drop: VerbSpec = {
   name: "drop",
-  summary: "Remove work that never started: a Queued task, or a plan none of whose phases has started (deleted from the backlog; the reason is kept)",
-  positionals: [{ name: "target", required: true, help: "task id, or plan id (p<N>)", complete: "task" }],
+  summary: "Remove work that never started: a Queued task, or a plan none of whose phases has started (deleted from the backlog; the reason is kept); or cancel an open ask",
+  positionals: [{ name: "target", required: true, help: "task id, plan id (p<N>), or ask id (a<N>)", complete: "task" }],
   flags: {
     "body-file": { type: "string", help: "why it is dropped, from a file or - for stdin (required)", fileFor: "body" },
     unblock: { type: "boolean", help: "also clear the blocked-by edges of open tasks that wait for it, rather than refuse" },
@@ -240,6 +242,7 @@ const drop: VerbSpec = {
     const reason = sanitizeBlock(stringArg(args, "body") ?? "").trim();
     if (reason.length === 0) throw new FlowrynError("bad_args", "say why it is dropped: --body-file -", `flowryn drop ${target} --body-file -`);
     if (reason.length > REASON_MAX) throw new FlowrynError("bad_args", `the reason is over ${REASON_MAX} characters`);
+    if (ASK_ID.test(target)) return dropAsk(ctx.db, target, { reason, by: ctx.caller.role }, ctx.now());
     const planned = planDrop(ctx.db, target, { unblock: boolArg(args, "unblock") });
     applyDrop(ctx.db, planned, { reason, by: ctx.caller.role, now: ctx.now() });
     return {
@@ -252,6 +255,19 @@ const drop: VerbSpec = {
       hints: ["flowryn fleet"],
     };
   },
+  async settle(_ctx, result) {
+    // After the commit: end a dropped ask's model call, which its runner then leaves cancelled.
+    if (typeof result.data.ask === "string") abortAsk(result.data.ask);
+    return result;
+  },
 };
+
+/** An ask is cancelled, not dropped: it has no backlog entry, and its row keeps the reason. */
+function dropAsk(db: Db, id: string, drop: { reason: string; by: string }, now: number): HandlerResult {
+  const ask = getAsk(db, id);
+  if (!ask) throw new FlowrynError("not_found", `no ask ${id}`, "flowryn fleet");
+  if (!recordCancelled(db, id, drop, now)) throw new FlowrynError("bad_args", `ask ${id} is ${ask.state} already`, `flowryn show ${id}`);
+  return { data: { ask: id, was: ask.state, state: "cancelled" }, hints: ["flowryn fleet"] };
+}
 
 export const DROP_VERBS: readonly VerbSpec[] = [drop];
