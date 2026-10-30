@@ -60,15 +60,22 @@ export function makeRepo(dir: string): string {
   return dir;
 }
 
+/** Where the stand-in harnesses log each ask's print-mode call (test/helpers/fake-ask.ts). */
+export function askCallLog(home: string): string {
+  return join(home, "ask-calls.jsonl");
+}
+
 /**
- * A stand-in harness binary that only answers --version. Written beside the
+ * A stand-in harness binary that answers --version, and plays an ask's
+ * print-mode call (`-p`) with test/helpers/fake-ask.ts. Written beside the
  * path and renamed over it, as an installer replaces a binary: macOS now and
  * then SIGKILLs the exec of an executed file rewritten in place.
  */
 function versionScript(dir: string, name: string, version = FAKE_VERSION): string {
   const path = join(dir, name);
   const staged = `${path}.new`;
-  writeFileSync(staged, `#!/bin/sh\necho "${version} (fake ${name})"\n`);
+  const ask = `if [ "$1" = "-p" ]; then exec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(import.meta.dir, "fake-ask.ts"))} ${name} ${JSON.stringify(askCallLog(join(dir, "..")))} "$@"; fi\n`;
+  writeFileSync(staged, `#!/bin/sh\n${ask}echo "${version} (fake ${name})"\n`);
   chmodSync(staged, 0o755);
   renameSync(staged, path);
   return path;

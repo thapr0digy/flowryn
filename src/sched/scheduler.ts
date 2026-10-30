@@ -65,6 +65,8 @@ export interface SchedulerDeps {
   quota?(account: Account): Promise<QuotaReading>;
   /** Start queued verifies while slots are free (src/verify/start.ts): first in each grant, since a verify is the step closest to shipping. */
   drainVerifies?(stopped: () => boolean): Promise<number>;
+  /** Start queued asks while their slots are free (src/ask/runner.ts): they hold no pool lease, so they never wait on a stage. */
+  drainAsks?(stopped: () => boolean): number;
 }
 
 interface Candidate {
@@ -375,6 +377,7 @@ export class Scheduler {
   private async grant(): Promise<void> {
     // Drain before fill: a queued verify is nearer shipping than any stage, so it takes a free validation slot first.
     if (this.deps.drainVerifies && !this.stopped) await this.step("verify-queue", async () => void (await this.deps.drainVerifies!(() => this.stopped)));
+    if (this.deps.drainAsks && !this.stopped) await this.step("ask-queue", async () => void this.deps.drainAsks!(() => this.stopped));
     const config = this.deps.config();
     // Reviews, decisions and merges waiting on you or the leader (docs/notes/2026-10-29-why-waiting-covers-fy.md), then the sweep.
     await this.explainWaits();

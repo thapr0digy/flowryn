@@ -77,6 +77,9 @@ export type ItemClass = "actionable" | "info";
  * dropped; src/lifecycle/watches.ts).
  * stack_base_lost: a stacked run's base task was dropped, failed or had its PR
  * closed unmerged, so the run cannot land as stacked (src/lifecycle/stacks.ts).
+ * Asks (src/ask/): answer_ready, an ask's answer, read with `show a<N>`;
+ * ask_failed, an ask that ended without one (its cap, its deadline, an error,
+ * or a scout it asked for that could not start).
  */
 export const LANE_TABLE = {
   worker_question_blocking: { lane: "P0", class: "actionable" },
@@ -87,6 +90,8 @@ export const LANE_TABLE = {
   pass_requested: { lane: "P1", class: "actionable" },
   review_channel: { lane: "P1", class: "actionable" },
   report_ready: { lane: "P1", class: "actionable" },
+  answer_ready: { lane: "P1", class: "actionable" },
+  ask_failed: { lane: "P1", class: "actionable" },
   worker_question: { lane: "P1", class: "actionable" },
   review_feedback: { lane: "P1", class: "actionable" },
   review_summary: { lane: "P1", class: "actionable" },
