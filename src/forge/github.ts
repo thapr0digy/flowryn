@@ -289,6 +289,11 @@ export class GitHubForge implements Forge {
     return { merged: answer?.merged === true, sha: typeof answer?.sha === "string" ? answer.sha : null, message: str(answer?.message) };
   }
 
+  async setBase(ref: PrRef, base: string): Promise<PullRequest> {
+    const { body } = await this.request("PATCH", `/repos/${enc(ref.owner)}/${enc(ref.repo)}/pulls/${ref.number}`, { base });
+    return this.toPull(body);
+  }
+
   /** Every item of a paged REST list, up to MAX_PAGES pages; each page is a conditional read. */
   private async list(path: string, what: string): Promise<Record<string, any>[]> {
     const items: Record<string, any>[] = [];

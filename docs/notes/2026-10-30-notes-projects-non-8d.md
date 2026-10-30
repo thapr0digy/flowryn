@@ -38,7 +38,7 @@ flowryn dispatch notes --kind ship --body-file - <<<'A one-page plan for the Q4 
 
 ## Data
 
-Migration 45 (`notes-projects`): `projects.kind` (`code` by default, or `notes`), `gates.draft_path`, `gates.draft_blob`. `home adopt` carries the kind over (a home from before migration 45 reads as `code`).
+Migration 46 (`notes-projects`): `projects.kind` (`code` by default, or `notes`), `gates.draft_path`, `gates.draft_blob`. `home adopt` carries the kind over (a home from before migration 46 reads as `code`).
 
 ## A repository with no remote
 

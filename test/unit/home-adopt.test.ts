@@ -41,7 +41,7 @@ function task(id: string, state: BacklogTask["state"], deps: string[] = []): Bac
 const project: ProjectRow = { id: "api", repo_url: "", path: join(WORK, "api"), default_branch: "main", delivery_mode: "local-only", yolo: 0, priority: 2, harness: "claude", workflow: "fix", autonomy: "plan", kind: "code" };
 
 function oldHome(backlog: BacklogTask[], phases: PhaseRow[] = []): OldHome {
-  const plans: PlanRow[] = phases.length > 0 ? [{ id: "p1", project_id: "api", title: "plan", state: "approved", source_task: null, gate_id: null, filed_by: "worker", created_at: 1, approved_at: 1, approved_via: "tty" }] : [];
+  const plans: PlanRow[] = phases.length > 0 ? [{ id: "p1", project_id: "api", title: "plan", state: "approved", source_task: null, gate_id: null, filed_by: "worker", created_at: 1, approved_at: 1, approved_via: "tty", stack: 1 }] : [];
   const policies = backlog.map((t) => ({ task_id: t.id, project_id: "api", kind: "ship", delivery_mode: "local-only", yolo: 0, sensitive: 0, workflow: "fix", auto: 1, reason: null, created_at: 1, import_source: null, mode_reason: null, base_branch: null }));
   return {
     home: join(root, "old"),
@@ -90,6 +90,8 @@ describe("home adopt assumptions", () => {
     expect(payload.dropped_edges).toEqual([{ task: "next-x1", blocked_by: "done-x0", why: "landed" }]);
     expect(db.query("SELECT task_id, blocked_by FROM plan_phases").all()).toEqual([{ task_id: "next-x1", blocked_by: "[]" }]);
     expect(phaseOfTask(db, "next-x1")).toMatchObject({ phase_no: 2, phases: 2 });
+    // A stacked plan stays stacked (docs/notes/2026-10-27-stack-a-plan-4y.md).
+    expect(db.query("SELECT stack FROM plans").all()).toEqual([{ stack: 1 }]);
     expect(intentArgs(pendingIntents(db, "backlog")[0]!).flags["blocked-by"]).toBeUndefined();
   });
 

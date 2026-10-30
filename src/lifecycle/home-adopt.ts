@@ -366,8 +366,8 @@ export function adoptHome(db: Db, config: FlowrynConfig, old: OldHome, requested
     planIds[plan.id] = id;
     // The old gate id names a gate of the old home, so it is not carried over.
     db.query(
-      "INSERT INTO plans (id, project_id, title, state, source_task, gate_id, filed_by, created_at, approved_at, approved_via) VALUES (?1, ?2, ?3, 'approved', ?4, NULL, ?5, ?6, ?7, ?8)",
-    ).run(id, plan.project_id, plan.title, plan.source_task, plan.filed_by, plan.created_at, plan.approved_at, plan.approved_via);
+      "INSERT INTO plans (id, project_id, title, state, source_task, gate_id, filed_by, created_at, approved_at, approved_via, stack) VALUES (?1, ?2, ?3, 'approved', ?4, NULL, ?5, ?6, ?7, ?8, ?9)",
+    ).run(id, plan.project_id, plan.title, plan.source_task, plan.filed_by, plan.created_at, plan.approved_at, plan.approved_via, plan.stack ?? 0);
     for (const phase of phases) {
       const deps = JSON.parse(phase.blocked_by) as string[];
       for (const dep of deps.filter((d) => !moved.has(d))) {
