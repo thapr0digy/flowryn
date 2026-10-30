@@ -36,7 +36,7 @@ export interface DecisionRow {
   context: string | null;
   recommendation: string | null;
   reserved_reason: string | null;
-  /** The reserved question's kind, recorded when it opened: a keyword class, ci-wait, nomistakes or nomistakes-unread; null for a source's own words and older rows. */
+  /** The reserved question's kind, recorded when it opened: a keyword class, ci-wait, nomistakes, or nomistakes-floor / nomistakes-unread (never eligible); null for a source's own words and older rows. */
   reserved_class: string | null;
   defer_until: string | null;
   /** policy: a `[decisions] nomistakes_rules` rule settled it (answered_via names the rule). */

@@ -238,7 +238,7 @@ const ask: VerbSpec = {
       ? null
       : (reservedReason({ question, context: null, sourceReason, blocksYoloOff: false }, cfg) ?? (verdict && !verdict.settled ? sanitizeLine(`nomistakes: ${verdict.reason}`, 200) : null));
     // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask no floor kept for the user.
-    const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : facts?.ok && !verdict.floored ? "nomistakes" : "nomistakes-unread"));
+    const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : !facts?.ok ? "nomistakes-unread" : verdict.floored ? "nomistakes-floor" : "nomistakes"));
     ctx.db
       .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13)")
       .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks);
