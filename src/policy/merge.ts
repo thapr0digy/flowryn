@@ -350,6 +350,8 @@ function ciNote(facts: MergeFacts, notStarted: string[]): string {
 export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   const { run, delivered, pr, project } = facts;
   const task = run.task_id;
+  // A stacked run lands only after the task beneath it (src/lifecycle/stacks.ts): its PR is then retargeted and delivered again.
+  if (run.stacked_on) throw new FlowrynError("stack_not_landed", `merge refused: ${task} is stacked on ${run.stacked_on}, which has not landed`, `flowryn show ${run.stacked_on}`);
   // 1 · the canonical PR for the task, at the head that was delivered.
   if (pr) {
     if (pr.state === "merged") {

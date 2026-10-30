@@ -45,6 +45,8 @@ export interface RunRow {
   base_sha: string;
   /** The branch the run started from and its PR targets; null: the project's default branch. */
   base_branch: string | null;
+  /** A stacked run (a stacked plan's phase): the task whose branch is its base until that task lands. */
+  stacked_on: string | null;
   proc_pid: number | null;
   proc_start: number | null;
   proc_exe: string | null;

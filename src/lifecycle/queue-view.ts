@@ -6,6 +6,7 @@ import type { BacklogTask } from "../journal/tasks-axi.ts";
 import { blockersOf, hasLanded, phaseOfTask } from "./plans.ts";
 import { getProject } from "./projects.ts";
 import { openRunForTask } from "./runs.ts";
+import { phaseReadiness } from "./stacks.ts";
 import { blockerLabel, watchOfTask } from "./watches.ts";
 
 /**
@@ -104,7 +105,9 @@ function describe(db: Db, task: BacklogTask, backlog: BacklogTask[]): QueuedTask
   const project = policy ? policy.project_id : (task.repo ?? "-");
   const blockedBy = blockersOf(task);
   const waits = blockedBy.filter((dep) => !hasLanded(db, dep, backlog));
-  const status: QueuedStatus = task.hold ? "held" : waits.length > 0 ? "waiting" : "ready";
+  // A stacked plan's phase is ready once all but one blocker landed and that one delivered its PR (src/lifecycle/stacks.ts).
+  const stacks = waits.length > 0 && phase !== null && phaseReadiness(db, task.id, backlog, JSON.parse(phase.blocked_by) as string[]).ready;
+  const status: QueuedStatus = task.hold ? "held" : waits.length > 0 && !stacks ? "waiting" : "ready";
   // The scheduler's own rule (autoDispatch): an approved plan's phase with auto on and no run ever, in a project whose autonomy is plan.
   const autonomous = policy !== null && policy.auto === 1 && getProject(db, project)?.autonomy === "plan";
   const startsByItself = autonomous && phase !== null && phase.plan_state === "approved" && !hasAnyRun(db, task.id);
