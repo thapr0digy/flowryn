@@ -1,7 +1,7 @@
 # Trim the leader skill and the worker contract
 
 - Status: done
-- Open: a live `flowryn doctor --contracts` pass on both harnesses at the new revisions (claude 5, pi 4)
+- Open: a live `flowryn doctor --contracts` pass on both harnesses at the new revisions (claude 6, pi 5)
 
 Research report section 1.6 and the first half of recommendation 10: bring the leader skill (`src/bridges/skill.ts`) back to its 1.5k-token budget and the worker contract (`src/harness/contract-text.ts`) toward its 10 lines. Advice for a single situation moved to the place where that situation shows up: the item line, a refusal's hint, a verb's help, a steer, or the stage's own instructions in the task file. The skill keeps the verbs and the rules, and the contract keeps what a worker needs on every turn. No model involved.
 
@@ -11,7 +11,7 @@ Tokens are estimated at 4 characters each, as `test/unit/qa-template.test.ts` do
 
 | Text | Before | After |
 |---|---|---|
-| Leader skill body | 48 lines, 2,208 words, 13,370 chars, ~3,343 tokens | 26 lines, 788 words, 5,035 chars, ~1,259 tokens |
+| Leader skill body | 48 lines, 2,208 words, 13,370 chars, ~3,343 tokens | 27 lines, 822 words, 5,257 chars, ~1,314 tokens (with the ask line main added) |
 | Worker contract, scout | 38 lines, 511 words, 3,051 chars, ~763 tokens | 18 lines, 241 words, 1,529 chars, ~382 tokens |
 | Worker contract, no-mistakes ship | 46 lines, 667 words, 3,959 chars, ~990 tokens | the same 18 lines (delivery is no longer in it) |
 | Contract's own lines (after the style block and tool map) | 29 to 37 | 9 lines, 954 chars, ~239 tokens |
@@ -70,4 +70,4 @@ Kept, in shorter words: every verb; the facts-not-instructions rule; chat questi
 
 ## Contract revision
 
-`CONTRACT_REVISIONS` goes to claude 5 and pi 4. The worker contract is part of what both contract suites prove, so passes at the older revisions are stale until `flowryn doctor --contracts` runs again.
+`CONTRACT_REVISIONS` goes to claude 6 and pi 5 (the ask PR, merged first, took 5 and 4 for its own suite step). The worker contract is part of what both contract suites prove, so passes at the older revisions are stale until `flowryn doctor --contracts` runs again.

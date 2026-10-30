@@ -45,6 +45,10 @@ export interface BoundedOptions {
   graceMs?: number;
   drainMs?: number;
   maxOutputBytes?: number;
+  /** Each chunk of stdout as it arrives (a streamed JSON reader), before the cap is applied. */
+  onStdout?: (chunk: Uint8Array) => void;
+  /** Ends the call early, as its deadline would (SIGTERM to the group, grace, SIGKILL); the result says `aborted`. */
+  signal?: AbortSignal;
 }
 
 export interface BoundedResult {
@@ -53,6 +57,8 @@ export interface BoundedResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** The caller's signal ended the call (the code is then the leader's, usually 143). */
+  aborted: boolean;
   /** Why the output is not the whole of it (over the cap), or null. */
   incomplete: string | null;
   /** The leader exited on its own while a process it started still held its output: left running, read so far. */
@@ -162,7 +168,7 @@ interface Collector {
 }
 
 /** Read a stream to its end, keeping at most `max` bytes and draining the rest so the child never blocks on a full pipe. */
-function collect(stream: ReadableStream<Uint8Array>, max: number): Collector {
+function collect(stream: ReadableStream<Uint8Array>, max: number, onChunk?: (chunk: Uint8Array) => void): Collector {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -172,6 +178,11 @@ function collect(stream: ReadableStream<Uint8Array>, max: number): Collector {
       for (;;) {
         const { done: end, value } = await reader.read();
         if (end) return;
+        try {
+          onChunk?.(value);
+        } catch {
+          // a reader's bug must not stop the drain, or the child blocks on a full pipe
+        }
         if (size >= max) {
           over = true;
           continue;
@@ -218,37 +229,51 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
     });
   } catch (error) {
     const message = (error as Error).message;
-    return { code: SPAWN_FAILED, stdout: "", stderr: message, timedOut: false, incomplete: null, lingering: false, spawnError: message, leftover: false };
+    return { code: SPAWN_FAILED, stdout: "", stderr: message, timedOut: false, aborted: false, incomplete: null, lingering: false, spawnError: message, leftover: false };
   }
   const pid = proc.pid;
   const child: LiveChild = { pid, group, entry: config ? record(config, { pid, spawned_at: spawnedAt, argv0: basename(argv[0] ?? ""), label: opts.label }) : null, keep: false };
   live.set(pid, child);
   const target = group ? -pid : pid;
-  const out = opts.outputFd === undefined ? collect(proc.stdout as ReadableStream<Uint8Array>, max) : null;
+  const out = opts.outputFd === undefined ? collect(proc.stdout as ReadableStream<Uint8Array>, max, opts.onStdout) : null;
   const err = opts.outputFd === undefined && opts.stderr !== "ignore" ? collect(proc.stderr as ReadableStream<Uint8Array>, max) : null;
 
   let timedOut = false;
+  let aborted = false;
   let exited = false;
   let killAt = Infinity;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const end = (): void => {
+    if (exited || killAt !== Infinity) return;
+    send(target, "SIGTERM");
+    killAt = Date.now() + graceMs;
+    graceTimer = setTimeout(() => send(target, "SIGKILL"), graceMs);
+  };
   const arm = (): void => {
     if (exited) return;
     timer = setTimeout(() => {
+      if (killAt !== Infinity) return;
       timedOut = true;
-      send(target, "SIGTERM");
-      killAt = Date.now() + graceMs;
-      graceTimer = setTimeout(() => send(target, "SIGKILL"), graceMs);
+      end();
     }, opts.timeoutMs);
   };
+  const onAbort = (): void => {
+    if (exited || killAt !== Infinity) return;
+    aborted = true;
+    end();
+  };
+  if (opts.signal?.aborted) onAbort();
+  else opts.signal?.addEventListener("abort", onAbort, { once: true });
   if (deadlineGate) deadlineGate({ exited: proc.exited }).then(arm, arm);
   else arm();
   await proc.exited;
   exited = true;
   clearTimeout(timer);
+  opts.signal?.removeEventListener("abort", onAbort);
 
   let leftover = false;
-  if (timedOut && group) {
+  if ((timedOut || aborted) && group) {
     // The leader is gone; its descendants get the rest of the grace, then SIGKILL, then must be gone.
     if (!(await waitGroupGone(pid, Math.max(0, killAt - Date.now())))) {
       send(-pid, "SIGKILL");
@@ -265,7 +290,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
     if (!drained) {
       for (const c of streams) c.cancel();
       // A timed-out call is 124 already; a leader that finished keeps its code and the output it wrote.
-      lingering = !timedOut;
+      lingering = !timedOut && !aborted;
     }
     if (streams.some((c) => c.overflowed())) incomplete = `its output went over ${max} bytes`;
   }
@@ -286,7 +311,7 @@ export async function runBounded(argv: string[], opts: BoundedOptions): Promise<
     code = INCOMPLETE;
     stderr = `${stderr}${stderr && !stderr.endsWith("\n") ? "\n" : ""}${opts.label} exited ${leaderCode} but ${incomplete}\n`;
   }
-  return { code, stdout, stderr, timedOut, incomplete, lingering, spawnError: null, leftover };
+  return { code, stdout, stderr, timedOut, aborted, incomplete, lingering, spawnError: null, leftover };
 }
 
 export interface OwnedStop {
