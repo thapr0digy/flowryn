@@ -302,7 +302,7 @@ describe("passing a review from its page with a pass code (docs/notes/2026-10-30
       await leader.start();
       const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: steps("pp", ["FAKE: sleep 120000"]) });
       expect(dispatched.code).toBe(0);
-      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      const { run } = dispatched.reply.data as { run: string };
       await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
       const gate = one<{ id: string; page_path: string }>(f, "SELECT id, page_path FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
       const calls = join(f.h.home, "lavish-calls.log");

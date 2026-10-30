@@ -28,7 +28,7 @@ export const ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 export const CHALLENGE_TTL_MS = 2 * 60 * 1000;
 /** A review page's pass code must be typed back this soon. */
 export const PAGE_CODE_TTL_MS = 10 * 60 * 1000;
-/** Wrong tries a gate's pass codes survive between them; the next wrong one voids the code held. */
+/** Wrong tries per gate, across all its codes; this one and every later one voids the code held. */
 export const PAGE_CODE_TRIES = 3;
 /** Pass codes one gate may mint in the daemon's life; a pass asked for after that opens the leader's request only. */
 export const PAGE_CODE_MINTS = 5;
