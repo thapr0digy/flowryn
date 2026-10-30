@@ -46,7 +46,7 @@ The floor is in code (`DEADLINE_FLOOR`, src/attention/decisions-policy.ts). All 
    - has wording that matches none of the keyword patterns. This is checked with every class on, whatever `reserved_classes` narrows.
 4. **The answer**: `answerDecision` with `answered_by = policy`, `answered_via = deadline`, and words saying how long it waited. The worker gets the usual answer steer; a CI-wait answer carries out `ciWaitSteer`, which credits the choice to the deadline default, not the user. A `decision.deadline_default` event records the kind, the choice and `waited_ms`. The daemon then notifies the run's bus and kicks the journal, the scheduler and attention.
 5. **The brief**: the return brief's "Decided for you" lists each deadline answer as `- [q130] … → merge-main (deadline after 4h 12m; undo: flowryn decide q130 <choice> --by captain)`. Once the run is over, the undo part reads "run over, no undo". So does the regular briefing's "Decided for you since the last briefing". "Settled by rule" leaves deadline answers out, so nothing is listed twice. `flowryn show <id>` shows the `class`.
-6. **Undo**: a deadline answer is a policy answer, so `decide <id> <choice> --by captain` takes the existing rule-undo path (`overrideRuleAnswer`) while the run is live. For a CI-wait question, the new steer carries out the new choice's instruction (`ciWaitSteer`; keep-waiting tells the worker to leave the pipeline as it now stands). For any other question it names the deadline answer and asks for a `git revert` of what was committed for it.
+6. **Undo**: a deadline answer is a policy answer, so `decide <id> <choice> --by captain` takes the existing rule-undo path (`overrideRuleAnswer`) while the run is live. For a CI-wait question, the new steer carries out the new choice's instruction (`ciWaitSteer`; keep-waiting tells the worker to leave the pipeline as it now stands). For any other question it names the deadline answer and asks for a `git revert` of what was committed for it. Picking the choice the deadline already took confirms it: the answer becomes the user's and no steer is sent, so nothing is redone.
 
 The away-mode comment in src/attention/away.ts used to say no decision rule reads away. It now names this rule as the one exception.
 
@@ -64,7 +64,7 @@ The away-mode comment in src/attention/away.ts used to say no decision rule read
   - every eligibility check failing alone;
   - the pass with the user present, with the user away, and with leader sessions inactive or active;
   - the return brief and the briefing lines, before and after the run ends;
-  - undo of a CI-wait and of a no-mistakes deadline answer.
+  - undo of a CI-wait and of a no-mistakes deadline answer, and a confirm of the same choice that sends no steer.
 - `test/integration/deadline-defaults.test.ts`, through the real daemon and CLI:
   - `ask --nomistakes` records each kind;
   - a backdated question stays open while the user is present;

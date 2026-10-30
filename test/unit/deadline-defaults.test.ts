@@ -245,6 +245,20 @@ describe("the brief and the undo", () => {
     expect(body).toContain("if what you did on the deadline default's answer is already committed");
   });
 
+  test("the user confirming the deadline's own choice records it and steers nothing", () => {
+    for (const fields of [{}, { reserved_class: "nomistakes", origin: "web-a", options: JSON.stringify(["fix", "approve", "skip"]), recommendation: "fix", reserved_reason: "nomistakes: no rule for r-1 (review warning, touched)", question: "no-mistakes review finding r-1" }]) {
+      const d = question(5, fields);
+      away();
+      pass();
+      const answered = getDecision(db, d.id)!;
+      const steers = (db.query("SELECT count(*) AS n FROM messages").get() as { n: number }).n;
+      const confirmed = tx(db, () => overrideRuleAnswer({ db, now: () => NOW + HOUR }, answered, { choice: answered.answer!, words: null, via: "shell" }));
+      expect(confirmed.steer).toBeNull();
+      expect((db.query("SELECT count(*) AS n FROM messages").get() as { n: number }).n).toBe(steers);
+      expect(getDecision(db, d.id)).toMatchObject({ answer: answered.answer, answered_by: "captain", answered_via: "shell", rationale: `(confirmed ${answered.answer} (deadline))` });
+    }
+  });
+
   test("waitedLabel", () => {
     expect(waitedLabel(4 * HOUR + 12 * 60_000 + 59_000)).toBe("4h 12m");
   });

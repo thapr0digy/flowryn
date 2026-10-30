@@ -91,18 +91,21 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
 /**
  * The user's undo of a rule's answer (docs/notes/2026-10-22-settle-routine-no-2r.md): a decision
  * answered by policy is answered again, by the user, while its run is live. The worker is steered
- * to the new choice and to revert, with new commits, any fix the rule's answer already made. Call
- * inside the verb's transaction, after the captain channel was checked.
+ * to the new choice and to revert, with new commits, any fix the rule's answer already made; the
+ * same choice confirms it and sends no steer. Call inside the verb's transaction, after the captain
+ * channel was checked.
  */
 export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; via: string }): ReturnType<typeof answerDecision> {
   const run = d.run_id ? getRunWithPolicy(ctx.db, d.run_id) : null;
   if (!run || isTerminal(run.state)) throw new FlowrynError("run_not_active", `${d.id} was settled by ${d.answered_via}, and its run is over`, "file the change as a follow-up task");
   const now = ctx.now();
   const before = `${d.answer} (${d.answered_via})`;
+  const confirmed = a.choice === d.answer;
   ctx.db
     .query("UPDATE decisions SET answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = 'captain', rationale = ?5 WHERE id = ?1")
-    .run(d.id, a.choice, a.via, now, [`(undid ${before})`, a.words].filter((w): w is string => !!w).join("\n"));
+    .run(d.id, a.choice, a.via, now, [`(${confirmed ? "confirmed" : "undid"} ${before})`, a.words].filter((w): w is string => !!w).join("\n"));
   appendEvent(ctx.db, { source: "cli", kind: "decision.overridden", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, from: d.answer, rule: d.answered_via, choice: a.choice, by: "captain", via: a.via }, ts: now });
+  if (confirmed) return { steer: null, run: run.id, dependents: [], held: false };
   if (d.origin === CI_WAIT_ORIGIN) {
     // The CI-wait watchdog's question was never the worker's: the new answer is carried out as its instruction.
     const instruction = ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) ?? "Leave the pipeline as it now stands and keep driving it; the watchdog asks again if CI still has no checks.";
