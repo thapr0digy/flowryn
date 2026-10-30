@@ -32,11 +32,13 @@ The first all-phase run with the two fixes above scored 21/23. The promoted scou
 
 ## Tests
 
-The change is to the lab script only. `bun test` never reaches a real Pi, so the proof is the live run (below). No product code changed, so `CONTRACT_REVISIONS` stays as it is. The full `bun test` passed on the branch before delivery.
+The change is to the lab script only. `bun test` never reaches a real Pi, so the proof is the live run (below). No product code changed, so `CONTRACT_REVISIONS` stays as it is. The full `bun test` on the branch: 2783 pass, 0 fail.
 
 ## Live run
 
 `scripts/lab/v1-live.sh` (all phases), 2026-10-30, lab session `fl-lab-flowryn-v1-*`, Pi 0.87.1 on the offline scripted provider:
 
 - `scripts/lab/v1-live.sh promote` alone: 5/5. The seed works, and the promoted scout committed, delivered locally, merged under yolo and was cleaned up.
-- all phases: RESULT_PENDING.
+- all phases, idempotent ship step and contract seed only: 21/23. The merge refused `not_fast_forward` (the origin sync above).
+- all phases, the same fixes, three runs while I made no commits: 24/24 each time. 22/22 was the failing count's shape: a promote phase that passes adds two checks (`merged under yolo`, `the task is a ship, done`) and drops the failure, so a full pass is 24.
+- all phases, with the clones detached from origin: **24/24** (lab session `fl-lab-flowryn-v1-49023-1550`; harness 7, scout 4, promote 5, divergence 4, herdr 4). I committed to this branch 6 s into the run. That commit landed before the promoted scout was dispatched, so this run does not test the mid-run race itself. The `no_origin` skip is what removes it.
