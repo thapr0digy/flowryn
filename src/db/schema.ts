@@ -902,6 +902,11 @@ ALTER TABLE task_policy ADD COLUMN base_branch TEXT;
 ALTER TABLE runs ADD COLUMN base_branch TEXT;
 `;
 
+/** The kind of a reserved question, recorded when it opens: what `[decisions] default_classes` matches (deadline defaults). */
+const RESERVED_CLASS_SQL = /* sql */ `
+ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -947,6 +952,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 42, name: "learnings", sql: LEARNINGS_SQL },
   { version: 43, name: "human-waits", sql: HUMAN_WAITS_SQL },
   { version: 44, name: "base-branch", sql: BASE_BRANCH_SQL },
+  { version: 45, name: "reserved-class", sql: RESERVED_CLASS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

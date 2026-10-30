@@ -36,6 +36,8 @@ export interface DecisionRow {
   context: string | null;
   recommendation: string | null;
   reserved_reason: string | null;
+  /** The reserved question's kind, recorded when it opened: a keyword class, ci-wait, nomistakes or nomistakes-unread; null for a source's own words and older rows. */
+  reserved_class: string | null;
   defer_until: string | null;
   /** policy: a `[decisions] nomistakes_rules` rule settled it (answered_via names the rule). */
   answered_by: "captain" | "leader" | "policy" | null;
@@ -51,8 +53,12 @@ export interface DecisionRow {
   blocks: string | null;
 }
 
+/** answered_via of a deadline default (src/attention/deadline-defaults.ts): a policy answer the user may undo. */
+export const DEADLINE_VIA = "deadline";
+
 /** A rule's answer the user may still undo (decide --by captain on an answered_by policy decision). */
 export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by">): boolean {
+  // A deadline default (DEADLINE_VIA) is a policy answer too, undone the same way.
   return d.state === "answered" && d.answered_by === "policy";
 }
 

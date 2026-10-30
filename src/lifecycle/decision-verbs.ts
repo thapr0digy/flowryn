@@ -13,11 +13,11 @@ import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { createStandaloneDecision, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
+import { createStandaloneDecision, DEADLINE_VIA, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject } from "./projects.ts";
-import { getRun, getRunWithPolicy, isTerminal, runBase } from "./runs.ts";
+import { getRunWithPolicy, isTerminal, runBase } from "./runs.ts";
 import type { ShowText } from "./show-text.ts";
 import { createSteer } from "./steers.ts";
 import { lensFor, projectRefScope, recordTaskScope, refScope, requireInScope } from "../leader/scope.ts";
@@ -95,7 +95,7 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
  * inside the verb's transaction, after the captain channel was checked.
  */
 export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; via: string }): ReturnType<typeof answerDecision> {
-  const run = d.run_id ? getRun(ctx.db, d.run_id) : null;
+  const run = d.run_id ? getRunWithPolicy(ctx.db, d.run_id) : null;
   if (!run || isTerminal(run.state)) throw new FlowrynError("run_not_active", `${d.id} was settled by ${d.answered_via}, and its run is over`, "file the change as a follow-up task");
   const now = ctx.now();
   const before = `${d.answer} (${d.answered_via})`;
@@ -103,7 +103,13 @@ export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRo
     .query("UPDATE decisions SET answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = 'captain', rationale = ?5 WHERE id = ?1")
     .run(d.id, a.choice, a.via, now, [`(undid ${before})`, a.words].filter((w): w is string => !!w).join("\n"));
   appendEvent(ctx.db, { source: "cli", kind: "decision.overridden", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, from: d.answer, rule: d.answered_via, choice: a.choice, by: "captain", via: a.via }, ts: now });
-  const text = `The user changed the answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}") from ${before} to ${a.choice}.${a.words ? ` ${a.words}` : ""} Act on ${a.choice} instead: if the rule's fix is already committed, undo it with git revert (new commits, never a rewrite), then respond to the gate or run the pipeline again.`;
+  if (d.origin === CI_WAIT_ORIGIN) {
+    // The CI-wait watchdog's question was never the worker's: the new answer is carried out as its instruction.
+    const instruction = ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) ?? "Leave the pipeline as it now stands and keep driving it; the watchdog asks again if CI still has no checks.";
+    return { steer: createSteer(ctx.db, run, `The user changed the answer to ${d.id} from ${before} to ${a.choice}. ${instruction}`, now, d.id).id, run: run.id, dependents: [], held: false };
+  }
+  const committed = d.answered_via === DEADLINE_VIA ? "what you did on the deadline default's answer is" : "the rule's fix is";
+  const text = `The user changed the answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}") from ${before} to ${a.choice}.${a.words ? ` ${a.words}` : ""} Act on ${a.choice} instead: if ${committed} already committed, undo it with git revert (new commits, never a rewrite), then respond to the gate or run the pipeline again.`;
   return { steer: createSteer(ctx.db, run, text, now, d.id).id, run: run.id, dependents: [], held: false };
 }
 
@@ -351,6 +357,7 @@ export function decisionView(d: DecisionRow, text: ShowText): Record<string, unk
     origin: d.origin ?? "-",
     key: d.key ?? "-",
     reserved: d.reserved_reason ?? "-",
+    ...(d.reserved_class ? { class: d.reserved_class } : {}),
     deferred_until: d.defer_until ?? "-",
     answer: d.answer ?? "-",
     by: d.answered_by ?? "-",

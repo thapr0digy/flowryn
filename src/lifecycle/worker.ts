@@ -4,7 +4,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
 import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
-import { decisionsConfig, reservedReason } from "../attention/decisions-policy.ts";
+import { decisionsConfig, keywordClass, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { capStoredText, MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
@@ -237,9 +237,11 @@ const ask: VerbSpec = {
     const reserved = verdict?.settled && !sourceReason?.trim()
       ? null
       : (reservedReason({ question, context: null, sourceReason, blocksYoloOff: false }, cfg) ?? (verdict && !verdict.settled ? sanitizeLine(`nomistakes: ${verdict.reason}`, 200) : null));
+    // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask no floor kept for the user.
+    const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : facts?.ok && !verdict.floored ? "nomistakes" : "nomistakes-unread"));
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at, blocks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12)")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, now, blocks);
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks);
     const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via, ...(verdict ? { nomistakes: true } : {}) } });
     if (verdict?.settled && reserved === null) {
       appendEvent(ctx.db, { source: "daemon", kind: "decision.settled_by_rule", runId: run.id, taskId: run.task_id, payload: { decision: id, step: facts!.ok ? facts!.step : "", rules: verdict.rules, answer: verdict.answer, findings: verdict.findings } });

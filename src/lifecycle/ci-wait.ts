@@ -138,8 +138,8 @@ export function openCiWait(db: Db, run: RunRow, project: string, stall: CiStall,
   const id = nextRunDecisionId(db);
   const key = `${stallPrefix(stall.nmRun)}${stallDecisions(db, run.id, stall.nmRun).length + 1}`;
   db.query(
-    `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, created_at, blocks)
-     VALUES (?1, ?2, ?3, ?4, ?5, 0, 'open', ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+    `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, reserved_class, created_at, blocks)
+     VALUES (?1, ?2, ?3, ?4, ?5, 0, 'open', ?6, ?7, ?8, ?9, ?10, ?6, ?11, ?12)`,
   ).run(id, run.task_id, run.id, question, JSON.stringify(CI_WAIT_OPTIONS), CI_WAIT_ORIGIN, key, context, recommend, CI_WAIT_RESERVED, now, "the ship's CI wait");
   const event = appendEvent(db, {
     source: "nomistakes",
