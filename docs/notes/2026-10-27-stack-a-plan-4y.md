@@ -95,7 +95,7 @@ Flowryn never deletes a remote branch, so the branch beneath survives until GitH
 
 ### Base lost
 
-The same pass: when the task beneath is dropped, its latest run `failed` or `cancelled`, or its PR read closed unmerged, the stacked run gets one P1 `stack_base_lost` ("cancel it, or run X again"). `stacked_on` stays set, so the merge stays refused: the stacked branch carries the lost task's work and must not land unreviewed. If that task runs again and delivers, the item settles by itself. There is no unstack verb.
+The same pass: when the task beneath is dropped, its latest run `failed` or `cancelled`, or its PR read closed unmerged, the stacked run gets one P1 `stack_base_lost` ("cancel it, or run X again"). `stacked_on` stays set, so the merge stays refused: the stacked branch carries the lost task's work and must not land unreviewed. If that task runs again and delivers, the item settles by itself; it also settles when the stacked run is retargeted or lands. There is no unstack verb.
 
 ### Data
 
@@ -111,4 +111,4 @@ Migration 45 (`stacked-plans`): `plans.stack` (0/1) and `runs.stacked_on` (the t
 
 ### Tests
 
-`test/integration/stacked-plans.test.ts`: a stacked two-phase plan through the fake worker and the fake GitHub (squash merges): phase 2 starts on phase 1's delivery from its branch and opens its PR into it, its merge is refused `stack_not_landed`, phase 1 lands, the PR is patched to main, phase 2 is sent back, a plain merge of main would conflict, the steer's merges are clean, it delivers again and lands. `test/unit/stacked-plans.test.ts`: the stack line, the merges after a squash and after a merge commit (real git), readiness (draft, depth, unstacked plans), the local-only refusal and the gate line, the merge refusal, following a new head, the retarget pass (patched, already moved, forge down) and base lost. `test/unit/home-adopt.test.ts`: the copied `stack`.
+`test/integration/stacked-plans.test.ts`: a stacked two-phase plan through the fake worker and the fake GitHub (squash merges): phase 2 starts on phase 1's delivery from its branch and opens its PR into it, its merge is refused `stack_not_landed`, phase 1 lands, the PR is patched to main, phase 2 is sent back, a plain merge of main would conflict, the steer's merges are clean, it delivers again and lands. `test/unit/stacked-plans.test.ts`: the stack line, the merges after a squash and after a merge commit (real git), readiness (draft, depth, unstacked plans), the local-only refusal and the gate line, the merge refusal, following a new head, the retarget pass (patched, already moved, forge down) and base lost. `test/unit/merged-off-base.test.ts`: a stacked PR merged into the branch beneath before that task landed (a divergence), into the landed task's base before the retarget (a landing that unstacks it), and into another branch after the landing (a divergence against the landed base). `test/unit/home-adopt.test.ts`: the copied `stack`.
