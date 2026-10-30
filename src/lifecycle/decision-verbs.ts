@@ -181,10 +181,10 @@ const decisionAdd: VerbSpec = {
     question: { type: "string", help: "the question, one line", placeholder: "text" },
     options: { type: "string", help: "comma-separated choices (optional)", placeholder: "a,b" },
     recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
-    blocks: { type: "list", help: "tasks that wait on this decision (repeatable)", placeholder: "task" },
+    blocks: { type: "list", help: "tasks that wait on this decision (repeatable)", placeholder: "task", complete: "task" },
     reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
-    origin: { type: "string", help: "where it came from (default: leader)", placeholder: "task" },
-    project: { type: "string", help: "the project it belongs to", placeholder: "id" },
+    origin: { type: "string", help: "where it came from (default: leader)", placeholder: "task", complete: "task" },
+    project: { type: "string", help: "the project it belongs to", placeholder: "id", complete: "project" },
     "body-file": { type: "string", help: "why it matters, what it blocks", fileFor: "body" },
   },
   kind: "mutation",
@@ -223,7 +223,7 @@ const decide: VerbSpec = {
   name: "decide",
   summary: "Answer a decision: the leader with --rationale; a reserved one only with the user's word (--by captain)",
   positionals: [
-    { name: "decision", required: true, help: "decision id, such as k3 or q2" },
+    { name: "decision", required: true, help: "decision id, such as k3 or q2", complete: "decision" },
     { name: "choice", required: true, help: "one of its options (a multi choice: \"a, b\"; a review question also takes \"other\" with the user's words), or the answer when it has none" },
   ],
   flags: {
@@ -311,7 +311,7 @@ function reply(ctx: HandlerCtx, d: DecisionRow, choice: string, by: string, done
 const decisionDefer: VerbSpec = {
   name: "decision defer",
   summary: "Leave an open decision out of the briefing until a date",
-  positionals: [{ name: "decision", required: true, help: "decision id" }],
+  positionals: [{ name: "decision", required: true, help: "decision id", complete: "decision" }],
   flags: { until: { type: "string", help: "YYYY-MM-DD", placeholder: "date" } },
   kind: "mutation",
   roles: ["leader", "human"],

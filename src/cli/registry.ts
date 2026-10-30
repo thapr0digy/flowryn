@@ -9,6 +9,7 @@ import { APPROVE_VERBS } from "./commands/approve.ts";
 import { LEADER_REPIN_VERBS } from "./commands/leader-repin.ts";
 import { VERIFY_CLI_VERBS } from "./commands/verify.ts";
 import { DIAG_CLI_VERBS } from "./commands/diag.ts";
+import { COMPLETION_VERBS } from "./commands/completion.ts";
 
 /**
  * The one command registry (design section 12): every verb the CLI accepts,
@@ -26,4 +27,5 @@ export const CLI_VERBS: readonly VerbSpec[] = [
   ...LEADER_REPIN_VERBS,
   ...VERIFY_CLI_VERBS,
   ...DIAG_CLI_VERBS,
+  ...COMPLETION_VERBS,
 ];

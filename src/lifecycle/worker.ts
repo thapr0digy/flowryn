@@ -57,6 +57,9 @@ function activeRun(ctx: HandlerCtx): RunWithPolicy {
  * under another name than chatter, and a missed finding costs more than a
  * dismissable P1.
  */
+/** The status words a worker's contract names, offered by shell completion; any word is accepted. */
+export const REPORT_STATUSES = ["finding", "blocked", "failed", "progress"] as const;
+
 export const REPORT_EFFECT: Readonly<Record<string, "item" | "record">> = {
   blocked: "item",
   finding: "item",
@@ -119,7 +122,7 @@ export function reportLine(title: string, status: string, body: string): string 
 const report: VerbSpec = {
   name: "report",
   summary: "Report a change your supervisor would act on (workers only)",
-  positionals: [{ name: "status", required: true, help: "one word: finding, blocked or failed open an item for your leader; progress is only recorded" }],
+  positionals: [{ name: "status", required: true, help: "one word: finding, blocked or failed open an item for your leader; progress is only recorded", values: REPORT_STATUSES }],
   flags: {
     "body-file": { type: "string", help: "details, read from a file or - for stdin", fileFor: "body" },
   },

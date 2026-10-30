@@ -20,6 +20,9 @@ export const EFFORT_LEVELS: Record<HarnessId, readonly string[]> = {
   pi: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
 
+/** Every effort level some harness takes, for shell completion of --effort. */
+export const EFFORT_CHOICES: readonly string[] = [...new Set(Object.values(EFFORT_LEVELS).flat())];
+
 /**
  * A model name as it is typed into the worker's pane: an alias, a full id, a
  * `[1m]` suffix, Pi's `<provider>/<id>` and its `:<thinking>` suffix. Nothing

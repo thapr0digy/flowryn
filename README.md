@@ -31,6 +31,7 @@ flowryn doctor --contracts   # run the harness contract suites; needed before an
 flowryn project add ~/code/web   # reads origin and the default branch
 ```
 
+- zsh tab completion: add `source <(flowryn completion zsh)` to `~/.zshrc` after `compinit` ([docs/notes/2026-10-29-zsh-completions-for-49.md](docs/notes/2026-10-29-zsh-completions-for-49.md)).
 - Re-run `flowryn doctor --contracts` after installing or updating Claude Code or Pi. Dispatch refuses an untested harness version.
 - Run `doctor` in your own terminal.
 - GitHub token: `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`. It is sent only to GitHub's API.

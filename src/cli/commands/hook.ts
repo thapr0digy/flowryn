@@ -9,6 +9,7 @@ import { readScopeDeny, sharedStores } from "../../policy/scope-paths.ts";
 import { request, TransportError } from "../../transport/unix.ts";
 import { ulid } from "../../util/ulid.ts";
 import { PROTO } from "../../version.ts";
+import { HARNESS_IDS } from "../../harness/types.ts";
 
 /**
  * `flowryn hook <name>`: the Claude hooks and Pi extensions of workers and
@@ -153,7 +154,7 @@ function signalHook(name: string, summary: string): VerbSpec {
     name: `hook ${name}`,
     summary,
     positionals: [],
-    flags: { harness: { type: "string", help: "claude (default) or pi", placeholder: "harness" } },
+    flags: { harness: { type: "string", help: "claude (default) or pi", placeholder: "harness", values: HARNESS_IDS } },
     kind: "local",
     roles: ["worker", "hook"],
     async local(args, io) {
@@ -201,7 +202,7 @@ const toolCheck: VerbSpec = {
   name: "hook tool-check",
   summary: "Hook (Pi): may this tool call run under the toolkit rules; prints {block, reason} or {}",
   positionals: [],
-  flags: { harness: { type: "string", help: "pi (default here) or claude", placeholder: "harness" } },
+  flags: { harness: { type: "string", help: "pi (default here) or claude", placeholder: "harness", values: HARNESS_IDS } },
   kind: "local",
   roles: ["worker", "hook"],
   async local(args, io) {
@@ -229,7 +230,7 @@ const waitSteer: VerbSpec = {
   name: "hook wait-steer",
   summary: "Wait for a steer and wake the worker (Claude asyncRewake waiter, Pi long poll)",
   positionals: [],
-  flags: { harness: { type: "string", help: "claude (default) or pi", placeholder: "harness" } },
+  flags: { harness: { type: "string", help: "claude (default) or pi", placeholder: "harness", values: HARNESS_IDS } },
   kind: "local",
   roles: ["worker"],
   async local(args, io) {
@@ -285,7 +286,7 @@ const waitP0: VerbSpec = {
   name: "hook wait-p0",
   summary: "Leader: wait for a P0 to push (Claude asyncRewake waiter, Pi long poll)",
   positionals: [],
-  flags: { harness: { type: "string", help: "claude (default) or pi", placeholder: "harness" } },
+  flags: { harness: { type: "string", help: "claude (default) or pi", placeholder: "harness", values: HARNESS_IDS } },
   kind: "local",
   roles: ["hook"],
   async local(args, io) {

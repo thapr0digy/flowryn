@@ -59,7 +59,7 @@ export function verifyLine(facts: MergeFacts): string {
 const merge: VerbSpec = {
   name: "merge",
   summary: "Merge a delivered ship through the merge gate; it counts only once the merge is proven",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: {
     head: { type: "string", help: "Pi leader extension: the head its confirm showed you", placeholder: "sha" },
     "key-file": { type: "string", help: "Pi leader extension only: its approval key, from stdin", fileFor: "approval_key" },
@@ -101,7 +101,7 @@ const merge: VerbSpec = {
 const decline: VerbSpec = {
   name: "decline",
   summary: "Decline a delivered ship: the worker gets your words as a steer and delivers again",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: { "body-file": { type: "string", help: "what to change, from a file or - for stdin", fileFor: "body" } },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -143,7 +143,7 @@ async function worktreeHead(ctx: HandlerCtx, run: RunWithPolicy, project: Projec
 const cleanup: VerbSpec = {
   name: "cleanup",
   summary: "Remove a landed, cancelled or failed task's worktree, through the cleanup guard (--discard needs your approval)",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: { discard: { type: "boolean", help: "discard unlanded work (needs a human discard approval: flowryn approve <task> --discard)" } },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -192,7 +192,7 @@ interface BeginPrepared {
 const approveBegin: VerbSpec = {
   name: "approve.begin",
   summary: "Start a /dev/tty approval: what you would approve, and the code to type back",
-  positionals: [{ name: "task", required: true, help: "task or run id" }],
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
   flags: {
     "allow-red": { type: "string", help: "waive exactly this one failing check" },
     discard: { type: "boolean", help: "approve discarding unlanded work" },

@@ -158,8 +158,8 @@ const capacityResume: VerbSpec = {
   summary: "Lift an account's usage-limit pause and its quota floor's hold now, in your own terminal",
   positionals: [],
   flags: {
-    account: { type: "string", help: "the account whose pause to lift (flowryn accounts)", placeholder: "id" },
-    harness: { type: "string", help: "every account of this harness: claude or pi", placeholder: "harness" },
+    account: { type: "string", help: "the account whose pause to lift (flowryn accounts)", placeholder: "id", complete: "account" },
+    harness: { type: "string", help: "every account of this harness: claude or pi", placeholder: "harness", values: HARNESS_IDS },
   },
   kind: "mutation",
   roles: ["human"],
