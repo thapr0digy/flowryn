@@ -6,7 +6,7 @@ import { lavishAnswer } from "../lifecycle/decision-verbs.ts";
 import { gateQuestions, gatesToPoll, gatesWithWidget, readsAsPass, recordGateComment, recordGateNotes, recordLavishEnded, requestGatePass, widgetState, type PassRequest } from "../lifecycle/gate-questions.ts";
 import { routedReply, routePageBatch, summarizeReview, type Routed, type UserMessage } from "../lifecycle/review-chat.ts";
 import { runBounded } from "../runtime/bounded.ts";
-import { PS_TIMEOUT_MS, PsUnavailable, psAnswer } from "../runtime/proc.ts";
+import { PS_TIMEOUT_MS, PsUnavailable, pidTooLarge, psAnswer } from "../runtime/proc.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { DEFAULT_CHANNEL_ALERT_MS } from "../config/leader.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
@@ -478,7 +478,7 @@ export class LavishPoller {
         const { pid, page } = JSON.parse(text) as { pid: number; page: string };
         if (Number.isInteger(pid) && pid > 1) {
           const read = await runBounded([ps, "-o", "command=", "-p", String(pid)], { label: "ps", timeoutMs: PS_TIMEOUT_MS, stderr: "pipe" });
-          const command = psAnswer(ps, read).trim();
+          const command = pidTooLarge(read) === pid ? "" : psAnswer(ps, read).trim();
           if (command.includes(" poll ") && command.includes(page)) {
             process.kill(pid, "SIGTERM");
             this.deps.log(`lavish: stopped a poll an earlier daemon left running (pid ${pid}, ${page})`);

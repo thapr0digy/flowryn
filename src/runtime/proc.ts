@@ -68,11 +68,32 @@ export function psAnswer(ps: string, result: BoundedResult): string {
   throw new PsUnavailable(`${ps} exited ${result.code}: ${result.stderr.trim() || "no stderr"}`);
 }
 
-/** A process table read through the given ps, bounded by `timeoutMs`. LC_ALL=C keeps lstart parseable. */
+/**
+ * The pid a ps refused as above the system's pid limit, or null. macOS ps
+ * exits 1 with "ps: process id too large: <pid>" for a pid above kern.pid_max
+ * and reads none of the others asked about. No process can hold such a pid,
+ * so it is gone, not unknown. Only that exact one-line answer counts.
+ */
+export function pidTooLarge(result: BoundedResult): number | null {
+  if (result.code !== 1 || result.stdout.trim() !== "") return null;
+  const match = /^(?:\S*ps: )?process id too large: (\d+)$/.exec(result.stderr.trim());
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * A process table read through the given ps, bounded by `timeoutMs`. LC_ALL=C keeps lstart parseable.
+ * A pid ps refuses as too large is dropped as gone and the rest are asked again.
+ */
 export function psRunnerAt(ps: string, timeoutMs = PS_TIMEOUT_MS): PsRunner {
   return async (pids) => {
-    const result = await runBounded([ps, "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], { label: "ps", timeoutMs, env: { ...process.env, LC_ALL: "C" } });
-    return psAnswer(ps, result);
+    let remaining = [...new Set(pids)];
+    while (remaining.length > 0) {
+      const result = await runBounded([ps, "-o", "pid=,lstart=,comm=", "-p", remaining.join(",")], { label: "ps", timeoutMs, env: { ...process.env, LC_ALL: "C" } });
+      const tooLarge = pidTooLarge(result);
+      if (tooLarge === null || !remaining.includes(tooLarge)) return psAnswer(ps, result);
+      remaining = remaining.filter((pid) => pid !== tooLarge);
+    }
+    return "";
   };
 }
 
