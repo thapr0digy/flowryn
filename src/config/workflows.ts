@@ -49,7 +49,8 @@ function stage(id: string, extra: Partial<StageDef> = {}): StageDef {
  * The built-in workflows; a [workflows.<id>] table replaces one of them or
  * adds another. Visual QA reviews only work with screens to look at:
  * `feature-ui` carries it, `feature` goes from build straight to ship
- * (no-mistakes already covers tests, lint and review there).
+ * (no-mistakes already covers tests, lint and review there). `draft` is a
+ * notes project's: the draft file reviewed, then landed as approved.
  */
 export const DEFAULT_WORKFLOWS: Record<string, WorkflowDef> = {
   feature: {
@@ -71,6 +72,12 @@ export const DEFAULT_WORKFLOWS: Record<string, WorkflowDef> = {
   },
   fix: { id: "fix", stages: [stage("build"), stage("ship", { pools: ["validation"], gate: "merge" })] },
   scout: { id: "scout", stages: [stage("investigate")] },
+  // A notes project's ships (docs/notes/2026-10-30-notes-projects-non-8d.md): one file, shown as the review
+  // page, then committed and delivered locally; no validation slot, since there is nothing to test.
+  draft: {
+    id: "draft",
+    stages: [stage("draft", { skill: "flowryn-draft", gate: "review" }), stage("final", { gate: "merge" })],
+  },
 };
 
 /** Every run holds a slot of this pool for as long as it has a live worker. */

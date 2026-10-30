@@ -51,5 +51,5 @@ export function mergeOnOrigin(other: string, file: string, text: string): string
 }
 
 export function projectAt(path: string, id = "web"): ProjectRow {
-  return { id, repo_url: "", path, default_branch: "main", delivery_mode: "direct-PR", yolo: 0, priority: 0, harness: "claude", workflow: "", autonomy: "manual" } as ProjectRow;
+  return { id, repo_url: "", path, default_branch: "main", delivery_mode: "direct-PR", yolo: 0, priority: 0, harness: "claude", workflow: "", autonomy: "manual", kind: "code" };
 }

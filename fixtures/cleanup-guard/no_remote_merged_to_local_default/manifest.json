@@ -1,0 +1,40 @@
+{
+  "name": "no_remote_merged_to_local_default",
+  "ported_from": "flowryn:notes-projects-non-8d",
+  "description": "A notes project's repository with no remote at all: origin is removed and deleted. The task commits its draft and the approved branch is fast-forwarded into the primary checkout's local main. With no remote, only the local default branch can prove the work landed; it does, so cleanup is allowed.",
+  "delivery_mode": "local-only",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "allow",
+    "reason_class": "merged_to_local_default"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "primary_main",
+      "expect": true
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

@@ -38,7 +38,7 @@ function task(id: string, state: BacklogTask["state"], deps: string[] = []): Bac
   return { id, title: id, state, kind: "ship", repo: "api", priority: null, body: "", created: null, closed: null, deps: deps.map((d) => `blocked-by:${d}`), hold: null, links: [] };
 }
 
-const project: ProjectRow = { id: "api", repo_url: "", path: join(WORK, "api"), default_branch: "main", delivery_mode: "local-only", yolo: 0, priority: 2, harness: "claude", workflow: "fix", autonomy: "plan" };
+const project: ProjectRow = { id: "api", repo_url: "", path: join(WORK, "api"), default_branch: "main", delivery_mode: "local-only", yolo: 0, priority: 2, harness: "claude", workflow: "fix", autonomy: "plan", kind: "code" };
 
 function oldHome(backlog: BacklogTask[], phases: PhaseRow[] = []): OldHome {
   const plans: PlanRow[] = phases.length > 0 ? [{ id: "p1", project_id: "api", title: "plan", state: "approved", source_task: null, gate_id: null, filed_by: "worker", created_at: 1, approved_at: 1, approved_via: "tty" }] : [];
