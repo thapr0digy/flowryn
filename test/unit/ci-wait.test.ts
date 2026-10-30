@@ -343,6 +343,15 @@ describe("CI-wait pieces", () => {
     expect(based).not.toContain("origin/main");
   });
 
+  test("a deadline default's answer is credited to the deadline, not the user", () => {
+    const merge = ciWaitSteer("q1", "merge-main", "Taken as recommended", "main", true)!;
+    expect(merge).toStartWith("A deadline default (the user was away) chose merge-main for q1");
+    expect(merge).toContain('Its note: "Taken as recommended"');
+    expect(merge).not.toContain("The user");
+    expect(ciWaitSteer("q1", "accept-without-ci", null, "main", true)).toStartWith("A deadline default (the user was away) accepted this ship without CI (q1)");
+    expect(ciWaitSteer("q1", "merge-main", "go", "main")).toContain('The user chose merge-main for q1');
+  });
+
   test("keep-waiting and unknown answers carry no steer", () => {
     expect(ciWaitSteer("q1", "keep-waiting", null)).toBeNull();
     expect(ciWaitSteer("q1", "other", null)).toBeNull();

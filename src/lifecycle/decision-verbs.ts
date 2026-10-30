@@ -82,7 +82,7 @@ export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a
   let steer: string | null = null;
   if (run && !isTerminal(run.state) && !held) {
     // The CI-wait watchdog's question was never the worker's: its answer is carried out as an instruction (keep-waiting sends none).
-    const text = d.origin === CI_WAIT_ORIGIN ? ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) : `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
+    const text = d.origin === CI_WAIT_ORIGIN ? ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!), a.via === DEADLINE_VIA) : `Answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}"): ${a.choice}.${a.words ? ` ${a.words}` : ""}`;
     if (text !== null) steer = createSteer(ctx.db, run, text, now, d.id).id;
   }
   return { steer, run: run?.id ?? null, dependents: d.run_id === null ? dependentsOf(backlogTasks(ctx), d.task_id).map((t) => t.id) : [], held };
