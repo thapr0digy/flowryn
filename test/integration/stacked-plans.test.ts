@@ -143,7 +143,7 @@ describe("stacked plans", () => {
         const ran = git(worktree, step.split(" ").slice(1));
         expect(ran, step).toMatchObject({ code: 0 });
       }
-      expect(git(worktree, ["diff", "--name-only", "origin/main", "HEAD"]).out.split("\n").sort()).toEqual(["shared.txt", "two.txt"]);
+      expect(git(worktree, ["diff", "--name-only", "origin/main", "HEAD"]).out.split("\n").toSorted()).toEqual(["shared.txt", "two.txt"]);
 
       // Delivered again into main, it merges and lands.
       await waitUntil(() => runOf(e, two)?.stage_state === "active", 30_000, "the last stage started again");
