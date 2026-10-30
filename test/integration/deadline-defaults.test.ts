@@ -66,15 +66,15 @@ async function setup() {
     return (asked.reply.data as { decision: string }).decision;
   };
   const row = (id: string) => {
-    const db = h.db();
-    const r = db.query("SELECT state, answer, answered_by, answered_via, reserved_class FROM decisions WHERE id = ?1").get(id) as Record<string, string | null>;
-    db.close();
+    const scratch = h.db();
+    const r = scratch.query("SELECT state, answer, answered_by, answered_via, reserved_class FROM decisions WHERE id = ?1").get(id) as Record<string, string | null>;
+    scratch.close();
     return r;
   };
   const backdate = (...ids: string[]) => {
-    const db = h.db();
-    for (const id of ids) db.query("UPDATE decisions SET created_at = created_at - ?2 WHERE id = ?1").run(id, 5 * HOUR);
-    db.close();
+    const scratch = h.db();
+    for (const id of ids) scratch.query("UPDATE decisions SET created_at = created_at - ?2 WHERE id = ?1").run(id, 5 * HOUR);
+    scratch.close();
   };
   return { h, run, head, ask, row, backdate };
 }
