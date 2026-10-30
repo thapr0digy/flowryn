@@ -180,8 +180,8 @@ export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_reque
 /**
  * SQL for "item `i` is a leader follow-up": a LEADER_WAKE_KINDS item, where a
  * pr_ready counts only when its task is yolo (the leader merges it with no
- * prompt) and no auto-merge is working on its run (the daemon merges it with
- * no leader turn; a held one wakes it as auto_merge_held). A pr_ready that
+ * prompt) and no auto-merge or landing queue is working on its run (the
+ * daemon merges it with no leader turn; a held one wakes it as auto_merge_held). A pr_ready that
  * waits on you is not one: it wakes only while you are away (awayWakeSql in
  * away.ts). A pr_ready is never sensitive work, which opens
  * sensitive_action_waiting instead.
@@ -189,7 +189,8 @@ export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_reque
 export const LEADER_WAKE_SQL = `(i.kind IN (${LEADER_WAKE_KINDS.filter((k) => k !== "pr_ready")
   .map((k) => `'${k}'`)
   .join(", ")}) OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1)
-    AND NOT EXISTS (SELECT 1 FROM auto_merges wa WHERE wa.run_id = i.run_id AND wa.state IN ('queued','verifying','waiting_checks','merging'))))`;
+    AND NOT EXISTS (SELECT 1 FROM auto_merges wa WHERE wa.run_id = i.run_id AND wa.state IN ('queued','verifying','waiting_checks','merging'))
+    AND NOT EXISTS (SELECT 1 FROM landing_queue wl WHERE wl.run_id = i.run_id AND wl.state IN ('waiting','landing'))))`;
 
 export interface ItemRow {
   id: string;

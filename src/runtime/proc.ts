@@ -68,11 +68,37 @@ export function psAnswer(ps: string, result: BoundedResult): string {
   throw new PsUnavailable(`${ps} exited ${result.code}: ${result.stderr.trim() || "no stderr"}`);
 }
 
-/** A process table read through the given ps, bounded by `timeoutMs`. LC_ALL=C keeps lstart parseable. */
+/**
+ * The pids a ps refused as above the system's pid limit, or null. macOS ps
+ * exits 1 with one "ps: process id too large: <pid>" line per such pid and
+ * then reads none of the others asked about. No process can hold such a pid,
+ * so it is gone, not unknown. Only an answer made of nothing but those lines counts.
+ */
+export function pidsTooLarge(result: BoundedResult): number[] | null {
+  if (result.code !== 1 || result.stdout.trim() !== "" || result.stderr.trim() === "") return null;
+  const pids: number[] = [];
+  for (const line of result.stderr.trim().split("\n")) {
+    const match = /^(?:\S*ps: )?process id too large: (\d+)$/.exec(line.trim());
+    if (!match) return null;
+    pids.push(Number(match[1]));
+  }
+  return pids;
+}
+
+/**
+ * A process table read through the given ps, bounded by `timeoutMs`. LC_ALL=C keeps lstart parseable.
+ * Pids ps refuses as too large are dropped as gone and the rest are asked again.
+ */
 export function psRunnerAt(ps: string, timeoutMs = PS_TIMEOUT_MS): PsRunner {
   return async (pids) => {
-    const result = await runBounded([ps, "-o", "pid=,lstart=,comm=", "-p", pids.join(",")], { label: "ps", timeoutMs, env: { ...process.env, LC_ALL: "C" } });
-    return psAnswer(ps, result);
+    let remaining = [...new Set(pids)];
+    while (remaining.length > 0) {
+      const result = await runBounded([ps, "-o", "pid=,lstart=,comm=", "-p", remaining.join(",")], { label: "ps", timeoutMs, env: { ...process.env, LC_ALL: "C" } });
+      const tooLarge = pidsTooLarge(result);
+      if (tooLarge === null || !tooLarge.every((pid) => remaining.includes(pid))) return psAnswer(ps, result);
+      remaining = remaining.filter((pid) => !tooLarge.includes(pid));
+    }
+    return "";
   };
 }
 

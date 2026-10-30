@@ -32,6 +32,7 @@ import { hashToken, mintToken } from "../../src/api/auth.ts";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { renderToml } from "../../src/config/toml.ts";
 import { contractRevision } from "../../src/contracts/revision.ts";
+import { recordPass } from "../../src/contracts/verbs.ts";
 import { migrate, openDb, tx } from "../../src/db/db.ts";
 import type { RunRow } from "../../src/lifecycle/runs.ts";
 import { HerdrClient } from "../../src/runtime/herdr/client.ts";
@@ -68,6 +69,11 @@ function clone(name: string): { path: string; branch: string } {
   const path = join(home, name);
   const cloned = Bun.spawnSync(["git", "clone", "--quiet", "--no-hardlinks", ROOT, path], { stdin: "ignore" });
   if (cloned.exitCode !== 0) throw new Error(`git clone failed: ${cloned.stderr.toString()}`);
+  // No origin: the daemon syncs a primary checkout from its origin (src/upkeep/sync.ts), and this one is
+  // your working repository, so a commit you make mid-run would move the scratch default branch under a
+  // run already branched from it (the merge then refuses not_fast_forward).
+  const detached = Bun.spawnSync(["git", "-C", path, "remote", "remove", "origin"], { stdin: "ignore" });
+  if (detached.exitCode !== 0) throw new Error(`git remote remove origin failed: ${detached.stderr.toString()}`);
   return { path, branch: Bun.spawnSync(["git", "-C", path, "branch", "--show-current"]).stdout.toString().trim() };
 }
 /** Fresh clones of this repository: the Pi project, and one a Claude project names (only its version is checked). */
@@ -99,7 +105,7 @@ const config = renderToml(
         extensions: [join(ROOT, "spikes/pi/lib/scripted-provider.ts")],
         agent_dir: piAgent,
         session_dir: join(home, "pi-sessions"),
-        env: { PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0" },
+        env: { PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0", FLOWRYN_PROVIDER_LOG: join(home, "provider.log") },
       },
     },
     reconcile: { pass_ms: 2_000, wait_poll_ms: 10_000 },
@@ -216,7 +222,15 @@ async function dispatch(script: string, title: string): Promise<{ task: string; 
 }
 
 const REPORT = `bash mkdir -p "$FLOWRYN_REPORT_DIR" && ls src > "$FLOWRYN_REPORT_DIR/notes.md" && $FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/notes.md"`;
-const SHIP = `bash printf 'promoted\\n' > promoted.txt && git add promoted.txt && git -c user.name=lab -c user.email=lab@example.invalid commit -qm 'the promoted fix' && $FLOWRYN_BIN deliver --local`;
+/**
+ * The promoted worker's ship step, safe to play twice: it commits once, delivers once (marked in the
+ * run's own TMPDIR, which survives the relaunch) and is a no-op after that. promote() plays it twice
+ * because the stopped scout may or may not get one more model turn: SIGTERM ends `sleep` first, Pi
+ * asks the model again, and its reply (this step) is in the session but never runs, since the tool
+ * waits on `hook tool-check` and the process is gone by then. The resumed session counts that reply,
+ * so the next step is either this one again or the one after it.
+ */
+const SHIP = `bash test -e "$TMPDIR/promoted-shipped" || { { test -f promoted.txt || { printf 'promoted\\n' > promoted.txt && git add promoted.txt && git -c user.name=lab -c user.email=lab@example.invalid commit -qm 'the promoted fix'; }; } && $FLOWRYN_BIN deliver --local && touch "$TMPDIR/promoted-shipped"; }`;
 
 // --- phases ---------------------------------------------------------------------------------------
 async function harness(): Promise<void> {
@@ -266,7 +280,7 @@ async function scout(): Promise<void> {
 }
 
 async function promote(): Promise<void> {
-  const { task, run } = await dispatch(`bash sleep 40 ;; ${SHIP} ;; say DONE`, "Live scout to promote");
+  const { task, run } = await dispatch(`bash sleep 40 ;; ${SHIP} ;; ${SHIP} ;; say DONE`, "Live scout to promote");
   try {
     const busy = await waitRun(run, "the scout busy", 120_000, (r) => r.liveness === "busy" && r.proc_pid !== null);
     const promoted = await call("promote", { task, body: "Ship the fix you found as promoted.txt." });
@@ -328,6 +342,27 @@ async function herdr(): Promise<void> {
   }
 }
 
+/**
+ * Other phases need Pi verified without running its suite: seed a pass for the installed version
+ * at the current contract revision, as m5-live's --seed-contracts does. (contracts.record cannot:
+ * a leader's record needs a report from its own suite run, and one without a report is at the
+ * baseline revision, which no longer verifies.) Written while the daemon is down, so its startup
+ * check reads Pi verified.
+ */
+function seedPiContract(): void {
+  const version = /(\d+\.\d+\.\d+)/.exec(Bun.spawnSync([PI_BIN, "--version"]).stdout.toString())?.[1];
+  if (!version) throw new Error(`cannot read the pi version from ${PI_BIN} --version`);
+  const db = openDb(dbPath);
+  try {
+    tx(db, () =>
+      recordPass(db, { harness: "pi", version, report: null, by: "human", build: null, session: null, source: "cli", revision: contractRevision("pi"), platform: null, herdr_version: null, launch_profile: null }, Date.now()),
+    );
+  } finally {
+    db.close();
+  }
+  log(`seeded pi ${version} at contract revision ${contractRevision("pi")} (suite not run)`);
+}
+
 // --- run ---------------------------------------------------------------------------------------------
 async function main(): Promise<number> {
   log(`scratch home ${home}; lab ${labSession}; pi ${PI_BIN} (${PI_MODEL})`);
@@ -341,13 +376,9 @@ async function main(): Promise<number> {
   }
   // The startup check runs on the harnesses in use: restart now that the projects name them.
   await stopDaemon();
+  if (!phases.includes("harness")) seedPiContract();
   await startDaemon();
   if (phases.includes("harness")) await harness();
-  else {
-    // Other phases need Pi verified; seed the record for the installed version, as M5's live run did.
-    const version = /(\d+\.\d+\.\d+)/.exec(Bun.spawnSync([PI_BIN, "--version"]).stdout.toString())?.[1] ?? "0.0.0";
-    await call("contracts.record", { harness: "pi", version });
-  }
   if (phases.includes("scout")) await scout();
   if (phases.includes("promote")) await promote();
   if (phases.includes("divergence")) await divergence();

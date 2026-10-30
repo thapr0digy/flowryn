@@ -11,7 +11,7 @@ Tokens are estimated at 4 characters each, as `test/unit/qa-template.test.ts` do
 
 | Text | Before | After |
 |---|---|---|
-| Leader skill body | 48 lines, 2,208 words, 13,370 chars, ~3,343 tokens | 27 lines, 822 words, 5,257 chars, ~1,314 tokens (with the ask line main added) |
+| Leader skill body | 48 lines, 2,208 words, 13,370 chars, ~3,343 tokens | 27 lines, 846 words, 5,387 chars, ~1,347 tokens (with the ask and landing-queue words main added) |
 | Worker contract, scout | 38 lines, 511 words, 3,051 chars, ~763 tokens | 18 lines, 241 words, 1,529 chars, ~382 tokens |
 | Worker contract, no-mistakes ship | 46 lines, 667 words, 3,959 chars, ~990 tokens | the same 18 lines (delivery is no longer in it) |
 | Contract's own lines (after the style block and tool map) | 29 to 37 | 9 lines, 954 chars, ~239 tokens |
