@@ -16,9 +16,10 @@ function span(ms: number): string {
   return `${Math.round(s / 86_400)}d`;
 }
 
+/** Dollars to four places, trailing zeros past the cents dropped: $1.00, $0.06, $0.0123. */
 export function usd(n: number | null): string {
   if (n === null) return "-";
-  return `$${n.toFixed(n < 0.1 ? 4 : 2)}`;
+  return `$${n.toFixed(4).replace(/0{1,2}$/, "")}`;
 }
 
 function openAskItem(db: Db, id: string): { id: string; kind: string } | null {

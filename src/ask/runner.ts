@@ -15,6 +15,7 @@ import { usageGate } from "../sched/usage.ts";
 import { askArgs, askContract, askEnv, capBytes, PiMeter, readClaudeResult, scoutRequest, type AskOutcome } from "./harness.ts";
 import { promoteAsk } from "./promote.ts";
 import { getAsk, markStarted, queuedAsks, recordAnswer, recordFailed, recoverInterrupted, runningAsks, type AskRow } from "./store.ts";
+import { usd } from "./view.ts";
 
 /**
  * The headless runner (docs/notes/2026-10-30-ask-a-lightweight-4v.md; design-v3's post-v1
@@ -66,7 +67,7 @@ export function abortAsk(id: string): boolean {
 export async function stopAsks(): Promise<void> {
   stopping = true;
   for (const controller of active.values()) controller.abort();
-  await Promise.allSettled([...finished]);
+  await Promise.allSettled(finished);
 }
 
 /** Tests: a fresh daemon in the same process. */
@@ -78,7 +79,7 @@ export function resetAskRunner(): void {
 
 /** Every call this process started has recorded its end (tests). */
 export async function settledAsks(): Promise<void> {
-  while (finished.size > 0) await Promise.allSettled([...finished]);
+  while (finished.size > 0) await Promise.allSettled(finished);
 }
 
 /**
@@ -134,10 +135,6 @@ function fail(deps: AskDeps, id: string, reason: string, costUsd: number | null,
   tx(deps.db, () => recordFailed(deps.db, id, { reason, costUsd, hint }, deps.now()));
 }
 
-function dollars(n: number): string {
-  return `$${n.toFixed(n < 0.1 ? 4 : 2)}`;
-}
-
 /** The output Pi streams can repeat each partial message, so only this much is kept; the meter reads every chunk. */
 const PI_KEPT_BYTES = 1024 * 1024;
 /** Claude prints one JSON result: a few times the largest answer is plenty. */
@@ -184,10 +181,10 @@ async function runAsk(deps: AskDeps, ask: AskRow, controller: AbortController): 
   // A daemon stop leaves the row running for the next start; a drop already cancelled it.
   if (stopping || getAsk(deps.db, ask.id)?.state !== "running") return;
   const outcome: AskOutcome = meter ? meter.outcome() : readClaudeResult(result.stdout);
-  if (overCap) return fail(deps, ask.id, `it spent ${dollars(meter!.costUsd)}, over its ${dollars(ask.max_usd)} cap`, meter!.costUsd, `dispatch it again with a higher --max-usd, or as a scout`);
+  if (overCap) return fail(deps, ask.id, `it spent ${usd(meter!.costUsd)}, over its ${usd(ask.max_usd)} cap`, meter!.costUsd, `dispatch it again with a higher --max-usd, or as a scout`);
   if (result.timedOut) return fail(deps, ask.id, `no answer within ${Math.round(settings.timeout_ms / 60_000)} min`, outcome.costUsd, "dispatch it again narrower, or as a scout");
   if (result.spawnError !== null) return fail(deps, ask.id, `${ask.harness} did not start: ${result.spawnError}`, null);
-  if (outcome.kind === "over_cap") return fail(deps, ask.id, `it reached its ${dollars(ask.max_usd)} cap (${outcome.detail})`, outcome.costUsd, "dispatch it again with a higher --max-usd, or as a scout");
+  if (outcome.kind === "over_cap") return fail(deps, ask.id, `it reached its ${usd(ask.max_usd)} cap (${outcome.detail})`, outcome.costUsd, "dispatch it again with a higher --max-usd, or as a scout");
   if (outcome.kind === "error") return fail(deps, ask.id, `${outcome.detail}${result.code !== 0 ? ` (exit ${result.code})` : ""}`, outcome.costUsd);
   const reason = scoutRequest(outcome.text);
   if (reason !== null && ask.no_promote === 0) return promote(deps, ask, reason, outcome.costUsd);
