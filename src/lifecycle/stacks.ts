@@ -23,7 +23,7 @@ import { createSteer } from "./steers.ts";
  * lookups over the database, git and the forge.
  */
 
-/** A phase never stacks on more than this many open PRs (the task beneath it and the ones that one sits on). */
+/** A phase stacks only while fewer than this many unlanded PRs sit beneath it (the task beneath it and the ones that one sits on). */
 export const MAX_STACK_DEPTH = 3;
 
 /** What a stacked phase starts on: the task beneath it, its run, branch and delivered head. */

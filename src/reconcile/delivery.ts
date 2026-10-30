@@ -135,6 +135,12 @@ function nudgeConflict(db: Db, run: RunWithPolicy, delivered: Delivered, pr: Pul
   return true;
 }
 
+/** The base a stacked run's task beneath landed in, or null while it has not landed. */
+function landedBaseOf(db: Db, taskId: string, project: { default_branch: string }): string | null {
+  const beneath = db.query("SELECT state, base_branch FROM runs WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as { state: string; base_branch: string | null } | null;
+  return beneath && (beneath.state === "landed" || beneath.state === "cleaned") ? runBase(beneath, project) : null;
+}
+
 /**
  * A PR merged on GitHub into a branch other than the run's base (retargeted
  * by hand, then merged): a divergence, not a landing, since the work is not
@@ -144,11 +150,12 @@ function mergedOffBase(db: Db, run: RunWithPolicy, pr: PullRequest, now: number)
   const project = getProject(db, run.project_id);
   if (!project || !pr.baseRef) return false;
   const base = runBase(run, project);
-  // A stacked PR merged into the branch beneath it before that branch landed is not where the run said it would go either.
-  if (pr.baseRef === base && !run.stacked_on) return false;
-  const summary = run.stacked_on
-    ? `the delivered PR ${pr.url} was merged into ${pr.baseRef}, the branch of ${run.stacked_on}, before ${run.stacked_on} landed`
-    : `the delivered PR ${pr.url} was merged into ${pr.baseRef}, not its base ${base}`;
+  const target = run.stacked_on ? landedBaseOf(db, run.stacked_on, project) : base;
+  if (pr.baseRef === target) return false;
+  const summary =
+    run.stacked_on && pr.baseRef === base
+      ? `the delivered PR ${pr.url} was merged into ${pr.baseRef}, the branch of ${run.stacked_on}, before ${run.stacked_on} landed`
+      : `the delivered PR ${pr.url} was merged into ${pr.baseRef}, not its base ${target ?? base}`;
   if (db.query("SELECT 1 FROM divergences WHERE run_id = ?1 AND summary = ?2 AND resolution = 'keep-run'").get(run.id, summary)) return false;
   openDivergence(db, "github", { runId: run.id, taskId: run.task_id, higher: "github", lower: "worker", summary }, now);
   return true;

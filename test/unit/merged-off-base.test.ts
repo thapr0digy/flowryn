@@ -83,4 +83,35 @@ describe("a PR merged into a branch other than the run's base", () => {
     expect(observe("release/2")).toBe(true);
     expect(divergences()).toHaveLength(0);
   });
+
+  describe("a stacked run", () => {
+    beforeEach(() => {
+      tx(db, () => {
+        db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES ('t0', 'p', 'ship', 'direct-PR', 0, 'fix', ?1)").run(now);
+        db.query(
+          `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+           VALUES ('r0', 't0', 'claude', 'v', 'ready', 'idle', 'fix', 'ship', '/w0', 'phase1', 's', 'r0', ?1, ?1)`,
+        ).run(now - 1_000);
+        db.query("UPDATE runs SET base_branch = 'phase1', stacked_on = 't0' WHERE id = 'r1'").run();
+      });
+    });
+
+    test("merged into the branch beneath before that task landed is a divergence", () => {
+      expect(observe("phase1")).toBe(false);
+      expect(divergences().map((d) => d.summary)).toEqual([`the delivered PR ${delivered.ref} was merged into phase1, the branch of t0, before t0 landed`]);
+    });
+
+    test("merged into the landed task's base before the retarget is a landing", () => {
+      tx(db, () => db.query("UPDATE runs SET state = 'landed' WHERE id = 'r0'").run());
+      expect(observe("main")).toBe(true);
+      expect(divergences()).toHaveLength(0);
+      expect(getRun(db, "r1")!.state).toBe("landed");
+    });
+
+    test("merged into another branch after the task beneath landed is a divergence against the landed base", () => {
+      tx(db, () => db.query("UPDATE runs SET state = 'landed' WHERE id = 'r0'").run());
+      expect(observe("release/2")).toBe(false);
+      expect(divergences().map((d) => d.summary)).toEqual([`the delivered PR ${delivered.ref} was merged into release/2, not its base main`]);
+    });
+  });
 });
