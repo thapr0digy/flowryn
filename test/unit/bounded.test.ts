@@ -392,3 +392,46 @@ test("ps etime reads as elapsed ms in every form ps prints, and garbage as null"
   expect(parseEtime("")).toBeNull();
   expect(parseEtime("soon")).toBeNull();
 });
+
+describe("streamed stdout and an abort signal (src/ask/runner.ts reads Pi's stream and stops it at its cap)", () => {
+  test("every stdout chunk reaches the callback, past the kept cap too, and a throwing callback does not stop the drain", async () => {
+    let seen = 0;
+    let calls = 0;
+    const result = await runBounded(["/bin/sh", "-c", "head -c 300000 /dev/zero"], {
+      label: "stream",
+      timeoutMs: 10_000,
+      maxOutputBytes: 1_000,
+      onStdout: (chunk) => {
+        seen += chunk.length;
+        if (++calls === 1) throw new Error("a reader bug");
+      },
+    });
+    expect(seen).toBe(300_000);
+    expect(result.stdout.length).toBe(1_000);
+    expect(result.incomplete).not.toBeNull();
+  });
+
+  test("an abort ends the whole group like a deadline, and says aborted rather than timed out", async () => {
+    const dir = tempDir();
+    configureOwnedProcesses({ dir: join(dir, "owned"), log: (l) => lines.push(l) });
+    const pidFile = join(dir, "child.pid");
+    const controller = new AbortController();
+    const call = runBounded(["/bin/sh", "-c", `sleep 60 & echo $! > ${pidFile}; wait`], { label: "abortable", timeoutMs: 30_000, graceMs: 300, drainMs: 300, signal: controller.signal });
+    const child = await pidFrom(pidFile);
+    const began = Date.now();
+    controller.abort();
+    const result = await call;
+    expect(result).toMatchObject({ aborted: true, timedOut: false });
+    expect(result.code).not.toBe(0);
+    expect(Date.now() - began).toBeLessThan(3_000);
+    expect(await gone(child)).toBe(true);
+    expect(readdirSync(join(dir, "owned"))).toEqual([]);
+  });
+
+  test("a signal aborted before the spawn ends the call at once", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runBounded(["/bin/sleep", "60"], { label: "pre-aborted", timeoutMs: 30_000, graceMs: 200, drainMs: 200, signal: controller.signal });
+    expect(result.aborted).toBe(true);
+  });
+});

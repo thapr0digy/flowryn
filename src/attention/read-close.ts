@@ -32,7 +32,7 @@ export const READ_RESOLVED_BY = "read by leader";
 
 /** Whether reading closes an item of this kind whose report has this status (null for a report_ready). */
 export function closesOnRead(kind: string, status: string | null): boolean {
-  if (kind === "report_ready") return true;
+  if (kind === "report_ready" || kind === "answer_ready") return true;
   return kind === "worker_report" && status !== null && READ_CLOSES_STATUSES.includes(status);
 }
 

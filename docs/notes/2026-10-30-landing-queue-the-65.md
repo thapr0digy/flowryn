@@ -45,7 +45,7 @@ A head of line whose worker is busy, shows a dialog, or whose worktree has uncom
 
 ## Where it lives
 
-- `src/verify/landing-queue.ts`: the store (`landing_queue`, migration 47), `enqueueLanding`, `deliveredToQueue` and the `LandingQueue` controller. It runs inside the auto-merger's pass (before and after the rows) and its `beforeMerge` hook, so every kick that moves an auto-merge moves the line.
+- `src/verify/landing-queue.ts`: the store (`landing_queue`, migration 48), `enqueueLanding`, `deliveredToQueue` and the `LandingQueue` controller. It runs inside the auto-merger's pass (before and after the rows) and its `beforeMerge` hook, so every kick that moves an auto-merge moves the line.
 - `src/verify/auto-merge.ts`: `createAutoMerge` (a row for any caller), `supersedeAutoMerge`, `setReadyProgress`, the `LandingHooks` dependency; a row that is a live entry's is not superseded by `auto_merge` being off.
 - `src/lifecycle/delivery.ts`: `carryLanding`. `src/reconcile/delivery.ts`: `sendConflictBack` (shared with the watcher's nudge), and a PR read whose head is the one the delivery was carried from is GitHub lagging behind the push, not a moved head.
 - `src/policy/merge.ts`: `standingApproval`, and `findLandingApproval` in `chooseApproval` for the daemon. `src/policy/verbs.ts`: the merge verb's queue path.

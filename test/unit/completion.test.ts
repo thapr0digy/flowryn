@@ -81,8 +81,8 @@ describe("the zsh script covers the registry", () => {
     expect(missing).toEqual([]);
   });
 
-  test("dispatch offers ship and scout for --kind, and every --harness offers claude and pi", () => {
-    expect(argsBlock(script, "dispatch")).toContain("'--kind=[ship or scout]:kind:(ship scout)'");
+  test("dispatch offers ship, scout and ask for --kind, and every --harness offers claude and pi", () => {
+    expect(argsBlock(script, "dispatch")).toContain("'--kind=[ship, scout or ask]:kind:(ship scout ask)'");
     const bare = CLI_VERBS.flatMap((v) => (v.flags.harness && v.flags.harness.values?.join() !== HARNESS_IDS.join() ? [v.name] : []));
     expect(bare).toEqual([]);
   });
