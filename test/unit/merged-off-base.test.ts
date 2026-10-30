@@ -113,5 +113,11 @@ describe("a PR merged into a branch other than the run's base", () => {
       expect(observe("release/2")).toBe(false);
       expect(divergences().map((d) => d.summary)).toEqual([`the delivered PR ${delivered.ref} was merged into release/2, not its base main`]);
     });
+
+    test("merged into the branch beneath after that task landed is a divergence against the landed base", () => {
+      tx(db, () => db.query("UPDATE runs SET state = 'landed' WHERE id = 'r0'").run());
+      expect(observe("phase1")).toBe(false);
+      expect(divergences().map((d) => d.summary)).toEqual([`the delivered PR ${delivered.ref} was merged into phase1, not its base main`]);
+    });
   });
 });

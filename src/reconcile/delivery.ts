@@ -165,7 +165,7 @@ function mergedOffBase(db: Db, run: RunWithPolicy, pr: PullRequest, now: number)
     return false;
   }
   const summary =
-    run.stacked_on && pr.baseRef === base
+    run.stacked_on && target === null && pr.baseRef === base
       ? `the delivered PR ${pr.url} was merged into ${pr.baseRef}, the branch of ${run.stacked_on}, before ${run.stacked_on} landed`
       : `the delivered PR ${pr.url} was merged into ${pr.baseRef}, not its base ${target ?? base}`;
   if (db.query("SELECT 1 FROM divergences WHERE run_id = ?1 AND summary = ?2 AND resolution = 'keep-run'").get(run.id, summary)) return false;
