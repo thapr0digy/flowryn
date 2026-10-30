@@ -7,7 +7,7 @@ Every liveness read goes through `ps`: the reconciler's "is the worker alive", `
 ## What a ps answer means now
 
 - **Bounded.** Each ps call runs through `runBounded` with a 5 s deadline (`PS_TIMEOUT_MS`): `psRunnerAt`, `readProcessTable` and the poller's sweep. In the daemon it gets its own process group and an ownership ledger entry like any other external command.
-- **Three answers.** `psAnswer` reads a bounded result: exit 0 is the table; exit 1 with nothing on stdout or stderr is "none of these pids" (what macOS ps and procps both do for a pid that is not running); anything else (an error on stderr, 124 timed out, 125 overflowed, 127 cannot spawn, a signal) throws `PsUnavailable`. `readIdentities` also throws it for a row that does not parse, since that row could be any pid asked about.
+- **Three answers.** `psAnswer` reads a bounded result: exit 0 is the table; exit 1 with nothing on stdout or stderr is "none of these pids" (what macOS ps and procps both do for a pid that is not running); macOS's "process id too large" refusal is read as gone too (docs/notes/2026-10-30-cleanup-order-fixture-ja.md); anything else (an error on stderr, 124 timed out, 125 overflowed, 127 cannot spawn, a signal) throws `PsUnavailable`. `readIdentities` also throws it for a row that does not parse, since that row could be any pid asked about.
 - **`PsRunner` contract.** A runner returns the rows of the live pids (or "") and throws `PsUnavailable` when it cannot say. `isAlive` and `readIdentity` pass the throw on; `aliveOrUnknown` turns it into `null` for callers that branch on it.
 
 ## What each reader does with "unknown"
