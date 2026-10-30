@@ -7,7 +7,7 @@ import { LavishPoller } from "../../src/lavish/poller.ts";
 import { processCwd } from "../../src/lease/repin.ts";
 import { reapUnder } from "../../src/policy/reap.ts";
 import { runBounded, TIMED_OUT, type BoundedResult } from "../../src/runtime/bounded.ts";
-import { aliveOrUnknown, isAlive, parseLstart, pidTooLarge, psAnswer, psRunnerAt, PsUnavailable, readIdentities, readIdentity, readProcessTable, terminate, type PsRunner } from "../../src/runtime/proc.ts";
+import { aliveOrUnknown, isAlive, parseLstart, pidsTooLarge, psAnswer, psRunnerAt, PsUnavailable, readIdentities, readIdentity, readProcessTable, terminate, type PsRunner } from "../../src/runtime/proc.ts";
 
 /**
  * ps answers liveness for every reader (the reconciler, terminate, the lease,
@@ -87,13 +87,15 @@ describe("what a ps exit means", () => {
 describe("a pid above the system's limit is gone, not unknown", () => {
   const TOO_LARGE = 99_999_998;
 
-  test("only ps's exact 'process id too large' answer names a refused pid", () => {
-    expect(pidTooLarge(result(1, "", `ps: process id too large: ${TOO_LARGE}\n`))).toBe(TOO_LARGE);
-    expect(pidTooLarge(result(1, "", `/bin/ps: process id too large: ${TOO_LARGE}`))).toBe(TOO_LARGE);
-    expect(pidTooLarge(result(1, "", "ps: sysctl failed"))).toBeNull();
-    expect(pidTooLarge(result(1, "", `ps: process id too large: ${TOO_LARGE}\nps: sysctl failed`))).toBeNull();
-    expect(pidTooLarge(result(TIMED_OUT, "", `ps: process id too large: ${TOO_LARGE}`))).toBeNull();
-    expect(pidTooLarge(result(1, RECORDED_ROW, `ps: process id too large: ${TOO_LARGE}`))).toBeNull();
+  test("only ps's exact 'process id too large' lines name refused pids", () => {
+    expect(pidsTooLarge(result(1, "", `ps: process id too large: ${TOO_LARGE}\n`))).toEqual([TOO_LARGE]);
+    expect(pidsTooLarge(result(1, "", `/bin/ps: process id too large: ${TOO_LARGE}`))).toEqual([TOO_LARGE]);
+    expect(pidsTooLarge(result(1, "", `ps: process id too large: ${TOO_LARGE}\nps: process id too large: ${TOO_LARGE - 1}\n`))).toEqual([TOO_LARGE, TOO_LARGE - 1]);
+    expect(pidsTooLarge(result(1, "", ""))).toBeNull();
+    expect(pidsTooLarge(result(1, "", "ps: sysctl failed"))).toBeNull();
+    expect(pidsTooLarge(result(1, "", `ps: process id too large: ${TOO_LARGE}\nps: sysctl failed`))).toBeNull();
+    expect(pidsTooLarge(result(TIMED_OUT, "", `ps: process id too large: ${TOO_LARGE}`))).toBeNull();
+    expect(pidsTooLarge(result(1, RECORDED_ROW, `ps: process id too large: ${TOO_LARGE}`))).toBeNull();
   });
 
   test("the real ps reads a too-large pid as gone on this platform", async () => {
@@ -116,7 +118,12 @@ describe("a pid above the system's limit is gone, not unknown", () => {
   // The fix assumes macOS ps refuses the whole read when one pid is above kern.pid_max.
   test.skipIf(process.platform !== "darwin")("macOS ps refuses every pid when one is too large", async () => {
     const read = await runBounded(["/bin/ps", "-o", "pid=", "-p", `${TOO_LARGE},${process.pid}`], { label: "ps", timeoutMs: 5_000 });
-    expect(pidTooLarge(read)).toBe(TOO_LARGE);
+    expect(pidsTooLarge(read)).toEqual([TOO_LARGE]);
+  });
+
+  test("several too-large pids are all dropped and the rest are still read", async () => {
+    const found = await readIdentities([TOO_LARGE, TOO_LARGE - 1, process.pid]);
+    expect([...found.keys()]).toEqual([process.pid]);
   });
 });
 
