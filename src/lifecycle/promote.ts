@@ -23,6 +23,8 @@ import { discardPlansOfGate } from "./plans.ts";
 import { summarizeReview } from "./review-chat.ts";
 import { flowLine, openGate, REVIEW_ITEMS, requestStage } from "./stages.ts";
 import { HARNESS_IDS } from "../harness/types.ts";
+import { applyAskPromotion, HAND_PROMOTES, prepareAskPromotion, type AskPromotion } from "../ask/promote.ts";
+import { ASK_ID, getAsk } from "../ask/store.ts";
 
 /**
  * `flowryn promote <task>` (design sections 4 and 12): a scout promoted to a
@@ -49,7 +51,7 @@ import { HARNESS_IDS } from "../harness/types.ts";
  * --model and --effort: a live scout's run keeps its own choice unless they replace it (its worker
  * is relaunched as a ship, so they apply then); a new run takes only what they say.
  */
-type Promotion = { mode: "live"; runId: string; pins: ModelPins } | { mode: "task"; taskId: string; account: Account; pins: ModelPins; version: string; base: string };
+type Promotion = { mode: "live"; runId: string; pins: ModelPins } | { mode: "task"; taskId: string; account: Account; pins: ModelPins; version: string; base: string } | { mode: "ask"; promotion: AskPromotion };
 
 function scoutRun(db: Db, target: string): RunWithPolicy {
   const found = findRun(db, target);
@@ -168,8 +170,8 @@ export function promotedAccount(config: FlowrynConfig, project: ProjectRow, args
 
 const promote: VerbSpec = {
   name: "promote",
-  summary: "Promote a scout to a ship in place: the same task, and while it works, the same worker and worktree",
-  positionals: [{ name: "task", required: true, help: "the scout's task or run id", complete: "task" }],
+  summary: "Promote a scout to a ship in place: the same task, and while it works, the same worker and worktree; or an ended ask (a<N>) to a scout on its question",
+  positionals: [{ name: "task", required: true, help: "the scout's task or run id, or an ask id", complete: "task" }],
   flags: {
     "body-file": { type: "string", help: "what to ship, from a file or - for stdin", fileFor: "body" },
     workflow: { type: "string", help: "the ship workflow (default: the project's)", placeholder: "id", complete: "workflow" },
@@ -182,7 +184,13 @@ const promote: VerbSpec = {
   roles: ["leader", "human"],
   scope: { kind: "ref", arg: "task" },
   async prepare(ctx, args): Promise<Promotion> {
-    const run = scoutRun(ctx.db, stringArg(args, "task")!);
+    const target = stringArg(args, "task")!;
+    if (ASK_ID.test(target)) {
+      const extra = ["body-file", "body", "workflow", "harness", "model", "effort", "sensitive"].filter((f) => args[f] !== undefined && args[f] !== false);
+      if (extra.length > 0) throw new FlowrynError("bad_args", `an ask is promoted to a scout on its own question, account and model: no ${extra.map((f) => `--${f.replace(/^body$/, "body-file")}`).join(", ")}`, `flowryn promote ${target}, then promote the scout to a ship`);
+      return { mode: "ask", promotion: await prepareAskPromotion(startDepsOf(ctx), target, HAND_PROMOTES) };
+    }
+    const run = scoutRun(ctx.db, target);
     const project = projectOf(ctx.db, run);
     workflowFor(ctx.config(), stringArg(args, "workflow") ?? project.workflow, "ship");
     if (run.state === "landed" || run.state === "ready") {
@@ -202,6 +210,11 @@ const promote: VerbSpec = {
   },
   apply(ctx, args, prepared) {
     const promotion = prepared as Promotion;
+    if (promotion.mode === "ask") {
+      const ask = getAsk(ctx.db, promotion.promotion.askId);
+      const promoted = applyAskPromotion(ctx.db, ctx.config(), promotion.promotion, { reason: `promoted by hand${ask?.reason ? ` (${ask.reason})` : ""}`, by: ctx.caller.role, source: "cli" }, ctx.now());
+      return { data: { ask: promotion.promotion.askId, task: promoted.task, run: promoted.run, kind: "scout", state: "launching" }, hints: [`flowryn show ${promoted.task}`] };
+    }
     return promotion.mode === "live" ? promoteLive(ctx, args, promotion.runId, promotion.pins) : promoteTask(ctx, args, promotion);
   },
   async settle(ctx, result) {

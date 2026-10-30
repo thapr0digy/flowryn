@@ -395,7 +395,11 @@ export function composeReturnBrief(db: Db, input: ReturnBriefInput): string {
     countEvents(db, "leader.p0_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')") +
     countEvents(db, "leader.questions_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')") +
     countEvents(db, "leader.follow_ups_pushed", since, until, "AND json_extract(payload, '$.path') IN ('waiter','trigger')");
-  lines.push(`Spend: ${plural(runs, "run")} dispatched, ${plural(stages, "stage")} started, ${plural(turns, "leader turn")} (${plural(wakes, "wake")}).`);
+  // Asks (src/ask/) ended in the window, and what their model calls cost.
+  const asks = (db.query("SELECT id, cost_usd FROM asks WHERE ended_at >= ?1 AND ended_at < ?2 AND state != 'cancelled'").all(since, until) as { id: string; cost_usd: number | null }[]).filter((a) => lens.task(a.id));
+  const askUsd = asks.reduce((sum, a) => sum + (a.cost_usd ?? 0), 0);
+  const askSpend = asks.length > 0 ? `, ${plural(asks.length, "ask")} ($${askUsd.toFixed(2)})` : "";
+  lines.push(`Spend: ${plural(runs, "run")} dispatched, ${plural(stages, "stage")} started, ${plural(turns, "leader turn")} (${plural(wakes, "wake")})${askSpend}.`);
   let text = lines.join("\n");
   if (text.length > BRIEFING_MAX_CHARS) text = `${text.slice(0, BRIEFING_MAX_CHARS - 40)}\n… (truncated: flowryn fleet)`;
   return text;

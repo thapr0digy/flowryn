@@ -933,6 +933,23 @@ ALTER TABLE approvals_v46 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 `;
 
+/**
+ * Migration 47 (docs/notes/2026-10-30-ask-a-lightweight-4v.md): asks, the headless question runs.
+ * An ask is not a task: no backlog entry, no run, no worktree. `answer` holds at most
+ * [ask] max_answer_bytes, `answer_path` the whole reply when it was cut.
+ */
+const ASKS_SQL = /* sql */ `
+CREATE TABLE asks (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, question TEXT NOT NULL,
+  harness TEXT NOT NULL, account TEXT NOT NULL, model_pin TEXT, effort_pin TEXT,
+  max_usd REAL NOT NULL, no_promote INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','promoted','failed','cancelled')),
+  attempts INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  started_at INTEGER, ended_at INTEGER, cost_usd REAL, answer TEXT, answer_path TEXT, reason TEXT, promoted_task TEXT);
+CREATE INDEX asks_open ON asks(state, created_at) WHERE state IN ('queued','running');
+CREATE INDEX asks_project ON asks(project_id, created_at);
+`;
+
 /** The kind of a reserved question, recorded when it opens: what `[decisions] default_classes` matches (deadline defaults). */
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
@@ -985,7 +1002,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 44, name: "base-branch", sql: BASE_BRANCH_SQL },
   { version: 45, name: "stacked-plans", sql: STACKED_PLANS_SQL },
   { version: 46, name: "page-channel", sql: PAGE_CHANNEL_SQL, rebuildsReferencedTable: true },
-  { version: 47, name: "reserved-class", sql: RESERVED_CLASS_SQL },
+  { version: 47, name: "asks", sql: ASKS_SQL },
+  { version: 48, name: "reserved-class", sql: RESERVED_CLASS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

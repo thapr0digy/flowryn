@@ -82,6 +82,7 @@ import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffP
 import { AutoContractChecker } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
+import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
@@ -544,6 +545,16 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
       now: Date.now,
     };
+    // An ask the last daemon was running when it stopped: queued again once (its process group was ended above), else failed.
+    try {
+      resetAskRunner();
+      const asks = recoverAsks(database, Date.now());
+      if (asks.requeued.length + asks.failed.length > 0) log(`ask: left running by the last daemon: requeued ${asks.requeued.join(", ") || "none"}; failed ${asks.failed.join(", ") || "none"}`);
+    } catch (error) {
+      log(`ask: startup recovery failed: ${(error as Error).message}`);
+    }
+    // Asks (src/ask/): headless read-only model calls, drained by the scheduler's pass.
+    const askDeps: AskDeps = { db: database, config: () => config, now: Date.now, log, startDeps, kick: () => scheduler?.kick(), root: askRoot(config) };
     scheduler = new Scheduler({
       db: database,
       config: () => config,
@@ -574,6 +585,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
           projectPath: (projectId) => getProject(database, projectId)?.path ?? null,
           host: async () => (await scheduler?.hostCheck()) ?? { ok: false, sample: null, reason: "the scheduler is not running" },
         }).finally(() => autoMerger?.kick()),
+      drainAsks: (isStopped) => drainAsks(askDeps, isStopped),
     });
     // Yolo auto-merge (src/verify/auto-merge.ts): an opted-in project's deliveries verified and merged with no leader turn.
     autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick() });
@@ -942,6 +954,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     // Every timer first, then wait for what is under way: the database closes only after its last use.
     const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }];
     stopVerifications();
+    draining.push({ name: "asks", done: stopAsks() });
     clearInterval(pass);
     clearInterval(steady);
     clearInterval(attentionTick);

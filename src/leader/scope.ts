@@ -129,6 +129,9 @@ export function taskProject(db: Db, taskId: string): string | null {
   if (policy) return policy.project_id;
   const watch = db.query("SELECT project_id FROM watches WHERE task_id = ?1").get(taskId) as { project_id: string } | null;
   if (watch) return watch.project_id;
+  // An ask (src/ask/) is no task, but its id stands in for one on its items.
+  const ask = /^a\d+$/.test(taskId) ? (db.query("SELECT project_id FROM asks WHERE id = ?1").get(taskId) as { project_id: string } | null) : null;
+  if (ask) return ask.project_id;
   for (const file of ["backlog", "todos"] as const) {
     const task = readSnapshot(db, file)?.tasks.find((t) => t.id === taskId);
     if (task?.repo) return task.repo;
@@ -175,6 +178,10 @@ export function refScope(db: Db, config: FlowrynConfig, ref: string): ThingScope
   if (/^w\d+$/.test(ref)) {
     const w = db.query("SELECT task_id FROM watches WHERE id = ?1").get(ref) as { task_id: string } | null;
     if (w) return ofTask(w.task_id);
+  }
+  if (/^a\d+$/.test(ref)) {
+    const a = db.query("SELECT project_id FROM asks WHERE id = ?1").get(ref) as { project_id: string } | null;
+    if (a) return projectScopeById(db, config, a.project_id);
   }
   if (/^l\d+$/.test(ref)) {
     const l = db.query("SELECT scope FROM learnings WHERE id = ?1").get(Number(ref.slice(1))) as { scope: string } | null;
