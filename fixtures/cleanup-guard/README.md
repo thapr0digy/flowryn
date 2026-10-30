@@ -28,7 +28,7 @@ test. The deliberate differences:
   mocks. Here the answers live in `forge.json`, and `bin/gh` is a small
   gh-compatible reader of that file. The reference's `pr list` mock returned PR 7
   whatever `--head` was asked for. Here PR 7 is returned only for
-  `--head fm/task-x1`. All 21 cases ask for that branch, so no answer changes.
+  `--head fm/task-x1`. All 24 cases ask for that branch, so no answer changes.
 - **`refs/pull/7/head` exists on origin** whenever the forge reports PR 7, as
   it would on GitHub. The primary checkout never fetches `refs/pull/*`, so no
   commit becomes reachable from a remote-tracking branch because of it.
