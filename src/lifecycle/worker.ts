@@ -29,6 +29,7 @@ import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLa
 import { landScout } from "./landing.ts";
 import { requireApprovedDraft } from "./draft.ts";
 import { startAutoMerge } from "../verify/auto-merge.ts";
+import { deliveredToQueue } from "../verify/landing-queue.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
 const MAX_REPORT_CHARS = 4_000;
@@ -472,6 +473,12 @@ const deliver: VerbSpec = {
       if (steered.length > 0) data.stacked_steered = steered.join(" ");
       if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
       const ship = outcome.ship;
+      // A queue project's PR waits its turn in the landing queue (src/verify/landing-queue.ts), which merges it.
+      if (ship.kind === "pr" && deliveredToQueue(ctx.db, ctx.config(), run, ship.pr.headSha, now)) {
+        // The watcher's pass kicks the auto-merger, whose pass takes it into the line.
+        ctx.delivery.watch(run.id);
+        return { data: { ...data, landing: "queue" }, hints: ["end your turn"] };
+      }
       // An opted-in yolo project's delivery is verified and merged by the daemon (src/verify/auto-merge.ts).
       const auto = startAutoMerge(
         ctx.db,
