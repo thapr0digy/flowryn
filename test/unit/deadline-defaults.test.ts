@@ -259,6 +259,16 @@ describe("the brief and the undo", () => {
     }
   });
 
+  test("the user confirming the deadline's choice with words passes the words on without a redo", () => {
+    const d = question(5);
+    away();
+    pass();
+    const confirmed = tx(db, () => overrideRuleAnswer({ db, now: () => NOW + HOUR }, getDecision(db, d.id)!, { choice: "merge-main", words: "also add a regression test", via: "shell" }));
+    const body = (db.query("SELECT body FROM messages WHERE id = ?1").get(confirmed.steer) as { body: string }).body;
+    expect(body).toBe(`The user confirmed merge-main for ${d.id}; keep going as you are, nothing to undo or redo. The user's words: "also add a regression test"`);
+    expect(getDecision(db, d.id)).toMatchObject({ answer: "merge-main", answered_by: "captain", rationale: "(confirmed merge-main (deadline))\nalso add a regression test" });
+  });
+
   test("waitedLabel", () => {
     expect(waitedLabel(4 * HOUR + 12 * 60_000 + 59_000)).toBe("4h 12m");
   });

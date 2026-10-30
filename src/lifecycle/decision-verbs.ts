@@ -105,7 +105,11 @@ export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRo
     .query("UPDATE decisions SET answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = 'captain', rationale = ?5 WHERE id = ?1")
     .run(d.id, a.choice, a.via, now, [`(${confirmed ? "confirmed" : "undid"} ${before})`, a.words].filter((w): w is string => !!w).join("\n"));
   appendEvent(ctx.db, { source: "cli", kind: "decision.overridden", runId: d.run_id, taskId: d.task_id, payload: { decision: d.id, from: d.answer, rule: d.answered_via, choice: a.choice, by: "captain", via: a.via }, ts: now });
-  if (confirmed) return { steer: null, run: run.id, dependents: [], held: false };
+  if (confirmed) {
+    if (!a.words) return { steer: null, run: run.id, dependents: [], held: false };
+    const note = `The user confirmed ${a.choice} for ${d.id}; keep going as you are, nothing to undo or redo. The user's words: "${sanitizeLine(a.words, 300)}"`;
+    return { steer: createSteer(ctx.db, run, note, now, d.id).id, run: run.id, dependents: [], held: false };
+  }
   if (d.origin === CI_WAIT_ORIGIN) {
     // The CI-wait watchdog's question was never the worker's: the new answer is carried out as its instruction.
     const instruction = ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) ?? "Leave the pipeline as it now stands and keep driving it; the watchdog asks again if CI still has no checks.";
