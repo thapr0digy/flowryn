@@ -71,7 +71,7 @@ The phase starts from that task's run branch (`flowryn/<task>`) fetched from ori
 
 - Each time the task beneath delivers a new head, every stacked run still working on it (`launching`, `running`, `validating`) gets a steer to `git merge origin/<its branch>` (event `stack.followed`). A delivered stacked run is left alone: the landing's merges take the final head first.
 - Its merge is refused while `stacked_on` is set: `stack_not_landed` (exit 2), first in the gate. Yolo auto-merge starts no row for it; its delivery after the retarget starts one.
-- A stacked PR read merged on GitHub before the task beneath landed (into that task's branch) is a divergence, not a landing (the merged-off-base rule). Read merged into the landed task's base after it landed, before the watcher retargets it, it lands as merged elsewhere.
+- A stacked PR read merged on GitHub before the task beneath landed (into that task's branch) is a divergence, not a landing (the merged-off-base rule). Read merged into the landed task's base after it landed, before the watcher retargets it, it lands as merged elsewhere and leaves the stack there (`run.retargeted`, its base the landed one), so a run stacked on it is retargeted to that base.
 
 ### When the task beneath lands
 

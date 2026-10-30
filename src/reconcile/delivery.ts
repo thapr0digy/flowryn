@@ -145,13 +145,25 @@ function landedBaseOf(db: Db, taskId: string, project: { default_branch: string 
  * A PR merged on GitHub into a branch other than the run's base (retargeted
  * by hand, then merged): a divergence, not a landing, since the work is not
  * where the run said it would go. Keeping the run (keep-run) lands it as merged.
+ * A stacked run merged into the base its task beneath landed in, before the
+ * retarget pass, takes that base and leaves the stack here (`run.retargeted`),
+ * so a run stacked on it is retargeted to the same base.
  */
 function mergedOffBase(db: Db, run: RunWithPolicy, pr: PullRequest, now: number): boolean {
   const project = getProject(db, run.project_id);
   if (!project || !pr.baseRef) return false;
   const base = runBase(run, project);
   const target = run.stacked_on ? landedBaseOf(db, run.stacked_on, project) : base;
-  if (pr.baseRef === target) return false;
+  if (pr.baseRef === target) {
+    if (run.stacked_on) {
+      const baseBranch = target === project.default_branch ? null : target;
+      db.query("UPDATE runs SET base_branch = ?2, stacked_on = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, baseBranch, now);
+      appendEvent(db, { source: "github", kind: "run.retargeted", runId: run.id, taskId: run.task_id, payload: { from: run.base_branch, to: target, on: run.stacked_on, merged: pr.url, prs: [] }, ts: now });
+      run.base_branch = baseBranch;
+      run.stacked_on = null;
+    }
+    return false;
+  }
   const summary =
     run.stacked_on && pr.baseRef === base
       ? `the delivered PR ${pr.url} was merged into ${pr.baseRef}, the branch of ${run.stacked_on}, before ${run.stacked_on} landed`

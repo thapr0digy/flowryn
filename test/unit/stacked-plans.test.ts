@@ -8,9 +8,11 @@ import { appendEvent } from "../../src/db/events.ts";
 import { ForgeError, type Forge, type PullRequest } from "../../src/forge/types.ts";
 import { parsePlan, pendingPlanLine, recordPlan } from "../../src/lifecycle/plans.ts";
 import type { ProjectRow } from "../../src/lifecycle/projects.ts";
-import { getRun } from "../../src/lifecycle/runs.ts";
+import { deliveredOf } from "../../src/lifecycle/delivery.ts";
+import { getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { MAX_STACK_DEPTH, phaseReadiness, retargetStacks, steerStackedOnRedelivery, takeBaseSteps } from "../../src/lifecycle/stacks.ts";
 import { checkGate } from "../../src/policy/merge.ts";
+import { applyPrObservation } from "../../src/reconcile/delivery.ts";
 
 /**
  * Stacked plans (docs/notes/2026-10-27-stack-a-plan-4y.md, phase 2): the
@@ -269,6 +271,27 @@ describe("stacked runs in the database", () => {
     const body = (db.query("SELECT body FROM messages WHERE run_id = 'r-two'").get() as { body: string }).body;
     expect(body).toContain(`git merge --no-edit -s ours ${"c".repeat(40)}`);
     expect(body).toContain("git fetch origin refs/pull/1/head");
+  });
+
+  test("a stacked run merged into main before its retarget leaves the stack, so the run stacked on it is retargeted to main", async () => {
+    landOne();
+    tx(db, () => {
+      addRun("two", "ready", { stackedOn: "one", base: "flowryn/one", started: now + 1 });
+      deliver("two", 2);
+      addRun("three", "running", { stackedOn: "two", base: "flowryn/two", started: now + 2 });
+    });
+    const two = getRunWithPolicy(db, "r-two")!;
+    const delivered = deliveredOf(db, "two")!;
+    const merged: PullRequest = { ...pr(2, "main", "merged"), mergeSha: "d".repeat(40), mergedAt: "2026-10-29T00:00:00Z" };
+    expect(tx(db, () => applyPrObservation(db, two, delivered, { pr: merged, checks: null }, new Set(), now, { nudgeConflicts: false })).landed).toBe(true);
+    expect(getRun(db, "r-two")).toMatchObject({ state: "landed", base_branch: null, stacked_on: null });
+    expect(db.query("SELECT count(*) AS n FROM divergences").get()).toEqual({ n: 0 });
+    const event = JSON.parse((db.query("SELECT payload FROM events WHERE kind = 'run.retargeted' AND task_id = 'two'").get() as { payload: string }).payload);
+    expect(event).toMatchObject({ from: "flowryn/one", to: "main", on: "one", merged: merged.url });
+    const f = forge([pr(3, "flowryn/two")]);
+    await retargetStacks(deps(f));
+    expect(f.patched).toEqual([{ number: 3, base: "main" }]);
+    expect(getRun(db, "r-three")).toMatchObject({ base_branch: null, stacked_on: null, state: "running" });
   });
 
   test("a PR GitHub already moved is not patched; a forge failure leaves the run stacked for the next pass", async () => {
