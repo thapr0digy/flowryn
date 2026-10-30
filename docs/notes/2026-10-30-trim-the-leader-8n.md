@@ -52,7 +52,7 @@ New: the contract tells a worker to reread `$FLOWRYN_TASK_FILE`, and `activateSt
 | pass_requested is not an approval | the pass_requested line (already) |
 | review_channel: tell the user, relay the fix, take answers in chat; it never passes the gate | the review_channel line (new words) |
 | A grant refused for a repin: the user runs `flowryn leader repin` | the grant refusal (`REPIN_HELP`); the skill keeps "never run leader repin" |
-| harness_unverified: run the contracts check outside the Bash sandbox; human_only / not_installed_build: ask the user | the item line (new: "needs Herdr: outside the Bash sandbox") and the record refusals (human_only's hint is new) |
+| harness_unverified: run the contracts check outside the Bash sandbox; human_only / not_installed_build: ask the user | the item line (new: "(outside the sandbox)" after its command) and the record refusals (human_only's hint is new) |
 | conflict_nudged / pr_conflict / review_steered / review_unanswered | their lines ("steer it or flowryn decline", already) |
 | policy_sent_back (info); policy_behind: tell the user before merging | their lines (policy_behind's words are new) |
 | checkout_unsynced: tell the user | its line (new words) |

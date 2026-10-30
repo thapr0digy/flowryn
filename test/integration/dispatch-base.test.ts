@@ -79,9 +79,10 @@ describe("dispatch --base", () => {
       // Started from the release branch: its commit is in the worktree's history.
       expect(git(row.worktree_path, ["log", "--format=%s"])).toContain("release work");
       const contract = readFileSync(join(e.fleet.h.stateDir, "runs", run, "contract.md"), "utf8");
-      expect(contract).toContain("open a PR into release/2 (gh-axi pr create)");
-      expect(contract).toContain("To take your base: new commits, git merge origin/release/2, a plain git push.");
-      expect(contract).not.toContain("To take main");
+      expect(contract).toContain("take release/2 by git merge origin/release/2, plain push.");
+      expect(contract).not.toContain("take main");
+      // The PR target is the last stage's: the task file was rewritten when it started.
+      expect(readFileSync(join(e.fleet.h.stateDir, "runs", run, "task.md"), "utf8")).toContain("open a PR into release/2 (gh-axi pr create)");
       const shown = await e.fleet.json(["show", task]);
       expect(shown.reply.data).toMatchObject({ base: "release/2" });
 

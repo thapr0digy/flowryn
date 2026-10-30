@@ -72,7 +72,7 @@ describe("every rule the leader skill no longer carries has a home", () => {
     ["review_channel: tell the user, relay the fix, take answers in chat", source("src/lavish/channel.ts"), "(tell the user and relay the fix)"],
     ["review_channel never passes the gate", source("src/lavish/channel.ts"), "it never passes the gate"],
     ["a refused grant names the repin", source("src/policy/grants.ts"), "flowryn leader repin (in their own terminal, not the leader's)"],
-    ["harness_unverified names its command, outside the sandbox", source("src/lifecycle/harness-gate.ts"), "(needs Herdr: outside the Bash sandbox)"],
+    ["harness_unverified names its command, outside the sandbox", source("src/lifecycle/harness-gate.ts"), "${contractsCommand(harness)} (outside the sandbox)"],
     ["human_only contract record: ask the user", source("src/contracts/grant.ts"), "ask the user to run flowryn doctor --contracts in their own terminal"],
     ["pr_conflict: steer or decline", source("src/reconcile/delivery.ts"), "steer it or flowryn decline ${run.task_id}"],
     ["review_unanswered: steer or decline", source("src/reconcile/reviews.ts"), "steer it or flowryn decline ${run.task_id}"],

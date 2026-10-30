@@ -408,13 +408,11 @@ describe("contract reports", () => {
 });
 
 describe("the leader skill", () => {
-  test("the SKILL.md written for both harnesses runs a worker-path PR's build verify-only itself, and the recording check after a harness update, asking the user only when refused", async () => {
+  test("the SKILL.md written for both harnesses runs a worker-path PR's build verify-only itself; the recording check after a harness update is the item line's, and its refusals ask the user (test/unit/instruction-budgets.test.ts)", async () => {
     const files = await writeLeaderFiles({ home: dir, command: ["flowryn"], socket: join(dir, "s"), style: null, toolkit: configStaticLayers(defaultConfig(dir)) });
     for (const path of [join(files.skillDir, "SKILL.md"), join(files.claudePlugin, "skills", basename(files.skillDir), "SKILL.md")]) {
       const skill = readFileSync(path, "utf8");
       expect(skill).toContain("bun <worktree>/src/main.ts doctor --contracts --verify-only");
-      expect(skill).toContain("doctor --contracts --harness <h>");
-      expect(skill).toContain("on `human_only` (strict policy) or `not_installed_build`, ask the user to run it");
       expect(skill).not.toContain("ask the user to run `flowryn doctor --contracts` in their own terminal and merge");
     }
   });

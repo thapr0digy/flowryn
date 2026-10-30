@@ -969,7 +969,7 @@ describe("review-channel health", () => {
     expect(line).toStartWith("Review page not delivering answers (tell the user and relay the fix): restart Lavish (lavish-axi server --verbose; its log is ~/.lavish-axi/server.log).");
     expect(line).toContain(`${taskId} (design gate g1) since `);
     expect(line).toContain(`3 failed polls: ${SERVER_ERROR} (exit 1)`);
-    expect(line).toContain("answer through the leader (flowryn decide)");
+    expect(line).toContain("it never passes the gate. Until then take their answers in chat (flowryn decide)");
     expect(channel()).toMatchObject({ channel_failing_since: NOW, channel_failures: 3, channel_item: items[0]!.id });
     expect(eventKinds()).toEqual(["gate.channel_failed", "gate.channel_failed", "gate.channel_failed", "gate.channel_degraded"]);
     expect(logs.some((l) => l.includes(`item ${items[0]!.id} opened`))).toBe(true);
