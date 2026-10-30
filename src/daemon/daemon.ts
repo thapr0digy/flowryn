@@ -543,6 +543,14 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
       now: Date.now,
     };
+    // An ask the last daemon was running when it stopped: queued again once (its process group was ended above), else failed.
+    try {
+      resetAskRunner();
+      const asks = recoverAsks(database, Date.now());
+      if (asks.requeued.length + asks.failed.length > 0) log(`ask: left running by the last daemon: requeued ${asks.requeued.join(", ") || "none"}; failed ${asks.failed.join(", ") || "none"}`);
+    } catch (error) {
+      log(`ask: startup recovery failed: ${(error as Error).message}`);
+    }
     // Asks (src/ask/): headless read-only model calls, drained by the scheduler's pass.
     const askDeps: AskDeps = { db: database, config: () => config, now: Date.now, log, startDeps, kick: () => scheduler?.kick(), root: askRoot(config) };
     scheduler = new Scheduler({
@@ -784,14 +792,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         autoAwayFailing = true;
       }
     };
-    // An ask the last daemon was running when it stopped: queued again once (its process group was ended above), else failed.
-    try {
-      resetAskRunner();
-      const asks = recoverAsks(database, Date.now());
-      if (asks.requeued.length + asks.failed.length > 0) log(`ask: left running by the last daemon: requeued ${asks.requeued.join(", ") || "none"}; failed ${asks.failed.join(", ") || "none"}`);
-    } catch (error) {
-      log(`ask: startup recovery failed: ${(error as Error).message}`);
-    }
     // A verification the last daemon was running when it stopped: recorded as an error and requeued once, its worktree removed.
     try {
       const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
