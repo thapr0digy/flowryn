@@ -94,9 +94,9 @@ export function deliveryLines(d: ContractDelivery): string[] {
  * (design section 11: the same stable text leads every worker's instructions,
  * so prompt caching holds).
  */
-export function workerContract(harness: HarnessId, style: string | null, delivery: Pick<ContractDelivery, "base"> = {}): string {
+export function workerContract(harness: HarnessId, style: string | null, delivery: Pick<ContractDelivery, "base" | "defaultBranch">): string {
   const channel = harness === "claude" ? "hook context" : "a message";
-  const base = delivery.base ?? "main";
+  const base = delivery.base ?? delivery.defaultBranch;
   const lines = [
     "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
     `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
@@ -130,6 +130,11 @@ export function steerLine(id: string, body: string): string {
 /** Why a Claude worker's tool call was denied: the urgent steer itself, as the reason it reads (Tier 2). */
 export function urgentBlockLine(id: string, body: string): string {
   return `${steerLine(id, body)} This tool call was blocked so you read this first; redo it if it still applies.`;
+}
+
+/** An urgent steer as a Pi worker gets it: it may cut short the tool call in flight (hook preempt). */
+export function urgentCutLine(id: string, body: string): string {
+  return `${steerLine(id, body)} A tool call cut short for this: redo it if it still applies.`;
 }
 
 /** The turn-end guard's one reminder per episode (src/lifecycle/turn-end-guard.ts). */

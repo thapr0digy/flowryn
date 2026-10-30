@@ -31,7 +31,7 @@ The style block (3 lines) and the tool map (6 lines) are unchanged. They lead bo
 | A finding that needs a decision is a question: ask it | `report` help (new) |
 | `ask` returns at once; end your turn; the answer arrives as a steer | `ask` summary and its reply hint |
 | A steer waiting: inbox, act, ack | `steerPointer`, the line that announces it |
-| A call blocked or cut short for an urgent steer: redo it if it still applies | `urgentBlockLine`, the denial reason itself |
+| A call blocked or cut short for an urgent steer: redo it if it still applies | `urgentBlockLine`, a Claude call's denial reason; for Pi, `urgentCutLine` (the urgent steer line itself) and the extension's block reason |
 | Review pages are for a human reader, not the terse style | flowryn-design skill; flowryn-visual-qa skill (new words) |
 | Every delivery line: no-mistakes (`stage begin`, the foreground `--wait` with its shell timeout, rerun on elapsed wait, reattach after respond, `ask --nomistakes`, a rule-settled steer, the conflict-only ci gate, `pull --ff-only`, `deliver --pr`, `--base-branch`), direct-PR, local-only, scout `deliver --report` | `deliveryLines` in the last stage's `stageInstructions`; earlier stages keep "do not run the pipeline yet"; the promote steer carries them |
 | "Your run's own TMPDIR, the same path in and out of the sandbox" | a fact, not a rule: the launcher sets `TMPDIR`; the contract keeps "scratch goes in $TMPDIR" |

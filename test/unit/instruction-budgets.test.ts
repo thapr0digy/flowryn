@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { SKILL_BODY, SKILL_DESCRIPTION } from "../../src/bridges/skill.ts";
 import { DEFAULT_WORKFLOWS } from "../../src/config/workflows.ts";
 import { VERIFY_CLI_VERBS } from "../../src/cli/commands/verify.ts";
-import { deliveryLines, REVIEW_TURN_END_REMINDER, steerPointer, STYLE_BLOCK, TURN_END_REMINDER, urgentBlockLine, workerContract, type ContractDelivery } from "../../src/harness/contract-text.ts";
+import { deliveryLines, REVIEW_TURN_END_REMINDER, steerPointer, STYLE_BLOCK, TURN_END_REMINDER, urgentBlockLine, urgentCutLine, workerContract, type ContractDelivery } from "../../src/harness/contract-text.ts";
 import { LEARNING_VERBS } from "../../src/leader/learning-verbs.ts";
 import type { VerbSpec } from "../../src/api/verbs.ts";
 import { stageInstructions } from "../../src/lifecycle/stages.ts";
@@ -31,7 +31,7 @@ describe("instruction budgets", () => {
   });
 
   test("assumption: the worker contract stays under 400 tokens whole (its own lines: test/unit/harness.test.ts)", () => {
-    const text = workerContract("claude", STYLE_BLOCK, { base: "release/2" });
+    const text = workerContract("claude", STYLE_BLOCK, { base: "release/2", defaultBranch: "main" });
     expect(text.length).toBeLessThanOrEqual(1_600);
   });
 });
@@ -49,6 +49,7 @@ describe("every rule the worker contract no longer carries has a home", () => {
     ["stage begin before the pipeline", deliveryLines(nm).join("\n"), "Before the pipeline: $FLOWRYN_BIN stage begin ship"],
     ["a waiting steer: inbox, act, ack", steerPointer("m1"), "Run $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack m1."],
     ["a blocked call is redone after an urgent steer", urgentBlockLine("m1", "x"), "redo it if it still applies"],
+    ["a call cut short for a Pi urgent steer is redone", urgentCutLine("m1", "x"), "A tool call cut short for this: redo it if it still applies."],
     ["report progress is only recorded", help(WORKER_VERBS, "report"), "progress is only recorded"],
     ["a finding that needs a decision is a question", help(WORKER_VERBS, "report"), "A finding that needs a decision is a question: ask it instead"],
     ["ask returns at once; the answer is a steer", help(WORKER_VERBS, "ask"), "returns at once, the answer arrives as a steer"],

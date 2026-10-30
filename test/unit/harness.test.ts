@@ -156,15 +156,15 @@ describe("worker contract text", () => {
   const ownLines = (text: string) => text.slice(text.indexOf(TOOL_MAP) + TOOL_MAP.length).split("\n").filter((l) => l.length > 0);
 
   test("names the mid-turn steer channel (M0 c07) and carries the style block when terse", () => {
-    const text = workerContract("claude", STYLE_BLOCK);
+    const text = workerContract("claude", STYLE_BLOCK, { defaultBranch: "main" });
     expect(text).toContain('- "Flowryn steer [<id>]:" lines (mid-turn as hook context, or after a pointer) are your leader\'s: act on them, then $FLOWRYN_BIN ack <id>.');
-    expect(workerContract("pi", null)).toContain("(mid-turn as a message, or after a pointer)");
+    expect(workerContract("pi", null, { defaultBranch: "main" })).toContain("(mid-turn as a message, or after a pointer)");
     expect(text).toContain("Reply in the fewest words");
-    expect(workerContract("pi", null)).not.toContain("fewest words");
+    expect(workerContract("pi", null, { defaultBranch: "main" })).not.toContain("fewest words");
     // The style block leads the instructions (design section 11), then the toolkit's tool map.
     expect(text.startsWith("Reply in the fewest words")).toBe(true);
     expect(text).toContain(TOOL_MAP);
-    expect(workerContract("pi", null).startsWith(TOOL_MAP)).toBe(true);
+    expect(workerContract("pi", null, { defaultBranch: "main" }).startsWith(TOOL_MAP)).toBe(true);
     expect(text.indexOf(TOOL_MAP)).toBeGreaterThan(text.indexOf("Reply in the fewest words"));
     expect(text).toContain("Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.");
   });
@@ -172,7 +172,7 @@ describe("worker contract text", () => {
   test("assumption: the contract stays within the design's budget (about 10 own lines), in every harness and base", () => {
     for (const harness of ["claude", "pi"] as const) {
       for (const base of [null, "release/2"]) {
-        const text = workerContract(harness, STYLE_BLOCK, { base });
+        const text = workerContract(harness, STYLE_BLOCK, { base, defaultBranch: "main" });
         const own = ownLines(text);
         expect(own.length).toBeLessThanOrEqual(10);
         // About 4 characters a token: Flowryn's own lines under 250 tokens, the whole contract (shared blocks included) under 400.
@@ -183,22 +183,28 @@ describe("worker contract text", () => {
   });
 
   test("the worker contract forbids history rewrites, unguarded rm and approvals, and says what to do at a prompt", () => {
-    const text = workerContract("claude", null);
+    const text = workerContract("claude", null, { defaultBranch: "main" });
     expect(text).toContain("- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take main by git merge origin/main, plain push.");
     expect(text).toContain('- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.');
     expect(text).toContain("- Never merge, clean up or approve. Exit 75: spooled, do not retry.");
-    for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null)).toContain("scratch goes in $TMPDIR");
+    for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null, { defaultBranch: "main" })).toContain("scratch goes in $TMPDIR");
     expect(text).toContain("- A confirmation prompt: never answer it; ask --blocking naming it.");
     expect(text).toContain("fail --body-file -) or on your own background job.");
   });
 
-  test("assumption: a task with no base gets the same contract text as one with no delivery at all", () => {
-    expect(workerContract("claude", STYLE_BLOCK, { base: null })).toBe(workerContract("claude", STYLE_BLOCK));
+  test("assumption: a task with no base gets the same contract text as one with no base given", () => {
+    expect(workerContract("claude", STYLE_BLOCK, { base: null, defaultBranch: "main" })).toBe(workerContract("claude", STYLE_BLOCK, { defaultBranch: "main" }));
+  });
+
+  test("a task with no base takes in its project's default branch", () => {
+    const text = workerContract("claude", null, { base: null, defaultBranch: "develop" });
+    expect(text).toContain("take develop by git merge origin/develop, plain push.");
+    expect(text).not.toContain("main");
   });
 
   test("a task's base (dispatch --base) is its PR target, the branch it takes in, and no-mistakes' --base-branch", () => {
-    expect(workerContract("claude", null, { base: "release/2" })).toContain("take release/2 by git merge origin/release/2, plain push.");
-    expect(workerContract("claude", null, { base: "release/2" })).not.toContain("take main");
+    expect(workerContract("claude", null, { base: "release/2", defaultBranch: "main" })).toContain("take release/2 by git merge origin/release/2, plain push.");
+    expect(workerContract("claude", null, { base: "release/2", defaultBranch: "main" })).not.toContain("take main");
     const direct = deliveryLines({ kind: "ship", mode: "direct-PR", defaultBranch: "main", base: "release/2" }).join("\n");
     expect(direct).toContain("open a PR into release/2 (gh-axi pr create)");
     const nm = deliveryLines({ kind: "ship", mode: "no-mistakes", defaultBranch: "main", base: "release/2", lastStage: { id: "ship", pools: ["validation"] } });
@@ -209,7 +215,7 @@ describe("worker contract text", () => {
 
   test("every ask the contract shows carries the flags ask requires, in every harness", () => {
     for (const harness of ["claude", "pi"] as const) {
-      const asks = workerContract(harness, STYLE_BLOCK).split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"));
+      const asks = workerContract(harness, STYLE_BLOCK, { defaultBranch: "main" }).split("\n").filter((line) => line.includes("$FLOWRYN_BIN ask"));
       expect(asks).toHaveLength(1);
       for (const line of asks) {
         const call = line.slice(line.indexOf("$FLOWRYN_BIN ask"));
@@ -225,7 +231,7 @@ describe("worker contract text", () => {
 
   test("assumption: the contract carries no delivery or stage steps: those are the task file's, in every delivery mode", () => {
     for (const harness of ["claude", "pi"] as const) {
-      const text = workerContract(harness, STYLE_BLOCK);
+      const text = workerContract(harness, STYLE_BLOCK, { defaultBranch: "main" });
       for (const gone of ["no-mistakes", "deliver --", "stage begin", "--wait", "review reply"]) expect(text).not.toContain(gone);
     }
   });
