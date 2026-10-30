@@ -5,8 +5,9 @@
  * when every prompt has the same fields), `session_ended: true` on the last
  * batch before the user ended the session, and `status: ended` after it. The
  * question widget's one Send queues one prompt that ends with one line
- * `flowryn-answers v2 <base64url JSON {g, a: [{d, c, n}], m, p}>`: every
- * answer, the user's "anything else" (m) and whether they asked to pass (p).
+ * `flowryn-answers v2 <base64url JSON {g, a: [{d, c, n}], m, p, k}>`: every
+ * answer, the user's "anything else" (m), whether they asked to pass (p) and
+ * the pass code they typed (k, absent when the field was empty).
  * A page loaded before that widget still sends one prompt per answer, ending
  * `flowryn-answer v1 <base64url JSON {g, d, c, n}>`. Either line survives any
  * quoting the encoder applies, so the answers never depend on the TOON layout.
@@ -24,6 +25,7 @@ const MAX_CHOICES = 20;
 const MAX_CHOICE = 1_000;
 const MAX_NOTE = 2_000;
 const MAX_COMMENT = 4_000;
+const MAX_CODE = 16;
 
 export interface LavishAnswer {
   gate: string;
@@ -37,8 +39,10 @@ export interface LavishSend {
   gate: string;
   /** The user's "anything else for the worker", verbatim. */
   comment: string | null;
-  /** The user asked to pass the review (a request: the gate passes only through a human channel). */
+  /** The user asked to pass the review: with the right code it passes (channel page), else it is a request for the leader. */
   pass: boolean;
+  /** The pass code the user typed, or null. Never logged or kept: src/policy/page-pass.ts. */
+  code: string | null;
 }
 
 export interface PollOutput {
@@ -134,7 +138,9 @@ function decodeV2(token: string): { answers: LavishAnswer[]; send: LavishSend } 
     answers.push(answer);
   }
   if (p.m !== undefined && typeof p.m !== "string") return null;
-  return { answers, send: { gate: p.g, comment: optionalText(p.m, MAX_COMMENT), pass: p.p === true } };
+  if (p.k !== undefined && typeof p.k !== "string") return null;
+  const code = typeof p.k === "string" && p.k.trim().length > 0 ? p.k.trim().slice(0, MAX_CODE) : null;
+  return { answers, send: { gate: p.g, comment: optionalText(p.m, MAX_COMMENT), pass: p.p === true, code } };
 }
 
 /** Encode an answer the way a v1 widget did (tests). */
@@ -143,9 +149,9 @@ export function encodeAnswer(a: LavishAnswer): string {
 }
 
 /** Encode a Send the way the widget does (tests and stand-ins). */
-export function encodeSend(send: LavishSend, answers: Omit<LavishAnswer, "gate">[]): string {
+export function encodeSend(send: Omit<LavishSend, "code"> & { code?: string | null }, answers: Omit<LavishAnswer, "gate">[]): string {
   const a = answers.map((x) => ({ d: x.decision, c: x.choice, n: x.note ?? "" }));
-  return Buffer.from(JSON.stringify({ g: send.gate, a, m: send.comment ?? "", p: send.pass }), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ g: send.gate, a, m: send.comment ?? "", p: send.pass, ...(send.code ? { k: send.code } : {}) }), "utf8").toString("base64url");
 }
 
 export function parsePollOutput(stdout: string): PollOutput {

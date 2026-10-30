@@ -64,7 +64,7 @@ import { schedTiming } from "../config/workflows.ts";
 import { GitHubForge, tokenSource } from "../forge/github.ts";
 import { cleanupRun, type CleanupReport, type LandingDeps } from "../lifecycle/landing.ts";
 import { getRun } from "../lifecycle/runs.ts";
-import { ChallengeStore } from "../policy/approvals.ts";
+import { ChallengeStore, PageCodeStore } from "../policy/approvals.ts";
 import { gitLabel, gitRunner } from "../policy/git.ts";
 import { HEAD_FETCH_TIMEOUT_MS } from "../policy/head-history.ts";
 import type { DeliveryServices } from "../policy/services.ts";
@@ -425,7 +425,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       off: () => notificationsOff(env),
       env,
       cwd: home,
-      ...(recorder ? { macos: recordingNotify(recorder) } : {}),
+      ...(recorder ? { macos: recordingNotify(recorder), macosRecords: true } : {}),
     });
     if (notificationsOff(env)) log("notify: off (FLOWRYN_NOTIFY=off or FLOWRYN_NOTIFIER=null): notifications are recorded, none is delivered");
     else if (recorder) log(`notify: the macOS channel records to ${recorder} (FLOWRYN_NOTIFIER)`);
@@ -718,6 +718,22 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       routed: (runId, resumed) => {
         bus.notify(runId);
         if (resumed) scheduler?.kick();
+      },
+      // Passing a review from its page with the code sent to your notifications (src/policy/page-pass.ts).
+      pagePass: {
+        codes: new PageCodeStore(),
+        head: async (gate) => {
+          const run = database.query("SELECT r.worktree_path FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1").get(gate) as { worktree_path: string | null } | null;
+          if (!run?.worktree_path) return "none";
+          const head = await git(["rev-parse", "HEAD"], run.worktree_path);
+          return head.exitCode === 0 ? head.stdout.trim() : "none";
+        },
+        sendCode: (gate, title, text) => inflight.track(notifyPump.sendPassCode(gate, title, text)),
+        passed: (runId) => {
+          bus.notify(runId);
+          journal.kick();
+          scheduler?.kick();
+        },
       },
     });
 

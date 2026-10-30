@@ -238,10 +238,11 @@ export function recordGateComment(db: Db, gateId: string, text: string, now: num
 export type PassRequest = { outcome: "requested" | "already" | "late" | "stale" } | { outcome: "questions_open"; open: string[] };
 
 /**
- * The user pressed "Send and request pass" on the review page. The page never
- * passes a gate (a review gate passes only through a human channel): this
- * opens one P1 for the leader to confirm it with the user, once every
- * question is answered. Call inside a transaction, after the Send's answers.
+ * The user pressed "Send and pass" on the review page without the right pass
+ * code (with it, src/policy/page-pass.ts passes the gate through the page
+ * channel): this opens one P1 for the leader to confirm it with the user,
+ * once every question is answered. Call inside a transaction, after the
+ * Send's answers.
  */
 export function requestGatePass(db: Db, gateId: string, now: number): PassRequest {
   const gate = liveGate(db, gateId);
