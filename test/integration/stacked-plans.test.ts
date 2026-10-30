@@ -132,8 +132,10 @@ describe("stacked plans", () => {
       expect(JSON.parse(event!.payload)).toMatchObject({ from: first.branch, to: "main", on: one });
 
       // The send-back's steer names the merges; a plain merge of main would conflict, the named ones do not.
-      const steer = query<{ body: string }>(e, "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE '%landed in main%' ORDER BY created_at DESC LIMIT 1", retargeted.id);
-      expect(steer).not.toBeNull();
+      // The stage-start steer is written when the scheduler grants the stage again.
+      const sql = "SELECT body FROM messages WHERE run_id = ?1 AND body LIKE '%landed in main%' ORDER BY created_at DESC LIMIT 1";
+      await waitUntil(() => query(e, sql, retargeted.id) !== null, 30_000, "the send-back's steer");
+      const steer = query<{ body: string }>(e, sql, retargeted.id);
       const steps = steer!.body.split("\n").filter((line) => line.startsWith("git "));
       expect(steps).toHaveLength(5);
       const worktree = retargeted.worktree_path;
