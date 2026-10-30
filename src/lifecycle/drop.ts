@@ -263,10 +263,10 @@ const drop: VerbSpec = {
 };
 
 /** An ask is cancelled, not dropped: it has no backlog entry, and its row keeps the reason. */
-function dropAsk(db: Db, id: string, drop: { reason: string; by: string }, now: number): HandlerResult {
+function dropAsk(db: Db, id: string, cancel: { reason: string; by: string }, now: number): HandlerResult {
   const ask = getAsk(db, id);
   if (!ask) throw new FlowrynError("not_found", `no ask ${id}`, "flowryn fleet");
-  if (!recordCancelled(db, id, drop, now)) throw new FlowrynError("bad_args", `ask ${id} is ${ask.state} already`, `flowryn show ${id}`);
+  if (!recordCancelled(db, id, cancel, now)) throw new FlowrynError("bad_args", `ask ${id} is ${ask.state} already`, `flowryn show ${id}`);
   return { data: { ask: id, was: ask.state, state: "cancelled" }, hints: ["flowryn fleet"] };
 }
 
