@@ -318,3 +318,37 @@ describe("doctor's notify command check", () => {
     expect(warn?.detail).toContain("(batch) failed: timed out; fix it, then flowryn notify test");
   });
 });
+
+describe("a review page's pass code (docs/notes/2026-10-30-pass-a-review-c6.md)", () => {
+  test("goes to the notify command whether or not you are away, stored nowhere: no notifications row, no item, and the event keeps no stderr", async () => {
+    const h = home();
+    const db = openDb(h);
+    const rec = recorder(h, 'echo "$stdin" >&2');
+    const log: string[] = [];
+    const p = pump(h, db, { now: 1_000 }, `command = "${rec.command}"`, { log });
+    expect(await p.sendPassCode("g1", "Flowryn pass code: WXYZ", "Type WXYZ on the review page to pass the design review of web-x")).toEqual(["command"]);
+    const [run] = rec.runs();
+    expect(run!.stdin).toContain("Type WXYZ on the review page");
+    expect(run!.env.FLOWRYN_NOTIFY_KIND).toBe("pass_code");
+    expect(run!.env.FLOWRYN_NOTIFY_TITLE).toBe("Flowryn pass code: WXYZ");
+    expect(commandEvents(db)).toEqual([expect.objectContaining({ kind: "pass_code", ok: true, stderr: "" })]);
+    expect(db.query("SELECT COUNT(*) AS n FROM notifications").get()).toEqual({ n: 0 });
+    expect(JSON.stringify(db.query("SELECT * FROM events").all())).not.toContain("WXYZ");
+    expect(log.join("\n")).not.toContain("WXYZ");
+  });
+
+  test("with notifications off it reaches nothing, except the tests' recorder", async () => {
+    const h = home();
+    const db = openDb(h);
+    const rec = recorder(h);
+    const off = pump(h, db, { now: 1_000 }, `command = "${rec.command}"`, { off: true });
+    expect(await off.sendPassCode("g1", "t", "x")).toEqual([]);
+    expect(rec.runs()).toEqual([]);
+    const seen: string[] = [];
+    const cfg = parseConfig(`[notify]\nmacos = true\ncommand = "${rec.command}"`, h.home);
+    const recording = new NotifyPump({ db, config: () => cfg, runtime: () => null, now: () => 1_000, log: () => {}, off: () => true, macos: async (title) => void seen.push(title), macosRecords: true });
+    expect(await recording.sendPassCode("g1", "Flowryn pass code: ABCD", "x")).toEqual(["macos"]);
+    expect(seen).toEqual(["Flowryn pass code: ABCD"]);
+    expect(rec.runs()).toEqual([]);
+  });
+});
