@@ -69,6 +69,11 @@ function clone(name: string): { path: string; branch: string } {
   const path = join(home, name);
   const cloned = Bun.spawnSync(["git", "clone", "--quiet", "--no-hardlinks", ROOT, path], { stdin: "ignore" });
   if (cloned.exitCode !== 0) throw new Error(`git clone failed: ${cloned.stderr.toString()}`);
+  // No origin: the daemon syncs a primary checkout from its origin (src/upkeep/sync.ts), and this one is
+  // your working repository, so a commit you make mid-run would move the scratch default branch under a
+  // run already branched from it (the merge then refuses not_fast_forward).
+  const detached = Bun.spawnSync(["git", "-C", path, "remote", "remove", "origin"], { stdin: "ignore" });
+  if (detached.exitCode !== 0) throw new Error(`git remote remove origin failed: ${detached.stderr.toString()}`);
   return { path, branch: Bun.spawnSync(["git", "-C", path, "branch", "--show-current"]).stdout.toString().trim() };
 }
 /** Fresh clones of this repository: the Pi project, and one a Claude project names (only its version is checked). */
