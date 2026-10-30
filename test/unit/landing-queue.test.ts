@@ -12,9 +12,10 @@ import { getRunWithPolicy, type RunWithPolicy } from "../../src/lifecycle/runs.t
 import { findLandingApproval, insertApproval } from "../../src/policy/approvals.ts";
 import { cleanMainMerge } from "../../src/policy/clean-merge.ts";
 import { gitRunner } from "../../src/policy/git.ts";
+import type { GitRunner } from "../../src/policy/landed.ts";
 import { chooseApproval, DAEMON_CALLER, standingApproval, type MergeFacts } from "../../src/policy/merge.ts";
 import { applyPrObservation } from "../../src/reconcile/delivery.ts";
-import { getAutoMerge, liveAutoMerge, startAutoMerge } from "../../src/verify/auto-merge.ts";
+import { createAutoMerge, getAutoMerge, liveAutoMerge, startAutoMerge } from "../../src/verify/auto-merge.ts";
 import { landingMode, landingQueued } from "../../src/verify/config.ts";
 import {
   BLOCKED_HOLD_MS,
@@ -106,9 +107,9 @@ function ship(n: number, file: string, text: string, opts: { yolo?: number; sens
   return { task, run, wt, branch, head, url, get: () => getRunWithPolicy(db, run)! };
 }
 
-function queue(cfg = config(), logs: string[] = []): { lq: LandingQueue; kicks: number[]; logs: string[] } {
+function queue(cfg = config(), logs: string[] = [], netGit: GitRunner = git): { lq: LandingQueue; kicks: number[]; logs: string[] } {
   const kicks: number[] = [];
-  const lq = new LandingQueue({ db, config: () => cfg, git, netGit: git, now: () => now, log: (m) => logs.push(m), kickScheduler: () => kicks.push(1) });
+  const lq = new LandingQueue({ db, config: () => cfg, git, netGit, now: () => now, log: (m) => logs.push(m), kickScheduler: () => kicks.push(1) });
   return { lq, kicks, logs };
 }
 
@@ -256,6 +257,35 @@ describe("the head of line", () => {
     expect(busy.get().state).toBe("ready");
   });
 
+  test("a head of line skipped while another PR landed gets its full 30 minutes again when it is next tried", async () => {
+    const busy = ship(1, "one.txt", "one\n", { liveness: "busy" });
+    const other = ship(2, "two.txt", "two\n");
+    const { lq } = queue();
+    await lq.pass();
+    expect(entries().map((e) => e.state)).toEqual(["waiting", "landing"]);
+    now += BLOCKED_HOLD_MS + 1;
+    tx(db, () => db.query("UPDATE runs SET state = 'landed' WHERE id = ?1").run(other.run));
+    await lq.pass();
+    expect(entries().map((e) => [e.task_id, e.state])).toEqual([
+      [busy.task, "waiting"],
+      [other.task, "landed"],
+    ]);
+    expect(liveLanding(db, busy.run)!.blocked_since).toBe(now);
+  });
+
+  test("a direct auto-merge left from before the project queued is superseded when its entry starts landing", async () => {
+    const s = ship(1, "one.txt", "one\n");
+    mergeOnOrigin(repos.other, "main.txt", "main moved\n");
+    const both = config(`[projects.web]\nverify = ${JSON.stringify(STEPS)}\nauto_merge = true\nlanding = "queue"\n`);
+    const direct = tx(db, () => createAutoMerge(db, both, s.get(), { ref: s.url, head: s.head, prNumber: 1, headRef: s.branch, worktree: null, source: "cli" }, now));
+    tx(db, () => enqueueLanding(db, s.get(), deliveredOf(db, s.task)!, null, now));
+    await queue(both).lq.pass();
+    const live = liveLanding(db, s.run)!;
+    expect(live.state).toBe("landing");
+    expect(getAutoMerge(db, direct.id)).toMatchObject({ state: "superseded", reason: "landing" });
+    expect(liveAutoMerge(db, s.run)).toMatchObject({ id: live.auto_merge_id, head_sha: deliveredOf(db, s.task)!.head });
+  });
+
   test("a merge a stop cut off before its push is pushed and carried on the next pass", async () => {
     const s = ship(1, "one.txt", "one\n");
     mergeOnOrigin(repos.other, "main.txt", "main moved\n");
@@ -350,6 +380,45 @@ describe("before the merge", () => {
 });
 
 describe("the watcher after the queue's push", () => {
+  /** A netGit whose push is followed at once by the watcher reading GitHub at the pushed head, before the queue carries the delivery. */
+  function watchedPush(s: Ship, carry: boolean): GitRunner {
+    return async (args, cwd) => {
+      const result = await git(args, cwd);
+      if (args[0] !== "push") return result;
+      const pushed = sh(s.wt, ["rev-parse", "HEAD"]);
+      const delivered = deliveredOf(db, s.task)!;
+      const proof = await cleanMainMerge(git, s.wt, { from: delivered.head, to: pushed, base: "main" });
+      const pr = { number: 1, url: s.url, title: s.task, state: "open" as const, draft: false, headSha: pushed, headRef: s.branch, headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: true };
+      // The daemon's hook for a carried head: on a queue project it waits its turn in the line.
+      const autoMerge = (r: RunWithPolicy, moved: { headSha: string }, at: number) => void deliveredToQueue(db, config(), r, moved.headSha, at);
+      tx(db, () => applyPrObservation(db, s.get(), delivered, { pr, checks: null }, new Set(), now, { nudgeConflicts: true, history: "descends", carry: carry ? { proof, verifyPolicy: null, autoMerge } : undefined }));
+      return result;
+    };
+  }
+
+  test("a moved head the watcher saw between the queue's push and its carry is settled by the carry", async () => {
+    const s = ship(1, "one.txt", "one\n", { yolo: 0 });
+    mergeOnOrigin(repos.other, "main.txt", "main moved\n");
+    const record = tx(db, () => insertApproval(db, { task: s.task, ref: s.url, head: s.head, channel: "cli-tty", actor: "you", action: "merge", now }));
+    tx(db, () => enqueueLanding(db, s.get(), deliveredOf(db, s.task)!, record.id, now));
+    await queue(config(), [], watchedPush(s, false)).lq.pass();
+    expect(liveLanding(db, s.run)).toMatchObject({ state: "landing" });
+    expect(db.query("SELECT COUNT(*) AS n FROM divergences").get()).toEqual({ n: 1 });
+    expect(db.query("SELECT resolution FROM divergences").get()).toEqual({ resolution: "carried" });
+    expect(openItems("divergence")).toEqual([]);
+  });
+
+  test("routine work the watcher carried first starts landing at the carried head", async () => {
+    const s = ship(1, "one.txt", "one\n");
+    mergeOnOrigin(repos.other, "main.txt", "main moved\n");
+    await queue(config(), [], watchedPush(s, true)).lq.pass();
+    const head = deliveredOf(db, s.task)!.head;
+    expect(head).not.toBe(s.head);
+    expect(entries()).toEqual([{ task_id: s.task, state: "landing", reason: null, integrations: 1 }]);
+    expect(liveAutoMerge(db, s.run)).toMatchObject({ head_sha: head });
+    expect(db.query("SELECT COUNT(*) AS n FROM divergences").get()).toEqual({ n: 0 });
+  });
+
   test("GitHub still showing the head the delivery was carried from is a lagging read, not a moved head", async () => {
     const s = ship(1, "one.txt", "one\n");
     mergeOnOrigin(repos.other, "main.txt", "main moved\n");

@@ -13,7 +13,7 @@ import { latestMerge, recordMergeResult } from "../policy/merge.ts";
 import { isActive, isConflictGate, oldestStep, quietSeconds, waitsOnlyOnCi, type NmRun } from "../policy/nomistakes.ts";
 import type { CleanMerge } from "../policy/clean-merge.ts";
 import type { HeadHistory } from "../policy/head-history.ts";
-import { openDivergence } from "./divergence.ts";
+import { closeDivergence, openDivergence, type DivergenceRow } from "./divergence.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 
 /**
@@ -69,6 +69,13 @@ export function headMoveRecorded(db: Db, runId: string, delivered: string, head:
       .query("SELECT 1 FROM divergences WHERE run_id = ?1 AND substr(summary, 1, ?3) = ?2 AND (resolved_at IS NULL OR resolution = 'keep-run') LIMIT 1")
       .get(runId, prefix, prefix.length) !== null
   );
+}
+
+/** Close the open divergence for exactly this head move: the daemon's own push made it and carried the delivery over. Call inside a transaction. */
+export function settleHeadMove(db: Db, run: RunWithPolicy, delivered: string, head: string, now: number): void {
+  const prefix = headMoveSummary(delivered, head);
+  const open = db.query("SELECT * FROM divergences WHERE run_id = ?1 AND substr(summary, 1, ?3) = ?2 AND resolved_at IS NULL").all(run.id, prefix, prefix.length) as DivergenceRow[];
+  for (const d of open) closeDivergence(db, d, "carried", "landing.carried", "daemon", now);
 }
 
 /** The divergence for a moved head, tagged when its history was rewritten or git could not say. */

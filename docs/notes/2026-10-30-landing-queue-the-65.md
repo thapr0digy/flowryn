@@ -33,7 +33,7 @@ landing = "queue"
 
 An approval carries across the queue's own clean merge of the base, unless the work is sensitive.
 
-- On a queue project, `flowryn merge <task>` checks only the approval. It does not merge: it leaves the approval standing as a record bound to the head (`standingApproval`: your record as it is, a Claude prompt, chat grant or Pi confirm turned into one), puts the PR in line and replies `landing: lq<n>`, `position`, `state: queued`. A yolo task needs no record.
+- On a queue project, `flowryn merge <task>` checks only the approval (sensitive work needs a human record even under yolo, as at the merge gate). It does not merge: it leaves the approval standing as a record bound to the head (`standingApproval`: your record as it is, a Claude prompt, chat grant or Pi confirm turned into one), puts the PR in line and replies `landing: lq<n>`, `position`, `state: queued`. A yolo task needs no record.
 - When the queue merges the base in, the carry voids standing records as any new head does; the queue then copies the entry's approval to the new head (same channel, same waiver, same expiry; the actor says `carried across a clean merge of main`). The daemon's merge finds it only through the live entry (`findLandingApproval`, for `DAEMON_CALLER` only).
 - Sensitive work: the approval does not carry. The entry leaves (`approval_needed`) with an `auto_merge_held` item naming `flowryn merge <task>`; the pushed merge of main stands, so your word at the new head is all it needs.
 
@@ -41,7 +41,7 @@ An approval carries across the queue's own clean merge of the base, unless the w
 
 An entry is `landed` when its run lands, or `left` with a reason: `conflict`, `sent_back` (a verify failure or a decline), `redelivered` (it rejoins at the back once delivered again), `held:<code>` (its auto-merge was held), `landing_blocked` (busy worker or changed worktree for over 30 min), `push_refused`, `merge_failed`, `not_clean`, `no_worktree`, `approval_needed`, `base_moving`, `landing_off` (the project left the queue), or the run's end. Holds open `auto_merge_held` (`Landing held: …; <next command>`), which wakes the leader. An entry is never taken again at the head it left at; a new delivery, or the leader's `flowryn merge`, puts it back.
 
-A head of line whose worker is busy, shows a dialog, or whose worktree has uncommitted changes is skipped for the next entry that can go (`landing.blocked`), and keeps its place.
+A head of line whose worker is busy, shows a dialog, or whose worktree has uncommitted changes is skipped for the next entry that can go (`landing.blocked`), and keeps its place. Its 30 minutes restart when another entry starts landing, so only time spent being tried counts.
 
 ## Where it lives
 
@@ -61,7 +61,7 @@ A head of line whose worker is busy, shows a dialog, or whose worktree has uncom
 ## Choices
 
 - Built on the auto-merge state machine rather than beside it: the verify, checks and merge path is already tested; the queue serialises it and adds the catch-up merge.
-- The daemon carries the delivery itself after its push (rather than waiting for the watcher), so the watcher sees the delivered head and opens no divergence, and the carry is not limited to routine work: the daemon made the merge.
+- The daemon carries the delivery itself after its push (rather than waiting for the watcher), and the carry is not limited to routine work: the daemon made the merge. A watcher read between the push and the carry may open a head-move divergence for exactly that move; the carry closes it (`settleHeadMove`, resolution `carried`). For routine work the watcher may carry it first; the queue then lands at the carried head. A live direct auto-merge from before the project queued is superseded when the entry starts landing.
 - The merge runs in the run's worktree, so a later send-back starts from it. Workers do not take Flowryn's repo lock, so the guard is the run's liveness and a clean worktree, checked just before the merge (the design said "the repo lock"; this is the deliberate change).
 - `flowryn merge` on a queue project never merges at once; to bypass the line, switch the project to manual.
 - A stacked PR (its base another task's branch) does not join until it is retargeted onto the default branch.

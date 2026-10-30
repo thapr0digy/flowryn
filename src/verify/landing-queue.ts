@@ -9,7 +9,7 @@ import { getRunWithPolicy, isTerminal, runBase, taskTitle, type RunWithPolicy } 
 import { findHumanApproval, insertApproval, isRoutineMerge, type ApprovalRow } from "../policy/approvals.ts";
 import { cleanMainMerge, type CleanMergeStep } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { sendConflictBack } from "../reconcile/delivery.ts";
+import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { createAutoMerge, getAutoMerge, setReadyProgress, supersedeAutoMerge, type AutoMergeRow, type LandingHooks } from "./auto-merge.ts";
 import { landingQueued, verifyConfig } from "./config.ts";
@@ -200,7 +200,9 @@ export function deliveredToQueue(db: Db, config: FlowrynConfig, run: RunWithPoli
   if (!landingQueued(config, run.project_id)) return false;
   supersedeAutoMerge(db, run.id, "redelivered", `delivered again at ${head.slice(0, 8)}`, now, "cli");
   const live = liveLanding(db, run.id);
-  if (live && live.head_sha !== head) leave(db, live, "redelivered", `delivered again at ${head.slice(0, 8)}`, now);
+  // The watcher carried the delivery across the queue's own push, between it and the queue's carry: the entry is landing it.
+  const carriedFromEntry = live?.state === "waiting" && deliveredOf(db, run.task_id)?.carriedFrom === live.head_sha;
+  if (live && live.head_sha !== head && !carriedFromEntry) leave(db, live, "redelivered", `delivered again at ${head.slice(0, 8)}`, now);
   return true;
 }
 
@@ -430,14 +432,20 @@ export class LandingQueue implements LandingHooks {
       const fresh = getLanding(db, row.id);
       const current = getRunWithPolicy(db, run.id);
       const delivered = current ? deliveredOf(db, current.task_id) : null;
-      if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready" || !delivered || delivered.head !== fresh.head_sha) return "left";
+      if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready" || !delivered) return "left";
+      // The watcher may have carried a routine delivery to the pushed merge already.
+      const carriedByWatcher = integrated !== null && delivered.head === integrated.head && delivered.carriedFrom === fresh.head_sha;
+      if (delivered.head !== fresh.head_sha && !carriedByWatcher) return "left";
       const steps = verifyConfig(config, current.project_id);
       let head = delivered.head;
       let approval = fresh.approval_id;
       if (integrated) {
         const evidence = prEvidence(db, current.id);
         const before = approval ? (db.query("SELECT * FROM approvals WHERE id = ?1").get(approval) as ApprovalRow | null) : null;
-        carryLanding(db, current, delivered, { headSha: integrated.head, number: evidence?.number ?? 0, headRef: evidence?.head_ref ?? current.branch }, { from: delivered.head, steps: integrated.steps, verifyPolicy: steps ? verifyPolicyId(steps) : null }, now);
+        if (!carriedByWatcher) {
+          carryLanding(db, current, delivered, { headSha: integrated.head, number: evidence?.number ?? 0, headRef: evidence?.head_ref ?? current.branch }, { from: delivered.head, steps: integrated.steps, verifyPolicy: steps ? verifyPolicyId(steps) : null }, now);
+          settleHeadMove(db, current, delivered.head, integrated.head, now);
+        }
         head = integrated.head;
         approval = null;
         if (before && before.consumed_at === null && before.expires_at > now) {
@@ -458,8 +466,11 @@ export class LandingQueue implements LandingHooks {
         }
       }
       const evidence = prEvidence(db, current.id);
+      supersedeAutoMerge(db, current.id, "landing", `the landing queue lands it at ${head.slice(0, 8)}`, now);
       const auto = createAutoMerge(db, config, current, { ref: delivered.ref, head, prNumber: evidence?.number ?? null, headRef: evidence?.head_ref ?? current.branch, worktree: null, source: "daemon" }, now);
       move(db, fresh, "landing", { head_sha: head, approval_id: approval, auto_merge_id: auto.id, integrations: fresh.integrations + (integrated ? 1 : 0), blocked_since: null, detail: integrated ? `merged origin/${integrated.base} at ${head.slice(0, 8)}` : null }, now);
+      // Time blocked counts only while an entry is tried: the others wait out this landing.
+      for (const other of projectLine(db, current.project_id)) if (other.state === "waiting" && other.blocked_since !== null) move(db, other, "waiting", { blocked_since: null }, now);
       refreshLine(db, current.project_id);
       return "started";
     });
