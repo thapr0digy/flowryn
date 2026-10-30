@@ -7,6 +7,7 @@ import { deliveredOf, projectRepo, type Delivered } from "../lifecycle/delivery.
 import { applyVerdict, backlogTasks, closeWatch, openWatches, orphanReason, ownPrVerdict, pendingTaskIds, prUrlOf, prVerdict, reportVerdict, watchOfTask, type WatchVerdict } from "../lifecycle/watches.ts";
 import { ciWaitDue, ciWaitMinutes, closeCiWaits, openCiWait, readBranchFacts, strandedCiWaits } from "../lifecycle/ci-wait.ts";
 import { landScout } from "../lifecycle/landing.ts";
+import { retargetStacks } from "../lifecycle/stacks.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { deliveryBasis, deliveryTransition, type BasisPart } from "../lifecycle/observed.ts";
 import { getRun, getRunWithPolicy, runBase, type RunWithPolicy } from "../lifecycle/runs.ts";
@@ -166,6 +167,8 @@ export class DeliveryWatcher {
   async pass(): Promise<void> {
     try {
       await this.watchPrs();
+      // After the PR reads, so a landing they proved retargets the runs stacked on it in the same pass.
+      await this.retargetStacks().catch((error: unknown) => this.deps.log(`delivery watcher: stacks: ${(error as Error).stack ?? String(error)}`));
       // Its own failure never holds up the watchers after it.
       await this.watchReviews().catch((error: unknown) => this.deps.log(`delivery watcher: reviews: ${(error as Error).stack ?? String(error)}`));
       await this.watchLocalMerges();
@@ -177,6 +180,20 @@ export class DeliveryWatcher {
       this.deps.log(`delivery watcher: ${(error as Error).stack ?? String(error)}`);
     }
     this.deps.passed?.();
+  }
+
+  /** Stacked runs whose base landed are retargeted; a base that cannot land is flagged (src/lifecycle/stacks.ts). */
+  private async retargetStacks(): Promise<void> {
+    if (this.deps.now() < this.forgeQuietUntil) return;
+    await retargetStacks({
+      db: this.deps.db,
+      forge: this.deps.forge,
+      webUrl: this.deps.webUrl,
+      now: this.deps.now,
+      log: this.deps.log,
+      kickScheduler: this.deps.kickScheduler,
+      notifySteer: this.deps.notifySteer,
+    });
   }
 
   private runs(sql: string, ...params: (string | number)[]): RunWithPolicy[] {

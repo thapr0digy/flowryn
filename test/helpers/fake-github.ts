@@ -435,6 +435,11 @@ export class FakeGitHub {
       if (req.method === "PATCH" && !pull[2]) {
         if (typeof body.draft === "boolean") pr.draft = body.draft;
         if (body.state === "closed" || body.state === "open") pr.state = body.state;
+        if (typeof body.base === "string") {
+          if (pr.state !== "open" || pr.merged) return this.json(req, path, 422, { message: "Cannot change the base branch of a closed pull request." });
+          if (repo.bare && !this.branchHead(repo, body.base)) return this.json(req, path, 422, { message: `Proposed base branch '${body.base}' was not found` });
+          pr.baseRef = body.base;
+        }
         return this.json(req, path, 200, this.prJson(repo, pr));
       }
       if (req.method === "PUT" && pull[2]) return this.merge(req, path, repo, pr, body);
@@ -506,7 +511,11 @@ export class FakeGitHub {
     pr.state = "closed";
     pr.mergeSha = sha;
     pr.mergedAt = new Date().toISOString();
-    if (repo.bare && repo.deleteBranchOnMerge) gitSync(repo.bare, ["update-ref", "-d", `refs/heads/${pr.headRef}`]);
+    if (repo.bare && repo.deleteBranchOnMerge) {
+      gitSync(repo.bare, ["update-ref", "-d", `refs/heads/${pr.headRef}`]);
+      // GitHub moves the open PRs into a branch it deletes on merge onto that PR's base.
+      for (const other of repo.prs) if (other.state === "open" && other.baseRef === pr.headRef) other.baseRef = pr.baseRef;
+    }
     return this.json(req, path, 200, { sha, merged: true, message: "Pull Request successfully merged" });
   }
 

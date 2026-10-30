@@ -135,4 +135,4 @@ These are out of v1 by the design itself (section 2's non-goals, section 17's "A
 - The Obsidian plugin; a Herdr plugin-pane board; the MCP wrapper; Claude Code channels and plugin monitors.
 - Harnesses other than Claude Code and Pi; runtimes other than Herdr; Linux and native Windows hosts (the transport and service seams exist).
 - Desks, quota-aware scheduling and profile routing; focus routing and score formulas; quiet mode (away mode came after v1, above); Jira; retention compaction; relay, the mail plane and multi-machine fleets.
-- Stacking a phase on an open PR (a per-plan option after v1, section 11).
+- Stacking a phase on an open PR (a per-plan option after v1, section 11; it came after v1: docs/notes/2026-10-27-stack-a-plan-4y.md, "Stacked plans").

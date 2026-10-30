@@ -75,6 +75,8 @@ export type ItemClass = "actionable" | "info";
  * watch_stuck: a task filed with `dispatch --after` waits for an event that
  * cannot happen as things stand (its PR closed unmerged, its scout failed or
  * dropped; src/lifecycle/watches.ts).
+ * stack_base_lost: a stacked run's base task was dropped, failed or had its PR
+ * closed unmerged, so the run cannot land as stacked (src/lifecycle/stacks.ts).
  * Asks (src/ask/): answer_ready, an ask's answer, read with `show a<N>`;
  * ask_failed, an ask that ended without one (its cap, its deadline, an error,
  * or a scout it asked for that could not start).
@@ -112,6 +114,7 @@ export const LANE_TABLE = {
   contract_leftover: { lane: "P1", class: "actionable" },
   phase_blocked: { lane: "P1", class: "actionable" },
   watch_stuck: { lane: "P1", class: "actionable" },
+  stack_base_lost: { lane: "P1", class: "actionable" },
   usage_limit: { lane: "P1", class: "actionable" },
   quota_low: { lane: "P1", class: "actionable" },
   account_signed_out: { lane: "P1", class: "actionable" },

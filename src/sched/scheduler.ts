@@ -15,7 +15,8 @@ import { checkStart, createRun, signInOf, storedBase, type StartDeps } from "../
 import { reviveReview, revivalBlocked, revivalsDue } from "../lifecycle/review-revival.ts";
 import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
-import { waitingOn, type PhaseRow } from "../lifecycle/plans.ts";
+import type { PhaseRow } from "../lifecycle/plans.ts";
+import { phaseReadiness } from "../lifecycle/stacks.ts";
 import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { activateStage, neededPools, positionOf, projectLimit, type StagePos } from "../lifecycle/stages.ts";
@@ -654,7 +655,9 @@ export class Scheduler {
       const task = backlog?.find((t) => t.id === phase.task_id);
       // Not in the backlog yet (its add is still pending), held, parked or already started by hand: wait.
       if (!task || task.state !== "queued" || task.hold) continue;
-      if (waitingOn(db, phase.task_id, backlog, JSON.parse(phase.blocked_by) as string[]).length > 0) continue;
+      // A stacked plan's phase may start on the one blocker that has delivered its PR (src/lifecycle/stacks.ts).
+      const ready = phaseReadiness(db, phase.task_id, backlog, JSON.parse(phase.blocked_by) as string[]);
+      if (!ready.ready) continue;
       let account: Account;
       const pins = { model: phase.model, effort: phase.effort };
       try {
@@ -678,8 +681,13 @@ export class Scheduler {
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
-        const start = await checkStart(this.deps.startDeps, project, account, storedBase(db, phase.task_id));
-        made = this.startPhase(phase, project, account, start, workflow, usage === "probe", moved, now());
+        const start = await checkStart(this.deps.startDeps, project, account, ready.stack?.branch ?? storedBase(db, phase.task_id));
+        if (ready.stack && start.base !== ready.stack.head) {
+          // Pushed since its delivery: wait for that task to deliver again.
+          this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} waits: ${ready.stack.branch} moved past ${ready.stack.task}'s delivered head`);
+          continue;
+        }
+        made = this.startPhase(phase, project, account, { ...start, stackedOn: ready.stack?.task ?? null }, workflow, usage === "probe", moved, now());
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
         else this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} failed to start: ${(error as Error).stack ?? String(error)}`);
@@ -727,7 +735,7 @@ export class Scheduler {
     phase: PhaseRow & { plan_title: string; source_task: string | null; phases: number },
     project: ProjectRow,
     account: Account,
-    start: { version: string; base: string; baseBranch: string | null },
+    start: { version: string; base: string; baseBranch: string | null; stackedOn: string | null },
     workflow: WorkflowDef,
     probe: boolean,
     moved: { from: string; why: string } | null,
@@ -737,16 +745,17 @@ export class Scheduler {
     const config = this.deps.config();
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
-      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, baseBranch: start.baseBranch, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
+      const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, baseBranch: start.baseBranch, stackedOn: start.stackedOn, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, account.id, runId, t);
       if (moved) appendEvent(db, { source: "daemon", kind: "sched.overflow", runId, taskId: phase.task_id, payload: { from: moved.from, to: account.id, why: moved.why, at: "phase start" }, ts: t });
       resolveItems(db, "phase_blocked", phase.task_id, "phase.started", t);
       // A plan a design handed in holds the phases after the design's own task, which is phase 1.
       const offset = phase.source_task ? 1 : 0;
       const [n, of] = [phase.phase_no + offset, phase.phases + offset];
-      const event = appendEvent(db, { source: "daemon", kind: "phase.started", runId, taskId: phase.task_id, payload: { plan: phase.plan_id, phase: n, of }, ts: t });
+      const event = appendEvent(db, { source: "daemon", kind: "phase.started", runId, taskId: phase.task_id, payload: { plan: phase.plan_id, phase: n, of, ...(start.stackedOn ? { stacked_on: start.stackedOn } : {}) }, ts: t });
       const where = of > 1 ? `Phase ${n} of ${of} in "${phase.plan_title}"` : `Queued task "${phase.title}"`;
-      openItem(db, { kind: "phase_started", eventSeq: event.seq, taskId: phase.task_id, runId, line: `${where} started by itself: ${phase.title} (${project.id}); its blockers landed`, now: t });
+      const why = start.stackedOn ? `stacked on ${start.stackedOn}'s open PR` : "its blockers landed";
+      openItem(db, { kind: "phase_started", eventSeq: event.seq, taskId: phase.task_id, runId, line: `${where} started by itself: ${phase.title} (${project.id}); ${why}`, now: t });
       return runId;
     });
   }
