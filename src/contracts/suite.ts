@@ -8,7 +8,8 @@ import { formatMs, steerStatus, type MessageRow } from "../lifecycle/steers.ts";
  * The harness contract suite (design section 5, "Contract tests gate every
  * harness version"): launch, capture the session id, observe busy and idle,
  * deliver while busy and while idle, interrupt, (Claude only) the toolkit's
- * live check, the worker's own temp dir, exit, resume, then a verified deliver. Every step runs against one real worker in a real Herdr session,
+ * live check, the worker's own temp dir, exit, resume, a verified deliver, then an ask
+ * (one print-mode call, no worker). Every step runs against one real worker in a real Herdr session,
  * dispatched through a scratch flowrynd, so it exercises the same adapter,
  * hooks or extension, and reconciler as production.
  *
@@ -479,5 +480,38 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         return `run ${run.id} ${run.state} with ${String(lastEvent(env, "run.delivered")?.payload.report)}${id ? `; ${timings(env, id)}` : ""}`;
       },
     },
+    askStep(harness),
   ];
+}
+
+/** The word an ask is told to answer with, and the answer must carry. */
+export const ASK_WORD = "ASKED";
+
+/** The ask's question: plain words for a real model, plus the scripted provider's one step for Pi. */
+export function askBody(harness: HarnessId, scripted: boolean): string {
+  const question = `Flowryn contract test for asks. Reply with the single word ${ASK_WORD} and nothing else.`;
+  return harness === "pi" && scripted ? `${question}\nFLOWRYN-SCRIPT: say ${ASK_WORD}` : question;
+}
+
+/**
+ * An ask (src/ask/; docs/notes/2026-10-30-ask-a-lightweight-4v.md): the harness's print-mode call
+ * with reading tools only and a spend cap, no pane or worktree, its reply stored as the answer.
+ */
+function askStep(harness: HarnessId): ContractStep {
+  return {
+    name: "ask",
+    typicalSeconds: harness === "claude" ? 15 : 3,
+    async run(env) {
+      const queued = await env.call("dispatch", { project: "contract", kind: "ask", harness, body: askBody(harness, env.scripted), "max-usd": "0.5" });
+      if (!queued.ok) throw new Error(`dispatch --kind ask: ${queued.error?.code} ${queued.error?.message}`);
+      const id = String(queued.data.ask);
+      const shown = await env.waitFor(`ask ${id} to end`, MID_MS, async () => {
+        const read = await env.call("show", { target: id });
+        return read.ok && !["queued", "running"].includes(String(read.data.state)) ? read.data : null;
+      });
+      if (shown.state !== "answered") throw new Error(`ask ${id} ended ${String(shown.state)}: ${String(shown.reason ?? "-")}`);
+      if (!String(shown.answer ?? "").includes(ASK_WORD)) throw new Error(`ask ${id}'s answer does not say ${ASK_WORD}: ${String(shown.answer ?? "").slice(0, 120)}`);
+      return `ask ${id} answered (${String(shown.spend)})`;
+    },
+  };
 }

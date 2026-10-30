@@ -6,6 +6,7 @@ import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
 import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
 import { policyMode } from "./policy.ts";
+import { askConfig } from "./ask.ts";
 import { upkeepConfig } from "./upkeep.ts";
 import { validationConfig } from "./validation.ts";
 import { herdrConfig, timingConfig, workersConfig } from "./workers.ts";
@@ -82,6 +83,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   accounts: accountsView,
   // Its rules resolve with the accounts; both views come from one parse.
   scopes: (c) => accountsConfig(c).scopes,
+  ask: askConfig,
 };
 
 export interface EffectiveConfig {

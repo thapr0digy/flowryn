@@ -1,4 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
+import { askLines, askView } from "../ask/view.ts";
+import { ASK_ID, getAsk } from "../ask/store.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
 import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
 import { awayLine, getAway } from "../attention/away.ts";
@@ -442,6 +444,9 @@ const fleet: VerbSpec = {
     // Why each waiting run waits, from its recorded explanation (docs/notes/2026-10-13-next-steps-md-wq.md); detail is show --why.
     const held = waitingRuns(ctx.db).filter((w) => lens.task(w.task_id));
     if (held.length > 0) data.waiting = held.map((w) => ({ task: w.task_id, ...waitingPointer(w) }));
+    // Asks (src/ask/) still queued or running: one line each, since an ask has no run to list.
+    const asks = askLines(ctx.db, ctx.now, (projectId) => lens.project(projectId));
+    if (asks.length > 0) data.asks = asks;
     if (queued.length > 0) {
       data.queued = queued.slice(0, MAX_QUEUED_ROWS).map((q) => queuedRow(ctx, q));
       if (queued.length > MAX_QUEUED_ROWS) data.queued_more = `${queued.length - MAX_QUEUED_ROWS} more queued: backlog.md`;
@@ -777,6 +782,8 @@ const show: VerbSpec = {
     // A review gate shows as its task, whose gates and grants it lists.
     const gateRun = /^g\d+$/.test(target) ? (ctx.db.query("SELECT run_id FROM gates WHERE id = ?1").get(target) as { run_id: string } | null) : null;
     if (gateRun) target = gateRun.run_id;
+    const ask = ASK_ID.test(target) ? getAsk(ctx.db, target) : null;
+    if (ask) return askView(ctx, ask, text.full);
     const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, text.full) : null;
     if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;
@@ -784,6 +791,8 @@ const show: VerbSpec = {
     const item = ctx.db.query("SELECT * FROM items WHERE id = ?1").get(target) as ItemRow | null;
     if (item?.kind === "worker_report") return workerReportView(ctx, target, item, text.full);
     if (item?.kind === "report_ready") return scoutReportView(ctx, target, item, text.full);
+    const itemAsk = (item?.kind === "answer_ready" || item?.kind === "ask_failed") && item.task_id ? getAsk(ctx.db, item.task_id) : null;
+    if (itemAsk) return askView(ctx, itemAsk, text.full);
     if (item) target = item.run_id ?? item.task_id ?? target;
     const dropped = item ? null : dropRecord(ctx.db, target);
     if (dropped) return droppedView(ctx, dropped, text);
