@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { sh } from "../helpers/scratch-git.ts";
 
@@ -59,6 +60,8 @@ describe("notes projects", () => {
         "FAKE: commit other.md Nobody reviewed this.",
         "FAKE: deliver-local",
         "FAKE: uncommit other.md",
+        // Main moved on while the draft was reviewed; the branch rebased onto it still delivers only the draft.
+        "FAKE: rebase main",
         "FAKE: deliver-local",
         "FAKE: sleep 120000",
       ].join("\n");
@@ -85,6 +88,10 @@ describe("notes projects", () => {
       expect(one(e, "SELECT 1 FROM gates WHERE id = ?1 AND state = 'open'", gate.id)).not.toBeNull();
       writeFileSync(gate.page_path, page);
 
+      writeFileSync(join(project.path, "landed.md"), "Another task landed meanwhile.\n");
+      sh(project.path, ["add", "landed.md"]);
+      sh(project.path, ["commit", "-q", "-m", "another task"]);
+
       expect((await e.approve(task, { gate: "draft" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.state === "ready" && r.stage === "final" && r.stage_state === "done", "the delivery");
       const delivered = (await e.replies(task, 7)).filter((r) => r.args.includes("--local"));
@@ -102,6 +109,7 @@ describe("notes projects", () => {
       expect(sh(project.path, ["show", "main:q4.md"])).toBe("Ship the notes kind, and more.");
       expect(sh(project.path, ["rev-parse", "main:q4.md"])).toBe(gate.draft_blob);
       expect(sh(project.path, ["ls-tree", "--name-only", "main", "other.md"])).toBe("");
+      expect(sh(project.path, ["show", "main:landed.md"])).toBe("Another task landed meanwhile.");
     },
     { timeout: 150_000 },
   );
