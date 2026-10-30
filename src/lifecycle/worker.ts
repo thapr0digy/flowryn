@@ -18,6 +18,7 @@ import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
 import { deliveryBasis, requireDeliveryBasis, type BasisPart, type DeliveryBasis } from "./observed.ts";
 import { deliveredOf, recordDelivery, verifyLocalDelivery, verifyPrDelivery, type Carry, type VerifiedLocal, type VerifiedPr } from "./delivery.ts";
+import { steerStackedOnRedelivery } from "./stacks.ts";
 import { cleanMainMerge } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { verifyConfig } from "../verify/config.ts";
@@ -461,7 +462,11 @@ const deliver: VerbSpec = {
     if (run.state !== "ready" && pipelineNeedsLastStage(ctx.db, run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {
+      const previous = deliveredOf(ctx.db, run.task_id);
       const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now, outcome.carry ?? null);
+      // Runs stacked on this task are told to take its new head (src/lifecycle/stacks.ts).
+      const steered = outcome.ship.kind === "pr" ? steerStackedOnRedelivery(ctx.db, run.task_id, previous?.head ?? null, outcome.ship.pr.headSha, run.branch, now) : [];
+      if (steered.length > 0) data.stacked_steered = steered.join(" ");
       if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
       const ship = outcome.ship;
       // An opted-in yolo project's delivery is verified and merged by the daemon (src/verify/auto-merge.ts).
@@ -532,6 +537,7 @@ const deliver: VerbSpec = {
   async settle(ctx, result) {
     // A PR is watched; a landed report's worktree is cleaned up by the same watcher pass.
     if (result.data.pr || result.data.report) ctx.delivery.watch(String(result.data.run));
+    if (typeof result.data.stacked_steered === "string") for (const id of result.data.stacked_steered.split(" ")) ctx.fleet.bus.notify(id);
     ctx.sched.kick();
     return result;
   },

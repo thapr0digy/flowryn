@@ -903,21 +903,33 @@ ALTER TABLE runs ADD COLUMN base_branch TEXT;
 `;
 
 /**
- * The review page's pass code (docs/notes/2026-10-30-pass-a-review-c6.md): approvals is rebuilt
+ * Migration 45 (docs/notes/2026-10-27-stack-a-plan-4y.md, phase 2): a stacked plan starts a phase
+ * on the open PR of the one task it still waits for. `plans.stack` is the plan's opt-in;
+ * `runs.stacked_on` the task whose branch the run's PR targets until that task lands (null: not
+ * stacked, or retargeted since).
+ */
+const STACKED_PLANS_SQL = /* sql */ `
+ALTER TABLE plans ADD COLUMN stack INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN stacked_on TEXT;
+CREATE INDEX runs_stacked_on ON runs(stacked_on) WHERE stacked_on IS NOT NULL;
+`;
+
+/**
+ * Migration 46, the review page's pass code (docs/notes/2026-10-30-pass-a-review-c6.md): approvals is rebuilt
  * for the new human channel page, as migration 17 rebuilt it for claude-chat (merges and gates
  * reference it, so foreign keys are off while it is swapped).
  */
 const PAGE_CHANNEL_SQL = /* sql */ `
-CREATE TABLE approvals_v45 (
+CREATE TABLE approvals_v46 (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
   channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','page','yolo')),
   actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
   allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   consumed_at INTEGER);
-INSERT INTO approvals_v45 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+INSERT INTO approvals_v46 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
   SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
 DROP TABLE approvals;
-ALTER TABLE approvals_v45 RENAME TO approvals;
+ALTER TABLE approvals_v46 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 `;
 
@@ -966,7 +978,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 42, name: "learnings", sql: LEARNINGS_SQL },
   { version: 43, name: "human-waits", sql: HUMAN_WAITS_SQL },
   { version: 44, name: "base-branch", sql: BASE_BRANCH_SQL },
-  { version: 45, name: "page-channel", sql: PAGE_CHANNEL_SQL, rebuildsReferencedTable: true },
+  { version: 45, name: "stacked-plans", sql: STACKED_PLANS_SQL },
+  { version: 46, name: "page-channel", sql: PAGE_CHANNEL_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

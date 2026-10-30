@@ -193,6 +193,8 @@ export function startAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy
   const live = liveAutoMerge(db, run.id);
   if (live) move(db, live, "superseded", { reason: "redelivered", detail: `delivered again at ${d.head.slice(0, 8)}` }, now, "cli");
   if (run.kind !== "ship" || run.sensitive || !isYolo(db, run.task_id) || !optedIn(config, run.project_id)) return null;
+  // A stacked run cannot merge until the task beneath it lands; its delivery after the retarget starts one.
+  if (run.stacked_on) return null;
   const policy = verifyPolicyId(verifyConfig(config, run.project_id)!);
   const next = Number(getMeta(db, "next_auto_merge_no") ?? "1");
   setMeta(db, "next_auto_merge_no", String(next + 1));
