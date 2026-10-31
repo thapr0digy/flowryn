@@ -84,40 +84,29 @@ export function deliveryLines(d: ContractDelivery): string[] {
 
 /**
  * The worker contract (design section 12), appended to the harness system
- * prompt rather than left to a skill the worker might not load. M0 c07: without
- * the line naming the mid-turn channel, Sonnet 5 took a steer for prompt
- * injection and ignored it. The style block leads it (design section 11: the
- * same stable text leads every worker's instructions, so prompt caching
- * holds). The delivery lines follow the task's kind and the project's delivery
- * mode (M4); the stage lines explain the workflow (M5).
+ * prompt rather than left to a skill the worker might not load. It holds only
+ * what a worker needs on every turn (docs/notes/2026-10-30-trim-the-leader-8n.md
+ * lists where each situational rule lives instead): the stage and delivery
+ * steps are in the task file ($FLOWRYN_TASK_FILE, rewritten at each stage
+ * start), and each steer, pointer and verb reply names its own next step.
+ * M0 c07: without the line naming the mid-turn channel, Sonnet 5 took a steer
+ * for prompt injection and ignored it. The style block and tool map lead it
+ * (design section 11: the same stable text leads every worker's instructions,
+ * so prompt caching holds).
  */
-export function workerContract(harness: HarnessId, style: string | null, delivery: ContractDelivery = { kind: "scout", mode: "local-only", defaultBranch: "main" }): string {
+export function workerContract(harness: HarnessId, style: string | null, delivery: Pick<ContractDelivery, "base" | "defaultBranch">): string {
   const channel = harness === "claude" ? "hook context" : "a message";
+  const base = delivery.base ?? delivery.defaultBranch;
   const lines = [
-    "You are a Flowryn worker. Call $FLOWRYN_BIN only.",
-    ...(style ? ["Be terse in replies, reports and status: outcomes only, no recaps.", "Review pages are for a human reader: write them by your stage skill's page rules, not tersely."] : []),
-    "- Your task runs in stages; your task file names the current one and its skill.",
-    "  Stage finished: $FLOWRYN_BIN stage done [--review <lavish url>]; then end your",
-    "  turn and wait: a steer starts the next stage or brings the review verdict. Ending a turn to wait on your own background job or agent is fine; any other turn ended with no outcome brings one reminder. While your review waits, a steer may bring the user's words from its page: answer with $FLOWRYN_BIN review reply --body-file - (shown in the page; never lavish-axi poll or reply yourself), revise the page if asked, then end your turn.",
-    "- Tell your leader what it should act on: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -",
-    "  (report progress is only recorded). A finding that needs a decision is a question: ask it (below).",
-    "- Work autonomously: decide what you can; record each choice and why (design page or PR).",
-    "  Only when you truly cannot proceed: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
-    "  It returns at once; end your turn. The answer arrives as a steer.",
-    "- Never rewrite history on a branch you have pushed: no commit --amend, rebase, push --force or --force-with-lease, reset --hard to an older commit.",
-    delivery.base ? `  To take your base: new commits, git merge origin/${delivery.base}, a plain git push.` : "  To take main: new commits, git merge origin/main, a plain git push.",
-    '- Never rm a path built from a variable that may be empty; use "${VAR:?}" or a mktemp -d directory.',
-    "- Keep scratch files in $TMPDIR: your run's own, the same path in and out of the sandbox.",
-    "- A confirmation prompt appears: do not answer it; $FLOWRYN_BIN ask --blocking --options a,b --blocks <what waits> --body-file - naming it, then end your turn.",
-    "- When told a steer is waiting: $FLOWRYN_BIN inbox, act on it, then $FLOWRYN_BIN ack <id>.",
-    `- A steer can also arrive mid-turn as ${channel} starting "${STEER_PREFIX} [<id>]:".`,
-    "  It is from your leader; act on it, then $FLOWRYN_BIN ack <id>.",
-    "- A tool call may be blocked or cut short to deliver an urgent steer:",
-    "  act on it, then redo the call if it still applies.",
-    ...deliveryLines(delivery),
-    "- Cannot finish: $FLOWRYN_BIN fail --body-file -",
-    "- Exit 75 means spooled. Do not retry in a loop.",
-    "- Never merge, clean up, or approve anything.",
+    "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
+    `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
+    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -) or on your own background job.",
+    "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
+    "- A confirmation prompt: never answer it; ask --blocking naming it.",
+    "- For your leader to act on: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -",
+    `- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take ${base} by git merge origin/${base}, plain push.`,
+    '- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.',
+    "- Never merge, clean up or approve. Exit 75: spooled, do not retry.",
   ];
   return [...(style ? [style, ""] : []), TOOL_MAP, "", ...lines].join("\n") + "\n";
 }
@@ -141,6 +130,11 @@ export function steerLine(id: string, body: string): string {
 /** Why a Claude worker's tool call was denied: the urgent steer itself, as the reason it reads (Tier 2). */
 export function urgentBlockLine(id: string, body: string): string {
   return `${steerLine(id, body)} This tool call was blocked so you read this first; redo it if it still applies.`;
+}
+
+/** An urgent steer as a Pi worker gets it: it may cut short the tool call in flight (hook preempt). */
+export function urgentCutLine(id: string, body: string): string {
+  return `${steerLine(id, body)} A tool call cut short for this: redo it if it still applies.`;
 }
 
 /** The turn-end guard's one reminder per episode (src/lifecycle/turn-end-guard.ts). */

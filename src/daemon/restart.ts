@@ -258,7 +258,7 @@ export function smokeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 function broken(command: readonly string[], why: string): FlowrynError {
-  return new FlowrynError("binary_broken", `${command.join(" ")} failed its smoke check: ${why}; the running daemon stays`, "rebuild it (bun run build), then try again");
+  return new FlowrynError("binary_broken", `${command.join(" ")} failed its smoke check: ${why}; the running daemon stays`, "tell the user: rebuild it (bun run build), then try again");
 }
 
 /**
@@ -579,7 +579,7 @@ export class RestartController {
         throw new FlowrynError(
           "restart_blocked",
           `a restart now would break ${guards.length === 1 ? "1 thing" : `${guards.length} things`}: ${guardLines(guards).join("; ")}`,
-          "flowryn daemon restart --when-idle (restarts once these clear)",
+          "tell the user, and offer flowryn daemon restart --when-idle (restarts once these clear; --cancel drops it)",
         );
       }
       const earlier = readPending(db);

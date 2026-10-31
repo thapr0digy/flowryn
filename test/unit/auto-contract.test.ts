@@ -771,7 +771,7 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(items("harness_unverified")).toEqual([
       expect.objectContaining({
         state: "open",
-        line: `claude 2.1.300 passed only at contract revision ${CLAUDE_REVISION}, not revision ${next}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude`,
+        line: `claude 2.1.300 passed only at contract revision ${CLAUDE_REVISION}, not revision ${next}, so dispatch and resume on claude are refused until it passes: flowryn doctor --contracts --harness claude (outside the sandbox)`,
       }),
     ]);
     await gate("claude", bumped("claude"));

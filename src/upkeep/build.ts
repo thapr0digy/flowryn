@@ -309,7 +309,7 @@ export class MergeBuilder {
     const { db } = this.deps;
     const now = this.deps.now();
     // The log first: an item line is cut at 200 characters, and the whole detail stays in the event.
-    const line = `Build after merge failed for ${project.id} at ${commit.slice(0, 8)}, the installed binary unchanged; log ${homeShort(logPath, homedir())}: ${detail}`;
+    const line = `Build after merge failed for ${project.id} at ${commit.slice(0, 8)} (tell the user), binary unchanged; log ${homeShort(logPath, homedir())}: ${detail}`;
     tx(db, () => {
       resolveItems(db, "build_failed", null, `superseded by ${commit.slice(0, 8)}`, now);
       setMeta(db, META_KEY, JSON.stringify({ commit, outcome: "failed", at: now, log: logPath, detail } satisfies BuildAttempt));

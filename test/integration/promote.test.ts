@@ -66,8 +66,10 @@ describe("a scout at work", () => {
       const args = start.params.args as string[];
       expect(args).toContain("--resume");
       expect(args.at(-1)).toContain("because your task changed");
-      expect(readFileSync(join(runDir(env, run), "contract.md"), "utf8")).toContain("deliver --local");
+      // The contract carries no delivery steps (docs/notes/2026-10-30-trim-the-leader-8n.md): the task file names the ship's workflow, and its last stage brings them.
+      expect(readFileSync(join(runDir(env, run), "contract.md"), "utf8")).not.toContain("deliver --");
       const taskFile = readFileSync(join(runDir(env, run), "task.md"), "utf8");
+      expect(taskFile).toContain("Flowryn stage build (1 of 2; workflow fix");
       expect(taskFile).toContain("Your leader promoted this scout to a ship");
       expect(taskFile).toContain("Fix the redirect loop you found.");
       await waitUntil(async () => (await backlogTask(env, task))?.kind === "ship", 10_000, "the backlog kind ship");

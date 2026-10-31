@@ -6,7 +6,7 @@ import * as leader from "../leader/hooks.ts";
 import { closeDismissedPromptExplanations } from "../attention/explanations.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { appendEvent } from "../db/events.ts";
-import { steerLine, steerPointer, urgentBlockLine } from "../harness/contract-text.ts";
+import { steerLine, steerPointer, urgentBlockLine, urgentCutLine } from "../harness/contract-text.ts";
 import { HOOK_SIGNALS, type HookName } from "../harness/types.ts";
 import { getProject } from "./projects.ts";
 import { gatherFacts } from "../policy/merge.ts";
@@ -805,8 +805,8 @@ const waitSteer: VerbSpec = {
     const message = getMessage(ctx.db, due.id)!;
     if (harness === "claude") return { data: { fire: { id: message.id, line: steerPointer(message.id) } } };
     // An urgent steer: the extension blocks the next tool call and cuts a tool past the threshold (asking hook preempt).
-    const urgent = message.urgent === 1 ? { urgent: true, preempt_after_ms: ctx.fleet.timing().steer_preempt_after_ms } : {};
-    return { data: { fire: { id: message.id, line: steerLine(message.id, message.body), ...urgent } } };
+    if (message.urgent !== 1) return { data: { fire: { id: message.id, line: steerLine(message.id, message.body) } } };
+    return { data: { fire: { id: message.id, line: urgentCutLine(message.id, message.body), urgent: true, preempt_after_ms: ctx.fleet.timing().steer_preempt_after_ms } } };
   },
 };
 

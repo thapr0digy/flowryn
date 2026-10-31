@@ -135,6 +135,28 @@ export function dispatchedTask(db: Db, runId: string): DispatchedTask | null {
   return { title: textOrNull(payload.title) ?? "", body: textOrNull(payload.body) ?? "", kind: textOrNull(payload.kind), project: textOrNull(payload.project) };
 }
 
+/**
+ * The task file: the current stage (where it sits in the workflow, its skill,
+ * what ends it), the stage's note unless a resume (`withNote: false`), then
+ * the task as dispatched. Rewritten on every launch and every stage start
+ * (rewriteTaskFile), so a worker that rereads it finds where the run is now:
+ * the worker contract keeps no stage or delivery steps of its own.
+ */
+export function taskFileText(db: Db, run: RunWithPolicy, config: FlowrynConfig, delivery: ContractDelivery, withNote: boolean): string {
+  const body = dispatchedBody(db, run.id).trim();
+  const pos = positionOf(db, run, run.kind);
+  const header = stageInstructions(pos, { stateDir: config.state_dir, delivery });
+  const note = withNote && run.stage_note ? `\n\n${run.stage_note}` : "";
+  return `${header}${note}\n\n---\n\n${body}\n`;
+}
+
+/** The task file of a live worker's run, after its stage changed; a run never launched has no run directory and nothing to rewrite. */
+export function rewriteTaskFile(db: Db, run: RunWithPolicy, config: FlowrynConfig, delivery: ContractDelivery): void {
+  const runDir = runDirFor(config, run.id);
+  if (!existsSync(runDir)) return;
+  writeFileAtomic(join(runDir, "task.md"), taskFileText(db, run, config, delivery, true), 0o600);
+}
+
 /** The task text a dispatch recorded; the launcher materializes it into task.md. */
 export function dispatchedBody(db: Db, runId: string): string {
   return dispatchedTask(db, runId)?.body ?? "";
@@ -255,7 +277,7 @@ export class Launcher {
     const contractFile = join(runDir, "contract.md");
     const deliveryMode = run.delivery_mode as "no-mistakes" | "direct-PR" | "local-only";
     const delivery = { kind: run.kind, mode: deliveryMode, defaultBranch: project.default_branch, base: run.base_branch, lastStage: lastStageOf(this.deps.db, run), harness: run.harness };
-    writeFileAtomic(instructionsFile, this.taskFile(run, config, delivery, mode), 0o600);
+    writeFileAtomic(instructionsFile, taskFileText(this.deps.db, run, config, delivery, mode !== "resume"), 0o600);
     writeFileAtomic(contractFile, workerContract(run.harness, styleBlock(config), delivery), 0o600);
     const skills = writeStageSkills(config.state_dir);
     if (run.harness === "pi") await loadExtensionSource();
@@ -398,20 +420,6 @@ export class Launcher {
     } catch (error) {
       return error as Error;
     }
-  }
-
-  /**
-   * The task file: the current stage (where it sits in the workflow, its
-   * skill, what ends it), the note a fresh stage worker starts with, then the
-   * task as dispatched. Rewritten on every launch, so a resumed or fresh
-   * worker reads where the run is now.
-   */
-  private taskFile(run: RunWithPolicy, config: FlowrynConfig, delivery: ContractDelivery, mode: LaunchMode): string {
-    const body = dispatchedBody(this.deps.db, run.id).trim();
-    const pos = positionOf(this.deps.db, run, run.kind);
-    const header = stageInstructions(pos, { stateDir: config.state_dir, delivery });
-    const note = mode !== "resume" && run.stage_note ? `\n\n${run.stage_note}` : "";
-    return `${header}${note}\n\n---\n\n${body}\n`;
   }
 
   /** git is the ground truth for worktrees; a relaunch reuses the run's own worktree. */

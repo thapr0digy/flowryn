@@ -76,7 +76,7 @@ export function recordSync(db: Db, project: ProjectRow, sync: SyncOutcome, now: 
     return `sync ${project.id}: fast-forwarded ${project.default_branch} ${sync.from.slice(0, 8)}..${sync.to.slice(0, 8)}`;
   }
   if (!(SHOWN_SKIPS as readonly string[]).includes(sync.reason)) return `sync ${project.id}: skipped (${sync.reason}: ${sync.detail})`;
-  const line = `Primary checkout of ${project.id} not synced with origin/${project.default_branch}: ${sync.detail}; new runs branch from it as it is`;
+  const line = `Primary checkout of ${project.id} not synced with origin/${project.default_branch}: ${sync.detail}; new runs branch from it as it is; tell the user`;
   const open = findOpenItem(db, "checkout_unsynced", key);
   if (open?.line === line) return null;
   if (open) resolveItems(db, "checkout_unsynced", key, `now ${sync.reason}`, now);

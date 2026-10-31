@@ -123,7 +123,7 @@ export function reportLine(title: string, status: string, body: string): string 
 const report: VerbSpec = {
   name: "report",
   summary: "Report a change your supervisor would act on (workers only)",
-  positionals: [{ name: "status", required: true, help: "one word: finding, blocked or failed open an item for your leader; progress is only recorded", values: REPORT_STATUSES }],
+  positionals: [{ name: "status", required: true, help: "one word: finding, blocked or failed open an item for your leader; progress is only recorded. A finding that needs a decision is a question: ask it instead", values: REPORT_STATUSES }],
   flags: {
     "body-file": { type: "string", help: "details, read from a file or - for stdin", fileFor: "body" },
   },

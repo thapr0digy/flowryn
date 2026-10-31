@@ -337,7 +337,8 @@ describe("no-mistakes, local-only, decline and cleanup", () => {
       const e = env;
       const { task, run } = await e.fleet.dispatch(`Pipeline\nFAKE: commit fix.txt fixed\nFAKE: verb stage begin ship\nFAKE: wait-file go\n${`FAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\n`}FAKE: deliver-pr\nFAKE: sleep 120000`, { kind: "ship" });
       const started = await e.fleet.waitRun(run, (r) => r.worker_started_at !== null, "worker started");
-      expect(readFileSync(join(e.fleet.h.stateDir, "runs", run, "contract.md"), "utf8")).toContain("Ship with no-mistakes");
+      // The task file names the pipeline (before its stage, "do not run it yet"; in it, how to drive it); the contract no longer does.
+      expect(readFileSync(join(e.fleet.h.stateDir, "runs", run, "task.md"), "utf8")).toContain("no-mistakes");
       const statusFile = join(e.fleet.h.home, "nm-status");
       writeFileSync(statusFile, `run:\n  id: "01NM"\n  branch: ${started.branch}\n  status: running\n  head: "abc"\n  pr: ""\n`);
       await e.fleet.waitRun(run, (r) => r.state === "validating", "validating", 10_000);

@@ -86,7 +86,7 @@ describe("review pages open in your browser", () => {
 
     await waitUntil(() => one<{ open_state: string }>(f, "SELECT open_state FROM gates WHERE id = ?1", gate.id)?.open_state === "failed", 10_000, "the open failed");
     const item = one<{ line: string; full_line: string | null }>(f, "SELECT line, full_line FROM items WHERE kind = 'gate_ready' AND run_id = ?1", run)!;
-    expect(item.full_line ?? item.line).toEndWith(`${gate.review_url} · NOT opened (open exited 1: Unable to find application named 'Google Chrome'); open it by hand`);
+    expect(item.full_line ?? item.line).toEndWith(`${gate.review_url} · NOT opened (open exited 1: Unable to find application named 'Google Chrome'); relay the URL to open it by hand`);
     const line = await gateLine(e, task, gate.id);
     expect(line).toContain("; browser: failed ");
     expect(line).toContain("(open exited 1: Unable to find application named 'Google Chrome')");
@@ -106,7 +106,7 @@ describe("review pages open in your browser", () => {
     await waitUntil(() => one(f, "SELECT 1 FROM items WHERE kind = 'review_channel' AND run_id = ?1 AND state = 'open'", run) !== null, 15_000, "the review_channel item");
     const item = one<{ id: string; lane: string; line: string; full_line: string | null }>(f, "SELECT id, lane, line, full_line FROM items WHERE kind = 'review_channel' AND run_id = ?1", run)!;
     expect(item.lane).toBe("P1");
-    expect(item.full_line ?? item.line).toStartWith("Review page not delivering answers: restart Lavish");
+    expect(item.full_line ?? item.line).toStartWith("Review page not delivering answers (tell the user and relay the fix): restart Lavish");
     expect(item.full_line ?? item.line).toContain(`${task} (design gate ${gate.id}) since `);
     expect(item.full_line ?? item.line).toContain("2 failed polls: error: Lavish Editor request failed: 500 (exit 1)");
     const down = await gateLine(e, task, gate.id);

@@ -205,4 +205,34 @@ describe("urgent steers to a pi worker", () => {
     },
     { timeout: 45_000 },
   );
+
+  test(
+    "the extension's long poll hands an urgent steer over with the redo clause for a call it cuts short; a normal steer without it",
+    async () => {
+      const env = await fleet();
+      // A worker that runs no long poll of its own: the test plays the extension's with the run's token.
+      const { run } = await env.dispatch("Build\nFAKE: no-start", { harness: "pi" });
+      const launched = await env.waitRun(run, (r) => r.pane_id !== null && r.proc_pid !== null, "launched");
+      const token = env.herdr.panes.get(launched.pane_id!)!.env.FLOWRYN_TOKEN!;
+      const poll = async () => {
+        const reply = await env.cli(["hook", "wait-steer", "--harness", "pi", "--json"], { env: { FLOWRYN_TOKEN: token }, stdin: "{}" });
+        return (JSON.parse(reply.stdout.trim().split("\n").pop()!) as { steer: { id: string; line: string; urgent?: boolean } }).steer;
+      };
+      const redo = "A tool call cut short for this: redo it if it still applies.";
+
+      const normal = await steer(env, run, "also update the docs", false);
+      const plain = await poll();
+      expect(plain).toMatchObject({ id: normal });
+      expect(plain.line).toStartWith(`Flowryn steer [${normal}]: also update the docs`);
+      expect(plain.line).not.toContain(redo);
+      expect((await env.cli(["ack", normal], { env: { FLOWRYN_TOKEN: token } })).code).toBe(0);
+
+      const urgent = await steer(env, run, "stop the migration", true);
+      const cut = await poll();
+      expect(cut).toMatchObject({ id: urgent, urgent: true });
+      expect(cut.line).toStartWith(`Flowryn steer [${urgent}]: stop the migration`);
+      expect(cut.line).toEndWith(redo);
+    },
+    { timeout: 30_000 },
+  );
 });
