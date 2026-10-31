@@ -9,8 +9,10 @@ import type { ItemKind } from "./items.ts";
  * Away mode (autonomy spec 2, ship B): `flowryn away` stores a posture, an
  * expiry and your words in the meta table; `flowryn back` or the expiry ends
  * it. While away, every new item that needs you wakes the leader as a P0
- * would, so it reaches you in the remote-control chat. It changes delivery
- * only: no approval, gate, merge or decision rule reads it. After `[away]
+ * would, so it reaches you in the remote-control chat. It changes delivery,
+ * and one decision rule: deadline defaults (attention/deadline-defaults.ts)
+ * answer an opted-in question only while you are away or inactive. No
+ * approval, gate or merge rule reads it. After `[away]
  * auto_after_min` with no input from you, the daemon starts it by itself
  * (autoAway, `by: "auto"`), and your next own message ends that one.
  */
@@ -162,7 +164,7 @@ export function autoAway(db: Db, input: { afterMs: number; now: number }): AwayP
  * When you went inactive in the lease holders' sessions (one per scope); null with no open holder
  * (nobody could be woken) or while you are active in any of them. Inactive in all: since the latest.
  */
-function holderInactiveSince(db: Db): number | null {
+export function holderInactiveSince(db: Db): number | null {
   const sessions = allLeases(db)
     .map((l) => (l.session_id ? getSession(db, l.session_id) : null))
     .filter((s): s is NonNullable<typeof s> => s !== null && s.ended_at === null);

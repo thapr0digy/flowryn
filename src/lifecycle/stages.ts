@@ -20,7 +20,7 @@ import type { GateOpenState } from "../lavish/opener.ts";
 import { parseGateQuestions } from "../lavish/questions.ts";
 import { findPageForKey, lavishSessionKey, lavishUrlKey } from "../lavish/session-key.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, openGateQuestions } from "./gate-questions.ts";
-import { reportDirFor } from "./launcher.ts";
+import { reportDirFor, rewriteTaskFile } from "./launcher.ts";
 import { approvePlan, discardPlansOfGate, fileWorkerPlan, parsePlan } from "./plans.ts";
 import { getProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type PendingLaunch, type RunRow, type RunWithPolicy } from "./runs.ts";
@@ -103,7 +103,7 @@ export function stageInstructions(pos: StagePos, ctx: StageTextContext): string 
   }
   if (ctx.delivery.kind === "ship" && ctx.delivery.mode === "no-mistakes") parts.push(`Do not run the no-mistakes pipeline yet: it runs in stage ${def.stages[def.stages.length - 1]!.id}, once that stage has started.`);
   if (stage.gate === "review") {
-    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict. Flowryn listens on the page itself and opens it in the user's browser: do not hold a lavish-axi poll open, and never say the page is open in their browser.");
+    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict. Flowryn listens on the page itself and opens it in the user's browser: do not hold a lavish-axi poll open, and never say the page is open in their browser. While it waits, a steer may bring the user's words from the page: answer with $FLOWRYN_BIN review reply --body-file - (never lavish-axi poll or reply yourself), revise the page if asked, then end your turn.");
     parts.push("Only a question you cannot proceed without goes to the user: add --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.");
   }
   else parts.push("When it is done: $FLOWRYN_BIN stage done, then end your turn; a steer starts the next stage.");
@@ -186,6 +186,15 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
   // A fresh launch reads its stage from the task file, and a fresh stage worker or a relaunched one its note too: the launcher clears it.
   const noteInFile = launch === "fresh" || launch === "stage" || launch === "relaunch";
   let steer: string | null = null;
+  // A live worker carries on: its task file now names this stage, so rereading it after a compaction finds the stage's steps.
+  let taskFileError: string | undefined;
+  if (starting && !noteInFile) {
+    try {
+      rewriteTaskFile(db, run, config, stageTextContext(db, config, run).delivery);
+    } catch (error) {
+      taskFileError = (error as Error).message;
+    }
+  }
   if (starting && opts.steer !== false && run.stage_note !== null && !noteInFile) {
     const text = [run.stage_note, stageInstructions(pos, stageTextContext(db, config, run))].filter((t) => t.length > 0).join(" ");
     steer = createSteer(db, run, text, now).id;
@@ -196,7 +205,7 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
        waiting_since = NULL, pending_launch = CASE WHEN ?3 IN ('stage','relaunch') THEN ?3 ELSE NULL END,
        stage_note = CASE WHEN ?4 = 1 THEN stage_note ELSE NULL END, updated_at = ?2 WHERE id = ?1`,
   ).run(run.id, now, launch ?? "", noteInFile ? 1 : 0);
-  if (starting) appendEvent(db, { source: "daemon", kind: "stage.started", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, index: pos.index, pools: pos.stage.pools, steer, launch }, ts: now });
+  if (starting) appendEvent(db, { source: "daemon", kind: "stage.started", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, index: pos.index, pools: pos.stage.pools, steer, launch, ...(taskFileError ? { taskFileError } : {}) }, ts: now });
   return { launch, steer };
 }
 

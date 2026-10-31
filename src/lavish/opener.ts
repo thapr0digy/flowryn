@@ -198,7 +198,7 @@ export function linesEndingWith(text: string, suffix: string): { line: string; f
 }
 
 function failedSuffix(why: string): string {
-  return ` · NOT opened (${why}); open it by hand`;
+  return ` · NOT opened (${why}); relay the URL to open it by hand`;
 }
 
 /** `/usr/bin/open -a <browser> <url>`: no shell, a fixed argv, 10 s at most. */

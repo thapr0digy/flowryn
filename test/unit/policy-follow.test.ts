@@ -256,7 +256,7 @@ describe("the follow-through pass", () => {
     await follower().pass();
     expect(getRunWithPolicy(db, "r1")!.state).toBe("ready");
     expect(openItemsOf("r1").map((i) => i.kind)).toEqual(["policy_behind"]);
-    expect(openItemsOf("r1")[0]!.line).toContain("merge as is, steer it, or flowryn decline t-r1");
+    expect(openItemsOf("r1")[0]!.line).toContain("tell the user before merging as is, steer it, or flowryn decline t-r1");
     expect(followEvents("r1")).toHaveLength(1);
 
     sh(wt, ["merge", "-q", "--no-edit", "origin/main"]);

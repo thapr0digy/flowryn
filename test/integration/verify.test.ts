@@ -339,7 +339,7 @@ describe("flowryn verify", () => {
       const followed = await second;
       expect(followed.code).toBe(0);
       expect(followed.stdout).toContain("vq2 · web https://github.com/acme/web/pull/51");
-      expect(followed.stdout).toContain("vq2 queued · 1 of 1 · the validation pool is full (1/1: v1 (verify))");
+      expect(followed.stdout).toContain("vq2 queued · 1 of 1 · the validation pool is full (1/1: v1 (verify)) · starts by itself; never run verify again to retry");
       expect(followed.stdout).toContain("v2 · web https://github.com/acme/web/pull/51");
       for (const step of STEPS) expect(followed.stdout).toContain(`✓ ${step}`);
 

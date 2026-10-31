@@ -27,7 +27,8 @@ export interface ClassifiedFinding {
   cls: FileClass;
 }
 
-export type RuleVerdict = { settled: true; answer: RuleAnswer; rules: string[]; findings: ClassifiedFinding[]; words: string } | { settled: false; reason: string };
+/** floored: a floor (sensitive task, ci step, error, outside the diff, irreversible) kept it the user's, so no deadline answers it either. */
+export type RuleVerdict = { settled: true; answer: RuleAnswer; rules: string[]; findings: ClassifiedFinding[]; words: string } | { settled: false; reason: string; floored?: boolean };
 
 /** `git diff --name-status -M` lines: A is added; M, T, and the new path of a rename or copy are changed. */
 export function parseNameStatus(text: string): { added: Set<string>; changed: Set<string> } {
@@ -91,17 +92,17 @@ export function fileClass(path: string, line: string, diff: BranchDiff): FileCla
 /** The gate's ask-user findings against the table, all or nothing. Pure: the facts were read before. */
 export function matchRules(input: { step: string; findings: NmFinding[]; diff: BranchDiff; worktree: string; options: string[]; sensitive: boolean }, rules: readonly NmRule[]): RuleVerdict {
   const asks = input.findings.filter((f) => f.action === "ask-user");
-  if (asks.length === 0) return { settled: false, reason: `no ask-user finding at the ${input.step || "parked"} gate` };
-  if (input.sensitive) return { settled: false, reason: "sensitive task" };
-  if ((NM_FLOOR.steps as readonly string[]).includes(input.step)) return { settled: false, reason: `${input.step} gate` };
+  if (asks.length === 0) return { settled: false, reason: `no ask-user finding at the ${input.step || "parked"} gate`, floored: true };
+  if (input.sensitive) return { settled: false, reason: "sensitive task", floored: true };
+  if ((NM_FLOOR.steps as readonly string[]).includes(input.step)) return { settled: false, reason: `${input.step} gate`, floored: true };
   const classified: ClassifiedFinding[] = [];
   const matched: NmRule[] = [];
   for (const f of asks) {
     const path = findingPath(f.file, input.worktree);
     const cls = fileClass(path, f.line, input.diff);
-    if ((NM_FLOOR.severities as readonly string[]).includes(f.severity)) return { settled: false, reason: `${f.severity} finding ${f.id}` };
-    if (NM_FLOOR.files.includes(cls)) return { settled: false, reason: cls === "none" ? `${f.id} names no file` : `${f.id} is outside the diff` };
-    if (irreversibleText(f.description)) return { settled: false, reason: `${f.id} names an irreversible step` };
+    if ((NM_FLOOR.severities as readonly string[]).includes(f.severity)) return { settled: false, reason: `${f.severity} finding ${f.id}`, floored: true };
+    if (NM_FLOOR.files.includes(cls)) return { settled: false, reason: cls === "none" ? `${f.id} names no file` : `${f.id} is outside the diff`, floored: true };
+    if (irreversibleText(f.description)) return { settled: false, reason: `${f.id} names an irreversible step`, floored: true };
     const rule = rules.find((r) => r.step === input.step && r.severity === f.severity && r.file.includes(cls));
     if (!rule) return { settled: false, reason: `no rule for ${f.id} (${input.step} ${f.severity || "-"}, ${cls})` };
     classified.push({ id: f.id, severity: f.severity, file: path, cls });

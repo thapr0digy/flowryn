@@ -97,6 +97,7 @@ describe("nudge a ship whose PR conflicts", () => {
       // The worker delivers the same head again, unchanged: no second nudge, one P1 for you.
       await waitUntil(() => openItems(e, "pr_conflict").length === 1, 30_000, "the pr_conflict P1");
       expect(openItems(e, "pr_conflict")[0]).toContain(`PR still conflicts with main after 1 nudge: Fix the login loop (web)`);
+      expect(openItems(e, "pr_conflict")[0]).toEndWith(`; steer it or flowryn decline ${e.fleet.run(run).task_id}`);
       expect(e.fleet.run(run).state).toBe("ready");
       expect(events(e, "run.conflict_nudged")).toHaveLength(1);
       expect(openItems(e, "pr_ready")).toHaveLength(1);

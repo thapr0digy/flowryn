@@ -321,6 +321,7 @@ describe("binary check", () => {
       expect(error).toBeInstanceOf(FlowrynError);
       expect((error as FlowrynError).code).toBe("binary_broken");
       expect((error as FlowrynError).message).toContain(why);
+      expect((error as FlowrynError).help).toBe("tell the user: rebuild it (bun run build), then try again");
     });
   }
 
@@ -402,7 +403,7 @@ describe("restart controller", () => {
 
   test("not supervised: refused with the reason, nothing recorded", async () => {
     const c = controller({ supervisor: fakeSupervisor({ supervised: "started by hand" }).supervisor });
-    await expect(c.preflight(false)).rejects.toMatchObject({ code: "not_supervised" });
+    await expect(c.preflight(false)).rejects.toMatchObject({ code: "not_supervised", help: "ask the user to run flowryn daemon stop, then flowryn daemon start, in their terminal" });
   });
 
   test("no_change when the target is the build already running; --force restarts anyway", async () => {
@@ -427,7 +428,7 @@ describe("restart controller", () => {
     } catch (e) {
       error = e;
     }
-    expect(error).toMatchObject({ code: "restart_blocked" });
+    expect(error).toMatchObject({ code: "restart_blocked", help: "tell the user, and offer flowryn daemon restart --when-idle (restarts once these clear; --cancel drops it)" });
     expect((error as Error).message).toContain("2 things");
     expect((error as Error).message).toContain("merging: t1");
     expect((error as Error).message).toContain("launching: t2");
@@ -706,7 +707,7 @@ describe("launchd supervisor", () => {
     const deps = scripted({ exitCode: 0, output: "" });
     expect(await launchdSupervisor(spec, {}, deps, plist).target()).toEqual({ program: spec.program });
     const stale = await launchdSupervisor({ ...spec, program: ["/new/flowryn", "daemon", "run"] }, {}, deps, plist).target();
-    expect("refusal" in stale && stale.refusal.code).toBe("plist_drift");
+    expect("refusal" in stale && stale.refusal).toMatchObject({ code: "plist_drift", help: "ask the user to run flowryn daemon install in their terminal" });
   });
 
   test("assumption: a detached helper outlives a SIGTERM to its parent's process group", async () => {

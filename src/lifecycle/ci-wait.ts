@@ -138,8 +138,8 @@ export function openCiWait(db: Db, run: RunRow, project: string, stall: CiStall,
   const id = nextRunDecisionId(db);
   const key = `${stallPrefix(stall.nmRun)}${stallDecisions(db, run.id, stall.nmRun).length + 1}`;
   db.query(
-    `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, created_at, blocks)
-     VALUES (?1, ?2, ?3, ?4, ?5, 0, 'open', ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+    `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, context, recommendation, reserved_reason, reserved_class, created_at, blocks)
+     VALUES (?1, ?2, ?3, ?4, ?5, 0, 'open', ?6, ?7, ?8, ?9, ?10, ?6, ?11, ?12)`,
   ).run(id, run.task_id, run.id, question, JSON.stringify(CI_WAIT_OPTIONS), CI_WAIT_ORIGIN, key, context, recommend, CI_WAIT_RESERVED, now, "the ship's CI wait");
   const event = appendEvent(db, {
     source: "nomistakes",
@@ -188,12 +188,13 @@ export function strandedCiWaits(db: Db): { id: string; task_id: string; state: s
     .all(CI_WAIT_ORIGIN) as { id: string; task_id: string; state: string }[];
 }
 
-/** The steer that carries out the user's answer; null for keep-waiting (the watchdog asks again later). */
-export function ciWaitSteer(decisionId: string, choice: string, words: string | null, base = "main"): string | null {
-  const said = words ? ` The user's words: "${sanitizeLine(words, 300)}"` : "";
+/** The steer that carries out the answer (the user's, or a deadline default's while they were away); null for keep-waiting (the watchdog asks again later). */
+export function ciWaitSteer(decisionId: string, choice: string, words: string | null, base = "main", byDeadline = false): string | null {
+  const who = byDeadline ? "A deadline default (the user was away)" : "The user";
+  const said = words ? ` ${byDeadline ? "Its note" : "The user's words"}: "${sanitizeLine(words, 300)}"` : "";
   if (choice === "merge-main") {
     return (
-      `The user chose merge-main for ${decisionId}: your no-mistakes pipeline waited in CI with no checks registered. ` +
+      `${who} chose merge-main for ${decisionId}: your no-mistakes pipeline waited in CI with no checks registered. ` +
       `Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}; never rebase or force-push), run the tests, ` +
       "then no-mistakes rerun (it cancels this run's CI wait and validates the branch again) and drive it with no-mistakes axi as usual. " +
       `Then deliver as usual.${said}`
@@ -201,7 +202,7 @@ export function ciWaitSteer(decisionId: string, choice: string, words: string | 
   }
   if (choice === "accept-without-ci") {
     return (
-      `The user accepted this ship without CI (${decisionId}). End only your pipeline's CI wait: no-mistakes axi abort. ` +
+      `${who} accepted this ship without CI (${decisionId}). End only your pipeline's CI wait: no-mistakes axi abort. ` +
       `Make no other change; then git pull --ff-only (your HEAD must be the PR head) and $FLOWRYN_BIN deliver --pr <your PR url>.${said}`
     );
   }

@@ -52,6 +52,8 @@ import { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { LeaderRewake } from "../leader/rewake.ts";
 import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
+import { decisionsConfig } from "../attention/decisions-policy.ts";
+import { deadlineDefaults } from "../attention/deadline-defaults.ts";
 import { awayConfig, leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
 import { autoAway, expireAway } from "../attention/away.ts";
 import type { AttentionServices } from "../attention/services.ts";
@@ -822,6 +824,26 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         autoAwayFailing = true;
       }
     };
+    // Deadline defaults, on every attention tick after automatic away: an opted-in reserved question
+    // that has waited [decisions] default_after_h while the user is away is answered as recommended.
+    let deadlineFailing = false;
+    const deadlineDefaultsIfDue = () => {
+      try {
+        const answered = tx(database, () => deadlineDefaults(database, { cfg: decisionsConfig(config), now: Date.now() }));
+        deadlineFailing = false;
+        if (answered.length === 0) return;
+        for (const a of answered) {
+          log(`decisions: ${a.decision} answered ${a.choice} by deadline default`);
+          bus.notify(a.run);
+        }
+        journal.kick();
+        scheduler?.kick();
+        attention.bus.notifyAll();
+      } catch (error) {
+        if (!deadlineFailing) log(`decisions: deadline default check failed: ${(error as Error).message}`);
+        deadlineFailing = true;
+      }
+    };
     // A verification the last daemon was running when it stopped: recorded as an error and requeued once, its worktree removed.
     try {
       const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
@@ -887,6 +909,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         attention.bus.notifyAll();
       }
       autoAwayIfDue();
+      deadlineDefaultsIfDue();
       guardScopes();
       void inflight.track(notifyPump.tick());
       void inflight.track(rewake.tick());

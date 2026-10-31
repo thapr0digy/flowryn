@@ -44,7 +44,7 @@ function lessonScope(db: Db, config: FlowrynConfig, caller: Caller, project: str
 
 const learnVerb: VerbSpec = {
   name: "learn",
-  summary: "Record a one-line fact about the projects for later leader sessions",
+  summary: "Record a one-line fact about the projects for later leader sessions: the same words again confirm one, --replaces corrects one, flowryn unlearn drops one; past the cap the least recently confirmed is set aside",
   positionals: [{ name: "lesson", required: false, help: `one line, at most ${LESSON_MAX_CHARS} characters (or --body-file -)` }],
   flags: {
     project: { type: "string", help: "the project it is about", placeholder: "id", complete: "project" },

@@ -134,7 +134,7 @@ describe("the opener", () => {
     await r.opener.idle();
     expect(r.opens).toEqual([{ browser: "Missing Browser", url: URL_A }]);
     expect(gate("g1")).toMatchObject({ open_state: "failed", open_detail: "open exited 1: Unable to find application named 'Missing Browser'" });
-    expect(itemLine("g1")).toBe(`design ready for review (g1): Feature (web) ${URL_A} · NOT opened (open exited 1: Unable to find application named 'Missing Browser'); open it by hand`);
+    expect(itemLine("g1")).toBe(`design ready for review (g1): Feature (web) ${URL_A} · NOT opened (open exited 1: Unable to find application named 'Missing Browser'); relay the URL to open it by hand`);
     expect(itemLine("g1")).not.toContain("opened in");
     expect(events("gate.browser").map((e) => e.kind)).toEqual(["gate.browser_opening", "gate.browser_failed"]);
     // Failed is final: a later offer does not try again.
@@ -159,8 +159,8 @@ describe("the opener", () => {
     const [failed, opened] = rows as [{ line: string; full_line: string | null }, { line: string; full_line: string | null }];
     expect(failed.line.length).toBeLessThanOrEqual(200);
     expect(failed.line.startsWith("design ready for review (g1): Rework")).toBe(true);
-    expect(failed.line.endsWith(`… · NOT opened (${why}); open it by hand`)).toBe(true);
-    expect(failed.full_line).toBe(`design ready for review (g1): ${title} (web) ${longUrl} · NOT opened (${why}); open it by hand`);
+    expect(failed.line.endsWith(`… · NOT opened (${why}); relay the URL to open it by hand`)).toBe(true);
+    expect(failed.full_line).toBe(`design ready for review (g1): ${title} (web) ${longUrl} · NOT opened (${why}); relay the URL to open it by hand`);
     expect(opened.line.length).toBeLessThanOrEqual(200);
     expect(opened.line.endsWith("… · opened in Google Chrome")).toBe(true);
     expect(opened.full_line).toBe(`design ready for review (g2): ${title} (web) ${URL_B} · opened in Google Chrome`);
@@ -173,7 +173,7 @@ describe("the opener", () => {
     await r.opener.idle();
     expect(r.opens).toEqual([]);
     expect(gate("g1")).toMatchObject({ open_state: "failed", open_detail: "Lavish never showed the page listened to in 60 s" });
-    expect(itemLine("g1")).toContain("· NOT opened (Lavish never showed the page listened to in 60 s); open it by hand");
+    expect(itemLine("g1")).toContain("· NOT opened (Lavish never showed the page listened to in 60 s); relay the URL to open it by hand");
     expect(events("gate.browser").map((e) => e.kind)).toEqual(["gate.browser_failed"]);
   });
 

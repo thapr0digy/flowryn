@@ -258,6 +258,10 @@ describe("applying a read to its run", () => {
     return (db.query("SELECT kind FROM items WHERE state IN ('open','presented') ORDER BY rowid").all() as { kind: string }[]).map((r) => r.kind);
   }
 
+  function openLines(): string[] {
+    return (db.query("SELECT line FROM items WHERE state IN ('open','presented') ORDER BY rowid").all() as { line: string }[]).map((r) => r.line);
+  }
+
   test("new feedback on a run at work is one batched steer, quoted as the reviewer's words, asking for the reply marker", () => {
     const out = apply([item("comment:1"), item("issue-comment:2", { kind: "comment", tracked: false, body: "why?" })], T0 + 1000);
     expect(out).toMatchObject({ via: "steer", sent: ["comment:1", "issue-comment:2"], reraised: [] });
@@ -314,6 +318,7 @@ describe("applying a read to its run", () => {
     const out = apply([item("comment:1")], T0 + MAX_REVIEW_SENDS * 24 * HOUR);
     expect(out).toMatchObject({ via: null, escalated: ["comment:1"] });
     expect(openItems()).toEqual(["review_unanswered"]);
+    expect(openLines()[0]).toEndWith("; steer it or flowryn decline t1");
     expect(steers()).toHaveLength(MAX_REVIEW_SENDS);
     // Answered at last: the P1 closes.
     apply([item("comment:1", { answered: "thread resolved" })], T0 + 100 * HOUR);
@@ -344,6 +349,7 @@ describe("applying a read to its run", () => {
     expect(apply(extra, T0 + 100).via).toBeNull();
     expect(rows().find((r) => r.key === `comment:${MAX_SENDS_PER_HEAD + 1}`)).toMatchObject({ state: "held", sends: 0 });
     expect(openItems()).toEqual(["review_unanswered"]);
+    expect(openLines()[0]).toEndWith("; steer it or flowryn decline t1");
     apply(extra, T0 + 200);
     expect(openItems()).toEqual(["review_unanswered"]);
   });

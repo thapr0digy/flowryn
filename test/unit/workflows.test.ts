@@ -8,7 +8,7 @@ import { parseConfig } from "../../src/config/config.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, defaultAutonomy, schedTiming, styleBlock, workflowConfigProblems, workflowFor, workflowsConfig, type WorkflowDef } from "../../src/config/workflows.ts";
 import { contractRevision } from "../../src/contracts/revision.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
-import { STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
+import { deliveryLines, STYLE_BLOCK } from "../../src/harness/contract-text.ts";
 import { escalateOperation, requestOperation } from "../../src/lifecycle/operations.ts";
 import { parsePlan } from "../../src/lifecycle/plans.ts";
 import { changesTarget, flowLine, positionOf, stageInstructions } from "../../src/lifecycle/stages.ts";
@@ -274,11 +274,13 @@ describe("job leases: a verify in the validation pool (docs/notes/2026-10-12-nex
 });
 
 describe("stage text", () => {
-  test("a stage's instructions name its skill file, its pools and what ends it", () => {
+  test("a stage's instructions name its skill file, its pools and what ends it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "fw-skills-"));
     dirs.push(dir);
     const files = writeStageSkills(dir);
     for (const skill of STAGE_SKILLS) expect(Bun.file(skillPath(dir, skill.name)!).size).toBeGreaterThan(100);
+    // The pages a human reviews are written plainly: the design page and the QA card each say so in the skill the worker reads.
+    for (const name of ["flowryn-design", "flowryn-visual-qa"]) expect(await Bun.file(skillPath(dir, name)!).text()).toContain("not the terse reply style");
     expect(Bun.file(join(files.claudePlugin, ".claude-plugin", "plugin.json")).size).toBeGreaterThan(10);
     const feature = DEFAULT_WORKFLOWS["feature-ui"]!;
     const delivery = { kind: "ship" as const, mode: "local-only" as const, defaultBranch: "main" };
@@ -301,7 +303,7 @@ describe("stage text", () => {
       ],
     };
     const delivery = { kind: "ship" as const, mode: "no-mistakes" as const, defaultBranch: "main", lastStage: { id: "publish", pools: [] } };
-    const contract = workerContract("claude", null, delivery);
+    const contract = deliveryLines(delivery).join("\n");
     expect(contract).toContain("Before the pipeline: $FLOWRYN_BIN stage begin publish.");
     expect(contract).not.toContain("stage_waiting");
     const code = stageInstructions({ def: release, index: 0, stage: release.stages[0]!, last: false }, { stateDir: "/none", delivery });
@@ -310,7 +312,7 @@ describe("stage text", () => {
     expect(publish).toContain("run its pipeline");
     expect(publish).not.toContain("stage begin");
 
-    const pooled = workerContract("pi", null, { ...delivery, lastStage: { id: "ship", pools: ["validation"] } });
+    const pooled = deliveryLines({ ...delivery, lastStage: { id: "ship", pools: ["validation"] } }).join("\n");
     expect(pooled).toContain("stage begin ship; it holds a slot of validation.");
     expect(pooled).toContain("On stage_waiting, end your turn");
   });

@@ -90,6 +90,14 @@ describe("recordGrant: who may record a contract pass", () => {
     expect(refusal({ role: "leader", mode: "strict", callerBuild: INSTALLED, daemonBuild: INSTALLED })).toBe("human_only");
   });
 
+  test("a human_only refusal tells the leader to ask the user to record in their own terminal", () => {
+    for (const input of [{ role: "reader", mode: "relaxed" }, { role: "leader", mode: "strict" }] as const) {
+      expect(() => recordGrant({ ...input, callerBuild: INSTALLED, daemonBuild: INSTALLED })).toThrow(
+        expect.objectContaining({ code: "human_only", help: "ask the user to run flowryn doctor --contracts in their own terminal; --verify-only runs the suite without recording" }),
+      );
+    }
+  });
+
   test("relaxed: the leader records only when its build is the daemon's build", () => {
     expect(refusal({ role: "leader", mode: "relaxed", callerBuild: INSTALLED, daemonBuild: INSTALLED })).toBeNull();
     expect(refusal({ role: "leader", mode: "relaxed", callerBuild: PR_BUILD, daemonBuild: INSTALLED })).toBe("not_installed_build");
@@ -408,13 +416,11 @@ describe("contract reports", () => {
 });
 
 describe("the leader skill", () => {
-  test("the SKILL.md written for both harnesses runs a worker-path PR's build verify-only itself, and the recording check after a harness update, asking the user only when refused", async () => {
+  test("the SKILL.md written for both harnesses runs a worker-path PR's build verify-only itself; the recording check after a harness update is the item line's, and its refusals ask the user (test/unit/instruction-budgets.test.ts)", async () => {
     const files = await writeLeaderFiles({ home: dir, command: ["flowryn"], socket: join(dir, "s"), style: null, toolkit: configStaticLayers(defaultConfig(dir)) });
     for (const path of [join(files.skillDir, "SKILL.md"), join(files.claudePlugin, "skills", basename(files.skillDir), "SKILL.md")]) {
       const skill = readFileSync(path, "utf8");
       expect(skill).toContain("bun <worktree>/src/main.ts doctor --contracts --verify-only");
-      expect(skill).toContain("doctor --contracts --harness <h>");
-      expect(skill).toContain("on `human_only` (strict policy) or `not_installed_build`, ask the user to run it");
       expect(skill).not.toContain("ask the user to run `flowryn doctor --contracts` in their own terminal and merge");
     }
   });
