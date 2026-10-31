@@ -3,9 +3,10 @@ import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
+import { DEADLINE_VIA } from "../lifecycle/decisions.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
-import { taskTitle } from "../lifecycle/runs.ts";
+import { isTerminal, taskTitle, type RunState } from "../lifecycle/runs.ts";
 import { allLeases, describeSession, getLease, getSession, UNCONFIRMED_SCOPE } from "../lease/lease.ts";
 import { otherScopeCounts, SEES_ALL, sessionLens, type ScopeLens } from "../leader/scope.ts";
 import { wakeLineFor } from "../leader/wake-state.ts";
@@ -15,6 +16,7 @@ import { autoRecordLine, leaderRecordLine } from "../contracts/grant.ts";
 import { activeAutoAttempt } from "../lifecycle/harness-gate.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { HARNESS_IDS } from "../harness/types.ts";
+import { waitedLabel } from "./deadline-defaults.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { RUN_HOLD_KINDS, waitingPointer, waitingRuns } from "./explanations.ts";
 import { openActionable, type RankedItem } from "./router.ts";
@@ -124,16 +126,29 @@ function reservedLines(db: Db, now: number, lens: ScopeLens): string[] {
   return lines;
 }
 
-/** What the leader decided after `since` (and up to `until`), under `heading`. */
+/** What the leader decided after `since` (and up to `until`), and what a deadline default took for you, under `heading`. */
 function decidedLines(db: Db, since: number, until: number, heading: string, lens: ScopeLens): string[] {
   const decided = (
     db
-      .query("SELECT id, task_id, question, answer, rationale FROM decisions WHERE answered_by = 'leader' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at")
-      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null }[]
+      .query(
+        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_at, d.created_at, r.state AS run_state
+         FROM decisions d LEFT JOIN runs r ON r.id = d.run_id
+         WHERE (d.answered_by = 'leader' OR (d.answered_by = 'policy' AND d.answered_via = '${DEADLINE_VIA}')) AND d.answered_at > ?1 AND d.answered_at <= ?2 ORDER BY d.answered_at`,
+      )
+      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_at: number; created_at: number | null; run_state: RunState | null }[]
   ).filter((d) => lens.task(d.task_id));
   if (decided.length === 0) return [];
   const lines = [`${heading} (${decided.length}):`];
-  for (const d of decided.slice(0, MAX_DECISION_LINES)) lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
+  for (const d of decided.slice(0, MAX_DECISION_LINES)) {
+    if (d.answered_by === "leader") {
+      lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
+      continue;
+    }
+    // A deadline default (docs/notes/2026-10-30-deadline-defaults-for-gg.md): undone like a rule's answer, while the run is live.
+    const waited = waitedLabel(d.answered_at - (d.created_at ?? d.answered_at));
+    const undo = d.run_state !== null && !isTerminal(d.run_state) ? `undo: flowryn decide ${d.id} <choice> --by captain` : "run over, no undo";
+    lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (deadline after ${waited}; ${undo})`);
+  }
   if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
   return lines;
 }
@@ -145,7 +160,7 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
 function ruleLines(db: Db, since: number, until: number, heading: string, lens: ScopeLens): string[] {
   const settled = (
     db
-      .query("SELECT id, task_id, question, answer, answered_via FROM decisions WHERE answered_by = 'policy' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at")
+      .query(`SELECT id, task_id, question, answer, answered_via FROM decisions WHERE answered_by = 'policy' AND answered_via IS NOT '${DEADLINE_VIA}' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at`)
       .all(since, until) as { id: string; task_id: string; question: string; answer: string; answered_via: string | null }[]
   ).filter((d) => lens.task(d.task_id));
   if (settled.length === 0) return [];

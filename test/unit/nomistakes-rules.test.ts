@@ -101,7 +101,26 @@ describe("the rule table", () => {
 
   test("all or nothing: one finding no rule covers keeps the whole gate for the user", () => {
     const v = verdict("review", [finding("r-1", "warning", "src/new.ts"), finding("r-2", "warning", "src/other.ts")]);
-    expect(v).toEqual({ settled: false, reason: "r-2 is outside the diff" });
+    expect(v).toEqual({ settled: false, reason: "r-2 is outside the diff", floored: true });
+  });
+
+  test("floored marks what a floor kept for the user, so no deadline default answers it either", () => {
+    const floored = (v: ReturnType<typeof verdict>) => !v.settled && v.floored === true;
+    for (const v of [
+      verdict("review", [finding("r-1", "warning", "src/other.ts", "1")]),
+      verdict("test", [finding("test-1", "warning", "")]),
+      verdict("review", [finding("r-1", "error", "src/new.ts")]),
+      verdict("ci", [finding("ci-1", "warning", "src/new.ts")]),
+      verdict("review", [finding("r-1", "warning", "src/new.ts", "", "ask-user", "Rewrite the history of this branch to drop the commit")]),
+      verdict("lint", [finding("lint-1", "warning", "src/new.ts")], { sensitive: true }),
+      verdict("lint", [finding("lint-1", "warning", "src/new.ts", "", "auto-fix")]),
+    ])
+      expect(floored(v)).toBe(true);
+    for (const v of [
+      verdict("lint", [finding("lint-1", "warning", "src/old.ts", "11")]),
+      verdict("lint", [finding("lint-1", "warning", "src/new.ts")], { options: ["accept", "live-run-first"] }),
+    ])
+      expect(floored(v)).toBe(false);
   });
 
   test("rules that disagree settle nothing; approve and skip respond without finding ids", () => {

@@ -968,6 +968,11 @@ CREATE UNIQUE INDEX landing_queue_live ON landing_queue(run_id) WHERE state IN (
 CREATE INDEX landing_queue_project ON landing_queue(project_id, state, enqueued_at);
 `;
 
+/** The kind of a reserved question, recorded when it opens: what `[decisions] default_classes` matches (deadline defaults). */
+const RESERVED_CLASS_SQL = /* sql */ `
+ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1017,6 +1022,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 46, name: "page-channel", sql: PAGE_CHANNEL_SQL, rebuildsReferencedTable: true },
   { version: 47, name: "asks", sql: ASKS_SQL },
   { version: 48, name: "landing-queue", sql: LANDING_QUEUE_SQL },
+  { version: 49, name: "reserved-class", sql: RESERVED_CLASS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

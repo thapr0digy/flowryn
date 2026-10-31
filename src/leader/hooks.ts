@@ -33,7 +33,7 @@ import { confirmLogin, type ReportedLogin } from "./login.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { decisionRef } from "../lifecycle/decision-verbs.ts";
-import { captainAnswerable, getDecision, isRuleAnswer } from "../lifecycle/decisions.ts";
+import { captainAnswerable, DEADLINE_VIA, getDecision, isRuleAnswer } from "../lifecycle/decisions.ts";
 import { approvalRef, deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
@@ -622,7 +622,7 @@ function promptFacts(ctx: HandlerCtx, gated: GatedCommand, command: string): { l
     if (gated.tooMany) return { line: `more than one captain answer in one command: "${sanitizeLine(command, 300)}"; only one flowryn decide … --by captain is allowed per command, so none of them will be recorded`, prUrl: null, head: null };
     const d = gated.task ? getDecision(ctx.db, gated.task) : null;
     if (!d || !captainAnswerable(d)) return { line: `record an answer to ${gated.task || "?"} from: "${sanitizeLine(command, 300)}": no open decision; it will be refused`, prUrl: null, head: null };
-    if (isRuleAnswer(d)) return { line: `UNDO the rule's answer ${d.answer} (${d.answered_via}) to ${d.id} ("${sanitizeLine(d.question, 120)}") and RECORD as the user's own answer: ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
+    if (isRuleAnswer(d)) return { line: `UNDO the ${d.answered_via === DEADLINE_VIA ? "deadline default" : "rule"}'s answer ${d.answer} (${d.answered_via}) to ${d.id} ("${sanitizeLine(d.question, 120)}") and RECORD as the user's own answer: ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
     return { line: `RECORD as the user's own answer to ${d.id} ("${sanitizeLine(d.question, 120)}"): ${sanitizeLine(command, 300)}`, prUrl: decisionRef(d.id), head: null };
   }
   const run = findRun(ctx.db, gated.task);

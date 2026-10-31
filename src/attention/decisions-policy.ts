@@ -53,20 +53,56 @@ const RULE_KEYS = ["id", "step", "severity", "file", "answer"];
 const RULE_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const RULE_WORD = /^[a-z][a-z0-9-]{0,31}$/;
 
+/**
+ * Deadline defaults (docs/notes/2026-10-30-deadline-defaults-for-gg.md): the kinds of reserved
+ * question `[decisions] default_classes` may opt in. A run-scoped question records its kind
+ * (`decisions.reserved_class`) when it opens; only these two may ever be answered by deadline.
+ */
+export const DEADLINE_CLASSES = ["ci-wait", "nomistakes"] as const;
+export type DeadlineClass = (typeof DEADLINE_CLASSES)[number];
+/** Never answered by deadline, whatever the config says: every keyword class. */
+export const DEADLINE_FLOOR: readonly string[] = RESERVED_CLASSES;
+/** Answers a deadline never takes: keep-waiting changes nothing, and skipping CI is the user's. */
+export const DEADLINE_REFUSED_ANSWERS: readonly string[] = ["accept-without-ci", "keep-waiting"];
+/** `[decisions] default_after_h` reaches at most a week. */
+export const DEADLINE_MAX_H = 168;
+const DECISIONS_KEYS = ["reserved_classes", "nomistakes_rules", "default_after_h", "default_classes"];
+
 export interface DecisionsConfig {
   reserved_classes: string[];
   nomistakes_rules: NmRule[];
+  /** Hours a reserved question waits before a deadline may answer it. */
+  default_after_h: number;
+  /** The opted-in kinds (empty: deadline defaults are off). */
+  default_classes: DeadlineClass[];
 }
 
 export function decisionsConfig(config: FlowrynConfig): DecisionsConfig {
   const raw = table(config.extra.decisions, "[decisions]");
-  for (const key of Object.keys(raw)) if (key !== "reserved_classes" && key !== "nomistakes_rules") throw new FlowrynError("config_invalid", `[decisions] ${key} is not a known setting`);
+  for (const key of Object.keys(raw)) if (!DECISIONS_KEYS.includes(key)) throw new FlowrynError("config_invalid", `[decisions] ${key} is not a known setting`);
   const classes = raw.reserved_classes ?? [...RESERVED_CLASSES];
   if (!Array.isArray(classes) || classes.some((c) => typeof c !== "string")) throw new FlowrynError("config_invalid", "[decisions] reserved_classes must be a list of class names");
   const unknown = (classes as string[]).filter((c) => !(RESERVED_CLASSES as readonly string[]).includes(c));
   if (unknown.length > 0) throw new FlowrynError("config_invalid", `[decisions] reserved_classes: ${unknown.join(", ")} is not one of ${RESERVED_CLASSES.join(", ")}`);
   const rules = raw.nomistakes_rules === undefined ? DEFAULT_NM_RULES.map((r) => ({ ...r, file: [...r.file] })) : nmRules(raw.nomistakes_rules);
-  return { reserved_classes: classes as string[], nomistakes_rules: rules };
+  return { reserved_classes: classes as string[], nomistakes_rules: rules, default_after_h: afterHours(raw.default_after_h), default_classes: deadlineClasses(raw.default_classes) };
+}
+
+function afterHours(value: unknown): number {
+  if (value === undefined) return 4;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > DEADLINE_MAX_H) throw new FlowrynError("config_invalid", `[decisions] default_after_h must be a number of hours above 0, at most ${DEADLINE_MAX_H}`);
+  return value;
+}
+
+/** `[decisions] default_classes`: a floor class is refused outright, never dropped. */
+function deadlineClasses(value: unknown): DeadlineClass[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((c) => typeof c !== "string")) throw new FlowrynError("config_invalid", "[decisions] default_classes must be a list of kinds");
+  const floored = (value as string[]).filter((c) => DEADLINE_FLOOR.includes(c));
+  if (floored.length > 0) throw new FlowrynError("config_invalid", `[decisions] default_classes: ${floored.join(", ")} is always the user's; no deadline may answer it`);
+  const unknown = (value as string[]).filter((c) => !(DEADLINE_CLASSES as readonly string[]).includes(c));
+  if (unknown.length > 0) throw new FlowrynError("config_invalid", `[decisions] default_classes: ${unknown.join(", ")} is not one of ${DEADLINE_CLASSES.join(", ")}`);
+  return [...new Set(value as DeadlineClass[])];
 }
 
 /** `[decisions] nomistakes_rules`, checked whole: a rule the floor forbids is refused, never silently dropped. */
@@ -108,6 +144,11 @@ export interface ReservedInput {
   sourceReason: string | null;
   /** The decision blocks a task that merges only with a human record (yolo off, or sensitive). */
   blocksYoloOff: boolean;
+}
+
+/** The keyword class a reserved reason names, or null for a source's own words. */
+export function keywordClass(reason: string | null): ReservedClass | null {
+  return reason !== null && (RESERVED_CLASSES as readonly string[]).includes(reason) ? (reason as ReservedClass) : null;
 }
 
 /** The reason only the user may answer, or null when the leader may. */
