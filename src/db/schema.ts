@@ -973,6 +973,20 @@ const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
 
+/**
+/**
+ * Migration 50, notes projects (docs/notes/2026-10-30-notes-projects-non-8d.md): a project's
+ * kind, and on a draft review gate the file it showed, that file's git blob and
+ * the digest of the page that showed it, so a pass needs that page unchanged
+ * and the delivery lands exactly what was approved.
+ */
+const NOTES_PROJECTS_SQL = /* sql */ `
+ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'code' CHECK (kind IN ('code','notes'));
+ALTER TABLE gates ADD COLUMN draft_path TEXT;
+ALTER TABLE gates ADD COLUMN draft_blob TEXT;
+ALTER TABLE gates ADD COLUMN draft_page TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1023,6 +1037,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 47, name: "asks", sql: ASKS_SQL },
   { version: 48, name: "landing-queue", sql: LANDING_QUEUE_SQL },
   { version: 49, name: "reserved-class", sql: RESERVED_CLASS_SQL },
+  { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

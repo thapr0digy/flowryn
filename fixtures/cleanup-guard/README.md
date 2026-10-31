@@ -1,14 +1,20 @@
 # Cleanup-guard fixtures
 
-This directory holds 21 fixtures for Flowryn's cleanup guard (the unlanded-work
+This directory holds 24 fixtures for Flowryn's cleanup guard (the unlanded-work
 guard in `docs/design-v3.html`, section 14). They do not depend on any language.
 Each fixture builds a real git state and a fake forge, then says what the guard
-must decide. Flowryn's guard must pass all 21 before it is used. Any other
+must decide. Flowryn's guard must pass all 24 before it is used. Any other
 implementation can be checked against them too.
 
 ## Where they come from
 
-The cases are ported from the previous orchestrator's `tests/fm-teardown.test.sh`
+Three cases are Flowryn's own (their `ported_from` is `flowryn:<task id>`):
+`no_remote_merged_to_local_default`, `no_remote_truly_unpushed` and
+`no_remote_equal_content_not_merged` cover a repository with no remote at all,
+as a notes project may be (docs/notes/2026-10-30-notes-projects-non-8d.md).
+Their builds call `fx_drop_origin`, so the scenario has no `origin.git/`, no
+remotes, and no `tracked_origin_main` or `origin_main` symbol. The other 21
+cases are ported from the previous orchestrator's `tests/fm-teardown.test.sh`
 ("the reference" below) at commit
 **`a09090d1`** (`a09090d13ef24ce3cf71d171ade119896d6db301`, 2026-09-19). Each
 case keeps its reference name, so the two suites can be compared. Its
@@ -22,7 +28,7 @@ test. The deliberate differences:
   mocks. Here the answers live in `forge.json`, and `bin/gh` is a small
   gh-compatible reader of that file. The reference's `pr list` mock returned PR 7
   whatever `--head` was asked for. Here PR 7 is returned only for
-  `--head fm/task-x1`. All 21 cases ask for that branch, so no answer changes.
+  `--head fm/task-x1`. All 24 cases ask for that branch, so no answer changes.
 - **`refs/pull/7/head` exists on origin** whenever the forge reports PR 7, as
   it would on GitHub. The primary checkout never fetches `refs/pull/*`, so no
   commit becomes reachable from a remote-tracking branch because of it.
@@ -107,7 +113,8 @@ A built scenario (`<case>/build.sh <out-dir>`) contains:
 writes the mapping to `scenario.json.refs`. Every scenario defines
 `local_head` (the worktree HEAD), `primary_main` (the primary's local `main`),
 `tracked_origin_main` (the primary's `refs/remotes/origin/main`, which can be
-stale) and `origin_main` (the real `main` in `origin.git`). Some cases add
+stale) and `origin_main` (the real `main` in `origin.git`); a no-remote
+scenario has only the first two. Some cases add
 their own symbols: `pr_head`, `fork_branch_head`, `local_parent`,
 `pre_rebase_head` and `squash_commit`.
 
@@ -198,8 +205,8 @@ fixtures/cleanup-guard/run.sh --case dirty_worktree --keep     # one case, keep 
 
 The default mode checks, for every case:
 
-- **The suite:** exactly 21 cases, the names from the design, and the verdict
-  counts: allow 10, refuse 8, record 2, discard 1.
+- **The suite:** exactly 24 cases, the names from the design plus the three
+  no-remote ones, and the verdict counts: allow 11, refuse 10, record 2, discard 1.
 - **The manifest:** the schema, and a verdict that matches the design list.
 - **The build:** it succeeds and produces its output files.
 - **The symbols:** every one resolves to a real commit in the built repos.
@@ -213,6 +220,6 @@ The runner needs bash, jq, and git 2.38 or newer (for
 own `fm-teardown.sh` and `fm-pr-check.sh` against the built scenarios. It runs from a `git archive`
 copy under `$TMPDIR` with every home, state, data and config path redirected,
 and with treehouse, tmux, no-mistakes and lsof stubbed. Its host-wide orphan
-sweep is replaced by a no-op. At `a09090d1` it agrees with all 21 expected
-verdicts. `REFERENCE_REPO` names the reference checkout and is required;
+sweep is replaced by a no-op. At `a09090d1` it agrees with all 21 ported
+verdicts (the three no-remote cases are not the reference's). `REFERENCE_REPO` names the reference checkout and is required;
 `REFERENCE_REV` picks a commit (default `HEAD`).

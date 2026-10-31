@@ -480,6 +480,7 @@ export class LavishPoller {
       const page = passFromPage(this.deps.db, pagePass.codes, gate, code, head, now);
       if (page.outcome === "passed" || page.outcome === "stale" || page.outcome === "late") return { gate, page, request: page.outcome === "passed" ? null : { outcome: page.outcome }, minted: null };
       if (page.outcome === "questions_open") return { gate, page: null, request: { outcome: "questions_open", open: page.open }, minted: null };
+      if (page.outcome === "draft_changed") return { gate, page, request: null, minted: null };
       return { gate, page, request: requestGatePass(this.deps.db, gate, now), minted: null };
     }
     const request = requestGatePass(this.deps.db, gate, now);
@@ -657,6 +658,8 @@ function pageRefusal(page: PagePass): string | null {
       return `The work changed since that pass code was sent, so it no longer works; look again, then ${fresh}.`;
     case "none":
       return `No pass code is waiting for this review (a restart forgets them); ${fresh}.`;
+    case "draft_changed":
+      return `Not passed: this page no longer shows the draft the review opened with. Send it back so the worker renders the draft again and opens a new review: flowryn gate changes ${page.task} --body-file -`;
     default:
       return null;
   }

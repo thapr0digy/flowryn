@@ -1,0 +1,40 @@
+{
+  "name": "no_remote_truly_unpushed",
+  "ported_from": "flowryn:notes-projects-non-8d",
+  "description": "A notes project's repository with no remote at all. The task's draft commit exists only on its branch: no remote holds it and local main does not contain it. Cleanup would destroy the only copy, so it is refused.",
+  "delivery_mode": "local-only",
+  "inputs": {
+    "operation": "cleanup",
+    "task_branch": "fm/task-x1",
+    "kind": "ship",
+    "recorded_pr_url": null,
+    "recorded_pr_head": null,
+    "pr_url_to_record": null,
+    "discard_approval": null
+  },
+  "forge": {
+    "reachable": true,
+    "pull_requests": []
+  },
+  "expected": {
+    "verdict": "refuse",
+    "reason_class": "unpushed"
+  },
+  "invariants": [
+    {
+      "check": "on_remote_tracking",
+      "ref": "local_head",
+      "expect": false
+    },
+    {
+      "check": "ancestor",
+      "ref": "local_head",
+      "of": "primary_main",
+      "expect": false
+    },
+    {
+      "check": "dirty",
+      "expect": false
+    }
+  ]
+}

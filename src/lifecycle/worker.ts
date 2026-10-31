@@ -27,6 +27,7 @@ import { getRunWithPolicy, holdReason, isTerminal, runBase, taskTitle, type RunW
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 import { landScout } from "./landing.ts";
+import { requireApprovedDraft } from "./draft.ts";
 import { startAutoMerge } from "../verify/auto-merge.ts";
 import { deliveredToQueue } from "../verify/landing-queue.ts";
 
@@ -453,6 +454,8 @@ const deliver: VerbSpec = {
     const project = getProject(ctx.db, run.project_id)!;
     const deps = { db: ctx.db, git: ctx.delivery.git, forge: ctx.delivery.forge(), webUrl: ctx.delivery.github().web_url, now: ctx.now };
     const seen = deliveryBasis(ctx.db, run.id);
+    // A run that passed a draft review lands that file as approved (src/lifecycle/draft.ts).
+    await requireApprovedDraft(ctx.db, deps.git, run, project.default_branch);
     if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen };
     const ship = await verifyPrDelivery(deps, run, project, asked.url);
     return { ship, seen, carry: await carryOf(ctx, deps.git, run, runBase(run, project), ship) };

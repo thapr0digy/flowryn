@@ -12,7 +12,8 @@ import type { GitRunner } from "../policy/landed.ts";
  * checkout to it, and only when that cannot lose or rewrite anything: the
  * checkout is on its default branch, has no tracked changes, and its branch
  * is behind origin's (never ahead or diverged). Git's own refusal (an
- * untracked file in the way, a lock) is a skip too. Plain git, no model.
+ * untracked file in the way, a lock) is a skip too. It never takes the
+ * checkout's index lock for a look (`--no-optional-locks`). Plain git, no model.
  */
 
 /** Skips you should hear about: the checkout stays stale until you act. */
@@ -43,7 +44,8 @@ export async function syncPrimary(git: GitRunner, project: ProjectRow): Promise<
   const remote = (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`], cwd)).stdout.trim();
   if (!local || !remote) return { outcome: "skipped", reason: "no_branch", detail: `cannot resolve ${branch} or origin/${branch}` };
   if (local === remote) return { outcome: "current", at: local };
-  const status = await git(["status", "--porcelain", "--untracked-files=no"], cwd);
+  // The checkout is yours: a status that refreshed the index would take its lock and fail a commit you make at that moment.
+  const status = await git(["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], cwd);
   if (status.code !== 0 || status.stdout.trim() !== "") return { outcome: "skipped", reason: "dirty", detail: "it has uncommitted changes" };
   if ((await git(["merge-base", "--is-ancestor", local, remote], cwd)).code !== 0) {
     const ahead = (await git(["merge-base", "--is-ancestor", remote, local], cwd)).code === 0;

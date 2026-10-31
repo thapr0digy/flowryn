@@ -113,6 +113,34 @@ describe("project verbs", () => {
     expect((await cliJson(h, ["project", "add", join(repo, "sub")], { env })).reply.error).toMatchObject({ code: "invalid_project" });
     expect((await cli(h, ["project", "add", join(h.home, "not-a-repo")], { env })).code).toBe(3);
   });
+
+  test("a notes project needs no remote, delivers locally through the draft workflow, and never takes a pushing mode", async () => {
+    const { h, env } = await setup();
+    const solo = gitRepo(join(h.home, "repos", "journal"), null);
+    const added = await cliJson(h, ["project", "add", solo, "--kind", "notes"], { env });
+    expect(added.code).toBe(0);
+    expect((added.reply.data as { project: Record<string, unknown> }).project).toMatchObject({ id: "journal", kind: "notes", repo: "-", mode: "local-only", workflow: "draft" });
+    expect((await cliJson(h, ["project", "set", "journal", "--mode", "no-mistakes", "--repo-url", "https://example.test/j.git"], { env })).reply.error).toMatchObject({ code: "invalid_project" });
+    // A remote does not change that: a notes project is delivered locally either way.
+    const remote = gitRepo(join(h.home, "repos", "plans"), "https://example.test/plans.git");
+    expect((await cliJson(h, ["project", "add", remote, "--kind", "notes", "--mode", "direct-PR"], { env })).reply.error).toMatchObject({ code: "invalid_project" });
+    const withRemote = await cliJson(h, ["project", "add", remote, "--kind", "notes", "--workflow", "fix"], { env });
+    expect((withRemote.reply.data as { project: Record<string, unknown> }).project).toMatchObject({ kind: "notes", repo: "https://example.test/plans.git", mode: "local-only", workflow: "fix" });
+    // Turning a code project into notes moves it to the draft workflow, and needs local-only.
+    const code = gitRepo(join(h.home, "repos", "site"), null);
+    expect((await cli(h, ["project", "add", code, "--mode", "local-only"], { env })).code).toBe(0);
+    const set = await cliJson(h, ["project", "set", "site", "--kind", "notes"], { env });
+    expect(set.code).toBe(0);
+    expect((set.reply.data as { changed: string[] }).changed.toSorted()).toEqual(["kind", "workflow"]);
+    // Turning it back into code moves it back to the fix workflow.
+    const back = await cliJson(h, ["project", "set", "site", "--kind", "code"], { env });
+    expect((back.reply.data as { project: Record<string, unknown> }).project).toMatchObject({ kind: "code", workflow: "fix" });
+    expect((await cliJson(h, ["project", "set", "site", "--kind", "notes"], { env })).code).toBe(0);
+    const list = await cliJson(h, ["project", "list"], { env });
+    expect((list.reply.data as { projects: Record<string, unknown>[] }).projects.map((p) => `${p.id}:${p.kind}`).toSorted()).toEqual(["journal:notes", "plans:notes", "site:notes"]);
+    const odd = await cliJson(h, ["project", "add", gitRepo(join(h.home, "repos", "poems"), null), "--kind", "poems"], { env });
+    expect(odd.code).toBe(3);
+  });
 });
 
 describe("roles", () => {

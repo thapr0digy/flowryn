@@ -12,6 +12,19 @@ import { lensFor, projectScopeById, requireInScope } from "../leader/scope.ts";
 export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as const;
 export const HARNESSES = ["claude", "pi"] as const;
 export const AUTONOMY = ["plan", "manual"] as const;
+/**
+ * What a project holds: code, or notes (docs/notes/2026-10-30-notes-projects-non-8d.md):
+ * prose in any git repository, a remote optional, always delivered locally,
+ * its tasks running the draft workflow unless told otherwise.
+ */
+export const PROJECT_KINDS = ["code", "notes"] as const;
+export type ProjectKind = (typeof PROJECT_KINDS)[number];
+/** The workflow a notes project's ships run unless --workflow names another. */
+export const NOTES_WORKFLOW = "draft";
+/** The workflow a new project of this kind, or one switched to it, runs unless --workflow names another. */
+export function defaultWorkflow(kind: ProjectKind): string {
+  return kind === "notes" ? NOTES_WORKFLOW : "fix";
+}
 /** The words `project set --yolo` takes. */
 export const ON_OFF = ["on", "off"] as const;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
@@ -28,6 +41,7 @@ export interface ProjectRow {
   harness: (typeof HARNESSES)[number];
   workflow: string;
   autonomy: (typeof AUTONOMY)[number];
+  kind: ProjectKind;
 }
 
 function oneOf<T extends string>(value: string | undefined, allowed: readonly T[], flag: string): T | undefined {
@@ -65,6 +79,13 @@ function onOff(value: string | undefined, flag: string): number | undefined {
   throw new FlowrynError("invalid_project", `--${flag} must be on or off`);
 }
 
+/** A notes project never pushes: its mode stays local-only. */
+function requireNotesLocal(kind: ProjectKind, mode: ProjectRow["delivery_mode"], id: string): void {
+  if (kind === "notes" && mode !== "local-only") {
+    throw new FlowrynError("invalid_project", `project ${id} is a notes project, so its mode must be local-only`, "notes are delivered locally; register a code project to open pull requests");
+  }
+}
+
 export function getProject(db: Db, id: string): ProjectRow | null {
   return db.query("SELECT * FROM projects WHERE id = ?1").get(id) as ProjectRow | null;
 }
@@ -72,9 +93,9 @@ export function getProject(db: Db, id: string): ProjectRow | null {
 /** Insert a project row and its event (call inside a transaction). */
 export function insertProject(db: Db, row: ProjectRow): void {
   db.query(
-    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
-  ).run(row.id, row.repo_url, row.path, row.default_branch, row.delivery_mode, row.yolo, row.priority, row.harness, row.workflow, row.autonomy);
+    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, kind)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+  ).run(row.id, row.repo_url, row.path, row.default_branch, row.delivery_mode, row.yolo, row.priority, row.harness, row.workflow, row.autonomy, row.kind);
   appendEvent(db, { source: "cli", kind: "project.added", payload: { ...row } });
 }
 
@@ -85,6 +106,7 @@ export function listProjects(db: Db): ProjectRow[] {
 function projectView(p: ProjectRow): Record<string, unknown> {
   return {
     id: p.id,
+    kind: p.kind,
     path: p.path,
     repo: p.repo_url || "-",
     branch: p.default_branch,
@@ -138,6 +160,7 @@ const projectAdd: VerbSpec = {
     harness: { type: "string", help: "worker harness: claude or pi", placeholder: "harness", values: HARNESSES },
     workflow: { type: "string", help: "its ships' workflow: fix (default), feature, feature-ui (with visual QA), or one from [workflows]", placeholder: "workflow", complete: "workflow" },
     autonomy: { type: "string", help: "plan (phases start by themselves once their blockers land) or manual; default [autonomy]", placeholder: "mode", values: AUTONOMY },
+    kind: { type: "string", help: "code (default) or notes: prose in any git repository, delivered locally through the draft workflow", placeholder: "kind", values: PROJECT_KINDS },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -150,10 +173,12 @@ const projectAdd: VerbSpec = {
     if (getProject(ctx.db, id)) throw new FlowrynError("already_exists", `project ${id} already exists`, `flowryn project set ${id} ...`);
     const byPath = ctx.db.query("SELECT id FROM projects WHERE path = ?1").get(facts.path) as { id: string } | null;
     if (byPath) throw new FlowrynError("already_exists", `${facts.path} is already project ${byPath.id}`);
-    const mode = oneOf(stringArg(args, "mode"), DELIVERY_MODES, "mode") ?? "no-mistakes";
+    const kind = oneOf(stringArg(args, "kind"), PROJECT_KINDS, "kind") ?? "code";
+    const mode = oneOf(stringArg(args, "mode"), DELIVERY_MODES, "mode") ?? (kind === "notes" ? "local-only" : "no-mistakes");
+    requireNotesLocal(kind, mode, id);
     const repoUrl = stringArg(args, "repo-url") ?? facts.repoUrl ?? "";
     if (repoUrl === "" && mode !== "local-only") {
-      throw new FlowrynError("invalid_project", `${facts.path} has no origin remote`, "pass --repo-url, or --mode local-only");
+      throw new FlowrynError("invalid_project", `${facts.path} has no origin remote`, "pass --repo-url, or --mode local-only (or --kind notes)");
     }
     const defaultBranch = stringArg(args, "default-branch") ?? facts.defaultBranch;
     if (!defaultBranch) throw new FlowrynError("invalid_project", "cannot tell the default branch", "pass --default-branch <branch>");
@@ -166,8 +191,9 @@ const projectAdd: VerbSpec = {
       yolo: boolArg(args, "yolo") ? 1 : 0,
       priority: priorityArg(args) ?? 2,
       harness: oneOf(stringArg(args, "harness"), HARNESSES, "harness") ?? "claude",
-      workflow: workflowArg(args, ctx.config()) ?? "fix",
+      workflow: workflowArg(args, ctx.config()) ?? defaultWorkflow(kind),
       autonomy: oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy") ?? defaultAutonomy(ctx.config()),
+      kind,
     };
     insertProject(ctx.db, row);
     // A scoped leader registers only its own scope's projects; refusing rolls the insert back.
@@ -185,11 +211,12 @@ const SETTABLE: Record<string, keyof ProjectRow> = {
   autonomy: "autonomy",
   "default-branch": "default_branch",
   "repo-url": "repo_url",
+  kind: "kind",
 };
 
 const projectSet: VerbSpec = {
   name: "project set",
-  summary: "Change a project's delivery mode, yolo posture, priority or defaults",
+  summary: "Change a project's kind, delivery mode, yolo posture, priority or defaults",
   positionals: [{ name: "id", required: true, help: "project id", complete: "project" }],
   flags: {
     mode: { type: "string", help: "no-mistakes, direct-PR or local-only", placeholder: "mode", values: DELIVERY_MODES },
@@ -200,6 +227,7 @@ const projectSet: VerbSpec = {
     autonomy: { type: "string", help: "plan or manual", placeholder: "mode", values: AUTONOMY },
     "default-branch": { type: "string", help: "default branch", placeholder: "branch" },
     "repo-url": { type: "string", help: "remote URL", placeholder: "url" },
+    kind: { type: "string", help: "code or notes (notes: local-only); a change of kind resets the workflow to fix or draft unless --workflow names one", placeholder: "kind", values: PROJECT_KINDS },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -225,11 +253,17 @@ const projectSet: VerbSpec = {
     if (branch) updates.default_branch = branch;
     const repoUrl = stringArg(args, "repo-url");
     if (repoUrl) updates.repo_url = repoUrl;
+    const kind = oneOf(stringArg(args, "kind"), PROJECT_KINDS, "kind");
+    if (kind) {
+      updates.kind = kind;
+      if (kind !== current.kind && !workflow) updates.workflow = defaultWorkflow(kind);
+    }
     const changed = Object.entries(updates).filter(([key, value]) => current[key as keyof ProjectRow] !== value);
     if (Object.keys(updates).length === 0) {
       throw new FlowrynError("bad_args", "nothing to change", `flags: ${Object.keys(SETTABLE).map((f) => `--${f}`).join(" ")}`);
     }
     const next = { ...current, ...updates };
+    requireNotesLocal(next.kind, next.delivery_mode, id);
     if (next.repo_url === "" && next.delivery_mode !== "local-only") {
       throw new FlowrynError("invalid_project", `project ${id} has no remote, so its mode must stay local-only`, "pass --repo-url too");
     }
@@ -262,6 +296,7 @@ const projectList: VerbSpec = {
       .filter((p) => lens.project(p.id))
       .map((p) => ({
       id: p.id,
+      kind: p.kind,
       mode: p.delivery_mode,
       yolo: p.yolo ? "on" : "off",
       priority: p.priority,
