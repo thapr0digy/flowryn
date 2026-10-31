@@ -80,8 +80,10 @@ describe("review feedback on a delivered PR", () => {
       const e = env;
       const { run } = await e.fleet.dispatch(shipSteps(e.github.apiUrl, "FAKE: sleep 6000\nFAKE: deliver-pr\n"), { kind: "ship" });
       await e.fleet.waitRun(run, (r) => r.state === "ready", "delivered");
-      const change = e.github.addReview("acme/web", 1, { login: "alice", association: "COLLABORATOR", state: "CHANGES_REQUESTED", body: "Please add a test for the retry path" });
-      const root = e.github.addReviewComment("acme/web", 1, { login: "alice", association: "COLLABORATOR", body: "Rename loopGuard to retryGuard", path: "src/login.ts", line: 42 });
+      // One timestamp for both: feedback is ordered by time, then key, so two clock reads a millisecond apart under load would reorder the steer's keys.
+      const at = new Date().toISOString();
+      const change = e.github.addReview("acme/web", 1, { login: "alice", association: "COLLABORATOR", state: "CHANGES_REQUESTED", body: "Please add a test for the retry path", at });
+      const root = e.github.addReviewComment("acme/web", 1, { login: "alice", association: "COLLABORATOR", body: "Rename loopGuard to retryGuard", path: "src/login.ts", line: 42, at });
 
       await waitUntil(() => steers(e, run).some((s) => s.includes("New review feedback")), 30_000, "the review steer");
       const steer = steers(e, run).find((s) => s.includes("New review feedback"))!;
