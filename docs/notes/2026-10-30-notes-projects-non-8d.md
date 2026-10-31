@@ -44,6 +44,8 @@ Migration 50 (`notes-projects`): `projects.kind` (`code` by default, or `notes`)
 
 A remote-less local-only project already registered, launched, delivered and landed before this change; the dispatch base, the delivery check, the landing and the cleanup guard all fall back to the local default branch when there is no origin, and the remote-only paths (CI waits, policy follow, the build watcher, the no-mistakes doctor) are gated to PR modes. `test/integration/notes-projects.test.ts` runs a notes task end to end on a repository with no remote: render, a refused stale page, review, a refused pass of a changed page, a refused different file, a refused extra file, delivery, merge, cleanup.
 
+The upkeep sync of a primary checkout (`src/upkeep/sync.ts`) now looks at it with `git --no-optional-locks status`: a plain status refreshed the index under its lock, so a commit made in the checkout a second after a local landing could fail with `index.lock: File exists` (seen in `delivery.test.ts`'s local-only case).
+
 The cleanup guard's rules are unchanged. With no remote nothing is ever on a remote-tracking branch, so a local-only run is allowed only when its HEAD is an ancestor of local main. Three new cleanup-guard fixtures build a repository with no remote (`fx_drop_origin` in `fixtures/cleanup-guard/lib/build-common.sh`; the runner now accepts a scenario without origin): `no_remote_merged_to_local_default` (allow), `no_remote_truly_unpushed` (refuse) and `no_remote_equal_content_not_merged` (refuse: local-only proves landing by ancestry, never by content). Their `ported_from` is `flowryn:notes-projects-non-8d`, since the reference had no such case.
 
 ## Choices
