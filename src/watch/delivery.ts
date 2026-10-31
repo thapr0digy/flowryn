@@ -16,7 +16,7 @@ import type { GitRunner } from "../policy/landed.ts";
 import { parseNmStatus, readNmStatus, type NmRun } from "../policy/nomistakes.ts";
 import { cleanMainMerge, type CleanMerge } from "../policy/clean-merge.ts";
 import { headHistory, type HeadHistory } from "../policy/head-history.ts";
-import { applyNmObservation, applyPrObservation, headMoveRecorded, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
+import { applyNmObservation, applyPrObservation, conflictActedOn, headMoveRecorded, noteMergedAfterEnd, noteNmOutage, yieldToCiWait } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp, settleForgeAlert } from "../reconcile/forge-health.ts";
 import { applyFeedback, openInlineThreads } from "../reconcile/reviews.ts";
 import { feedbackItems } from "../forge/feedback.ts";
@@ -520,6 +520,12 @@ export class DeliveryWatcher {
       return;
     }
     tx(db, () => closeCiWaits(db, run, "a new pipeline run", now(), nm.id));
+    // The conflict nudge wins: a pipeline on a head it already sent back (or asked you about) is not a CI wait to ask about.
+    const head = nm.headSha || nm.head;
+    if (conflictActedOn(db, run.id, head)) {
+      tx(db, () => closeCiWaits(db, run, "superseded by the conflict nudge on this head", now(), null, "conflict"));
+      return;
+    }
     const alert = this.deps.ciWaitAlertMin();
     if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return;
     const seen = deliveryBasis(db, run.id);
@@ -530,7 +536,7 @@ export class DeliveryWatcher {
     const facts = await readBranchFacts(this.deps.git, run.worktree_path, runBase(run, project));
     const observed = deliveryTransition(db, seen, CI_WAIT_PARTS, "ci_wait", "nomistakes", now(), (current) => {
       if (current.state !== "validating" && current.state !== "running") return null;
-      if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now())) return null;
+      if (!ciWaitDue(db, run.id, nm.id, minutes, alert, now()) || conflictActedOn(db, run.id, head)) return null;
       const id = openCiWait(db, current, project.id, { nmRun: nm.id, minutes, pr: nm.pr, defaultBranch: runBase(run, project) }, facts, alert, now());
       yieldToCiWait(db, current, nm, now());
       return id;
