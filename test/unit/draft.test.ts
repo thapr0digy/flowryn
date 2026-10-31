@@ -85,6 +85,28 @@ describe("the draft page", () => {
     expect(html).toContain("&lt;script&gt;");
   });
 
+  test("a Markdown draft's links keep only http(s), mailto and relative targets, and images only relative ones", () => {
+    const html = renderDraftBody(
+      "a.md",
+      '[js](javascript:alert(1)) [mixed](JaVa&#115;cript:x "t") [tab](java&#9;script:x) [vb](vbscript:x) [data](data:text/html,hi)\n\n' +
+        "[web](https://a.example/p?x=1&y=2) [mail](mailto:a@b.example) [rel](./other.md) [frag](#top)\n\n" +
+        "![remote](http://h.example/t.png) ![proto](//h.example/t.png) ![inline](data:image/png;base64,AA) ![local](./pic.png)\n\n" +
+        "[x][ref]\n\n[ref]: javascript:ref\n",
+    );
+    expect(html.toLowerCase()).not.toMatch(/href="(javascript|vbscript):/);
+    expect(html).toContain('<a href="java%09script:x">tab</a>');
+    expect(html).not.toContain("data:");
+    expect(html).not.toContain("h.example");
+    expect(html).toContain('<a title="t">mixed</a>');
+    expect(html).toContain("<a>x</a>");
+    expect(html).toContain('<a href="https://a.example/p?x=1&amp;y=2">web</a>');
+    expect(html).toContain('<a href="mailto:a@b.example">mail</a>');
+    expect(html).toContain('<a href="./other.md">rel</a>');
+    expect(html).toContain('<a href="#top">frag</a>');
+    expect(html).toContain('<img src="./pic.png" alt="local"');
+    expect(html).toContain("remote proto inline");
+  });
+
   test("plain text is shown as it is, escaped", () => {
     expect(renderDraftBody("a.txt", "a < b & *c*\n")).toBe('<pre class="plain">a &lt; b &amp; *c*\n</pre>\n');
   });

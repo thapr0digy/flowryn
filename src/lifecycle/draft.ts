@@ -74,9 +74,38 @@ function escapeHtml(text: string): string {
   return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
-/** The file's body as HTML: Markdown with any raw HTML shown as text, or plain text as it is. */
+const LINK_SCHEMES = new Set(["http", "https", "mailto"]);
+
+/** An attribute's URL as a browser reads it: entities decoded, spaces and control characters dropped. */
+function attributeUrl(attribute: string): string {
+  const decoded = attribute.replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  return [...decoded].filter((char) => char.charCodeAt(0) > 0x20).join("");
+}
+
+function urlScheme(url: string): string | null {
+  return /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * The page may only lead away from the draft, never change it or fetch for
+ * it: a link keeps its target for http(s), mailto or a relative path, and an
+ * image only for a relative path; any other is shown as its text.
+ */
+function keepSafeUrls(html: string): string {
+  return html
+    .replace(/<a href="([^"]*)"((?: title="[^"]*")?)>/g, (tag, href: string, title: string) => {
+      const scheme = urlScheme(attributeUrl(href));
+      return scheme === null || LINK_SCHEMES.has(scheme) ? tag : `<a${title}>`;
+    })
+    .replace(/<img src="([^"]*)" alt="([^"]*)"[^>]*>/g, (tag, src: string, alt: string) => {
+      const url = attributeUrl(src);
+      return urlScheme(url) === null && !/^[\\/]{2}/.test(url) ? tag : alt;
+    });
+}
+
+/** The file's body as HTML: Markdown with any raw HTML shown as text and only safe link and image targets, or plain text as it is. */
 export function renderDraftBody(path: string, text: string): string {
-  if (MARKDOWN.has(extname(path).toLowerCase())) return Bun.markdown.html(text, { noHtmlBlocks: true, noHtmlSpans: true });
+  if (MARKDOWN.has(extname(path).toLowerCase())) return keepSafeUrls(Bun.markdown.html(text, { noHtmlBlocks: true, noHtmlSpans: true }));
   return `<pre class="plain">${escapeHtml(text)}</pre>\n`;
 }
 
