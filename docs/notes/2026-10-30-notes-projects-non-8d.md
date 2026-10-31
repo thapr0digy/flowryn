@@ -15,7 +15,7 @@ flowryn dispatch notes --kind ship --body-file - <<<'A one-page plan for the Q4 
 ```
 
 - `project add --kind notes` sets `--mode local-only` and `--workflow draft` unless you name them. A notes project refuses any mode but `local-only`, at `add` and at `set`, with or without a remote: a repository you want pull requests for is a code project.
-- `project set --kind notes` on a code project also sets the workflow to `draft` unless `--workflow` names another, and needs the mode to be `local-only` already (or `--mode local-only` with it).
+- `project set --kind notes` on a code project also sets the workflow to `draft` unless `--workflow` names another, and needs the mode to be `local-only` already (or `--mode local-only` with it). `project set --kind code` on a notes project sets the workflow back to `fix` the same way.
 - `project list` and the project view show the kind (`code` or `notes`).
 - `--workflow` still overrides: a notes project can run `fix` if you want the file without a review page.
 

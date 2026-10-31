@@ -21,6 +21,10 @@ export const PROJECT_KINDS = ["code", "notes"] as const;
 export type ProjectKind = (typeof PROJECT_KINDS)[number];
 /** The workflow a notes project's ships run unless --workflow names another. */
 export const NOTES_WORKFLOW = "draft";
+/** The workflow a new project of this kind, or one switched to it, runs unless --workflow names another. */
+export function defaultWorkflow(kind: ProjectKind): string {
+  return kind === "notes" ? NOTES_WORKFLOW : "fix";
+}
 /** The words `project set --yolo` takes. */
 export const ON_OFF = ["on", "off"] as const;
 const WORKFLOW_ID = /^[a-z][a-z0-9-]{0,31}$/;
@@ -187,7 +191,7 @@ const projectAdd: VerbSpec = {
       yolo: boolArg(args, "yolo") ? 1 : 0,
       priority: priorityArg(args) ?? 2,
       harness: oneOf(stringArg(args, "harness"), HARNESSES, "harness") ?? "claude",
-      workflow: workflowArg(args, ctx.config()) ?? (kind === "notes" ? NOTES_WORKFLOW : "fix"),
+      workflow: workflowArg(args, ctx.config()) ?? defaultWorkflow(kind),
       autonomy: oneOf(stringArg(args, "autonomy"), AUTONOMY, "autonomy") ?? defaultAutonomy(ctx.config()),
       kind,
     };
@@ -223,7 +227,7 @@ const projectSet: VerbSpec = {
     autonomy: { type: "string", help: "plan or manual", placeholder: "mode", values: AUTONOMY },
     "default-branch": { type: "string", help: "default branch", placeholder: "branch" },
     "repo-url": { type: "string", help: "remote URL", placeholder: "url" },
-    kind: { type: "string", help: "code or notes (notes: local-only, and the draft workflow unless --workflow names one)", placeholder: "kind", values: PROJECT_KINDS },
+    kind: { type: "string", help: "code or notes (notes: local-only); a change of kind resets the workflow to fix or draft unless --workflow names one", placeholder: "kind", values: PROJECT_KINDS },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -252,8 +256,7 @@ const projectSet: VerbSpec = {
     const kind = oneOf(stringArg(args, "kind"), PROJECT_KINDS, "kind");
     if (kind) {
       updates.kind = kind;
-      // Turning a project into notes moves its ships to the draft workflow, unless --workflow names one.
-      if (kind === "notes" && current.kind !== "notes" && !workflow) updates.workflow = NOTES_WORKFLOW;
+      if (kind !== current.kind && !workflow) updates.workflow = defaultWorkflow(kind);
     }
     const changed = Object.entries(updates).filter(([key, value]) => current[key as keyof ProjectRow] !== value);
     if (Object.keys(updates).length === 0) {

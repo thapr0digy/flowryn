@@ -132,6 +132,10 @@ describe("project verbs", () => {
     const set = await cliJson(h, ["project", "set", "site", "--kind", "notes"], { env });
     expect(set.code).toBe(0);
     expect((set.reply.data as { changed: string[] }).changed.toSorted()).toEqual(["kind", "workflow"]);
+    // Turning it back into code moves it back to the fix workflow.
+    const back = await cliJson(h, ["project", "set", "site", "--kind", "code"], { env });
+    expect((back.reply.data as { project: Record<string, unknown> }).project).toMatchObject({ kind: "code", workflow: "fix" });
+    expect((await cliJson(h, ["project", "set", "site", "--kind", "notes"], { env })).code).toBe(0);
     const list = await cliJson(h, ["project", "list"], { env });
     expect((list.reply.data as { projects: Record<string, unknown>[] }).projects.map((p) => `${p.id}:${p.kind}`).toSorted()).toEqual(["journal:notes", "plans:notes", "site:notes"]);
     const odd = await cliJson(h, ["project", "add", gitRepo(join(h.home, "repos", "poems"), null), "--kind", "poems"], { env });
