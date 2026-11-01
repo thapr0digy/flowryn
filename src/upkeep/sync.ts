@@ -62,15 +62,26 @@ function itemKey(project: ProjectRow): string {
   return `project:${project.id}`;
 }
 
+/** A local-only project lands into its local default branch and never pushes, so being ahead of origin is where it should be. */
+function expectedAhead(project: ProjectRow, sync: SyncOutcome): boolean {
+  return project.delivery_mode === "local-only" && sync.outcome === "skipped" && sync.reason === "ahead";
+}
+
 /**
  * Record a sync: a fast-forward is an event; a skip you should hear about
  * opens one `checkout_unsynced` P1 info item per project (replaced when the
- * reason changes), closed once the checkout is in step again. Off its default
- * branch is left to dispatch's `checkout_tangle`; a missing origin or a failed
- * fetch is only logged. Call inside a transaction; returns a log line or null.
+ * reason changes), closed once the checkout is in step again. A local-only
+ * project only ahead of origin is in step too (its landings are never
+ * pushed). Off its default branch is left to dispatch's `checkout_tangle`; a
+ * missing origin or a failed fetch is only logged. Call inside a transaction;
+ * returns a log line or null.
  */
 export function recordSync(db: Db, project: ProjectRow, sync: SyncOutcome, now: number): string | null {
   const key = itemKey(project);
+  if (expectedAhead(project, sync)) {
+    resolveItems(db, "checkout_unsynced", key, "local-only: ahead of origin is expected", now);
+    return null;
+  }
   if (sync.outcome === "current" || sync.outcome === "synced") {
     resolveItems(db, "checkout_unsynced", key, sync.outcome === "synced" ? "upkeep.synced" : "in step with origin", now);
     if (sync.outcome === "current") return null;
