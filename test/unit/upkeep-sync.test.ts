@@ -44,6 +44,12 @@ async function syncAndRecord(project = projectAt(repos.primary)) {
   return outcome;
 }
 
+function commitLocal(file: string): void {
+  writeFileSync(join(repos.primary, file), "local\n");
+  sh(repos.primary, ["add", "."]);
+  sh(repos.primary, ["commit", "-q", "-m", "local"]);
+}
+
 describe("syncPrimary", () => {
   test("a checkout behind origin is fast-forwarded to it, and the sync is an event", async () => {
     const before = sh(repos.primary, ["rev-parse", "HEAD"]);
@@ -113,6 +119,42 @@ describe("syncPrimary", () => {
     // The item follows the reason: one open item, the newest reason.
     expect(openUnsynced()).toHaveLength(1);
     expect(openUnsynced()[0]).toContain("have diverged");
+  });
+
+  test("local-only project ahead of origin (a local landing): no item, and an open one from before is closed", async () => {
+    const project = { ...projectAt(repos.primary), delivery_mode: "local-only" as const };
+    commitLocal("local.txt");
+    // An item left from before this rule (or from when the project was direct-PR) closes on the next pass.
+    await syncAndRecord(projectAt(repos.primary));
+    expect(openUnsynced()).toHaveLength(1);
+    expect(await syncAndRecord(project)).toMatchObject({ outcome: "skipped", reason: "ahead" });
+    expect(openUnsynced()).toEqual([]);
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'upkeep.sync_skipped'").get()).toEqual({ n: 1 });
+  });
+
+  test("local-only project behind or diverged: still an item", async () => {
+    const project = { ...projectAt(repos.primary), delivery_mode: "local-only" as const };
+    writeFileSync(join(repos.primary, "a.txt"), "edited\n");
+    mergeOnOrigin(repos.other, "b.txt", "two\n");
+    expect(await syncAndRecord(project)).toMatchObject({ outcome: "skipped", reason: "dirty" });
+    expect(openUnsynced()[0]).toContain("uncommitted changes");
+    sh(repos.primary, ["checkout", "-q", "--", "a.txt"]);
+    commitLocal("local.txt");
+    expect(await syncAndRecord(project)).toMatchObject({ outcome: "skipped", reason: "diverged" });
+    expect(openUnsynced()).toHaveLength(1);
+    expect(openUnsynced()[0]).toContain("have diverged");
+  });
+
+  test("direct-PR and no-mistakes projects ahead of origin: still an item", async () => {
+    commitLocal("local.txt");
+    for (const mode of ["direct-PR", "no-mistakes"] as const) {
+      const project = { ...projectAt(repos.primary, mode), delivery_mode: mode };
+      expect(await syncAndRecord(project)).toMatchObject({ outcome: "skipped", reason: "ahead" });
+    }
+    expect(openUnsynced().toSorted()).toEqual([
+      "Primary checkout of direct-PR not synced with origin/main: its main has commits that are not on origin/main; new runs branch from it as it is; tell the user",
+      "Primary checkout of no-mistakes not synced with origin/main: its main has commits that are not on origin/main; new runs branch from it as it is; tell the user",
+    ]);
   });
 
   test("off the default branch: skipped quietly (dispatch's checkout_tangle says it), nothing moves", async () => {
