@@ -139,6 +139,16 @@ describe("passing from the page", () => {
     expect(gateState()).toBe("open");
   });
 
+  test("a draft page that no longer shows its draft refuses, and drops the code that came with it", () => {
+    answerAll();
+    db.query("UPDATE gates SET draft_page = ?2 WHERE id = ?1").run("g1", "0".repeat(64));
+    const codes = new PageCodeStore();
+    const { code } = codes.mint("g1", HEAD, NOW)!;
+    expect(tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW))).toEqual({ outcome: "draft_changed", task: taskId });
+    expect(codes.has("g1", NOW)).toBe(false);
+    expect(gateState()).toBe("open");
+  });
+
   test("a guessed, moved, expired or missing code never passes, and the event names the outcome, never the code", () => {
     answerAll();
     const codes = new PageCodeStore();
@@ -310,6 +320,26 @@ describe("the poller's side", () => {
     expect(p.sent).toEqual([]);
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
     expect(p.logs.some((l) => l.includes("pass page passed"))).toBe(true);
+  });
+
+  test("a draft page changed under its review refuses the pass, keeps the Send's answers and tells the page why", async () => {
+    db.query("UPDATE gates SET draft_page = ?2 WHERE id = ?1").run("g1", "0".repeat(64));
+    const codes = new PageCodeStore();
+    const { code } = codes.mint("g1", HEAD, NOW)!;
+    const p = pollerWith(sendOutput(code), codes);
+    const calls = join(h.home, "calls.log");
+    try {
+      p.poller.pass();
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("no longer shows the draft"), 5_000, "the reply on the next poll");
+    } finally {
+      p.poller.stop();
+    }
+    expect(gateState()).toBe("open");
+    expect(db.query("SELECT state FROM decisions WHERE id = 'q1'").get()).toEqual({ state: "answered" });
+    expect(readFileSync(calls, "utf8")).toContain(`flowryn gate changes ${taskId}`);
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
+    expect(codes.has("g1", NOW)).toBe(false);
   });
 
   test("a wrong code falls back to today's request for the leader; the gate stays open", async () => {

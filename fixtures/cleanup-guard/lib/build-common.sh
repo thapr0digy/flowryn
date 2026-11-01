@@ -103,6 +103,16 @@ fx_init() {
   git -C "$FX_PRIMARY" worktree add -q -b "$FX_TASK_BRANCH" "$FX_WT" "$FX_DEFAULT_BRANCH"
 }
 
+# fx_drop_origin: a repository with no remote at all (a notes project,
+# docs/notes/2026-10-30-notes-projects-non-8d.md). The primary forgets origin and
+# its remote-tracking refs, and origin.git is deleted; scenario.json then has
+# no origin path and no remotes, and the origin symbols are not registered.
+fx_drop_origin() {
+  git -C "$FX_PRIMARY" remote remove origin
+  rm -rf "$FX_ORIGIN"
+  FX_ORIGIN=""
+}
+
 # fx_ref <name> <commit-ish> [repo]: register a symbolic ref for the manifest.
 fx_ref() {
   local name=$1 rev=$2 repo=${3:-$FX_PRIMARY} sha
@@ -261,8 +271,10 @@ fx_finish() {
   local refs_json sym missing=""
   fx_ref local_head HEAD "$FX_WT"
   fx_ref primary_main "refs/heads/$FX_DEFAULT_BRANCH"
-  fx_ref tracked_origin_main "refs/remotes/origin/$FX_DEFAULT_BRANCH"
-  fx_ref origin_main "refs/heads/$FX_DEFAULT_BRANCH" "$FX_ORIGIN"
+  if [ -n "$FX_ORIGIN" ]; then
+    fx_ref tracked_origin_main "refs/remotes/origin/$FX_DEFAULT_BRANCH"
+    fx_ref origin_main "refs/heads/$FX_DEFAULT_BRANCH" "$FX_ORIGIN"
+  fi
 
   refs_json=$(jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add' < "$FX_ROOT/.fx/refs.tsv")
   while IFS= read -r sym; do
@@ -307,14 +319,14 @@ fx_finish() {
       default_branch: $default,
       paths: {
         root: $root,
-        origin: $origin,
+        origin: (if $origin == "" then null else $origin end),
         primary: $primary,
         worktree: $wt,
         fork: (if $fork == "" then null else $fork end),
         forge: "\($root)/forge.json",
         bin: "\($root)/bin"
       },
-      remotes: ({origin: $origin} + (if $fork == "" then {} else {fork: $fork} end)),
+      remotes: ((if $origin == "" then {} else {origin: $origin} end) + (if $fork == "" then {} else {fork: $fork} end)),
       inputs: ($man.inputs | .recorded_pr_head |= sym),
       refs: $refs
     }' > "$FX_ROOT/scenario.json"

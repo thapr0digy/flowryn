@@ -72,6 +72,19 @@ describe("syncPrimary", () => {
     expect(openUnsynced()).toEqual(["Primary checkout of web not synced with origin/main: it has uncommitted changes; new runs branch from it as it is; tell the user"]);
   });
 
+  test("its look at the checkout never takes the index lock, so a commit you make meanwhile is not refused", async () => {
+    mergeOnOrigin(repos.other, "b.txt", "two\n");
+    const calls: string[][] = [];
+    const recording: typeof git = (args, cwd) => {
+      calls.push(args);
+      return git(args, cwd);
+    };
+    expect((await syncPrimary(recording, projectAt(repos.primary))).outcome).toBe("synced");
+    const looks = calls.filter((args) => args.includes("status"));
+    expect(looks.length).toBeGreaterThan(0);
+    for (const args of looks) expect(args[0]).toBe("--no-optional-locks");
+  });
+
   test("an untracked file alone does not stop a sync that does not touch it", async () => {
     const merged = mergeOnOrigin(repos.other, "b.txt", "two\n");
     writeFileSync(join(repos.primary, "notes.txt"), "mine\n");

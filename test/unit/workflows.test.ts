@@ -30,11 +30,16 @@ afterEach(() => {
 describe("workflows (design section 11)", () => {
   test("the built-in workflows; only feature-ui carries visual QA, and a ship's ends in the merge gate", () => {
     const wf = workflowsConfig(cfg(""));
-    expect(Object.keys(wf).toSorted()).toEqual(["feature", "feature-ui", "fix", "scout"]);
+    expect(Object.keys(wf).toSorted()).toEqual(["draft", "feature", "feature-ui", "fix", "scout"]);
     expect(flowLine(wf.feature!)).toBe("design (review) → build → ship (merge)");
     expect(flowLine(wf["feature-ui"]!)).toBe("design (review) → build → qa (review) → ship (merge)");
     expect(flowLine(wf.fix!)).toBe("build → ship (merge)");
     expect(flowLine(wf.scout!)).toBe("investigate");
+    // A notes project's: no validation slot, since a draft has nothing to test.
+    expect(flowLine(wf.draft!)).toBe("draft (review) → final (merge)");
+    expect(wf.draft!.stages.map((s) => s.pools)).toEqual([[], []]);
+    expect(wf.draft!.stages[0]).toMatchObject({ skill: "flowryn-draft" });
+    expect(workflowFor(cfg(""), "draft", "ship").id).toBe("draft");
     expect(wf["feature-ui"]!.stages[2]).toMatchObject({ id: "qa", skill: "flowryn-visual-qa", pools: ["docker_env", "browser"] });
     expect(workflowFor(cfg(""), "feature", "ship").id).toBe("feature");
     expect(workflowFor(cfg(""), "feature-ui", "ship").id).toBe("feature-ui");

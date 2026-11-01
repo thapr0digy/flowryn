@@ -1,6 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
+import { requireDraftPageShown } from "../lifecycle/draft.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getRunWithPolicy } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
@@ -23,6 +24,7 @@ export type PagePass =
   | { outcome: "passed"; passed: GatePassed }
   | { outcome: "stale" | "late" }
   | { outcome: "questions_open"; open: string[] }
+  | { outcome: "draft_changed"; task: string }
   | { outcome: Exclude<PageCodeCheck, "ok"> };
 
 function user(): string {
@@ -49,6 +51,13 @@ export function passFromPage(db: Db, codes: PageCodeStore, gateId: string, code:
     codes.drop(gateId);
     const open = db.query("SELECT id FROM decisions WHERE gate_id = ?1 AND state = 'open' ORDER BY id").all(gateId) as { id: string }[];
     return { outcome: "questions_open", open: open.map((d) => d.id) };
+  }
+  try {
+    requireDraftPageShown(run, gate);
+  } catch (error) {
+    if (!(error instanceof FlowrynError) || error.code !== "draft_changed") throw error;
+    codes.drop(gateId);
+    return { outcome: "draft_changed", task: run.task_id };
   }
   const checked = codes.check(gateId, code, head, now);
   if (checked !== "ok") {

@@ -63,8 +63,11 @@ content_in_default_fallback allow
 content_fallback_refreshes_stale_origin_ref allow
 dirty_worktree refuse
 gh_error_and_content_absent refuse
-local_only_force_overrides_unpushed discard'
-EXPECTED_TALLY="allow=10 discard=1 record=2 refuse=8"
+local_only_force_overrides_unpushed discard
+no_remote_merged_to_local_default allow
+no_remote_truly_unpushed refuse
+no_remote_equal_content_not_merged refuse'
+EXPECTED_TALLY="allow=11 discard=1 record=2 refuse=10"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/cleanup-guard-fixtures.XXXXXX") || exit 2
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
@@ -85,7 +88,7 @@ for d in "$HERE"/*/; do
   fi
 done
 
-[ "${#CASES[@]}" -eq 21 ] || suite_fail "expected 21 cases, found ${#CASES[@]}"
+[ "${#CASES[@]}" -eq 24 ] || suite_fail "expected 24 cases, found ${#CASES[@]}"
 listed=$(printf '%s\n' "$EXPECTED_CASES" | awk '{print $1}' | sort)
 present=$(printf '%s\n' "${CASES[@]}" | sort)
 [ "$listed" = "$present" ] || suite_fail "case set differs from the design list:
@@ -105,8 +108,8 @@ manifest_errors() {
       (["name","ported_from","description","delivery_mode","inputs","forge","expected"][]
         | select(. as $k | $root | has($k) | not) | "missing key \(.)"),
       (if .name != $name then "name \(.name) does not match directory \($name)" else empty end),
-      (if (.ported_from | str and test("^tests/fm-teardown\\.test\\.sh:test_[a-z0-9_]+$")) | not
-        then "ported_from must be tests/fm-teardown.test.sh:<test function>" else empty end),
+      (if (.ported_from | str and test("^(tests/fm-teardown\\.test\\.sh:test_[a-z0-9_]+|flowryn:[a-z0-9-]+)$")) | not
+        then "ported_from must be tests/fm-teardown.test.sh:<test function> or flowryn:<task id>" else empty end),
       (if (.description | str) | not then "description must be a non-empty string" else empty end),
       (if .delivery_mode | IN("local-only","no-mistakes","direct-PR") | not
         then "delivery_mode \(.delivery_mode) not in local-only|no-mistakes|direct-PR" else empty end),
@@ -157,7 +160,7 @@ load_scenario() {
   local dir=$1 k v
   SC_DIR=$dir
   PRIMARY=$(jq -r '.paths.primary' "$dir/scenario.json")
-  ORIGIN=$(jq -r '.paths.origin' "$dir/scenario.json")
+  ORIGIN=$(jq -r '.paths.origin // ""' "$dir/scenario.json")
   FORK=$(jq -r '.paths.fork // ""' "$dir/scenario.json")
   WT=$(jq -r '.paths.worktree' "$dir/scenario.json")
   REF=()
@@ -167,7 +170,8 @@ load_scenario() {
 }
 
 gitx() {
-  local alternates="$PRIMARY/.git/objects:$ORIGIN/objects"
+  local alternates="$PRIMARY/.git/objects"
+  [ -z "$ORIGIN" ] || alternates="$alternates:$ORIGIN/objects"
   [ -z "$FORK" ] || alternates="$alternates:$FORK/objects"
   GIT_OBJECT_DIRECTORY="$SCRATCH_OBJ" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alternates" \
     git -C "$PRIMARY" "$@"
@@ -175,7 +179,7 @@ gitx() {
 
 is_commit_anywhere() {
   local sha=$1 repo
-  for repo in "$PRIMARY" "$ORIGIN" ${FORK:+"$FORK"}; do
+  for repo in "$PRIMARY" ${ORIGIN:+"$ORIGIN"} ${FORK:+"$FORK"}; do
     git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null && return 0
   done
   return 1
@@ -253,8 +257,12 @@ scenario_errors() {
     || echo "worktree is not on fm/task-x1"
   [ "$(git -C "$WT" rev-parse HEAD 2>/dev/null)" = "${REF[local_head]}" ] \
     || echo "local_head does not match the worktree HEAD"
-  [ "$(git -C "$PRIMARY" remote get-url origin)" = "$ORIGIN" ] || echo "primary's origin is not origin.git"
-  [ "$(git -C "$ORIGIN" symbolic-ref HEAD)" = refs/heads/main ] || echo "origin HEAD is not main"
+  if [ -n "$ORIGIN" ]; then
+    [ "$(git -C "$PRIMARY" remote get-url origin)" = "$ORIGIN" ] || echo "primary's origin is not origin.git"
+    [ "$(git -C "$ORIGIN" symbolic-ref HEAD)" = refs/heads/main ] || echo "origin HEAD is not main"
+  else
+    [ -z "$(git -C "$PRIMARY" remote)" ] || echo "a no-remote scenario's primary still has a remote"
+  fi
   jq -e --slurpfile m "$manifest" '.reachable == $m[0].forge.reachable
       and (.pull_requests | length) == ($m[0].forge.pull_requests | length)' "$dir/forge.json" >/dev/null \
     || echo "forge.json disagrees with the manifest's forge block"
