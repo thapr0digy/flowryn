@@ -1,5 +1,5 @@
 import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { configProblems, loadConfig, resolveTool, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
 import { divergedMigrations, integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
@@ -27,6 +27,7 @@ import { judgeQuota, probeQuota, quotaTarget, type QuotaReading } from "../sched
 import { resumeCommand } from "../sched/usage.ts";
 import { accountsConfig, type Account } from "../config/accounts.ts";
 import { nmAutoFixChecks } from "./nomistakes.ts";
+import { brokenGitLink, projectWorktrees, relinkHint } from "../lifecycle/relink.ts";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
 
@@ -377,6 +378,46 @@ function notifyCommandChecks(config: FlowrynConfig): Check[] {
   }
 }
 
+/**
+ * Each project's checkout, and each open run's worktree link
+ * (docs/notes/2026-11-01-flowryn-survive-a-xa.md): a moved checkout fails
+ * with the command that gives the project its new path, a worktree whose
+ * `.git` names a missing dir with the command that relinks it. Files only.
+ */
+export function checkoutChecks(db: Db): Check[] {
+  const checks: Check[] = [];
+  const projects = db.query("SELECT id, path FROM projects ORDER BY id").all() as { id: string; path: string }[];
+  const missing = new Set<string>();
+  for (const p of projects) {
+    if (existsSync(join(p.path, ".git"))) continue;
+    missing.add(p.id);
+    checks.push({ check: `project ${p.id}`, status: "fail", detail: `${p.path} has no git checkout; if it moved: flowryn project set ${p.id} --path <its new path>` });
+  }
+  for (const p of projects) {
+    if (missing.has(p.id)) continue;
+    for (const w of projectWorktrees(db, p.id)) {
+      const broken = brokenGitLink(w.path);
+      if (broken) checks.push({ check: `worktree ${w.task}`, status: "fail", detail: `${w.path}'s .git names ${broken}, which is gone; ${relinkHint(p, w.path)}` });
+    }
+  }
+  if (checks.length === 0 && projects.length > 0) checks.push({ check: "checkouts", status: "ok", detail: `${projects.length} project(s), their worktrees linked` });
+  return checks;
+}
+
+function checkoutCheckRun(config: FlowrynConfig): Check[] {
+  const { db: dbPath } = stateFiles(config.state_dir);
+  if (!existsSync(dbPath)) return [];
+  let db: Db | null = null;
+  try {
+    db = openDb(dbPath, { readonly: true });
+    return checkoutChecks(db);
+  } catch (error) {
+    return [{ check: "checkouts", status: "warn", detail: `cannot read projects: ${(error as Error).message}` }];
+  } finally {
+    db?.close();
+  }
+}
+
 /** Every doctor check, in reading order. Never mutates anything. */
 export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const home = flowrynHome(env.env);
@@ -403,6 +444,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(...(await lavishCheck(config)));
   checks.push(...databaseChecks(config));
   checks.push(...notifyCommandChecks(config));
+  checks.push(...checkoutCheckRun(config));
   checks.push(...(await daemonChecks(home, config, env)));
   checks.push(...configSectionProblems(config, env.env).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
   checks.push(await herdrCheck(config));

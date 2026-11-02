@@ -26,7 +26,7 @@ import { approvalRef, deliveredOf, prEvidence } from "./delivery.ts";
 import { capacityConfig, WORKER_POOL } from "../config/workflows.ts";
 import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
-import { dropRecord } from "./drop.ts";
+import { dropRecord, isDropped } from "./drop.ts";
 import { watchById, watchLabel, watchOfTask, type WatchRow } from "./watches.ts";
 import { planView, storedBase } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
@@ -39,7 +39,7 @@ import { LANDED_BEFORE_CANCEL } from "./landing.ts";
 import { getOperation, heldByEscalation, latestOperation, launchKind, openOperation, operationLine, requestCancel, requestOperation } from "./operations.ts";
 import { channelView } from "../lavish/channel.ts";
 import { closeReadItems, type ReportRead } from "../attention/read-close.ts";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { Db } from "../db/db.ts";
 
 function activeRunFor(db: ReadCtx["db"], ref: string): RunRow {
@@ -169,12 +169,20 @@ function waitingReply(db: Db, result: HandlerResult): HandlerResult {
   return { data: { ...result.data, state, ...(why ? { rule: why.rule } : {}) }, hints };
 }
 
-/** A run whose dead worker can be resumed from its stored session. */
+/**
+ * A run whose dead worker can be resumed from its stored session. A cancelled
+ * run is resumed in place too (docs/notes/2026-11-01-flowryn-survive-a-xa.md):
+ * its worktree, branch, stage and gates stand until it is cleaned up.
+ */
 function resumable(db: ReadCtx["db"], target: string): RunRow {
   const run = findRun(db, target);
   if (!run) throw new FlowrynError("not_found", `no run or task ${target}`);
-  if (run.state === "cancelled" || run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
+  if (run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
   if (run.cleanup === "done") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is cleaned up: its worktree is gone`, `dispatch ${run.task_id} again`);
+  if (run.state === "cancelled") {
+    if (isDropped(db, run.task_id)) throw new FlowrynError("run_not_active", `${run.task_id} was dropped after its run was cancelled`, `flowryn show ${run.task_id}`);
+    if (!existsSync(run.worktree_path)) throw new FlowrynError("run_not_active", `the cancelled run for ${run.task_id} has no worktree at ${run.worktree_path}`, `dispatch ${run.task_id} again`);
+  }
   // An escalated launch or resume is yours to settle: after looking at its pane, `flowryn resume` is one way out (cancel the other).
   const held = heldByEscalation(db, run.id);
   const escalatedStart = held !== null && held.kind !== "cancel";
@@ -196,7 +204,7 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
  */
 const resume: VerbSpec = {
   name: "resume",
-  summary: "Resume a dead worker from its stored session, in the same worktree",
+  summary: "Resume a dead or cancelled worker from its stored session, in the same worktree",
   positionals: [{ name: "target", required: true, help: "task or run id", complete: "task" }],
   flags: {},
   kind: "mutation",
@@ -218,20 +226,25 @@ const resume: VerbSpec = {
     const mode = replacement ?? "resume";
     // A resume already asked for (the automatic one waiting for its harness) is the same operation: no second one.
     const op = open ?? requestOperation(ctx.db, { id: ctx.ulid, run, kind: launchKind(mode), mode, requestedBy: ctx.caller.role, source: "cli", now });
+    // A failed or cancelled run is back to running in its current stage; its cleanup refusal (the sweep's) no longer stands.
     ctx.db
-      .query("UPDATE runs SET state = CASE WHEN state = 'failed' THEN 'running' ELSE state END, liveness = 'starting', resume_count = resume_count + 1, ended_at = NULL, updated_at = ?2 WHERE id = ?1")
+      .query(
+        `UPDATE runs SET state = CASE WHEN state IN ('failed','cancelled') THEN 'running' ELSE state END,
+           cleanup = CASE WHEN state = 'cancelled' AND cleanup = 'refused' THEN NULL ELSE cleanup END,
+           liveness = 'starting', resume_count = resume_count + 1, ended_at = NULL, updated_at = ?2 WHERE id = ?1`,
+      )
       .run(run.id, now);
     // A dead worker holds no slot (design section 11): the scheduler grants its worker slot, and its stage's pools, first.
     const viaScheduler = replacement !== null || !holdsLease(ctx.db, run.id, WORKER_POOL);
     if (replacement) ctx.db.query("UPDATE runs SET waiting_since = ?2 WHERE id = ?1").run(run.id, now);
     else if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
-    if (run.state === "failed") {
-      // failRun parked the task; take it back to In flight.
+    if (run.state === "failed" || run.state === "cancelled") {
+      // failRun and cancelRun parked the task; take it back to In flight.
       recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: run.task_id, positional: [run.task_id], now });
       recordIntent(ctx.db, { file: "backlog", verb: "start", taskId: run.task_id, positional: [run.task_id], now });
     }
     resolveRunItems(ctx.db, run.id, ["failure_needs_you", "operation_escalated", "review_worker_gone"], "run.resume_requested", now);
-    appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler } });
+    appendEvent(ctx.db, { source: "cli", kind: "run.resume_requested", runId: run.id, taskId: run.task_id, payload: { by: ctx.caller.role, resume: run.resume_count + 1, via_scheduler: viaScheduler, from: run.state } });
     return { data: { run: run.id, task: run.task_id, state: "resuming", operation: op.id }, hints: [`flowryn show ${run.task_id}`] };
   },
   async settle(ctx, result) {
