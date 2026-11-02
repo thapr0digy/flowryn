@@ -8,6 +8,8 @@ import { slugify } from "./ids.ts";
 import { defaultAutonomy, workflowFor } from "../config/workflows.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { lensFor, projectScopeById, requireInScope } from "../leader/scope.ts";
+import { normalizeRemote } from "../config/accounts.ts";
+import { relinkWorktrees } from "./relink.ts";
 
 export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as const;
 export const HARNESSES = ["claude", "pi"] as const;
@@ -216,7 +218,7 @@ const SETTABLE: Record<string, keyof ProjectRow> = {
 
 const projectSet: VerbSpec = {
   name: "project set",
-  summary: "Change a project's kind, delivery mode, yolo posture, priority or defaults",
+  summary: "Change a project's kind, delivery mode, yolo posture, priority, defaults or checkout path",
   positionals: [{ name: "id", required: true, help: "project id", complete: "project" }],
   flags: {
     mode: { type: "string", help: "no-mistakes, direct-PR or local-only", placeholder: "mode", values: DELIVERY_MODES },
@@ -228,15 +230,22 @@ const projectSet: VerbSpec = {
     "default-branch": { type: "string", help: "default branch", placeholder: "branch" },
     "repo-url": { type: "string", help: "remote URL", placeholder: "url" },
     kind: { type: "string", help: "code or notes (notes: local-only); a change of kind resets the workflow to fix or draft unless --workflow names one", placeholder: "kind", values: PROJECT_KINDS },
+    path: { type: "string", help: "the checkout's new absolute path after you moved it; relinks every task worktree (run it again to retry)", placeholder: "path" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
   scope: { kind: "project", arg: "id" },
-  apply(ctx, args) {
+  async prepare(ctx, args) {
+    const path = stringArg(args, "path");
+    return path === undefined ? null : await inspectRepo(ctx, path);
+  },
+  apply(ctx, args, prepared) {
     const id = stringArg(args, "id")!;
     const current = getProject(ctx.db, id);
     if (!current) throw new FlowrynError("not_found", `no project ${id}`, "flowryn project list");
     const updates: Partial<ProjectRow> = {};
+    const moved = prepared as RepoFacts | null;
+    if (moved) updates.path = moved.path;
     const mode = oneOf(stringArg(args, "mode"), DELIVERY_MODES, "mode");
     if (mode) updates.delivery_mode = mode;
     const yolo = onOff(stringArg(args, "yolo"), "yolo");
@@ -260,27 +269,55 @@ const projectSet: VerbSpec = {
     }
     const changed = Object.entries(updates).filter(([key, value]) => current[key as keyof ProjectRow] !== value);
     if (Object.keys(updates).length === 0) {
-      throw new FlowrynError("bad_args", "nothing to change", `flags: ${Object.keys(SETTABLE).map((f) => `--${f}`).join(" ")}`);
+      throw new FlowrynError("bad_args", "nothing to change", `flags: ${[...Object.keys(SETTABLE), "path"].map((f) => `--${f}`).join(" ")}`);
     }
     const next = { ...current, ...updates };
+    if (moved) requireSameRepository(ctx.db, next, moved);
     requireNotesLocal(next.kind, next.delivery_mode, id);
     if (next.repo_url === "" && next.delivery_mode !== "local-only") {
       throw new FlowrynError("invalid_project", `project ${id} has no remote, so its mode must stay local-only`, "pass --repo-url too");
     }
-    const columns = new Set<string>(Object.values(SETTABLE));
+    const columns = new Set<string>([...Object.values(SETTABLE), "path"]);
+    const scopeBefore = moved ? projectScopeById(ctx.db, ctx.config(), id) : null;
     for (const [column, value] of changed) {
-      // Column names come from SETTABLE, never from input; values are bound parameters.
+      // Column names come from SETTABLE (and path), never from input; values are bound parameters.
       if (!columns.has(column)) throw new Error(`refusing to update unexpected column ${column}`);
       ctx.db.query(`UPDATE projects SET ${column} = ?2 WHERE id = ?1`).run(id, value as string | number);
+    }
+    // A new path may match another scope's [scopes] paths: refusing rolls the update back.
+    if (moved && projectScopeById(ctx.db, ctx.config(), id) !== scopeBefore) {
+      throw new FlowrynError("invalid_project", `${moved.path} is outside project ${id}'s scope ${scopeBefore ?? "(none)"}`, `add its folder to [scopes.${scopeBefore ?? "<scope>"}] paths, or set [projects.${id}] scope`);
     }
     appendEvent(ctx.db, {
       source: "cli",
       kind: "project.updated",
       payload: { id, changes: Object.fromEntries(changed.map(([key, value]) => [key, { from: current[key as keyof ProjectRow], to: value }])) },
     });
-    return { data: { project: projectView(next), changed: changed.map(([key]) => key) }, hints: ["flowryn project list"] };
+    const data: Record<string, unknown> = { project: projectView(next), changed: changed.map(([key]) => key) };
+    if (moved) data.relink = { from: current.path, to: moved.path };
+    return { data, hints: ["flowryn project list"] };
+  },
+  /** After the new path is committed: relink the project's worktrees to it (idempotent, so a replay or a rerun retries). */
+  async settle(ctx, result) {
+    const relink = result.data.relink as { from: string; to: string } | undefined;
+    if (!relink) return result;
+    const project = (result.data.project as { id: string }).id;
+    const outcome = await relinkWorktrees(ctx, project, relink.to, relink.from !== relink.to);
+    const hints = [...(result.hints ?? [])];
+    if (outcome.worktrees.some((w) => w.result === "failed")) hints.unshift(`fix what failed, then flowryn project set ${project} --path ${relink.to} again`);
+    for (const live of outcome.live) hints.push(`${live.task}'s worker still has the old path in its sandbox: flowryn cancel ${live.task}, then flowryn resume ${live.task}`);
+    return { ...result, data: { ...result.data, worktrees: outcome.worktrees, live: outcome.live.map((l) => l.task) }, hints };
   },
 };
+
+/** A new path for a project must be the same repository: the origin its remote will be (this call's --repo-url, else the stored one), and no other project's checkout. */
+function requireSameRepository(db: Db, project: ProjectRow, moved: RepoFacts): void {
+  const other = db.query("SELECT id FROM projects WHERE path = ?1 AND id != ?2").get(moved.path, project.id) as { id: string } | null;
+  if (other) throw new FlowrynError("already_exists", `${moved.path} is already project ${other.id}`);
+  if (project.repo_url !== "" && moved.repoUrl && normalizeRemote(moved.repoUrl) !== normalizeRemote(project.repo_url)) {
+    throw new FlowrynError("invalid_project", `${moved.path}'s origin is ${moved.repoUrl}, not project ${project.id}'s ${project.repo_url}`, "give the path of the same repository's checkout");
+  }
+}
 
 const projectList: VerbSpec = {
   name: "project list",
