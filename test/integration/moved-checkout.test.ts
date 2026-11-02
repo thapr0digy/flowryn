@@ -145,6 +145,27 @@ describe("a moved project checkout", () => {
     },
     { timeout: 60_000 },
   );
+
+  test(
+    "project set --path with --repo-url checks the new checkout against the remote the same call sets",
+    async () => {
+      const env = (fleet = await makeFleetEnv());
+      expect((await env.json(["project", "set", "web", "--repo-url", "https://github.com/acme/web.git"])).code).toBe(0);
+      const renamed = join(dirname(env.repo), "renamed");
+      mkdirSync(renamed);
+      git(renamed, ["init", "-q", "-b", "main"]);
+      git(renamed, ["remote", "add", "origin", "https://github.com/acme/renamed.git"]);
+      writeFileSync(join(renamed, "a.txt"), "a\n");
+      git(renamed, ["add", "."]);
+      git(renamed, ["commit", "-q", "-m", "a"]);
+      const mismatched = await env.json(["project", "set", "web", "--path", renamed, "--repo-url", "https://github.com/acme/other.git"]);
+      expect(mismatched.reply.error).toMatchObject({ code: "invalid_project" });
+      const set = await env.json(["project", "set", "web", "--path", renamed, "--repo-url", "https://github.com/acme/renamed.git"]);
+      expect(set.code).toBe(0);
+      expect((set.reply.data as { changed: string[] }).changed.sort()).toEqual(["path", "repo_url"]);
+    },
+    { timeout: 60_000 },
+  );
 });
 
 describe("a cancelled run resumed in place", () => {
@@ -224,6 +245,31 @@ describe("a cancelled run resumed in place", () => {
       expect(back.worktree_path).toBe(busy.worktree_path);
     },
     { timeout: 90_000 },
+  );
+
+  test(
+    "resume refuses a cancelled run by its run id once a later run of its task superseded it",
+    async () => {
+      const env = (fleet = await makeFleetEnv());
+      const { task, run } = await env.dispatch("Build\nFAKE: sleep 60000", { kind: "ship" });
+      await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      expect((await env.json(["cancel", task])).code).toBe(0);
+      const later = `${run}-later`;
+      const db = env.h.db();
+      try {
+        db.run("CREATE TEMP TABLE later_run AS SELECT * FROM runs WHERE id = ?1", [run]);
+        db.run("UPDATE later_run SET id = ?1, state = 'failed', liveness = 'dead', started_at = started_at + 1000", [later]);
+        db.run("INSERT INTO runs SELECT * FROM later_run");
+      } finally {
+        db.close();
+      }
+      const resumed = await env.json(["resume", run]);
+      expect(resumed.code).not.toBe(0);
+      expect(resumed.reply.error).toMatchObject({ code: "run_not_active" });
+      expect((resumed.reply.error as { message: string }).message).toContain(later);
+      expect(env.run(run).state).toBe("cancelled");
+    },
+    { timeout: 60_000 },
   );
 
   test(

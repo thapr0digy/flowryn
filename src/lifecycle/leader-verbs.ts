@@ -169,6 +169,14 @@ function waitingReply(db: Db, result: HandlerResult): HandlerResult {
   return { data: { ...result.data, state, ...(why ? { rule: why.rule } : {}) }, hints };
 }
 
+/** A later run of the same task, or at the same worktree path: the worktree on disk is that run's, not this one's. */
+function newerRun(db: ReadCtx["db"], run: RunRow): string | null {
+  const row = db
+    .query("SELECT id FROM runs WHERE id != ?1 AND (task_id = ?2 OR worktree_path = ?3) AND (started_at > ?4 OR (started_at = ?4 AND id > ?1)) LIMIT 1")
+    .get(run.id, run.task_id, run.worktree_path, run.started_at) as { id: string } | null;
+  return row?.id ?? null;
+}
+
 /**
  * A run whose dead worker can be resumed from its stored session. A cancelled
  * run is resumed in place too (docs/notes/2026-11-01-flowryn-survive-a-xa.md):
@@ -179,6 +187,8 @@ function resumable(db: ReadCtx["db"], target: string): RunRow {
   if (!run) throw new FlowrynError("not_found", `no run or task ${target}`);
   if (run.state === "cleaned") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is ${run.state}`);
   if (run.cleanup === "done") throw new FlowrynError("run_not_active", `the run for ${run.task_id} is cleaned up: its worktree is gone`, `dispatch ${run.task_id} again`);
+  const newer = newerRun(db, run);
+  if (newer) throw new FlowrynError("run_not_active", `run ${run.id} of ${run.task_id} was superseded by run ${newer}`, `flowryn show ${run.task_id}`);
   if (run.state === "cancelled") {
     if (isDropped(db, run.task_id)) throw new FlowrynError("run_not_active", `${run.task_id} was dropped after its run was cancelled`, `flowryn show ${run.task_id}`);
     if (!existsSync(run.worktree_path)) throw new FlowrynError("run_not_active", `the cancelled run for ${run.task_id} has no worktree at ${run.worktree_path}`, `dispatch ${run.task_id} again`);

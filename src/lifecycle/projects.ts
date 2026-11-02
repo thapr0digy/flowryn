@@ -245,10 +245,7 @@ const projectSet: VerbSpec = {
     if (!current) throw new FlowrynError("not_found", `no project ${id}`, "flowryn project list");
     const updates: Partial<ProjectRow> = {};
     const moved = prepared as RepoFacts | null;
-    if (moved) {
-      requireSameRepository(ctx.db, current, moved);
-      updates.path = moved.path;
-    }
+    if (moved) updates.path = moved.path;
     const mode = oneOf(stringArg(args, "mode"), DELIVERY_MODES, "mode");
     if (mode) updates.delivery_mode = mode;
     const yolo = onOff(stringArg(args, "yolo"), "yolo");
@@ -275,6 +272,7 @@ const projectSet: VerbSpec = {
       throw new FlowrynError("bad_args", "nothing to change", `flags: ${[...Object.keys(SETTABLE), "path"].map((f) => `--${f}`).join(" ")}`);
     }
     const next = { ...current, ...updates };
+    if (moved) requireSameRepository(ctx.db, next, moved);
     requireNotesLocal(next.kind, next.delivery_mode, id);
     if (next.repo_url === "" && next.delivery_mode !== "local-only") {
       throw new FlowrynError("invalid_project", `project ${id} has no remote, so its mode must stay local-only`, "pass --repo-url too");
@@ -312,12 +310,12 @@ const projectSet: VerbSpec = {
   },
 };
 
-/** A new path for a project must be the same repository: the same origin, and no other project's checkout. */
-function requireSameRepository(db: Db, current: ProjectRow, moved: RepoFacts): void {
-  const other = db.query("SELECT id FROM projects WHERE path = ?1 AND id != ?2").get(moved.path, current.id) as { id: string } | null;
+/** A new path for a project must be the same repository: the origin its remote will be (this call's --repo-url, else the stored one), and no other project's checkout. */
+function requireSameRepository(db: Db, project: ProjectRow, moved: RepoFacts): void {
+  const other = db.query("SELECT id FROM projects WHERE path = ?1 AND id != ?2").get(moved.path, project.id) as { id: string } | null;
   if (other) throw new FlowrynError("already_exists", `${moved.path} is already project ${other.id}`);
-  if (current.repo_url !== "" && moved.repoUrl && normalizeRemote(moved.repoUrl) !== normalizeRemote(current.repo_url)) {
-    throw new FlowrynError("invalid_project", `${moved.path}'s origin is ${moved.repoUrl}, not project ${current.id}'s ${current.repo_url}`, "give the path of the same repository's checkout");
+  if (project.repo_url !== "" && moved.repoUrl && normalizeRemote(moved.repoUrl) !== normalizeRemote(project.repo_url)) {
+    throw new FlowrynError("invalid_project", `${moved.path}'s origin is ${moved.repoUrl}, not project ${project.id}'s ${project.repo_url}`, "give the path of the same repository's checkout");
   }
 }
 
