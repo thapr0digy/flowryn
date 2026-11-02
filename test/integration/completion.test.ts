@@ -82,8 +82,8 @@ describe("completion values", () => {
     expect((await values("task")).lines).toEqual(["api-w1:fix the api", "site-p1:the site: header"]);
     expect((await values("decision")).lines).toEqual(["q1:which db?", "q3:which colour?"]);
     expect((await values("todo")).lines).toEqual(["bank-a1:call the bank"]);
-    expect(ids((await values("workflow")).lines)).toEqual(["feature", "feature-ui", "fix", "scout"]);
-    expect(ids((await values("stage")).lines)).toEqual(["design", "build", "ship", "qa", "investigate"]);
+    expect(ids((await values("workflow")).lines)).toEqual(["feature", "feature-ui", "fix", "scout", "draft"]);
+    expect(ids((await values("stage")).lines)).toEqual(["design", "build", "ship", "qa", "investigate", "draft", "final"]);
     expect(ids((await values("account")).lines)).toEqual(expect.arrayContaining(["claude-work", "claude-personal"]));
   });
 

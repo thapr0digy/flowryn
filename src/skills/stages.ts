@@ -6,7 +6,7 @@ import { DESIGN_TEMPLATE, DESIGN_TEMPLATE_FILE, DESIGN_TLDR_WORDS_MAX, DESIGN_VI
 import { QA_CARD_WORDS_MAX, QA_TEMPLATE, QA_TEMPLATE_FILE } from "./qa-template.ts";
 
 /**
- * The three stage skills (design section 11): Flowryn owns when and whether
+ * The stage skills (design section 11; the draft one is notes projects'): Flowryn owns when and whether
  * a stage runs; these hold how. Each has a description of at most 60 tokens
  * (always loaded) and a body of at most 1.5k tokens (read on demand), plus
  * any files it names (the design and QA pages' templates), written next to it. The
@@ -92,6 +92,24 @@ Rules:
 - A question only the user can answer: write \`$FLOWRYN_REPORT_DIR/qa/questions.json\` in the design skill's shape (at most 5, each with options, a recommendation and what it blocks), mount \`<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>\` in evidence.html right after the card (\`data-lavish-live-reload-root\` on \`<html>\`), say "Answer the questions below." in the card's decisions entry, and add \`--questions-file $FLOWRYN_REPORT_DIR/qa/questions.json\` to stage done. Flowryn renders them as clickable options; never list them on the page as text. Decide the rest yourself.
 `;
 
+const DRAFT_BODY = `# Flowryn draft stage
+
+Goal: one file of prose (a plan, a note, a comparison, a letter) that the user reviews and approves in Lavish. This is a notes project: no code, no tests, no push. What the user approves is exactly what lands.
+
+1. Read the task file and the repository: its AGENTS.md, CLAUDE.md or README if it has one, and the notes near where this file belongs. Follow its conventions for names, folders and front matter.
+2. Write the draft as one Markdown (.md) or plain text (.txt) file in your worktree, at most 1 MB. Do not commit yet.
+3. Render the review page: \`$FLOWRYN_BIN draft render <file>\` (its path from the worktree's top level). Flowryn writes \`$FLOWRYN_REPORT_DIR/draft/draft.html\` from the file itself; never write or edit that page by hand (\`stage done\` renders the file again and refuses a page that differs). Raw HTML in the file is shown as text, and so is a link that is not http(s), mailto or relative, or an image that is not relative.
+4. Questions for the user: only what you truly cannot proceed without; decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/draft/questions.json\` in the flowryn-design skill's shape (at most 5, each with options, a recommendation and what it blocks; recorded choices under "decided"). The page already mounts the question widget; never list questions in the file as text.
+5. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/draft/draft.html\` prints its URL; pass it as it is. lavish-axi's \`status: opened\` is its session, not a browser tab.
+6. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/draft/draft.html [--questions-file $FLOWRYN_REPORT_DIR/draft/questions.json]\`, then end your turn. Flowryn listens on the page; do not hold a \`lavish-axi poll\` open. A steer brings the verdict: changes with the user's words (edit the file, render again, host it again, stage done again), or approved.
+7. After approval (the final stage): commit the file exactly as approved and \`$FLOWRYN_BIN deliver --local\`. A file that differs from the approved one, or any other file your branch changes, is refused; a change needs a new review.
+
+Rules:
+- Only the user passes a review gate. Never say or assume the draft was approved until the steer says so.
+- One file per task. Stay inside your worktree and your branch; never push.
+- Write in the user's voice for the reader the task names; mark guesses as guesses in the text.
+`;
+
 export const STAGE_SKILLS: readonly StageSkill[] = [
   {
     name: "flowryn-design",
@@ -109,6 +127,11 @@ export const STAGE_SKILLS: readonly StageSkill[] = [
     description: "Flowryn visual QA stage: run the app in labelled Docker environments, walk its flows with chrome-devtools-axi, and publish the evidence in Lavish. Use when your Flowryn stage is qa.",
     body: QA_BODY,
     files: { [QA_TEMPLATE_FILE]: QA_TEMPLATE },
+  },
+  {
+    name: "flowryn-draft",
+    description: "Flowryn draft stage (notes projects): write one Markdown or text file, render it as the Lavish review page, and deliver it locally exactly as approved. Use when your Flowryn stage is draft.",
+    body: DRAFT_BODY,
   },
 ];
 

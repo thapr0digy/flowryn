@@ -156,7 +156,7 @@ describe("stacked runs in the database", () => {
   let dir: string;
   let db: Db;
   const now = 9_000_000;
-  const project: ProjectRow = { id: "p", repo_url: "https://github.com/acme/web", path: "/p", default_branch: "main", delivery_mode: "direct-PR", yolo: 0, priority: 2, harness: "claude", workflow: "fix", autonomy: "plan" };
+  const project: ProjectRow = { id: "p", repo_url: "https://github.com/acme/web", path: "/p", default_branch: "main", delivery_mode: "direct-PR", yolo: 0, priority: 2, harness: "claude", workflow: "fix", autonomy: "plan", kind: "code" };
 
   function addRun(task: string, state: string, opts: { stackedOn?: string | null; base?: string | null; mode?: string; started?: number; id?: string } = {}): string {
     const id = opts.id ?? `r-${task}`;

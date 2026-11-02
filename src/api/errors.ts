@@ -47,6 +47,10 @@ export const ERROR_CODES = {
   daemon_unavailable: EXIT.unavailable,
   delivery_refused: EXIT.policy,
   design_page_invalid: EXIT.validation,
+  // notes drafts (docs/notes/2026-10-30-notes-projects-non-8d.md): the delivered file is not the approved one, a bad draft file or page
+  draft_changed: EXIT.policy,
+  draft_invalid: EXIT.validation,
+  draft_page_invalid: EXIT.validation,
   forge_unavailable: EXIT.failure,
   fork_pr: EXIT.policy,
   // a chat-answer grant names another item or choice than the command

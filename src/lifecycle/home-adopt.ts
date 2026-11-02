@@ -301,9 +301,9 @@ function adoptProjects(db: Db, config: FlowrynConfig, accounts: AccountsConfig, 
 
 function insertAdoptedProject(db: Db, p: ProjectRow & { import_source?: string | null }): void {
   db.query(
-    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, import_source)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
-  ).run(p.id, p.repo_url, p.path, p.default_branch, p.delivery_mode, p.yolo, p.priority, p.harness, p.workflow, p.autonomy, p.import_source ?? null);
+    `INSERT INTO projects (id, repo_url, path, default_branch, delivery_mode, yolo, priority, harness, workflow, autonomy, import_source, kind)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+  ).run(p.id, p.repo_url, p.path, p.default_branch, p.delivery_mode, p.yolo, p.priority, p.harness, p.workflow, p.autonomy, p.import_source ?? null, p.kind ?? "code");
 }
 
 function insertPolicy(db: Db, row: Row): void {

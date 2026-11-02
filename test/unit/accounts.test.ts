@@ -324,7 +324,7 @@ describe("plan phases' accounts", () => {
   const db = openDb(join(dir, "flowryn.db"));
   migrate(db);
   afterAll(() => db.close());
-  const site: ProjectRow = { ...project("site", join(PERSONAL, "site")), default_branch: "main", delivery_mode: "local-only", yolo: 0, priority: 2, workflow: "fix", autonomy: "manual" } as ProjectRow;
+  const site: ProjectRow = { ...project("site", join(PERSONAL, "site")), default_branch: "main", delivery_mode: "local-only", yolo: 0, priority: 2, workflow: "fix", autonomy: "manual", kind: "code" } as ProjectRow;
   insertProject(db, site);
   const file = (text: string, gateId: string) => fileWorkerPlan(db, c, { project: site, sourceTask: "site-design-a1", gateId, phases: parsePlan(text), workflow: "fix", now: 1 });
 

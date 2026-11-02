@@ -1,3 +1,4 @@
+import { brokenGitLink, relinkHint } from "../lifecycle/relink.ts";
 import { FlowrynError } from "../api/errors.ts";
 import type { Caller } from "../api/verbs.ts";
 import { hashToken } from "../api/auth.ts";
@@ -364,6 +365,11 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
       return { waived: null, alreadyMerged: true, localGreen: null };
     }
     if (pr.state === "closed") throw new FlowrynError("pr_closed", `${delivered.ref} was closed without being merged`, `flowryn show ${task}`);
+  }
+  if (facts.head === "") {
+    // git could not read the worktree's HEAD: its link to the repository is broken (a moved checkout), not a new head.
+    const broken = brokenGitLink(run.worktree_path);
+    throw new FlowrynError("head_moved", `cannot read ${run.worktree_path}'s head${broken ? `: its .git names ${broken}, which is gone` : ""}`, relinkHint(project, run.worktree_path));
   }
   if (facts.head !== delivered.head) {
     throw new FlowrynError("head_moved", `the head moved from ${delivered.head.slice(0, 8)} (delivered) to ${facts.head.slice(0, 8)}; the worker must deliver again`, `flowryn steer ${task} --body-file -`);

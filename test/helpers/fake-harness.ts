@@ -28,6 +28,8 @@
  *   FAKE: ignore-term                ignore SIGTERM, so only the exit's SIGKILL after the grace stops it
  *   FAKE: commit <file> <text...>    write <file> in the worktree and commit it
  *   FAKE: scratch <file> <text...>   write <file> in the worktree and leave it uncommitted
+ *   FAKE: uncommit <file>            remove <file> from the worktree and commit that
+ *   FAKE: rebase <branch>            rebase the run branch onto <branch> (a main that moved on)
  *   FAKE: push                       git push origin HEAD (the run branch)
  *   FAKE: pr <api> <owner/repo> [draft] [base:<branch>]  open a PR for the run branch on a fake GitHub (into main
  *                                    unless base: names another branch; base:@<file> reads the branch from
@@ -381,6 +383,21 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
         writeFileSync(join(WORKTREE, file), `${words.join(" ") || "a change"}\n`);
         await git(["add", "--", file]);
         await git(["commit", "-q", "-m", `fake: ${file}`]);
+      });
+      return "continue";
+    }
+    case "uncommit": {
+      const [file = "change.txt"] = rest;
+      await tool(async () => {
+        await git(["rm", "-q", "--", file]);
+        await git(["commit", "-q", "-m", `fake: remove ${file}`]);
+      });
+      return "continue";
+    }
+    case "rebase": {
+      const [onto = "main"] = rest;
+      await tool(async () => {
+        await git(["rebase", "-q", onto]);
       });
       return "continue";
     }

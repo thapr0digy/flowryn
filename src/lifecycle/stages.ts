@@ -26,6 +26,7 @@ import { getProject } from "./projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type PendingLaunch, type RunRow, type RunWithPolicy } from "./runs.ts";
 import { summarizeReview } from "./review-chat.ts";
 import { createSteer } from "./steers.ts";
+import { checkDraftPage, DRAFT_SKILL, draftPageDigest, type DraftFile } from "./draft.ts";
 
 /**
  * Workflow stages and gates (design section 11). A run moves through its
@@ -232,6 +233,8 @@ export interface GateRow {
   channel_item?: string | null;
   /** The run that carried this review on after its own run ended for good (src/lifecycle/review-revival.ts). */
   replaced_by?: string | null;
+  /** A draft review's page digest at `stage done` (src/lifecycle/draft.ts): it passes only while the page still shows that. */
+  draft_page?: string | null;
   approval_id: string | null;
   feedback: string | null;
   opened_at: number;
@@ -631,14 +634,26 @@ const stageDone: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  apply(ctx, args) {
+  // A draft stage's page must be its file rendered as the worktree holds it now; reading that asks git.
+  async prepare(ctx, args) {
+    const run = workerRun(ctx);
+    const pos = positionOf(ctx.db, run, run.kind);
+    if (pos.stage.skill !== DRAFT_SKILL || pos.stage.gate !== "review" || run.stage_state !== "active") return null;
+    const page = stringArg(args, "page");
+    if (page === undefined) throw new FlowrynError("draft_page_invalid", "a draft stage's review needs --page: the page $FLOWRYN_BIN draft render wrote", "$FLOWRYN_BIN draft render <file>");
+    const reportDir = reportDirFor(ctx.config(), run.task_id);
+    return checkDraftPage(ctx.delivery.git, run.worktree_path, checkReviewPage(page, reportDir, { widget: false }), reportDir);
+  },
+  apply(ctx, args, prepared) {
     const run = workerRun(ctx);
     const pos = positionOf(ctx.db, run, run.kind);
     const now = ctx.now();
+    const draft = prepared as DraftFile | null;
     if (run.stage_state === "waiting") throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} has not started yet; it waits for capacity`, "end your turn; a steer says when it starts");
     if (run.stage_state === "review") throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} is already waiting for its review`, "end your turn; a steer brings the verdict");
     if (run.stage_state === "done") throw new FlowrynError("wrong_stage", "you delivered already");
     if (pos.last) throw new FlowrynError("wrong_stage", `${pos.stage.id} is the last stage; it ends with your delivery`, run.kind === "scout" ? "$FLOWRYN_BIN deliver --report <path>" : "$FLOWRYN_BIN deliver");
+    if (pos.stage.skill === DRAFT_SKILL && pos.stage.gate === "review" && !draft) throw new FlowrynError("wrong_stage", "your stage changed while its draft was checked", "run stage done again");
     const review = stringArg(args, "review");
     const planText = stringArg(args, "plan");
     const page = stringArg(args, "page");
@@ -673,6 +688,8 @@ const stageDone: VerbSpec = {
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
       // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
       if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
+      // A draft review approves this file's exact bytes: the delivery must carry them (src/lifecycle/draft.ts).
+      if (draft) ctx.db.query("UPDATE gates SET draft_path = ?2, draft_blob = ?3, draft_page = ?4 WHERE id = ?1").run(gateId, draft.path, draft.blob, draftPageDigest(draft));
       const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, pagePath, questions, now) : [];
       let plan: string | null = null;
       if (planText !== undefined) {
@@ -680,7 +697,7 @@ const stageDone: VerbSpec = {
         if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
         plan = fileWorkerPlan(ctx.db, ctx.config(), { project, sourceTask: run.task_id, gateId, phases: parsePlan(planText), workflow: project.workflow, now });
       }
-      const event = appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, gate: gateId, review: gateReview, plan, questions: asked, via: ctx.via }, ts: now });
+      const event = appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, gate: gateId, review: gateReview, plan, questions: asked, via: ctx.via, ...(draft ? { draft: draft.path, blob: draft.blob } : {}) }, ts: now });
       appendEvent(ctx.db, { source: "cli", kind: "gate.opened", runId: run.id, taskId: run.task_id, payload: { gate: gateId, stage: pos.stage.id, kind: "review", review: gateReview, browser: browser.state }, ts: now });
       resolveRunItems(ctx.db, run.id, ["worker_idle"], "stage.done", now);
       const asking = asked.length > 0 ? ` with ${asked.length} question${asked.length === 1 ? "" : "s"} for you (${asked.join(", ")})` : "";

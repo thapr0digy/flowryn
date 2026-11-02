@@ -1,3 +1,4 @@
+import { brokenGitLink, relinkHint } from "./relink.ts";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
@@ -284,6 +285,8 @@ export class Launcher {
 
     const flowrynBin = await this.deps.flowrynBin();
     const gitAccess = run.kind === "ship" ? await shipGitAccess((args) => this.deps.git(args), worktree) : { writable: [], readOnly: [] };
+    // Read fresh from the worktree at every launch; a link git cannot follow would leave the worker unable to commit.
+    if (run.kind === "ship" && gitAccess.writable.length === 0) throw new Error(`git cannot read ${worktree}'s git dir, so its worker could not commit; ${relinkHint(project, worktree)}`);
     const toolkit = configStaticLayers(config);
     const context: RunContext = {
       runId: run.id,
@@ -428,7 +431,10 @@ export class Launcher {
     if (existsSync(path)) {
       const top = await this.deps.git(["-C", path, "rev-parse", "--show-toplevel"]);
       const branch = await this.deps.git(["-C", path, "branch", "--show-current"]);
-      if (top.exitCode !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(path)) throw new Error(`${path} exists but is not a git worktree root`);
+      if (top.exitCode !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(path)) {
+        const broken = brokenGitLink(path);
+        throw new Error(broken ? `${path}'s .git names ${broken}, which is gone; ${relinkHint(project, path)}` : `${path} exists but is not a git worktree root`);
+      }
       if (branch.stdout.trim() !== run.branch) throw new Error(`${path} is on ${branch.stdout.trim() || "a detached HEAD"}, not ${run.branch}`);
       return realpathSync(path);
     }

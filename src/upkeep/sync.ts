@@ -12,7 +12,8 @@ import type { GitRunner } from "../policy/landed.ts";
  * checkout to it, and only when that cannot lose or rewrite anything: the
  * checkout is on its default branch, has no tracked changes, and its branch
  * is behind origin's (never ahead or diverged). Git's own refusal (an
- * untracked file in the way, a lock) is a skip too. Plain git, no model.
+ * untracked file in the way, a lock) is a skip too. It never takes the
+ * checkout's index lock for a look (`--no-optional-locks`). Plain git, no model.
  */
 
 /** Skips you should hear about: the checkout stays stale until you act. */
@@ -43,7 +44,8 @@ export async function syncPrimary(git: GitRunner, project: ProjectRow): Promise<
   const remote = (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}^{commit}`], cwd)).stdout.trim();
   if (!local || !remote) return { outcome: "skipped", reason: "no_branch", detail: `cannot resolve ${branch} or origin/${branch}` };
   if (local === remote) return { outcome: "current", at: local };
-  const status = await git(["status", "--porcelain", "--untracked-files=no"], cwd);
+  // The checkout is yours: a status that refreshed the index would take its lock and fail a commit you make at that moment.
+  const status = await git(["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"], cwd);
   if (status.code !== 0 || status.stdout.trim() !== "") return { outcome: "skipped", reason: "dirty", detail: "it has uncommitted changes" };
   if ((await git(["merge-base", "--is-ancestor", local, remote], cwd)).code !== 0) {
     const ahead = (await git(["merge-base", "--is-ancestor", remote, local], cwd)).code === 0;
@@ -60,15 +62,26 @@ function itemKey(project: ProjectRow): string {
   return `project:${project.id}`;
 }
 
+/** A local-only project lands into its local default branch and never pushes, so being ahead of origin is where it should be. */
+function expectedAhead(project: ProjectRow, sync: SyncOutcome): boolean {
+  return project.delivery_mode === "local-only" && sync.outcome === "skipped" && sync.reason === "ahead";
+}
+
 /**
  * Record a sync: a fast-forward is an event; a skip you should hear about
  * opens one `checkout_unsynced` P1 info item per project (replaced when the
- * reason changes), closed once the checkout is in step again. Off its default
- * branch is left to dispatch's `checkout_tangle`; a missing origin or a failed
- * fetch is only logged. Call inside a transaction; returns a log line or null.
+ * reason changes), closed once the checkout is in step again. A local-only
+ * project only ahead of origin is in step too (its landings are never
+ * pushed). Off its default branch is left to dispatch's `checkout_tangle`; a
+ * missing origin or a failed fetch is only logged. Call inside a transaction;
+ * returns a log line or null.
  */
 export function recordSync(db: Db, project: ProjectRow, sync: SyncOutcome, now: number): string | null {
   const key = itemKey(project);
+  if (expectedAhead(project, sync)) {
+    resolveItems(db, "checkout_unsynced", key, "local-only: ahead of origin is expected", now);
+    return null;
+  }
   if (sync.outcome === "current" || sync.outcome === "synced") {
     resolveItems(db, "checkout_unsynced", key, sync.outcome === "synced" ? "upkeep.synced" : "in step with origin", now);
     if (sync.outcome === "current") return null;
