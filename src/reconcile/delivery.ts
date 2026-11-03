@@ -4,7 +4,7 @@ import { appendEvent } from "../db/events.ts";
 import type { ChecksSummary, PullRequest } from "../forge/types.ts";
 import { carryDelivery, deliveredOf, prEvidenceFrom, recordPrEvidence, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun } from "../lifecycle/landing.ts";
-import { askedCiWait } from "../lifecycle/ci-wait.ts";
+import { askedCiWait, closeCiWaits } from "../lifecycle/ci-wait.ts";
 import { isTerminal, recordEvidence, runBase, taskTitle, type RunRow, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { pipelineNeedsLastStage, positionOf } from "../lifecycle/stages.ts";
@@ -126,6 +126,8 @@ export function sendConflictBack(db: Db, run: RunWithPolicy, delivered: Delivere
     (e) => (JSON.parse(e.payload) as { head?: string | null }).head ?? null,
   );
   const base = conflict.base || "main";
+  // The nudge or its pr_conflict P1 answers the PR's conflict; a CI-wait question on the same ship is moot from here.
+  closeCiWaits(db, run, `superseded by the conflict nudge: the PR conflicts with ${base}`, now, null, "conflict");
   if (conflictAction(nudges, delivered.head) === "ask") {
     if (!findOpenRunItem(db, "pr_conflict", run.id)) {
       const event = appendEvent(db, { source: conflict.source, kind: "pr.conflict", runId: run.id, taskId: run.task_id, payload: { pr: conflict.url, head: conflict.head, nudges: nudges.length }, ts: now });
@@ -359,9 +361,19 @@ export type ConflictCover = "conflict_nudged" | "pr_conflict";
  */
 export function conflictCovered(db: Db, run: Pick<RunRow, "id" | "branch">, nm: NmRun | null): ConflictCover | null {
   if (!nm || nm.branch !== run.branch || !isConflictGate(nm)) return null;
-  const head = nm.headSha || nm.head;
+  return conflictActedOn(db, run.id, nm.headSha || nm.head);
+}
+
+/**
+ * The conflict nudge has acted on this head (full or short): the ship was
+ * sent back to merge its base (`conflict_nudged`), or the nudges were spent
+ * and `pr_conflict` asks you (`pr_conflict`). A pipeline still validating
+ * that head validates a conflicting PR the worker is told to replace, so the
+ * CI-wait watchdog asks nothing about it. Null with no head, or none acted on.
+ */
+export function conflictActedOn(db: Db, runId: string, head: string): ConflictCover | null {
   if (!head) return null;
-  const events = db.query("SELECT kind, payload FROM events WHERE run_id = ?1 AND kind IN ('run.conflict_nudged', 'pr.conflict') ORDER BY seq DESC").all(run.id) as { kind: string; payload: string }[];
+  const events = db.query("SELECT kind, payload FROM events WHERE run_id = ?1 AND kind IN ('run.conflict_nudged', 'pr.conflict') ORDER BY seq DESC").all(runId) as { kind: string; payload: string }[];
   for (const e of events) {
     const at = (JSON.parse(e.payload) as { head?: unknown }).head;
     if (typeof at === "string" && at !== "" && (at.startsWith(head) || head.startsWith(at))) return e.kind === "pr.conflict" ? "pr_conflict" : "conflict_nudged";
