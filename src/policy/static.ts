@@ -37,7 +37,6 @@ export const DENIED_BASH_PREFIXES = [
   "hub",
   "jira",
   "jira-cli",
-  "acli jira",
   "git worktree add",
   "git worktree remove",
   "git worktree move",

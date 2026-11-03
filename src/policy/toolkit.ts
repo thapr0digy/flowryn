@@ -52,7 +52,7 @@ export interface ToolkitPaths {
 export const TOOL_MAP = [
   "Tools (Flowryn blocks the other ways):",
   "- GitHub: gh-axi (not gh, not curl api.github.com).",
-  "- Jira: jira-axi. Browser: chrome-devtools-axi (a project's playwright test is fine).",
+  "- Jira: jira-axi; for an option jira-axi lacks, acli jira. Browser: chrome-devtools-axi (a project's playwright test is fine).",
   "- SQLite reads: sqlite-axi. Git worktrees: treehouse.",
   "- A project's backlog.md and todos.md: tasks-axi. Flowryn's own backlog: flowryn verbs.",
   "- Visuals for review: lavish-axi.",
@@ -158,7 +158,7 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
     case "worktree":
       return "use treehouse get --lease --json and treehouse return <path>. A Flowryn worker already has its worktree; for another, ask your leader.";
     case "jira":
-      return "use jira-axi.";
+      return "use jira-axi; for an option jira-axi lacks, acli jira.";
     case "browser":
       return "use chrome-devtools-axi (a project's own playwright test is fine).";
     case "tasks":
@@ -332,7 +332,7 @@ function commandVerdict(c: Command, call: ToolCall, paths: ToolkitPaths): Toolki
     const sub = gitSubcommand(args);
     if (sub && sub.name === "worktree" && ["add", "remove", "prune", "move"].includes(sub.rest[0] ?? "")) return deny("worktree", call, `\`git worktree ${sub.rest[0]}\``);
   }
-  if (c.name === "jira" || c.name === "jira-cli" || (c.name === "acli" && args[0] === "jira")) return deny("jira", call, `\`${shown}\``);
+  if (c.name === "jira" || c.name === "jira-cli") return deny("jira", call, `\`${shown}\``);
   const browser = browserHit(c, args);
   if (browser) return deny("browser", call, browser);
   if (c.name === "tasks-axi") {

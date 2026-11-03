@@ -190,13 +190,13 @@ describe("rule: worktree", () => {
 });
 
 describe("rule: jira", () => {
-  test.each(["curl https://acme.atlassian.net/rest/api/3/issue/X-1", "curl -u a:b acme.atlassian.net/wiki", "curl https://jira.acme.com/rest/api/2/search", "curl https://jira.acme.com/rest/agile/1.0/board", "jira issue list", "acli jira workitem view X-1"])("denies %s", (cmd) => {
+  test.each(["curl https://acme.atlassian.net/rest/api/3/issue/X-1", "curl -u a:b acme.atlassian.net/wiki", "curl https://jira.acme.com/rest/api/2/search", "curl https://jira.acme.com/rest/agile/1.0/board", "jira issue list", "jira-cli issue list"])("denies %s", (cmd) => {
     const v = bash(cmd);
     expect(v?.rule).toBe("jira");
-    expect(v?.reason).toContain("jira-axi");
+    expect(v?.reason).toContain("use jira-axi; for an option jira-axi lacks, acli jira.");
   });
 
-  test.each(["jira-axi issue view X-1", "curl http://localhost:3000/rest/api/users", "acli --help"])("allows %s", (cmd) => {
+  test.each(["jira-axi issue view X-1", "curl http://localhost:3000/rest/api/users", "acli --help", "acli jira workitem view X-1", "acli jira workitem search --jql 'project = X' --fields key,summary"])("allows %s", (cmd) => {
     expect(ruleOf(cmd)).toBeNull();
   });
 

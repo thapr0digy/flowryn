@@ -15,7 +15,7 @@ export const TOOL_NAMES = [
   "no_mistakes",
   "docker",
   "lavish_axi",
-  // The toolkit (src/policy/toolkit.ts): the one tool for each job; acli is jira-axi's dependency.
+  // The toolkit (src/policy/toolkit.ts): the one tool for each job; acli is jira-axi's dependency and its fallback for an option jira-axi lacks.
   "gh_axi",
   "jira_axi",
   "acli",
