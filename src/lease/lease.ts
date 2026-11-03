@@ -151,10 +151,14 @@ export function heartbeat(db: Db, sessionId: string, now: number): void {
 export type LeaseState = "vacant" | "held" | "stale" | "mine";
 
 /**
- * The lease as a session starting up sees it. Stale needs both: no heartbeat
- * for stale_ms and the holder's process proven gone. A live but silent
+ * The lease as a session sees it, at its start and on its later prompts. Stale
+ * needs the holder's process proven gone (the recorded pid + start + exe no
+ * longer running) and, from another pane, no heartbeat for stale_ms as well. A
+ * session in the holder's own Herdr pane needs no wait: a pane runs one
+ * harness, so a new one there means the old one is gone. A live but silent
  * holder (a sleeping laptop) is never taken over automatically, and a holder
- * whose process was never recorded, or that ps cannot read, cannot be proven gone.
+ * whose process was never recorded, or that ps cannot read, cannot be proven
+ * gone. ps runs only when the heartbeat is old enough or the pane matches.
  */
 export async function leaseState(db: Db, sessionId: string, now: number, staleMs: number, ps?: PsRunner): Promise<{ state: LeaseState; epoch: number }> {
   const lease = leaseOfSession(db, sessionId);
@@ -164,10 +168,37 @@ export async function leaseState(db: Db, sessionId: string, now: number, staleMs
   const holder = getSession(db, lease.session_id);
   if (!holder || holder.ended_at !== null) return { state: "vacant", epoch: lease.epoch };
   const silent = lease.heartbeat_at === null || now - lease.heartbeat_at >= staleMs;
-  if (!silent) return { state: "held", epoch: lease.epoch };
-  if (holder.proc_pid === null || holder.proc_start === null || holder.proc_exe === null) return { state: "held", epoch: lease.epoch };
-  const alive = await aliveOrUnknown({ pid: holder.proc_pid, start: holder.proc_start, exe: holder.proc_exe }, ps);
-  return { state: alive === false ? "stale" : "held", epoch: lease.epoch };
+  if (!silent && !sharesPane(getSession(db, sessionId), holder)) return { state: "held", epoch: lease.epoch };
+  return { state: (await processGone(holder, ps)) ? "stale" : "held", epoch: lease.epoch };
+}
+
+function sharesPane(a: Pick<LeaderSessionRow, "pane_id"> | null, b: Pick<LeaderSessionRow, "pane_id">): boolean {
+  return a !== null && a.pane_id !== null && a.pane_id === b.pane_id;
+}
+
+/** True only when the session's recorded harness process is proven gone; no record, or ps unreadable, is not proof. */
+async function processGone(session: LeaderSessionRow, ps?: PsRunner): Promise<boolean> {
+  if (session.proc_pid === null || session.proc_start === null || session.proc_exe === null) return false;
+  return (await aliveOrUnknown({ pid: session.proc_pid, start: session.proc_start, exe: session.proc_exe }, ps)) === false;
+}
+
+/**
+ * The other open sessions in this session's pane whose harness process is
+ * proven gone (a restart killed it before its exit hook ran), so the caller can
+ * close them. A lease holder is left to its scope's stale check and claim.
+ */
+export async function deadPaneSessions(db: Db, sessionId: string, ps?: PsRunner): Promise<string[]> {
+  const session = getSession(db, sessionId);
+  if (!session?.pane_id) return [];
+  const peers = db
+    .query(
+      `SELECT * FROM leader_sessions WHERE pane_id = ?1 AND session_id != ?2 AND ended_at IS NULL AND proc_pid IS NOT NULL
+         AND session_id NOT IN (SELECT session_id FROM leader_lease WHERE session_id IS NOT NULL) ORDER BY started_at`,
+    )
+    .all(session.pane_id, sessionId) as LeaderSessionRow[];
+  const dead: string[] = [];
+  for (const peer of peers) if (await processGone(peer, ps)) dead.push(peer.session_id);
+  return dead;
 }
 
 export interface Claimed {

@@ -27,7 +27,7 @@ import { awayConfig } from "../config/leader.ts";
 import { acceptedWithoutCi } from "../lifecycle/ci-wait.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { appendEvent } from "../db/events.ts";
-import { claim, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, UNCONFIRMED_SCOPE, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
+import { claim, deadPaneSessions, getLease, getSession, heartbeat, closeSession, isHolder, leaseState, UNCONFIRMED_SCOPE, type Claimed, type LeaderSessionRow } from "../lease/lease.ts";
 import { refScope, sees, sessionLens, type ScopeLens } from "./scope.ts";
 import { confirmLogin, type ReportedLogin } from "./login.ts";
 import { transcriptShowsInterrupt, transcriptSize } from "../lifecycle/control.ts";
@@ -288,9 +288,50 @@ function brief(ctx: HandlerCtx, s: LeaderSessionRow, turn: number, now: number):
 
 // --- session start ------------------------------------------------------------------------
 
-export async function prepareSessionStart(ctx: HandlerCtx): Promise<{ state: string; epoch: number }> {
+/** The lease as read before a hook's transaction, and the dead sessions in the caller's pane. */
+export interface LeaseCheck {
+  state: string;
+  epoch: number;
+  dead: string[];
+}
+
+export async function prepareSessionStart(ctx: HandlerCtx): Promise<LeaseCheck> {
   const s = leaderSession(ctx);
-  return leaseState(ctx.db, s.session_id, ctx.now(), ctx.attention.timing().stale_ms, ctx.attention.ps);
+  const ps = ctx.attention.ps;
+  const lease = await leaseState(ctx.db, s.session_id, ctx.now(), ctx.attention.timing().stale_ms, ps);
+  return { ...lease, dead: await deadPaneSessions(ctx.db, s.session_id, ps) };
+}
+
+/**
+ * A read-only session re-runs the stale check on its later prompts, so it
+ * takes over once the holder is proven gone without anyone running `leader
+ * claim`. Null for the holder and for a session in no scope. leaseState runs
+ * ps only when the holder's heartbeat is old enough or the panes match.
+ */
+export async function prepareLeaseRecheck(ctx: HandlerCtx): Promise<LeaseCheck | null> {
+  const s = leaderSession(ctx);
+  if (s.scope === UNCONFIRMED_SCOPE || isHolder(ctx.db, s.session_id)) return null;
+  const lease = await leaseState(ctx.db, s.session_id, ctx.now(), ctx.attention.timing().stale_ms, ctx.attention.ps);
+  return lease.state === "stale" ? { ...lease, dead: [] } : null;
+}
+
+/**
+ * Claim a lease the check found stale, under the epoch guard (a claim since
+ * the check moved the epoch, and this one stands down), then close the holder
+ * it replaced: its process is proven gone. Inside a transaction.
+ */
+function takeOverStale(ctx: HandlerCtx, s: LeaderSessionRow, check: LeaseCheck | null, now: number): Claimed | null {
+  if (!check || check.state !== "stale" || s.scope === UNCONFIRMED_SCOPE) return null;
+  const lease = getLease(ctx.db, s.scope);
+  if (!lease.session_id || lease.session_id === s.session_id || check.epoch !== lease.epoch) return null;
+  const claimed = claim(ctx.db, s.session_id, "stale", now);
+  if (claimed.previous) closeSession(ctx.db, claimed.previous, "process gone", now);
+  return claimed;
+}
+
+/** Close the sessions whose harness process was proven gone, unless one has taken a lease since. Inside a transaction. */
+function closeDead(ctx: HandlerCtx, sessions: readonly string[], now: number): void {
+  for (const id of sessions) if (!isHolder(ctx.db, id)) closeSession(ctx.db, id, "process gone", now);
 }
 
 /**
@@ -317,11 +358,12 @@ function releaseScope(ctx: HandlerCtx, s: LeaderSessionRow, problem: string, now
 
 /**
  * A leader session started, resumed, cleared or compacted. It claims the
- * lease when it is vacant or stale; the holder gets the briefing (which
+ * lease when it is vacant or stale (closing the stale holder), and closes the
+ * other sessions in its pane whose process is proven gone; the holder gets the briefing (which
  * re-lists every open actionable item, so it also re-grounds a compacted
  * session), anyone else one read-only banner line.
  */
-export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: { state: string; epoch: number }, login: ReportedLogin | null = null): HandlerResult {
+export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: LeaseCheck, login: ReportedLogin | null = null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
   const source = input.source ?? "startup";
@@ -344,7 +386,8 @@ export function sessionStart(ctx: HandlerCtx, input: LeaderHookInput, prepared: 
     const lease = getLease(ctx.db, s.scope);
     const holderRow = lease.session_id ? getSession(ctx.db, lease.session_id) : null;
     if (!lease.session_id || !holderRow || holderRow.ended_at !== null) claimed = claim(ctx.db, s.session_id, "vacant", now);
-    else if (lease.session_id !== s.session_id && prepared.state === "stale" && prepared.epoch === lease.epoch) claimed = claim(ctx.db, s.session_id, "stale", now);
+    else claimed = takeOverStale(ctx, s, prepared, now);
+    closeDead(ctx, prepared.dead, now);
   }
   heartbeat(ctx.db, s.session_id, now);
   const holder = isHolder(ctx.db, s.session_id);
@@ -394,9 +437,12 @@ export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): 
  * (M0 p04). A prompt you typed makes you active and gets the P1 digest.
  * A Claude prompt that arrives while a turn runs joins that turn (takenMidTurn).
  */
-export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null): HandlerResult {
+export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null, recheck: LeaseCheck | null = null): HandlerResult {
   const s = leaderSession(ctx);
   const now = ctx.now();
+  // A read-only session whose holder is proven gone takes over here (prepareLeaseRecheck); its briefing rides below.
+  const claimed = takeOverStale(ctx, s, recheck, now);
+  const taken = claimed?.previous ? { previous: claimed.previous } : {};
   const notice = isNotificationPrompt(input.prompt);
   // Fail-closed (design section 7): your next message also kills a declined attempt the Claude
   // leader is still holding, the same as the next Bash call does.
@@ -412,7 +458,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
     if (busyNow(s, now)) refreshBusy(ctx, s, now);
     else startTurn(ctx, s, now, "run");
     heartbeat(ctx.db, s.session_id, now);
-    return { data: {} };
+    return { data: taken };
   }
   const source = input.source ?? "prompt";
   const continues = takenMidTurn(ctx, s, now);
@@ -430,7 +476,7 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
   heartbeat(ctx.db, s.session_id, now);
   if (late) {
     appendEvent(ctx.db, { source: "hook", kind: "leader.digest_late", payload: { session: s.session_id, turn }, ts: now });
-    return { data: {} };
+    return { data: taken };
   }
   const lines: string[] = [];
   if (s.banner) {
@@ -456,8 +502,8 @@ export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number
       lines.push(digest.text);
     }
   }
-  if (lines.length === 0) return { data: {} };
-  return { data: deadline === null ? { context: lines.join("\n") } : { context: lines.join("\n"), deadline } };
+  if (lines.length === 0) return { data: taken };
+  return { data: deadline === null ? { ...taken, context: lines.join("\n") } : { ...taken, context: lines.join("\n"), deadline } };
 }
 
 /**
