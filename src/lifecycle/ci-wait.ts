@@ -165,10 +165,12 @@ export function openCiWait(db: Db, run: RunRow, project: string, stall: CiStall,
 /**
  * Close the run's open CI-wait decisions unanswered: the wait ended before
  * the user answered (CI started, the pipeline moved on or ended, the run left
- * validation), or the policy follow-through's steer superseded it (`via`
- * policy). No steer: the worker never asked. Call inside a transaction.
+ * validation), the policy follow-through's steer superseded it (`via`
+ * policy), or the PR-conflict nudge did (`via` conflict). Its items resolve
+ * in the same transaction, so the leader never relays a moot question. No
+ * steer: the worker never asked. Call inside a transaction.
  */
-export function closeCiWaits(db: Db, run: Pick<RunRow, "id" | "task_id">, why: string, now: number, keepNmRun: string | null = null, via: "watchdog" | "policy" = "watchdog"): string[] {
+export function closeCiWaits(db: Db, run: Pick<RunRow, "id" | "task_id">, why: string, now: number, keepNmRun: string | null = null, via: "watchdog" | "policy" | "conflict" = "watchdog"): string[] {
   const open = db.query("SELECT id, key FROM decisions WHERE origin = ?1 AND run_id = ?2 AND state = 'open'").all(CI_WAIT_ORIGIN, run.id) as { id: string; key: string }[];
   const closed: string[] = [];
   for (const d of open) {

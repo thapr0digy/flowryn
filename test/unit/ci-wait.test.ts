@@ -5,13 +5,17 @@ import { join } from "node:path";
 import { parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_VALIDATION, validationConfig } from "../../src/config/validation.ts";
 import { getMeta, migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import type { ChecksSummary, Forge, PullRequest } from "../../src/forge/types.ts";
 import { ForgeError } from "../../src/forge/types.ts";
 import { acceptedWithoutCi, CI_WAIT_ORIGIN, CI_WAIT_RESERVED, ciWaitMinutes, ciWaitSteer, declaresNoCi } from "../../src/lifecycle/ci-wait.ts";
 import { answerDecision } from "../../src/lifecycle/decision-verbs.ts";
 import { getDecision, type DecisionRow } from "../../src/lifecycle/decisions.ts";
+import { deliveredOf, recordDelivery } from "../../src/lifecycle/delivery.ts";
+import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { parseNmStatus } from "../../src/policy/nomistakes.ts";
+import { sendConflictBack } from "../../src/reconcile/delivery.ts";
 import { DeliveryWatcher } from "../../src/watch/delivery.ts";
 
 /**
@@ -108,6 +112,15 @@ function openItems(): { kind: string; decision_id: string | null; line: string }
 
 function steers(): string[] {
   return (db.query("SELECT body FROM messages WHERE run_id = 'r1' ORDER BY created_at, id").all() as { body: string }[]).map((m) => m.body);
+}
+
+/** The conflict nudge sent the ship back at `head` (its run.conflict_nudged event, as sendConflictBack writes it). */
+function nudgedAt(head: string): void {
+  tx(db, () => appendEvent(db, { source: "github", kind: "run.conflict_nudged", runId: "r1", taskId: "t1", payload: { ref: PR, head, pr: PR, base: "main", nudge: 1 }, ts: now }));
+}
+
+function conflicting(): PullRequest {
+  return { number: 7, url: PR, title: "t", state: "open", draft: false, headSha: "abc0123456789", headRef: "b", headRepo: "acme/web", baseRef: "main", mergeSha: null, mergedAt: null, mergeable: false };
 }
 
 function answer(id: string, choice: string, words: string | null = null): void {
@@ -306,6 +319,48 @@ describe("the CI-wait watchdog", () => {
     await watcher().pass();
     expect(ciWaits()[0]!.state).toBe("dismissed");
     expect(openItems()).toEqual([]);
+  });
+
+  test("assumption: a CI wait on a head the conflict nudge already sent back is moot: no question opens (the nudge wins)", async () => {
+    // As on 2026-10-30: the nudge sent the ship back at head abc…, and the old pipeline, still in `ci` on that head, read as a 69-min wait a second later.
+    nudgedAt("abc0123456789");
+    nmSays(CI_WAIT("1h9m"));
+    await watcher().pass();
+    expect(ciWaits()).toEqual([]);
+    expect(openItems().filter((i) => i.kind === "worker_question")).toEqual([]);
+  });
+
+  test("assumption: the pipeline's head names the nudged head (short or full): a pipeline on a new head after the merge is a new stall and is asked about", async () => {
+    nudgedAt("abc0123456789");
+    nmSays(CI_WAIT("1h10m", "01NMAFTERMERGE").replace("head: abc", "head: def"));
+    await watcher().pass();
+    expect(ciWaits()).toHaveLength(1);
+  });
+
+  test("a spent nudge (pr_conflict asks you) also wins over a CI-wait question on that head", async () => {
+    tx(db, () => appendEvent(db, { source: "github", kind: "pr.conflict", runId: "r1", taskId: "t1", payload: { pr: PR, head: "abc0123456789", nudges: 3 }, ts: now }));
+    nmSays(CI_WAIT("2h"));
+    await watcher().pass();
+    expect(ciWaits()).toEqual([]);
+  });
+
+  test("assumption: an open CI-wait question closes, with its leader item, in the conflict nudge's own transaction", async () => {
+    nmSays(CI_WAIT("2h"));
+    await watcher().pass();
+    const [d] = ciWaits();
+    expect(openItems().map((i) => i.decision_id)).toContain(d!.id);
+    tx(db, () => recordDelivery(db, getRunWithPolicy(db, "r1")!, { kind: "pr", pr: conflicting(), checks: { state: "none", checks: [] }, url: PR }, "socket", now));
+    tx(db, () => db.query("UPDATE runs SET stage_state = 'done' WHERE id = 'r1'").run());
+    const run = getRunWithPolicy(db, "r1")!;
+    expect(run.state).toBe("ready");
+    const sent = tx(db, () => sendConflictBack(db, run, deliveredOf(db, "t1")!, { url: PR, base: "main", head: "abc0123456789", source: "github" }, "t", now));
+    expect(sent).toBe(true);
+    // No watcher pass between: the nudge alone closed it.
+    expect(getDecision(db, d!.id)).toMatchObject({ state: "dismissed", answered_via: "conflict" });
+    expect(openItems().filter((i) => i.decision_id === d!.id)).toEqual([]);
+    expect(steers().some((m) => m.includes(d!.id))).toBe(false);
+    const [dismissed] = db.query("SELECT payload FROM events WHERE kind = 'decision.dismissed'").all() as { payload: string }[];
+    expect(JSON.parse(dismissed!.payload).why).toContain("superseded by the conflict nudge");
   });
 
   test("assumption: with no-mistakes' clock unreadable, the wait is timed from when flowrynd first saw it, across reads", async () => {
