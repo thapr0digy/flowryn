@@ -438,10 +438,10 @@ export function digestDeadline(ctx: HandlerCtx, startedAt: number | undefined): 
  * A Claude prompt that arrives while a turn runs joins that turn (takenMidTurn).
  */
 export function prompt(ctx: HandlerCtx, input: LeaderHookInput, deadline: number | null, recheck: LeaseCheck | null = null): HandlerResult {
-  const s = leaderSession(ctx);
   const now = ctx.now();
   // A read-only session whose holder is proven gone takes over here (prepareLeaseRecheck); its briefing rides below.
-  const claimed = takeOverStale(ctx, s, recheck, now);
+  const claimed = takeOverStale(ctx, leaderSession(ctx), recheck, now);
+  const s = leaderSession(ctx);
   const taken = claimed?.previous ? { previous: claimed.previous } : {};
   const notice = isNotificationPrompt(input.prompt);
   // Fail-closed (design section 7): your next message also kills a declined attempt the Claude
