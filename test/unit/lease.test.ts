@@ -6,7 +6,7 @@ import { carry } from "../../src/attention/presentations.ts";
 import { openItem } from "../../src/attention/items.ts";
 import { tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
-import { attachProcess, claim, closeSession, getLease, getSession, heartbeat, leaseState, openSession, release } from "../../src/lease/lease.ts";
+import { attachProcess, claim, closeSession, deadPaneSessions, getLease, getSession, heartbeat, leaseState, openSession, release } from "../../src/lease/lease.ts";
 import { PsUnavailable, type PsRunner } from "../../src/runtime/proc.ts";
 import { makeHome, seedRun, type TestHome } from "../helpers/harness.ts";
 
@@ -104,5 +104,72 @@ describe("the lease (design section 10)", () => {
     expect(await leaseState(db, b.session, 1_000 + staleMs, staleMs, () => Promise.reject(new PsUnavailable("/bin/ps exited 124: ps did not finish within 5000 ms")))).toEqual({ state: "held", epoch: 1 });
     tx(db, () => closeSession(db, a.session, "quit", 5));
     expect((await leaseState(db, b.session, 6, staleMs, ps(true))).state).toBe("vacant");
+  });
+
+  describe("a session in the holder's own pane (a pane runs one harness)", () => {
+    const staleMs = 600_000;
+    const started = new Date(2026, 8, 24, 4, 0, 0).getTime();
+
+    function holderIn(pane: string | null): { holder: string; newcomer: (newPane: string | null) => string } {
+      const a = tx(db, () => openSession(db, { harness: "claude", pane, cwd: null, now: 0 }));
+      tx(db, () => claim(db, a.session, "vacant", 0));
+      tx(db, () => attachProcess(db, a.session, { pid: 4242, start: started, exe: "claude" }, 0));
+      tx(db, () => heartbeat(db, a.session, 1_000));
+      return { holder: a.session, newcomer: (newPane) => tx(db, () => openSession(db, { harness: "claude", pane: newPane, cwd: null, now: 2_000 })).session };
+    }
+
+    test("same pane and the holder's process proven gone: stale at once, with no stale_ms wait", async () => {
+      const { newcomer } = holderIn("wG:p1");
+      expect(await leaseState(db, newcomer("wG:p1"), 2_000, staleMs, ps(false))).toEqual({ state: "stale", epoch: 1 });
+    });
+
+    test("same pane but the holder still running: held", async () => {
+      const { newcomer } = holderIn("wG:p1");
+      expect((await leaseState(db, newcomer("wG:p1"), 2_000, staleMs, ps(true))).state).toBe("held");
+    });
+
+    test("same pane but the process check is unknown (ps unreadable, or no pid recorded): held", async () => {
+      const { holder, newcomer } = holderIn("wG:p1");
+      const b = newcomer("wG:p1");
+      expect((await leaseState(db, b, 2_000, staleMs, () => Promise.reject(new PsUnavailable("ps timed out")))).state).toBe("held");
+      db.query("UPDATE leader_sessions SET proc_pid = NULL WHERE session_id = ?1").run(holder);
+      expect((await leaseState(db, b, 2_000, staleMs, ps(false))).state).toBe("held");
+    });
+
+    test("another pane with a recent heartbeat: held, and ps is never run", async () => {
+      const { newcomer } = holderIn("wG:p1");
+      let calls = 0;
+      const counting: PsRunner = async () => {
+        calls++;
+        return "";
+      };
+      expect((await leaseState(db, newcomer("wH:p2"), 2_000, staleMs, counting)).state).toBe("held");
+      expect(calls).toBe(0);
+    });
+
+    test("no pane recorded on either side is not the same pane", async () => {
+      const { newcomer } = holderIn(null);
+      expect((await leaseState(db, newcomer(null), 2_000, staleMs, ps(false))).state).toBe("held");
+    });
+
+    test("an unconfirmed-scope session in the holder's pane never sees it stale", async () => {
+      const { newcomer } = holderIn("wG:p1");
+      const b = newcomer("wG:p1");
+      db.query("UPDATE leader_sessions SET scope = '' WHERE session_id = ?1").run(b);
+      expect((await leaseState(db, b, 2_000, staleMs, ps(false))).state).toBe("held");
+    });
+
+    test("deadPaneSessions lists the pane's other open non-holder sessions whose process is proven gone", async () => {
+      const { newcomer } = holderIn("wG:p1");
+      const old = newcomer("wG:p1");
+      tx(db, () => attachProcess(db, old, { pid: 4242, start: started, exe: "claude" }, 0));
+      newcomer("wG:p1"); // no process recorded: never proven gone
+      const elsewhere = newcomer("wH:p2");
+      tx(db, () => attachProcess(db, elsewhere, { pid: 4242, start: started, exe: "claude" }, 0));
+      const me = newcomer("wG:p1");
+      expect(await deadPaneSessions(db, me, ps(false))).toEqual([old]);
+      expect(await deadPaneSessions(db, me, ps(true))).toEqual([]);
+      expect(await deadPaneSessions(db, me, () => Promise.reject(new PsUnavailable("ps timed out")))).toEqual([]);
+    });
   });
 });

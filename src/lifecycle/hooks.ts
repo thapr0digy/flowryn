@@ -351,7 +351,14 @@ function signalVerb(
         ctx.fleet.bus.notify(ctx.caller.runId);
         ctx.fleet.urgent.kick(ctx.caller.runId);
       }
-      if (isLeaderCall(ctx)) ctx.attention.bus.notify(ctx.caller.session!);
+      if (isLeaderCall(ctx)) {
+        // A prompt that took over a stale lease: the old holder's waiter exits, and pushes route to this session.
+        if (typeof result.data.previous === "string") {
+          ctx.attention.bus.forget(result.data.previous);
+          ctx.attention.kick();
+        }
+        ctx.attention.bus.notify(ctx.caller.session!);
+      }
       if (result.data.usage === "paused" || result.data.usage === "resumed") ctx.sched.kick();
       return result;
     },
@@ -441,8 +448,11 @@ const prompt = signalVerb(
     markBusy(ctx, run, HOOK_SIGNALS.prompt);
     return { data: { run: run.id } };
   },
-  (ctx, input, _args, prepared) => leader.prompt(ctx, input, (prepared as number | null | undefined) ?? null),
-  async (ctx, args) => leader.digestDeadline(ctx, intArg(args, "started-at")),
+  (ctx, input, _args, prepared) => {
+    const p = prepared as { deadline: number | null; recheck: leader.LeaseCheck | null };
+    return leader.prompt(ctx, input, p.deadline, p.recheck);
+  },
+  async (ctx, args) => ({ deadline: leader.digestDeadline(ctx, intArg(args, "started-at")), recheck: await leader.prepareLeaseRecheck(ctx) }),
 );
 
 function toolkitArg(args: Args): ToolkitDenial | null {
@@ -620,7 +630,7 @@ const sessionEnd = signalVerb(
 const sessionStart = leaderVerb(
   "session-start",
   "Leader hook: session start, resume, clear or compaction; claims a vacant or stale lease and returns the briefing",
-  (ctx, input, args, prepared) => leader.sessionStart(ctx, input, prepared as { state: string; epoch: number }, reportedLogin(args)),
+  (ctx, input, args, prepared) => leader.sessionStart(ctx, input, prepared as leader.LeaseCheck, reportedLogin(args)),
   (ctx) => leader.prepareSessionStart(ctx),
   async (ctx, result) => {
     // The old holder's waiter exits silently (design section 10).
