@@ -39,11 +39,11 @@ describe("the toolkit's static layers", () => {
     for (const server of DENIED_MCP_SERVERS) expect(server.slice(5)).not.toContain("__");
   });
 
-  test("back the hook up for raw gh, worktree changes and acli jira, and never catch the axi tools", () => {
+  test("back the hook up for raw gh, worktree changes and jira, and never catch the axi tools or acli jira", () => {
     const bash = layers.permissionsDeny.filter((rule) => rule.startsWith("Bash("));
     const denied = (command: string) => bash.some((rule) => bashRuleMatches(rule, command));
-    for (const command of ["gh", "gh pr list", "hub pr", "git worktree add ../x", "git worktree prune", "acli jira workitem view X-1"]) expect(denied(command)).toBe(true);
-    for (const command of ["gh-axi pr list", "git worktree list", "treehouse get --lease --json", "jira-axi issue view X-1", "acli --help"]) expect(denied(command)).toBe(false);
+    for (const command of ["gh", "gh pr list", "hub pr", "git worktree add ../x", "git worktree prune", "jira issue list", "jira-cli issue list"]) expect(denied(command)).toBe(true);
+    for (const command of ["gh-axi pr list", "git worktree list", "treehouse get --lease --json", "jira-axi issue view X-1", "acli --help", "acli jira workitem view X-1"]) expect(denied(command)).toBe(false);
   });
 
   test("q31: no blanket sqlite3 deny, only Flowryn's own database", () => {

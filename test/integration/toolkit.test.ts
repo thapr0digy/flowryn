@@ -82,6 +82,9 @@ describe("a Claude worker: one raw call per rule is denied through the real pre-
     // An allowed call is untouched.
     expect(await preTool(env, token, "Bash", { command: "gh-axi pr list && git status" })).toBeNull();
     expect(await preTool(env, token, "Bash", { command: "no-mistakes axi run --intent 'ship it'", timeout: 600_000 })).toBeNull();
+    // acli jira is the fallback for an option jira-axi lacks; a raw jira CLI is still denied.
+    expect(await preTool(env, token, "Bash", { command: "acli jira workitem view X-1" })).toBeNull();
+    expect(await preTool(env, token, "Bash", { command: "jira issue list" })).toMatchObject({ permissionDecision: "deny" });
   }, 60_000);
 
   test("the daemon down: the hook process still denies (no daemon call needed)", async () => {
