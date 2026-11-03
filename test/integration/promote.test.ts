@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { listTasks, processRunner, type BacklogTask } from "../../src/journal/tasks-axi.ts";
+import { tx } from "../../src/db/db.ts";
 import { addReviewMessage } from "../../src/lifecycle/review-chat.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
@@ -239,7 +240,8 @@ describe("a scout in a review with questions", () => {
       expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "open", answered_via: null, items: 1, resolved_by: null }]);
       const seeded = env.h.db();
       try {
-        seeded.transaction(() => addReviewMessage(seeded, { id: gate, run_id: run }, "user", "Use the db", Date.now()))();
+        // BEGIN IMMEDIATE, like the daemon: a deferred transaction's read-to-write upgrade gets SQLITE_BUSY at once while the daemon writes, without waiting out the busy timeout.
+        tx(seeded, () => addReviewMessage(seeded, { id: gate, run_id: run }, "user", "Use the db", Date.now()));
       } finally {
         seeded.close();
       }
