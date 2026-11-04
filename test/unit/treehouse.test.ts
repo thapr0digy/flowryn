@@ -228,25 +228,25 @@ describe("the cleanup's return path", () => {
   });
 });
 
-describe("doctor's worktrees line", () => {
-  function config(extra: string, tools = "") {
-    dir ||= realpathSync(mkdtempSync(join(tmpdir(), "fw-th-")));
-    return parseConfig(`data_dir = ${JSON.stringify(join(dir, "d"))}\nstate_dir = ${JSON.stringify(join(dir, "s"))}\n[tools]\n${tools}\n[workers]\n${extra}\n`, dir);
-  }
+function doctorConfig(extra: string, tools = "") {
+  dir ||= realpathSync(mkdtempSync(join(tmpdir(), "fw-th-")));
+  return parseConfig(`data_dir = ${JSON.stringify(join(dir, "d"))}\nstate_dir = ${JSON.stringify(join(dir, "s"))}\n[tools]\n${tools}\n[workers]\n${extra}\n`, dir);
+}
 
+describe("doctor's worktrees line", () => {
   test("git: says runs get a fresh git worktree", async () => {
-    const checks = await worktreeChecks(config('worktree_provider = "git"'));
+    const checks = await worktreeChecks(doctorConfig('worktree_provider = "git"'));
     expect(checks).toEqual([expect.objectContaining({ check: "worktrees", status: "ok", detail: expect.stringContaining("git: a fresh git worktree per run") })]);
   });
 
   test("treehouse missing: says runs fall back to git", async () => {
-    const checks = await worktreeChecks(config("", `treehouse = ${JSON.stringify(join(tmpdir(), "no-such-treehouse"))}`));
+    const checks = await worktreeChecks(doctorConfig("", `treehouse = ${JSON.stringify(join(tmpdir(), "no-such-treehouse"))}`));
     expect(checks).toEqual([expect.objectContaining({ check: "worktrees", status: "warn", detail: expect.stringContaining("treehouse is not installed") })]);
   });
 
   test("treehouse found: its version and where the pools live", async () => {
     const s = scratch();
-    const checks = await worktreeChecks(config("", `treehouse = ${JSON.stringify(s.bin)}`));
+    const checks = await worktreeChecks(doctorConfig("", `treehouse = ${JSON.stringify(s.bin)}`));
     expect(checks).toEqual([expect.objectContaining({ check: "worktrees", status: "ok", detail: expect.stringContaining(`treehouse ${VERIFIED_TREEHOUSE}: run worktrees come from a pool`) })]);
   });
 });
