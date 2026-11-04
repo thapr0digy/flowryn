@@ -5,6 +5,8 @@ import type { HandlerCtx } from "../api/verbs.ts";
 import { appendEvent } from "../db/events.ts";
 import { tx } from "../db/db.ts";
 import { withRepoLock } from "../runtime/repo-lock.ts";
+import { poolRoot, poolSlots } from "../runtime/treehouse.ts";
+import { workersConfig } from "../config/workers.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -35,6 +37,17 @@ export function projectWorktrees(db: Db, projectId: string): { task: string; pat
     .all(projectId) as { task: string; path: string }[];
   const seen = new Set<string>();
   return rows.filter((r) => existsSync(r.path) && !seen.has(r.path) && seen.add(r.path) !== undefined);
+}
+
+/**
+ * The project's treehouse pool worktrees no run holds (src/runtime/treehouse.ts): linked worktrees of the
+ * checkout too, so a move breaks them alike, and the next lease would get a broken slot.
+ */
+function idlePoolSlots(ctx: HandlerCtx, projectId: string): { task: string; path: string }[] {
+  const held = new Set(projectWorktrees(ctx.db, projectId).map((w) => w.path));
+  return poolSlots(poolRoot(workersConfig(ctx.config()).worktree_root, projectId))
+    .filter((path) => !held.has(path))
+    .map((path) => ({ task: "(pool)", path }));
 }
 
 /** Runs of the project whose worker is up: it was launched with the old path in its sandbox. */
@@ -84,7 +97,7 @@ async function commonDir(ctx: HandlerCtx, dir: string): Promise<string | null> {
  * workers, whose sandboxes still name the old path.
  */
 export async function relinkWorktrees(ctx: HandlerCtx, projectId: string, checkout: string, moved: boolean): Promise<{ worktrees: RelinkedWorktree[]; live: { task: string }[] }> {
-  const worktrees = projectWorktrees(ctx.db, projectId);
+  const worktrees = [...projectWorktrees(ctx.db, projectId), ...idlePoolSlots(ctx, projectId)];
   const expected = await commonDir(ctx, checkout);
   const results: RelinkedWorktree[] = [];
   if (worktrees.length > 0) {

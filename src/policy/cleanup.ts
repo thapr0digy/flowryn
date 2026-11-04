@@ -15,7 +15,8 @@ import { reapUnder } from "./reap.ts";
  * no-mistakes run is aborted (proven its own, never another branch's); the
  * worker stops; leaked processes are reaped by identity; and last the
  * worktree is removed, with --force only for an approved discard, and its
- * branch deleted. A worktree already gone is pruned; its branch goes only
+ * branch deleted. A pool worktree is returned to its pool instead
+ * (`returnWorktree`), forced likewise only for an approved discard. A worktree already gone is pruned; its branch goes only
  * when the guard, judging the branch itself, allows it or a human approved
  * the discard. Each refusal leaves the worktree, its branch and its HEAD
  * exactly as they were. An unexpected error at any step is a refusal too
@@ -49,6 +50,12 @@ export interface CleanupDeps {
   ps: PsRunner;
   config: CleanupConfig;
   log(line: string): void;
+  /**
+   * Hand a pool worktree back instead of removing it (treehouse return, src/runtime/treehouse.ts): `discard`
+   * only for an approved discard, as `--force` is for git. Absent, the worktree is removed with git; the
+   * fixtures have none.
+   */
+  returnWorktree?(path: string, discard: boolean): Promise<{ ok: boolean; detail: string }>;
   /** Stop the worker's harness by its recorded identity; the fixtures have no worker. */
   exitWorker?(): Promise<{ ok: boolean; detail: string }>;
   kill?(pid: number, signal: NodeJS.Signals): void;
@@ -190,7 +197,13 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
   const head = existsSync(req.guard.worktree)
     ? (await deps.git(["rev-parse", "HEAD"], req.guard.worktree)).stdout.trim() || null
     : (await deps.git(["rev-parse", "--verify", "--quiet", `refs/heads/${req.guard.branch}`], req.primary)).stdout.trim() || null;
-  if (existsSync(req.guard.worktree)) {
+  const returned = existsSync(req.guard.worktree) && deps.returnWorktree !== undefined;
+  if (returned) {
+    // A pool worktree goes back clean and detached, its ignored files (the warm caches) kept; a plain return refuses changes.
+    const back = await deps.returnWorktree!(req.guard.worktree, discard);
+    steps.push(`worktree_return:${back.ok ? "ok" : "failed"}`);
+    if (!back.ok) return result("refused", "remove_failed", `${back.detail}; the worktree is kept for inspection or a retry`, { verdict, lock, aborted, reaped: reap.reaped });
+  } else if (existsSync(req.guard.worktree)) {
     const removed = await deps.git(["worktree", "remove", ...(discard ? ["--force"] : []), req.guard.worktree], req.primary);
     steps.push(`worktree_remove:${removed.code === 0 ? "ok" : "failed"}`);
     if (removed.code !== 0) {
@@ -205,6 +218,6 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
     branchDeleted = (await deps.git(["branch", "-D", req.guard.branch], req.primary)).code === 0;
     steps.push(`branch_delete:${branchDeleted ? "ok" : "failed"}`);
   }
-  deps.log(`removed worktree ${req.guard.worktree}${branchDeleted ? ` and branch ${req.guard.branch}` : ""} (${verdict.reason})`);
+  deps.log(`${returned ? "returned worktree to the pool" : "removed worktree"} ${req.guard.worktree}${branchDeleted ? ` and branch ${req.guard.branch}` : ""} (${verdict.reason})`);
   return result("removed", verdict.reason, verdict.detail, { verdict, lock, aborted, reaped: reap.reaped, branchDeleted, discardedHead: discard ? head : null });
 }

@@ -6,7 +6,7 @@ import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { currentWorkflow, styleBlock } from "../config/workflows.ts";
 import { checkPinsAtLaunch, resolveModelChoice, type ModelChoice } from "../config/model-choice.ts";
 import { runAccount, workersFor } from "../config/accounts.ts";
-import { herdrConfig, timingConfig, workersConfig } from "../config/workers.ts";
+import { herdrConfig, plannedWorktree, timingConfig, workersConfig, type WorkersConfig } from "../config/workers.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
@@ -20,6 +20,7 @@ import { HerdrError } from "../runtime/herdr/client.ts";
 import type { HarnessProcess, HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { terminate } from "../runtime/proc.ts";
 import { withRepoLock } from "../runtime/repo-lock.ts";
+import { acquireSlot, adoptSlot, leaseHolder, poolRoot, returnSlot } from "../runtime/treehouse.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
 import { configStaticLayers } from "../policy/static.ts";
@@ -425,25 +426,111 @@ export class Launcher {
     }
   }
 
-  /** git is the ground truth for worktrees; a relaunch reuses the run's own worktree. */
+  /**
+   * git is the ground truth for worktrees; a relaunch reuses the run's own
+   * worktree. A run that holds a treehouse lease reuses its slot; one that
+   * holds none takes a slot from Flowryn's pool (src/runtime/treehouse.ts),
+   * and falls back to a fresh `git worktree add` when treehouse is off,
+   * missing or fails (docs/notes/2026-11-04-use-treehouse-for-2b.md).
+   */
   private async ensureWorktree(run: RunWithPolicy, project: ProjectRow): Promise<string> {
     const path = run.worktree_path;
     if (existsSync(path)) {
-      const top = await this.deps.git(["-C", path, "rev-parse", "--show-toplevel"]);
-      const branch = await this.deps.git(["-C", path, "branch", "--show-current"]);
-      if (top.exitCode !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(path)) {
-        const broken = brokenGitLink(path);
-        throw new Error(broken ? `${path}'s .git names ${broken}, which is gone; ${relinkHint(project, path)}` : `${path} exists but is not a git worktree root`);
-      }
-      if (branch.stdout.trim() !== run.branch) throw new Error(`${path} is on ${branch.stdout.trim() || "a detached HEAD"}, not ${run.branch}`);
+      await this.checkWorktreeRoot(project, path);
+      const branch = (await this.deps.git(["-C", path, "branch", "--show-current"])).stdout.trim();
+      // A slot leased but not yet switched (the daemon stopped in between) finishes its checkout here.
+      if (run.worktree_lease && branch === "") return this.checkoutSlot(run, project, path);
+      if (branch !== run.branch) throw new Error(`${path} is on ${branch || "a detached HEAD"}, not ${run.branch}`);
       return realpathSync(path);
     }
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const workers = workersConfig(this.deps.config());
+    if (run.worktree_lease) {
+      // Its slot is gone (destroyed by hand): the branch holds the run's commits, so a new slot checks it out again.
+      this.deps.log(`launch ${run.id}: its pool worktree ${path} is gone; taking another`);
+      this.recordWorktree(run, plannedWorktree(workers, project.id, run.task_id), null, "run.worktree_lost", { path, lease: run.worktree_lease });
+    }
+    if (workers.worktree_provider === "treehouse") {
+      const pooled = await this.leaseWorktree(run, project, workers);
+      if (pooled) return pooled;
+    }
+    const planned = run.worktree_path;
+    mkdirSync(dirname(planned), { recursive: true, mode: 0o700 });
     const exists = await this.deps.git(["-C", project.path, "rev-parse", "--verify", "--quiet", `refs/heads/${run.branch}`]);
-    const args = exists.exitCode === 0 ? ["worktree", "add", path, run.branch] : ["worktree", "add", "-b", run.branch, path, run.base_sha];
+    const args = exists.exitCode === 0 ? ["worktree", "add", planned, run.branch] : ["worktree", "add", "-b", run.branch, planned, run.base_sha];
     const added = await withRepoLock(project.path, () => this.deps.git(["-C", project.path, ...args]));
     if (added.exitCode !== 0) throw new Error(`git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`);
-    return realpathSync(path);
+    return realpathSync(planned);
+  }
+
+  private async checkWorktreeRoot(project: ProjectRow, path: string): Promise<void> {
+    const top = await this.deps.git(["-C", path, "rev-parse", "--show-toplevel"]);
+    if (top.exitCode !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(path)) {
+      const broken = brokenGitLink(path);
+      throw new Error(broken ? `${path}'s .git names ${broken}, which is gone; ${relinkHint(project, path)}` : `${path} exists but is not a git worktree root`);
+    }
+  }
+
+  /** The run's worktree path and lease, saved with an event in one transaction; `run` follows. */
+  private recordWorktree(run: RunWithPolicy, path: string, lease: string | null, kind: string, payload: Record<string, unknown>): void {
+    const { db, now } = this.deps;
+    tx(db, () => {
+      db.query("UPDATE runs SET worktree_path = ?2, worktree_lease = ?3, updated_at = ?4 WHERE id = ?1").run(run.id, path, lease, now());
+      appendEvent(db, { source: "daemon", kind, runId: run.id, taskId: run.task_id, payload });
+    });
+    run.worktree_path = path;
+    run.worktree_lease = lease;
+  }
+
+  /** A slot from the pool with the run's branch checked out, or null to fall back to git (logged and recorded). */
+  private async leaseWorktree(run: RunWithPolicy, project: ProjectRow, workers: WorkersConfig): Promise<string | null> {
+    const bin = resolveTool(this.deps.config(), "treehouse");
+    if (!bin) return this.fallBack(run, "treehouse is not installed");
+    const root = poolRoot(workers.worktree_root, project.id);
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const holder = leaseHolder(run.id);
+    // A new slot is a `git worktree add` in the repository: one worktree change at a time, as for git's own.
+    const leased = await withRepoLock(project.path, async () => {
+      const held = await adoptSlot(bin, root, project.path, holder);
+      if (!held.ok) return held;
+      if (held.value) return { ok: true as const, value: { ...held.value, adopted: true } };
+      const got = await acquireSlot(bin, root, project.path, holder);
+      return got.ok ? { ok: true as const, value: { ...got.value, adopted: false } } : got;
+    });
+    if (!leased.ok) return this.fallBack(run, leased.detail);
+    const slot = leased.value;
+    this.recordWorktree(run, slot.path, slot.lease_id, "run.worktree_leased", { path: slot.path, lease: slot.lease_id, pool: root, adopted: slot.adopted });
+    this.deps.log(`launch ${run.id}: ${slot.adopted ? "adopted" : "leased"} pool worktree ${slot.path}`);
+    try {
+      await this.checkWorktreeRoot(project, slot.path);
+      const branch = (await this.deps.git(["-C", slot.path, "branch", "--show-current"])).stdout.trim();
+      if (slot.adopted && branch === run.branch) return realpathSync(slot.path);
+      return await this.checkoutSlot(run, project, slot.path);
+    } catch (error) {
+      // Nothing of the run's is in the slot yet: it goes back, and the launch fails as a failed worktree add does.
+      const back = await returnSlot(bin, root, slot.path, slot.lease_id, true);
+      if (back.ok) this.recordWorktree(run, plannedWorktree(workers, project.id, run.task_id), null, "run.worktree_returned", { path: slot.path, lease: slot.lease_id, why: (error as Error).message });
+      else this.deps.log(`launch ${run.id}: the pool worktree ${slot.path} was not returned: ${back.detail}`);
+      throw error;
+    }
+  }
+
+  /** A clean, detached slot onto the run's branch: a new one at the base commit, or the existing one. */
+  private async checkoutSlot(run: RunWithPolicy, project: ProjectRow, slot: string): Promise<string> {
+    const status = await this.deps.git(["-C", slot, "status", "--porcelain"]);
+    if (status.exitCode !== 0) throw new Error(`git status failed in ${slot}: ${status.stderr.trim()}`);
+    if (status.stdout.trim() !== "") throw new Error(`the pool worktree ${slot} is not clean: ${status.stdout.trim().split("\n").slice(0, 3).join("; ")}`);
+    const exists = await this.deps.git(["-C", project.path, "rev-parse", "--verify", "--quiet", `refs/heads/${run.branch}`]);
+    const args = exists.exitCode === 0 ? ["switch", run.branch] : ["switch", "-c", run.branch, run.base_sha];
+    const switched = await withRepoLock(project.path, () => this.deps.git(["-C", slot, ...args]));
+    if (switched.exitCode !== 0) throw new Error(`git switch failed in ${slot}: ${switched.stderr.trim() || switched.stdout.trim()}`);
+    return realpathSync(slot);
+  }
+
+  private fallBack(run: RunWithPolicy, why: string): null {
+    const { db, now } = this.deps;
+    this.deps.log(`launch ${run.id}: no pool worktree (${why}); using a git worktree`);
+    tx(db, () => appendEvent(db, { source: "daemon", kind: "run.worktree_fallback", runId: run.id, taskId: run.task_id, payload: { reason: why }, ts: now() }));
+    return null;
   }
 
   /**

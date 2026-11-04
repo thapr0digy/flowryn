@@ -183,6 +183,10 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   const herdrBin = join(bin, "herdr");
   writeFileSync(herdrBin, "#!/bin/sh\necho 'herdr 0.7.5-test'\n");
   chmodSync(herdrBin, 0o755);
+  // Nor the real treehouse: a stand-in answering Flowryn's pool calls (test/helpers/fake-treehouse.ts).
+  const treehouseBin = join(bin, "treehouse");
+  writeFileSync(treehouseBin, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(join(import.meta.dir, "fake-treehouse.ts"))} "$@"\n`);
+  chmodSync(treehouseBin, 0o755);
   const harnessStandIns = ["claude", "pi"].filter((name) => !new RegExp(`^${name}\\s*=`, "m").test(extraConfig)).map((name) => `${name} = ${JSON.stringify(noHarness)}`);
   const lines = [
     `data_dir = ${JSON.stringify(dataDir)}`,
@@ -200,6 +204,7 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     ...(/^quota_axi\s*=/m.test(extraConfig) ? [] : [`quota_axi = ${JSON.stringify(quota)}`]),
     ...harnessStandIns,
     ...(/^herdr\s*=/m.test(extraConfig) ? [] : [`herdr = ${JSON.stringify(herdrBin)}`]),
+    ...(/^treehouse\s*=/m.test(extraConfig) ? [] : [`treehouse = ${JSON.stringify(treehouseBin)}`]),
     extraConfig,
   ];
   // Nor GitHub: a forge address that answers nothing unless a test serves a fake one.
@@ -217,6 +222,13 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     const at = lines.findIndex((line) => /^\[workers\]\s*$/m.test(line));
     if (at >= 0) lines[at] = lines[at]!.replace(/^\[workers\]\s*$/m, `[workers]\n${root}`);
     else lines.push("[workers]", root);
+  }
+  // Run worktrees come from git unless a test asks for the pool (worktree_provider = "treehouse", served by the stand-in).
+  if (!/^worktree_provider\s*=/m.test(extraConfig)) {
+    const provider = 'worktree_provider = "git"';
+    const at = lines.findIndex((line) => /^\[workers\]\s*$/m.test(line));
+    if (at >= 0) lines[at] = lines[at]!.replace(/^\[workers\]\s*$/m, `[workers]\n${provider}`);
+    else lines.push("[workers]", provider);
   }
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`, "unreachable_alert_ms = 86400000");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });

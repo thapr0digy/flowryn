@@ -14,6 +14,7 @@
  * test/unit/tz.test.ts.
  */
 import { afterAll } from "bun:test";
+import { realpathSync } from "node:fs";
 
 process.env.FLOWRYN_NOTIFY = "off";
 process.env.TZ = "UTC";
@@ -21,6 +22,30 @@ process.env.TZ = "UTC";
 export const OSASCRIPT = "/usr/bin/osascript";
 /** Review pages open through it (src/lavish/opener.ts); refused like osascript. */
 export const OPEN = "/usr/bin/open";
+
+/**
+ * The real treehouse, as PATH finds it before any test changes PATH: only a test home's stand-in
+ * (test/helpers/fake-treehouse.ts) runs, so a pool call never reaches this machine's worktrees.
+ */
+const REAL_TREEHOUSE = ((): string | null => {
+  const found = Bun.which("treehouse");
+  if (!found) return null;
+  try {
+    return realpathSync(found);
+  } catch {
+    return found;
+  }
+})();
+
+function isRealTreehouse(command: string): boolean {
+  if (command === "treehouse") return true;
+  if (!REAL_TREEHOUSE || !command.endsWith("/treehouse")) return false;
+  try {
+    return realpathSync(command) === REAL_TREEHOUSE;
+  } catch {
+    return false;
+  }
+}
 
 const guard = globalThis as { __flowrynOsascriptSpawns?: string[] };
 guard.__flowrynOsascriptSpawns ??= [];
@@ -37,6 +62,10 @@ function refuse(args: unknown[]): void {
   if (command === OSASCRIPT || command?.endsWith("/osascript") || command === "osascript") {
     guard.__flowrynOsascriptSpawns!.push(JSON.stringify(args[0]));
     throw new Error("the test suite never runs osascript: a real macOS notification would reach your Mac");
+  }
+  if (command && isRealTreehouse(command)) {
+    guard.__flowrynOsascriptSpawns!.push(JSON.stringify(args[0]));
+    throw new Error("the test suite never runs the real treehouse: a pool call would reach this machine's worktrees");
   }
   if (command === OPEN || command === "open") {
     guard.__flowrynOsascriptSpawns!.push(JSON.stringify(args[0]));
@@ -63,5 +92,5 @@ export function refusedOsascriptSpawns(): readonly string[] {
 // A notifier swallows a failing channel, so a refused spawn would not fail its own test: the run fails here instead.
 afterAll(() => {
   const spawns = guard.__flowrynOsascriptSpawns!;
-  if (spawns.length > 0) throw new Error(`osascript or open spawn(s) refused in this test process so far: ${spawns.length} (${spawns.join("; ")})`);
+  if (spawns.length > 0) throw new Error(`osascript, open or treehouse spawn(s) refused in this test process so far: ${spawns.length} (${spawns.join("; ")})`);
 });

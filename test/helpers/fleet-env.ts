@@ -142,6 +142,8 @@ export interface FleetOptions {
   supervised?: boolean;
   /** [workers] turn_end_guard (default on). */
   turnEndGuard?: boolean;
+  /** [workers] worktree_provider (default git in test homes; treehouse runs the home's stand-in, test/helpers/fake-treehouse.ts). */
+  worktreeProvider?: "treehouse" | "git";
   /** The fake Herdr starts these scripts in place of the FAKE: worker, per harness kind. */
   harnessScripts?: FakeHerdrOptions["harnessScripts"];
   /** The fake Herdr server's own shell shows this startup prompt and eats the first typed character (FakeHerdrOptions.serverShellPrompt). */
@@ -169,6 +171,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
         "[workers]",
         `worktree_root = ${JSON.stringify(join(home, "wt"))}`,
         ...(options.turnEndGuard === false ? ["turn_end_guard = false"] : []),
+        ...(options.worktreeProvider ? [`worktree_provider = "${options.worktreeProvider}"`] : []),
         "[workers.claude]",
         'pretrust = "register"',
         `config_dir = ${JSON.stringify(join(home, "claude-config"))}`,

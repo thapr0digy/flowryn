@@ -8,6 +8,7 @@ import type { Forge } from "../forge/types.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { consumeApproval, discardRef, insertApproval, matchAttempt } from "../policy/approvals.ts";
 import { runCleanup, type CleanupOutcome } from "../policy/cleanup.ts";
+import { poolRoot, returnSlot } from "../runtime/treehouse.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { psRunner, type PsRunner } from "../runtime/proc.ts";
 import { deliveredOf, projectRepo } from "./delivery.ts";
@@ -89,6 +90,8 @@ export interface LandingDeps {
   exitWorker(runId: string): Promise<{ ok: boolean; detail: string }>;
   /** Close the run's Herdr workspace, best effort. */
   closeWorkspace(runId: string): Promise<void>;
+  /** The treehouse binary and `[workers] worktree_root`, for returning a pool worktree; null without treehouse. */
+  treehouse?(): { bin: string; worktreeRoot: string } | null;
   /** Remove the run's temp directory (src/lifecycle/run-tmp.ts); throws when it cannot. */
   removeRunTmp?(runId: string): "removed" | "absent" | "not_ours";
   /** Apply the backlog intents just recorded (the task done) without waiting for the journal's next pass. */
@@ -165,6 +168,22 @@ function removeTmp(deps: LandingDeps, run: RunWithPolicy): void {
 }
 
 /**
+ * How a run's pool worktree goes back (src/runtime/treehouse.ts), or null for
+ * a git worktree. With treehouse gone since the launch, the slot is removed
+ * with git like any worktree (logged): it is a linked worktree all the same.
+ */
+function poolReturn(deps: LandingDeps, run: RunWithPolicy, projectId: string): ((path: string, discard: boolean) => Promise<{ ok: boolean; detail: string }>) | null {
+  const lease = run.worktree_lease;
+  if (!lease) return null;
+  const th = deps.treehouse?.() ?? null;
+  if (!th) {
+    deps.log(`cleanup ${run.task_id}: treehouse is not installed, so its pool worktree ${run.worktree_path} is removed with git`);
+    return null;
+  }
+  return (path, discard) => returnSlot(th.bin, poolRoot(th.worktreeRoot, projectId), path, lease, discard);
+}
+
+/**
  * Clean up one run's worktree with the cleanup procedure, then record the
  * result: a landed run becomes cleaned and its task done; a cancelled or
  * failed run keeps its state and only loses its worktree. A refusal changes
@@ -178,6 +197,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
   if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
   const github = deps.github();
   const delivered = deliveredOf(db, run.task_id);
+  const returnWorktree = poolReturn(deps, run, project.id);
   const outcome = await runCleanup(
     {
       guard: {
@@ -202,6 +222,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
       config: deps.cleanupConfig(),
       log: (line) => deps.log(`cleanup ${run.task_id}: ${line}`),
       exitWorker: () => deps.exitWorker(run.id),
+      ...(returnWorktree ? { returnWorktree } : {}),
     },
   );
   const now = deps.now();
@@ -223,7 +244,8 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
       const made = insertApproval(db, { task: run.task_id, ref: discardRef(run), head, channel: "claude-ask", actor: `${process.env.USER ?? "you"} (Claude prompt, leader ${session})`, action: "discard", now });
       consumeApproval(db, made.id, now, `discard ${run.task_id}`);
     }
-    db.query("UPDATE runs SET cleanup = 'done', cleanup_detail = ?2, liveness = 'dead', busy_until = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, outcome.reason, now);
+    // The slot is back in the pool (or gone): the run no longer holds it, so nothing judges by its path again.
+    db.query("UPDATE runs SET cleanup = 'done', cleanup_detail = ?2, liveness = 'dead', busy_until = NULL, worktree_lease = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, outcome.reason, now);
     appendEvent(db, { source: "daemon", kind: "cleanup.done", runId: run.id, taskId: run.task_id, payload, ts: now });
     dismissRunQuestions(db, current, now, "run ended", "daemon");
     resolveRunItems(db, run.id, ["cleanup_refused"], "cleanup.done", now);
