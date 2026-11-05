@@ -7,6 +7,7 @@ import { addReviewMessage, replyGate, REVIEW_REPLY_MAX } from "./review-chat.ts"
 import { getRunWithPolicy, isTerminal } from "./runs.ts";
 import { repinDesign, type PinnedGate } from "./design-spec.ts";
 import { reportDirFor } from "./launcher.ts";
+import { REFUSAL_HINT, refreshSnapshot, refusalText } from "../lavish/snapshot.ts";
 
 /**
  * `flowryn review reply --body-file -` (workers only): answer what the user
@@ -35,11 +36,14 @@ const reviewReply: VerbSpec = {
     if (body.length > REVIEW_REPLY_MAX) throw new FlowrynError("bad_args", `the reply is ${body.length} characters; keep it to ${REVIEW_REPLY_MAX}`, "say the rest by revising the page");
     const gate = replyGate(ctx.db, run.id);
     if (!gate) throw new FlowrynError("review_closed", "you have no open review page to reply on (the review closed, or the user ended its session)", "carry on with the steer you were given; anything for the user goes to your leader: $FLOWRYN_BIN report finding --body-file -");
+    const pinned = ctx.db.query("SELECT id, run_id, page_path, source_page, spec_path, spec_digest, page_digest FROM gates WHERE id = ?1").get(gate.id) as PinnedGate;
+    // The user sees the daemon's copy of the page: a reply after a revision copies it first (src/lavish/snapshot.ts).
+    const copied = pinned.page_path && pinned.source_page ? refreshSnapshot(ctx.db, { id: gate.id, run_id: run.id, task_id: run.task_id, page_path: pinned.page_path, source_page: pinned.source_page }, ctx.now()) : null;
     // A design review approves what the user last saw: a reply after a revision pins the page and spec as they are now.
-    const pinned = ctx.db.query("SELECT id, run_id, page_path, spec_path, spec_digest, page_digest FROM gates WHERE id = ?1").get(gate.id) as PinnedGate;
     const repinned = repinDesign(ctx.db, pinned, reportDirFor(ctx.config(), run.task_id), run.task_id, ctx.now());
     const seq = addReviewMessage(ctx.db, gate, "worker", body, ctx.now());
-    return { data: { gate: gate.id, seq, chars: body.length, ...(repinned ? { repinned: "design page and build spec" } : {}) } };
+    const refused = copied?.outcome === "refused" ? [`your revised page was not shown: ${refusalText(copied.problems)}; the user still sees the last good version. ${REFUSAL_HINT}`] : [];
+    return { data: { gate: gate.id, seq, chars: body.length, ...(repinned ? { repinned: "design page and build spec" } : {}), ...(refused.length > 0 ? { page: "refused" } : {}) }, ...(refused.length > 0 ? { hints: refused } : {}) };
   },
   async settle(ctx, result) {
     const gateId = String(result.data.gate);

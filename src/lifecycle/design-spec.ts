@@ -88,6 +88,8 @@ export interface PinnedGate {
   id: string;
   run_id?: string;
   page_path?: string | null;
+  /** The worker's page, when page_path is the daemon's copy of it (src/lavish/snapshot.ts). */
+  source_page?: string | null;
   spec_path?: string | null;
   spec_digest?: string | null;
   page_digest?: string | null;
@@ -102,7 +104,7 @@ export interface PinnedGate {
 export function repinDesign(db: Db, gate: PinnedGate, reportDir: string, taskId: string, now: number): boolean {
   if (!gate.spec_digest || !gate.page_path) return false;
   const spec = readDesignSpec(reportDir, { required: true })!;
-  requireSpecLinked(gate.page_path, spec);
+  requireSpecLinked(gate.source_page ?? gate.page_path, spec);
   const page = digestOf(gate.page_path);
   if (spec.digest === gate.spec_digest && page === gate.page_digest) return false;
   pinDesign(db, gate.id, gate.page_path, spec);

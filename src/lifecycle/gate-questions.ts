@@ -306,6 +306,8 @@ export function widgetState(db: Db, gateId: string): { page: string; state: Widg
 export interface PolledGate {
   id: string;
   page_path: string;
+  /** The worker's page, when page_path is the daemon's copy that must be hosted before a poll (src/lavish/snapshot.ts). */
+  source_page: string | null;
 }
 
 export const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
@@ -328,7 +330,7 @@ const PAGE_RUN = `r.state NOT IN ('cleaned','cancelled') AND (r.state != 'failed
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
     .query(
-      `SELECT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id
+      `SELECT g.id, g.page_path, g.source_page FROM gates g JOIN runs r ON r.id = g.run_id
        WHERE g.state = 'open' AND ${PAGE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
     )
     .all() as PolledGate[];

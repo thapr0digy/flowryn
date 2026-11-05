@@ -528,4 +528,22 @@ describe("one click: the tab's pass key (docs/notes/2026-11-05-one-click-approve
     expect(p.sent).toHaveLength(1);
     expect(readFileSync(calls, "utf8")).toContain("A pass code went to your notifications");
   });
+
+  test("the poller: a design page changed under its review refuses the click with no leader request and no code, as a typed code is", async () => {
+    db.query("UPDATE gates SET spec_path = ?2, spec_digest = ?3, page_digest = ?3 WHERE id = ?1").run("g1", join(h.home, "no-spec.md"), "0".repeat(64));
+    const codes = new PageCodeStore();
+    const p = pollerWith(keyedOutput(key), codes);
+    const calls = join(h.home, "calls.log");
+    try {
+      p.poller.pass();
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("the design page or its build spec changed"), 5_000, "the reply");
+    } finally {
+      p.poller.stop();
+    }
+    expect(gateState()).toBe("open");
+    expect(p.sent).toEqual([]);
+    expect(codes.has("g1", NOW)).toBe(false);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+  });
 });

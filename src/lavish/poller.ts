@@ -15,6 +15,9 @@ import { passFromPage, type PagePass } from "../policy/page-pass.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
 import { parsePollOutput, withoutAnswerTokens, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
+import { hostSnapshot, REFUSAL_HINT, refreshSnapshot, refusalText, snapshotGates, sourceFingerprint } from "./snapshot.ts";
+import { getRun } from "../lifecycle/runs.ts";
+import { createSteer } from "../lifecycle/steers.ts";
 
 /**
  * The daemon's side of a review page. Each pass rewrites the question widget
@@ -42,6 +45,10 @@ import { requirePageDir, writeWidget } from "./widget.ts";
  * for `[review] channel_alert_ms` opens one review_channel item
  * (src/lavish/channel.ts). Once a gate's poll has started, the gate is offered to the
  * opener (src/lavish/opener.ts), which opens the page in your browser.
+ * A gate's page is the daemon's checked copy of the worker's (src/lavish/snapshot.ts): each pass,
+ * and every SNAPSHOT_CHECK_MS while such a gate is open, a revised worker page is copied over it
+ * or refused (the worker is steered with why), and the copy is hosted with lavish-axi before its
+ * first poll and again after a failed one.
  * Nothing here decides anything: patterns and the database.
  */
 
@@ -137,6 +144,8 @@ const BACKOFF_MAX_MS = 60_000;
  * its request open while it waits for the user.
  */
 export const STEADY_MS = 15_000;
+/** How often the worker's page is looked at for a revision to copy while its gate is open. */
+export const SNAPSHOT_CHECK_MS = 2_000;
 
 export class LavishPoller {
   private readonly running = new Map<string, Running>();
@@ -150,6 +159,12 @@ export class LavishPoller {
   /** Gates whose finished poll is still being recorded: no new poll starts until its reply is queued. */
   private readonly recording = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Gates whose copy lavish-axi hosts (its session exists), and those being hosted now. */
+  private readonly hosted = new Set<string>();
+  private readonly hosting = new Set<string>();
+  /** The worker's page as last copied or refused, per gate (sizes and times). */
+  private readonly prints = new Map<string, string>();
   private retry: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
@@ -173,6 +188,8 @@ export class LavishPoller {
     if (this.closed) return;
     try {
       this.sweep ??= this.startSweep();
+      this.refreshSnapshots();
+      this.scheduleSnapshots();
       this.writeWidgets();
       if (this.sweepDone) this.followGates();
     } catch (error) {
@@ -212,8 +229,77 @@ export class LavishPoller {
   stop(): void {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
     if (this.retry) clearTimeout(this.retry);
     for (const gate of this.running.keys()) this.halt(gate);
+  }
+
+  /** Copy each open gate's revised worker page over its copy, or refuse it and steer the worker. True when a copy changed. */
+  private refreshSnapshots(): boolean {
+    const gates = snapshotGates(this.deps.db);
+    const live = new Set(gates.map((g) => g.id));
+    for (const id of this.prints.keys()) if (!live.has(id)) this.prints.delete(id);
+    let changed = false;
+    for (const gate of gates) {
+      const print = sourceFingerprint(gate.source_page);
+      if (print === null || this.prints.get(gate.id) === print) continue;
+      this.prints.set(gate.id, print);
+      try {
+        const result = tx(this.deps.db, () => {
+          const now = this.deps.now();
+          const refreshed = refreshSnapshot(this.deps.db, gate, now);
+          const run = refreshed.outcome === "refused" ? getRun(this.deps.db, gate.run_id) : null;
+          if (run && refreshed.outcome === "refused") {
+            createSteer(this.deps.db, run, `Your revised review page (${gate.source_page}) was not shown to the user: ${refusalText(refreshed.problems)}. They still see the last good version. ${REFUSAL_HINT}. Fix the page, then end your turn.`, now);
+          }
+          return refreshed;
+        });
+        if (result.outcome === "updated") {
+          changed = true;
+          this.deps.log(`lavish: copied gate ${gate.id}'s revised page`);
+        } else if (result.outcome === "refused") {
+          this.deps.log(`lavish: gate ${gate.id}'s revised page was refused (${result.problems.join("; ")}); the last good copy stays`);
+          this.deps.routed?.(gate.run_id, false);
+        }
+      } catch (error) {
+        this.deps.log(`lavish: cannot copy gate ${gate.id}'s page: ${(error as Error).message}`);
+      }
+    }
+    return changed;
+  }
+
+  private scheduleSnapshots(): void {
+    if (this.closed || this.snapshotTimer || snapshotGates(this.deps.db).length === 0) return;
+    this.snapshotTimer = setTimeout(() => {
+      this.snapshotTimer = null;
+      if (this.closed) return;
+      try {
+        if (this.refreshSnapshots()) this.kick();
+        this.scheduleSnapshots();
+      } catch (error) {
+        this.deps.log(`lavish: the page copy check failed: ${(error as Error).stack ?? String(error)}`);
+      }
+    }, SNAPSHOT_CHECK_MS);
+    this.snapshotTimer.unref?.();
+  }
+
+  /** Host a gate's copy with lavish-axi; a failure backs off as a failed poll does. */
+  private host(lavish: string, gate: string, page: string): void {
+    this.hosting.add(gate);
+    void hostSnapshot(lavish, page)
+      .then(
+        () => {
+          this.hosted.add(gate);
+        },
+        (error: unknown) => {
+          if (!this.closed) this.pollFailed(gate, `cannot host the review page's copy: ${(error as Error).message}`);
+        },
+      )
+      .catch((error: unknown) => this.deps.log(`lavish: hosting gate ${gate}'s page could not be recorded: ${(error as Error).message}`))
+      .finally(() => {
+        this.hosting.delete(gate);
+        this.kick();
+      });
   }
 
   private writeWidgets(): void {
@@ -236,12 +322,14 @@ export class LavishPoller {
 
   private followGates(): void {
     const lavish = this.deps.lavish();
-    const wanted = new Map(gatesToPoll(this.deps.db).map((g) => [g.id, g.page_path]));
+    const polled = gatesToPoll(this.deps.db);
+    const wanted = new Map(polled.map((g) => [g.id, g.page_path]));
+    const copies = new Set(polled.filter((g) => g.source_page !== null).map((g) => g.id));
     for (const [gate, entry] of this.running) if (!wanted.has(gate) && !entry.final) this.halt(gate);
     const now = this.deps.now();
     // A channel nobody polls any more is not degraded: its failures clear and its item resolves.
-    const polled = lavish ? new Set(wanted.keys()) : new Set<string>();
-    for (const gate of clearUnpolledChannels(this.deps.db, polled, (id) => (lavish ? notPolledWhy(this.deps.db, id) : "lavish-axi is not installed"), now)) {
+    const listened = lavish ? new Set(wanted.keys()) : new Set<string>();
+    for (const gate of clearUnpolledChannels(this.deps.db, listened, (id) => (lavish ? notPolledWhy(this.deps.db, id) : "lavish-axi is not installed"), now)) {
       this.deps.log(`lavish: gate ${gate}'s channel cleared: its page is no longer polled`);
     }
     let nextRetry: number | null = null;
@@ -260,6 +348,10 @@ export class LavishPoller {
       }
       if (!existsSync(page)) {
         this.warnOnce(gate, `lavish: gate ${gate}'s page ${page} is gone; its questions are answered only through the leader`);
+        continue;
+      }
+      if (copies.has(gate) && !this.hosted.has(gate)) {
+        if (!this.hosting.has(gate)) this.host(lavish, gate, page);
         continue;
       }
       this.start(lavish, gate, page, false);
@@ -357,18 +449,25 @@ export class LavishPoller {
         this.deps.log(`lavish: the last poll of gate ${gate} failed (${why}); its reply is dropped`);
         return;
       }
-      const failures = channelFailures(this.deps.db, gate) + 1;
-      const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** (failures - 1));
-      this.waitUntil.set(gate, now + delay);
-      this.deps.log(`lavish: the poll of gate ${gate} failed (${why}); again in ${delay / 1000} s`);
-      const item = recordChannelFailure(this.deps.db, gate, { reason: why, retryAt: now + delay, alertMs: this.deps.channelAlertMs?.() ?? DEFAULT_CHANNEL_ALERT_MS, now });
-      if (item) this.deps.log(`lavish: gate ${gate}'s review page is not delivering answers; item ${item} opened`);
+      this.pollFailed(gate, why);
       return;
     }
     this.waitUntil.delete(gate);
     if (!final && recordChannelOk(this.deps.db, gate, "delivered", now)) this.deps.log(`lavish: gate ${gate}'s poll delivered`);
     const out = parsePollOutput(stdout);
     await this.record(gate, page, out, stdout);
+  }
+
+  /** A poll (or the hosting before it) failed: back off, keep the failure on the gate, and host the copy again before the next poll. */
+  private pollFailed(gate: string, why: string): void {
+    const now = this.deps.now();
+    this.hosted.delete(gate);
+    const failures = channelFailures(this.deps.db, gate) + 1;
+    const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** (failures - 1));
+    this.waitUntil.set(gate, now + delay);
+    this.deps.log(`lavish: the poll of gate ${gate} failed (${why}); again in ${delay / 1000} s`);
+    const item = recordChannelFailure(this.deps.db, gate, { reason: why, retryAt: now + delay, alertMs: this.deps.channelAlertMs?.() ?? DEFAULT_CHANNEL_ALERT_MS, now });
+    if (item) this.deps.log(`lavish: gate ${gate}'s review page is not delivering answers; item ${item} opened`);
   }
 
   private async record(gate: string, page: string, out: PollOutput, raw: string): Promise<void> {
@@ -483,7 +582,7 @@ export class LavishPoller {
       const page = passFromPage(this.deps.db, pagePass.codes, gate, { key }, head, now);
       if (page.outcome === "passed" || page.outcome === "stale" || page.outcome === "late") return { gate, page, request: page.outcome === "passed" ? null : { outcome: page.outcome }, minted: null, keyed: true };
       if (page.outcome === "questions_open") return { gate, page: null, request: { outcome: "questions_open", open: page.open }, minted: null, keyed: true };
-      if (page.outcome === "draft_changed") return { gate, page, request: null, minted: null, keyed: true };
+      if (page.outcome === "draft_changed" || page.outcome === "design_changed") return { gate, page, request: null, minted: null, keyed: true };
       const request = requestGatePass(this.deps.db, gate, now);
       // A spent key or moved work falls back to a typed code; a wrong key (not the tab's) gets the leader's request only.
       const asked = request.outcome === "requested" || request.outcome === "already";

@@ -25,6 +25,7 @@ import { acquireSlot, adoptSlot, leaseHolder, poolRoot, returnSlot } from "../ru
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
 import { browserProfileReads, configStaticLayers } from "../policy/static.ts";
+import { SNAPSHOT_ROOT } from "../lavish/snapshot.ts";
 import { PROTO } from "../version.ts";
 import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
@@ -308,6 +309,7 @@ export class Launcher {
     // Read fresh from the worktree at every launch; a link git cannot follow would leave the worker unable to commit.
     if (run.kind === "ship" && gitAccess.writable.length === 0) throw new Error(`git cannot read ${worktree}'s git dir, so its worker could not commit; ${relinkHint(project, worktree)}`);
     const toolkit = configStaticLayers(config);
+    const reviewCopies = [...new Set([join(config.state_dir, SNAPSHOT_ROOT), join(realpathSync(config.state_dir), SNAPSHOT_ROOT)])];
     const context: RunContext = {
       runId: run.id,
       taskId: run.task_id,
@@ -324,9 +326,10 @@ export class Launcher {
       daemonSocket: this.deps.socketPath,
       tmpDir: tmp.dir,
       writable: [spool, reportDir, ...tmp.writable, ...gitAccess.writable],
-      readOnly: [...gitAccess.readOnly, ...toolkit.denyWrite],
+      readOnly: [...gitAccess.readOnly, ...toolkit.denyWrite, ...reviewCopies],
       // A review tab's address carries its pass key, and browsers keep addresses in their history.
-      permissionsDeny: [...toolkit.permissionsDeny, ...browserProfileReads(homedir())],
+      // The page the tab shows is the daemon's checked copy (src/lavish/snapshot.ts): file tools never write it.
+      permissionsDeny: [...toolkit.permissionsDeny, ...browserProfileReads(homedir()), ...reviewCopies.map((dir) => `Edit(/${dir}/**)`)],
       stagePlugin: skills.claudePlugin,
       ...(mode === "relaunch" ? { resumePrompt: relaunchPrompt(instructionsFile) } : {}),
     };

@@ -51,10 +51,10 @@ function seedRun(target: Db, runId = "r1", taskId = "web-a1"): void {
 }
 
 /** A review gate as stage done opens it, with its gate_ready item. */
-function seedGate(gateId: string, url: string, state = "pending", runId = "r1", title = "Feature"): void {
+function seedGate(gateId: string, url: string, state = "pending", runId = "r1", title = "Feature", source: string | null = "/r/design/design.html"): void {
   const now = Date.now();
   tx(db, () => {
-    db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state) VALUES (?1, ?2, 'design', 'review', ?3, 'open', ?4, ?5)").run(gateId, runId, url, now, state);
+    db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state, source_page) VALUES (?1, ?2, 'design', 'review', ?3, 'open', ?4, ?5, ?6)").run(gateId, runId, url, now, state, source);
     const event = appendEvent(db, { source: "cli", kind: "stage.done", runId, taskId: "web-a1", payload: { gate: gateId } });
     openItem(db, { kind: "gate_ready", eventSeq: event.seq, taskId: "web-a1", runId, line: `design ready for review (${gateId}): ${title} (web) ${url}`, now });
   });
@@ -498,6 +498,17 @@ describe("one click: the tab's pass key (docs/notes/2026-11-05-one-click-approve
     await r.opener.idle();
     expect(hashOf("g3")).toBeNull();
     expect(events("gate.browser_skipped")[1]!.payload).toMatchObject({ one_click: false });
+  });
+
+  test("a page that is not the daemon's checked copy (a gate from before the copy) gets no key: a script on it could read one", async () => {
+    seedGate("g1", URL_A, "pending", "r1", "Feature", null);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(gate("g1").open_state).toBe("opened");
+    expect(r.keys).toEqual([]);
+    expect(hashOf("g1")).toBeNull();
+    expect(events("gate.browser_opening")[0]!.payload).toMatchObject({ one_click: false });
   });
 
   test("a file:// page gets no key, and a failed open never shows the key in why", async () => {

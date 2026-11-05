@@ -12,7 +12,7 @@ import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { loadConfig } from "../../src/config/config.ts";
-import { browserProfileReads, configStaticLayers } from "../../src/policy/static.ts";
+import { configStaticLayers } from "../../src/policy/static.ts";
 import { homedir } from "node:os";
 import { tx } from "../../src/db/db.ts";
 import { claimOperation, escalateOperation, requestOperation } from "../../src/lifecycle/operations.ts";
@@ -326,8 +326,21 @@ describe("safeguards at start", () => {
         permissions: { deny: string[] };
         sandbox: { filesystem: { denyWrite: string[] } };
       };
-      // The toolkit's layer, then the browser profiles (a review tab's address carries its pass key).
-      expect(settings.permissions.deny).toEqual([...configStaticLayers(config).permissionsDeny, ...browserProfileReads(homedir())]);
+      // The toolkit's layer, then the browser profiles (a review tab's address carries its pass key), in
+      // Claude's absolute-path rule form (`//` + the path, then `/**` for everything under it).
+      const deny = settings.permissions.deny as string[];
+      expect(deny.slice(0, configStaticLayers(config).permissionsDeny.length)).toEqual(configStaticLayers(config).permissionsDeny);
+      const home = homedir();
+      expect(deny).toEqual(expect.arrayContaining([
+        `Read(/${home}/Library/Application Support/Google/Chrome/**)`,
+        `Read(/${home}/Library/Application Support/Firefox/**)`,
+        `Read(/${home}/Library/Application Support/BraveSoftware/**)`,
+        `Read(/${home}/Library/Application Support/Arc/**)`,
+        `Read(/${home}/Library/Safari/**)`,
+        // The daemon's copies of review pages, whose tab carries the pass key (src/lavish/snapshot.ts).
+        `Edit(/${realpathSync(config.state_dir)}/review-pages/**)`,
+      ]));
+      expect(settings.sandbox.filesystem.denyWrite).toContain(join(realpathSync(config.state_dir), "review-pages"));
       expect(settings.permissions.deny).toContain("mcp__claude-in-chrome");
       expect(settings.sandbox.filesystem.denyWrite).toEqual(expect.arrayContaining([config.tasks.backlog, config.tasks.todos, `${config.tasks.backlog}.lock`]));
     },

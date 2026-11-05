@@ -20,6 +20,7 @@ import type { GateOpenState } from "../lavish/opener.ts";
 import { parseGateQuestions } from "../lavish/questions.ts";
 import { MOUNT_SNIPPET, pageMountsWidget } from "../lavish/widget.ts";
 import { findPageForKey, lavishSessionKey, lavishUrlKey } from "../lavish/session-key.ts";
+import { REFUSAL_HINT, refusalText, snapshotPathFor, snapshotUrl, takeSnapshot } from "../lavish/snapshot.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, openGateQuestions } from "./gate-questions.ts";
 import { reportDirFor, rewriteTaskFile } from "./launcher.ts";
 import { approvePlan, discardPlansOfGate, fileWorkerPlan, parsePlan } from "./plans.ts";
@@ -696,6 +697,7 @@ const stageDone: VerbSpec = {
     const title = taskTitle(ctx.db, run.task_id);
     let gateReview: string | null = null;
     let listened: string | null = null;
+    let source: string | null = null;
     let spec: DesignSpec | null = null;
     if (pos.stage.gate === "review") {
       if (!review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has a review gate: pass --review <lavish url>`);
@@ -712,6 +714,14 @@ const stageDone: VerbSpec = {
       if (lavishUrlKey(checked.url) && !pageMountsWidget(readFileSync(checked.page, "utf8"))) throw new FlowrynError("bad_args", "the review page does not mount Flowryn's widget (its Approve button, and any questions)", `add ${MOUNT_SNIPPET}`);
       gateReview = checked.url;
       listened = checked.page;
+      // The user reviews the daemon's checked copy of a Lavish page, never the worker's file (src/lavish/snapshot.ts).
+      if (lavishUrlKey(checked.url)) {
+        const taken = takeSnapshot(checked.page, snapshotPathFor(ctx.config().state_dir, run.id, reportDir, checked.page));
+        if (!taken.ok) throw new FlowrynError("review_invalid", `${checked.page}: ${refusalText(taken.problems)}`, `${REFUSAL_HINT}; fix the page, then run stage done again`);
+        source = checked.page;
+        listened = taken.page;
+        gateReview = snapshotUrl(checked.url, taken.page);
+      }
     }
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
     if (gateReview !== null) {
@@ -723,13 +733,13 @@ const stageDone: VerbSpec = {
         .run(gateId, run.id, pos.stage.id, gateReview, now, browser.state, browser.detail, reviewHead);
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
       // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
-      if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
+      if (listened) ctx.db.query("UPDATE gates SET page_path = ?2, source_page = ?3 WHERE id = ?1").run(gateId, listened, source);
       // A design review approves its page and build spec together, pinned by digest; later stages read the gate's copy.
       if (spec && listened) pinDesign(ctx.db, gateId, listened, spec);
       const handoffId = handoff !== null ? recordHandoff(ctx.db, run, pos.stage.id, handoff, now) : null;
       // A draft review approves this file's exact bytes: the delivery must carry them (src/lifecycle/draft.ts).
       if (draft) ctx.db.query("UPDATE gates SET draft_path = ?2, draft_blob = ?3, draft_page = ?4 WHERE id = ?1").run(gateId, draft.path, draft.blob, draftPageDigest(draft));
-      const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, pagePath, questions, now) : [];
+      const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, listened ?? pagePath, questions, now) : [];
       let plan: string | null = null;
       if (planText !== undefined) {
         const project = getProject(ctx.db, run.project_id);

@@ -26,6 +26,8 @@ import { lavishUrlKey } from "./session-key.ts";
  *
  * One-click approve (src/policy/pass-key.ts): the claim mints the tab's pass key, keeps its hash
  * on the gate in the claim's transaction, and only the address handed to `open` carries the key.
+ * Only a Lavish page that is the daemon's checked copy (src/lavish/snapshot.ts) gets one: a
+ * worker's own page could carry a script that reads it.
  * Events, items and the log keep the review URL without it. Plain code.
  */
 
@@ -61,6 +63,8 @@ interface PendingGate {
   run_id: string;
   task_id: string;
   review_url: string;
+  /** Set when the page is the daemon's checked copy (src/lavish/snapshot.ts): only such a tab gets a pass key. */
+  source_page: string | null;
 }
 
 export class ReviewOpener {
@@ -98,7 +102,7 @@ export class ReviewOpener {
   private pendingGate(gateId: string): PendingGate | null {
     return this.deps.db
       .query(
-        `SELECT g.id, g.run_id, r.task_id, g.review_url FROM gates g JOIN runs r ON r.id = g.run_id
+        `SELECT g.id, g.run_id, r.task_id, g.review_url, g.source_page FROM gates g JOIN runs r ON r.id = g.run_id
          WHERE g.id = ?1 AND g.kind = 'review' AND g.state = 'open' AND g.open_state = 'pending' AND g.review_url IS NOT NULL`,
       )
       .get(gateId) as PendingGate | null;
@@ -171,7 +175,7 @@ export class ReviewOpener {
     return tx(this.deps.db, () => {
       const changed = this.deps.db.query("UPDATE gates SET open_state = 'opening', open_at = ?2 WHERE id = ?1 AND open_state = 'pending' AND state = 'open'").run(gate.id, now).changes;
       if (changed === 0) return null;
-      const minted = lavishUrlKey(gate.review_url) ? mintPassKey() : null;
+      const minted = lavishUrlKey(gate.review_url) && gate.source_page !== null ? mintPassKey() : null;
       if (minted) this.deps.db.query("UPDATE gates SET pass_key_hash = ?2 WHERE id = ?1").run(gate.id, minted.hash);
       appendEvent(this.deps.db, { source: "daemon", kind: "gate.browser_opening", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, url: gate.review_url, browser, one_click: minted !== null }, ts: now });
       return { key: minted?.key ?? null };

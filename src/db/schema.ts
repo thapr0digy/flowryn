@@ -1019,10 +1019,12 @@ CREATE INDEX stage_handoffs_task ON stage_handoffs(task_id, created_at);
 `;
 
 // One-click approve (docs/notes/2026-11-05-one-click-approve-3y.md): the SHA-256 of the pass key
-// the daemon opened the review tab with (never the key), and the HEAD the review opened at.
+// the daemon opened the review tab with (never the key), the HEAD the review opened at, and the
+// worker's page the daemon's copy (page_path, under <state_dir>/review-pages) is taken from.
 const PAGE_PASS_KEY_SQL = /* sql */ `
 ALTER TABLE gates ADD COLUMN pass_key_hash TEXT;
 ALTER TABLE gates ADD COLUMN pass_head TEXT;
+ALTER TABLE gates ADD COLUMN source_page TEXT;
 `;
 
 export const MIGRATIONS: readonly Migration[] = [
