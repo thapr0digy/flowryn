@@ -8,6 +8,7 @@ import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { migrate, openDb, type Db } from "../../src/db/db.ts";
 import { handoffsOf } from "../../src/lifecycle/handoffs.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import type { WorkflowDef } from "../../src/config/workflows.ts";
 import { beginLastStage, deliveryHandoff, recordStageDelivered, startPooledStages } from "../../src/lifecycle/stages.ts";
 
 /**
@@ -46,17 +47,21 @@ afterEach(() => {
 /** A no-mistakes ship in its workflow's build stage; `startedAt` 0 is a run from before the rich-briefs migration. */
 type Mode = "no-mistakes" | "direct-PR" | "local-only";
 
-function seed(workflow: "feature" | "fix", opts: { startedAt?: number; stage?: string; stageState?: string; mode?: Mode } = {}): void {
+function seed(workflow: "feature" | "fix" | "pooled", opts: { startedAt?: number; stage?: string; stageState?: string; mode?: Mode; workflowDef?: WorkflowDef } = {}): void {
   const now = Date.now();
   db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, 'web', 'ship', ?2, 0, ?3, ?4)").run(TASK, opts.mode ?? "no-mistakes", workflow, now);
   db.query(
-    `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, stage_state, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
-     VALUES (?1, ?2, 'claude', '2.1.281', 'running', 'busy', ?3, ?4, ?5, '/tmp/wt', 'fm/x', 'abc123', 'h', ?6, ?7)`,
-  ).run(RUN, TASK, workflow, opts.stage ?? "build", opts.stageState ?? "active", opts.startedAt ?? now + 1000, now);
+    `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, workflow_def, stage, stage_state, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+     VALUES (?1, ?2, 'claude', '2.1.281', 'running', 'busy', ?3, ?8, ?4, ?5, '/tmp/wt', 'fm/x', 'abc123', 'h', ?6, ?7)`,
+  ).run(RUN, TASK, workflow, opts.stage ?? "build", opts.stageState ?? "active", opts.startedAt ?? now + 1000, now, opts.workflowDef ? JSON.stringify(opts.workflowDef) : null);
 }
 
 function ctxFor(config: FlowrynConfig): HandlerCtx {
-  const sched = { grantNow: async () => true, kick: () => {} };
+  const grantNow = async (runId: string) => {
+    db.query("UPDATE runs SET stage_state = 'active', waiting_since = NULL, stage_started_at = ?2 WHERE id = ?1 AND stage_state = 'waiting'").run(runId, Date.now());
+    return true;
+  };
+  const sched = { grantNow, kick: () => {} };
   return { db, config: () => config, now: () => Date.now(), via: "socket", caller: { role: "worker", runId: RUN, taskId: TASK }, sched } as unknown as HandlerCtx;
 }
 
@@ -183,6 +188,21 @@ describe("a delivery straight from a build stage", () => {
     await startPooledStages(ctxFor(ENFORCED), RUN);
     expect(stageOf().stage).toBe("ship");
     expect(handoffsOf(db, TASK)).toEqual([]);
+  });
+
+  test("a configured workflow with two pooled stages after build keeps the handoff once, under build", async () => {
+    const step = (id: string, extra: Partial<WorkflowDef["stages"][number]> = {}) => ({ id, skill: null, gate: "none" as const, pools: ["validation"], fresh: false, ...extra });
+    const workflowDef: WorkflowDef = { id: "pooled", stages: [step("build", { skill: "flowryn-build-test", pools: [] }), step("a"), step("ship", { gate: "merge" })] };
+    seed("pooled", { mode: "direct-PR", workflowDef });
+    expect(await startPooledStages(ctxFor(ENFORCED), RUN, HANDOFF)).toEqual({ handoffKept: true });
+    expect(stageOf().stage).toBe("ship");
+    expect(handoffsOf(db, TASK).map((h) => [h.stage, h.text])).toEqual([["build", HANDOFF]]);
+    const id = (db.query("SELECT id FROM stage_handoffs").get() as { id: number }).id;
+    expect(doneEvents()).toEqual([
+      expect.objectContaining({ stage: "build", next: "a", handoff: id }),
+      expect.not.objectContaining({ handoff: expect.anything() }),
+    ]);
+    expect(doneEvents()[1]).toMatchObject({ stage: "a", next: "ship" });
   });
 
   test("the fix workflow's build (no build skill) owes none", async () => {

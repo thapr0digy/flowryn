@@ -436,7 +436,9 @@ async function grantRequested(ctx: HandlerCtx, runId: string, requested: Request
  * and the run waits: the steer that starts the stage tells the worker to
  * deliver again.
  */
-export async function startPooledStages(ctx: HandlerCtx, runId: string, handoffText?: string): Promise<void> {
+export async function startPooledStages(ctx: HandlerCtx, runId: string, handoffText?: string): Promise<{ handoffKept: boolean }> {
+  let handoff = handoffText;
+  let handoffKept = false;
   for (;;) {
     const requested = tx(ctx.db, () => {
       const run = getRunWithPolicy(ctx.db, runId);
@@ -450,10 +452,11 @@ export async function startPooledStages(ctx: HandlerCtx, runId: string, handoffT
         if (!(error instanceof FlowrynError && error.code === "stage_waiting")) throw error;
       }
       const stage = pos.def.stages[index]!;
-      const handoff = deliveryHandoff(ctx, run, handoffText);
-      return requestLater(ctx, run, pos, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, "deliver", handoff);
+      return requestLater(ctx, run, pos, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, "deliver", deliveryHandoff(ctx, run, handoff));
     });
-    if (!requested) return;
+    if (!requested) return { handoffKept };
+    handoffKept ||= handoff !== undefined;
+    handoff = undefined;
     await grantRequested(ctx, runId, requested, () => stageWaiting(requested.stage));
   }
 }

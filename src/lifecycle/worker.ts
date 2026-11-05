@@ -446,12 +446,13 @@ const deliver: VerbSpec = {
     // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate.
     const before = activeRun(ctx);
     const handoffText = stringArg(args, "handoff");
+    let handoffKept = false;
     if (before.state !== "ready") {
       if (pipelineNeedsLastStage(ctx.db, before)) requireLastStageStarted(ctx.db, before);
       else {
         // Refused before anything moves or GitHub and git are asked; kept where the stage ends.
         if (before.kind === "ship") deliveryHandoff(ctx, before, handoffText);
-        await startPooledStages(ctx, before.id, handoffText);
+        ({ handoffKept } = await startPooledStages(ctx, before.id, handoffText));
       }
     }
     const run = activeRun(ctx);
@@ -462,19 +463,19 @@ const deliver: VerbSpec = {
     const seen = deliveryBasis(ctx.db, run.id);
     // A run that passed a draft review lands that file as approved (src/lifecycle/draft.ts).
     await requireApprovedDraft(ctx.db, deps.git, run, project.default_branch);
-    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen };
+    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen, handoffKept };
     const ship = await verifyPrDelivery(deps, run, project, asked.url);
-    return { ship, seen, carry: await carryOf(ctx, deps.git, run, runBase(run, project), ship) };
+    return { ship, seen, handoffKept, carry: await carryOf(ctx, deps.git, run, runBase(run, project), ship) };
   },
   apply(ctx, args, prepared) {
     const run = activeRun(ctx);
     const now = ctx.now();
-    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis; carry?: Carry | null };
+    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis; carry?: Carry | null; handoffKept?: boolean };
     if (outcome.seen) requireDeliveryBasis(ctx.db, outcome.seen, DELIVER_PARTS, "deliver", "cli", now, "read your steers, then deliver again");
     if (run.state !== "ready" && pipelineNeedsLastStage(ctx.db, run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {
-      const handoff = deliveryHandoff(ctx, run, stringArg(args, "handoff"));
+      const handoff = deliveryHandoff(ctx, run, outcome.handoffKept ? undefined : stringArg(args, "handoff"));
       const previous = deliveredOf(ctx.db, run.task_id);
       const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now, outcome.carry ?? null);
       // Runs stacked on this task are told to take its new head (src/lifecycle/stacks.ts).
