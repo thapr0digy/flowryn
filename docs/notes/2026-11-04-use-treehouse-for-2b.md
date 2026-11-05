@@ -24,7 +24,8 @@ Calls (treehouse 3.1.8, read from each subcommand's help and tried in a scratch 
 | When | Call |
 |---|---|
 | Launch | `treehouse --root R get --lease --json --no-fetch --unique-leaf --lease-holder flowryn:<run>` from the checkout. `get --lease` is the one non-interactive acquire that resets a slot; `lease <name>` only marks an existing slot. `--no-fetch`: the base commit is already local. |
-| Launch after a crash | `treehouse --root R status --json`: a slot whose `lease_holder` is `flowryn:<run>` is adopted, so a lease taken but never recorded is not leaked. |
+| Launch after a crash | `treehouse --root R status --json`: a slot whose `lease_holder` is `flowryn:<run>` and whose folder exists is adopted, so a lease taken but never recorded is not leaked. |
+| A get that failed | the same status, and a slot it leased anyway (a warm-up hook failing, or the 300 s deadline after the lease was taken) goes back with `return --force --if-lease-id`. |
 | Cleanup | `treehouse --root R return [--force] --if-lease-id <lease> <path>`: `--force` only for a discard you approved, as `git worktree remove --force` was; `--if-lease-id` never returns a slot another run holds now. |
 
 ## Launch
@@ -32,15 +33,15 @@ Calls (treehouse 3.1.8, read from each subcommand's help and tried in a scratch 
 `ensureWorktree` (src/lifecycle/launcher.ts), under the repository lock (src/runtime/repo-lock.ts) for the get (a new slot is a `git worktree add`) and for the checkout:
 
 1. A run whose `worktree_path` exists is checked as before (a worktree root, on the run's branch). One holding a lease whose slot is still detached (the daemon stopped between lease and checkout) finishes its checkout.
-2. A run holding a lease whose slot is gone (destroyed by hand) records `run.worktree_lost` and takes another slot; the branch still has its commits.
+2. A run holding a lease whose slot is gone (destroyed by hand) returns that lease forced (logged if treehouse refuses it), records `run.worktree_lost` and takes another slot; the branch still has its commits. A slot treehouse still lists for the run but whose folder is gone is never adopted, so the launch cannot pick the vanished slot again.
 3. Otherwise, with the treehouse provider: adopt or lease a slot, record `runs.worktree_path` and `runs.worktree_lease` with a `run.worktree_leased` event in one transaction, then check the slot is clean (`git status --porcelain` empty: ignored files are fine) and `git switch -c <branch> <base_sha>`, or `git switch <branch>` when it exists. Treehouse's own `-b` cuts from its base branch, not an arbitrary commit, so it is not used (stacked phases need `base_sha`). A failed check or switch returns the slot forced (nothing of the run's is in it yet), puts the planned git path back with `run.worktree_returned`, and fails the launch with git's words, as a failed `git worktree add` did.
-4. Treehouse missing, or a status or get call failing: the git worktree, as before.
+4. Treehouse missing, or a status or get call failing: the git worktree, as before. A get that fails after treehouse marked a slot leased hands that slot back forced first (nothing of the run's is in it), so the fallback leaves no lease held.
 
 The dispatch still records the planned git path; the launch replaces it with the slot's. A dispatch of a task whose earlier run still holds its slot (not cleaned up) is refused `already_exists`, as the planned path existing refuses it for git: the branch is checked out there.
 
 ## Cleanup
 
-The order is unchanged (src/policy/cleanup.ts): the landed-work verdict, the index lock, the parked no-mistakes run, the worker's exit, the reap of every process whose cwd is inside the worktree (the Herdr pane's shell included). Then, for a run holding a lease (`returnWorktree`, src/lifecycle/landing.ts), the slot is returned instead of removed, and the branch is deleted as before. On `cleanup.done` the run's `worktree_lease` is cleared. With treehouse uninstalled since the launch, the slot is removed with git like any linked worktree (logged).
+The order is unchanged (src/policy/cleanup.ts): the landed-work verdict, the index lock, the parked no-mistakes run, the worker's exit, the reap of every process whose cwd is inside the worktree (the Herdr pane's shell included). Then, for a run holding a lease (`returnWorktree`, src/lifecycle/landing.ts), the slot is returned instead of removed, and the branch is deleted as before. On `cleanup.done` the run's `worktree_lease` is cleared. With treehouse uninstalled since the launch, the cleanup is refused `remove_failed` (install it and retry): removing the slot with git would leave treehouse holding its lease for good.
 
 What the guard protects is kept the same way:
 
@@ -66,8 +67,8 @@ What the next run in a returned slot does not inherit: the branch (the return de
 
 ## Tests
 
-- `test/helpers/fake-treehouse.ts`: the stand-in every test home gets (`[tools] treehouse`), answering `--version`, `get --lease --json`, `status --json` and `return [--force] [--if-lease-id]` as 3.1.8 did, with real `git worktree add --detach` for new slots, state in the pool root and a call log in `$FLOWRYN_HOME/treehouse-calls.log` (`treehouse.fail` makes every call fail). The test preload refuses spawning the real treehouse in-process.
+- `test/helpers/fake-treehouse.ts`: the stand-in every test home gets (`[tools] treehouse`), answering `--version`, `get --lease --json`, `status --json` and `return [--force] [--if-lease-id]` as 3.1.8 did, with real `git worktree add --detach` for new slots, state in the pool root (`.treehouse/fake-get-fails` makes `get` fail after leasing) and a call log in `$FLOWRYN_HOME/treehouse-calls.log` (`treehouse.fail` makes every call fail). The test preload refuses spawning the real treehouse in-process.
 - `test/integration/treehouse-pool.test.ts`: a ship leased from the pool, cleaned up with a plain return after its work landed in the local main, and the next run given the same slot clean, on its own branch, with the ignored cache kept; a failing treehouse leaving the run on a git worktree, with the log line, event and doctor warning, and its cleanup removing the worktree with git.
-- `test/unit/treehouse.test.ts`: one test per assumption (the lease and status shapes, the version's leading `v`, adopt by holder, a plain return refusing changes, a return detaching the slot so the branch can go, a forced return keeping ignored files, `--if-lease-id` refusing another lease), the cleanup's return path (an approved discard forced with its head recorded, landed work returned plain, a failed return refusing with everything kept), and doctor's lines.
+- `test/unit/treehouse.test.ts`: Flowryn's side (the lease and status shapes, the version's leading `v`, adopt by holder, a failed get handing its slot back, a vanished slot never adopted). treehouse 3.1.8's real behaviour (a plain return refusing changes, a return detaching the slot so the branch can go, a forced return keeping ignored files, `--if-lease-id` refusing another lease) was checked by hand in a scratch repository, not by the suite, which never runs the real treehouse; the "stand-in fidelity" tests keep the stand-in faithful to it. Then the cleanup's return path (an approved discard forced with its head recorded, landed work returned plain, a failed return refusing with everything kept), and doctor's lines.
 - `test/unit/leader-scope.test.ts`: the pool under a custom root denied to other scopes, a cleaned-up run's slot no longer.
 - Both cleanup fixture sets pass unchanged: they run the git removal, as `scripts/guard/cleanup-impl.ts` passes no `returnWorktree`.

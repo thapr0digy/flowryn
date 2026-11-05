@@ -1,9 +1,11 @@
 /**
  * Flowryn's treehouse calls (src/runtime/treehouse.ts) and the cleanup's
  * return path (src/policy/cleanup.ts), against the test homes' stand-in
- * treehouse (test/helpers/fake-treehouse.ts) and real git. Each assumption
- * the design (docs/notes/2026-11-04-use-treehouse-for-2b.md) rests on has a
- * test named after it; the stand-in mirrors what treehouse 3.1.8 did by hand.
+ * treehouse (test/helpers/fake-treehouse.ts) and real git. treehouse 3.1.8's
+ * real behaviour was checked by hand in a scratch repository, not by this
+ * suite (`bun test` never runs the real treehouse); the "stand-in fidelity"
+ * tests only keep the stand-in faithful to what was seen there, so the tests
+ * built on it rest on the same behaviour.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -99,7 +101,8 @@ describe("the pool calls", () => {
     expect(await adoptSlot(s.bin, s.root, s.repo, leaseHolder("r8"))).toEqual({ ok: true, value: null });
   });
 
-  test("a plain return refuses a slot with changes (no terminal to confirm) and leaves it as it was", async () => {
+  // Stand-in fidelity: what this checks lives in the stand-in, mirroring 3.1.8 as tried by hand.
+  test("stand-in fidelity: a plain return refuses a slot with changes (no terminal to confirm) and leaves it as it was", async () => {
     const s = scratch();
     const slot = await leased(s);
     sh(slot.path, ["switch", "-q", "-c", "flowryn/t"]);
@@ -111,7 +114,8 @@ describe("the pool calls", () => {
     expect(git(slot.path, ["branch", "--show-current"]).out).toBe("flowryn/t");
   });
 
-  test("a return detaches the slot, so the branch can be deleted, and keeps its commits on the branch", async () => {
+  // Stand-in fidelity: what this checks lives in the stand-in, mirroring 3.1.8 as tried by hand.
+  test("stand-in fidelity: a return detaches the slot, so the branch can be deleted, and keeps its commits on the branch", async () => {
     const s = scratch();
     const slot = await leased(s);
     sh(slot.path, ["switch", "-q", "-c", "flowryn/t"]);
@@ -125,7 +129,8 @@ describe("the pool calls", () => {
     expect(git(s.repo, ["branch", "-D", "flowryn/t"]).code).toBe(0);
   });
 
-  test("a forced return cleans tracked and untracked changes but keeps ignored files (the warm cache)", async () => {
+  // Stand-in fidelity: what this checks lives in the stand-in, mirroring 3.1.8 as tried by hand.
+  test("stand-in fidelity: a forced return cleans tracked and untracked changes but keeps ignored files (the warm cache)", async () => {
     const s = scratch();
     const slot = await leased(s);
     writeFileSync(join(slot.path, "a.txt"), "changed\n");
@@ -141,7 +146,8 @@ describe("the pool calls", () => {
     expect(again.lease_id).not.toBe(slot.lease_id);
   });
 
-  test("a return names its lease: a slot another lease now holds is never returned", async () => {
+  // Stand-in fidelity: what this checks lives in the stand-in, mirroring 3.1.8 as tried by hand.
+  test("stand-in fidelity: --if-lease-id refuses a slot another lease now holds", async () => {
     const s = scratch();
     const slot = await leased(s);
     expect((await returnSlot(s.bin, s.root, slot.path, slot.lease_id, true)).ok).toBe(true);
@@ -150,6 +156,35 @@ describe("the pool calls", () => {
     expect(stale.ok).toBe(false);
     expect(stale.detail).toContain("lease precondition failed");
     expect((await adoptSlot(s.bin, s.root, s.repo, leaseHolder("r2"))).ok).toBe(true);
+  });
+});
+
+describe("leases that would otherwise stay held", () => {
+  test("a get that fails after leasing a slot hands that slot back forced, so the pool keeps it", async () => {
+    const s = scratch();
+    mkdirSync(join(s.root, ".treehouse"), { recursive: true });
+    writeFileSync(join(s.root, ".treehouse", "fake-get-fails"), "");
+    const got = await acquireSlot(s.bin, s.root, s.repo, leaseHolder("r1"));
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.detail).toContain("treehouse get failed");
+    expect(got.detail).toContain("the slot it leased was returned");
+    expect(await adoptSlot(s.bin, s.root, s.repo, leaseHolder("r1"))).toEqual({ ok: true, value: null });
+    rmSync(join(s.root, ".treehouse", "fake-get-fails"));
+    const next = await leased(s, leaseHolder("r2"));
+    expect(next.path).toBe(poolSlots(s.root)[0]!);
+    expect(poolSlots(s.root)).toHaveLength(1);
+  });
+
+  test("a slot treehouse still lists for the holder but whose folder is gone is not adopted; a new one is leased", async () => {
+    const s = scratch();
+    const lost = await leased(s, leaseHolder("r1"));
+    rmSync(lost.path, { recursive: true, force: true });
+    expect(await adoptSlot(s.bin, s.root, s.repo, leaseHolder("r1"))).toEqual({ ok: true, value: null });
+    sh(s.repo, ["worktree", "prune"]);
+    const next = await leased(s, leaseHolder("r1"));
+    expect(next.path).not.toBe(lost.path);
+    expect(existsSync(next.path)).toBe(true);
   });
 });
 

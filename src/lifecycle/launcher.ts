@@ -447,6 +447,7 @@ export class Launcher {
     if (run.worktree_lease) {
       // Its slot is gone (destroyed by hand): the branch holds the run's commits, so a new slot checks it out again.
       this.deps.log(`launch ${run.id}: its pool worktree ${path} is gone; taking another`);
+      await this.returnLost(run, project, workers, path, run.worktree_lease);
       this.recordWorktree(run, plannedWorktree(workers, project.id, run.task_id), null, "run.worktree_lost", { path, lease: run.worktree_lease });
     }
     if (workers.worktree_provider === "treehouse") {
@@ -512,6 +513,14 @@ export class Launcher {
       else this.deps.log(`launch ${run.id}: the pool worktree ${slot.path} was not returned: ${back.detail}`);
       throw error;
     }
+  }
+
+  /** Hand a vanished slot's lease back, forced, so the pool does not keep it held; a failure is only logged. */
+  private async returnLost(run: RunWithPolicy, project: ProjectRow, workers: WorkersConfig, path: string, lease: string): Promise<void> {
+    const bin = resolveTool(this.deps.config(), "treehouse");
+    if (!bin) return this.deps.log(`launch ${run.id}: treehouse is not installed, so the lease on ${path} stays held`);
+    const back = await withRepoLock(project.path, () => returnSlot(bin, poolRoot(workers.worktree_root, project.id), path, lease, true));
+    if (!back.ok) this.deps.log(`launch ${run.id}: the lease on ${path} was not returned: ${back.detail}`);
   }
 
   /** A clean, detached slot onto the run's branch: a new one at the base commit, or the existing one. */

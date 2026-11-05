@@ -118,13 +118,21 @@ export function parseStatus(stdout: string): SlotStatus[] | null {
   return out;
 }
 
-/** Lease a slot for `holder`, cut from the repository's base without a fetch (the run's base commit is already local). */
+/**
+ * Lease a slot for `holder`, cut from the repository's base without a fetch (the run's base commit is already local).
+ * Call it only when `holder` holds no slot: a get that fails or times out after treehouse marked a slot leased hands
+ * that slot back forced (nothing of the run's is in it), so the run's fallback to git leaves no lease behind.
+ */
 export async function acquireSlot(bin: string, root: string, repo: string, holder: string): Promise<Outcome<SlotLease>> {
   const call = await treehouse(bin, root, ["get", "--lease", "--json", "--no-fetch", "--unique-leaf", "--lease-holder", holder], repo, GET_TIMEOUT_MS);
-  if (call.code !== 0) return { ok: false, detail: `treehouse get failed (${said(call)})` };
-  const lease = parseLease(call.stdout);
-  if (!lease) return { ok: false, detail: `treehouse get printed no lease: ${call.stdout.trim().slice(0, 200) || "(nothing)"}` };
-  return { ok: true, value: lease };
+  const lease = call.code === 0 ? parseLease(call.stdout) : null;
+  if (lease) return { ok: true, value: lease };
+  const detail = call.code !== 0 ? `treehouse get failed (${said(call)})` : `treehouse get printed no lease: ${call.stdout.trim().slice(0, 200) || "(nothing)"}`;
+  const stray = await adoptSlot(bin, root, repo, holder);
+  if (!stray.ok) return { ok: false, detail: `${detail}; ${stray.detail}` };
+  if (!stray.value) return { ok: false, detail };
+  const back = await returnSlot(bin, root, stray.value.path, stray.value.lease_id, true);
+  return { ok: false, detail: `${detail}; the slot it leased ${back.ok ? "was returned" : `was not returned: ${back.detail}`}` };
 }
 
 export async function poolStatus(bin: string, root: string, repo: string): Promise<Outcome<SlotStatus[]>> {
@@ -135,11 +143,14 @@ export async function poolStatus(bin: string, root: string, repo: string): Promi
   return { ok: true, value: slots };
 }
 
-/** The slot a lease of `holder` still holds (a launch that leased one and stopped before recording it), or null. */
+/**
+ * The slot a lease of `holder` still holds (a launch that leased one and stopped before recording it), or null.
+ * A slot treehouse still lists but whose folder is gone (destroyed by hand) is never adopted.
+ */
 export async function adoptSlot(bin: string, root: string, repo: string, holder: string): Promise<Outcome<SlotLease | null>> {
   const status = await poolStatus(bin, root, repo);
   if (!status.ok) return status;
-  const held = status.value.find((s) => s.lease_holder === holder && s.lease_id !== "");
+  const held = status.value.find((s) => s.lease_holder === holder && s.lease_id !== "" && existsSync(s.path));
   return { ok: true, value: held ? { path: held.path, lease_id: held.lease_id, lease_holder: held.lease_holder } : null };
 }
 
@@ -150,7 +161,7 @@ export async function adoptSlot(bin: string, root: string, repo: string, holder:
  */
 export async function returnSlot(bin: string, root: string, path: string, leaseId: string, force: boolean): Promise<{ ok: boolean; detail: string }> {
   const args = ["return", ...(force ? ["--force"] : []), "--if-lease-id", leaseId, path];
-  // From the pool root's parent: treehouse finds the pool from the path itself, and the slot may be the thing being reset.
+  // From the pool root, not the slot: treehouse finds the pool from the path itself, and the slot may be the thing being reset.
   const call = await treehouse(bin, root, args, existsSync(root) ? root : "/", RETURN_TIMEOUT_MS);
   return call.code === 0 ? { ok: true, detail: "returned" } : { ok: false, detail: `treehouse return failed (${said(call)})` };
 }

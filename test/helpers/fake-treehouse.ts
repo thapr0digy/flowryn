@@ -9,7 +9,9 @@
  * (exit 3, as with stdin at EOF), refuses another lease (exit 1), and resets a
  * returned slot clean and detached while keeping its ignored files.
  *
- * State lives in the pool root (`--root`), in `.treehouse/fake-state.json`.
+ * State lives in the pool root (`--root`), in `.treehouse/fake-state.json`;
+ * with `.treehouse/fake-get-fails` there, `get` leases its slot and then fails
+ * (a warm-up hook failing, or a timeout after the lease was taken).
  * Every call is appended to `$FLOWRYN_HOME/treehouse-calls.log`; with
  * `$FLOWRYN_HOME/treehouse.fail` present every call fails, printing its text.
  */
@@ -114,6 +116,10 @@ if (command === "get") {
   slot.lease_id = randomBytes(16).toString("hex");
   slot.lease_holder = holder;
   save(slots);
+  if (existsSync(join(root, ".treehouse", "fake-get-fails"))) {
+    console.error("treehouse: warm-up hook failed after the lease was taken");
+    process.exit(1);
+  }
   console.error(`🌳 Leased worktree at ${slot.path}.`);
   console.log(JSON.stringify({ path: slot.path, lease_id: slot.lease_id, lease_holder: holder, leased_at: new Date().toISOString(), base_branch: "main" }));
   process.exit(0);

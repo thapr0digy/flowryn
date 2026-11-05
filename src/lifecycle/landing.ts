@@ -169,17 +169,14 @@ function removeTmp(deps: LandingDeps, run: RunWithPolicy): void {
 
 /**
  * How a run's pool worktree goes back (src/runtime/treehouse.ts), or null for
- * a git worktree. With treehouse gone since the launch, the slot is removed
- * with git like any worktree (logged): it is a linked worktree all the same.
+ * a git worktree. With treehouse gone since the launch, the return refuses:
+ * removing the slot with git would leave treehouse holding its lease for good.
  */
 function poolReturn(deps: LandingDeps, run: RunWithPolicy, projectId: string): ((path: string, discard: boolean) => Promise<{ ok: boolean; detail: string }>) | null {
   const lease = run.worktree_lease;
   if (!lease) return null;
   const th = deps.treehouse?.() ?? null;
-  if (!th) {
-    deps.log(`cleanup ${run.task_id}: treehouse is not installed, so its pool worktree ${run.worktree_path} is removed with git`);
-    return null;
-  }
+  if (!th) return async () => ({ ok: false, detail: "treehouse is not installed, so the pool worktree cannot go back to its pool; install it and retry" });
   return (path, discard) => returnSlot(th.bin, poolRoot(th.worktreeRoot, projectId), path, lease, discard);
 }
 
