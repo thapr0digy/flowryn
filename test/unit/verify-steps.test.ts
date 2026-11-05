@@ -153,9 +153,12 @@ describe("verify groups and verify_step_timeout_min in config", () => {
     ]);
   });
 
-  test("assumption: Bun's TOML reads a group in a one-line list only when the list does not end in ]] (docs note: break the lines)", () => {
-    expect(refused('[projects.web]\nverify = ["a", ["b", "c"]]\n')).toBe("config_invalid");
-    expect(verifyConfig(config('[projects.web]\nverify = ["a", ["b", "c"] ]\n'), "web")!.steps).toEqual(["a", ["b", "c"]]);
+  test("assumption: Bun 1.4's TOML reads a group in a one-line list, even one that ends in ]] (Bun 1.3 refused that; docs note)", () => {
+    const spaced = verifyConfig(config('[projects.web]\nverify = ["a", ["b", "c"] ]\n'), "web")!.steps;
+    expect(spaced).toEqual(["a", ["b", "c"]]);
+    // engines.bun still allows 1.3.x (docs/notes/2026-11-04-move-ci-and-2d.md), whose parser refused a list ending in ]].
+    if (Bun.semver.satisfies(Bun.version, ">=1.4.0")) expect(verifyConfig(config('[projects.web]\nverify = ["a", ["b", "c"]]\n'), "web")!.steps).toEqual(spaced);
+    else expect(refused('[projects.web]\nverify = ["a", ["b", "c"]]\n')).toBe("config_invalid");
   });
 
   test("an empty or nested-too-deep group, a blank step in a group and a bad step timeout are refused", () => {

@@ -48,7 +48,7 @@ verify = [
 
 Nothing infers dependencies, so group only steps that are independent. Here `doctor` runs `./dist/flowryn`, so it must come after `bun run build`, and the steps of a group share one worktree, so they must not write the same files. The grouping above saves about 2 s. Running `bun test` beside `doctor` would save about 2 min, but it is untested for interference (both start daemons on Unix sockets, and CPU contention may slow timing-sensitive tests), so it is not recommended yet.
 
-**Sharp edge (Bun's TOML):** a one-line list that ends in `]]` fails to parse (`verify = ["a", ["b", "c"]]`), and the config is refused as invalid TOML. Write the list over several lines as above, or put a space between the brackets (`["b", "c"] ]`). A test pins this behaviour, so a Bun upgrade that fixes it will show up there.
+**Sharp edge (Bun's TOML):** Bun 1.3 fails to parse a one-line list that ends in `]]` (`verify = ["a", ["b", "c"]]`) and the config is refused as invalid TOML; Bun 1.4 reads it. Under a Bun 1.3 build, write the list over several lines as above, or put a space between the brackets (`["b", "c"] ]`). A test pins both behaviours (docs/notes/2026-11-04-move-ci-and-2d.md).
 
 **Policy identity.** A flat list hashes exactly as before, so passes recorded under today's flowryn and fathom configs still count (a test pins flowryn's live `vp1:bae79e93…`). A grouped list hashes its structure, so moving a step into or out of a group is a different policy. A group of one is the plain step. The time limits are not part of the identity.
 

@@ -9,6 +9,7 @@ import { stateFiles } from "../../src/config/paths.ts";
 import { PING_VERB } from "../../src/daemon/system-verbs.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
+import { mergeDuplicateTables } from "../../src/config/toml-parse.ts";
 import { PROTO } from "../../src/version.ts";
 
 export const REPO_ROOT = resolve(import.meta.dir, "../..");
@@ -220,7 +221,8 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   }
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`, "unreachable_alert_ms = 86400000");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(home, "config.toml"), lines.join("\n") + "\n");
+  // Fragments (a helper's, then a test's own) may each open the same table; Bun 1.4 refuses a table defined twice, so fold them.
+  writeFileSync(join(home, "config.toml"), mergeDuplicateTables(lines.join("\n")) + "\n");
   // No daemon the tests start ever delivers a notification (FLOWRYN_NOTIFY=off, which startDaemon requires);
   // behind it, the macOS channel only records, never runs osascript, and review pages are recorded to
   // browser-opens.log, never opened (FLOWRYN_OPENER; src/lavish/opener.ts).

@@ -8,6 +8,7 @@ import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, 
 import { policyMode } from "./policy.ts";
 import { askConfig } from "./ask.ts";
 import { upkeepConfig } from "./upkeep.ts";
+import { parseTomlText } from "./toml-parse.ts";
 import { validationConfig } from "./validation.ts";
 import { herdrConfig, timingConfig, workersConfig } from "./workers.ts";
 import { capacityConfig, defaultAutonomy, DEFAULT_WORKFLOWS, projectMaxWorkers, schedTiming, styleBlock, workflowsConfig } from "./workflows.ts";
@@ -144,7 +145,7 @@ function leafPaths(value: Record<string, unknown>, prefix: string[], out: string
 export function configOverrides(text: string): string[] {
   let raw: unknown;
   try {
-    raw = Bun.TOML.parse(text);
+    raw = parseTomlText(text);
   } catch {
     return [];
   }
