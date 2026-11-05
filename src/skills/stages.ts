@@ -71,7 +71,7 @@ Goal: the change the approved design describes, with tests that prove it and tes
    - No secrets in logs, errors, storage, task files or commits.
    - Errors are explicit, never swallowed; each failure path has a test.
 6. Self-review: read your whole diff as a reviewer would (\`git diff <base>...HEAD\`), fix what you find, run the suite again.
-7. Finish: commit everything, write the handoff (\`$FLOWRYN_BIN template handoff\`: ## Done, ## Deviations from the spec and why, ## Risks), then \`$FLOWRYN_BIN stage done --handoff-file <file>\` and end your turn. The next stage gets your handoff.
+7. Finish: commit everything, write the handoff (\`$FLOWRYN_BIN template handoff\`: ## Done, ## Deviations from the spec and why, ## Risks), then \`$FLOWRYN_BIN stage done --handoff-file <file>\` and end your turn. Going straight to a no-mistakes pipeline instead, the same handoff goes with \`$FLOWRYN_BIN stage begin <last stage> --handoff-file <file>\`. The next stage gets your handoff.
 
 Rules:
 - A test you cannot make pass: \`$FLOWRYN_BIN ask --options a,b --blocks <what waits> --body-file -\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.

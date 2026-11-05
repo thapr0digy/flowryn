@@ -149,4 +149,48 @@ describe("rich briefs", () => {
     },
     { timeout: 150_000 },
   );
+
+  test(
+    "design → build → stage begin ship: refused without a handoff, then the ship stage's task file holds the build handoff",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only", extraConfig: ENFORCE });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const steps = [
+        `FAKE: write design/design.html ${PAGE}`,
+        `FAKE: write design/spec.md ${SPEC}`,
+        "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: wait-file build-go",
+        "FAKE: commit cache.ts export const cache = 1;",
+        // Straight to the last stage, the no-mistakes shortcut: no handoff, refused.
+        "FAKE: verb stage begin ship",
+        `FAKE: write handoff.md ${HANDOFF}`,
+        "FAKE: verb stage begin ship --handoff-file $FLOWRYN_REPORT_DIR/handoff.md",
+        "FAKE: deliver-local",
+        "FAKE: sleep 120000",
+      ];
+      const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: brief(steps) });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
+      expect((await e.approve(task, { gate: "design" })).ok).toBe(true);
+      writeFileSync(join(f.h.dataDir, task, "build-go"), "");
+
+      await f.waitRun(run, (r) => r.state === "ready", "the delivery", 60_000);
+      const replies = await e.replies(task, 3);
+      const begins = replies.filter((r) => r.args.join(" ").startsWith("stage begin ship"));
+      expect(begins.length).toBe(2);
+      expect((begins[0]!.reply.error as { code: string }).code).toBe("handoff_invalid");
+      expect((begins[0]!.reply.error as { help: string }).help).toContain("stage begin ship --handoff-file");
+      expect(begins[1]!.reply.ok).toBe(true);
+      const done = one<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'stage.done' AND run_id = ?1 AND payload LIKE '%\"for\":\"begin\"%'", run)!;
+      expect(JSON.parse(done.payload)).toMatchObject({ stage: "build", next: "ship", handoff: expect.any(Number) });
+      const taskFile = readFileSync(join(f.h.stateDir, "runs", run, "task.md"), "utf8");
+      expect(taskFile).toStartWith("Flowryn stage ship (3 of 3;");
+      expect(taskFile).toContain("#### build (run ");
+      expect(taskFile).toContain("FLOWRYN-HANDOFF-MARK");
+    },
+    { timeout: 150_000 },
+  );
 });

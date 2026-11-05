@@ -49,7 +49,7 @@ function beginLines(d: ContractDelivery): string[] {
   const pools = d.lastStage?.pools ?? [];
   const slot = pools.length > 0 ? `; it holds a slot of ${pools.join(" and ")}` : "";
   const wait = !d.lastStage || pools.length > 0 ? ["  On stage_waiting, end your turn: a steer says when it has started."] : [];
-  return [`  Before the pipeline: $FLOWRYN_BIN stage begin ${id}${slot}.`, ...wait];
+  return [`  Before the pipeline: $FLOWRYN_BIN stage begin ${id}${slot}; skipping build, add --handoff-file <your handoff>.`, ...wait];
 }
 
 /** The branch the worker's PR targets and takes in with a merge: its base, else the default branch. */
