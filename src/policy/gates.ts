@@ -7,6 +7,7 @@ import type { Account } from "../config/accounts.ts";
 import { runAccount } from "../config/accounts.ts";
 import { checkStart, startDepsOf } from "../lifecycle/dispatch.ts";
 import { requireDraftPageShown } from "../lifecycle/draft.ts";
+import { requireDesignPinned } from "../lifecycle/design-spec.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { goneForGood } from "../lifecycle/review-chat.ts";
@@ -78,6 +79,7 @@ export function recordGatePass(db: Db, run: RunWithPolicy, gate: GateRow, approv
   // The user answered "refuse" (q3): a gate with an open question of its own never passes.
   requireGateAnswered(db, gate);
   requireDraftPageShown(run, gate);
+  requireDesignPinned(run, gate);
   const row = insertApproval(db, { task: run.task_id, ref: gateRef(gate), head: approval.head, channel: approval.channel, actor: approval.actor, action: "gate", now });
   consumeApproval(db, row.id, now, `gate ${gate.id} of ${run.task_id}`);
   const passed = passReviewGate(db, run, gate, { id: row.id, channel: approval.channel }, now);

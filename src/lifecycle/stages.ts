@@ -27,6 +27,9 @@ import { getRunWithPolicy, isTerminal, taskTitle, type PendingLaunch, type RunRo
 import { summarizeReview } from "./review-chat.ts";
 import { createSteer } from "./steers.ts";
 import { checkDraftPage, DRAFT_SKILL, draftPageDigest, type DraftFile } from "./draft.ts";
+import { briefsConfig } from "../config/briefs.ts";
+import { pinDesign, readDesignSpec, requireSpecLinked, type DesignSpec } from "./design-spec.ts";
+import { checkHandoff, HANDOFF_REQUIRED_SKILL, handoffNote, recordHandoff } from "./handoffs.ts";
 
 /**
  * Workflow stages and gates (design section 11). A run moves through its
@@ -235,6 +238,11 @@ export interface GateRow {
   replaced_by?: string | null;
   /** A draft review's page digest at `stage done` (src/lifecycle/draft.ts): it passes only while the page still shows that. */
   draft_page?: string | null;
+  /** A design review's pinned build spec and page (src/lifecycle/design-spec.ts). */
+  spec_path?: string | null;
+  spec_text?: string | null;
+  spec_digest?: string | null;
+  page_digest?: string | null;
   approval_id: string | null;
   feedback: string | null;
   opened_at: number;
@@ -630,6 +638,7 @@ const stageDone: VerbSpec = {
     "plan-file": { type: "string", help: "a phase plan for the later phases, approved with the design", fileFor: "plan" },
     page: { type: "string", help: "the review page's .html file: Flowryn listens on it for the user's feedback, and it mounts the question widget with --questions-file", placeholder: "path" },
     "questions-file": { type: "string", help: "what only the user can answer, as JSON (with --page); each becomes a decision reserved for them", fileFor: "questions" },
+    "handoff-file": { type: "string", help: "your handoff to the next stage (## Done, ## Deviations, ## Risks; $FLOWRYN_BIN template handoff); required after build", fileFor: "handoff" },
   },
   kind: "mutation",
   roles: ["worker"],
@@ -658,6 +667,12 @@ const stageDone: VerbSpec = {
     const planText = stringArg(args, "plan");
     const page = stringArg(args, "page");
     const questionsText = stringArg(args, "questions");
+    const enforce = briefsConfig(ctx.config()).enforce;
+    const handoffText = stringArg(args, "handoff");
+    if (handoffText === undefined && enforce && pos.stage.skill === HANDOFF_REQUIRED_SKILL) {
+      throw new FlowrynError("handoff_invalid", `stage ${pos.stage.id} ends with a handoff to the next stage: what you did, deviations from the spec and why, open risks`, "$FLOWRYN_BIN template handoff > \"$TMPDIR/handoff.md\", fill it, then $FLOWRYN_BIN stage done --handoff-file \"$TMPDIR/handoff.md\"");
+    }
+    const handoff = handoffText !== undefined ? checkHandoff(handoffText) : null;
     if (questionsText !== undefined && page === undefined) throw new FlowrynError("bad_args", "--questions-file needs --page: the questions go on that page");
     if (questionsText !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `questions ride with a review gate; stage ${pos.stage.id} has none: decide them yourself and record your choices`);
     if (page !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `--page rides with a review gate; stage ${pos.stage.id} has none`);
@@ -667,13 +682,18 @@ const stageDone: VerbSpec = {
     const title = taskTitle(ctx.db, run.task_id);
     let gateReview: string | null = null;
     let listened: string | null = null;
+    let spec: DesignSpec | null = null;
     if (pos.stage.gate === "review") {
       if (!review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has a review gate: pass --review <lavish url>`);
       const qaPage = pos.stage.skill === QA_SKILL ? checkQaPage(reportDir) : null;
       if (qaPage !== null && pagePath !== null && pagePath !== qaPage) throw new FlowrynError("bad_args", `the QA review page is ${qaPage}; --page names another`);
       const lavish = resolveTool(ctx.config(), "lavish_axi");
       const checked = checkReviewUrl(review, { page: qaPage ?? pagePath, reportDir, lavishInstalled: lavish !== null && existsSync(lavish) });
-      if (pos.stage.skill === DESIGN_SKILL) checkDesignPage(checked.page, { widget: questions !== null });
+      if (pos.stage.skill === DESIGN_SKILL) {
+        checkDesignPage(checked.page, { widget: questions !== null });
+        spec = readDesignSpec(reportDir, { required: enforce });
+        if (spec) requireSpecLinked(checked.page, spec);
+      }
       gateReview = checked.url;
       listened = checked.page;
     }
@@ -688,6 +708,9 @@ const stageDone: VerbSpec = {
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
       // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
       if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
+      // A design review approves its page and build spec together, pinned by digest; later stages read the gate's copy.
+      if (spec && listened) pinDesign(ctx.db, gateId, listened, spec);
+      const handoffId = handoff !== null ? recordHandoff(ctx.db, run, pos.stage.id, handoff, now) : null;
       // A draft review approves this file's exact bytes: the delivery must carry them (src/lifecycle/draft.ts).
       if (draft) ctx.db.query("UPDATE gates SET draft_path = ?2, draft_blob = ?3, draft_page = ?4 WHERE id = ?1").run(gateId, draft.path, draft.blob, draftPageDigest(draft));
       const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, pagePath, questions, now) : [];
@@ -697,7 +720,7 @@ const stageDone: VerbSpec = {
         if (!project) throw new FlowrynError("not_found", `project ${run.project_id} is gone`);
         plan = fileWorkerPlan(ctx.db, ctx.config(), { project, sourceTask: run.task_id, gateId, phases: parsePlan(planText), workflow: project.workflow, now });
       }
-      const event = appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, gate: gateId, review: gateReview, plan, questions: asked, via: ctx.via, ...(draft ? { draft: draft.path, blob: draft.blob } : {}) }, ts: now });
+      const event = appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, gate: gateId, review: gateReview, plan, questions: asked, via: ctx.via, ...(draft ? { draft: draft.path, blob: draft.blob } : {}), ...(spec ? { spec_digest: spec.digest } : {}), ...(handoffId !== null ? { handoff: handoffId } : {}) }, ts: now });
       appendEvent(ctx.db, { source: "cli", kind: "gate.opened", runId: run.id, taskId: run.task_id, payload: { gate: gateId, stage: pos.stage.id, kind: "review", review: gateReview, browser: browser.state }, ts: now });
       resolveRunItems(ctx.db, run.id, ["worker_idle"], "stage.done", now);
       const asking = asked.length > 0 ? ` with ${asked.length} question${asked.length === 1 ? "" : "s"} for you (${asked.join(", ")})` : "";
@@ -707,8 +730,9 @@ const stageDone: VerbSpec = {
     }
     if (planText !== undefined) throw new FlowrynError("bad_args", "a plan rides with a review gate (approving the design approves the plan); this stage has none");
     if (review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has no review gate; drop --review`);
-    appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, via: ctx.via }, ts: now });
-    requestStage(ctx.db, run, pos.def, pos.index + 1, `Stage ${pos.stage.id} is done.`, now);
+    const handoffId = handoff !== null ? recordHandoff(ctx.db, run, pos.stage.id, handoff, now) : null;
+    appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, via: ctx.via, ...(handoffId !== null ? { handoff: handoffId } : {}) }, ts: now });
+    requestStage(ctx.db, run, pos.def, pos.index + 1, handoffNote(pos.stage.id, handoff), now);
     resolveRunItems(ctx.db, run.id, ["worker_idle"], "stage.done", now);
     return { data: { stage: pos.stage.id, next: pos.def.stages[pos.index + 1]!.id, state: "requested" }, hints: ["end your turn; a steer starts the next stage"] };
   },

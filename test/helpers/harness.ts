@@ -231,6 +231,8 @@ export function makeHome(options: HomeOptions = {}): TestHome {
     if (at >= 0) lines[at] = lines[at]!.replace(/^\[workers\]\s*$/m, `[workers]\n${provider}`);
     else lines.push("[workers]", provider);
   }
+  // Structured briefs, design specs and handoffs are enforced only where a test asks ([briefs] enforce = true), so one-line fake bodies still dispatch.
+  if (!extraConfig.includes("[briefs]")) lines.push("[briefs]", "enforce = false");
   if (!extraConfig.includes("[herdr]")) lines.push("[herdr]", `socket = ${JSON.stringify(join(home, "no-herdr.sock"))}`, "unreachable_alert_ms = 86400000");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   // Fragments (a helper's, then a test's own) may each open the same table; Bun 1.4 refuses a table defined twice, so fold them.

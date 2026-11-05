@@ -34,6 +34,8 @@ import { blockerLabel, openWatch, parseAfter, setWaiter, watchLabel, watchOfTask
 import { ForgeError } from "../forge/types.ts";
 import { dismissEarlierRunsQuestions } from "./gate-questions.ts";
 import { applyAsk, prepareAsk, withAskState, type AskPlan } from "../ask/dispatch.ts";
+import { briefsConfig } from "../config/briefs.ts";
+import { briefKindFor, docProblems } from "./brief.ts";
 
 /** Re-exported for existing importers (e.g. divergences.ts); the constant now lives in ids.ts to avoid a cycle with queued.ts. */
 export { MAX_BACKLOG_BODY };
@@ -391,6 +393,42 @@ function reserveBlockingDecisions(db: Db, blockedBy: string[], now: number): voi
   }
 }
 
+const MAX_LOOSE_REASON = 500;
+
+/**
+ * A new ship or scout carries a structured brief (src/lifecycle/brief.ts):
+ * refused with every problem listed. `--loose <reason>` skips the check for
+ * you at your terminal, never for a leader; the reason is kept on the
+ * dispatch. `[briefs] enforce = false` turns the check off.
+ */
+export function checkBrief(ctx: Pick<HandlerCtx, "config" | "caller">, args: Record<string, unknown>, kind: string, field: "body" | "brief" = "body"): string | null {
+  const loose = stringArg(args as never, "loose");
+  if (loose !== undefined) {
+    if (ctx.caller.role !== "human") throw new FlowrynError("bad_args", "--loose is yours, at your terminal: a leader always writes the full brief", "flowryn template ship");
+    if (sanitizeBlock(loose).trim().length === 0) throw new FlowrynError("bad_args", "--loose needs a reason");
+    if (loose.length > MAX_LOOSE_REASON) throw new FlowrynError("bad_args", `--loose's reason is over ${MAX_LOOSE_REASON} characters`);
+    return null;
+  }
+  const briefKind = briefKindFor(kind);
+  const body = sanitizeBlock(stringArg(args as never, field) ?? "").trim();
+  if (!briefKind || !briefsConfig(ctx.config()).enforce) return body.length > 0 ? body : null;
+  if (body.length === 0) {
+    if (field === "body") return null;
+    throw new FlowrynError("brief_invalid", "a plan carries the brief its phases share: --brief-file <path> (its ## sections are the ship brief's)", "flowryn template ship prints the brief's shape");
+  }
+  if (body.length > MAX_BODY) throw new FlowrynError("bad_args", `the brief is over ${MAX_BODY} characters`);
+  const problems = docProblems(briefKind, body);
+  if (problems.length > 0) throw new FlowrynError("brief_invalid", `the ${kind} brief is incomplete: ${problems.join("; ")}`, `flowryn template ${briefKind} prints the brief's shape`);
+  return body;
+}
+
+/** A dispatch that skipped the brief check keeps your reason, in its transaction. */
+function recordLoose(ctx: HandlerCtx, args: Record<string, unknown>, taskId: string, runId: string | null, now: number): void {
+  const loose = stringArg(args as never, "loose");
+  if (loose === undefined) return;
+  appendEvent(ctx.db, { source: "cli", kind: "brief.loose", runId, taskId, payload: { reason: sanitizeBlock(loose).trim(), by: ctx.caller.role }, ts: now });
+}
+
 async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): Promise<DispatchPlan> {
   const projectId = stringArg(args as never, "project")!;
   const project = getProject(ctx.db, projectId);
@@ -432,6 +470,7 @@ async function prepareDispatch(ctx: HandlerCtx, args: Record<string, unknown>): 
   }
   const kind = stringArg(args as never, "kind");
   if (!kind || !(TASK_KINDS as readonly string[]).includes(kind)) throw new FlowrynError("bad_args", "--kind must be ship, scout or ask");
+  checkBrief(ctx, args, kind);
   const account = accountFor(ctx.config(), project, args);
   const pins = pinsFor(args, account);
   const baseBranch = await baseFlag(startDepsOf(ctx), args, project, kind, override?.mode ?? project.delivery_mode);
@@ -522,6 +561,7 @@ export const dispatchVerb: VerbSpec = {
     base: { type: "string", help: "a ship's base branch on origin: it starts from it and its PR targets it (default: the project's default branch); not on local-only", placeholder: "branch" },
     "max-usd": { type: "string", help: "an ask's spend cap in dollars (default: [ask] max_usd)", placeholder: "dollars" },
     "no-promote": { type: "boolean", help: "an ask that needs to write answers so instead of becoming a scout" },
+    loose: { type: "string", help: "yours at your terminal only: skip the structured brief check, with the reason (kept on the task)", placeholder: "reason" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -570,6 +610,7 @@ export const dispatchVerb: VerbSpec = {
         now,
       });
       const taskId = filed.phases[0]!.task_id;
+      recordLoose(ctx, args, taskId, null, now);
       for (const watch of watches) setWaiter(ctx.db, watch, taskId, "cli", now);
       if (!auto) ctx.db.query("UPDATE task_policy SET auto = 0 WHERE task_id = ?1").run(taskId);
       if (boolArg(args, "sensitive")) ctx.db.query("UPDATE task_policy SET sensitive = 1 WHERE task_id = ?1").run(taskId);
@@ -593,6 +634,7 @@ export const dispatchVerb: VerbSpec = {
     const taskId = mintTaskId(title, takenIds(ctx.db));
     const runId = createRun(ctx.db, config, { taskId, title, body, project: plan.project, kind, account: plan.account, pins: plan.pins, version: plan.version, base: plan.base, baseBranch: plan.baseBranch, workflow, sensitive: boolArg(args, "sensitive"), existing: false, by: ctx.caller.role, override: plan.override, now });
     applyModeOverride(ctx.db, taskId, plan.override);
+    recordLoose(ctx, args, taskId, runId, now);
     return {
       data: { task: taskId, run: runId, harness: `${plan.account.harness} ${plan.version}`, account: plan.account.id, ...choiceOf(ctx.db, runId), mode: plan.override?.mode ?? plan.project.delivery_mode, yolo: plan.project.yolo ? "on" : "off", ...(plan.baseBranch ? { base: plan.baseBranch } : {}), workflow: workflow.id, state: "launching" },
       hints: [`flowryn show ${taskId}`, "flowryn fleet"],
@@ -642,6 +684,8 @@ export const planVerb: VerbSpec = {
     model: { type: "string", help: "the phases' model (a phase's model: line wins; default: the workflow's, else the account's)", placeholder: "model" },
     effort: { type: "string", help: "the phases' effort (a phase's effort: line wins; default: the workflow's, else the account's)", placeholder: "level", values: EFFORT_CHOICES },
     stack: { type: "boolean", help: "stack the plan: a phase starts on the open PR of the one task it still waits for (same as a stack: on line)" },
+    "brief-file": { type: "string", help: "the ship brief every phase shares (flowryn template ship), carried into each phase's task file", fileFor: "brief" },
+    loose: { type: "string", help: "yours at your terminal only: file the plan without a brief, with the reason (kept on the plan)", placeholder: "reason" },
   },
   kind: "mutation",
   roles: ["leader", "human"],
@@ -651,6 +695,7 @@ export const planVerb: VerbSpec = {
     const project = getProject(ctx.db, projectId);
     if (!project) throw new FlowrynError("not_found", `no project ${projectId}`, "flowryn project list");
     const parsed = parsePlan(stringArg(args, "body") ?? "");
+    const brief = checkBrief(ctx, args, "ship", "brief");
     const config = ctx.config();
     const workflow = stringArg(args, "workflow") ?? project.workflow;
     const harness = accountFor(config, project, args).harness;
@@ -663,6 +708,9 @@ export const planVerb: VerbSpec = {
     const title = stringArg(args, "title") ?? parsed.title ?? parsed.phases[0]!.title;
     const stack = parsed.stack || boolArg(args, "stack");
     const filed = recordPlan(ctx.db, { project, title, phases: parsed.phases, stack, sourceTask: null, gateId: null, workflow, harness, account, model, effort, filedBy: ctx.caller.role, state: "approved", now });
+    if (brief) ctx.db.query("UPDATE plans SET preamble = ?2 WHERE id = ?1").run(filed.id, brief);
+    const loose = stringArg(args, "loose");
+    if (loose !== undefined) appendEvent(ctx.db, { source: "cli", kind: "brief.loose", runId: null, taskId: null, payload: { plan: filed.id, reason: sanitizeBlock(loose).trim(), by: ctx.caller.role }, ts: now });
     return {
       data: {
         plan: filed.id,
