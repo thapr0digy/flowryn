@@ -1,8 +1,9 @@
-# Bun 1.4.4 in CI, and config tables defined twice
+# Bun 1.4.4 support, and config tables defined twice
 
-- Status: done
+- Status: partial
+- Open: the CI bump itself (`.github/workflows/ci.yml` `bun-version: 1.3.8` → `1.4.4`): GitHub refused the push, as the pushing token lacks the `workflow` scope, so it ships separately
 
-CI moves from Bun 1.3.8 (pinned in the M1 commit as the then-current version) to 1.4.4, the version on the user's Mac. On 1.4.4, 13 tests failed on main, all from one parser change: Bun 1.4's TOML follows the spec and refuses a table defined twice (`Bun.TOML.parse("[a]\nx=1\n[a]\ny=2")` throws "Cannot redefine table 'a'"), where 1.3.8 merged the two.
+CI pins Bun 1.3.8 (the M1 commit's then-current version); the user's Mac runs 1.4.4, and this change makes the code and suite pass on both, ready for CI to move to 1.4.4. On 1.4.4, 13 tests failed on main, all from one parser change: Bun 1.4's TOML follows the spec and refuses a table defined twice (`Bun.TOML.parse("[a]\nx=1\n[a]\ny=2")` throws "Cannot redefine table 'a'"), where 1.3.8 merged the two.
 
 ## What 1.3.8 did, and what Flowryn now does
 
@@ -22,4 +23,4 @@ Both version-dependent assumption tests branch on `Bun.version`, and both files 
 
 ## The engines floor stays at 1.3.8
 
-`package.json` keeps `engines.bun >= 1.3.8`: nothing in the product needs 1.4 (the duplicate-table reader works on both, and the `]]` list is only something 1.4 additionally accepts). README now says 1.3.8 or newer, with 1.4.4 the version CI and development run.
+`package.json` keeps `engines.bun >= 1.3.8`: nothing in the product needs 1.4 (the duplicate-table reader works on both, and the `]]` list is only something 1.4 additionally accepts). README's setup version is unchanged.
