@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DOC_TEMPLATES } from "../../src/lifecycle/brief-templates.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
@@ -38,6 +38,14 @@ function one<T>(e: ShipEnv, sql: string, ...params: string[]): T | null {
   }
 }
 
+/** A message the user leaves on the review page, as lavish-axi's next poll reports it (its feedback output). */
+function queueAnnotation(e: ShipEnv, text: string): void {
+  const dir = join(e.fleet.h.home, "lavish-queue");
+  mkdirSync(dir, { recursive: true });
+  const prompt = `  - uid: x\n    prompt: ${JSON.stringify(text)}\n    selector: h1\n    tag: annotation\n    text: Design`;
+  writeFileSync(join(dir, "001.out"), `session:\n  file: /x/design.html\n  status: feedback\nprompts[1]:\n${prompt}\nnext_step: "Apply the requested changes."\ndom_snapshot: ""\n`);
+}
+
 describe("rich briefs", () => {
   test("a free-text ship is refused with every missing section; your --loose dispatch goes through and keeps its reason; a leader's --loose is refused", async () => {
     ship = await makeShipEnv({ mode: "local-only", extraConfig: ENFORCE });
@@ -57,6 +65,22 @@ describe("rich briefs", () => {
     expect((template.reply.data as { required: string[] }).required).toEqual(["Intent", "Context", "Requirements", "Constraints", "Security", "Out of scope", "Verification"]);
   });
 
+  test("your --loose plan keeps its shared brief; a brief over the size cap is refused even with [briefs] enforce off", async () => {
+    ship = await makeShipEnv({ mode: "local-only", extraConfig: ENFORCE });
+    const planBody = "# Draft plan\n\n## Cache\nFAKE: sleep 120000\n";
+    const loose = await ship.call("plan", { project: "web", body: planBody, brief: "Shared notes: FLOWRYN-LOOSE-BRIEF", loose: "a rough draft" });
+    expect(loose.ok).toBe(true);
+    const plan = (loose.data as { plan: string }).plan;
+    expect(one<{ preamble: string }>(ship, "SELECT preamble FROM plans WHERE id = ?1", plan)!.preamble).toBe("Shared notes: FLOWRYN-LOOSE-BRIEF");
+    await ship.cleanup();
+
+    ship = await makeShipEnv({ mode: "local-only" });
+    const oversized = await ship.call("plan", { project: "web", body: planBody, brief: "x".repeat(64_001) });
+    expect(oversized.ok).toBe(false);
+    expect(oversized.error).toMatchObject({ code: "bad_args" });
+    expect(one<{ n: number }>(ship, "SELECT count(*) AS n FROM plans")!.n).toBe(0);
+  });
+
   test(
     "design → build → ship: the spec is pinned, a changed spec cannot pass until the worker replies, and the ship stage's task file holds the spec and the build handoff",
     async () => {
@@ -70,6 +94,11 @@ describe("rich briefs", () => {
         "FAKE: verb stage done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
         `FAKE: write design/spec.md ${SPEC}`,
         "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
+        // The user's page message wakes the worker, which replies on the page once the spec is revised.
+        "FAKE: wait-file spec-revised",
+        "FAKE: write reply.md Revised the spec: two tables.",
+        "FAKE: verb review reply --body-file $FLOWRYN_REPORT_DIR/reply.md",
+        "FAKE: wait-file build-go",
         "FAKE: commit cache.ts export const cache = 1;",
         // No handoff: refused.
         "FAKE: verb stage done",
@@ -93,16 +122,14 @@ describe("rich briefs", () => {
       const drifted = await e.approve(task, { gate: "design" });
       expect(drifted.ok).toBe(false);
       expect(drifted.error).toMatchObject({ code: "design_changed" });
-      const db = f.h.db();
-      try {
-        // What the worker's review reply does: pin what the page and spec show now (src/lifecycle/design-spec.ts).
-        const { repinDesign } = await import("../../src/lifecycle/design-spec.ts");
-        const pinned = db.query("SELECT id, run_id, page_path, spec_path, spec_digest, page_digest FROM gates WHERE id = ?1").get(gate.id) as never;
-        expect(repinDesign(db, pinned, join(f.h.dataDir, task), task, Date.now())).toBe(true);
-      } finally {
-        db.close();
-      }
+      queueAnnotation(e, "Use two tables, not one.");
+      writeFileSync(join(f.h.dataDir, task, "spec-revised"), "");
+      const [, , reply] = await e.replies(task, 3);
+      expect(reply!.args.join(" ")).toStartWith("review reply");
+      expect(reply!.reply.data).toMatchObject({ gate: gate.id, repinned: "design page and build spec" });
+      expect(one<{ spec_text: string }>(e, "SELECT spec_text FROM gates WHERE id = ?1", gate.id)!.spec_text).toContain("Two tables.");
       expect((await e.approve(task, { gate: "design" })).ok).toBe(true);
+      writeFileSync(join(f.h.dataDir, task, "build-go"), "");
 
       await f.waitRun(run, (r) => r.state === "ready", "the delivery", 60_000);
       const replies = await e.replies(task, 4);

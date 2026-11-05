@@ -407,16 +407,15 @@ export function checkBrief(ctx: Pick<HandlerCtx, "config" | "caller">, args: Rec
     if (ctx.caller.role !== "human") throw new FlowrynError("bad_args", "--loose is yours, at your terminal: a leader always writes the full brief", "flowryn template ship");
     if (sanitizeBlock(loose).trim().length === 0) throw new FlowrynError("bad_args", "--loose needs a reason");
     if (loose.length > MAX_LOOSE_REASON) throw new FlowrynError("bad_args", `--loose's reason is over ${MAX_LOOSE_REASON} characters`);
-    return null;
   }
-  const briefKind = briefKindFor(kind);
   const body = sanitizeBlock(stringArg(args as never, field) ?? "").trim();
-  if (!briefKind || !briefsConfig(ctx.config()).enforce) return body.length > 0 ? body : null;
+  if (body.length > MAX_BODY) throw new FlowrynError("bad_args", `the ${field === "brief" ? "brief" : "task body"} is over ${MAX_BODY} characters`);
+  const briefKind = briefKindFor(kind);
+  if (loose !== undefined || !briefKind || !briefsConfig(ctx.config()).enforce) return body.length > 0 ? body : null;
   if (body.length === 0) {
     if (field === "body") return null;
     throw new FlowrynError("brief_invalid", "a plan carries the brief its phases share: --brief-file <path> (its ## sections are the ship brief's)", "flowryn template ship prints the brief's shape");
   }
-  if (body.length > MAX_BODY) throw new FlowrynError("bad_args", `the brief is over ${MAX_BODY} characters`);
   const problems = docProblems(briefKind, body);
   if (problems.length > 0) throw new FlowrynError("brief_invalid", `the ${kind} brief is incomplete: ${problems.join("; ")}`, `flowryn template ${briefKind} prints the brief's shape`);
   return body;
