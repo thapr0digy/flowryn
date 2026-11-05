@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import { configPath, flowrynHome, toAbsolute } from "./paths.ts";
 import { FlowrynError } from "../api/errors.ts";
+import { parseTomlText } from "./toml-parse.ts";
 
 export const TOOL_NAMES = [
   "tasks_axi",
@@ -197,7 +198,7 @@ function asString(value: unknown, where: string): string | undefined {
 export function parseConfig(text: string, home: string): FlowrynConfig {
   let raw: Record<string, unknown>;
   try {
-    raw = Bun.TOML.parse(text) as Record<string, unknown>;
+    raw = parseTomlText(text);
   } catch (error) {
     throw new FlowrynError("config_invalid", `config.toml is not valid TOML: ${(error as Error).message}`);
   }
