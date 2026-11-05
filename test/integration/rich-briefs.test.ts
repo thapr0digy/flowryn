@@ -149,4 +149,44 @@ describe("rich briefs", () => {
     },
     { timeout: 150_000 },
   );
+
+  test(
+    "a reply after a revision the copy refused pins nothing: the tab still shows the old page and spec, so the changed spec cannot pass",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only", extraConfig: ENFORCE });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const handler = PAGE.replace("</details>", '<img src="x.png" onerror="go()"></details>');
+      const steps = [
+        `FAKE: write design/design.html ${PAGE}`,
+        `FAKE: write design/spec.md ${SPEC}`,
+        "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html",
+        "FAKE: wait-file spec-revised",
+        `FAKE: write design/design.html ${handler}`,
+        "FAKE: write reply.md Revised the spec: two tables.",
+        "FAKE: verb review reply --body-file $FLOWRYN_REPORT_DIR/reply.md",
+        "FAKE: sleep 120000",
+      ];
+      const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: brief(steps) });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
+      const gate = one<{ id: string; spec_digest: string }>(e, "SELECT id, spec_digest FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+
+      const specPath = join(f.h.dataDir, task, "design", "spec.md");
+      writeFileSync(specPath, readFileSync(specPath, "utf8").replace("One table.", "Two tables."));
+      queueAnnotation(e, "Use two tables, not one.");
+      writeFileSync(join(f.h.dataDir, task, "spec-revised"), "");
+      const [, reply] = await e.replies(task, 2);
+      expect(reply!.args.join(" ")).toStartWith("review reply");
+      expect(reply!.reply.data).toMatchObject({ gate: gate.id, page: "refused" });
+      expect(reply!.reply.data).not.toHaveProperty("repinned");
+      expect(one<{ spec_digest: string; spec_text: string }>(e, "SELECT spec_digest, spec_text FROM gates WHERE id = ?1", gate.id)).toMatchObject({ spec_digest: gate.spec_digest, spec_text: expect.stringContaining("One table.") });
+      const refused = await e.approve(task, { gate: "design" });
+      expect(refused.ok).toBe(false);
+      expect(refused.error).toMatchObject({ code: "design_changed" });
+    },
+    { timeout: 150_000 },
+  );
 });

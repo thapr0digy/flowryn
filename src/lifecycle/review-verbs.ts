@@ -40,7 +40,8 @@ const reviewReply: VerbSpec = {
     // The user sees the daemon's copy of the page: a reply after a revision copies it first (src/lavish/snapshot.ts).
     const copied = pinned.page_path && pinned.source_page ? refreshSnapshot(ctx.db, { id: gate.id, run_id: run.id, task_id: run.task_id, page_path: pinned.page_path, source_page: pinned.source_page }, ctx.now()) : null;
     // A design review approves what the user last saw: a reply after a revision pins the page and spec as they are now.
-    const repinned = repinDesign(ctx.db, pinned, reportDirFor(ctx.config(), run.task_id), run.task_id, ctx.now());
+    const shown = copied === null || copied.outcome === "same" || copied.outcome === "updated";
+    const repinned = shown && repinDesign(ctx.db, pinned, reportDirFor(ctx.config(), run.task_id), run.task_id, ctx.now());
     const seq = addReviewMessage(ctx.db, gate, "worker", body, ctx.now());
     const refused = copied?.outcome === "refused" ? [`your revised page was not shown: ${refusalText(copied.problems)}; the user still sees the last good version. ${REFUSAL_HINT}`] : [];
     return { data: { gate: gate.id, seq, chars: body.length, ...(repinned ? { repinned: "design page and build spec" } : {}), ...(refused.length > 0 ? { page: "refused" } : {}) }, ...(refused.length > 0 ? { hints: refused } : {}) };
