@@ -106,7 +106,7 @@ if (command === "get") {
   if (slot) {
     must(["checkout", "-q", "--detach", base], slot.path);
   } else {
-    const name = String(slots.length + 1);
+    const name = String(Math.max(0, ...slots.map((s) => Number(s.name))) + 1);
     const leaf = `${basename(repo)}-${name}`;
     const path = join(root, ".treehouse", `${basename(repo)}-fake`, name, leaf);
     mkdirSync(join(path, ".."), { recursive: true });
