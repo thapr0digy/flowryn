@@ -1,5 +1,6 @@
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, extname, join, relative, sep } from "node:path";
+import { itemLines } from "../attention/items.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { runBounded } from "../runtime/bounded.ts";
@@ -415,8 +416,24 @@ export function recordHostedUrl(db: Db, gateId: string, url: string, now: number
     task_id: string;
   } | null;
   if (!gate) return;
-  if (gate.review_url !== url) db.query("UPDATE gates SET review_url = ?2 WHERE id = ?1").run(gateId, url);
+  if (gate.review_url !== null && gate.review_url !== url) {
+    db.query("UPDATE gates SET review_url = ?2 WHERE id = ?1").run(gateId, url);
+    repointGateItem(db, gate.run_id, gateId, gate.review_url, url);
+  }
   appendEvent(db, { source: "daemon", kind: "gate.page_hosted", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, url, ...(gate.review_url !== url ? { was: gate.review_url } : {}) }, ts: now });
+}
+
+/** The gate's gate_ready item names the URL the user is sent to: the hosted one, never the one the worker named. */
+function repointGateItem(db: Db, runId: string, gateId: string, was: string, url: string): void {
+  const items = db
+    .query("SELECT id, line, full_line FROM items WHERE kind = 'gate_ready' AND run_id = ?1 AND state IN ('open','presented')")
+    .all(runId) as { id: string; line: string; full_line: string | null }[];
+  for (const item of items) {
+    const text = item.full_line ?? item.line;
+    if (!text.includes(`(${gateId})`) || !text.includes(was)) continue;
+    const lines = itemLines(text.replaceAll(was, url));
+    db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(item.id, lines.line, lines.full_line);
+  }
 }
 
 /** The URL lavish-axi last printed for the gate's copy, or null when the daemon never hosted it. */

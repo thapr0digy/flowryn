@@ -85,7 +85,7 @@ describe("review pages open in your browser", () => {
     const e = ship;
     const f = e.fleet;
     const opens = join(f.h.home, "browser-opens.log");
-    const { gate } = await handIn(e, "lavish@127.0.0.1:9999:design/design.html");
+    const { run, gate } = await handIn(e, "lavish@127.0.0.1:9999:design/design.html");
     expect(gate.review_url).toStartWith("http://127.0.0.1:9999/session/");
 
     await waitUntil(() => one<{ open_state: string }>(f, "SELECT open_state FROM gates WHERE id = ?1", gate.id)?.open_state === "opened", 10_000, "the page opened");
@@ -95,6 +95,9 @@ describe("review pages open in your browser", () => {
     const opened = readFileSync(opens, "utf8");
     expect(opened).toMatch(new RegExp(`^Google Chrome\\t${hosted.replaceAll(".", "\\.")}\\?flowryn_pass=[A-Za-z0-9_-]{43}\\n$`));
     expect(opened).not.toContain(":9999");
+    const item = one<{ line: string; full_line: string | null }>(f, "SELECT line, full_line FROM items WHERE kind = 'gate_ready' AND run_id = ?1", run)!;
+    expect(item.full_line ?? item.line).toEndWith(`${hosted} · opened in Google Chrome`);
+    expect(item.full_line ?? item.line).not.toContain(":9999");
   });
 
   test("a failed open shows on the gate item and in show with the URL to open by hand", async () => {

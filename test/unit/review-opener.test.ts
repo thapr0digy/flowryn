@@ -57,9 +57,9 @@ function seedGate(gateId: string, url: string, state = "pending", runId = "r1", 
   const now = Date.now();
   tx(db, () => {
     db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state, source_page) VALUES (?1, ?2, 'design', 'review', ?3, 'open', ?4, ?5, ?6)").run(gateId, runId, url, now, state, source);
-    if (source !== null && hosted !== null) recordHostedUrl(db, gateId, hosted, now);
     const event = appendEvent(db, { source: "cli", kind: "stage.done", runId, taskId: "web-a1", payload: { gate: gateId } });
     openItem(db, { kind: "gate_ready", eventSeq: event.seq, taskId: "web-a1", runId, line: `design ready for review (${gateId}): ${title} (web) ${url}`, now });
+    if (source !== null && hosted !== null) recordHostedUrl(db, gateId, hosted, now);
   });
 }
 
@@ -526,6 +526,8 @@ describe("one click: the tab's pass key (docs/notes/2026-11-05-one-click-approve
     expect(r.keys).toHaveLength(1);
     expect(events("gate.page_hosted")[0]!.payload).toMatchObject({ gate: "g1", url: URL_A, was: workerUrl });
     expect(events("gate.browser_opening")[0]!.payload).toMatchObject({ url: URL_A, one_click: true });
+    expect(itemLine("g1")).toBe(`design ready for review (g1): Feature (web) ${URL_A} · opened in Google Chrome`);
+    expect(itemLine("g1")).not.toContain(":9999");
   });
 
   test("a copy the daemon never hosted opens nothing and gets no key", async () => {
