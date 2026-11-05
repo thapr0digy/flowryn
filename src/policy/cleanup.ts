@@ -210,6 +210,11 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
       return result("refused", "remove_failed", `git worktree remove failed: ${removed.stderr.trim() || removed.stdout.trim()}`, { verdict, lock, aborted, reaped: reap.reaped });
     }
   } else {
+    if (deps.returnWorktree) {
+      const back = await deps.returnWorktree(req.guard.worktree, true);
+      steps.push(`worktree_return:${back.ok ? "ok" : "failed"}`);
+      if (!back.ok) deps.log(`the lease on ${req.guard.worktree}, which is gone, was not returned: ${back.detail}`);
+    }
     await deps.git(["worktree", "prune"], req.primary);
     steps.push("worktree_prune");
   }

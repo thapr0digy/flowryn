@@ -235,6 +235,20 @@ describe("the cleanup's return path", () => {
     expect(git(s.repo, ["rev-parse", "--verify", "--quiet", "refs/heads/flowryn/t"]).code).not.toBe(0);
   });
 
+  test("a slot whose folder is gone still has its lease handed back, forced, and the cleanup completes", async () => {
+    const s = scratch();
+    const slot = await leased(s);
+    sh(slot.path, ["switch", "-q", "-c", "flowryn/t"]);
+    sh(s.repo, ["merge", "-q", "--ff-only", "flowryn/t"]);
+    rmSync(slot.path, { recursive: true, force: true });
+    const returned: string[] = [];
+    const outcome = await cleanup(s, slot.path, slot.lease_id, false, returned);
+    expect(outcome).toMatchObject({ outcome: "removed", branchDeleted: true });
+    expect(returned).toEqual([`${slot.path} force`]);
+    expect(outcome.steps.indexOf("worktree_prune")).toBeGreaterThan(outcome.steps.findIndex((step) => step.startsWith("worktree_return:")));
+    expect(git(s.repo, ["rev-parse", "--verify", "--quiet", "refs/heads/flowryn/t"]).code).not.toBe(0);
+  });
+
   test("landed work is returned without force", async () => {
     const s = scratch();
     const slot = await leased(s);
