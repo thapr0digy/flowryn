@@ -16,7 +16,7 @@
  *   FAKE: tmpdir <file>              write the $TMPDIR it was started with to $FLOWRYN_REPORT_DIR/<file>, and a file in it
  *   FAKE: write <file> <text...>     write $FLOWRYN_REPORT_DIR/<file> (literal \n tokens become newlines): a review
  *                                    page, a questions file
- *   FAKE: verb <args...>             run flowryn <args> --json ($FLOWRYN_REPORT_DIR and lavish:<file> expand, as in
+ *   FAKE: verb <args...>             run flowryn <args> --json ($FLOWRYN_REPORT_DIR, $FLOWRYN_TASK and lavish:<file> expand, as in
  *                                    stage-done); the reply goes to $FLOWRYN_REPORT_DIR/fake-replies.jsonl
  *   FAKE: ask <a,b> <question...>    ask (blocking), then end the turn
  *   FAKE: fail <reason...>           fail
@@ -352,7 +352,7 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
     case "verb": {
       const dir = env.FLOWRYN_REPORT_DIR ?? ".";
       await tool(async () => {
-        const result = await flowryn([...rest.map((a) => lavishArg(a.replaceAll("$FLOWRYN_REPORT_DIR", env.FLOWRYN_REPORT_DIR ?? "."))), "--json"]);
+        const result = await flowryn([...rest.map((a) => lavishArg(a.replaceAll("$FLOWRYN_REPORT_DIR", env.FLOWRYN_REPORT_DIR ?? ".").replaceAll("$FLOWRYN_TASK", env.FLOWRYN_TASK ?? ""))), "--json"]);
         mkdirSync(dir, { recursive: true });
         appendFileSync(join(dir, "fake-replies.jsonl"), JSON.stringify({ args: rest, code: result.code, reply: result.stdout.trim() }) + "\n");
       });
