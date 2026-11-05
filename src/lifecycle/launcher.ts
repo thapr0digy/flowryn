@@ -30,6 +30,7 @@ import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
 import { failRun, getRunWithPolicy, isTerminal, type RunWithPolicy } from "./runs.ts";
 import { lastStageOf, positionOf, stageInstructions } from "./stages.ts";
+import { contextBlock } from "./context-block.ts";
 import { markLost } from "./steers.ts";
 import { ensureRunTmp } from "./run-tmp.ts";
 import { ensureHarnessShim, ensurePaneShell, paneEvidence, TAIL_READ_LINES } from "./pane-shell.ts";
@@ -150,7 +151,24 @@ export function taskFileText(db: Db, run: RunWithPolicy, config: FlowrynConfig, 
   const pos = positionOf(db, run, run.kind);
   const header = stageInstructions(pos, { stateDir: config.state_dir, delivery });
   const note = withNote && run.stage_note ? `\n\n${run.stage_note}` : "";
-  return `${header}${note}\n\n---\n\n${body}\n`;
+  const carried = carriedContext(db, run, config);
+  return `${header}${note}${carried ? `\n\n${carried}` : ""}\n\n---\n\n${body}\n`;
+}
+
+/**
+ * The task's carried context (src/lifecycle/context-block.ts), between the
+ * stage note and the brief; a document too big to inline is written to the
+ * run's `context/` directory, private to the run.
+ */
+function carriedContext(db: Db, run: RunWithPolicy, config: FlowrynConfig): string {
+  const contextDir = join(runDirFor(config, run.id), "context");
+  const block = contextBlock(db, run.task_id, { reportDirFor: (task) => reportDirFor(config, task), contextDir });
+  if (block.files.length > 0) {
+    ensureDir(dirname(contextDir), 0o700);
+    ensureDir(contextDir, 0o700);
+    for (const file of block.files) writeFileAtomic(join(contextDir, file.name), `${file.text}\n`, 0o600);
+  }
+  return block.text;
 }
 
 /** The task file of a live worker's run, after its stage changed; a run never launched has no run directory and nothing to rewrite. */

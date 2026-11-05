@@ -7,6 +7,7 @@ import { cleanupConfig, githubConfig } from "./delivery.ts";
 import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
 import { policyMode } from "./policy.ts";
 import { askConfig } from "./ask.ts";
+import { briefsConfig } from "./briefs.ts";
 import { upkeepConfig } from "./upkeep.ts";
 import { parseTomlText } from "./toml-parse.ts";
 import { validationConfig } from "./validation.ts";
@@ -85,6 +86,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   // Its rules resolve with the accounts; both views come from one parse.
   scopes: (c) => accountsConfig(c).scopes,
   ask: askConfig,
+  briefs: briefsConfig,
 };
 
 export interface EffectiveConfig {

@@ -53,8 +53,21 @@ The core verbs (you or the leader):
 
 ```bash
 flowryn dispatch web --kind scout --body-file - <<'EOF'
-Find where the login redirect loop comes from.
+Login redirect loop
+
+## Intent
+"Find where the login redirect loop comes from." (2026-11-05)
+
+## Context
+Signing in on staging loops between /login and /home since Monday's deploy.
+
+## Questions
+1. Which code path issues the redirect, and why does it repeat?
+
+## Out of scope
+Fixing it; this is a report.
 EOF
+flowryn template ship|scout  # the brief's sections; a brief missing one is refused (--loose <reason> from your terminal only)
 flowryn dispatch web --kind ship --workflow feature --body-file -   # design, review, build, ship
 flowryn fleet                # every worker and queued task: state, what it needs
 flowryn show <id>            # one task, run, item, decision or plan; --full for whole text

@@ -2,6 +2,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { requireDraftPageShown } from "../lifecycle/draft.ts";
+import { requireDesignPinned } from "../lifecycle/design-spec.ts";
 import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getRunWithPolicy } from "../lifecycle/runs.ts";
 import { openGate } from "../lifecycle/stages.ts";
@@ -33,6 +34,7 @@ export type PagePass =
   | { outcome: "stale" | "late" }
   | { outcome: "questions_open"; open: string[] }
   | { outcome: "draft_changed"; task: string }
+  | { outcome: "design_changed"; task: string }
   | { outcome: Exclude<PageCodeCheck, "ok"> }
   /** One click: the key is not the tab's (a worker's guess, or an old tab), none is live (spent, or the page was not opened with one), or the work moved since the review opened. */
   | { outcome: "wrong_key" | "no_key" | "key_moved" };
@@ -83,6 +85,13 @@ export function passFromPage(db: Db, codes: PageCodeStore, gateId: string, proof
     if (!(error instanceof FlowrynError) || error.code !== "draft_changed") throw error;
     spend("draft_changed");
     return { outcome: "draft_changed", task: run.task_id };
+  }
+  try {
+    requireDesignPinned(run, gate);
+  } catch (error) {
+    if (!(error instanceof FlowrynError) || error.code !== "design_changed") throw error;
+    spend("design_changed");
+    return { outcome: "design_changed", task: run.task_id };
   }
   if (keyed) return passWithKey(db, run, gate, row, proof.key, head, now);
   const checked = codes.check(gateId, proof.code, head, now);

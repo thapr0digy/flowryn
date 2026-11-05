@@ -39,6 +39,7 @@ export const ERROR_CODES = {
   base_mismatch: EXIT.policy,
   binary_broken: EXIT.policy,
   blockers_not_landed: EXIT.policy,
+  brief_invalid: EXIT.validation,
   challenge_failed: EXIT.validation,
   checks_pending: EXIT.policy,
   cleanup_refused: EXIT.policy,
@@ -46,6 +47,7 @@ export const ERROR_CODES = {
   contract_unverified: EXIT.policy,
   daemon_unavailable: EXIT.unavailable,
   delivery_refused: EXIT.policy,
+  design_changed: EXIT.policy,
   design_page_invalid: EXIT.validation,
   // notes drafts (docs/notes/2026-10-30-notes-projects-non-8d.md): the delivered file is not the approved one, a bad draft file or page
   draft_changed: EXIT.policy,
@@ -55,6 +57,7 @@ export const ERROR_CODES = {
   fork_pr: EXIT.policy,
   // a chat-answer grant names another item or choice than the command
   grant_mismatch: EXIT.policy,
+  handoff_invalid: EXIT.validation,
   // flowryn drop: the task still blocks others
   has_dependents: EXIT.policy,
   head_mismatch: EXIT.policy,
@@ -116,6 +119,7 @@ export const ERROR_CODES = {
   run_not_active: EXIT.validation,
   // a leader reaching another scope's task, or a session whose login is unconfirmed (docs/notes/2026-10-24-leader-scoping-and-vj.md)
   scope_refused: EXIT.role,
+  spec_invalid: EXIT.validation,
   // a stacked run's merge while the task beneath it has not landed (docs/notes/2026-10-27-stack-a-plan-4y.md)
   stack_not_landed: EXIT.policy,
   stage_waiting: EXIT.policy,

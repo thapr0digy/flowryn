@@ -29,6 +29,7 @@ Goal: a design the user reviews and approves in Lavish, and a phase plan when th
 
 1. Read the task file and the project: its AGENTS.md or CLAUDE.md, the README, and the code the task touches. Note the constraints you find.
 2. Write the design for an engineer who has not read the code and must judge it in about two minutes. Copy \`${DESIGN_TEMPLATE_FILE}\` (next to this SKILL.md) to \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree, so the branch stays clean) and fill every {{SLOT}}. Its parts, in order: In short (the problem and the change, at most ${DESIGN_TLDR_WORDS_MAX} words); What I need from you (approve or send changes, and the two or three calls worth a look); What changes for you (before and after, as the user would notice it); Goals and non-goals; How it works (a diagram, then a few steps in words); Other ways we could do it (doing nothing included); Risks, and how we'd know it's wrong. Then, folded and last: the files, APIs, data and identifiers, the assumptions the build must test, every choice you made and why, sources, and what you could not check.
+   Then the engineer build spec, for the stages after you: \`$FLOWRYN_REPORT_DIR/design/spec.md\` (\`$FLOWRYN_BIN template spec\` prints its shape): ## Approach, ## Files and interfaces, ## Data and schema, ## Error handling, ## Security (threat surface, secrets, input validation, authorization), ## Test plan (with a test per assumption), ## Rejected alternatives. Link it from the page's folded detail (\`<a href="spec.md">\`). Review approves the page and the spec together, pinned as they are: a revision while the review is open counts once you answer on the page (\`review reply\`). Later stages get the approved spec in their task file.
    Plain words above the fold: no code names (an underscore, a lowercase start with a capital inside, a file path, a --flag, a call()), no \`<code>\` or \`<pre>\`, and no internal term the reader would not know; define a term you need with \`<dfn>\` on first use, and mark what the user types with \`<kbd>\`. At most ${DESIGN_VISIBLE_WORDS_MAX} words above the fold; diagrams do not count. These are the review page's rules, not the terse reply style. \`stage done\` refuses a page that breaks them and lists each problem.
 3. Questions for the user: only what you truly cannot proceed without (a real decision that changes what you build); decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/design/questions.json\`:
 
@@ -57,14 +58,20 @@ const BUILD_BODY = `# Flowryn build and test stage
 
 Goal: the change the approved design describes, with tests that prove it and tests that check the design's assumptions. This stage has no review gate: finish it on your own.
 
-1. Re-read the design (its page, and the steer that started this stage). List every assumption it makes: inputs, data shapes, limits, ordering, failure modes.
+1. Re-read your task file: its carried context holds the approved build spec, the review's answers and recorded choices, and any scout report. List every assumption the spec makes: inputs, data shapes, limits, ordering, failure modes.
 2. Test each layer with the project's own tools (read package.json, the Makefile, the CI config; add a framework only when the project has none for that layer):
    - Front end: unit tests for the logic behind the UI; one end-to-end smoke of each changed flow when the project has an end-to-end setup.
    - Back end: unit tests for new functions; an API test per changed endpoint covering the status, the body, the errors and the auth.
    - Database: migrations apply forward on a scratch database; queries run against the real schema (a container, or the in-memory engine the project already uses). No test touches a shared database.
 3. For each design assumption, write at least one test that fails when the assumption is wrong, and name it after the assumption.
 4. Build in small commits on your branch. Run the whole test suite and the linters; everything green before you finish.
-5. Finish: commit everything, \`$FLOWRYN_BIN stage done\`, end your turn. The next stage arrives as a steer.
+5. Principal-level bar, checked before you finish:
+   - The change matches the spec; every deviation has a reason.
+   - Threat-model it: who controls each input, what an attacker gains; validate inputs at the boundary, enforce authorization where the data is.
+   - No secrets in logs, errors, storage, task files or commits.
+   - Errors are explicit, never swallowed; each failure path has a test.
+6. Self-review: read your whole diff as a reviewer would (\`git diff <base>...HEAD\`), fix what you find, run the suite again.
+7. Finish: commit everything, write the handoff (\`$FLOWRYN_BIN template handoff\`: ## Done, ## Deviations from the spec and why, ## Risks), then \`$FLOWRYN_BIN stage done --handoff-file <file>\` and end your turn. The next stage gets your handoff.
 
 Rules:
 - A test you cannot make pass: \`$FLOWRYN_BIN ask --options a,b --blocks <what waits> --body-file -\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
