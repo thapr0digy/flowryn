@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { brokenGitLink, relinkHint } from "./relink.ts";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -23,7 +24,7 @@ import { withRepoLock } from "../runtime/repo-lock.ts";
 import { acquireSlot, adoptSlot, leaseHolder, poolRoot, returnSlot } from "../runtime/treehouse.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
-import { configStaticLayers } from "../policy/static.ts";
+import { browserProfileReads, configStaticLayers } from "../policy/static.ts";
 import { PROTO } from "../version.ts";
 import { writeStageSkills } from "../skills/stages.ts";
 import { getProject, type ProjectRow } from "./projects.ts";
@@ -306,7 +307,8 @@ export class Launcher {
       tmpDir: tmp.dir,
       writable: [spool, reportDir, ...tmp.writable, ...gitAccess.writable],
       readOnly: [...gitAccess.readOnly, ...toolkit.denyWrite],
-      permissionsDeny: toolkit.permissionsDeny,
+      // A review tab's address carries its pass key, and browsers keep addresses in their history.
+      permissionsDeny: [...toolkit.permissionsDeny, ...browserProfileReads(homedir())],
       stagePlugin: skills.claudePlugin,
       ...(mode === "relaunch" ? { resumePrompt: relaunchPrompt(instructionsFile) } : {}),
     };

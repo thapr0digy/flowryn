@@ -13,7 +13,7 @@ import { DEFAULT_CHANNEL_ALERT_MS } from "../config/leader.ts";
 import type { PageCode, PageCodeStore } from "../policy/approvals.ts";
 import { passFromPage, type PagePass } from "../policy/page-pass.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
-import { parsePollOutput, type PollOutput } from "./poll-output.ts";
+import { parsePollOutput, withoutAnswerTokens, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
 
 /**
@@ -22,7 +22,8 @@ import { requirePageDir, writeWidget } from "./widget.ts";
  * running for each open gate with a known page, questions or not
  * (gatesToPoll), so the leader never has to. A poll returns when the user
  * sends feedback; its answers are recorded (lavishAnswer), then the Send's
- * "anything else" (recordGateComment) and its pass: with the pass code you
+ * "anything else" (recordGateComment) and its pass: with the tab's pass key
+ * (one click, src/policy/pass-key.ts) or the pass code you
  * typed it passes the gate (passFromPage, channel page), else it is a request
  * (requestGatePass, a P1 for the leader) and, with no code, a fresh code goes
  * to your notifications (sendPassCode), all in one transaction;
@@ -90,6 +91,8 @@ interface PassOutcome {
   /** A fresh code to send (the Send carried none); after the transaction, the channels it reached. */
   minted: PageCode | null;
   reached?: string[];
+  /** The Send carried the tab's pass key (one click). */
+  keyed?: boolean;
 }
 
 /** A leftover poll's record that ps could not check, kept beside the gate's own `<gate>.json`. */
@@ -375,7 +378,7 @@ export class LavishPoller {
     if (others || said.length > 0) {
       const path = join(dirname(page), `lavish-notes-${gate}.txt`);
       const stamp = new Date(this.deps.now()).toISOString();
-      const text = [...(others ? [`--- ${stamp}\n${raw}\n`] : []), ...said.map((c) => `--- ${stamp} anything else for the worker\n${c}\n`)].join("");
+      const text = [...(others ? [`--- ${stamp}\n${withoutAnswerTokens(raw)}\n`] : []), ...said.map((c) => `--- ${stamp} anything else for the worker\n${c}\n`)].join("");
       try {
         appendNotes(page, path, text);
         notes = path;
@@ -401,7 +404,7 @@ export class LavishPoller {
       const sent = routePageBatch(this.deps.db, gate, { messages: words, answers, ended: out.ended }, this.deps.now());
       // After the words went their way: a pass closes the gate.
       const minting = new Set<string>();
-      const asked = out.sends.filter((s) => s.pass).map((s) => this.passSend(s.gate, s.code, heads.get(s.gate) ?? null, minting));
+      const asked = out.sends.filter((s) => s.pass).map((s) => this.passSend(s.gate, s.key, s.code, heads.get(s.gate) ?? null, minting));
       let item: string | null = null;
       if (out.ended && !asked.some((a) => a.gate === gate && a.page?.outcome === "passed")) {
         recordLavishEnded(this.deps.db, gate, this.deps.now());
@@ -443,7 +446,7 @@ export class LavishPoller {
     if (routed) parts.push(routedReply(routed));
     const last = passes[passes.length - 1];
     if (last?.page?.outcome === "passed") {
-      parts.push(`The review passed with your pass code; the ${last.page.passed.next} stage starts now.`);
+      parts.push(last.keyed ? `Approved: the review passed; the ${last.page.passed.next} stage starts now.` : `The review passed with your pass code; the ${last.page.passed.next} stage starts now.`);
       return parts.join(" ");
     }
     if (last?.page) {
@@ -455,7 +458,7 @@ export class LavishPoller {
     const asked = pass?.outcome === "requested" || pass?.outcome === "already";
     if (asked && last?.reached !== undefined) {
       parts.push(last.reached.length > 0
-        ? "A pass code went to your notifications (good for 10 minutes): type it in the pass code field and press Send and pass. Your leader can also confirm the pass with you."
+        ? "A pass code went to your notifications (good for 10 minutes): type it in the pass code field and press Approve. Your leader can also confirm the pass with you."
         : "Pass requested, but no pass code could be sent (notifications are off or not set up): your leader asks you to confirm it, or you run flowryn approve in your terminal.");
     } else if (asked && !last?.page) parts.push("Pass requested. This page cannot pass the review: your leader asks you to confirm it, or you run flowryn approve in your terminal.");
     else if (asked) parts.push("Your leader can also confirm the pass with you, or you run flowryn approve in your terminal.");
@@ -473,11 +476,24 @@ export class LavishPoller {
    * fresh code is minted for you, at most one per gate in a batch (`minting`) and none past the
    * gate's PAGE_CODE_MINTS. Without pagePass, only the request.
    */
-  private passSend(gate: string, code: string | null, head: string | null, minting: Set<string>): PassOutcome {
+  private passSend(gate: string, key: string | null, code: string | null, head: string | null, minting: Set<string>): PassOutcome {
     const now = this.deps.now();
     const pagePass = this.deps.pagePass;
+    if (pagePass && key !== null && head !== null) {
+      const page = passFromPage(this.deps.db, pagePass.codes, gate, { key }, head, now);
+      if (page.outcome === "passed" || page.outcome === "stale" || page.outcome === "late") return { gate, page, request: page.outcome === "passed" ? null : { outcome: page.outcome }, minted: null, keyed: true };
+      if (page.outcome === "questions_open") return { gate, page: null, request: { outcome: "questions_open", open: page.open }, minted: null, keyed: true };
+      if (page.outcome === "draft_changed") return { gate, page, request: null, minted: null, keyed: true };
+      const request = requestGatePass(this.deps.db, gate, now);
+      // A spent key or moved work falls back to a typed code; a wrong key (not the tab's) gets the leader's request only.
+      const asked = request.outcome === "requested" || request.outcome === "already";
+      const fallback = page.outcome !== "wrong_key" && asked && !minting.has(gate);
+      const minted = fallback ? pagePass.codes.mint(gate, head, now) : null;
+      if (fallback) minting.add(gate);
+      return { gate, page, request, minted, keyed: true };
+    }
     if (pagePass && code !== null && head !== null) {
-      const page = passFromPage(this.deps.db, pagePass.codes, gate, code, head, now);
+      const page = passFromPage(this.deps.db, pagePass.codes, gate, { code }, head, now);
       if (page.outcome === "passed" || page.outcome === "stale" || page.outcome === "late") return { gate, page, request: page.outcome === "passed" ? null : { outcome: page.outcome }, minted: null };
       if (page.outcome === "questions_open") return { gate, page: null, request: { outcome: "questions_open", open: page.open }, minted: null };
       if (page.outcome === "draft_changed") return { gate, page, request: null, minted: null };
@@ -646,8 +662,14 @@ function passLog(p: PassOutcome): string {
 
 /** Why a typed pass code did not pass the review, for the page. */
 function pageRefusal(page: PagePass): string | null {
-  const fresh = "press Send and pass with the code field empty for a new one";
+  const fresh = "press Approve with the code field empty for a new one";
   switch (page.outcome) {
+    case "wrong_key":
+      return "Not passed: this page was not opened with the pass key Flowryn gave your browser. Use the tab Flowryn opened, or ask your leader to confirm the pass.";
+    case "no_key":
+      return "This page's one-click approve is used up (or the page was not opened by Flowryn), so it falls back to a pass code.";
+    case "key_moved":
+      return "Not passed: the work changed since this review opened, so one click no longer covers it; look again, then pass with a code.";
     case "wrong":
       return "That pass code is wrong; check your notification and try again (three wrong tries void it).";
     case "voided":

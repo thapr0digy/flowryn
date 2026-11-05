@@ -996,6 +996,13 @@ const WORKTREE_LEASE_SQL = /* sql */ `
 ALTER TABLE runs ADD COLUMN worktree_lease TEXT;
 `;
 
+// One-click approve (docs/notes/2026-11-05-one-click-approve-3y.md): the SHA-256 of the pass key
+// the daemon opened the review tab with (never the key), and the HEAD the review opened at.
+const PAGE_PASS_KEY_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN pass_key_hash TEXT;
+ALTER TABLE gates ADD COLUMN pass_head TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1048,6 +1055,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 49, name: "reserved-class", sql: RESERVED_CLASS_SQL },
   { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
   { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
+  { version: 52, name: "page-pass-key", sql: PAGE_PASS_KEY_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

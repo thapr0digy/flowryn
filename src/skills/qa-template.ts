@@ -27,7 +27,7 @@ export const QA_CARD_SLOTS = ["what-changed", "what-checked", "verdict", "decisi
 export const QA_PLACEHOLDERS = ["{{TITLE}}", "{{WHAT_CHANGED}}", "{{WHAT_CHECKED}}", "{{VERDICT}}", "{{VERDICT_DETAIL}}", "{{DECISIONS}}", "{{HOW_CHECKED}}", "{{FLOWS}}", "{{RAW_OUTPUT}}"] as const;
 
 export const QA_TEMPLATE = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en" data-lavish-live-reload-root><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>QA: {{TITLE}}</title>
 <!--
   Fill every {{SLOT}}; stage done refuses the page while one is left.
@@ -39,7 +39,8 @@ export const QA_TEMPLATE = `<!doctype html>
   VERDICT        exactly one of: works | works-with-caveats | broken (the label is drawn from it).
   VERDICT_DETAIL each caveat or failure spelled out, or "No caveats."
   DECISIONS      each question with your recommendation (an <ol> of <li>), or "Nothing to decide."; for questions
-                 only the user can answer, "Answer the questions below." and the gate-question widget right after the card
+                 only the user can answer, "Answer the questions below." The widget mount right after the card
+                 shows the Approve button and those questions; keep it.
   Everything else goes in the folded sections below the card. A section with nothing in it says "None."
 -->
 <style>
@@ -73,6 +74,7 @@ table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:4px 8p
 <dd data-slot="decisions">{{DECISIONS}}</dd>
 </dl>
 </section>
+<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>
 <details><summary>How it was checked</summary>
 {{HOW_CHECKED}}
 </details>

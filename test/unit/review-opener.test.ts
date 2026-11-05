@@ -10,6 +10,7 @@ import { appendEvent } from "../../src/db/events.ts";
 import { MIGRATIONS } from "../../src/db/schema.ts";
 import { STAGE_SKILLS } from "../../src/skills/stages.ts";
 import { lavishPresence, recordedPresence, recordOpen, ReviewOpener, type OpenResult, type PresenceResult } from "../../src/lavish/opener.ts";
+import { hashPassKey } from "../../src/policy/pass-key.ts";
 
 /**
  * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md): the
@@ -80,13 +81,20 @@ function events(kindPrefix: string): { kind: string; payload: Record<string, unk
 
 interface Rig {
   opener: ReviewOpener;
+  /** Each open, its URL without the tab's pass key (that is in `keys`). */
   opens: { browser: string; url: string }[];
+  keys: string[];
+  keyed: string[];
   probes: string[];
   logs: string[];
 }
 
-function rig(options: { review?: Partial<ReviewConfig>; mode?: OpenerMode; open?: OpenResult; presence?: PresenceResult } = {}): Rig {
+const KEYED = /\?flowryn_pass=([A-Za-z0-9_-]{43})$/;
+
+function rig(options: { review?: Partial<ReviewConfig>; mode?: OpenerMode; open?: OpenResult | ((url: string) => OpenResult); presence?: PresenceResult } = {}): Rig {
   const opens: { browser: string; url: string }[] = [];
+  const keys: string[] = [];
+  const keyed: string[] = [];
   const probes: string[] = [];
   const logs: string[] = [];
   const opener = new ReviewOpener({
@@ -96,15 +104,18 @@ function rig(options: { review?: Partial<ReviewConfig>; mode?: OpenerMode; open?
     log: (m) => logs.push(m),
     now: Date.now,
     open: async (browser, url) => {
-      opens.push({ browser, url });
-      return options.open ?? { ok: true };
+      const key = KEYED.exec(url);
+      if (key) keys.push(key[1]!);
+      opens.push({ browser, url: url.replace(KEYED, "") });
+      return typeof options.open === "function" ? options.open(url) : (options.open ?? { ok: true });
     },
+    keyed: (gateId) => keyed.push(gateId),
     presence: async (url) => {
       probes.push(url);
       return options.presence ?? { listening: true };
     },
   });
-  return { opener, opens, probes, logs };
+  return { opener, opens, keys, keyed, probes, logs };
 }
 
 describe("the opener", () => {
@@ -442,5 +453,66 @@ describe("Lavish presence over its /events WebSocket", () => {
     } finally {
       lavish.server.stop(true);
     }
+  });
+});
+
+describe("one click: the tab's pass key (docs/notes/2026-11-05-one-click-approve-3y.md)", () => {
+  beforeEach(() => seedRun(db));
+
+  function hashOf(gateId: string): string | null {
+    return (db.query("SELECT pass_key_hash FROM gates WHERE id = ?1").get(gateId) as { pass_key_hash: string | null }).pass_key_hash;
+  }
+
+  test("the claim mints a key: only the address handed to open carries it, the gate keeps its hash, events and items never the key", async () => {
+    seedGate("g1", URL_A);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(r.keys).toHaveLength(1);
+    const key = r.keys[0]!;
+    expect(hashPassKey(key)).toBe(hashOf("g1")!);
+    expect(r.keyed).toEqual(["g1"]);
+    expect(events("gate.browser_opening")[0]!.payload).toMatchObject({ url: URL_A, one_click: true });
+    const everything = [JSON.stringify(db.query("SELECT * FROM events").all()), JSON.stringify(db.query("SELECT * FROM items").all()), JSON.stringify(db.query("SELECT * FROM gates").all()), ...r.logs].join("\n");
+    expect(everything).not.toContain(key);
+  });
+
+  test("a resubmitted page reuses the tab: its gate is skipped and takes the tab's hash", async () => {
+    seedGate("g1", URL_A);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    closeGate("g1");
+    seedGate("g2", URL_A);
+    r.opener.offer("g2");
+    await r.opener.idle();
+    expect(gate("g2").open_state).toBe("skipped");
+    expect(hashOf("g2")).toBe(hashOf("g1"));
+    expect(r.keyed).toEqual(["g1", "g2"]);
+    expect(events("gate.browser_skipped")[0]!.payload).toMatchObject({ one_click: true });
+    // A spent key is not taken again.
+    db.query("UPDATE gates SET pass_key_hash = NULL").run();
+    closeGate("g2");
+    seedGate("g3", URL_A);
+    r.opener.offer("g3");
+    await r.opener.idle();
+    expect(hashOf("g3")).toBeNull();
+    expect(events("gate.browser_skipped")[1]!.payload).toMatchObject({ one_click: false });
+  });
+
+  test("a file:// page gets no key, and a failed open never shows the key in why", async () => {
+    seedGate("g1", "file:///tmp/page.html");
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(r.keys).toEqual([]);
+    expect(hashOf("g1")).toBeNull();
+    seedGate("g2", URL_B);
+    const failing = rig({ open: (url) => ({ ok: false, why: `cannot open ${url}` }) });
+    failing.opener.offer("g2");
+    await failing.opener.idle();
+    const key = failing.keys[0]!;
+    expect(gate("g2").open_detail).toContain("****");
+    expect(JSON.stringify(db.query("SELECT * FROM events").all()) + JSON.stringify(db.query("SELECT * FROM items").all()) + failing.logs.join("\n")).not.toContain(key);
   });
 });
