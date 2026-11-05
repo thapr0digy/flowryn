@@ -79,6 +79,20 @@ function digestOf(path: string | null | undefined): string | null {
   }
 }
 
+/**
+ * The spec as the user's tab shows it: with the page served from the daemon's
+ * copy (src/lavish/snapshot.ts), the copy of the spec beside it, byte for byte
+ * the worker's; null when the copy holds no such file. Without a copy, the
+ * worker's spec itself.
+ */
+export function specAsShown(spec: DesignSpec, gate: { page_path: string; source_page: string | null }): DesignSpec | null {
+  if (!gate.source_page) return spec;
+  const rel = relative(dirname(gate.source_page), spec.path);
+  if (rel.startsWith("..") || isAbsolute(rel)) return null;
+  const copy = join(dirname(gate.page_path), rel);
+  return digestOf(copy) === spec.digest ? { ...spec, path: copy } : null;
+}
+
 /** Pin the spec and the page on the gate. Call inside a transaction. */
 export function pinDesign(db: Db, gateId: string, page: string, spec: DesignSpec): void {
   db.query("UPDATE gates SET spec_path = ?2, spec_text = ?3, spec_digest = ?4, page_digest = ?5 WHERE id = ?1").run(gateId, spec.path, spec.text, spec.digest, digestOf(page));
@@ -103,8 +117,10 @@ export interface PinnedGate {
  */
 export function repinDesign(db: Db, gate: PinnedGate, reportDir: string, taskId: string, now: number): boolean {
   if (!gate.spec_digest || !gate.page_path) return false;
-  const spec = readDesignSpec(reportDir, { required: true })!;
-  requireSpecLinked(gate.source_page ?? gate.page_path, spec);
+  const read = readDesignSpec(reportDir, { required: true })!;
+  requireSpecLinked(gate.source_page ?? gate.page_path, read);
+  const spec = specAsShown(read, { page_path: gate.page_path, source_page: gate.source_page ?? null });
+  if (!spec) return false;
   const page = digestOf(gate.page_path);
   if (spec.digest === gate.spec_digest && page === gate.page_digest) return false;
   pinDesign(db, gate.id, gate.page_path, spec);

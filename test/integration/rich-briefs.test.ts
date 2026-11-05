@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DOC_TEMPLATES } from "../../src/lifecycle/brief-templates.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { waitUntil } from "../helpers/harness.ts";
 
 /**
  * Rich briefs end to end on the fake fleet (docs/notes/2026-11-05-workers-get-rich-hx.md), with
@@ -119,6 +120,10 @@ describe("rich briefs", () => {
       // The spec changes under the open review: the pass is refused until it is pinned again.
       const specPath = join(f.h.dataDir, task, "design", "spec.md");
       writeFileSync(specPath, readFileSync(specPath, "utf8").replace("One table.", "Two tables."));
+      // The daemon copies the revision into the page the user sees (src/lavish/snapshot.ts); the pin checks that copy.
+      const shownSpec = one<{ spec_path: string }>(e, "SELECT spec_path FROM gates WHERE id = ?1", gate.id)!.spec_path;
+      expect(shownSpec).toBe(join(realpathSync(f.h.stateDir), "review-pages", run, "design", "spec.md"));
+      await waitUntil(() => readFileSync(shownSpec, "utf8").includes("Two tables."), 10_000, "the spec copied");
       const drifted = await e.approve(task, { gate: "design" });
       expect(drifted.ok).toBe(false);
       expect(drifted.error).toMatchObject({ code: "design_changed" });

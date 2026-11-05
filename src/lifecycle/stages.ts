@@ -30,7 +30,7 @@ import { summarizeReview } from "./review-chat.ts";
 import { createSteer } from "./steers.ts";
 import { checkDraftPage, DRAFT_SKILL, draftPageDigest, type DraftFile } from "./draft.ts";
 import { briefsConfig } from "../config/briefs.ts";
-import { pinDesign, readDesignSpec, requireSpecLinked, type DesignSpec } from "./design-spec.ts";
+import { pinDesign, readDesignSpec, requireSpecLinked, specAsShown, type DesignSpec } from "./design-spec.ts";
 import { checkHandoff, HANDOFF_REQUIRED_SKILL, handoffNote, recordHandoff, startedUnderRichBriefs } from "./handoffs.ts";
 
 /**
@@ -721,6 +721,11 @@ const stageDone: VerbSpec = {
         source = checked.page;
         listened = taken.page;
         gateReview = snapshotUrl(checked.url, taken.page);
+      }
+      if (spec) {
+        const shown = specAsShown(spec, { page_path: listened, source_page: source });
+        if (!shown) throw new FlowrynError("spec_invalid", "the review page's copy does not carry the build spec the page links", "keep the spec in the design page's folder, at most 3 folders down, then run stage done again");
+        spec = shown;
       }
     }
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);

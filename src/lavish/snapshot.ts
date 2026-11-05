@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { dirname, extname, join, relative, sep } from "node:path";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -233,9 +233,20 @@ interface Asset {
   mtimeMs: number;
 }
 
+interface AssetList {
+  assets: Asset[];
+  /** Why the folder holds more than a copy takes: a copy that left some out would show a page other than the worker's. */
+  problems: string[];
+}
+
+function isAssetName(name: string): boolean {
+  return name !== WIDGET_FILE && !DAEMON_FILE.test(name) && ASSET_EXTENSIONS.has(extname(name).toLowerCase());
+}
+
 /** The page's images, CSS and Markdown under its folder: regular files only (no symlink is followed), bounded. */
-function listAssets(root: string, page: string): Asset[] {
-  const found: Asset[] = [];
+function listAssets(root: string, page: string): AssetList {
+  const assets: Asset[] = [];
+  const problems = new Set<string>();
   let total = 0;
   const walk = (dir: string, depth: number) => {
     let entries;
@@ -245,24 +256,52 @@ function listAssets(root: string, page: string): Asset[] {
       return;
     }
     for (const entry of entries.toSorted((a, b) => a.name.localeCompare(b.name))) {
-      if (found.length >= MAX_ASSETS) return;
       const path = join(dir, entry.name);
       if (entry.isDirectory() && depth < MAX_DEPTH) walk(path, depth + 1);
-      if (!entry.isFile() || path === page || entry.name === WIDGET_FILE || DAEMON_FILE.test(entry.name)) continue;
-      if (!ASSET_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue;
+      if (!entry.isFile() || path === page || !isAssetName(entry.name)) continue;
       let st;
       try {
         st = lstatSync(path);
       } catch {
         continue;
       }
-      if (!st.isFile() || st.size > MAX_ASSET_BYTES || total + st.size > MAX_ASSETS_TOTAL) continue;
-      total += st.size;
-      found.push({ rel: relative(root, path), path, size: st.size, mtimeMs: st.mtimeMs });
+      if (!st.isFile()) continue;
+      if (assets.length >= MAX_ASSETS) {
+        problems.add(`more than ${MAX_ASSETS} images, stylesheets and Markdown files in its folder`);
+        return;
+      }
+      if (st.size > MAX_ASSET_BYTES) problems.add(`${relative(root, path)} over ${MAX_ASSET_BYTES / 1024 / 1024} MB`);
+      else if (total + st.size > MAX_ASSETS_TOTAL) problems.add(`more than ${MAX_ASSETS_TOTAL / 1024 / 1024} MB of images, stylesheets and Markdown in its folder`);
+      else {
+        total += st.size;
+        assets.push({ rel: relative(root, path), path, size: st.size, mtimeMs: st.mtimeMs });
+      }
     }
   };
   walk(root, 1);
-  return found;
+  return { assets, problems: [...problems] };
+}
+
+/** Remove the copy's assets the worker's folder no longer has (the widget and the daemon's own files stay). */
+function removeStale(destRoot: string, dest: string, keep: Set<string>): boolean {
+  let removed = false;
+  const walk = (dir: string, depth: number) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory() && depth < MAX_DEPTH) walk(path, depth + 1);
+      if (!entry.isFile() || path === dest || !isAssetName(entry.name) || keep.has(relative(destRoot, path))) continue;
+      rmSync(path, { force: true });
+      removed = true;
+    }
+  };
+  walk(destRoot, 1);
+  return removed;
 }
 
 /** A regular file's bytes, never through a symlink, at most `max` bytes; null otherwise. */
@@ -307,30 +346,37 @@ export function sourceFingerprint(page: string): string | null {
   } catch {
     return null;
   }
-  const assets = listAssets(dirname(page), page).map((a) => `${a.rel}:${a.size}:${a.mtimeMs}`);
+  const assets = listAssets(dirname(page), page).assets.map((a) => `${a.rel}:${a.size}:${a.mtimeMs}`);
   return [`${st.isFile() ? "f" : "x"}:${st.size}:${st.mtimeMs}:${st.ino}`, ...assets].join("|");
 }
 
 export type Snapshot = { ok: true; page: string; changed: boolean } | { ok: false; problems: string[] };
 
 /**
- * Check the worker's page and copy it, with its assets, to `dest`. The bytes
- * checked are the bytes written. Refused: nothing is written, and the last
+ * Check the worker's page and copy it, with its assets, to `dest`: all of
+ * them or none (a folder past the caps is refused), and an asset gone from
+ * the worker's folder goes from the copy. The bytes checked are the bytes
+ * written. Refused: nothing is written, and the last
  * good copy (if any) stays. Only what changed is written, so Lavish reloads
  * the tab only for a real revision.
  */
 export function takeSnapshot(source: string, dest: string): Snapshot {
   const bytes = readRegular(source, MAX_PAGE_BYTES);
   if (!bytes) return { ok: false, problems: [`${source} is not a regular file of at most 5 MB`] };
-  const problems = reviewPageProblems(new TextDecoder().decode(bytes));
-  if (problems.length > 0) return { ok: false, problems };
   const root = dirname(source);
+  const listed = listAssets(root, source);
+  const problems = [...reviewPageProblems(new TextDecoder().decode(bytes)), ...listed.problems];
+  if (problems.length > 0) return { ok: false, problems };
   const destRoot = dirname(dest);
   let changed = false;
-  for (const asset of listAssets(root, source)) {
+  const kept = new Set<string>();
+  for (const asset of listed.assets) {
     const data = readRegular(asset.path, MAX_ASSET_BYTES);
-    if (data && writeIfChanged(join(destRoot, asset.rel), data)) changed = true;
+    if (!data) continue;
+    kept.add(asset.rel);
+    if (writeIfChanged(join(destRoot, asset.rel), data)) changed = true;
   }
+  if (removeStale(destRoot, dest, kept)) changed = true;
   if (writeIfChanged(dest, bytes)) changed = true;
   return { ok: true, page: realpathSync(dest), changed };
 }

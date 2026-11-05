@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import type { Db } from "../../src/db/db.ts";
 import { LavishPoller } from "../../src/lavish/poller.ts";
 import { refreshSnapshot, reviewPageProblems, snapshotPathFor, takeSnapshot } from "../../src/lavish/snapshot.ts";
 import { WIDGET_FILE } from "../../src/lavish/widget.ts";
 import { renderDraftPage } from "../../src/lifecycle/draft.ts";
+import { specAsShown } from "../../src/lifecycle/design-spec.ts";
 import { QA_TEMPLATE } from "../../src/skills/qa-template.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import { makeHome, seedRun, type TestHome } from "../helpers/harness.ts";
@@ -115,6 +117,45 @@ describe("the copy", () => {
     expect(copied()).toEqual(["a.png", "design.html", "shots/b.webp", "spec.md", "style.css"]);
     expect(readFileSync(snapshot, "utf8")).toBe(readFileSync(source, "utf8"));
     expect(takeSnapshot(source, snapshot)).toMatchObject({ ok: true, changed: false });
+  });
+
+  test("a folder past the copy's 200 files is refused whole, never copied in part: a spec sorted after the cap would otherwise stay stale", () => {
+    const dir = join(source, "..");
+    expect(takeSnapshot(source, snapshot).ok).toBe(true);
+    writeFileSync(join(dir, "spec.md"), "# Spec v1");
+    expect(takeSnapshot(source, snapshot).ok).toBe(true);
+    for (let n = 0; n < 200; n++) writeFileSync(join(dir, `a${String(n).padStart(3, "0")}.png`), "png");
+    writeFileSync(join(dir, "spec.md"), "# Spec v2");
+    const taken = takeSnapshot(source, snapshot);
+    expect(taken.ok).toBe(false);
+    if (!taken.ok) expect(taken.problems.join("; ")).toContain("more than 200 images");
+    expect(readFileSync(join(snapshot, "..", "spec.md"), "utf8")).toBe("# Spec v1");
+    expect(existsSync(join(snapshot, "..", "a000.png"))).toBe(false);
+  });
+
+  test("an asset gone from the worker's folder goes from the copy; the widget beside the copy stays", () => {
+    const dir = join(source, "..");
+    writeFileSync(join(dir, "spec.md"), "# Spec");
+    writeFileSync(join(dir, "shots", "b.png"), "png");
+    expect(takeSnapshot(source, snapshot).ok).toBe(true);
+    writeFileSync(join(snapshot, "..", WIDGET_FILE), "// the daemon's widget");
+    rmSync(join(dir, "spec.md"));
+    rmSync(join(dir, "shots", "b.png"));
+    expect(takeSnapshot(source, snapshot)).toMatchObject({ ok: true, changed: true });
+    expect(copied()).toEqual(["design.html", WIDGET_FILE]);
+  });
+
+  test("the spec as shown is the copy's, byte for byte the worker's; none when the copy does not carry it", () => {
+    const specPath = join(source, "..", "spec.md");
+    writeFileSync(specPath, "# Spec v1");
+    expect(takeSnapshot(source, snapshot).ok).toBe(true);
+    const real = realpathSync(snapshot);
+    const spec = (text: string, path = specPath) => ({ path, text, digest: createHash("sha256").update(text).digest("hex") });
+    const gate = { page_path: real, source_page: source };
+    expect(specAsShown(spec("# Spec v1"), gate)).toMatchObject({ path: join(real, "..", "spec.md") });
+    expect(specAsShown(spec("# Spec v2"), gate)).toBeNull();
+    expect(specAsShown(spec("# Spec v1", join(reportDir, "elsewhere", "spec.md")), gate)).toBeNull();
+    expect(specAsShown(spec("# Spec v2"), { page_path: real, source_page: null })).toMatchObject({ path: specPath });
   });
 
   test("a page with a script is refused and nothing is written", () => {
