@@ -153,7 +153,7 @@ export function contextBlock(db: Db, taskId: string, opts: { reportDirFor: (task
 
   const parts: string[] = [CONTEXT_HEADING, "Flowryn assembled this from its own records; it is rebuilt on every start, resume and stage change. Documents are fenced: their headings are theirs, not Flowryn's."];
   const files: ContextFile[] = [];
-  let budget = INLINE_BLOCK_MAX;
+  let budget = INLINE_BLOCK_MAX - notes.reduce((n, note) => n + note.length, 0);
   for (const doc of docs) {
     parts.push(`### ${doc.title}\n${doc.source}`);
     if (doc.text.length === 0) continue;
@@ -168,7 +168,17 @@ export function contextBlock(db: Db, taskId: string, opts: { reportDirFor: (task
   parts.push(...notes);
   if (handoffs.length > 0) {
     parts.push(`### Stage handoffs (${plural(handoffs.length, "stage")})`);
-    for (const h of handoffs) parts.push(`#### ${h.stage} (run ${h.run_id}, ${new Date(h.created_at).toISOString().slice(0, 16).replace("T", " ")} UTC)\n${fenced(h.text)}`);
+    for (const h of handoffs) {
+      const heading = `#### ${h.stage} (run ${h.run_id}, ${new Date(h.created_at).toISOString().slice(0, 16).replace("T", " ")} UTC)`;
+      if (h.text.length <= budget) {
+        parts.push(`${heading}\n${fenced(h.text)}`);
+        budget -= h.text.length;
+        continue;
+      }
+      const file = `handoff-${h.stage}.md`;
+      files.push({ name: file, text: h.text });
+      parts.push(`${heading}\nToo long to inline in this block: read it whole at ${join(opts.contextDir, file)} (sha256 ${sha256Hex(h.text)}). Its outline:\n${outlineOf(h.text)}`);
+    }
   }
   return { text: parts.join("\n\n"), files };
 }

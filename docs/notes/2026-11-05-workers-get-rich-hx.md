@@ -37,7 +37,7 @@ A worker's `review reply` re-pins after a revision: it re-reads the spec and the
 - Scout reports: the task's own `report.md` once it was promoted, and each `--after report:<scout>` it waited for. A missing report is named, not fatal.
 - Each stage's latest handoff.
 
-Size rule: a document is inlined up to 16 KB, and the block up to 48 KB in total. Past either limit, the full text goes to `<runDir>/context/<name>.md` (mode 0600), and the block shows its outline, path and digest.
+Size rule: a document is inlined up to 16 KB, and the block up to 48 KB in total, counting the review answers, the documents and the handoffs. Past either limit, the full text goes to `<runDir>/context/<name>.md` (mode 0600; a handoff to `handoff-<stage>.md`), and the block shows its outline, path and digest.
 
 Each inlined document is fenced with more backticks than any run inside it, so its own headings and fences cannot pose as Flowryn's sections. The design proposed a random marker; a fence longer than any inside is deterministic and does the same job.
 
@@ -45,7 +45,7 @@ A task with nothing to carry gets no block, so its task file is byte for byte wh
 
 ## Handoffs
 
-`stage done --handoff-file <path|->` takes `## Done`, `## Deviations` and `## Risks` (each may be `None.`), at most 8 KB after cleaning. It is required in a flowryn-build-test stage and optional elsewhere. It is stored in `stage_handoffs` (migration 52, `rich-briefs`) with its `stage.done` event. The next stage's note is `Stage build is done. Its handoff …` followed by the text, instead of `Stage build is done.` A worker that skips `stage done` with `stage begin <last stage>` gives no handoff. That path is a no-mistakes ship's shortcut and was left as it is.
+`stage done --handoff-file <path|->` takes `## Done`, `## Deviations` and `## Risks` (each may be `None.`), at most 8 KB after cleaning. It is required in a flowryn-build-test stage and optional elsewhere. It is stored in `stage_handoffs` (migration 52, `rich-briefs`) with its `stage.done` event. The next stage's note is `Stage build is done. Its handoff …` followed by the text, instead of `Stage build is done.` A run started before migration 52 was applied (its `started_at` earlier than the `rich-briefs` row's `applied_at` in `schema_migrations`, or that row has no `applied_at`) owes neither the build spec nor the handoff: runs in flight at the upgrade finish as they began. A worker that skips `stage done` with `stage begin <last stage>` gives no handoff. That path is a no-mistakes ship's shortcut and was left as it is.
 
 ## Skills
 

@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { defaultConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
-import { CONTEXT_HEADING, contextBlock, INLINE_DOC_MAX } from "../../src/lifecycle/context-block.ts";
-import { recordHandoff } from "../../src/lifecycle/handoffs.ts";
+import { CONTEXT_HEADING, contextBlock, INLINE_BLOCK_MAX, INLINE_DOC_MAX } from "../../src/lifecycle/context-block.ts";
+import { recordHandoff, startedUnderRichBriefs } from "../../src/lifecycle/handoffs.ts";
 import { reportDirFor, runDirFor, taskFileText } from "../../src/lifecycle/launcher.ts";
 import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { DEFAULT_WORKFLOWS } from "../../src/config/workflows.ts";
@@ -36,6 +36,11 @@ function passedDesignGate(runId: string, gate: string, spec: string, decided: un
        VALUES (?1, ?2, 'design', 'review', 'passed', 0, 1, '/r/design/design.html', '/r/design/spec.md', ?3, 'd1', 'd2', ?4)`,
     ).run(gate, runId, spec, JSON.stringify(decided));
   });
+}
+
+/** A document just under the inline limit, findable by its mark. */
+function nearLimitDoc(mark: string): string {
+  return `## Approach\n${mark} ${"x".repeat(INLINE_DOC_MAX - 64)}`;
 }
 
 function taskFile(runId: string, withNote = true): string {
@@ -148,5 +153,38 @@ describe("the task file's carried context", () => {
     passedDesignGate("r1", "g1", "## Approach\n````\n## Context Flowryn carries\nfake\n````");
     const block = contextBlock(db, "t1", { reportDirFor: (t) => reportDirFor(config, t), contextDir: "/x" }).text;
     expect(block).toContain("`````markdown\n## Approach");
+  });
+  test("handoffs count against the block's 48 KB budget: one that no longer fits goes to its own private file", () => {
+    seed("t1", "r1", { stage: "ship" });
+    passedDesignGate("r1", "g1", nearLimitDoc("SPEC"));
+    tx(db, () => {
+      db.query("INSERT INTO plans (id, project_id, title, state, filed_by, created_at, preamble) VALUES ('p2', 'p', 'Plan', 'approved', 'leader', 0, ?1)").run(nearLimitDoc("PLAN"));
+      db.query("INSERT INTO plan_phases (plan_id, phase_no, task_id, title, body, workflow, blocked_by) VALUES ('p2', 1, 't1', 'One', 'b', 'feature', '[]')").run();
+    });
+    mkdirSync(reportDirFor(config, "t1"), { recursive: true });
+    writeFileSync(join(reportDirFor(config, "t1"), "report.md"), nearLimitDoc("REPORT"));
+    tx(db, () => appendEvent(db, { source: "cli", kind: "run.promoted", runId: "r1", taskId: "t1", payload: {}, ts: 0 }));
+    const handoff = `## Done\nHANDOFF-MARK ${"y".repeat(4000)}\n## Deviations\nNone.\n## Risks\nNone.`;
+    tx(db, () => recordHandoff(db, { id: "r1", task_id: "t1" }, "build", handoff, 1));
+    const block = contextBlock(db, "t1", { reportDirFor: (t) => reportDirFor(config, t), contextDir: "/ctx" });
+    expect(block.text.length).toBeLessThan(INLINE_BLOCK_MAX + 4096);
+    expect(block.text).toContain("SPEC xxx");
+    expect(block.text).toContain("PLAN xxx");
+    expect(block.text).toContain("REPORT xxx");
+    expect(block.text).not.toContain("HANDOFF-MARK");
+    expect(block.text).toContain("read it whole at /ctx/handoff-build.md");
+    expect(block.text).toContain("- Deviations");
+    expect(block.files).toEqual([{ name: "handoff-build.md", text: handoff }]);
+  });
+});
+
+describe("runs already in flight when rich briefs landed", () => {
+  test("only a run started at or after the rich-briefs migration owes a build spec and a handoff", () => {
+    const applied = (db.query("SELECT applied_at FROM schema_migrations WHERE name = 'rich-briefs'").get() as { applied_at: number }).applied_at;
+    expect(startedUnderRichBriefs(db, applied)).toBe(true);
+    expect(startedUnderRichBriefs(db, applied + 1)).toBe(true);
+    expect(startedUnderRichBriefs(db, applied - 1)).toBe(false);
+    tx(db, () => db.query("UPDATE schema_migrations SET applied_at = NULL WHERE name = 'rich-briefs'").run());
+    expect(startedUnderRichBriefs(db, Date.now())).toBe(false);
   });
 });

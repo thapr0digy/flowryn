@@ -21,6 +21,12 @@ export interface Handoff {
   created_at: number;
 }
 
+/** Runs started before the rich-briefs migration was applied finish as they began: no build spec or handoff is required of them. */
+export function startedUnderRichBriefs(db: Db, startedAt: number): boolean {
+  const row = db.query("SELECT applied_at FROM schema_migrations WHERE name = 'rich-briefs'").get() as { applied_at: number | null } | null;
+  return row?.applied_at != null && startedAt >= row.applied_at;
+}
+
 /** A handoff as the worker wrote it, cleaned and checked: refused with every problem. */
 export function checkHandoff(raw: string): string {
   const text = sanitizeBlock(raw).trim();

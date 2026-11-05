@@ -29,7 +29,7 @@ import { createSteer } from "./steers.ts";
 import { checkDraftPage, DRAFT_SKILL, draftPageDigest, type DraftFile } from "./draft.ts";
 import { briefsConfig } from "../config/briefs.ts";
 import { pinDesign, readDesignSpec, requireSpecLinked, type DesignSpec } from "./design-spec.ts";
-import { checkHandoff, HANDOFF_REQUIRED_SKILL, handoffNote, recordHandoff } from "./handoffs.ts";
+import { checkHandoff, HANDOFF_REQUIRED_SKILL, handoffNote, recordHandoff, startedUnderRichBriefs } from "./handoffs.ts";
 
 /**
  * Workflow stages and gates (design section 11). A run moves through its
@@ -667,7 +667,7 @@ const stageDone: VerbSpec = {
     const planText = stringArg(args, "plan");
     const page = stringArg(args, "page");
     const questionsText = stringArg(args, "questions");
-    const enforce = briefsConfig(ctx.config()).enforce;
+    const enforce = briefsConfig(ctx.config()).enforce && startedUnderRichBriefs(ctx.db, run.started_at);
     const handoffText = stringArg(args, "handoff");
     if (handoffText === undefined && enforce && pos.stage.skill === HANDOFF_REQUIRED_SKILL) {
       throw new FlowrynError("handoff_invalid", `stage ${pos.stage.id} ends with a handoff to the next stage: what you did, deviations from the spec and why, open risks`, "$FLOWRYN_BIN template handoff > \"$TMPDIR/handoff.md\", fill it, then $FLOWRYN_BIN stage done --handoff-file \"$TMPDIR/handoff.md\"");
