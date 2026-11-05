@@ -7,7 +7,8 @@
  * real `git worktree add --detach`); `status --json`; and `return [--force]
  * [--if-lease-id <id>] <path>`, which refuses a slot with changes unless forced
  * (exit 3, as with stdin at EOF), refuses another lease (exit 1), and resets a
- * returned slot clean and detached while keeping its ignored files.
+ * returned slot clean and detached while keeping its ignored files; a slot
+ * whose folder is gone is forgotten once its lease matches.
  *
  * State lives in the pool root (`--root`), in `.treehouse/fake-state.json`;
  * with `.treehouse/fake-get-fails` there, `get` leases its slot and then fails
@@ -151,6 +152,12 @@ if (command === "return") {
   if (ifLease !== null && slot.lease_id !== ifLease) {
     console.error(`failed to return worktree: lease precondition failed: lease identity does not match worktree ${slot.path}`);
     process.exit(1);
+  }
+  if (!existsSync(slot.path)) {
+    // 3.1.8 by hand: a slot whose folder is gone is forgotten, forced or not, once its lease matches.
+    save(slots.filter((s) => s !== slot));
+    console.error("🌳 Worktree returned to pool.");
+    process.exit(0);
   }
   const dirty = must(["status", "--porcelain"], slot.path) !== "";
   if (dirty && !force) {

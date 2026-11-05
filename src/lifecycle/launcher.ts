@@ -515,12 +515,20 @@ export class Launcher {
     }
   }
 
-  /** Hand a vanished slot's lease back, forced, so the pool does not keep it held; a failure is only logged. */
+  /**
+   * Hand a vanished slot's lease back, forced, so the pool does not keep it held (a failure is only logged), and
+   * prune git's record of it, which would otherwise keep the run's branch checked out there.
+   */
   private async returnLost(run: RunWithPolicy, project: ProjectRow, workers: WorkersConfig, path: string, lease: string): Promise<void> {
     const bin = resolveTool(this.deps.config(), "treehouse");
-    if (!bin) return this.deps.log(`launch ${run.id}: treehouse is not installed, so the lease on ${path} stays held`);
-    const back = await withRepoLock(project.path, () => returnSlot(bin, poolRoot(workers.worktree_root, project.id), path, lease, true));
-    if (!back.ok) this.deps.log(`launch ${run.id}: the lease on ${path} was not returned: ${back.detail}`);
+    await withRepoLock(project.path, async () => {
+      if (!bin) this.deps.log(`launch ${run.id}: treehouse is not installed, so the lease on ${path} stays held`);
+      else {
+        const back = await returnSlot(bin, poolRoot(workers.worktree_root, project.id), path, lease, true);
+        if (!back.ok) this.deps.log(`launch ${run.id}: the lease on ${path} was not returned, so it stays held in treehouse: ${back.detail}`);
+      }
+      await this.deps.git(["-C", project.path, "worktree", "prune"]);
+    });
   }
 
   /** A clean, detached slot onto the run's branch: a new one at the base commit, or the existing one. */

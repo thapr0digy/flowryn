@@ -213,7 +213,7 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
     if (deps.returnWorktree) {
       const back = await deps.returnWorktree(req.guard.worktree, true);
       steps.push(`worktree_return:${back.ok ? "ok" : "failed"}`);
-      if (!back.ok) deps.log(`the lease on ${req.guard.worktree}, which is gone, was not returned: ${back.detail}`);
+      if (!back.ok) deps.log(`the lease on ${req.guard.worktree}, which is gone, was not returned, so it stays held in treehouse: ${back.detail}`);
     }
     await deps.git(["worktree", "prune"], req.primary);
     steps.push("worktree_prune");

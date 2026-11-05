@@ -8,7 +8,7 @@
  * recorded and shown by doctor.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
@@ -94,6 +94,34 @@ describe("run worktrees from the treehouse pool", () => {
       expect(git(slot, ["status", "--porcelain"]).out).toBe("");
       expect(git(slot, ["rev-parse", "HEAD"]).out).toBe(git(env.repo, ["rev-parse", "HEAD"]).out);
       expect(readFileSync(join(slot, "warm.cache"), "utf8")).toContain("warm");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "a resume whose pool slot was destroyed by hand hands the old lease back and takes a fresh slot",
+    async () => {
+      const env = (fleet = await makeFleetEnv({ worktreeProvider: "treehouse" }));
+      const { run } = await env.dispatch("Build\nFAKE: commit a.txt hello\nFAKE: sleep 60000", { kind: "ship" });
+      const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+      const lost = busy.worktree_path;
+      await waitUntil(() => git(env.repo, ["log", "--oneline", "-1", busy.branch]).out.includes("a.txt"), 10_000, "the commit");
+      const head = git(env.repo, ["rev-parse", busy.branch]).out;
+      // The folder goes while the worker runs, then the worker dies: the resume finds its slot gone.
+      rmSync(lost, { recursive: true, force: true });
+      env.herdr.killHarness(busy.pane_id!, "SIGKILL");
+      const back = await env.waitRun(run, (r) => r.resume_count === 1 && r.liveness === "busy" && r.proc_pid !== busy.proc_pid, "the resumed worker", 30_000);
+      expect(back.worktree_lease).not.toBe(busy.worktree_lease);
+      expect(existsSync(back.worktree_path)).toBe(true);
+      expect(git(back.worktree_path, ["branch", "--show-current"]).out).toBe(busy.branch);
+      expect(git(back.worktree_path, ["rev-parse", "HEAD"]).out).toBe(head);
+      expect(events(env, run, "run.worktree_fallback")).toEqual([]);
+      expect(events(env, run, "run.worktree_lost")).toEqual([expect.objectContaining({ path: lost, lease: busy.worktree_lease })]);
+      const ret = calls(env).find((argv) => argv.includes("return"))!;
+      expect(ret).toEqual(expect.arrayContaining(["--force", "--if-lease-id", busy.worktree_lease!, lost]));
+      const pool = JSON.parse(readFileSync(join(env.h.home, "wt", "web", ".pool", ".treehouse", "fake-state.json"), "utf8")) as { path: string; lease_id: string }[];
+      expect(pool.some((slot) => slot.lease_id === busy.worktree_lease)).toBe(false);
+      expect(pool.filter((slot) => slot.lease_id !== "").map((slot) => slot.lease_id)).toEqual([back.worktree_lease!]);
     },
     { timeout: 90_000 },
   );

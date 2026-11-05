@@ -15,7 +15,7 @@ import { cleanupConfig } from "../../src/config/delivery.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { runCleanup } from "../../src/policy/cleanup.ts";
 import { gitRunner } from "../../src/policy/git.ts";
-import { acquireSlot, adoptSlot, leaseHolder, parseLease, parseStatus, poolRoot, poolSlots, returnSlot, treehouseVersion } from "../../src/runtime/treehouse.ts";
+import { acquireSlot, adoptSlot, leaseHolder, parseLease, parseStatus, poolRoot, poolSlots, poolStatus, returnSlot, treehouseVersion } from "../../src/runtime/treehouse.ts";
 import { worktreeChecks, VERIFIED_TREEHOUSE } from "../../src/doctor/doctor.ts";
 import { GIT_ENV, sh } from "../helpers/scratch-git.ts";
 
@@ -245,7 +245,11 @@ describe("the cleanup's return path", () => {
     const outcome = await cleanup(s, slot.path, slot.lease_id, false, returned);
     expect(outcome).toMatchObject({ outcome: "removed", branchDeleted: true });
     expect(returned).toEqual([`${slot.path} force`]);
-    expect(outcome.steps.indexOf("worktree_prune")).toBeGreaterThan(outcome.steps.findIndex((step) => step.startsWith("worktree_return:")));
+    expect(outcome.steps.indexOf("worktree_prune")).toBeGreaterThan(outcome.steps.indexOf("worktree_return:ok"));
+    expect(outcome.steps).toContain("worktree_return:ok");
+    expect(await adoptSlot(s.bin, s.root, s.repo, leaseHolder("r1"))).toEqual({ ok: true, value: null });
+    const status = await poolStatus(s.bin, s.root, s.repo);
+    expect(status.ok && status.value.some((entry) => entry.lease_id === slot.lease_id)).toBe(false);
     expect(git(s.repo, ["rev-parse", "--verify", "--quiet", "refs/heads/flowryn/t"]).code).not.toBe(0);
   });
 
