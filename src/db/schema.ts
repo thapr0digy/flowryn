@@ -996,6 +996,28 @@ const WORKTREE_LEASE_SQL = /* sql */ `
 ALTER TABLE runs ADD COLUMN worktree_lease TEXT;
 `;
 
+/**
+ * Rich briefs (docs/notes/2026-11-05-workers-get-rich-hx.md): a design
+ * gate pins its build spec and page by digest and keeps the spec's text;
+ * a leader's plan keeps its shared brief; a stage's handoff to the next.
+ */
+const RICH_BRIEFS_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN spec_path TEXT;
+ALTER TABLE gates ADD COLUMN spec_text TEXT;
+ALTER TABLE gates ADD COLUMN spec_digest TEXT;
+ALTER TABLE gates ADD COLUMN page_digest TEXT;
+ALTER TABLE plans ADD COLUMN preamble TEXT;
+CREATE TABLE stage_handoffs (
+  id INTEGER PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX stage_handoffs_task ON stage_handoffs(task_id, created_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1048,6 +1070,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 49, name: "reserved-class", sql: RESERVED_CLASS_SQL },
   { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
   { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
+  { version: 52, name: "rich-briefs", sql: RICH_BRIEFS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

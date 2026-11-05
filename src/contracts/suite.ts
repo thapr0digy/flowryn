@@ -78,11 +78,22 @@ const MID_MS = 120_000;
 
 /** What the worker is told. Steer ids are predictable (m1, m2, ...) because the scratch daemon is fresh. */
 export function contractBody(harness: HarnessId, scripted: boolean): string {
+  // A scout brief (src/lifecycle/brief.ts), so the dispatch passes the brief check of a real home.
   const lines = [
-    "Flowryn contract test for the worker adapter. Work one step at a time with your shell tool.",
+    "Flowryn contract test for the worker adapter.",
+    "",
+    "## Intent",
+    "Prove that this harness's worker follows its task and its leader's steers. Work one step at a time with your shell tool.",
+    "",
+    "## Context",
+    "Steers from your leader may arrive while you work or wait. Do what each one says, then acknowledge it with $FLOWRYN_BIN ack <id>.",
+    "",
+    "## Questions",
     "1. Run exactly this command and wait for it to finish: perl -e 'sleep 25'",
     "2. Then reply with the single word ONE and end your turn.",
-    "Steers from your leader may arrive while you work or wait. Do what each one says, then acknowledge it with $FLOWRYN_BIN ack <id>.",
+    "",
+    "## Out of scope",
+    "None: a scratch run in a scratch home; change nothing else.",
   ];
   if (harness === "pi" && scripted) {
     const script = [
