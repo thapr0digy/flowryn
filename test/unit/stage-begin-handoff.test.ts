@@ -7,12 +7,13 @@ import type { HandlerCtx } from "../../src/api/verbs.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { migrate, openDb, type Db } from "../../src/db/db.ts";
 import { handoffsOf } from "../../src/lifecycle/handoffs.ts";
-import { beginLastStage } from "../../src/lifecycle/stages.ts";
+import { getRunWithPolicy } from "../../src/lifecycle/runs.ts";
+import { beginLastStage, deliveryHandoff, recordStageDelivered, startPooledStages } from "../../src/lifecycle/stages.ts";
 
 /**
- * `stage begin <last stage>` from a build stage owes the same handoff as `stage done`
- * (docs/notes/2026-11-05-workers-get-rich-hx.md, "Handoffs"): refused without one, stored
- * under the build stage with its stage.done event when given.
+ * `stage begin <last stage>`, and a direct-PR or local-only `deliver`, from a build stage owe
+ * the same handoff as `stage done` (docs/notes/2026-11-05-workers-get-rich-hx.md, "Handoffs"):
+ * refused without one, stored under the build stage with its stage event when given.
  */
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fl-begin-handoff-")));
@@ -43,9 +44,11 @@ afterEach(() => {
 });
 
 /** A no-mistakes ship in its workflow's build stage; `startedAt` 0 is a run from before the rich-briefs migration. */
-function seed(workflow: "feature" | "fix", opts: { startedAt?: number; stage?: string; stageState?: string } = {}): void {
+type Mode = "no-mistakes" | "direct-PR" | "local-only";
+
+function seed(workflow: "feature" | "fix", opts: { startedAt?: number; stage?: string; stageState?: string; mode?: Mode } = {}): void {
   const now = Date.now();
-  db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, 'web', 'ship', 'no-mistakes', 0, ?2, ?3)").run(TASK, workflow, now);
+  db.query("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, workflow, created_at) VALUES (?1, 'web', 'ship', ?2, 0, ?3, ?4)").run(TASK, opts.mode ?? "no-mistakes", workflow, now);
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, stage_state, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
      VALUES (?1, ?2, 'claude', '2.1.281', 'running', 'busy', ?3, ?4, ?5, '/tmp/wt', 'fm/x', 'abc123', 'h', ?6, ?7)`,
@@ -133,5 +136,58 @@ describe("stage begin from a build stage", () => {
     expect(doneEvents()).toEqual([]);
     const error = await refusal(beginLastStage(ctxFor(ENFORCED), RUN, "ship", "not a handoff"));
     expect(error.code).toBe("handoff_invalid");
+  });
+});
+
+const DELIVERY: Record<"direct-PR" | "local-only", string> = { "direct-PR": "$FLOWRYN_BIN deliver --pr <url>", "local-only": "$FLOWRYN_BIN deliver --local" };
+
+describe("a delivery straight from a build stage", () => {
+  for (const mode of ["direct-PR", "local-only"] as const) {
+    test(`${mode}: the pooled ship stage it starts is refused without a handoff, and nothing moves`, async () => {
+      seed("feature", { mode });
+      const error = await refusal(startPooledStages(ctxFor(ENFORCED), RUN));
+      expect(error.code).toBe("handoff_invalid");
+      expect(error.message).toBe("stage build ends with a handoff to the next stage: what you did, deviations from the spec and why, open risks");
+      expect(error.help).toContain(`${DELIVERY[mode]} --handoff-file "$TMPDIR/handoff.md"`);
+      expect(stageOf()).toEqual({ stage: "build", stage_state: "active" });
+      expect(doneEvents()).toEqual([]);
+    });
+
+    test(`${mode}: a given handoff is kept under build, on the stage.done event of the stage it ends`, async () => {
+      seed("feature", { mode });
+      await startPooledStages(ctxFor(ENFORCED), RUN, HANDOFF);
+      expect(stageOf().stage).toBe("ship");
+      expect(handoffsOf(db, TASK).map((h) => [h.stage, h.text])).toEqual([["build", HANDOFF]]);
+      const id = (db.query("SELECT id FROM stage_handoffs").get() as { id: number }).id;
+      expect(doneEvents()).toEqual([expect.objectContaining({ stage: "build", for: "deliver", next: "ship", handoff: id })]);
+      // The redelivery from ship, once it has started, owes none and keeps nothing new.
+      expect(deliveryHandoff(ctxFor(ENFORCED), getRunWithPolicy(db, RUN)!, HANDOFF)).toBeNull();
+    });
+
+    test(`${mode}: a delivery that ends build at once (no pooled stage between) keeps it on stage.delivered`, () => {
+      seed("feature", { mode });
+      const run = getRunWithPolicy(db, RUN)!;
+      expect(() => deliveryHandoff(ctxFor(ENFORCED), run, undefined)).toThrow(expect.objectContaining({ code: "handoff_invalid" }));
+      const handoff = deliveryHandoff(ctxFor(ENFORCED), run, HANDOFF);
+      expect(handoff).toEqual({ stage: "build", text: HANDOFF });
+      recordStageDelivered(db, run, ["build", "ship"], Date.now(), handoff);
+      const id = (db.query("SELECT id FROM stage_handoffs").get() as { id: number }).id;
+      const delivered = db.query("SELECT payload FROM events WHERE kind = 'stage.delivered'").get() as { payload: string };
+      expect(JSON.parse(delivered.payload)).toMatchObject({ stage: "ship", handoff: id });
+      expect(handoffsOf(db, TASK).map((h) => h.stage)).toEqual(["build"]);
+    });
+  }
+
+  test("assumption: a run started before the rich-briefs migration owes no handoff when it delivers either", async () => {
+    seed("feature", { mode: "local-only", startedAt: 0 });
+    await startPooledStages(ctxFor(ENFORCED), RUN);
+    expect(stageOf().stage).toBe("ship");
+    expect(handoffsOf(db, TASK)).toEqual([]);
+  });
+
+  test("the fix workflow's build (no build skill) owes none", async () => {
+    seed("fix", { mode: "direct-PR" });
+    await startPooledStages(ctxFor(ENFORCED), RUN);
+    expect(stageOf().stage).toBe("ship");
   });
 });

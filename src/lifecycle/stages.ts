@@ -436,7 +436,7 @@ async function grantRequested(ctx: HandlerCtx, runId: string, requested: Request
  * and the run waits: the steer that starts the stage tells the worker to
  * deliver again.
  */
-export async function startPooledStages(ctx: HandlerCtx, runId: string): Promise<void> {
+export async function startPooledStages(ctx: HandlerCtx, runId: string, handoffText?: string): Promise<void> {
   for (;;) {
     const requested = tx(ctx.db, () => {
       const run = getRunWithPolicy(ctx.db, runId);
@@ -450,7 +450,8 @@ export async function startPooledStages(ctx: HandlerCtx, runId: string): Promise
         if (!(error instanceof FlowrynError && error.code === "stage_waiting")) throw error;
       }
       const stage = pos.def.stages[index]!;
-      return requestLater(ctx, run, pos, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, "deliver");
+      const handoff = deliveryHandoff(ctx, run, handoffText);
+      return requestLater(ctx, run, pos, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, "deliver", handoff);
     });
     if (!requested) return;
     await grantRequested(ctx, runId, requested, () => stageWaiting(requested.stage));
@@ -496,6 +497,26 @@ export async function beginLastStage(ctx: HandlerCtx, runId: string, target: str
 }
 
 /**
+ * The handoff a delivery owes when it ends a build stage (local-only and
+ * direct-PR deliver straight from build): checked like stage done's, kept
+ * under that stage. Null when none is owed nor given, from the last stage
+ * (a given one is checked, not kept), or once the stages are over (a redelivery).
+ */
+export function deliveryHandoff(ctx: { db: Db; config: () => FlowrynConfig }, run: RunWithPolicy, text: string | undefined): { stage: string; text: string } | null {
+  if (run.state === "ready" || run.stage_state === "done") return null;
+  const pos = positionOf(ctx.db, run, run.kind);
+  // From the last stage, the stage before it has ended already and kept its handoff then.
+  if (pos.last) {
+    if (text !== undefined) checkHandoff(text);
+    return null;
+  }
+  const owed = handoffOwedBy(ctx, run, pos.def.stages.slice(pos.index));
+  const command = run.delivery_mode === "local-only" ? "$FLOWRYN_BIN deliver --local" : "$FLOWRYN_BIN deliver --pr <url>";
+  const handoff = takeHandoff(text, owed, `${command} --handoff-file "$TMPDIR/handoff.md"`);
+  return handoff !== null ? { stage: owed?.id ?? pos.stage.id, text: handoff } : null;
+}
+
+/**
  * The stage among those a call ends or skips whose handoff is owed (the last
  * build stage), or null: none is, [briefs] enforce is off, or the run started
  * before the rich-briefs migration and finishes as it began.
@@ -518,12 +539,13 @@ function stageDoneHelp(pos: StagePos): string {
 }
 
 /** The delivery ended the last stage: its pools go back and a ship's merge gate opens. Call inside a transaction. */
-export function recordStageDelivered(db: Db, run: RunWithPolicy, skipped: string[], now: number): void {
+export function recordStageDelivered(db: Db, run: RunWithPolicy, skipped: string[], now: number, handoff: { stage: string; text: string } | null = null): void {
   const def = runWorkflow(db, run, run.kind);
   const last = def.stages[def.stages.length - 1]!;
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, `stage ${last.id} delivered`, now);
+  const handoffId = handoff !== null ? recordHandoff(db, run, handoff.stage, handoff.text, now) : null;
   db.query("UPDATE runs SET stage = ?2, stage_state = 'done', waiting_since = NULL, stage_note = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, last.id, now);
-  appendEvent(db, { source: "cli", kind: "stage.delivered", runId: run.id, taskId: run.task_id, payload: { stage: last.id, finished_at_delivery: skipped }, ts: now });
+  appendEvent(db, { source: "cli", kind: "stage.delivered", runId: run.id, taskId: run.task_id, payload: { stage: last.id, finished_at_delivery: skipped, ...(handoffId !== null ? { handoff: handoffId } : {}) }, ts: now });
   run.stage = last.id;
   run.stage_state = "done";
   if (run.kind === "ship" && last.gate === "merge") openMergeGate(db, run, now);

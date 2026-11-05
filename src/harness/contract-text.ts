@@ -52,6 +52,11 @@ function beginLines(d: ContractDelivery): string[] {
   return [`  Before the pipeline: $FLOWRYN_BIN stage begin ${id}${slot}; skipping build, add --handoff-file <your handoff>.`, ...wait];
 }
 
+/** A delivery from before the last stage that ends build owes its handoff (src/lifecycle/stages.ts deliveryHandoff). */
+function handoffFlag(d: ContractDelivery): string {
+  return d.inLastStage ? "" : " (ending build: add --handoff-file <your handoff>)";
+}
+
 /** The branch the worker's PR targets and takes in with a merge: its base, else the default branch. */
 function targetOf(d: ContractDelivery): string {
   return d.base ?? d.defaultBranch;
@@ -65,9 +70,9 @@ function baseLines(d: ContractDelivery): string[] {
 /** The "finished" lines: how this worker delivers, and that it is verified. */
 export function deliveryLines(d: ContractDelivery): string[] {
   if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
-  if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", "  Finished: $FLOWRYN_BIN deliver --local. It is verified."];
+  if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", `  Finished: $FLOWRYN_BIN deliver --local${handoffFlag(d)}. It is verified.`];
   if (d.mode === "direct-PR") {
-    return [`- Ship: commit, git push origin HEAD, open a PR into ${targetOf(d)} (gh-axi pr create).`, "  Finished: $FLOWRYN_BIN deliver --pr <url>. Verified: your HEAD must be the PR head."];
+    return [`- Ship: commit, git push origin HEAD, open a PR into ${targetOf(d)} (gh-axi pr create).`, `  Finished: $FLOWRYN_BIN deliver --pr <url>${handoffFlag(d)}. Verified: your HEAD must be the PR head.`];
   }
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
