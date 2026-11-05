@@ -403,6 +403,30 @@ export async function hostSnapshot(lavish: string, page: string): Promise<string
   return url;
 }
 
+/**
+ * The copy is hosted: the gate's review URL becomes the one lavish-axi printed (the worker's
+ * --review only named the session, its host and port are the worker's word), with event
+ * gate.page_hosted. Call inside a transaction.
+ */
+export function recordHostedUrl(db: Db, gateId: string, url: string, now: number): void {
+  const gate = db.query("SELECT g.run_id, g.review_url, r.task_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1 AND g.source_page IS NOT NULL").get(gateId) as {
+    run_id: string;
+    review_url: string | null;
+    task_id: string;
+  } | null;
+  if (!gate) return;
+  if (gate.review_url !== url) db.query("UPDATE gates SET review_url = ?2 WHERE id = ?1").run(gateId, url);
+  appendEvent(db, { source: "daemon", kind: "gate.page_hosted", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gateId, url, ...(gate.review_url !== url ? { was: gate.review_url } : {}) }, ts: now });
+}
+
+/** The URL lavish-axi last printed for the gate's copy, or null when the daemon never hosted it. */
+export function hostedUrl(db: Db, runId: string, gateId: string): string | null {
+  const row = db
+    .query("SELECT json_extract(payload, '$.url') AS url FROM events WHERE run_id = ?1 AND kind = 'gate.page_hosted' AND json_extract(payload, '$.gate') = ?2 ORDER BY seq DESC LIMIT 1")
+    .get(runId, gateId) as { url: string | null } | null;
+  return row?.url ?? null;
+}
+
 // --- the gate's copy ------------------------------------------------------------------------------
 
 export interface SnapshotGate {

@@ -15,7 +15,7 @@ import { passFromPage, type PagePass } from "../policy/page-pass.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
 import { parsePollOutput, withoutAnswerTokens, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
-import { hostSnapshot, REFUSAL_HINT, refreshSnapshot, refusalText, snapshotGates, sourceFingerprint } from "./snapshot.ts";
+import { hostSnapshot, recordHostedUrl, REFUSAL_HINT, refreshSnapshot, refusalText, snapshotGates, sourceFingerprint } from "./snapshot.ts";
 import { getRun } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
 
@@ -288,7 +288,8 @@ export class LavishPoller {
     this.hosting.add(gate);
     void hostSnapshot(lavish, page)
       .then(
-        () => {
+        (url) => {
+          tx(this.deps.db, () => recordHostedUrl(this.deps.db, gate, url, this.deps.now()));
           this.hosted.add(gate);
         },
         (error: unknown) => {

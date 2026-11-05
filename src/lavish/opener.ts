@@ -7,6 +7,7 @@ import { appendEvent } from "../db/events.ts";
 import { MAX_LINE_CHARS, sanitizeLine } from "../util/sanitize.ts";
 import { keyedUrl, mintPassKey, redactKey } from "../policy/pass-key.ts";
 import { lavishUrlKey } from "./session-key.ts";
+import { hostedUrl } from "./snapshot.ts";
 
 /**
  * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md). A review
@@ -27,7 +28,9 @@ import { lavishUrlKey } from "./session-key.ts";
  * One-click approve (src/policy/pass-key.ts): the claim mints the tab's pass key, keeps its hash
  * on the gate in the claim's transaction, and only the address handed to `open` carries the key.
  * Only a Lavish page that is the daemon's checked copy (src/lavish/snapshot.ts) gets one: a
- * worker's own page could carry a script that reads it.
+ * worker's own page could carry a script that reads it. The copy's tab is probed and opened only at
+ * the URL lavish-axi printed when the daemon hosted it (gate.page_hosted), never a host and port
+ * the worker named: a worker's listener there would read the key from the request.
  * Events, items and the log keep the review URL without it. Plain code.
  */
 
@@ -148,7 +151,11 @@ export class ReviewOpener {
   }
 
   private async attempt(gate: PendingGate): Promise<void> {
-    const url = gate.review_url;
+    const url = this.pageUrl(gate);
+    if (url === null) {
+      this.settle(gate, "failed", "the daemon never hosted the page's copy with lavish-axi");
+      return;
+    }
     if (!url.startsWith("file://")) {
       const seen = await this.presence(url, PRESENCE_WAIT_MS, this.abort.signal);
       // A stopping daemon leaves the gate pending: the next one offers it again.
@@ -159,7 +166,7 @@ export class ReviewOpener {
       }
     }
     const { browser } = this.deps.review();
-    const claimed = this.claim(gate, browser);
+    const claimed = this.claim(gate, browser, url);
     if (!claimed) return;
     if (claimed.key) this.deps.keyed?.(gate.id);
     const result = await this.open(browser, claimed.key ? keyedUrl(url, claimed.key) : url);
@@ -170,16 +177,23 @@ export class ReviewOpener {
    * pending → opening, committed before the spawn: at most once. A Lavish page's tab gets a pass
    * key, its hash kept on the gate in the same transaction; the key itself only goes to `open`.
    */
-  private claim(gate: PendingGate, browser: string): { key: string | null } | null {
+  private claim(gate: PendingGate, browser: string, url: string): { key: string | null } | null {
     const now = this.deps.now();
     return tx(this.deps.db, () => {
-      const changed = this.deps.db.query("UPDATE gates SET open_state = 'opening', open_at = ?2 WHERE id = ?1 AND open_state = 'pending' AND state = 'open'").run(gate.id, now).changes;
+      const changed = this.deps.db.query("UPDATE gates SET open_state = 'opening', open_at = ?2 WHERE id = ?1 AND open_state = 'pending' AND state = 'open' AND review_url = ?3").run(gate.id, now, url).changes;
       if (changed === 0) return null;
-      const minted = lavishUrlKey(gate.review_url) && gate.source_page !== null ? mintPassKey() : null;
+      const minted = lavishUrlKey(url) && gate.source_page !== null && hostedUrl(this.deps.db, gate.run_id, gate.id) === url ? mintPassKey() : null;
       if (minted) this.deps.db.query("UPDATE gates SET pass_key_hash = ?2 WHERE id = ?1").run(gate.id, minted.hash);
       appendEvent(this.deps.db, { source: "daemon", kind: "gate.browser_opening", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, url: gate.review_url, browser, one_click: minted !== null }, ts: now });
       return { key: minted?.key ?? null };
     });
+  }
+
+  /** The address to open: for the daemon's copy, only the URL lavish-axi printed when the daemon hosted it (null before). */
+  private pageUrl(gate: PendingGate): string | null {
+    if (gate.source_page === null) return gate.review_url;
+    const hosted = hostedUrl(this.deps.db, gate.run_id, gate.id);
+    return hosted === gate.review_url ? hosted : null;
   }
 
   private record(gate: PendingGate, browser: string, result: OpenResult): void {
