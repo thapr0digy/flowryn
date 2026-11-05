@@ -52,9 +52,10 @@ function headerName(inner: string): string | null {
 /**
  * Where each line stands: a header (outside any value), or part of the body.
  * Tracks multi-line strings and arrays or inline tables spread over lines, so a
- * `["a", "b"]` line inside a list is never taken for a header.
+ * `["a", "b"]` line inside a list is never taken for a header. Null when a
+ * header line's name is not one `headerName` reads.
  */
-function scan(lines: string[]): (Header | null)[] {
+function scan(lines: string[]): (Header | null)[] | null {
   const out: (Header | null)[] = [];
   let depth = 0;
   let multi: '"""' | "'''" | null = null;
@@ -68,6 +69,7 @@ function scan(lines: string[]): (Header | null)[] {
           continue;
         }
       }
+      if (/^\s*\[/.test(line)) return null;
     }
     out.push(null);
     // Walk the body line for strings, comments and brackets.
@@ -111,12 +113,13 @@ function scan(lines: string[]): (Header | null)[] {
  * The same document with each table's repeated headers folded into its first one:
  * the later header's lines move up to the end of the first table's body, so every
  * table is defined once. Array-of-tables elements (`[[x]]`) and the tables under
- * them stay where they are, one per element. Text with no repeated header comes
- * back unchanged.
+ * them stay where they are, one per element. Text with no repeated header, or
+ * with a header line whose name it cannot read, comes back unchanged.
  */
 export function mergeDuplicateTables(text: string): string {
   const lines = text.split("\n");
   const headers = scan(lines);
+  if (headers === null) return text;
   interface Section {
     header: string | null;
     body: string[];

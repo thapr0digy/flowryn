@@ -41,6 +41,13 @@ describe("a table defined twice (Bun 1.4 refuses it; Bun 1.3 merged it)", () => 
     expect(() => parseTomlText("[a]\nx=1\n[a]\nx=2\n")).toThrow("Cannot redefine key 'x'");
   });
 
+  test("a header whose name it cannot read leaves the text alone, so Bun's refusal stands", () => {
+    // Bun 1.3.8 read this as { a: { x: 1, z: 2 }, "k\\x": { y: 1 } }; folding past the escaped header filed z under it.
+    const text = '[a]\nx=1\n["k\\\\x"]\ny=1\n[a]\nz=2\n';
+    expect(mergeDuplicateTables(text)).toBe(text);
+    if (Bun.semver.satisfies(Bun.version, ">=1.4.0")) expect(() => parseTomlText(text)).toThrow("Cannot redefine table 'a'");
+  });
+
   test("text with no repeated table comes back unchanged", () => {
     const text = '# c\ntop = 1\n[a]\nx = 1\n[a.b]\ny = "[a]"\n[[r]]\nn = 1\n[[r]]\nn = 2\n';
     expect(mergeDuplicateTables(text)).toBe(text);
