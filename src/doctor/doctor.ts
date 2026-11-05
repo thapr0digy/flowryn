@@ -1,6 +1,8 @@
 import { accessSync, constants, copyFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { configProblems, loadConfig, resolveTool, TOOL_NAMES, whichTool, type FlowrynConfig, type ToolName } from "../config/config.ts";
+import { workersConfig, type WorkersConfig } from "../config/workers.ts";
+import { treehouseVersion } from "../runtime/treehouse.ts";
 import { flowrynHome, runDir, socketPath, stateFiles } from "../config/paths.ts";
 import { divergedMigrations, integrityProblems, LATEST_SCHEMA_VERSION, openDb, schemaVersion, type Db } from "../db/db.ts";
 import { listBackups } from "../db/backup.ts";
@@ -53,7 +55,7 @@ const OPTIONAL_TOOLS: Partial<Record<ToolName, string>> = {
   acli: "not found (jira-axi runs it for every call)",
   jira_axi: "not found (optional: Jira; the jira rule names it)",
   sqlite_axi: "not found (optional: SQLite reads; the sqlite rule names it)",
-  treehouse: "not found (optional: git worktrees; the worktree rule names it)",
+  treehouse: "not found (optional: run worktrees then come from git, not a reusable pool; the worktree rule names it)",
   quota_axi: "not found (the quota floor reads it before a new Claude run; without it nothing waits on the quota)",
   bun: "not found (optional: without it the daemon does not build Flowryn after a Flowryn merge)",
 };
@@ -418,6 +420,52 @@ function checkoutCheckRun(config: FlowrynConfig): Check[] {
   }
 }
 
+/** The treehouse version Flowryn's pool calls were read from and tried against (src/runtime/treehouse.ts). */
+export const VERIFIED_TREEHOUSE = "3.1.8";
+const FALLBACK_WINDOW_MS = 24 * 3_600_000;
+
+/**
+ * Where run worktrees come from (docs/notes/2026-11-04-use-treehouse-for-2b.md): the provider, treehouse's
+ * version, and the launches of the last day that fell back to git, with the last reason. Reads only.
+ */
+export async function worktreeChecks(config: FlowrynConfig, version: (bin: string) => Promise<string | null> = treehouseVersion): Promise<Check[]> {
+  let workers: WorkersConfig;
+  try {
+    workers = workersConfig(config);
+  } catch {
+    return [];
+  }
+  const root = workers.worktree_root;
+  if (workers.worktree_provider === "git") return [{ check: "worktrees", status: "ok", detail: `git: a fresh git worktree per run under ${root} ([workers] worktree_provider = "git")` }];
+  const bin = resolveTool(config, "treehouse");
+  if (!bin || !existsSync(bin)) return [{ check: "worktrees", status: "warn", detail: `treehouse is not installed, so each run gets a fresh git worktree under ${root} instead of a pool one. Install: ${INSTALL_HINTS.treehouse}` }];
+  const checks: Check[] = [];
+  const v = await version(bin);
+  if (!v) checks.push({ check: "worktrees", status: "warn", detail: `cannot read the version from ${bin} --version; a launch whose treehouse call fails uses a git worktree` });
+  else checks.push({ check: "worktrees", status: v === VERIFIED_TREEHOUSE ? "ok" : "info", detail: `treehouse ${v}: run worktrees come from a pool under ${join(root, "<project>", ".pool")}${v === VERIFIED_TREEHOUSE ? "" : ` (verified against ${VERIFIED_TREEHOUSE})`}` });
+  const { db: dbPath } = stateFiles(config.state_dir);
+  if (!existsSync(dbPath)) return checks;
+  let db: Db | null = null;
+  try {
+    db = openDb(dbPath, { readonly: true });
+    const rows = db.query("SELECT payload FROM events WHERE kind = 'run.worktree_fallback' AND ts >= ?1 ORDER BY seq").all(Date.now() - FALLBACK_WINDOW_MS) as { payload: string }[];
+    if (rows.length > 0) {
+      let reason = "";
+      try {
+        reason = String((JSON.parse(rows[rows.length - 1]!.payload) as { reason?: unknown }).reason ?? "");
+      } catch {
+        reason = "";
+      }
+      checks.push({ check: "worktree fallbacks", status: "warn", detail: `${rows.length} launch(es) in the last day used a git worktree instead of the pool; the last: ${reason || "no reason recorded"}` });
+    }
+  } catch (error) {
+    checks.push({ check: "worktree fallbacks", status: "warn", detail: `cannot read events: ${(error as Error).message}` });
+  } finally {
+    db?.close();
+  }
+  return checks;
+}
+
 /** Every doctor check, in reading order. Never mutates anything. */
 export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   const home = flowrynHome(env.env);
@@ -445,6 +493,7 @@ export async function runChecks(env: DoctorEnv): Promise<Check[]> {
   checks.push(...databaseChecks(config));
   checks.push(...notifyCommandChecks(config));
   checks.push(...checkoutCheckRun(config));
+  checks.push(...(await worktreeChecks(config)));
   checks.push(...(await daemonChecks(home, config, env)));
   checks.push(...configSectionProblems(config, env.env).map((problem): Check => ({ check: "config", status: "fail", detail: problem })));
   checks.push(await herdrCheck(config));

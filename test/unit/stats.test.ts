@@ -28,6 +28,7 @@ import { dbLine, eventGrowth, MAX_EVENT_DAYS, readLatency, stateDirSizes, tableR
 import { parseConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent, type EventSource } from "../../src/db/events.ts";
+import { MIGRATIONS } from "../../src/db/schema.ts";
 import { POLICY_EVENT } from "../../src/upkeep/policy-follow.ts";
 
 /** `flowryn stats` on seeded data with a fixed clock (docs/notes/2026-10-13-measure-waiting-time-na.md). */
@@ -454,7 +455,7 @@ describe("unneeded: three rules", () => {
 describe("store growth", () => {
   test("events' MAX(seq) is its row count: append-only, so no gaps", () => {
     // More events than schema_migrations has rows (one per migration), so events is the largest table.
-    for (let i = 0; i < 50; i += 1) ev("x", NOW - i, null);
+    for (let i = 0; i < MIGRATIONS.length + 10; i += 1) ev("x", NOW - i, null);
     const events = tableRows(db).find((t) => t.table === "events")!;
     expect(events.rows).toBe((db.query("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n);
     expect(tableRows(db)[0]!.table).toBe("events");

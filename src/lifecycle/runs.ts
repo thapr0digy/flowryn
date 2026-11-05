@@ -65,6 +65,8 @@ export interface RunRow {
   /** M4: the worktree's cleanup after landing or cancel: null, refused or done. */
   cleanup: string | null;
   cleanup_detail: string | null;
+  /** The treehouse lease the run holds its pool worktree by; null for a plain git worktree or once returned. */
+  worktree_lease: string | null;
   /** M5: the stage's state: waiting for a grant, active, review (a gate is open) or done (delivered). */
   stage_state: StageState;
   stage_started_at: number | null;

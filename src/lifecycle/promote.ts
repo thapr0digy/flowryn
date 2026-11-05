@@ -202,7 +202,8 @@ const promote: VerbSpec = {
       return { mode: "live", runId: run.id, pins };
     }
     // Over: a new run on the same task, checked as a dispatch is.
-    if (existsSync(run.worktree_path)) {
+    // A cleaned-up run's pool worktree is back in the pool, and may be another run's now: only one not cleaned up is the scout's.
+    if (run.cleanup !== "done" && existsSync(run.worktree_path)) {
       throw new FlowrynError("not_ready", `the scout's worktree ${run.worktree_path} is still there`, `flowryn cleanup ${run.task_id} (--discard needs your approval), then promote`);
     }
     const account = promotedAccount(ctx.config(), project, args, run);

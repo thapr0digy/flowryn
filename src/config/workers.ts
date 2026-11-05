@@ -66,8 +66,17 @@ export interface PiWorkerConfig {
   env: Record<string, string>;
 }
 
+/**
+ * Where a run's worktree comes from (docs/notes/2026-11-04-use-treehouse-for-2b.md): treehouse leases a
+ * slot from Flowryn's own pool and falls back to git when treehouse is missing or a call fails; git is a
+ * fresh `git worktree add` under worktree_root, always.
+ */
+export const WORKTREE_PROVIDERS = ["treehouse", "git"] as const;
+export type WorktreeProvider = (typeof WORKTREE_PROVIDERS)[number];
+
 export interface WorkersConfig {
   worktree_root: string;
+  worktree_provider: WorktreeProvider;
   /** Each run's private temp directory (its TMPDIR) is made under it (src/lifecycle/run-tmp.ts); short, for Claude's 44-byte limit. */
   tmp_root: string;
   /** Run branches are `<branch_prefix><task>`; contract and lab runs set a unique prefix so they can clean up by name. */
@@ -151,6 +160,11 @@ export function tmpRoot(config: Pick<FlowrynConfig, "extra" | "home">): string {
   return absPath(optString(raw.tmp_root, "[workers] tmp_root"), config.home) ?? defaultTmpRoot();
 }
 
+/** A git-provider run's worktree, `<worktree_root>/<project>/<task>`: the path a dispatch records until a pool slot replaces it. */
+export function plannedWorktree(workers: Pick<WorkersConfig, "worktree_root">, projectId: string, taskId: string): string {
+  return join(workers.worktree_root, projectId, taskId);
+}
+
 export function workersConfig(config: FlowrynConfig): WorkersConfig {
   const raw = table(config.extra.workers, "[workers]");
   const claude = table(raw.claude, "[workers.claude]");
@@ -158,6 +172,7 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
   const configDir = absPath(optString(claude.config_dir, "[workers.claude] config_dir"), config.home);
   return {
     worktree_root: absPath(optString(raw.worktree_root, "[workers] worktree_root"), config.home) ?? join(config.data_dir, "worktrees"),
+    worktree_provider: oneOf(raw.worktree_provider, WORKTREE_PROVIDERS, "[workers] worktree_provider", "treehouse"),
     tmp_root: tmpRoot(config),
     branch_prefix: branchPrefix(optString(raw.branch_prefix, "[workers] branch_prefix") ?? "flowryn/"),
     turn_end_guard: optBool(raw.turn_end_guard, "[workers] turn_end_guard", true),

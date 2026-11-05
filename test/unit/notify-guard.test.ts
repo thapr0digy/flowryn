@@ -139,4 +139,15 @@ describe("notifications are on in your setup, and never real under test", () => 
     const h = home();
     expect(h.env.FLOWRYN_OPENER).toBe(`record:${join(h.home, "browser-opens.log")}`);
   });
+
+  test("nor does a test run the real treehouse: it is refused in-process, and test homes get a stand-in on git worktrees", async () => {
+    expect(() => Bun.spawn(["treehouse", "status", "--json"])).toThrow("never runs the real treehouse");
+    const spawns = refusedOsascriptSpawns() as string[];
+    expect(spawns.length).toBe(1);
+    spawns.splice(0);
+    const h = home();
+    const config = readFileSync(join(h.home, "config.toml"), "utf8");
+    expect(config).toContain(`treehouse = ${JSON.stringify(join(h.home, "bin", "treehouse"))}`);
+    expect(config).toMatch(/^worktree_provider = "git"$/m);
+  });
 });

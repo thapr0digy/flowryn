@@ -163,6 +163,8 @@ export function scratchConfig(options: ContractOptions, pin: HarnessPin, home: s
   workers.branch_prefix = branchPrefix;
   // The contract worker ends its turns without an outcome on purpose; a reminder would keep it busy past the idle step.
   workers.turn_end_guard = false;
+  // Its cleanup removes its own worktrees by exact name under the scratch root (src/contracts/cleanup.ts): a git worktree, never a pool slot.
+  workers.worktree_provider = "git";
   if (options.harness === "pi") {
     const own = workers.pi as Record<string, unknown> | undefined;
     if (options.piProfile === "real") {

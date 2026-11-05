@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { hashToken, mintToken } from "../api/auth.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
@@ -8,7 +7,7 @@ import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { findOpenItem, openItem } from "../attention/items.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
 import { resolveAccount, type Account } from "../config/accounts.ts";
-import { herdrConfig, workersConfig } from "../config/workers.ts";
+import { herdrConfig, plannedWorktree, workersConfig } from "../config/workers.ts";
 import { accountSignIn } from "../harness/sign-in.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
 import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
@@ -246,8 +245,12 @@ export interface NewRun {
 export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   const runId = `r${ulid(r.now)}`;
   const workers = workersConfig(config);
-  const worktree = join(workers.worktree_root, r.project.id, r.taskId);
+  const worktree = plannedWorktree(workers, r.project.id, r.taskId);
   if (existsSync(worktree)) throw new FlowrynError("already_exists", `${worktree} already exists`);
+  // An earlier run of the task still holding its pool worktree (not cleaned up) keeps it, as the planned path above does for git.
+  const held = db.query("SELECT worktree_path FROM runs WHERE task_id = ?1 AND worktree_lease IS NOT NULL").all(r.taskId) as { worktree_path: string }[];
+  const kept = held.find((h) => existsSync(h.worktree_path));
+  if (kept) throw new FlowrynError("already_exists", `${kept.worktree_path} already exists`);
   if (openRunForTask(db, r.taskId)) throw new FlowrynError("already_exists", `${r.taskId} already has a run`);
   if (isDropped(db, r.taskId)) throw new FlowrynError("not_found", `${r.taskId} was dropped`, `flowryn show ${r.taskId}`);
   const { harness } = r.account;

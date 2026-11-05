@@ -471,6 +471,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         const run = getRun(database, runId);
         if (run?.workspace_id && runtime) await runtime.closeWorkspace(run.workspace_id);
       },
+      treehouse: () => {
+        const bin = resolveTool(config, "treehouse");
+        return bin ? { bin, worktreeRoot: workersConfig(config).worktree_root } : null;
+      },
       removeRunTmp: (runId) => removeRunTmp({ root: workersConfig(config).tmp_root, runId, stateDir: config.state_dir }),
       kickJournal: () => journal.kick(),
       log,

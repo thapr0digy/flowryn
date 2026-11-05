@@ -2,6 +2,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
 import { spoolDir } from "../config/paths.ts";
+import { workersConfig } from "../config/workers.ts";
 import { scopeDenyFile } from "../policy/scope-paths.ts";
 import type { Db } from "../db/db.ts";
 import { projectScopeById, scopeIds, taskScope } from "./scope.ts";
@@ -40,6 +41,8 @@ export function scopeDenyLists(db: Db, config: FlowrynConfig): ScopeDenyList[] {
     const scope = projectScopeById(db, config, p.id);
     add(scope, p.path);
     add(scope, join(config.data_dir, "worktrees", p.id));
+    // The configured root, which also holds the project's treehouse pool (src/runtime/treehouse.ts).
+    add(scope, join(workersConfig(config).worktree_root, p.id));
   }
   const tasks = db.query("SELECT task_id FROM task_policy").all() as { task_id: string }[];
   for (const { task_id } of tasks) {
@@ -47,11 +50,12 @@ export function scopeDenyLists(db: Db, config: FlowrynConfig): ScopeDenyList[] {
     if (scope === "global") continue;
     add(scope, join(config.data_dir, task_id));
   }
-  const runs = db.query("SELECT id, task_id, worktree_path FROM runs").all() as { id: string; task_id: string; worktree_path: string | null }[];
+  const runs = db.query("SELECT id, task_id, worktree_path, cleanup FROM runs").all() as { id: string; task_id: string; worktree_path: string | null; cleanup: string | null }[];
   for (const r of runs) {
     const scope = taskScope(db, config, r.task_id);
     if (scope === "global") continue;
-    add(scope, r.worktree_path);
+    // A cleaned-up run's worktree is gone, or (a pool worktree) back in the pool and maybe another run's: that run decides.
+    if (r.cleanup !== "done") add(scope, r.worktree_path);
     add(scope, join(config.state_dir, "runs", r.id));
     add(scope, join(spoolDir(config.data_dir), r.id));
   }
@@ -80,7 +84,8 @@ export function writeScopeDenyLists(db: Db, config: FlowrynConfig): string[] {
 let lastSignature: { config: FlowrynConfig; key: string } | null = null;
 
 /**
- * Rewrite the lists when what they are made of changed: config, projects, policies or runs. Cheap
+ * Rewrite the lists when what they are made of changed: config, projects, policies, runs, a run's
+ * pool worktree leased or returned. Cheap
  * to call every attention tick, so a new run's folders are denied to the other scopes within a second.
  */
 export function refreshScopeGuard(db: Db, config: FlowrynConfig): string[] {
@@ -90,6 +95,8 @@ export function refreshScopeGuard(db: Db, config: FlowrynConfig): string[] {
               (SELECT COUNT(*) || ':' || COALESCE(MAX(rowid), 0) FROM task_policy) || '/' ||
               (SELECT COUNT(*) || ':' || COALESCE(MAX(rowid), 0) FROM runs) || '/' ||
               (SELECT COUNT(*) FROM runs WHERE worktree_path IS NOT NULL) || '/' ||
+              (SELECT COUNT(*) FROM runs WHERE cleanup = 'done') || '/' ||
+              (SELECT COALESCE(group_concat(worktree_lease), '') FROM runs WHERE worktree_lease IS NOT NULL) || '/' ||
               (SELECT COUNT(*) || ':' || COALESCE(MAX(rowid), 0) FROM task_scopes) AS key`,
     )
     .get() as { key: string };

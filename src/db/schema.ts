@@ -987,6 +987,15 @@ ALTER TABLE gates ADD COLUMN draft_blob TEXT;
 ALTER TABLE gates ADD COLUMN draft_page TEXT;
 `;
 
+/**
+ * A run's worktree borrowed from Flowryn's treehouse pool (docs/notes/2026-11-04-use-treehouse-for-2b.md):
+ * the lease id treehouse gave it, while the run holds the slot at worktree_path. Null for a plain git
+ * worktree, and once the cleanup returned the slot.
+ */
+const WORKTREE_LEASE_SQL = /* sql */ `
+ALTER TABLE runs ADD COLUMN worktree_lease TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1038,6 +1047,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 48, name: "landing-queue", sql: LANDING_QUEUE_SQL },
   { version: 49, name: "reserved-class", sql: RESERVED_CLASS_SQL },
   { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
+  { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
