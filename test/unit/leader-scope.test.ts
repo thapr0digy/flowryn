@@ -470,19 +470,19 @@ describe("the folder guard", () => {
 
   test("a project's pool under a custom worktree root is denied to the other scopes; a cleaned-up run's worktree path no longer is", () => {
     seedBoth();
-    const root = join(HOME, "elsewhere-wt");
-    const config = parseConfig(SCOPES.replace("[scopes]", `[workers]\nworktree_root = ${JSON.stringify(root)}\n\n[scopes]`), HOME);
+    const customRoot = join(HOME, "elsewhere-wt");
+    const config = parseConfig(SCOPES.replace("[scopes]", `[workers]\nworktree_root = ${JSON.stringify(customRoot)}\n\n[scopes]`), HOME);
     // The work run's worktree is a pool slot (docs/notes/2026-11-04-use-treehouse-for-2b.md); once it is cleaned up the slot is back in the pool.
-    const slot = join(root, "api", ".pool", ".treehouse", "api-1", "1", "api-1");
+    const slot = join(customRoot, "api", ".pool", ".treehouse", "api-1", "1", "api-1");
     db.query("UPDATE runs SET worktree_path = ?2, worktree_lease = 'lease1' WHERE id = ?1").run("r01WORK", slot);
     let lists = Object.fromEntries(scopeDenyLists(db, config).map((l) => [l.scope, l.paths]));
-    expect(lists.personal).toContain(join(root, "api"));
+    expect(lists.personal).toContain(join(customRoot, "api"));
     expect(lists.personal).toContain(slot);
     db.query("UPDATE runs SET cleanup = 'done', worktree_lease = NULL WHERE id = ?1").run("r01WORK");
     lists = Object.fromEntries(scopeDenyLists(db, config).map((l) => [l.scope, l.paths]));
     expect(lists.personal).not.toContain(slot);
-    expect(lists.personal).toContain(join(root, "api"));
-    expect(lists.work).toContain(join(root, "site"));
+    expect(lists.personal).toContain(join(customRoot, "api"));
+    expect(lists.work).toContain(join(customRoot, "site"));
   });
 
   test("the leader settings deny reading Flowryn's shared stores only with more than one scope, and writing every Claude account's transcripts", () => {
