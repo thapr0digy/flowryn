@@ -8,7 +8,7 @@ v1 is built; [`docs/v1-status.md`](docs/v1-status.md) lists every item and its P
 
 Requirements:
 
-- macOS, `git`, Node, and [Bun](https://bun.sh) 1.3.8.
+- macOS, `git`, Node, and [Bun](https://bun.sh) 1.4.4.
 - `tasks-axi` 0.2.5 on PATH: `npm install -g tasks-axi@0.2.5`.
 - Herdr 0.7.5 or newer, and Claude Code and/or Pi.
 - Optional: `no-mistakes` (that delivery mode), Docker (visual QA), `lavish-axi` (review pages), `gh` signed in (GitHub PRs).
