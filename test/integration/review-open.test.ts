@@ -62,7 +62,8 @@ describe("review pages open in your browser", () => {
     // The daemon's own poll of the page is what the opener waited on.
     const calls = join(f.h.home, "lavish-calls.log");
     await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("poll "), 10_000, "the lavish-axi poll");
-    expect(readFileSync(opens, "utf8")).toBe(`Google Chrome\t${gate.review_url}\n`);
+    // The address handed to the browser carries the tab's pass key (one click, src/policy/pass-key.ts).
+    expect(readFileSync(opens, "utf8")).toMatch(new RegExp(`^Google Chrome\\t${gate.review_url.replaceAll(".", "\\.")}\\?flowryn_pass=[A-Za-z0-9_-]{43}\\n$`));
     // The worker's own lavish-axi never opens anything.
     const pane = [...f.herdr.panes.values()].find((p) => p.env.FLOWRYN_RUN === run)!;
     expect(pane.env.LAVISH_AXI_NO_OPEN).toBe("1");

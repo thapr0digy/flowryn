@@ -12,7 +12,8 @@ import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { loadConfig } from "../../src/config/config.ts";
-import { configStaticLayers } from "../../src/policy/static.ts";
+import { browserProfileReads, configStaticLayers } from "../../src/policy/static.ts";
+import { homedir } from "node:os";
 import { tx } from "../../src/db/db.ts";
 import { claimOperation, escalateOperation, requestOperation } from "../../src/lifecycle/operations.ts";
 
@@ -325,7 +326,8 @@ describe("safeguards at start", () => {
         permissions: { deny: string[] };
         sandbox: { filesystem: { denyWrite: string[] } };
       };
-      expect(settings.permissions.deny).toEqual(configStaticLayers(config).permissionsDeny);
+      // The toolkit's layer, then the browser profiles (a review tab's address carries its pass key).
+      expect(settings.permissions.deny).toEqual([...configStaticLayers(config).permissionsDeny, ...browserProfileReads(homedir())]);
       expect(settings.permissions.deny).toContain("mcp__claude-in-chrome");
       expect(settings.sandbox.filesystem.denyWrite).toEqual(expect.arrayContaining([config.tasks.backlog, config.tasks.todos, `${config.tasks.backlog}.lock`]));
     },

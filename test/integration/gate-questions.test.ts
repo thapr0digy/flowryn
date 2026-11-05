@@ -472,7 +472,9 @@ describe("the daemon listens on every review page", () => {
       // No question to answer, yet the daemon listens, so Lavish never says the agent is not listening.
       const calls = join(f.h.home, "lavish-calls.log");
       await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
-      expect(existsSync(join(gate.page_path, "..", "flowryn-questions.js"))).toBe(false);
+      // Its widget holds only the Approve button: no questions.
+      await waitUntil(() => existsSync(join(gate.page_path, "..", "flowryn-questions.js")), 10_000, "the widget");
+      expect(readFileSync(join(gate.page_path, "..", "flowryn-questions.js"), "utf8")).toContain('"questions":[]');
 
       queuePoll(f, 1, gate.id, [], ["approved, ship it"]);
       // The worker gets the words and answers in the page; the leader is not woken for it.
