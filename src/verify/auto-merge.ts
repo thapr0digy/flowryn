@@ -533,7 +533,7 @@ export class AutoMerger {
       kind: "auto_merge.verify_requeued",
       runId: row.run_id,
       taskId: row.task_id,
-      payload: { auto_merge: row.id, lost: from?.id ?? row.request_id ?? row.verification_id, why: lost, head, state: verified.state, request: verified.requestId, verification: verified.verificationId, made: verified.made, attempt: requeues + 1 },
+      payload: { auto_merge: row.id, lost: from?.id ?? (reason === "verify_error" ? row.verification_id : row.request_id), why: lost, head, state: verified.state, request: verified.requestId, verification: verified.verificationId, made: verified.made, attempt: requeues + 1 },
       ts: now,
     });
     if (verified.made) this.deps.kickScheduler();

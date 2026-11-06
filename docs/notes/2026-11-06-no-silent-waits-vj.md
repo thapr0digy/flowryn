@@ -1,0 +1,91 @@
+# No silent waits: every wait has a deadline, and an expired wait acts by itself
+
+- Status: done
+- Open: not yet run against a live home; the wake rides `LEADER_WAKE_KINDS` until no-idle-workers-23 lands its own loop guard
+- Config: `[waits] verify_queue_min`, `[waits] capacity_min`, `[waits] host_min`, `[waits] harness_check_min`, `[waits] phase_start_min`, `[waits] auto_merge_min`, `[waits] landing_min`
+
+Two stalls on 2026-11-06 went unnoticed for hours. In the first, auto-merge am4 waited 2.5 h on verify request vq128. The verify queue had cancelled that request: GitHub still showed the head the delivery was carried from, so the drain read it as "the PR head moved". In the second, phase 2 of a plan waited about 2 h on the host check (7.8 GB free against an 8 GB floor), and the only signal was the 30-minute capacity P1. Both had the same cause. A wait ended only when some event arrived, and nothing timed it out when that event never came. This change fixes it with plain code (a table, timers and the reconciler) and no model.
+
+## A lost verify is queued again at once (`src/verify/auto-merge.ts`)
+
+The auto-merge used to wait up to 6 h on a request cancelled because its head moved. It held at once on a request that was gone, or on a verification cut off by a second daemon stop. Now each of those cases calls `requeueLost`:
+
+- **A cancelled request.** Any cancel reason except a final one: a closed or merged PR, GitHub having no such PR, the project or its verify steps gone (`cancelIsFinal`, `src/verify/start.ts`).
+- **A request that is gone.** For example, one dropped while the daemon was down.
+- **A verification that is gone, or cut off by a stop.** This includes a stop that interrupted a rerun, which the startup recovery requeues only once (`interruptedByStop`).
+
+`requeueLost` queues a verify of the current head and writes one `auto_merge.verify_requeued` event. The event records why (`why`), which request or verification was lost, the head, what the row now follows and the attempt number. It also kicks the scheduler, so the new request drains straight away.
+
+- **The head GitHub read.**
+  - If it is an earlier delivered head of the task (`staleRead`, typically the head a carry started from), GitHub has not caught up. The delivered head is verified again. A carried head follows the existing carried rule: its re-verify is never skipped.
+  - If it really moved (the watcher's evidence shows a new head that was never delivered), that head's verify is queued. The row is superseded (`head_moved`), and the delivery of that head starts the next auto-merge on the verify already queued. If no delivery comes, the watcher's head-moved item tells the leader.
+- **The cap.** After `MAX_VERIFY_REQUEUES` (3) requeues of one row, the row holds (`auto_merge_held`) with `flowryn verify <task>, then flowryn merge <task>`.
+- **The landing queue.** It drives its head of line through the same rows, so lq4 and lq5 get the same recovery.
+
+The drain no longer cancels on a stale read. When GitHub shows an earlier delivered head of a task whose latest delivery is the request's head, the request waits instead. It waits up to `STALE_READ_WAIT_MS` (5 min) from when it was requested, and is cancelled after that.
+
+## The wait registry (`src/reconcile/waits.ts`, `src/reconcile/wait-deadlines.ts`)
+
+`collectWaits` lists every waiting state there is now. One table (`WAIT_DEADLINES_MS`) gives each kind its deadline:
+
+| kind | what waits | counted from | deadline |
+|---|---|---|---|
+| `verify_queue` | the first request in the verify queue | its expected start: the later of its request time, the queue's last move, and each running verify's usual end (its project's slowest of the last 5 passes, else its timeout) | 20 min |
+| `capacity` | a run waiting for a grant (pools, project limit, usage limit, quota, sign-in) | `runs.waiting_since` | 10 min |
+| `host` | a run whose latest refusal is `capacity.host_check` | `runs.waiting_since` | 10 min |
+| `harness_check` | a run whose latest refusal is `capacity.harness_unverified` (the automatic contract check) | `runs.waiting_since` | 20 min |
+| `phase_start` | an approved plan's automatic phase, on a `plan`-autonomy project, whose blockers have landed and that has no run | its last blocker's `run.landed` or `run.cleaned`, else the plan's approval | 10 min |
+| `auto_merge` | a live auto-merge not following a queued request or a running verify (those are the queue's and the verify's own deadlines) | `state_since` | 30 min |
+| `landing` | each project's first waiting entry while none of its entries is landing | `state_since` | 30 min |
+
+`[waits] <kind>_min` overrides a deadline in whole minutes, from 1 to 1440. Any other key or value refuses the config at load: the effective config's `waits` section, which `flowryn config` shows.
+
+### The pass
+
+The reconciler runs `checkWaits` on each full pass (the `checkWaits` dep wired in `src/daemon/daemon.ts`). Each wait goes through these steps:
+
+1. **Past its deadline: recovery first.**
+   - A row in `waits` (migration 55) records it, with a `wait.recovered` event.
+   - The pass then kicks the scheduler (`verify_queue`, `capacity`, `host`, `harness_check`, `phase_start`) or the auto-merger (`auto_merge`, `landing`). A scheduler pass drains the verify queue, re-reads the host check, grants, and re-evaluates every phase's blockers (`autoDispatch`). An auto-merger pass re-queues a lost verify as above and moves the landing queue.
+   - Recovery never passes a gate, answers a decision or merges.
+2. **Still there on a later pass (at least `RECOVERY_GRACE_MS`, 30 s, after the recovery): one item.**
+   - A `wait.expired` event, and one `wait_expired` item (P1, actionable, in `LEADER_WAKE_KINDS`, so it wakes an idle leader once).
+   - Its line puts the command before the cause, so a digest that cuts the line keeps the fix: `Waiting 11m, past its 10m deadline: <what> (<title>); <fix>; why: <cause>`.
+   - A host wait gives the measured value, the floor and the key: `7.8 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb)`. Its fix is `free the host, or change [capacity.host] min_free_mem_gb in config.toml (the daemon reloads it); flowryn capacity`.
+   - A run that is a plan phase is named `phase N of "<plan>" (<task>), stage <stage>`, so when a phase waits for a grant the item says why.
+   - A phase with no run says why it has not started: not in the backlog snapshot, not queued, held, its `phase_blocked` reason, or that the scheduler has not started it. Its fix is `flowryn dispatch <project> --task <id>`.
+   - Item text holds only task ids, durations, measured values and commands.
+3. **A wait some other open item already carries** (`usage_limit`, `quota_low`, `account_signed_out`, `harness_unverified`) is recovered, but never itemized twice. Its row records `covered:<item>`, and the registry never resolves an item it did not open.
+4. **A wait that ends,** or one that starts a new episode (a different `since`): its row is deleted and its item resolved (`wait ended`), with a `wait.cleared` event.
+
+The scheduler's 30-minute `capacity_wait` P1 no longer opens when every run waiting that long already has its own registry item.
+
+## `flowryn fleet`
+
+Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`in 8m`, or `passed 2m ago`). A run's entry keeps the words of its recorded explanation. A wait with no run explanation (the verify queue, an auto-merge, a landing entry, a phase with no run) is listed with the registry's own words and fix. An invalid `[waits]` table, which the daemon refused, shows the entries without the clock rather than failing the read.
+
+## Choices
+
+- Waits are computed from the live tables on every pass, not stored as their own state machine. Only expired waits get a row, so the registry cannot drift from what it describes.
+- The auto-merge's own recovery runs on its next pass with no deadline. A lost request is never something to wait out. The registry's `auto_merge` deadline covers what is left: checks pending, a merge unproven, or a head moved with nothing delivered.
+- The phase deadline counts from the blocker's cleanup as well as its landing, because a phase becomes ready only once its blocker's run is cleaned (`hasLanded`).
+
+## Tests
+
+- `test/unit/auto-merge.test.ts`:
+  - A cancelled verify is queued again at once, up to `MAX_VERIFY_REQUEUES`, then held.
+  - A stale GitHub read re-verifies the delivered head.
+  - A head that really moved gets its verify queued, and its delivery follows it.
+  - A request that is gone is requeued; a final cancel holds.
+  - A second interruption by a stop is requeued.
+- `test/unit/waits.test.ts`:
+  - The `[waits]` table and its validation.
+  - A host-held launch is recovered at 10 min, then itemized with the numbers, wakes the leader, and the item resolves when the wait ends.
+  - A covered usage-limit wait.
+  - A phase that did not start after its blocker landed is re-kicked, then itemized; its run starting ends the wait.
+  - The verify queue's expected start.
+  - An auto-merge waiting on checks.
+- `test/integration/no-silent-waits.test.ts`, with a real daemon and the fake GitHub:
+  - A verify cancelled mid-auto-merge is queued again at once and both PRs land.
+  - A restart that drops a queued verify is followed by a requeue and both land.
+  - `flowryn fleet` shows the queued verify's age and deadline.
