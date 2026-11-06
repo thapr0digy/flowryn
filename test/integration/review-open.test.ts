@@ -23,7 +23,9 @@ afterEach(async () => {
 
 const PAGE = filledDesignPage();
 
-const STEPS = ["Feature open", `FAKE: write design/design.html ${PAGE}`, "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html", "FAKE: sleep 120000"].join("\n");
+function steps(review = "lavish:design/design.html"): string {
+  return ["Feature open", `FAKE: write design/design.html ${PAGE}`, `FAKE: stage-done --review ${review} --page $FLOWRYN_REPORT_DIR/design/design.html`, "FAKE: sleep 120000"].join("\n");
+}
 
 function one<T>(e: FleetEnv, sql: string, ...params: string[]): T | null {
   const db = e.h.db();
@@ -34,10 +36,10 @@ function one<T>(e: FleetEnv, sql: string, ...params: string[]): T | null {
   }
 }
 
-async function handIn(e: ShipEnv): Promise<{ task: string; run: string; gate: { id: string; review_url: string } }> {
+async function handIn(e: ShipEnv, review?: string): Promise<{ task: string; run: string; gate: { id: string; review_url: string } }> {
   const f = e.fleet;
   expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
-  const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: STEPS });
+  const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: steps(review) });
   expect(dispatched.code).toBe(0);
   const { task, run } = dispatched.reply.data as { task: string; run: string };
   await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
@@ -62,7 +64,8 @@ describe("review pages open in your browser", () => {
     // The daemon's own poll of the page is what the opener waited on.
     const calls = join(f.h.home, "lavish-calls.log");
     await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("poll "), 10_000, "the lavish-axi poll");
-    expect(readFileSync(opens, "utf8")).toBe(`Google Chrome\t${gate.review_url}\n`);
+    // The address handed to the browser carries the tab's pass key (one click, src/policy/pass-key.ts).
+    expect(readFileSync(opens, "utf8")).toMatch(new RegExp(`^Google Chrome\\t${gate.review_url.replaceAll(".", "\\.")}\\?flowryn_pass=[A-Za-z0-9_-]{43}\\n$`));
     // The worker's own lavish-axi never opens anything.
     const pane = [...f.herdr.panes.values()].find((p) => p.env.FLOWRYN_RUN === run)!;
     expect(pane.env.LAVISH_AXI_NO_OPEN).toBe("1");
@@ -75,6 +78,26 @@ describe("review pages open in your browser", () => {
     await f.restartDaemon();
     await Bun.sleep(500);
     expect(readFileSync(opens, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("a worker's --review naming another host and port: the daemon opens and keys only the URL lavish-axi printed for the copy", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const e = ship;
+    const f = e.fleet;
+    const opens = join(f.h.home, "browser-opens.log");
+    const { run, gate } = await handIn(e, "lavish@127.0.0.1:9999:design/design.html");
+    expect(gate.review_url).toStartWith("http://127.0.0.1:9999/session/");
+
+    await waitUntil(() => one<{ open_state: string }>(f, "SELECT open_state FROM gates WHERE id = ?1", gate.id)?.open_state === "opened", 10_000, "the page opened");
+    // The test home's lavish-axi prints http://127.0.0.1:4387/session/<the copy's key> when the daemon hosts the copy.
+    const hosted = `http://127.0.0.1:4387/session/${gate.review_url.slice(-16)}`;
+    expect(one<{ review_url: string }>(f, "SELECT review_url FROM gates WHERE id = ?1", gate.id)!.review_url).toBe(hosted);
+    const opened = readFileSync(opens, "utf8");
+    expect(opened).toMatch(new RegExp(`^Google Chrome\\t${hosted.replaceAll(".", "\\.")}\\?flowryn_pass=[A-Za-z0-9_-]{43}\\n$`));
+    expect(opened).not.toContain(":9999");
+    const item = one<{ line: string; full_line: string | null }>(f, "SELECT line, full_line FROM items WHERE kind = 'gate_ready' AND run_id = ?1", run)!;
+    expect(item.full_line ?? item.line).toEndWith(`${hosted} · opened in Google Chrome`);
+    expect(item.full_line ?? item.line).not.toContain(":9999");
   });
 
   test("a failed open shows on the gate item and in show with the URL to open by hand", async () => {

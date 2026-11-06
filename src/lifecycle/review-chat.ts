@@ -305,6 +305,8 @@ interface SummaryGate {
   stage: string;
   state: string;
   page_path: string | null;
+  /** The worker's page, when page_path is the daemon's copy of it (src/lavish/snapshot.ts). */
+  source_page: string | null;
   opened_at: number;
   summarized_at: number | null;
   page_resumes: number;
@@ -355,7 +357,7 @@ function pageRevised(page: string | null, openedAt: number): boolean {
 export function summarizeReview(db: Db, gateId: string, outcome: ReviewOutcome, now: number, log?: (message: string) => void, newRun?: string): string | null {
   const gate = db
     .query(
-      `SELECT g.id, g.run_id, g.stage, g.state, g.page_path, g.opened_at, g.summarized_at, g.page_resumes, r.task_id, r.state AS run_state
+      `SELECT g.id, g.run_id, g.stage, g.state, g.page_path, g.source_page, g.opened_at, g.summarized_at, g.page_resumes, r.task_id, r.state AS run_state
        FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1 AND g.kind = 'review'`,
     )
     .get(gateId) as SummaryGate | null;
@@ -364,7 +366,7 @@ export function summarizeReview(db: Db, gateId: string, outcome: ReviewOutcome, 
   const answered = gateQuestions(db, gateId).filter((d) => d.state === "answered" && d.answered_via === "lavish");
   const fromUser = messages.filter((m) => m.author === "user");
   const replies = messages.filter((m) => m.author === "worker");
-  const revised = pageRevised(gate.page_path, gate.opened_at);
+  const revised = pageRevised(gate.source_page ?? gate.page_path, gate.opened_at);
   const passWords = fromUser.some((m) => readsAsPass(m.body));
   db.query("UPDATE gates SET summarized_at = ?2 WHERE id = ?1").run(gateId, now);
   const stillOpen = gate.state === "open" && outcome === "ended";

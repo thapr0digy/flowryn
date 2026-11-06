@@ -57,7 +57,7 @@ const revive = (words: string | null = null, at = NOW + 20) =>
 describe("a page message on a run gone for good", () => {
   test("a failed run whose worktree was cleaned up asks for a new run once; the words are kept and no steer goes to the old run", () => {
     failAndClean();
-    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page, source_page: null }]);
     const routed = route();
     expect(routed).toEqual({ to: "new_run" });
     expect(routedReply(routed!)).toContain("starting a new run of the task at this stage");
