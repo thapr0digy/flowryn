@@ -1,7 +1,7 @@
 # Fast tests: parallel suite, fail fast, scoped runs, contract checks only when needed
 
 - Status: done
-- Open: the 5 min target was not reached on the shared Mac (load average 28–48 from other sessions during every run; see "Timings"); no-mistakes' own test command lives outside this repo (see "no-mistakes")
+- Open: the 5 min target was not reached on the shared Mac (10–12 min, load average 15–48 from other sessions; see "Timings"); no-mistakes' own test command lives outside this repo (see "no-mistakes")
 - Config: `[projects.<id>] verify` step tables `{ run, when_changed }`, `FLOWRYN_TEST_JOBS`, `FLOWRYN_CONTRACT_POLL_MS`
 
 Leader audit of 2026-11-06: `bun test` took 25–27 min, one file at a time, and one PR ran it 3 to 7 times (the build skill, no-mistakes, verify, the landing queue's re-verify). This change makes the full run parallel, orders verify so cheap steps fail first, has the build stage run only the affected tests, and lets verify skip the contract checks when no file on a worker's path changed. Everything is plain code: a glob compiler, a git diff, a step table, a runner script. No model.
@@ -64,9 +64,11 @@ Runs on the shared 12-core Mac, with other sessions' go test matrices, a qemu VM
 | before | `bun test` (v146, v148) | 25–27 min | serial |
 | 1 | `bun test --parallel=8` | 9 min 51 s | 29 timeouts at bun's 5 s default |
 | 2 | `bun test --parallel=12 --timeout=30000` | 11 min 35 s | 7 failures, all in the files now serial |
-| final ×3 | `bun run test` | see the PR | see the PR |
+| final 1 | `bun run test` | 10 min 27 s | 3186 pass, 0 fail (unit 88 s, integration 431 s, serial 108 s) |
+| final 2 | `bun run test` | 11 min 35 s | 3186 pass, 0 fail (unit 94 s, integration 491 s, serial 110 s) |
+| final 3 | `bun run test` | 11 min 10 s | 3186 pass, 0 fail (unit 90 s, integration 471 s, serial 110 s) |
 
-The final three runs and their times are reported in the PR.
+That is about 2.3 times faster than the serial suite, not the 5 min target. These runs shared the CPU with other sessions, and bun used about 2.8 cores on average. The unit part (about 1.5 min) is the fail-fast window. One more flake turned up under load and was fixed: `upkeep-build`'s build-guard test slept 300 ms before checking that a build was under way. It now waits for the build's first step.
 
 ## Tests
 
