@@ -38,8 +38,8 @@ export interface AskCall {
   tools?: readonly string[];
   /** Directories Claude's file tools may read besides its working directory (the verify review's checkout). */
   addDirs?: readonly string[];
-  /** Pi loads no AGENTS.md or CLAUDE.md whatever `[workers.pi] no_context_files` says (the verify review's checkout is the worker's). */
-  noContextFiles?: boolean;
+  /** Pi loads no AGENTS.md or CLAUDE.md, whatever `[workers.pi] no_context_files` says, and ignores project-local `.pi` files (the verify review's checkout is the worker's). */
+  untrustedCwd?: boolean;
 }
 
 /** Claude in print mode: JSON result, no saved session, no settings files, hooks or MCP servers, reading tools only, the native spend cap. */
@@ -65,7 +65,8 @@ export function piAskArgs(call: AskCall): string[] {
   if (pi.effort) args.push("--thinking", pi.effort);
   if (pi.no_extensions) args.push("--no-extensions");
   if (pi.no_skills) args.push("--no-skills");
-  if (pi.no_context_files || call.noContextFiles) args.push("--no-context-files");
+  if (pi.no_context_files || call.untrustedCwd) args.push("--no-context-files");
+  if (call.untrustedCwd) args.push("--no-approve");
   args.push("--append-system-prompt", call.contractFile);
   return args;
 }

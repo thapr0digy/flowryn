@@ -492,17 +492,18 @@ describe("unattended mode and a delivery's auto-verify", () => {
   const VERIFY_ONLY = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\n`;
 
   /** A not-yolo delivery's auto-verify at HEAD, a live grant over web, and one unattended pass at 20 000. */
-  async function unattended(end: "held" | "live"): Promise<{ f: Fixture; row: string; merges: string[] }> {
+  async function unattended(end: "held" | "held-then-passed" | "live"): Promise<{ f: Fixture; row: string; merges: string[] }> {
     const f = fixture({ yolo: 0 });
     const cfg = config(VERIFY_ONLY);
     const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
     expect(row.merge).toBe(0);
-    if (end === "held") {
+    if (end !== "live") {
       const v = verification(f, f.root);
       tx(f.db, () => f.db.query("UPDATE auto_merges SET state = 'verifying', verification_id = ?2 WHERE id = ?1").run(row.id, v.id));
       finish(f, v, "error", v.steps, "the step could not start");
       await merger(f, cfg).auto.pass();
       expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_error" });
+      if (end === "held-then-passed") finish(f, verification(f, f.root), "passed");
     }
     tx(f.db, () => {
       f.db.query("UPDATE schema_migrations SET applied_at = 0 WHERE name = 'autonomy'").run();
@@ -523,6 +524,15 @@ describe("unattended mode and a delivery's auto-verify", () => {
     const { f, merges } = await unattended("held");
     expect(merges).toEqual([]);
     expect((f.db.query("SELECT COUNT(*) AS n FROM auto_merges").get() as { n: number }).n).toBe(1);
+  });
+
+  test("a held head that the leader's verify then passed merges on that verify, without another", async () => {
+    const { f, row, merges } = await unattended("held-then-passed");
+    expect(merges).toHaveLength(1);
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "held" });
+    expect(getAutoMerge(f.db, merges[0]!)).toMatchObject({ merge: 1, head_sha: HEAD, state: "waiting_checks", request_id: null });
+    const queued = f.db.query("SELECT id FROM verify_queue").all() as { id: string }[];
+    expect(queued.map((q) => q.id)).toEqual([getAutoMerge(f.db, row)!.request_id!]);
   });
 
   test("a live auto-verify gives way to unattended mode's merge at the same head", async () => {

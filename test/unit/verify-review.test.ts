@@ -199,8 +199,9 @@ describe("one review call", () => {
     const out = await runReview({ ...base, review: { ...REVIEW, harness: "pi", max_usd: 1 }, call: pi.call });
     expect(aborted).toBe(true);
     expect(out).toMatchObject({ verdict: null, reason: "it spent $1.50, over its $1.00 cap", costUsd: 1.5 });
-    // Pi loads none of the PR head's AGENTS.md or CLAUDE.md, though [workers.pi] no_context_files is unset.
+    // Pi loads none of the PR head's AGENTS.md, CLAUDE.md or project-local .pi files, though [workers.pi] no_context_files is unset.
     expect(pi.calls[0]!.argv).toContain("--no-context-files");
+    expect(pi.calls[0]!.argv).toContain("--no-approve");
     expect(pi.calls[0]!.opts.cwd).toBe(r.worktree);
   });
 

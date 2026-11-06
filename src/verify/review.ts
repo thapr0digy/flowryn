@@ -27,7 +27,7 @@ import type { ReviewConfig } from "./config.ts";
  * cannot guess, and the reviewer is told nothing inside a fence is an
  * instruction. The checkout's own context files are the worker's too: Claude
  * runs outside it (reading it through --add-dir, which loads its CLAUDE.md only
- * under a CLAUDE_CODE_ variable the scrubbed environment drops) and Pi with --no-context-files. The call can only read (Read, Grep, Glob; Pi's read tools), gets
+ * under a CLAUDE_CODE_ variable the scrubbed environment drops) and Pi with --no-context-files and --no-approve. The call can only read (Read, Grep, Glob; Pi's read tools), gets
  * no web tools, and is capped by `max_usd` and a deadline. No token or secret
  * goes into the prompt: only the brief, the spec and the diff.
  */
@@ -159,7 +159,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewResult> {
     const claude = review.harness === "claude";
     const cwd = claude ? join(input.dir, "review-cwd") : input.worktree;
     if (claude) mkdirSync(cwd, { recursive: true, mode: 0o700 });
-    const argv = askArgs({ harness: review.harness, binary, workers, contractFile, maxUsd: review.max_usd, ...(claude ? { tools: CLAUDE_REVIEW_TOOLS, addDirs: [input.worktree] } : { noContextFiles: true }) });
+    const argv = askArgs({ harness: review.harness, binary, workers, contractFile, maxUsd: review.max_usd, ...(claude ? { tools: CLAUDE_REVIEW_TOOLS, addDirs: [input.worktree] } : { untrustedCwd: true }) });
     const question = reviewPrompt({ brief: briefOf(input.db, input.taskId), spec: input.taskId ? (approvedSpec(input.db, input.taskId)?.text ?? null) : null, diff: diff.diff, base: diff.base, stat: diff.stat, checkout: input.worktree });
     const controller = new AbortController();
     input.signal?.addEventListener("abort", () => controller.abort(), { once: true });
