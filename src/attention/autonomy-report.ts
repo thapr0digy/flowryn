@@ -67,10 +67,10 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
     .filter(mine)
     .map((e) => {
       const p = payload(e);
-      const d = db.query("SELECT id, question, answer, rationale, state, answered_by FROM decisions WHERE id = ?1").get(String(p.decision ?? "")) as { id: string; question: string; answer: string | null; rationale: string | null; state: string; answered_by: string | null } | null;
+      const d = db.query("SELECT id, question, answer, note, state, answered_by FROM decisions WHERE id = ?1").get(String(p.decision ?? "")) as { id: string; question: string; answer: string | null; note: string | null; state: string; answered_by: string | null } | null;
       if (!d) return `- [${sanitizeLine(String(p.decision ?? "?"), 12)}] ${named(db, e.task_id)} → ${sanitizeLine(String(p.choice ?? "?"), 60)}`;
       const changed = d.answered_by === "captain" ? `; the user changed it to ${sanitizeLine(d.answer ?? "?", 60)}` : `; undo: flowryn decide ${d.id} <choice> --by captain`;
-      const why = (d.rationale ?? "").replace(/^Decided under unattended mode \(u\d+\) as the worker recommended: /, "");
+      const why = d.note?.trim() || "no reason given";
       return `- [${d.id}] ${named(db, e.task_id)}: "${sanitizeLine(d.question, 100)}" → ${sanitizeLine(String(p.choice ?? "?"), 60)}; why: ${sanitizeLine(why, 120)}${changed}`;
     });
   const merges = (
@@ -93,7 +93,7 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
       return `- ${named(db, e.task_id)} on ${sanitizeLine(what, 12)}: ${sanitizeLine(String(p.why ?? "?"), 160)}${next}`;
     });
   return [
-    `Autonomous (${grants.map((g) => autonomyLine(g, input.now)).join("; ")}):`,
+    `Autonomous (${grants.map((g) => autonomyLine(g, input.now, lens)).join("; ")}):`,
     ...group("Gates passed", gates),
     ...group("Decided", decided),
     ...group("Merged", merges),

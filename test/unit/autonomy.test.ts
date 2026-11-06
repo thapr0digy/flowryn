@@ -379,11 +379,13 @@ describe("the merge takes the standing approval", () => {
 
 describe("the morning report", () => {
   test("lists gates, decisions, merges and parked tasks, filtered by the lens, words sanitised", () => {
-    const row = grant(["web"]);
+    const row = grant(["web", "api"]);
     tx(db, () => {
       db.query("INSERT INTO events (ulid, ts, source, task_id, kind, payload) VALUES ('e1', ?1, 'daemon', 't', 'autonomy.gate_passed', ?2)").run(NOW + 1, JSON.stringify({ autonomy: "u1", gate: "g1", stage: "design", review_url: "http://127.0.0.1:1/session/x", spec_path: "/r/design/spec.md" }));
-      db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, answer, answered_by, answered_via, rationale, created_at) VALUES ('q9', 't', 'r1', 'Which layout?', '[\"flat\",\"nested\"]', 0, 'answered', 'flat', 'worker', 'autonomous', 'Decided under unattended mode (u1) as the worker recommended: fewer files', ?1)").run(NOW);
+      db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, answer, answered_by, answered_via, note, rationale, created_at) VALUES ('q9', 't', 'r1', 'Which layout?', '[\"flat\",\"nested\"]', 0, 'answered', 'flat', 'worker', 'autonomous', 'fewer files', 'not the why', ?1)").run(NOW);
       db.query("INSERT INTO events (ulid, ts, source, task_id, kind, payload) VALUES ('e2', ?1, 'daemon', 't', 'autonomy.decided', ?2)").run(NOW + 2, JSON.stringify({ autonomy: "u1", decision: "q9", choice: "flat" }));
+      db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, answer, answered_by, answered_via, note, rationale, created_at) VALUES ('q10', 't', 'r1', 'Which name?', '[\"short\",\"long\"]', 0, 'answered', 'long', 'captain', 'cli-tty', 'easy to type', 'my own words', ?1)").run(NOW);
+      db.query("INSERT INTO events (ulid, ts, source, task_id, kind, payload) VALUES ('e2b', ?1, 'daemon', 't', 'autonomy.decided', ?2)").run(NOW + 2, JSON.stringify({ autonomy: "u1", decision: "q10", choice: "short" }));
       const approval = mintAutonomyApproval(db, row, { task: "t", ref: "https://github.com/acme/web/pull/1", head: "h1", action: "merge" }, NOW + 3);
       db.query("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state, merge_sha) VALUES ('m1', 't', 'https://github.com/acme/web/pull/1', 'h1', ?1, ?2, 'merged', 'abcdef1234567890')").run(approval.id, NOW + 4);
       db.query("INSERT INTO events (ulid, ts, source, task_id, kind, payload) VALUES ('e3', ?1, 'daemon', 'other', 'autonomy.parked', ?2)").run(NOW + 5, JSON.stringify({ autonomy: "u1", gate: "g2", why: "a destructive question\u001b[31m" }));
@@ -391,14 +393,21 @@ describe("the morning report", () => {
     });
     const lines = autonomyLines(db, { since: NOW - 1, until: NOW + HOUR, now: NOW + HOUR, lens: SEES_ALL });
     const text = lines.join("\n");
-    expect(lines[0]).toContain("Autonomous (u1: live, projects web");
+    expect(lines[0]).toContain("Autonomous (u1: live, projects api, web");
+    expect(lines[0]).toContain("the user's words");
     expect(text).toContain("design review g1 passed; page http://127.0.0.1:1/session/x; spec /r/design/spec.md");
     expect(text).toContain('[q9] t: "Which layout?" → flat; why: fewer files; undo: flowryn decide q9 <choice> --by captain');
+    expect(text).toContain('[q10] t: "Which name?" → short; why: easy to type; the user changed it to long');
+    expect(text).not.toContain("my own words");
     expect(text).toContain("https://github.com/acme/web/pull/1 merged as abcdef123456");
     expect(text).toContain("other on g2: a destructive question");
     expect(text).not.toContain("\u001b");
-    const scoped = { ...SEES_ALL, restricted: true, task: (id: string | null | undefined) => id === "t" };
-    expect(autonomyLines(db, { since: NOW - 1, until: NOW + HOUR, now: NOW + HOUR, lens: scoped }).join("\n")).toContain("Parked: none.");
+    const scoped = { ...SEES_ALL, restricted: true, task: (id: string | null | undefined) => id === "t", project: (id: string) => id === "web" };
+    const seen = autonomyLines(db, { since: NOW - 1, until: NOW + HOUR, now: NOW + HOUR, lens: scoped });
+    expect(seen.join("\n")).toContain("Parked: none.");
+    expect(seen[0]).toContain("projects web, +1 other project, until");
+    expect(seen[0]).not.toContain("api");
+    expect(seen[0]).not.toContain("the user's words");
   });
 
   test("nothing at all when no grant was live in the window", () => {

@@ -67,7 +67,7 @@ The return brief gains an `Autonomous (…)` section after "Settled by rule" whe
 - **Merged:** the PR URL and the merge commit.
 - **Parked:** why, and the command that moves it on.
 
-`flowryn show autonomy` (the latest grant) and `flowryn show u<N>` print the terms and the same section. Everything goes through the caller's scope lens and is sanitised. Events carry ids, classes and choices, never the user's words.
+`flowryn show autonomy` (the latest grant) and `flowryn show u<N>` print the terms and the same section. Everything goes through the caller's scope lens and is sanitised: a scoped leader sees only its own projects in the header (the rest as `+N other projects`) and never the user's words. The why is the worker's own (`decisions.note`), kept after you change the answer. Events carry ids, classes and choices, never the user's words.
 
 ## Leader skill
 

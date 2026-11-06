@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { DOC_TEMPLATES } from "../../src/lifecycle/brief-templates.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
-import { waitUntil } from "../helpers/harness.ts";
+import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
+import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 
 /**
@@ -15,7 +17,10 @@ import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
  */
 
 let env: ShipEnv | null = null;
+const ptys: Pty[] = [];
+const MAIN = join(REPO_ROOT, "src/main.ts");
 afterEach(async () => {
+  for (const pty of ptys.splice(0)) pty.kill();
   await env?.cleanup();
   env = null;
 }, 30_000);
@@ -61,7 +66,7 @@ async function dispatch(e: ShipEnv, title: string, steps: string[], extra: strin
   return reply.reply.data as { task: string; run: string };
 }
 
-/** Grant from your terminal: begin, then confirm with the code it showed (the /dev/tty read is the CLI's, tested on its own). */
+/** Grant from your terminal: begin, then confirm with the code it showed (the /dev/tty read is the CLI's, tested through a pty below). */
 async function grantFromTerminal(e: ShipEnv, args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const begun = await e.call("autonomy.begin", args);
   if (!begun.ok) throw new Error(`autonomy.begin: ${JSON.stringify(begun.error)}`);
@@ -71,7 +76,34 @@ async function grantFromTerminal(e: ShipEnv, args: Record<string, unknown>): Pro
   return confirmed.data as Record<string, unknown>;
 }
 
+/** You, in your own terminal: `flowryn away --autonomous` in a real pty, typing back what `answer` makes of the code it shows. */
+async function awayInShell(e: ShipEnv, answer: (code: string) => string): Promise<{ code: number; text: string }> {
+  const pty = Pty.spawn(["bun", MAIN, "away", "--autonomous", "--projects", "web", "--until", "+2h"], e.fleet.h.env, REPO_ROOT);
+  ptys.push(pty);
+  const [, code] = await pty.waitFor(/Type (\S+) to grant it/);
+  await pty.type(`${answer(code!)}\n`);
+  return { code: await pty.exited, text: pty.text() };
+}
+
 describe("unattended mode", () => {
+  test(
+    "from your terminal: piped input is refused, a wrong code grants nothing, the code read from /dev/tty grants it on cli-tty",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: false, extraConfig: CONFIG });
+      const e = env;
+      const piped = await e.fleet.json(["away", "--autonomous", "--projects", "web", "--until", "+2h"], { env: { FLOWRYN_TOKEN: "" } });
+      expect(piped.reply.error).toMatchObject({ code: "human_only" });
+      const wrong = await awayInShell(e, (code) => (code === "ZZZZ" ? "YYYY" : "ZZZZ"));
+      expect(wrong.code).not.toBe(0);
+      expect(wrong.text).toContain("the code does not match; nothing was granted");
+      expect(rows(e, "SELECT 1 FROM autonomy_grants")).toHaveLength(0);
+      const right = await awayInShell(e, (code) => code);
+      expect(right.code).toBe(0);
+      expect(rows(e, "SELECT id, channel FROM autonomy_grants")).toEqual([{ id: "u1", channel: "cli-tty" }]);
+    },
+    { timeout: 60_000 },
+  );
+
   test(
     "two spec'd ships run dispatch → design auto-pass → build → ship → queue merge with no input; a destructive question parks its ship alone; back prints all three",
     async () => {

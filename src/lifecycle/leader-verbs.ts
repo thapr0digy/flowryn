@@ -1,5 +1,5 @@
 import { autonomyLines } from "../attention/autonomy-report.ts";
-import { getAutonomy, latestAutonomy, projectsOf } from "../policy/autonomy.ts";
+import { getAutonomy, latestAutonomy, projectsShown } from "../policy/autonomy.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
@@ -774,9 +774,10 @@ function autonomyView(ctx: ReadCtx, target: string): HandlerResult | null {
     if (target === "autonomy") throw new FlowrynError("not_found", "unattended mode was never granted", "flowryn away --autonomous");
     return null;
   }
-  const lines = autonomyLines(ctx.db, { since: row.started_at - 1, until: row.ended_at ?? ctx.now, now: ctx.now, lens: lensFor(ctx.db, ctx.config, ctx.caller.scope) });
+  const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+  const lines = autonomyLines(ctx.db, { since: row.started_at - 1, until: row.ended_at ?? ctx.now, now: ctx.now, lens });
   return {
-    data: { autonomy: row.id, state: row.ended_at !== null ? `ended (${row.end_reason ?? "?"})` : row.expires_at <= ctx.now ? "expired" : "live", projects: projectsOf(row).join(","), until: new Date(row.expires_at).toISOString(), channel: row.channel, words: row.words ? sanitizeLine(row.words, 500) : "-", report: lines },
+    data: { autonomy: row.id, state: row.ended_at !== null ? `ended (${row.end_reason ?? "?"})` : row.expires_at <= ctx.now ? "expired" : "live", projects: projectsShown(row, lens), until: new Date(row.expires_at).toISOString(), channel: row.channel, words: row.words && !lens.restricted ? sanitizeLine(row.words, 500) : "-", report: lines },
     hints: row.ended_at === null ? ["flowryn back ends it"] : ["flowryn away --autonomous grants it again"],
   };
 }

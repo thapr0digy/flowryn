@@ -6,6 +6,7 @@ import { PROJECT_ID, getProject } from "../lifecycle/projects.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { sha256Hex } from "../util/hash.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
+import type { ScopeLens } from "../leader/scope.ts";
 import { insertApproval, type ApprovalRow } from "./approvals.ts";
 
 /**
@@ -233,9 +234,17 @@ export function mintAutonomyApproval(db: Db, row: AutonomyRow, a: { task: string
   return db.query("SELECT * FROM approvals WHERE id = ?1").get(approval.id) as ApprovalRow;
 }
 
-/** The one line the briefing and `show autonomy` carry for a grant. */
-export function autonomyLine(row: AutonomyRow, now: number): string {
+/** The grant's projects as this caller may see them: other scopes' projects only counted. */
+export function projectsShown(row: AutonomyRow, lens: Pick<ScopeLens, "project">): string {
+  const all = projectsOf(row);
+  const mine = all.filter((p) => lens.project(p));
+  const hidden = all.length - mine.length;
+  return [...mine, ...(hidden > 0 ? [`+${hidden} other project${hidden === 1 ? "" : "s"}`] : [])].join(", ");
+}
+
+/** The one line the briefing and `show autonomy` carry for a grant; a scoped leader never sees the user's words. */
+export function autonomyLine(row: AutonomyRow, now: number, lens: Pick<ScopeLens, "project" | "restricted">): string {
   const state = row.ended_at !== null ? `ended (${row.end_reason ?? "?"})` : row.expires_at <= now ? "expired" : "live";
-  const words = row.words ? `; the user's words: "${sanitizeLine(row.words, 120)}"` : "";
-  return `${row.id}: ${state}, projects ${projectsOf(row).join(", ")}, until ${stampOf(row.expires_at)}, from ${row.channel}${words}`;
+  const words = row.words && !lens.restricted ? `; the user's words: "${sanitizeLine(row.words, 120)}"` : "";
+  return `${row.id}: ${state}, projects ${projectsShown(row, lens)}, until ${stampOf(row.expires_at)}, from ${row.channel}${words}`;
 }
