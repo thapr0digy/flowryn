@@ -308,6 +308,7 @@ const approveConfirm: VerbSpec = {
     if (taken === "expired") throw new FlowrynError("challenge_failed", "the approval challenge expired", "run flowryn approve again");
     if (taken === "wrong") throw new FlowrynError("challenge_failed", "the code does not match; nothing was approved", "run flowryn approve again");
     if (taken.action === "repin") throw new FlowrynError("challenge_failed", "that challenge is a repin, not an approval; nothing was approved", "run flowryn approve again");
+    if (taken.action === "autonomy") throw new FlowrynError("challenge_failed", "that challenge starts unattended mode, not an approval; nothing was approved", "run flowryn away --autonomous again");
     const actor = (stringArg(args, "actor") ?? "").replace(/[^A-Za-z0-9._@-]/g, "").slice(0, 64) || "you";
     if (taken.action === "gate") {
       // Your word on a review gate passes it as it is recorded (design section 11).

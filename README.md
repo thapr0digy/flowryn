@@ -80,7 +80,7 @@ flowryn drop <task|plan> --body-file -   # remove queued work that never started
 flowryn help                 # every verb; `flowryn <verb> --help` for one
 ```
 
-- Merges and review gates need your word: Claude's prompt, Pi's confirm, `flowryn approve` or the board.
+- Merges and review gates need your word: Claude's prompt, Pi's confirm, `flowryn approve` or the board. `flowryn away --autonomous` gives that word once for a night ([unattended mode](docs/notes/2026-11-05-unattended-mode-one-9e.md)).
 - Output is TOON; `--json` for JSON. Exit codes: 0 ok, 2 policy refusal, 3 validation, 4 not found, 69 daemon down, 75 spooled, 76 protocol mismatch, 77 role refused.
 - Config: `~/.flowryn/config.toml` (`FLOWRYN_HOME` moves the home). `SIGHUP` reloads it. Each key is explained in the milestone notes and [`docs/notes/`](docs/notes/README.md); `bun run notes` lists them.
 

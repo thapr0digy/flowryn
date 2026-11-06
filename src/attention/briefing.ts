@@ -1,3 +1,4 @@
+import { autonomyLines } from "./autonomy-report.ts";
 import type { Db } from "../db/db.ts";
 import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
@@ -370,7 +371,7 @@ function taskNames(db: Db, events: WindowEvent[], suffix: (e: WindowEvent) => st
 /**
  * The return brief (away mode): one fixed template in a fixed order, from
  * the briefing's own sections and the event log, so it can be recomputed:
- * waiting on you; decided for you; landed; failed; spend.
+ * waiting on you; decided for you; settled by rule; autonomous; landed; failed; spend.
  */
 const RETURN_HOW: Record<AwayEndReason, string> = { back: "back", expired: "away expired", returned: "automatic away, the user returned" };
 
@@ -384,6 +385,8 @@ export function composeReturnBrief(db: Db, input: ReturnBriefInput): string {
   const decided = decidedLines(db, since, until, "Decided for you", lens);
   lines.push(...(decided.length > 0 ? decided : ["Decided for you: nothing."]));
   lines.push(...ruleLines(db, since, until, "Settled by rule", lens));
+  // Unattended mode's morning report (src/attention/autonomy-report.ts), when a grant was live in the window.
+  lines.push(...autonomyLines(db, { since, until, now: input.now, lens }));
   const landed = windowEvents(db, ["run.landed"], since, until).filter((e) => lens.task(e.task_id));
   lines.push(landed.length > 0 ? `Landed (${landed.length}): ${taskNames(db, landed, () => "")}` : "Landed: nothing.");
   const failed = windowEvents(db, ["run.failed", "run.cancelled"], since, until).filter((e) => lens.task(e.task_id));

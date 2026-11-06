@@ -54,6 +54,8 @@ import { resolveHerdrSocket } from "../runtime/herdr/socket.ts";
 import { HerdrWatcher } from "../watch/herdr.ts";
 import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { deadlineDefaults } from "../attention/deadline-defaults.ts";
+import { autonomyPass } from "../attention/autonomy-pass.ts";
+import { expireAutonomy } from "../policy/autonomy.ts";
 import { awayConfig, leaderTiming, notificationsOff, notifyConfig, openerMode, recordingNotifierPath, reviewConfig } from "../config/leader.ts";
 import { autoAway, expireAway } from "../attention/away.ts";
 import type { AttentionServices } from "../attention/services.ts";
@@ -850,6 +852,34 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         deadlineFailing = true;
       }
     };
+    // Unattended mode (docs/notes/2026-11-05-unattended-mode-one-9e.md), on every attention tick: an
+    // expired grant ends; a live one decides or parks worker questions, passes review gates and starts
+    // merges for its projects. One pass at a time; a failing pass logs once until it recovers.
+    let autonomyRunning = false;
+    let autonomyFailing = false;
+    const autonomyIfDue = async () => {
+      if (autonomyRunning) return;
+      autonomyRunning = true;
+      try {
+        const ended = tx(database, () => expireAutonomy(database, Date.now()));
+        if (ended) log(`autonomy: ${ended.id} expired`);
+        const out = await autonomyPass({ db: database, config: () => config, decisions: () => decisionsConfig(config), git: deliveryGit, now: Date.now, log });
+        autonomyFailing = false;
+        if (out.steered.length + out.passed.length + out.parked.length + out.merges.length === 0) return;
+        for (const run of out.steered) bus.notify(run);
+        if (out.passed.length + out.parked.length + out.merges.length > 0) log(`autonomy: ${out.passed.length} gate(s) passed, ${out.parked.length} parked, ${out.merges.length} merge(s) started`);
+        journal.kick();
+        lavishPoller.kick();
+        scheduler?.kick();
+        autoMerger?.kick();
+        attention.bus.notifyAll();
+      } catch (error) {
+        if (!autonomyFailing) log(`autonomy: pass failed: ${(error as Error).message}`);
+        autonomyFailing = true;
+      } finally {
+        autonomyRunning = false;
+      }
+    };
     // A verification the last daemon was running when it stopped: recorded as an error and requeued once, its worktree removed.
     try {
       const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
@@ -916,6 +946,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }
       autoAwayIfDue();
       deadlineDefaultsIfDue();
+      void inflight.track(autonomyIfDue());
       guardScopes();
       void inflight.track(notifyPump.tick());
       void inflight.track(rewake.tick());
