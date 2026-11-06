@@ -43,6 +43,7 @@ The leader skill (src/bridges/skill.ts) says: a reply that `waits` on the contra
 
 ## Tests
 
-- test/unit/auto-contract.test.ts: the retry (a first failure has no P1, the second opens one), a flake (fail then pass, no P1), the retry kept across a hold and a restart, and the refusal help when flagged in this call.
+- test/unit/auto-contract.test.ts: the retry (a first failure has no P1, the second opens one), a flake (fail then pass, no P1), and the retry kept across a hold and a restart.
+- test/unit/ask.test.ts: an ask on an untested harness version stays queued with no call, and starts after the version passes.
 - test/unit/version-poll.test.ts: the poll flags a new version with no dispatch and kicks the check, waits on a restart, survives an unreadable or throwing version read, and the config key's bounds.
-- test/integration/auto-contract.test.ts (compiled daemon): a relaxed dispatch waits, then launches after the automatic pass; a failing check (both tries) keeps it waiting with one P1, and a manual pass releases it; an update while waiting is gated again at the grant and launches on the newer version's pass, recording it; strict still refuses.
+- test/integration/auto-contract.test.ts (compiled daemon): a relaxed dispatch waits, then launches after the automatic pass; a failing check (both tries) keeps it waiting with one P1, and a manual pass releases it; an update while waiting is gated again at the grant and launches on the newer version's pass, recording it; a resume on an untested version replies `state: waiting` and launches only after the automatic pass; strict still refuses.
