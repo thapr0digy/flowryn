@@ -268,7 +268,7 @@ function startMerges(db: Db, config: FlowrynConfig, now: number, out: AutonomyOu
     const delivered = deliveredOf(db, run.task_id);
     if (!delivered) continue;
     const ref = delivered.kind === "pr" ? delivered.ref : `local:${delivered.ref}`;
-    if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2 AND merge = 1").get(run.id, delivered.head)) continue;
+    if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2 AND (merge = 1 OR state IN ('held', 'sent_back'))").get(run.id, delivered.head)) continue;
     const evidence = delivered.kind === "pr" ? prEvidence(db, run.id) : null;
     try {
       // The delivery's auto-verify gives way to the merge, which follows its verify.

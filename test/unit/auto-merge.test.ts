@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { autonomyPass } from "../../src/attention/autonomy-pass.ts";
+import { decisionsConfig } from "../../src/attention/decisions-policy.ts";
 import { LEADER_WAKE_SQL, openItem } from "../../src/attention/items.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { effectiveConfig } from "../../src/config/effective.ts";
@@ -483,5 +485,50 @@ describe("shutdown", () => {
     expect(stopped).toBe(true);
     auto.kick();
     expect(passes).toBe(1);
+  });
+});
+
+describe("unattended mode and a delivery's auto-verify", () => {
+  const VERIFY_ONLY = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\n`;
+
+  /** A not-yolo delivery's auto-verify at HEAD, a live grant over web, and one unattended pass at 20 000. */
+  async function unattended(end: "held" | "live"): Promise<{ f: Fixture; row: string; merges: string[] }> {
+    const f = fixture({ yolo: 0 });
+    const cfg = config(VERIFY_ONLY);
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    expect(row.merge).toBe(0);
+    if (end === "held") {
+      const v = verification(f, f.root);
+      tx(f.db, () => f.db.query("UPDATE auto_merges SET state = 'verifying', verification_id = ?2 WHERE id = ?1").run(row.id, v.id));
+      finish(f, v, "error", v.steps, "the step could not start");
+      await merger(f, cfg).auto.pass();
+      expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_error" });
+    }
+    tx(f.db, () => {
+      f.db.query("UPDATE schema_migrations SET applied_at = 0 WHERE name = 'autonomy'").run();
+      f.db.query("INSERT INTO autonomy_grants (id, channel, actor, projects, terms_hash, started_at, expires_at) VALUES ('u1', 'cli-tty', 'you', '[\"web\"]', 'h', 0, 1000000)").run();
+    });
+    const out = await autonomyPass({
+      db: f.db,
+      config: () => cfg,
+      decisions: () => decisionsConfig(cfg),
+      git: async () => ({ code: 1, stdout: "", stderr: "no remote" }),
+      now: () => 20_000,
+      log: () => {},
+    });
+    return { f, row: row.id, merges: out.merges };
+  }
+
+  test("a head whose auto-verify ended held is not verified again by unattended mode", async () => {
+    const { f, merges } = await unattended("held");
+    expect(merges).toEqual([]);
+    expect((f.db.query("SELECT COUNT(*) AS n FROM auto_merges").get() as { n: number }).n).toBe(1);
+  });
+
+  test("a live auto-verify gives way to unattended mode's merge at the same head", async () => {
+    const { f, row, merges } = await unattended("live");
+    expect(merges).toHaveLength(1);
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "superseded" });
+    expect(getAutoMerge(f.db, merges[0]!)).toMatchObject({ merge: 1, head_sha: HEAD });
   });
 });

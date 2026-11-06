@@ -36,6 +36,10 @@ export interface AskCall {
   maxUsd: number;
   /** Claude's tools for this call, narrower than CLAUDE_ASK_TOOLS (the verify review step has no web tools). */
   tools?: readonly string[];
+  /** Directories Claude's file tools may read besides its working directory (the verify review's checkout). */
+  addDirs?: readonly string[];
+  /** Pi loads no AGENTS.md or CLAUDE.md whatever `[workers.pi] no_context_files` says (the verify review's checkout is the worker's). */
+  noContextFiles?: boolean;
 }
 
 /** Claude in print mode: JSON result, no saved session, no settings files, hooks or MCP servers, reading tools only, the native spend cap. */
@@ -44,6 +48,7 @@ export function claudeAskArgs(call: AskCall): string[] {
   const tools = (call.tools ?? CLAUDE_ASK_TOOLS).join(",");
   const args = [call.binary, "-p", "--output-format", "json", "--no-session-persistence", "--restricted", "--strict-mcp-config", "--disable-slash-commands"];
   args.push("--tools", tools, "--allowedTools", tools, "--permission-mode", "dontAsk");
+  for (const dir of call.addDirs ?? []) args.push("--add-dir", dir);
   args.push("--max-budget-usd", String(call.maxUsd), "--append-system-prompt-file", call.contractFile);
   if (claude.model) args.push("--model", claude.model);
   if (claude.effort) args.push("--effort", claude.effort);
@@ -60,7 +65,7 @@ export function piAskArgs(call: AskCall): string[] {
   if (pi.effort) args.push("--thinking", pi.effort);
   if (pi.no_extensions) args.push("--no-extensions");
   if (pi.no_skills) args.push("--no-skills");
-  if (pi.no_context_files) args.push("--no-context-files");
+  if (pi.no_context_files || call.noContextFiles) args.push("--no-context-files");
   args.push("--append-system-prompt", call.contractFile);
   return args;
 }
