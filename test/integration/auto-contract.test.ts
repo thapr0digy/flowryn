@@ -120,7 +120,8 @@ describe("the automatic contract check", () => {
       // The dispatch that waited launches by itself once the pass is recorded, never before it.
       await waitUntil(() => runOf(env, run).launched_at !== null, 30_000, "the waiting run to launch");
       expect(runOf(env, run).harness_version).toBe(NEW_VERSION);
-      expect(seqOf(env, "contract.passed")[0]!).toBeLessThan(seqOf(env, "run.launched", `run_id = '${run}'`)[0]!);
+      // launched_at is written with run.launching (run.launched follows once the worker process is up).
+      expect(seqOf(env, "contract.passed")[0]!).toBeLessThan(seqOf(env, "run.launching", `run_id = '${run}'`)[0]!);
     },
     180_000,
   );
@@ -213,7 +214,7 @@ describe("the automatic contract check", () => {
       expect(runOf(env, run).harness_version).toBe(NEWER);
       expect(events(env, "run.harness_version")).toEqual([expect.objectContaining({ harness: "claude", from: NEW_VERSION, to: NEWER })]);
       const newerPass = seqOf(env, "contract.passed", `json_extract(payload, '$.version') = '${NEWER}'`)[0]!;
-      expect(newerPass).toBeLessThan(seqOf(env, "run.launched", `run_id = '${run}'`)[0]!);
+      expect(newerPass).toBeLessThan(seqOf(env, "run.launching", `run_id = '${run}'`)[0]!);
     },
     240_000,
   );
