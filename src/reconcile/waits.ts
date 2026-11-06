@@ -443,8 +443,9 @@ export function checkWaits(deps: WaitPassDeps): WaitPassResult {
         result.recovered.push(w.key);
         continue;
       }
-      if (row.item_id || now - row.recovered_at < RECOVERY_GRACE_MS) continue;
+      if ((row.item_id && !row.item_id.startsWith(COVERED)) || now - row.recovered_at < RECOVERY_GRACE_MS) continue;
       const covering = coveringItem(db, w);
+      if (covering && row.item_id === `${COVERED}${covering}`) continue;
       const event = appendEvent(db, {
         source: "reconciler",
         kind: "wait.expired",

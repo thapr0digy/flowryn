@@ -168,6 +168,25 @@ describe("a host-held launch", () => {
     pass(db, cfg, 1_000 + 12 * MIN);
     expect(db.query("SELECT state FROM items WHERE id = 'i99'").get()).toEqual({ state: "open" });
   });
+
+  test("a covered wait whose covering item closes while it still waits is itemized on the next pass", () => {
+    const db = database();
+    const cfg = config();
+    seedRun(db, { id: "r1", task: "t1", waitingSince: 1_000 });
+    tx(db, () => {
+      explain(db, { run: { id: "r1", task_id: "t1", stage: "build" }, kind: "capacity", rule: "capacity.usage_limit", reason: "the usage limit on account a pauses its starts", facts: [], unblock: [{ by: "captain", action: "flowryn resume --account a" }], source: "daemon", now: 1_000 });
+      const event = appendEvent(db, { source: "daemon", kind: "sched.usage_limit", payload: {}, ts: 1_000 });
+      db.query("INSERT INTO items (id, event_seq, class, lane, kind, line, opened_at) VALUES ('i99', ?1, 'actionable', 'P1', 'usage_limit', 'usage limit', 1000)").run(event.seq);
+    });
+    pass(db, cfg, 1_000 + 10 * MIN);
+    pass(db, cfg, 1_000 + 11 * MIN);
+    expect(pass(db, cfg, 1_000 + 12 * MIN).result.itemized).toEqual([]);
+    tx(db, () => db.query("UPDATE items SET state = 'resolved', resolved_at = ?1 WHERE id = 'i99'").run(1_000 + 12 * MIN));
+    expect(pass(db, cfg, 1_000 + 13 * MIN).result.itemized).toEqual(["run:r1"]);
+    expect(openWaitItems(db).map((i) => i.run_id)).toEqual(["r1"]);
+    expect(events(db, "wait.expired").map((e) => e.covered_by)).toEqual(["i99", null]);
+    expect(pass(db, cfg, 1_000 + 14 * MIN).result.itemized).toEqual([]);
+  });
 });
 
 describe("a plan phase", () => {

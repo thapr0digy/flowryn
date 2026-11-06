@@ -118,10 +118,10 @@ export function cancelIsFinal(detail: string | null): boolean {
 /** How long a request waits on GitHub to show its head when GitHub still shows the task's earlier delivered head, before it is cancelled. */
 export const STALE_READ_WAIT_MS = 5 * 60_000;
 
-/** Is `read` an earlier delivered head of the task whose latest delivery is the request's head (GitHub lagging behind a push), not a new one? */
+/** Is `read` (a head, or its short form) an earlier delivered head of the task whose latest delivery is the request's head (GitHub lagging behind a push), not a new one? */
 export function staleRead(db: Db, request: Pick<VerifyRequest, "task_id" | "head_sha">, read: string): boolean {
   if (!request.task_id || deliveredOf(db, request.task_id)?.head !== request.head_sha) return false;
-  return db.query("SELECT 1 FROM artifacts WHERE task_id = ?1 AND head_sha = ?2 AND kind IN ('pr','local') LIMIT 1").get(request.task_id, read) !== null;
+  return db.query("SELECT 1 FROM artifacts WHERE task_id = ?1 AND substr(head_sha, 1, length(?2)) = ?2 AND kind IN ('pr','local') LIMIT 1").get(request.task_id, read) !== null;
 }
 
 type Wanted = { start: VerifyConfig; projectPath: string } | { cancel: string } | { wait: string };

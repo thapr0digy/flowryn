@@ -118,6 +118,7 @@ test(
 
     // The cancel the 2026-11-06 stall saw: GitHub read the older head as the drain checked it.
     const head = query<{ head_sha: string }>(e, "SELECT head_sha FROM verify_queue WHERE id = ?1", queued)[0]!.head_sha;
+    exec(e, "INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) SELECT 'a-older', task_id, kind, ref, '0123abcd' || substr(head_sha, 9), 0 FROM artifacts WHERE task_id = ?1 AND head_sha = ?2 LIMIT 1", b.task, head);
     exec(e, "UPDATE verify_queue SET state = 'cancelled', detail = ?2, ended_at = ?3 WHERE id = ?1", queued, `the PR head moved from ${head.slice(0, 8)} to 0123abcd; verify the new head`, String(Date.now()));
     await waitUntil(() => query(e, "SELECT 1 FROM events WHERE kind = 'auto_merge.verify_requeued' AND task_id = ?1", b.task).length === 1, 15_000, "B's verify queued again");
     const row = autoRow(e, b.run)!;

@@ -19,6 +19,7 @@ The auto-merge used to wait up to 6 h on a request cancelled because its head mo
 - **The head GitHub read.**
   - If it is an earlier delivered head of the task (`staleRead`, typically the head a carry started from), GitHub has not caught up. The delivered head is verified again. A carried head follows the existing carried rule: its re-verify is never skipped.
   - If it really moved (the watcher's evidence shows a new head that was never delivered), that head's verify is queued. The row is superseded (`head_moved`), and the delivery of that head starts the next auto-merge on the verify already queued. If no delivery comes, the watcher's head-moved item tells the leader.
+  - If the watcher's evidence does not show that head yet, the row is left as it is for that pass, and no requeue is counted. The registry's `auto_merge` deadline bounds this.
 - **The cap.** After `MAX_VERIFY_REQUEUES` (3) requeues of one row, the row holds (`auto_merge_held`) with `flowryn verify <task>, then flowryn merge <task>`.
 - **The landing queue.** It drives its head of line through the same rows, so lq4 and lq5 get the same recovery.
 
@@ -31,7 +32,7 @@ The leader's audit (steer m576) added these:
 - **A passed verify whose PR head moved** and was never redelivered now holds after `HEAD_MOVED_WAIT_MS` (30 min), not 6 h. The merge gate's `head_moved` retry uses the same bound.
 - **GitHub's checks** may stay pending `CHECKS_WAIT_MS` (6 h). On a project whose default branch's `.no-mistakes.yaml` says `no_ci: true`, the limit is `NO_CI_CHECKS_WAIT_MS` (1 h). The daemon reads the file through bounded git and keeps the reading for a minute (the auto-merger's `noCi` dep).
 - **The verify drain** (`drainVerifyQueue`) still starts requests in order. A request that has to wait on its own PR now steps aside for that pass, so the requests behind it start. Such a wait is GitHub lagging, GitHub unreachable, or an invalid project config. A full validation pool, a pending restart or a failing host check still hold the whole queue.
-- **The scheduler's `capacity_wait` P1** also counts the oldest queued verify. One queued over `[sched] wait_alert_ms` opens it, with its id, task and age in the line (`oldest queued verify vq1 (t1) 31m`). No P1 opens when the wait registry has already itemized that wait.
+- **The scheduler's `capacity_wait` P1**, opened by runs waiting over `[sched] wait_alert_ms`, also names the oldest queued verify in the queue's own order, with its id, task and age (`oldest queued verify vq1 (t1) 31m`). A queued verify alone never opens it: the registry's `verify_queue` wait covers that.
 
 ## The wait registry (`src/reconcile/waits.ts`, `src/reconcile/wait-deadlines.ts`)
 
@@ -64,10 +65,10 @@ The reconciler runs `checkWaits` on each full pass (the `checkWaits` dep wired i
    - A run that is a plan phase is named `phase N of "<plan>" (<task>), stage <stage>`, so when a phase waits for a grant the item says why.
    - A phase with no run says why it has not started: not in the backlog snapshot, not queued, held, its `phase_blocked` reason, or that the scheduler has not started it. Its fix is `flowryn dispatch <project> --task <id>`.
    - Item text holds only task ids, durations, measured values and commands.
-3. **A wait some other open item already carries** (`usage_limit`, `quota_low`, `account_signed_out`, `harness_unverified`) is recovered, but never itemized twice. Its row records `covered:<item>`, and the registry never resolves an item it did not open.
+3. **A wait some other open item already carries** (`usage_limit`, `quota_low`, `account_signed_out`, `harness_unverified`) is recovered, but never itemized twice. Its row records `covered:<item>`, and the registry never resolves an item it did not open. Each pass checks the cover again: once that item closes (or the run's refusal changes), the wait is itemized.
 4. **A wait that ends,** or one that starts a new episode (a different `since`): its row is deleted and its item resolved (`wait ended`), with a `wait.cleared` event.
 
-The scheduler's 30-minute `capacity_wait` P1 no longer opens when every run waiting that long already has its own registry item.
+The scheduler's 30-minute `capacity_wait` P1 no longer opens when every run waiting that long already has its own registry item (its `run:<id>` row), or a cover that is still open.
 
 ## `flowryn fleet`
 
@@ -85,6 +86,7 @@ Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`
   - A cancelled verify is queued again at once, up to `MAX_VERIFY_REQUEUES`, then held.
   - A stale GitHub read re-verifies the delivered head.
   - A head that really moved gets its verify queued, and its delivery follows it.
+  - A moved head the watcher's evidence does not show yet leaves the row for that pass and counts no requeue.
   - A request that is gone is requeued; a final cancel holds.
   - A second interruption by a stop is requeued.
 - `test/unit/auto-merge.test.ts` also covers the 30-min head-moved hold and the 1 h no_ci checks limit.
@@ -92,12 +94,12 @@ Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`
   - A request waiting on its own PR steps aside, and the request behind it starts.
   - A stale read waits up to `STALE_READ_WAIT_MS`, then is cancelled.
 - `test/unit/capacity-alert.test.ts`:
-  - A verify queued over the alert threshold opens `capacity_wait` with its age, and the alert closes once nothing waits that long.
-  - A verify the registry already itemized opens no second P1.
+  - A queued verify alone opens no `capacity_wait`. Runs waiting over the threshold open it, with the oldest queued verify (in queue order) and its age, and it closes once nothing waits that long.
+  - A run whose own registry wait is itemized opens no second P1. One whose cover has closed, or whose only itemized wait is another key, still counts.
 - `test/unit/waits.test.ts`:
   - The `[waits]` table and its validation.
   - A host-held launch is recovered at 10 min, then itemized with the numbers, wakes the leader, and the item resolves when the wait ends.
-  - A covered usage-limit wait.
+  - A covered usage-limit wait, itemized once its cover closes.
   - A phase that did not start after its blocker landed is re-kicked, then itemized; its run starting ends the wait.
   - The verify queue's expected start.
   - An auto-merge waiting on checks.
