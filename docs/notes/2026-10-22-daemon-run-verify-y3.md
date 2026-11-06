@@ -58,20 +58,20 @@ The user's answer in the design review (q78): a verify that fails because a step
   | From | Event | To |
   |---|---|---|
   | queued | its request started | verifying |
-  | queued | its request was cancelled (PR closed, no steps; a moved head only after 6 h with no redelivery) | held (`verify_cancelled`) |
+  | queued | its request was cancelled for good (PR closed or merged, no steps); any other lost request or verify is queued again, up to 3 times (docs/notes/2026-11-06-no-silent-waits-vj.md) | held (`verify_cancelled`) |
   | verifying | passed | waiting_checks |
   | verifying | `error`, and startup recovery requeued it | queued, following the rerun |
   | verifying | a step exited non-zero, first time at this head | sent_back: the ship stage starts again with the step, its exit and its last 40 lines as the steer |
   | verifying | a timeout (the run's deadline, or a step whose every attempt hung past `verify_step_timeout_min`: `endedAtDeadline`), an unrequeued `error`, a failure with no failing step, or a second failure at this head | held (`verify_timeout`, `verify_error`, `verify_failed`) |
   | waiting_checks | the watcher's PR evidence shows no pending check at the head | the merge, through the merge path |
-  | waiting_checks | checks pending, or the PR head moved, for over 6 h | held (`checks_timeout`, `head_moved`) |
+  | waiting_checks | checks pending for over 6 h (1 h on a `no_ci` project), or the PR head moved for over 30 min | held (`checks_timeout`, `head_moved`) |
   | merging | its merge is proven | merged |
   | merging | its merge was refused | held (`merge_refused`) |
   | merging | unproven | stays; the existing `unproven_merge` P1 covers it |
   | any live | run sent back, cancelled or failed; merged by hand; redelivered; auto_merge turned off (not a landing-queue entry's row: docs/notes/2026-10-30-landing-queue-the-65.md) | superseded |
 
 - **The merge** is the `merge` verb's own path, `src/policy/merge-path.ts`. `mergeable`, `applyMerge` and `settleMerge` are shared with the verb, and `prepareDaemonMerge` is the verb's prepare without a harness channel. The caller is `DAEMON_CALLER` (`{ role: "daemon" }`, a type only the daemon process constructs, not a `Role`), so `chooseApproval` finds no leader channel and uses a standing human approval (`flowryn approve`) if there is one, else the yolo posture: channel `yolo`. `checkGate` is unchanged. `merge.requested` has source `daemon` and `by: auto` (the verb's carry `by: leader` or `human`). Under channel `yolo` the run lands `by: auto` whoever proves the merge, its own settle or the watcher after a restart (`recordMergeResult` looks the merge up in `auto_merges`); one that used a standing human approval lands `by: other`, so a `landed` item reports it.
-- **Gate refusals.** `checks_pending`, `forge_unavailable`, `merge_in_flight`, `not_ready` and `head_moved` mean "not yet": the next pass tries again, and `head_moved` holds after 6 h. A stale read is recorded as the verb's is and tried again. Any other code holds with the gate's message and its help as the next command (`red_checks` names the `--allow-red` waiver).
+- **Gate refusals.** `checks_pending`, `forge_unavailable`, `merge_in_flight`, `not_ready` and `head_moved` mean "not yet": the next pass tries again, and `head_moved` holds after 30 min (`HEAD_MOVED_WAIT_MS`). A stale read is recorded as the verb's is and tried again. Any other code holds with the gate's message and its help as the next command (`red_checks` names the `--allow-red` waiver).
 - **Items.**
   - New `auto_merge_held` (P1, actionable, in `LEADER_WAKE_KINDS` and the away wake). Its line is `Auto-merge held: <title> (<task>): <reason>; <next command>`. It is named in the leader's follow-up wake line (`an auto-merge is held`). A landing, a send-back and a redelivery resolve it.
   - `pr_ready` still opens. Its line ends with the progress, kept current: `; auto-merge: verify queued (vq7, 2 of 3)`, `verifying (v41)`, `verify v41 passed, waiting on checks`, `merging (mg12)`, `held (red_checks)`. A queued row's place moving rewrites the line with an `auto_merge.queue_moved` event (its request, position and queue length); a steady queue writes nothing.
@@ -85,7 +85,7 @@ The user's answer in the design review (q78): a verify that fails because a step
 
 - A redelivery always makes a new row, even at the same head. Rows are history, and "once per head" counts the earlier `sent_back` rows of the run at that head.
 - Checks are read from the watcher's stored PR evidence to decide when to try. That adds no GitHub calls, and the gate then re-reads everything.
-- A PR head that moved past the delivered one waits rather than holds. The design said every refusal holds, but a worker pushing before its redelivery is the normal path, and holding there woke the leader for nothing (the redelivery test caught it). The wait is bounded at 6 h.
+- A PR head that moved past the delivered one waits rather than holds. The design said every refusal holds, but a worker pushing before its redelivery is the normal path, and holding there woke the leader for nothing (the redelivery test caught it). The wait is bounded at 30 min (`HEAD_MOVED_WAIT_MS`, docs/notes/2026-11-06-no-silent-waits-vj.md).
 - The leader merging by hand while a row is live: the existing basis and `merge_in_flight` guards stop a double merge, and the row ends superseded.
 - No contract revision bump: the worker's deliver path is unchanged, apart from an extra reply field.
 
@@ -97,7 +97,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   - a red check is held (`red_checks`);
   - a failed verify is sent back with the step and its tail, then fails again at the same head and is held;
   - a redelivery at a new head (pushed while the first waits on checks) supersedes the first row, and the second lands.
-- `test/unit/auto-merge.test.ts`: the config key and the daemon's config check; the policy unchanged by it; the trigger (opt-in, yolo, sensitive, PATH, following a passed, running or queued verify, superseding, one live row); the verify verdict and the send-back text; the controller's moves without GitHub. That includes the two restart cases: an `error` that recovery requeued is followed, and a merge the watcher proves after a restart lands `by: auto` with no `landed` wake. Also the supersede cases, the 6 h checks and moved-head bounds, and the wake rule.
+- `test/unit/auto-merge.test.ts`: the config key and the daemon's config check; the policy unchanged by it; the trigger (opt-in, yolo, sensitive, PATH, following a passed, running or queued verify, superseding, one live row); the verify verdict and the send-back text; the controller's moves without GitHub. That includes the two restart cases: an `error` that recovery requeued is followed, and a merge the watcher proves after a restart lands `by: auto` with no `landed` wake. Also the supersede cases, the checks and moved-head bounds, and the wake rule.
 - `test/unit/policy.test.ts`: a daemon caller gets only yolo, never a waiver, never for a task that is not yolo, and sensitive work is refused.
 
 ## What phase 1 built
