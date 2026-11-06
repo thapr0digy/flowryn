@@ -40,8 +40,8 @@ import { claimOperation, confirmOperation, escalatedStart, getOperation, launchK
 /**
  * fresh: the run's first launch; resume: its stored session again; stage: a
  * new session for a stage with fresh = true; relaunch: its stored session
- * again under a changed contract (a scout promoted in place), the old worker
- * already stopped by the scheduler.
+ * again under a changed contract (a scout promoted in place) or a stage's own
+ * model or effort, the old worker already stopped by the scheduler.
  */
 export type LaunchMode = "fresh" | "resume" | "stage" | "relaunch";
 
@@ -270,10 +270,12 @@ export class Launcher {
     const config = this.deps.config();
     // The account recorded at dispatch, checked against its project's scope again at every launch.
     const account = runAccount(config, project, run.account, run.harness);
-    // Looked up at every launch: the task's own choice, then the workflow's default, the account's, the harness's.
+    // Looked up at every launch: a review stage's model and the stage's own effort (frozen with the run's
+    // workflow), the task's own choice, then the workflow's default, the account's, the harness's.
     const pins = { model: run.model_pin, effort: run.effort_pin };
     checkPinsAtLaunch(pins, account);
-    const choice = resolveModelChoice(config, { pins, workflow: currentWorkflow(config, run.workflow), account });
+    const stage = positionOf(this.deps.db, run, run.kind).stage;
+    const choice = resolveModelChoice(config, { pins, workflow: currentWorkflow(config, run.workflow), account, stage });
     const workers = workersFor(workersConfig(config), account, choice);
     const timing = timingConfig(config);
     const runtime = this.deps.runtime();

@@ -2,7 +2,7 @@ import { FlowrynError } from "../api/errors.ts";
 import type { HarnessId } from "../harness/types.ts";
 import type { Account } from "./accounts.ts";
 import { table, type FlowrynConfig } from "./config.ts";
-import type { WorkflowDef } from "./workflows.ts";
+import type { StageDef, WorkflowDef } from "./workflows.ts";
 
 /**
  * A worker's model and effort (docs/notes/2026-10-24-model-and-effort-sc.md).
@@ -19,6 +19,13 @@ export const EFFORT_LEVELS: Record<HarnessId, readonly string[]> = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   pi: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
+
+/**
+ * What a workflow stage may set as its `effort` (docs/notes/2026-11-06-effort-and-model-gn.md): the levels
+ * both harnesses take, never max (the cost has no matching gain for a worker; a task that needs it says so
+ * with dispatch --effort).
+ */
+export const STAGE_EFFORT_LEVELS: readonly string[] = ["low", "medium", "high", "xhigh"];
 
 /** Every effort level some harness takes, for shell completion of --effort. */
 export const EFFORT_CHOICES: readonly string[] = [...new Set(Object.values(EFFORT_LEVELS).flat())];
@@ -94,8 +101,24 @@ function accountSets(config: FlowrynConfig, account: Account, key: "model" | "ef
   return raw[key] !== undefined;
 }
 
-export function resolveModelChoice(config: FlowrynConfig, input: { pins: ModelPins; workflow: WorkflowDef | null; account: Account }): ModelChoice {
-  const { pins, workflow, account } = input;
+/** The part of a stage the lookup reads: its own effort, and the review model frozen onto a review stage at dispatch. */
+export type StageChoice = Pick<StageDef, "id"> & Partial<Pick<StageDef, "effort" | "review_model">>;
+
+/**
+ * A review stage's model: the project's `review_model`, frozen onto the stage at dispatch. Claude only: a
+ * Pi worker stays on its own model (the user's rule: Pi keeps the free model), so it is never set there.
+ */
+export function stageModel(stage: StageChoice | null | undefined, harness: HarnessId): string | null {
+  return harness === "claude" ? (stage?.review_model ?? null) : null;
+}
+
+/** A stage's own effort, unless the task chose one itself (dispatch --effort wins over every default). */
+export function stageEffort(stage: StageChoice | null | undefined, pins: ModelPins): string | null {
+  return pins.effort === null ? (stage?.effort ?? null) : null;
+}
+
+export function resolveModelChoice(config: FlowrynConfig, input: { pins: ModelPins; workflow: WorkflowDef | null; account: Account; stage?: StageChoice | null }): ModelChoice {
+  const { pins, workflow, account, stage } = input;
   const defaults = workflow?.models?.[account.harness] ?? NO_PINS;
   const below = (key: "model" | "effort"): string => {
     if (account[key] === null) return "harness default";
@@ -104,7 +127,10 @@ export function resolveModelChoice(config: FlowrynConfig, input: { pins: ModelPi
 
   let model: string | null;
   let modelSource: string;
-  if (pins.model !== null) [model, modelSource] = [pins.model, "dispatch"];
+  const reviewModel = stageModel(stage, account.harness);
+  // A review stage runs on the project's review model, whoever built: the point is a second model's read.
+  if (reviewModel !== null) [model, modelSource] = [reviewModel, `review_model (stage ${stage!.id})`];
+  else if (pins.model !== null) [model, modelSource] = [pins.model, "dispatch"];
   else if (defaults.model !== null && modelFits(defaults.model, account)) [model, modelSource] = [defaults.model, `workflow ${workflow!.id}`];
   else {
     [model, modelSource] = [account.model, below("model")];
@@ -114,7 +140,9 @@ export function resolveModelChoice(config: FlowrynConfig, input: { pins: ModelPi
 
   let effort: string | null;
   let effortSource: string;
+  const ownEffort = stageEffort(stage, pins);
   if (pins.effort !== null) [effort, effortSource] = [pins.effort, "dispatch"];
+  else if (ownEffort !== null) [effort, effortSource] = [ownEffort, `stage ${stage!.id}`];
   else if (defaults.effort !== null) [effort, effortSource] = [defaults.effort, `workflow ${workflow!.id}`];
   else [effort, effortSource] = [account.effort, below("effort")];
 

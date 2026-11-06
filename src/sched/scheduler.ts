@@ -832,7 +832,8 @@ function newPass(): GrantPass {
  * with the run). Call inside the grant's transaction.
  */
 function overflowRun(db: Db, config: FlowrynConfig, run: RunWithPolicy, from: string, to: Account, why: string, now: number): void {
-  const choice = resolveModelChoice(config, { pins: { model: run.model_pin, effort: run.effort_pin }, workflow: currentWorkflow(config, run.workflow), account: to });
+  const stage = positionOf(db, run, run.kind).stage;
+  const choice = resolveModelChoice(config, { pins: { model: run.model_pin, effort: run.effort_pin }, workflow: currentWorkflow(config, run.workflow), account: to, stage });
   db.query("UPDATE runs SET account = ?2, model = ?3, effort = ?4, updated_at = ?5 WHERE id = ?1").run(run.id, to.id, choice.model, choice.effort, now);
   appendEvent(db, { source: "daemon", kind: "sched.overflow", runId: run.id, taskId: run.task_id, payload: { from, to: to.id, why, at: "grant", ...choice }, ts: now });
 }
