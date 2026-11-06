@@ -175,7 +175,7 @@ export function startAutonomy(db: Db, a: NewAutonomy): AutonomyRow {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
   ).run(id, a.channel, actor, a.grantId, JSON.stringify(a.terms.projects), words, termsHash(a.terms), a.now, a.terms.until);
   // The words are the user's and may hold anything: the row keeps them, the event does not.
-  appendEvent(db, { source: a.channel === "cli-tty" ? "cli" : "hook", kind: "autonomy.started", payload: { autonomy: id, channel: a.channel, projects: a.terms.projects, until: a.terms.until, grant: a.grantId, ...(live ? { superseded: live.id } : {}) }, ts: a.now });
+  appendEvent(db, { source: "cli", kind: "autonomy.started", payload: { autonomy: id, channel: a.channel, projects: a.terms.projects, until: a.terms.until, grant: a.grantId, ...(live ? { superseded: live.id } : {}) }, ts: a.now });
   return getAutonomy(db, id)!;
 }
 
