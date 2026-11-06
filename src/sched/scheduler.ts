@@ -785,6 +785,14 @@ export class Scheduler {
     const open = findOpenItem(db, "capacity_wait", null);
     if (oldest && t - oldest.waiting_since >= threshold) {
       if (open) return;
+      // Every run waiting that long already has its own item from the wait registry (src/reconcile/waits.ts): no second P1.
+      const uncovered = db
+        .query(
+          `SELECT COUNT(*) AS n FROM runs r WHERE r.state NOT IN ('cleaned','failed','cancelled') AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')
+             AND r.waiting_since <= ?1 AND NOT EXISTS (SELECT 1 FROM waits w WHERE w.run_id = r.id AND w.item_id IS NOT NULL)`,
+        )
+        .get(t - threshold) as { n: number };
+      if (uncovered.n === 0) return;
       const count = (db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead') AND waiting_since <= ?1").get(t - threshold) as { n: number }).n;
       const host = hostState(db);
       const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);

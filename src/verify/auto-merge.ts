@@ -115,6 +115,10 @@ export function autoMergeLine(db: Db, row: AutoMergeRow): string {
 }
 
 /** What the pr_ready line says of a row, or null once it ended. */
+export function autoMergeProgress(db: Db, row: AutoMergeRow): string | null {
+  return progressOf(db, row);
+}
+
 function progressOf(db: Db, row: AutoMergeRow): string | null {
   switch (row.state) {
     case "queued": {

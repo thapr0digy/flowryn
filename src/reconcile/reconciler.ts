@@ -75,6 +75,11 @@ export interface ReconcilerDeps {
    * and say whether it now matches it; absent, the invariant pass is skipped.
    */
   backlogFresh?(): Promise<boolean>;
+  /**
+   * The wait registry's pass (src/reconcile/waits.ts): recover each wait past its deadline, itemize one
+   * its recovery did not clear; absent, waits are not checked.
+   */
+  checkWaits?(): void;
 }
 
 export type PassReason = "startup" | "reconnect" | "steady" | "event" | "kick";
@@ -191,6 +196,7 @@ export class Reconciler {
     if (this.stopped) return;
     await this.checkBacklog();
     if (this.stopped) return;
+    this.checkWaits();
     tx(db, () => flagUnackedSteers(db, now(), timing()));
     for (const run of runs) if (unackedSteers(db, run.id).length > 0) this.deps.bus.notify(run.id);
     if (reason === "startup" && stats.dead >= HUSK_RESTART_THRESHOLD) {
@@ -199,6 +205,16 @@ export class Reconciler {
     }
     if (reason !== "steady" || stats.dead + stats.resumed + stats.reattached > 0) {
       log(`reconcile ${reason}: ${stats.checked} run(s), ${stats.reattached} reattached, ${stats.dead} dead, ${stats.resumed} resumed`);
+    }
+  }
+
+  /** Every wait against its deadline; a throw is logged, never stops the pass. */
+  private checkWaits(): void {
+    if (!this.deps.checkWaits) return;
+    try {
+      this.deps.checkWaits();
+    } catch (error) {
+      this.deps.log(`reconcile: waits: ${(error as Error).stack ?? String(error)}`);
     }
   }
 

@@ -134,6 +134,7 @@ export const LANE_TABLE = {
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
   auto_merge_held: { lane: "P1", class: "actionable" },
+  wait_expired: { lane: "P1", class: "actionable" },
   autonomy_parked: { lane: "P1", class: "actionable" },
   review_unanswered: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
@@ -174,9 +175,10 @@ export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropp
  * did outside the leader session (user_acted, and a pass you asked for on a
  * review page), a merge that landed without the leader's own merge call, and
  * a yolo task's PR ready for the leader to verify and merge (LEADER_WAKE_SQL),
- * and an auto-merge that was held. Each wakes it once (followUpBatch in router.ts).
+ * an auto-merge that was held, and a wait past its deadline that its recovery did not
+ * clear (src/reconcile/waits.ts). Each wakes it once (followUpBatch in router.ts).
  */
-export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready", "auto_merge_held"];
+export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready", "auto_merge_held", "wait_expired"];
 
 /**
  * SQL for "item `i` is a leader follow-up": a LEADER_WAKE_KINDS item, where a

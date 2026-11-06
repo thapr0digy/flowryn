@@ -44,6 +44,7 @@ import { ReviewOpener } from "../lavish/opener.ts";
 import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
+import { checkWaits } from "../reconcile/waits.ts";
 import { configureOwnedProcesses, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../runtime/bounded.ts";
 import { Operations } from "../lifecycle/operation-recovery.ts";
 import { adapterFor } from "../harness/registry.ts";
@@ -396,6 +397,10 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         if (journal.locks.isHeld("backlog")) return false;
         const snapshot = readSnapshot(database, "backlog");
         return snapshot !== null && snapshot.contentHash === hashFile(config.tasks.backlog);
+      },
+      checkWaits: () => {
+        const outcome = checkWaits({ db: database, config: () => config, now: Date.now, kickScheduler: () => scheduler?.kick(), kickAutoMerger: () => autoMerger?.kick() });
+        if (outcome.recovered.length + outcome.itemized.length > 0) log(`waits: recovered ${outcome.recovered.join(", ") || "none"}; itemized ${outcome.itemized.join(", ") || "none"}`);
       },
     });
     const herdrWatcher = new HerdrWatcher({

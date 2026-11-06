@@ -8,6 +8,7 @@ import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, 
 import { policyMode } from "./policy.ts";
 import { askConfig } from "./ask.ts";
 import { briefsConfig } from "./briefs.ts";
+import { waitDeadlines } from "../reconcile/wait-deadlines.ts";
 import { upkeepConfig } from "./upkeep.ts";
 import { parseTomlText } from "./toml-parse.ts";
 import { validationConfig } from "./validation.ts";
@@ -87,6 +88,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   scopes: (c) => accountsConfig(c).scopes,
   ask: askConfig,
   briefs: briefsConfig,
+  waits: (c) => Object.fromEntries(Object.entries(waitDeadlines(c)).map(([kind, ms]) => [`${kind}_min`, ms / 60_000])),
 };
 
 export interface EffectiveConfig {
