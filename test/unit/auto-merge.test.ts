@@ -14,7 +14,9 @@ import { inertDelivery } from "../../src/policy/services.ts";
 import {
   AutoMerger,
   getAutoMerge,
+  HEAD_MOVED_WAIT_MS,
   MAX_VERIFY_REQUEUES,
+  NO_CI_CHECKS_WAIT_MS,
   requeueCount,
   liveAutoMerge,
   sendBackText,
@@ -475,6 +477,43 @@ describe("the controller, without GitHub", () => {
       await merger(f, after ?? config(OPTED_IN)).auto.pass();
       expect({ name, ...getAutoMerge(f.db, row.id) }).toMatchObject({ name, state: "superseded", detail: why });
     }
+  });
+
+  test("a head that moved past a passed verify with nothing delivered holds after 30 min, not 6 h; a no_ci project's checks get 1 h", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const v = verification(f, f.root);
+    finish(f, v, "passed");
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    const evidence = (head: string, pending: string[]) =>
+      tx(f.db, () =>
+        f.db
+          .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+          .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head, head_ref: "flowryn/t1", merge_sha: null, checks: { state: pending.length ? "pending" : "green", line: "x", red: [], pending, total: 1 }, observed_at: 1 })),
+      );
+    evidence("c".repeat(40), []);
+    await merger(f, cfg, 5_000 + HEAD_MOVED_WAIT_MS).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
+    await merger(f, cfg, 5_000 + HEAD_MOVED_WAIT_MS + 1).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "head_moved" });
+    expect(getAutoMerge(f.db, row.id)!.detail).toContain("over 30 min ago");
+
+    const g = fixture();
+    const w = verification(g, g.root);
+    finish(g, w, "passed");
+    const other = tx(g.db, () => startAutoMerge(g.db, cfg, g.run(), g.delivery, 5_000))!;
+    tx(g.db, () =>
+      g.db
+        .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+        .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: HEAD, head_ref: "flowryn/t1", merge_sha: null, checks: { state: "pending", line: "x", red: [], pending: ["ci/test"], total: 1 }, observed_at: 1 })),
+    );
+    const at = (now: number, noCi: boolean) => new AutoMerger({ db: g.db, config: () => cfg, delivery: inertDelivery(), now: () => now, log: () => {}, kickScheduler: () => {}, noCi: async () => noCi });
+    await at(5_000 + NO_CI_CHECKS_WAIT_MS + 1, false).pass();
+    expect(getAutoMerge(g.db, other.id)?.state).toBe("waiting_checks");
+    await at(5_000 + NO_CI_CHECKS_WAIT_MS, true).pass();
+    expect(getAutoMerge(g.db, other.id)?.state).toBe("waiting_checks");
+    await at(5_000 + NO_CI_CHECKS_WAIT_MS + 1, true).pass();
+    expect(getAutoMerge(g.db, other.id)).toMatchObject({ state: "held", reason: "checks_timeout" });
   });
 
   test("checks pending over 6 h, or a head that moved with nothing delivered since, hold", async () => {

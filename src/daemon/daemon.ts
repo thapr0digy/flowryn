@@ -45,6 +45,7 @@ import { LavishPoller } from "../lavish/poller.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
 import { checkWaits } from "../reconcile/waits.ts";
+import { declaresNoCi } from "../lifecycle/ci-wait.ts";
 import { configureOwnedProcesses, recoverOwnedProcesses, runBounded, stopOwnedProcesses } from "../runtime/bounded.ts";
 import { Operations } from "../lifecycle/operation-recovery.ts";
 import { adapterFor } from "../harness/registry.ts";
@@ -613,7 +614,19 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
       kickScheduler: () => scheduler?.kick(),
     });
-    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick(), landing });
+    // A no_ci project's checks get NO_CI_CHECKS_WAIT_MS: its default branch's .no-mistakes.yaml, read through bounded git, kept a minute.
+    const noCiRead = new Map<string, { at: number; value: boolean }>();
+    const noCi = async (projectId: string): Promise<boolean> => {
+      const project = getProject(database, projectId);
+      if (!project) return false;
+      const kept = noCiRead.get(projectId);
+      if (kept && Date.now() - kept.at < 60_000) return kept.value;
+      const shown = await deliveryGit(["show", `origin/${project.default_branch}:.no-mistakes.yaml`], project.path);
+      const value = shown.code === 0 && declaresNoCi(shown.stdout);
+      noCiRead.set(projectId, { at: Date.now(), value });
+      return value;
+    };
+    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick(), landing, noCi });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
       explainWaits: () => scheduler?.kickWaits(),

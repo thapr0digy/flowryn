@@ -775,25 +775,21 @@ export class Scheduler {
     const { db, now } = this.deps;
     const t = now();
     const threshold = schedTiming(this.deps.config()).wait_alert_ms;
-    const oldest = db
-      .query(
-        `SELECT task_id, waiting_since FROM runs WHERE state NOT IN ('cleaned','failed','cancelled')
-           AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead')
-           AND waiting_since IS NOT NULL ORDER BY waiting_since LIMIT 1`,
-      )
-      .get() as { task_id: string; waiting_since: number } | null;
+    const waitingRuns = `FROM runs r WHERE r.state NOT IN ('cleaned','failed','cancelled')
+           AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead') AND r.waiting_since IS NOT NULL`;
+    const oldest = db.query(`SELECT r.task_id, r.waiting_since ${waitingRuns} ORDER BY r.waiting_since LIMIT 1`).get() as { task_id: string; waiting_since: number } | null;
+    // A queued verify waits for capacity too (the validation pool, the host check): the oldest one counts.
+    const verify = db.query("SELECT id, task_id, requested_at FROM verify_queue WHERE state = 'queued' ORDER BY requested_at, CAST(substr(id, 3) AS INTEGER) LIMIT 1").get() as { id: string; task_id: string | null; requested_at: number } | null;
+    const runOver = oldest !== null && t - oldest.waiting_since >= threshold;
+    const verifyOver = verify !== null && t - verify.requested_at >= threshold;
     const open = findOpenItem(db, "capacity_wait", null);
-    if (oldest && t - oldest.waiting_since >= threshold) {
+    if (runOver || verifyOver) {
       if (open) return;
-      // Every run waiting that long already has its own item from the wait registry (src/reconcile/waits.ts): no second P1.
-      const uncovered = db
-        .query(
-          `SELECT COUNT(*) AS n FROM runs r WHERE r.state NOT IN ('cleaned','failed','cancelled') AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead')
-             AND r.waiting_since <= ?1 AND NOT EXISTS (SELECT 1 FROM waits w WHERE w.run_id = r.id AND w.item_id IS NOT NULL)`,
-        )
-        .get(t - threshold) as { n: number };
-      if (uncovered.n === 0) return;
-      const count = (db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead') AND waiting_since <= ?1").get(t - threshold) as { n: number }).n;
+      // Every wait that long already has its own item from the wait registry (src/reconcile/waits.ts): no second P1.
+      const uncoveredRuns = runOver ? (db.query(`SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?1 AND NOT EXISTS (SELECT 1 FROM waits w WHERE w.run_id = r.id AND w.item_id IS NOT NULL)`).get(t - threshold) as { n: number }).n : 0;
+      const uncoveredVerify = verifyOver && !db.query("SELECT 1 FROM waits WHERE key = ?1 AND item_id IS NOT NULL").get(`verify:${verify.id}`);
+      if (uncoveredRuns === 0 && !uncoveredVerify) return;
+      const count = runOver ? (db.query(`SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?1`).get(t - threshold) as { n: number }).n : 0;
       const host = hostState(db);
       const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
       const paused = pausedAccounts(db, t);
@@ -811,9 +807,18 @@ export class Scheduler {
                 : untested
                   ? `${untested[0]} ${untested[1]} has no passing contract, or full capacity pools`
                   : "full capacity pools";
+      const verifyAge = verify ? Math.round((t - verify.requested_at) / 60_000) : null;
+      const verifyPart = verifyOver ? `oldest queued verify ${verify.id}${verify.task_id ? ` (${verify.task_id})` : ""} ${verifyAge}m` : null;
+      const runPart = runOver ? `${count} run(s) waiting over ${Math.round(threshold / 60_000)}m for capacity (${why}); oldest ${taskTitle(db, oldest.task_id)}` : `a verify waiting over ${Math.round(threshold / 60_000)}m (${why})`;
       tx(db, () => {
-        const event = appendEvent(db, { source: "daemon", kind: "sched.waiting", taskId: oldest.task_id, payload: { runs: count, oldest_ms: t - oldest.waiting_since, why }, ts: t });
-        openItem(db, { kind: "capacity_wait", eventSeq: event.seq, line: `${count} run(s) waiting over ${Math.round(threshold / 60_000)}m for capacity (${why}); oldest ${taskTitle(db, oldest.task_id)}; flowryn capacity`, now: t });
+        const event = appendEvent(db, {
+          source: "daemon",
+          kind: "sched.waiting",
+          taskId: runOver ? oldest.task_id : (verify?.task_id ?? null),
+          payload: { runs: count, oldest_ms: runOver ? t - oldest.waiting_since : null, verify: verifyOver ? verify.id : null, verify_ms: verifyOver ? t - verify.requested_at : null, why },
+          ts: t,
+        });
+        openItem(db, { kind: "capacity_wait", eventSeq: event.seq, line: `${runPart}${verifyPart ? `; ${verifyPart}` : ""}; flowryn capacity`, now: t });
       });
     } else if (open) {
       tx(db, () => {

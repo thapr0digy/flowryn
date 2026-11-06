@@ -24,6 +24,15 @@ The auto-merge used to wait up to 6 h on a request cancelled because its head mo
 
 The drain no longer cancels on a stale read. When GitHub shows an earlier delivered head of a task whose latest delivery is the request's head, the request waits instead. It waits up to `STALE_READ_WAIT_MS` (5 min) from when it was requested, and is cancelled after that.
 
+## Shorter auto-merge waits, and a queue a waiting request does not block
+
+The leader's audit (steer m576) added these:
+
+- **A passed verify whose PR head moved** and was never redelivered now holds after `HEAD_MOVED_WAIT_MS` (30 min), not 6 h. The merge gate's `head_moved` retry uses the same bound.
+- **GitHub's checks** may stay pending `CHECKS_WAIT_MS` (6 h). On a project whose default branch's `.no-mistakes.yaml` says `no_ci: true`, the limit is `NO_CI_CHECKS_WAIT_MS` (1 h). The daemon reads the file through bounded git and keeps the reading for a minute (the auto-merger's `noCi` dep).
+- **The verify drain** (`drainVerifyQueue`) still starts requests in order. A request that has to wait on its own PR now steps aside for that pass, so the requests behind it start. Such a wait is GitHub lagging, GitHub unreachable, or an invalid project config. A full validation pool, a pending restart or a failing host check still hold the whole queue.
+- **The scheduler's `capacity_wait` P1** also counts the oldest queued verify. One queued over `[sched] wait_alert_ms` opens it, with its id, task and age in the line (`oldest queued verify vq1 (t1) 31m`). No P1 opens when the wait registry has already itemized that wait.
+
 ## The wait registry (`src/reconcile/waits.ts`, `src/reconcile/wait-deadlines.ts`)
 
 `collectWaits` lists every waiting state there is now. One table (`WAIT_DEADLINES_MS`) gives each kind its deadline:
@@ -78,6 +87,13 @@ Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`
   - A head that really moved gets its verify queued, and its delivery follows it.
   - A request that is gone is requeued; a final cancel holds.
   - A second interruption by a stop is requeued.
+- `test/unit/auto-merge.test.ts` also covers the 30-min head-moved hold and the 1 h no_ci checks limit.
+- `test/unit/verify-queue.test.ts`:
+  - A request waiting on its own PR steps aside, and the request behind it starts.
+  - A stale read waits up to `STALE_READ_WAIT_MS`, then is cancelled.
+- `test/unit/capacity-alert.test.ts`:
+  - A verify queued over the alert threshold opens `capacity_wait` with its age, and the alert closes once nothing waits that long.
+  - A verify the registry already itemized opens no second P1.
 - `test/unit/waits.test.ts`:
   - The `[waits]` table and its validation.
   - A host-held launch is recovered at 10 min, then itemized with the numbers, wakes the leader, and the item resolves when the wait ends.

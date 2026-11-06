@@ -30,7 +30,8 @@ import { finishedAtHead, getVerification, runningVerifications, type Verificatio
  *
  * A verify step that exits non-zero sends the ship back to its worker once
  * per head with the step and its tail (sent_back); a timeout, an error, a
- * second failure at the head, checks pending over 6 h, or a merge-gate refusal
+ * second failure at the head, checks pending over 6 h (1 h under no_ci), a moved head
+ * not redelivered in 30 min, or a merge-gate refusal
  * holds it (auto_merge_held, a P1 that wakes the leader). A run that is sent
  * back, cancelled or redelivered, or a project that turns it off, supersedes
  * the row. The merge is the `merge` verb's own path (src/policy/merge-path.ts)
@@ -57,6 +58,10 @@ export function interruptedByStop(v: Pick<Verification, "state" | "detail">): bo
 
 /** How long a passed verify waits on GitHub's checks before the auto-merge is held. */
 export const CHECKS_WAIT_MS = 6 * 60 * 60_000;
+/** A project whose default branch's .no-mistakes.yaml says `no_ci: true` gets this long for GitHub's checks instead. */
+export const NO_CI_CHECKS_WAIT_MS = 60 * 60_000;
+/** How long a passed verify waits for the redelivery of a PR head that moved past it before the auto-merge is held. */
+export const HEAD_MOVED_WAIT_MS = 30 * 60_000;
 /** The controller's fallback pass; a finished verify, a watcher pass and a delivery kick it sooner. */
 export const AUTO_MERGE_TICK_MS = 60_000;
 /** Lines of a failed step's output a send-back carries. */
@@ -311,7 +316,7 @@ export function sendBackText(v: Verification, step: VerifyStep): string {
 /**
  * Codes the merge gate refuses with that only mean "not yet": the next pass
  * tries again. A head that moved is a worker mid-redelivery; the watcher's
- * next read of the PR makes fromWaitingChecks wait on it, bounded by CHECKS_WAIT_MS.
+ * next read of the PR makes fromWaitingChecks wait on it, bounded by HEAD_MOVED_WAIT_MS.
  */
 const RETRY_CODES = new Set(["checks_pending", "forge_unavailable", "merge_in_flight", "not_ready", "head_moved"]);
 
@@ -327,6 +332,8 @@ export interface AutoMergerDeps extends MergeServices {
   /** A sent-back ship's last stage waits for a grant: the scheduler looks now. */
   kickScheduler(): void;
   landing?: LandingHooks;
+  /** Whether the project's default branch declares `no_ci: true` (.no-mistakes.yaml); absent or unreadable: no. */
+  noCi?(projectId: string): Promise<boolean>;
   /** The fallback pass interval (AUTO_MERGE_TICK_MS). */
   tickMs?: number;
 }
@@ -369,6 +376,16 @@ export class AutoMerger {
         this.kick();
       }
     });
+  }
+
+  private async noCi(projectId: string): Promise<boolean> {
+    if (!this.deps.noCi) return false;
+    try {
+      return await this.deps.noCi(projectId);
+    } catch (error) {
+      this.deps.log(`auto-merge: reading project ${projectId}'s no_ci failed: ${(error as Error).message}`);
+      return false;
+    }
   }
 
   /** One pass over the live rows. Exposed for tests. */
@@ -582,16 +599,17 @@ export class AutoMerger {
     const delivered = deliveredOf(db, row.task_id);
     if (delivered?.kind === "pr") {
       const pr = prEvidence(db, row.run_id);
-      const waitedTooLong = now - row.state_since > CHECKS_WAIT_MS;
+      const waited = now - row.state_since;
       // The worker pushed past the delivered head: its redelivery supersedes this row.
       if (pr && pr.head !== row.head_sha) {
-        if (!waitedTooLong) return row;
-        return tx(db, () => this.hold(row, "head_moved", `the PR head moved from ${row.head_sha.slice(0, 8)} (delivered) to ${pr.head.slice(0, 8)} over ${CHECKS_WAIT_MS / 3_600_000} h ago, and nothing was delivered since`, `flowryn steer ${row.task_id} --body-file -`, now));
+        if (waited <= HEAD_MOVED_WAIT_MS) return row;
+        return tx(db, () => this.hold(row, "head_moved", `the PR head moved from ${row.head_sha.slice(0, 8)} (delivered) to ${pr.head.slice(0, 8)} over ${HEAD_MOVED_WAIT_MS / 60_000} min ago, and nothing was delivered since`, `flowryn steer ${row.task_id} --body-file -`, now));
       }
       const pending = pr && pr.checks && (pr.checks.state === "pending" || pr.checks.pending.length > 0);
       if (pending) {
-        if (!waitedTooLong) return row;
-        return tx(db, () => this.hold(row, "checks_timeout", `GitHub's checks have been pending for over ${CHECKS_WAIT_MS / 3_600_000} h (${pr.checks!.pending.join(", ") || pr.checks!.line})`, `flowryn show ${row.task_id}; once they finish: flowryn merge ${row.task_id}`, now));
+        const limit = (await this.noCi(row.project_id)) ? NO_CI_CHECKS_WAIT_MS : CHECKS_WAIT_MS;
+        if (waited <= limit) return row;
+        return tx(db, () => this.hold(row, "checks_timeout", `GitHub's checks have been pending for over ${limit / 3_600_000} h (${pr.checks!.pending.join(", ") || pr.checks!.line})`, `flowryn show ${row.task_id}; once they finish: flowryn merge ${row.task_id}`, now));
       }
     }
     if (this.deps.landing && !(await this.deps.landing.beforeMerge(row))) return getAutoMerge(db, row.id) ?? row;
@@ -619,7 +637,7 @@ export class AutoMerger {
         tx(db, () => appendEvent(db, event));
         return row;
       }
-      if (RETRY_CODES.has(error.code) && !(error.code === "head_moved" && this.deps.now() - row.state_since > CHECKS_WAIT_MS)) return row;
+      if (RETRY_CODES.has(error.code) && !(error.code === "head_moved" && this.deps.now() - row.state_since > HEAD_MOVED_WAIT_MS)) return row;
       return tx(db, () => {
         const fresh = getAutoMerge(db, row.id);
         if (fresh?.state !== "waiting_checks") return fresh ?? row;

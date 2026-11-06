@@ -190,14 +190,19 @@ function followRunning(db: Db, requestId: string, policy: string | null, now: nu
 /**
  * Start queued requests while their turn comes and a slot is free: the first
  * request in line either starts, is cancelled (its PR closed, its head moved),
- * follows a running verification of its PR and head under today's policy,
- * or holds everything behind it (FIFO). Returns how many started.
+ * follows a running verification of its PR and head under today's policy, or
+ * waits on its own PR (GitHub lagging behind a push, a read that failed) and
+ * steps aside for the ones behind it this pass. A full pool, a pending
+ * restart or the host check still hold the whole queue (FIFO). Returns how
+ * many started.
  */
 export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
   const { db } = deps;
   let started = 0;
+  // Requests that must wait on their own PR (GitHub lagging, unreadable, a bad project config): the ones behind go first.
+  const waiting = new Set<string>();
   for (;;) {
-    const first = queuedRequests(db)[0];
+    const first = queuedRequests(db).find((r) => !waiting.has(r.id));
     if (!first) return started;
     if (tx(db, () => followRunning(db, first.id, todaysPolicy(deps.config(), first.project_id), deps.now()))) continue;
     const caps = capacityConfig(deps.config()).pools;
@@ -206,7 +211,8 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
     const wanted = await stillWanted(deps, first);
     if ("wait" in wanted) {
       deps.log(`verify ${first.id}: waits: ${wanted.wait}`);
-      return started;
+      waiting.add(first.id);
+      continue;
     }
     if ("cancel" in wanted) {
       tx(db, () => cancelRequest(db, first, wanted.cancel, deps.now()));
