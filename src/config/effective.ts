@@ -7,6 +7,7 @@ import { cleanupConfig, githubConfig } from "./delivery.ts";
 import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
 import { policyMode } from "./policy.ts";
 import { askConfig } from "./ask.ts";
+import { contractsConfig } from "./contracts.ts";
 import { briefsConfig } from "./briefs.ts";
 import { upkeepConfig } from "./upkeep.ts";
 import { parseTomlText } from "./toml-parse.ts";
@@ -87,6 +88,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   scopes: (c) => accountsConfig(c).scopes,
   ask: askConfig,
   briefs: briefsConfig,
+  contracts: contractsConfig,
 };
 
 export interface EffectiveConfig {

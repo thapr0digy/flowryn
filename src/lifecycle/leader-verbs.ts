@@ -28,9 +28,10 @@ import { holdsLease, liveCounts, runLeases } from "../sched/pools.ts";
 import { phaseOfTask } from "./plans.ts";
 import { dropRecord, isDropped } from "./drop.ts";
 import { watchById, watchLabel, watchOfTask, type WatchRow } from "./watches.ts";
-import { planView, storedBase } from "./dispatch.ts";
+import { harnessWaitOf, planView, storedBase } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
-import { gateHarness, harnessRefusal } from "./harness-gate.ts";
+import { gateHarness, harnessRefusal, waitsOnAutoCheck } from "./harness-gate.ts";
+import type { FlowrynConfig } from "../config/config.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
 import { latestMerge } from "../policy/merge.ts";
 import { queuedAge, queuedTask, queuedWork, waitsCell, type QueuedTask } from "./queue-view.ts";
@@ -160,7 +161,9 @@ const cancel: VerbSpec = {
 };
 
 /** A resume the grant has not started yet, with the reason its open wait explanation gives. */
-function waitingReply(db: Db, result: HandlerResult): HandlerResult {
+function waitingReply(db: Db, config: FlowrynConfig, result: HandlerResult): HandlerResult {
+  const untested = harnessWaitOf(db, config, String(result.data.run));
+  if (untested) return { data: { ...result.data, state: "waiting", waits: untested }, hints: [`flowryn show ${String(result.data.task)}`] };
   const why = db
     .query("SELECT rule, reason FROM explanations WHERE run_id = ?1 AND kind IN ('capacity','resume') AND closed_at IS NULL ORDER BY id DESC LIMIT 1")
     .get(String(result.data.run)) as { rule: string; reason: string } | null;
@@ -224,10 +227,13 @@ const resume: VerbSpec = {
     const run = resumable(ctx.db, stringArg(args, "target")!);
     // Design section 5: the installed version is checked before a resume, as at dispatch.
     const check = await gateHarness(ctx.db, ctx.config(), run.harness, ctx.fleet.harnessVersion, "cli", "resume", ctx.now);
-    if (check.state !== "verified") throw harnessRefusal(check, ctx.db, ctx.config());
+    // An untested version the daemon checks itself (relaxed): the resume waits on the scheduler's grant, which gates it again.
+    if (waitsOnAutoCheck(ctx.db, ctx.config(), check)) return { waitsOnCheck: true };
+    if (check.state !== "verified") throw harnessRefusal(check, ctx.db, ctx.config(), check.flaggedNow);
     return null;
   },
-  apply(ctx, args) {
+  apply(ctx, args, prepared) {
+    const waitsOnCheck = (prepared as { waitsOnCheck?: boolean } | null)?.waitsOnCheck === true;
     const run = resumable(ctx.db, stringArg(args, "target")!);
     const now = ctx.now();
     const open = openOperation(ctx.db, run.id);
@@ -245,7 +251,8 @@ const resume: VerbSpec = {
       )
       .run(run.id, now);
     // A dead worker holds no slot (design section 11): the scheduler grants its worker slot, and its stage's pools, first.
-    const viaScheduler = replacement !== null || !holdsLease(ctx.db, run.id, WORKER_POOL);
+    // So does one waiting on the contract check: only the grant launches it, once the version passes.
+    const viaScheduler = replacement !== null || waitsOnCheck || !holdsLease(ctx.db, run.id, WORKER_POOL);
     if (replacement) ctx.db.query("UPDATE runs SET waiting_since = ?2 WHERE id = ?1").run(run.id, now);
     else if (viaScheduler) ctx.db.query("UPDATE runs SET pending_launch = 'resume', waiting_since = ?2 WHERE id = ?1").run(run.id, now);
     if (run.state === "failed" || run.state === "cancelled") {
@@ -263,12 +270,12 @@ const resume: VerbSpec = {
     if (row?.pending_launch === "resume") {
       await ctx.sched.passNow();
       const after = ctx.db.query("SELECT pending_launch FROM runs WHERE id = ?1").get(String(result.data.run)) as { pending_launch: string | null } | null;
-      return after?.pending_launch === "resume" ? waitingReply(ctx.db, result) : result;
+      return after?.pending_launch === "resume" ? waitingReply(ctx.db, ctx.config(), result) : result;
     }
     if (op?.mode && op.mode !== "resume") {
       await ctx.sched.passNow();
       const after = ctx.db.query("SELECT waiting_since FROM runs WHERE id = ?1").get(String(result.data.run)) as { waiting_since: number | null } | null;
-      return after?.waiting_since != null ? waitingReply(ctx.db, result) : result;
+      return after?.waiting_since != null ? waitingReply(ctx.db, ctx.config(), result) : result;
     }
     // The launcher issues the resume only from `requested`: a replayed settlement finds it issued and starts nothing.
     // A reply stored before operations existed names none: its resume was launched then.

@@ -19,6 +19,7 @@ You lead a crew of workers through the \`flowryn\` CLI. Lines starting "Flowryn"
 
 ## Act
 - \`flowryn dispatch <project> --kind ship|scout [--workflow feature|feature-ui|fix] [--blocked-by <decision task> --auto] --body-file -\` (\`feature-ui\` adds a visual QA review for work with screens). For docs, point the worker at the project's AGENTS.md rule; never name a shared notes file. The body is a structured brief (\`flowryn template ship|scout\` prints it): the user's words verbatim and the acceptance criteria under ## Intent, the substance of every source written into ## Context (not "read X"), then requirements, constraints, security, out of scope, verification; build instructions go under ## Spec, never in the intent. A brief missing a section is refused.
+- A reply \`waits\` on the contract check: report it in one line, nothing more; in relaxed mode never ask the user to run doctor.
 - A question that needs reading, not changing: \`flowryn dispatch <project> --kind ask --body-file -\`, not an answer here. One capped read-only model call (\`--max-usd\`); its answer arrives as an item (\`flowryn show a<N>\`).
 - \`flowryn plan <project> --brief-file <brief> --body-file -\`: one \`## Phase\` section each; each starts once the one before has landed; the brief carries to every phase.
 - \`flowryn steer <task> [--end-turn] --body-file -\`; \`interrupt|cancel|resume <task>\`; \`promote <task> --body-file -\` (a scout the user wants built).

@@ -155,8 +155,9 @@ function checker(options: { maxRunMs?: number; stopGraceMs?: number; daemonStopW
 }
 
 /** What a dispatch does: the gate, against the installed version (at `revisions`: this build's, or a test's bump). */
-function gate(harness: HarnessId, revisionMap?: RevisionMap): Promise<HarnessCheck> {
-  return gateHarness(db, config, harness, async (h) => versions[h], "cli", "dispatch", Date.now, revisionMap);
+async function gate(harness: HarnessId, revisionMap?: RevisionMap): Promise<HarnessCheck> {
+  const { flaggedNow: _flaggedNow, ...check } = await gateHarness(db, config, harness, async (h) => versions[h], "cli", "dispatch", Date.now, revisionMap);
+  return check as HarnessCheck;
 }
 
 function items(kind: string): { line: string; state: string; class: string }[] {
@@ -230,32 +231,87 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(await gate("claude")).toMatchObject({ state: "verified" });
   });
 
-  test("once per version: a failure opens one P1 naming the report and is not retried; a newer version runs again", async () => {
+  test("once per version, with one retry: a first failure is its own attempt with no P1; the second opens one P1 naming the report and is not retried; a newer version runs again", async () => {
     const auto = checker();
     auto.init();
     script = () => ({ passed: false });
     await gate("claude");
     await auto.tick();
+    // The first failure: recorded, not final, no P1; the version stays flagged and the retry is queued.
+    expect(items("harness_unverified")).toEqual([]);
+    expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", try: 1, final: false })]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.300", state: "waiting", try: 2, wait: "a retry (try 2 of 2) after a failed first attempt" });
+    expect(autoAttempt(db, "claude")!.manifest).toBeUndefined();
+    expect(unverifiedVersion(db, "claude")).toBe("2.1.300");
+    await auto.tick();
+    expect(jobs).toHaveLength(2);
+    expect(events("contract.auto_started").map((e) => e.try)).toEqual([1, 2]);
     const open = items("harness_unverified");
     expect(open).toHaveLength(1);
     expect(open[0]!.line).toStartWith(`claude 2.1.300 failed its automatic contract check: ${join(dir, "data", "contracts", "claude-2.1.300-")}`);
     expect(recorded()).toEqual([]);
-    expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ harness: "claude", version: "2.1.300", build: BUILD, detail: "the report is not a passing run" })]);
+    expect(events("contract.auto_failed").at(-1)).toEqual(expect.objectContaining({ harness: "claude", version: "2.1.300", build: BUILD, detail: "the report is not a passing run", try: 2, final: true }));
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "failed", try: 2 });
 
     await gate("claude");
     await auto.tick();
     await auto.tick();
-    expect(jobs).toHaveLength(1);
+    expect(jobs).toHaveLength(2);
     expect(items("harness_unverified")).toHaveLength(1);
 
     versions.claude = "2.1.301";
     script = () => ({});
     await gate("claude");
     await auto.tick();
-    expect(jobs.map((j) => j.version)).toEqual(["2.1.300", "2.1.301"]);
+    expect(jobs.map((j) => j.version)).toEqual(["2.1.300", "2.1.300", "2.1.301"]);
     expect(recorded()).toEqual([{ harness: "claude", version: "2.1.301" }]);
     // The superseded version's P1 closed with it.
     expect(items("harness_unverified").filter((i) => i.state === "open")).toEqual([]);
+  });
+
+  test("a flake: a first failure then a pass records the version with no P1, each try its own event", async () => {
+    const auto = checker();
+    auto.init();
+    let n = 0;
+    script = () => ({ passed: n++ > 0 });
+    await gate("claude");
+    await auto.tick();
+    await auto.tick();
+    expect(jobs).toHaveLength(2);
+    expect(recorded()).toEqual([{ harness: "claude", version: "2.1.300" }]);
+    expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ try: 1, final: false })]);
+    expect(events("contract.auto_started").map((e) => e.try)).toEqual([1, 2]);
+    expect(items("harness_unverified")).toEqual([]);
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "passed" });
+    expect(passes).toBe(1);
+  });
+
+  test("the queued retry stays the retry while it waits and across a daemon restart", async () => {
+    const auto = checker();
+    auto.init();
+    script = () => ({ passed: false });
+    await gate("claude");
+    await auto.tick();
+    busy = true;
+    await auto.tick();
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", wait: "a daemon restart", try: 2 });
+    busy = false;
+    // A new daemon: the attempt is waiting with no manifest, so nothing is released and the retry runs as try 2.
+    const next = checker();
+    next.init();
+    await next.tick();
+    expect(recovered).toEqual([]);
+    expect(events("contract.auto_started").map((e) => e.try)).toEqual([1, 2]);
+    expect(items("harness_unverified")).toHaveLength(1);
+  });
+
+  test("a refusal from the call that flagged the version names the check about to start, not the doctor command", () => {
+    checker().init();
+    const check = { harness: "claude" as const, state: "unverified" as const, version: "2.1.300", revision: CLAUDE_REVISION, stale: [] };
+    expect(harnessRefusal(check, db, config, true).help).toBe("an automatic contract check of claude 2.1.300 starts within seconds; dispatch and resume work once it passes");
+    expect(harnessRefusal(check, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
+    useConfig("strict");
+    expect(harnessRefusal(check, db, config, true).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
   });
 
   test("a run that wrote no report fails, naming its log", async () => {
@@ -263,6 +319,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     auto.init();
     script = () => ({ passed: false, report: false });
     await gate("pi");
+    await auto.tick();
     await auto.tick();
     const [p1] = items("harness_unverified");
     expect(p1!.line).toStartWith(`pi 0.90.0 failed its automatic contract check: ${join(dir, "data", "contracts", "auto-pi-0.90.0-")}`);
@@ -275,6 +332,7 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     script = () => ({ build: "0f0f0f0f0f0f" });
     await gate("claude");
     await auto.tick();
+    await auto.tick();
     expect(recorded()).toEqual([]);
     expect(items("harness_unverified")).toHaveLength(1);
     expect(events("contract.auto_failed")[0]).toMatchObject({ detail: "the report was written by build 0f0f0f0f0f0f" });
@@ -282,8 +340,9 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     script = () => ({ mode: "verify-only" });
     await gate("pi");
     await auto.tick();
+    await auto.tick();
     expect(recorded()).toEqual([]);
-    expect(events("contract.auto_failed")[1]).toMatchObject({ detail: "the report is a verify-only run, not a recording one" });
+    expect(events("contract.auto_failed")[2]).toMatchObject({ detail: "the report is a verify-only run, not a recording one" });
   });
 
   test("one check at a time, listed as a restart guard while it runs; the dispatch refusal says it is running", async () => {
@@ -557,7 +616,8 @@ describe("one owner, one budget: the check's deadline and its cleanup", () => {
     await auto.tick();
     expect(signals.map((s) => s.signal)).toEqual(["TERM", "KILL"]);
     expect(signals[1]!.at - signals[0]!.at).toBeGreaterThanOrEqual(190);
-    expect(autoAttempt(db, "claude")).toMatchObject({ state: "failed", detail: expect.stringContaining("did not finish within"), cleanup: "ok", manifest: jobs[0]!.manifest });
+    // A timeout is a failure like any other: its first try queues the retry, with its cleanup recorded and its manifest settled.
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", try: 2, detail: expect.stringContaining("did not finish within"), cleanup: "ok" });
     expect(jobs[0]!.manifest).toStartWith(join(dir, "data", "contracts", "auto-claude-2.1.300-"));
     expect(jobs[0]!.manifest).toEndWith(".owned.json");
     expect(recovered).toEqual([jobs[0]!.manifest]);
@@ -572,7 +632,7 @@ describe("one owner, one budget: the check's deadline and its cleanup", () => {
     await gate("claude");
     await auto.tick();
     expect(signals.map((s) => s.signal)).toEqual(["TERM"]);
-    expect(autoAttempt(db, "claude")).toMatchObject({ state: "failed", cleanup: "ok" });
+    expect(autoAttempt(db, "claude")).toMatchObject({ state: "waiting", try: 2, cleanup: "ok" });
     expect(recovered).toEqual([]);
   });
 
@@ -595,6 +655,7 @@ describe("one owner, one budget: the check's deadline and its cleanup", () => {
     versions.claude = "2.1.301";
     script = () => ({ passed: false, manifest: "clean" });
     await gate("claude");
+    await auto.tick();
     await auto.tick();
     expect(autoAttempt(db, "claude")).toMatchObject({ version: "2.1.301", state: "failed", cleanup: "ok" });
     expect(items("contract_leftover")).toHaveLength(1);
@@ -800,7 +861,7 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     expect(items("harness_unverified")).toEqual([]);
   });
 
-  test("a check that failed at another revision does not settle the daemon's: it runs once more, then is final", async () => {
+  test("a check that failed at another revision does not settle the daemon's: it runs again (with its one retry), then is final", async () => {
     tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.300", revision: CLAUDE_REVISION + 1, state: "failed", ended_at: 1, detail: "a failure at another revision" }));
     const auto = checker();
     auto.init();
@@ -808,9 +869,10 @@ describe("contract revision (docs/notes/2026-10-12-next-steps-md-ez.md)", () => 
     await gate("claude");
     await auto.tick();
     await auto.tick();
-    expect(jobs).toHaveLength(1);
+    await auto.tick();
+    expect(jobs).toHaveLength(2);
     expect(autoAttempt(db, "claude")).toMatchObject({ revision: CLAUDE_REVISION, state: "failed" });
-    expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION })]);
+    expect(events("contract.auto_failed")).toEqual([expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION, final: false }), expect.objectContaining({ version: "2.1.300", revision: CLAUDE_REVISION, final: true })]);
   });
 
   // Both harnesses are past the baseline revision now, so these pin the checker to it.

@@ -16,6 +16,9 @@ import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
 import { readManifest, type OwnedResources } from "../../src/contracts/owned.ts";
 import { contractRevision } from "../../src/contracts/revision.ts";
 import { isAlive } from "../../src/runtime/proc.ts";
+import { request } from "../../src/transport/unix.ts";
+import { ulid } from "../../src/util/ulid.ts";
+import { PROTO } from "../../src/version.ts";
 
 const NEW_VERSION = "9.9.10";
 let buildDir: string;
@@ -35,13 +38,13 @@ afterEach(async () => {
   for (const env of envs.splice(0)) await env.cleanup();
 });
 
-async function fleet(mode: "strict" | "relaxed", contractsAt?: number): Promise<FleetEnv> {
+async function fleet(mode: "strict" | "relaxed", contractsAt?: number, options: { extraConfig?: string; stepWaitMs?: number } = {}): Promise<FleetEnv> {
   const env = await makeFleetEnv({
     contractsAt,
-    extraConfig: `[policy]\nmode = "${mode}"`,
+    extraConfig: `[policy]\nmode = "${mode}"${options.extraConfig ? `\n${options.extraConfig}` : ""}`,
     daemonProgram: [bin, "daemon", "run"],
     // Each contract step's wait, capped: the fakes answer in seconds, so a broken step fails fast.
-    daemonEnv: { FLOWRYN_CONTRACT_MAX_WAIT_MS: "15000" },
+    daemonEnv: { FLOWRYN_CONTRACT_MAX_WAIT_MS: String(options.stepWaitMs ?? 15_000) },
     harnessScripts: { claude: `${import.meta.dir}/../helpers/fake-contract-claude.ts`, pi: `${import.meta.dir}/../helpers/fake-contract-pi.ts` },
   });
   envs.push(env);
@@ -61,10 +64,29 @@ const versions = (env: FleetEnv) => query<{ version: string }>(env, "SELECT vers
 const items = (env: FleetEnv, kind: string) => query<{ state: string; line: string; class: string }>(env, "SELECT state, line, class FROM items WHERE kind = ?1", kind);
 const events = (env: FleetEnv, kind: string) => query<{ payload: string }>(env, "SELECT payload FROM events WHERE kind = ?1 ORDER BY seq", kind).map((r) => JSON.parse(r.payload) as Record<string, unknown>);
 
-/** A dispatch on Claude: the gate reads the installed version, and refuses an untested one. */
-async function dispatchClaude(env: FleetEnv): Promise<{ code: number; error: { code?: string } }> {
+/** A dispatch on Claude: the gate reads the installed version; strict refuses an untested one, relaxed queues it on the automatic check. */
+async function dispatchClaude(env: FleetEnv): Promise<{ code: number; error: { code?: string }; data: Record<string, unknown> }> {
   const result = await env.json(["dispatch", "web", "--kind", "scout", "--harness", "claude", "--body-file", "-"], { stdin: "look around" });
-  return { code: result.code, error: (result.reply.error ?? {}) as { code?: string } };
+  return { code: result.code, error: (result.reply.error ?? {}) as { code?: string }, data: (result.reply.data ?? {}) as Record<string, unknown> };
+}
+
+interface RunView {
+  id: string;
+  harness_version: string;
+  pending_launch: string | null;
+  launched_at: number | null;
+}
+const runOf = (env: FleetEnv, id: string) => query<RunView>(env, "SELECT id, harness_version, pending_launch, launched_at FROM runs WHERE id = ?1", id)[0]!;
+const seqOf = (env: FleetEnv, kind: string, where = "1=1") => query<{ seq: number }>(env, `SELECT seq FROM events WHERE kind = ?1 AND ${where} ORDER BY seq`, kind).map((r) => r.seq);
+
+/** A relaxed dispatch on an untested version: accepted, waiting on the automatic check, never launched yet. */
+async function dispatchWaiting(env: FleetEnv, version: string): Promise<string> {
+  const reply = await dispatchClaude(env);
+  expect(reply.code).toBe(0);
+  expect(reply.data).toMatchObject({ state: "waiting", waits: `waits on the automatic contract check for claude ${version}; starts by itself once it passes` });
+  const run = String(reply.data.run);
+  expect(runOf(env, run)).toMatchObject({ pending_launch: "fresh", launched_at: null });
+  return run;
 }
 
 describe("the automatic contract check", () => {
@@ -73,8 +95,7 @@ describe("the automatic contract check", () => {
     async () => {
       const env = await fleet("relaxed");
       setHarnessVersion(env.h, "claude", NEW_VERSION);
-      const refused = await dispatchClaude(env);
-      expect(refused.error.code).toBe("contract_unverified");
+      const run = await dispatchWaiting(env, NEW_VERSION);
       try {
         await waitUntil(() => versions(env).includes(NEW_VERSION), 120_000, `the daemon to record claude ${NEW_VERSION}`);
       } catch (error) {
@@ -88,9 +109,60 @@ describe("the automatic contract check", () => {
       expect(events(env, "contract.passed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, by: "daemon", build })]);
       expect(items(env, "contract_recorded")).toEqual([expect.objectContaining({ class: "info", line: expect.stringContaining(`claude ${NEW_VERSION} passed, recorded automatically (build ${build})`) })]);
       expect(items(env, "harness_unverified")).toEqual([]);
-      expect(env.herdr.livePanes()).toEqual([]);
+      // The dispatch that waited launches by itself once the pass is recorded, never before it.
+      await waitUntil(() => runOf(env, run).launched_at !== null, 30_000, "the waiting run to launch");
+      expect(runOf(env, run).harness_version).toBe(NEW_VERSION);
+      expect(seqOf(env, "contract.passed")[0]!).toBeLessThan(seqOf(env, "run.launched", `run_id = '${run}'`)[0]!);
     },
     180_000,
+  );
+
+  test(
+    "relaxed: a failing check keeps the waiting run waiting, retries once, opens one P1; a later manual pass releases it",
+    async () => {
+      // A step wait of a few ms: every suite run fails at its first wait.
+      const env = await fleet("relaxed", undefined, { stepWaitMs: 5 });
+      setHarnessVersion(env.h, "claude", NEW_VERSION);
+      const run = await dispatchWaiting(env, NEW_VERSION);
+      await waitUntil(() => items(env, "harness_unverified").length > 0, 120_000, "the final failure's P1");
+      expect(events(env, "contract.auto_failed")).toEqual([expect.objectContaining({ try: 1, final: false }), expect.objectContaining({ try: 2, final: true })]);
+      const [p1] = items(env, "harness_unverified");
+      expect(p1).toMatchObject({ state: "open", line: expect.stringContaining(`claude ${NEW_VERSION} failed its automatic contract check`) });
+      expect(p1!.line).toContain("flowryn doctor --contracts --harness claude");
+      // Two more checker passes: nothing runs again, and the run is still waiting.
+      await Bun.sleep(11_000);
+      expect(events(env, "contract.auto_started")).toHaveLength(2);
+      expect(runOf(env, run)).toMatchObject({ pending_launch: "fresh", launched_at: null });
+      const again = await dispatchClaude(env);
+      expect(String(again.data.waits)).toStartWith(`waits for claude ${NEW_VERSION} to pass its contract suite: the automatic check failed`);
+
+      // A pass from your own terminal settles the P1 and releases both runs.
+      const report = join(env.h.home, "report.json");
+      await Bun.write(report, JSON.stringify({ harness: "claude", version: NEW_VERSION, passed: true, mode: "record", build: null, by: "human", revision: contractRevision("claude"), context: { platform: "darwin-arm64 25.3.0", herdr: "0.7.5", launch_profile: "scripted" } }));
+      const recorded = (await request(join(env.h.home, "run", "flowrynd.sock"), { proto: PROTO, ulid: ulid(), verb: "contracts.record", token: null, channel: "tty", args: { harness: "claude", version: NEW_VERSION, report } }, { connectMs: 1_000, replyMs: 10_000 })) as { ok: boolean };
+      expect(recorded.ok).toBe(true);
+      await waitUntil(() => runOf(env, run).launched_at !== null, 30_000, "the waiting run to launch after the manual pass");
+      expect(items(env, "harness_unverified").filter((i) => i.state === "open")).toEqual([]);
+    },
+    240_000,
+  );
+
+  test(
+    "relaxed: Claude updating again while a run waits is gated again at the grant: it launches only on the newer version's pass, and records that version",
+    async () => {
+      const env = await fleet("relaxed");
+      setHarnessVersion(env.h, "claude", NEW_VERSION);
+      const run = await dispatchWaiting(env, NEW_VERSION);
+      const NEWER = "9.9.11";
+      setHarnessVersion(env.h, "claude", NEWER);
+      await waitUntil(() => runOf(env, run).launched_at !== null, 170_000, "the waiting run to launch on the newer version");
+      expect(versions(env)).toContain(NEWER);
+      expect(runOf(env, run).harness_version).toBe(NEWER);
+      expect(events(env, "run.harness_version")).toEqual([expect.objectContaining({ harness: "claude", from: NEW_VERSION, to: NEWER })]);
+      const newerPass = seqOf(env, "contract.passed", `json_extract(payload, '$.version') = '${NEWER}'`)[0]!;
+      expect(newerPass).toBeLessThan(seqOf(env, "run.launched", `run_id = '${run}'`)[0]!);
+    },
+    240_000,
   );
 
   test(
@@ -98,8 +170,8 @@ describe("the automatic contract check", () => {
     async () => {
       const revision = contractRevision("claude");
       const env = await fleet("relaxed", revision + 1);
-      const refused = await env.json(["dispatch", "web", "--kind", "scout", "--harness", "claude", "--body-file", "-"], { stdin: "look around" });
-      expect(refused.reply.error).toMatchObject({ code: "contract_unverified", message: `claude ${FAKE_VERSION} passed only at contract revision ${revision + 1}, not revision ${revision}` });
+      const waiting = await dispatchClaude(env);
+      expect(waiting.data).toMatchObject({ state: "waiting", waits: `waits on the automatic contract check for claude ${FAKE_VERSION}; starts by itself once it passes` });
       const revisions = () => query<{ revision: number }>(env, "SELECT revision FROM harness_contracts WHERE harness = 'claude' AND version = ?1 ORDER BY revision", FAKE_VERSION).map((r) => r.revision);
       try {
         await waitUntil(() => revisions().includes(revision), 120_000, `the daemon to record claude ${FAKE_VERSION} at revision ${revision}`);
@@ -125,11 +197,11 @@ describe("the automatic contract check", () => {
     test(
       `assumption: a check stopped mid-suite by ${signal} leaves nothing: the ${releasedBy} releases exactly what the manifest names; the failure and the cleanup are recorded apart`,
       async () => {
-        const env = await fleet("relaxed");
+        // The version poll trips the gate, so no dispatch's worker shares the fake Herdr with the check.
+        const env = await fleet("relaxed", undefined, { extraConfig: "[contracts]\nversion_poll_ms = 10000" });
         // A workspace that is not the contract run's: it must stay.
         const unrelated = env.herdr.addPaneWithStatus(env.repo, "working");
         setHarnessVersion(env.h, "claude", NEW_VERSION);
-        expect((await dispatchClaude(env)).error.code).toBe("contract_unverified");
 
         // The suite's worker is up in the fake Herdr, and the manifest names the scratch daemon.
         const contracts = join(env.h.dataDir, "contracts");
@@ -150,7 +222,8 @@ describe("the automatic contract check", () => {
         await waitUntil(() => events(env, "contract.auto_cleanup").length + events(env, "contract.auto_cleanup_failed").length > 0, 60_000, "the cleanup recorded");
         expect(events(env, "contract.auto_cleanup_failed")).toEqual([]);
         expect(events(env, "contract.auto_cleanup")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, ok: true, by: releasedBy })]);
-        expect(events(env, "contract.auto_failed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION })]);
+        // The cut-off check is a first failure: not final (its retry runs on a later pass).
+        expect(events(env, "contract.auto_failed")[0]).toEqual(expect.objectContaining({ harness: "claude", version: NEW_VERSION, try: 1, final: false }));
         expect(versions(env)).toEqual([FAKE_VERSION]);
         expect(items(env, "contract_leftover")).toEqual([]);
         expect(env.herdr.livePanes()).toEqual([]);

@@ -255,7 +255,7 @@ describe("the runner", () => {
       return result(CLAUDE_SUCCESS);
     });
     const a = newAsk("Q?");
-    expect(drainAsks(d)).toBe(1);
+    expect(await drainAsks(d)).toBe(1);
     await settledAsks();
     expect(getAsk(db, a.id)).toMatchObject({ state: "answered", answer: "`TIMED_OUT` is `124`.", cost_usd: 0.00108937 });
     expect(seen[0]!.opts).toMatchObject({ cwd: h.home, stdin: "Q?", timeoutMs: DEFAULT_ASK.timeout_ms, label: "ask a1" });
@@ -270,8 +270,8 @@ describe("the runner", () => {
       return result(CLAUDE_SUCCESS);
     });
     for (let i = 0; i < 3; i++) newAsk(`Q${i}?`);
-    expect(drainAsks(d)).toBe(DEFAULT_ASK.max_concurrent);
-    expect(drainAsks(d)).toBe(0);
+    expect(await drainAsks(d)).toBe(DEFAULT_ASK.max_concurrent);
+    expect(await drainAsks(d)).toBe(0);
     expect((db.query("SELECT state FROM asks ORDER BY id").all() as { state: string }[]).map((r) => r.state)).toEqual(["running", "running", "queued"]);
     gate.resolve();
     await settledAsks();
@@ -282,7 +282,7 @@ describe("the runner", () => {
     tx(db, () => noteUsageLimit(db, "claude", "a worker", "limit reached", Date.now(), { usage_backoff_ms: 3_600_000, usage_backoff_max_ms: 3_600_000 }));
     newAsk();
     db.query("INSERT INTO asks (id, project_id, title, question, harness, account, max_usd, created_by, created_at) VALUES ('a2', 'web', 't', 'q', 'pi', 'pi', 1, 'leader', 2000)").run();
-    expect(drainAsks(d)).toBe(1);
+    expect(await drainAsks(d)).toBe(1);
     await settledAsks();
     expect(getAsk(db, "a1")!.state).toBe("queued");
     expect(getAsk(db, "a2")!.state).not.toBe("queued");
@@ -296,7 +296,7 @@ describe("the runner", () => {
         }),
     );
     const a = newAsk();
-    drainAsks(d);
+    await drainAsks(d);
     tx(db, () => recordCancelled(db, a.id, { reason: "no", by: "leader" }, Date.now()));
     expect(abortAsk(a.id)).toBe(true);
     await settledAsks();
@@ -311,25 +311,25 @@ describe("the runner", () => {
       return result("", { code: 143, aborted: opts.signal!.aborted });
     });
     db.query("INSERT INTO asks (id, project_id, title, question, harness, account, max_usd, created_by, created_at) VALUES ('a1', 'web', 't', 'q', 'pi', 'pi', 1, 'leader', 1)").run();
-    drainAsks(d);
+    await drainAsks(d);
     await settledAsks();
     expect(getAsk(db, "a1")).toMatchObject({ state: "failed", reason: "it spent $1.20, over its $1.00 cap" });
   });
 
   test("a deadline or a failed start is the ask's failure, named", async () => {
     newAsk();
-    drainAsks(deps(async () => result("", { code: 124, timedOut: true })));
+    await drainAsks(deps(async () => result("", { code: 124, timedOut: true })));
     await settledAsks();
     expect(getAsk(db, "a1")!.reason).toBe("no answer within 10 min");
     newAsk();
-    drainAsks(deps(async () => result("", { code: 127, spawnError: "ENOENT" })));
+    await drainAsks(deps(async () => result("", { code: 127, spawnError: "ENOENT" })));
     await settledAsks();
     expect(getAsk(db, "a2")!.reason).toBe("claude did not start: ENOENT");
   });
 
   test("a scout request whose scout cannot start (no Herdr here) fails the ask with how to promote it later", async () => {
     newAsk();
-    drainAsks(deps(async () => result(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "NEEDS-SCOUT: it must run the tests", total_cost_usd: 0.01 }))));
+    await drainAsks(deps(async () => result(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "NEEDS-SCOUT: it must run the tests", total_cost_usd: 0.01 }))));
     await settledAsks();
     const a = getAsk(db, "a1")!;
     expect(a.state).toBe("failed");

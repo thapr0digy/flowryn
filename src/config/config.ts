@@ -119,6 +119,7 @@ export const CONFIG_SECTIONS = [
   "scopes",
   "ask",
   "briefs",
+  "contracts",
 ] as const;
 export type SectionName = (typeof CONFIG_SECTIONS)[number];
 
