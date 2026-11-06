@@ -18,7 +18,7 @@ Terms:
 - `--projects` defaults to every project the caller sees that has `verify` steps. Each named project must be in the caller's scope and have `verify` steps, because an autonomous merge goes only through the verify-backed auto-merge or landing queue.
 - A worker cannot call `away`. A reader, a Pi leader and a socket call from the human role without the challenge are refused. Plain `away` (no flag) is unchanged and grants nothing.
 
-The grant is one row in `autonomy_grants` (migration 53 `autonomy`): `u<N>`, channel `cli-tty` or `claude-chat`, actor, chat grant id, projects, the user's words (sanitised, at most 500 characters), a terms hash, start, expiry, end and reason. At most one row is live (a partial unique index). A new grant supersedes the live one, so extending needs you again.
+The grant is one row in `autonomy_grants` (migration 54 `autonomy`): `u<N>`, channel `cli-tty` or `claude-chat`, actor, chat grant id, projects, the user's words (sanitised, at most 500 characters), a terms hash, start, expiry, end and reason. At most one row is live (a partial unique index). A new grant supersedes the live one, so extending needs you again.
 
 The grant ends on:
 
@@ -32,7 +32,7 @@ Automatic away never starts or extends it, and your own message ends only an aut
 
 The attention tick (1 s) runs one pass at a time, and only for the grant's projects. It first reads, outside the transaction, each candidate review gate's worktree HEAD and each project's default-branch `.no-mistakes.yaml`. One transaction then checks everything again:
 
-1. **Questions** (`autonomyVerdict`, pure). The pass looks at each open run-scoped question of a covered run started after migration 53, oldest first.
+1. **Questions** (`autonomyVerdict`, pure). The pass looks at each open run-scoped question of a covered run started after migration 54, oldest first.
    - It **parks** the question when:
      - its recorded class is protected: `destructive`, `irreversible`, `security`, `credential` or `outward` (`PARKING_CLASSES`: every keyword class but `merge`);
      - its wording names one of those classes, checked with all of them on, whatever `[decisions] reserved_classes` narrows;
@@ -51,12 +51,12 @@ The attention tick (1 s) runs one pass at a time, and only for the grant's proje
    - a flowryn-design stage pinned a build spec;
    - the pinned page and spec (and a draft's page) are unchanged.
 
-   Otherwise the gate is parked with the reason, and it waits for your `flowryn approve <task> --gate <stage>`. A run started before migration 53 is left as it was.
+   Otherwise the gate is parked with the reason, and it waits for your `flowryn approve <task> --gate <stage>`. A run started before migration 54 is left as it was.
 3. **Merges.** The daemon's own merge (`DAEMON_CALLER`) of work that yolo does not cover (not yolo, or sensitive) takes the grant as your record: the choice is `autonomy` (`src/policy/merge.ts`). It mints an approval with channel `autonomous`, bound to the ref and head, which the merge uses. Every other merge rule is unchanged: the exact head, every check green (a waiver is never taken from the grant), local green under the verify policy, and checks not pending.
    - A **landing-queue** project's line takes a ready PR on a minted approval. Its catch-up merge of main re-mints one at the new head, sensitive work included (`src/verify/landing-queue.ts`).
    - A **manual** project's ready ship gets the verify-backed auto-merge, once per head.
 
-   A leader's `flowryn merge` never takes the grant, and neither does a run started before migration 53 (`autonomyForRun`): it still needs your own approval per PR. Each mint appends `autonomy.merge_approved`.
+   A leader's `flowryn merge` never takes the grant, and neither does a run started before migration 54 (`autonomyForRun`): it still needs your own approval per PR. Each mint appends `autonomy.merge_approved`.
 
 ## The morning report (`src/attention/autonomy-report.ts`)
 

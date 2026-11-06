@@ -18,7 +18,9 @@ import { skillPath } from "../skills/stages.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import type { GateOpenState } from "../lavish/opener.ts";
 import { parseGateQuestions } from "../lavish/questions.ts";
+import { MOUNT_SNIPPET, pageMountsWidget } from "../lavish/widget.ts";
 import { findPageForKey, lavishSessionKey, lavishUrlKey } from "../lavish/session-key.ts";
+import { REFUSAL_HINT, refusalText, snapshotPathFor, snapshotUrl, takeSnapshot } from "../lavish/snapshot.ts";
 import { checkReviewPage, dismissGateQuestions, gateAnswersNote, openGateQuestions } from "./gate-questions.ts";
 import { reportDirFor, rewriteTaskFile } from "./launcher.ts";
 import { approvePlan, discardPlansOfGate, fileWorkerPlan, parsePlan } from "./plans.ts";
@@ -28,7 +30,7 @@ import { summarizeReview } from "./review-chat.ts";
 import { createSteer } from "./steers.ts";
 import { checkDraftPage, DRAFT_SKILL, draftPageDigest, type DraftFile } from "./draft.ts";
 import { briefsConfig } from "../config/briefs.ts";
-import { pinDesign, readDesignSpec, requireSpecLinked, type DesignSpec } from "./design-spec.ts";
+import { pinDesign, readDesignSpec, requireSpecLinked, specAsShown, type DesignSpec } from "./design-spec.ts";
 import { checkHandoff, HANDOFF_REQUIRED_SKILL, handoffNote, recordHandoff, startedUnderRichBriefs } from "./handoffs.ts";
 
 /**
@@ -681,6 +683,12 @@ export function checkDesignPage(page: string, opts: { widget: boolean }): void {
  * the next stage is requested and a steer starts it. Either way the worker
  * ends its turn.
  */
+/** What stage done read before its transaction: the draft checked, and the HEAD the review opens at. */
+interface StageDonePrepared {
+  draft: DraftFile | null;
+  head: string;
+}
+
 const stageDone: VerbSpec = {
   name: "stage done",
   summary: "Finish your current stage: --review <lavish url> for a stage with a review gate; then end your turn",
@@ -695,21 +703,27 @@ const stageDone: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  // A draft stage's page must be its file rendered as the worktree holds it now; reading that asks git.
+  // A review gate records the HEAD it opened at (a one-click pass is bound to it), and a draft
+  // stage's page must be its file rendered as the worktree holds it now; both ask git.
   async prepare(ctx, args) {
     const run = workerRun(ctx);
     const pos = positionOf(ctx.db, run, run.kind);
-    if (pos.stage.skill !== DRAFT_SKILL || pos.stage.gate !== "review" || run.stage_state !== "active") return null;
+    if (pos.stage.gate !== "review" || run.stage_state !== "active") return null;
+    // As src/policy/gates.ts reviewedHead reads it ("none" before the first commit).
+    const read = await ctx.delivery.git(["rev-parse", "HEAD"], run.worktree_path);
+    const head = read.code === 0 ? read.stdout.trim() : "none";
+    if (pos.stage.skill !== DRAFT_SKILL) return { draft: null, head } satisfies StageDonePrepared;
     const page = stringArg(args, "page");
     if (page === undefined) throw new FlowrynError("draft_page_invalid", "a draft stage's review needs --page: the page $FLOWRYN_BIN draft render wrote", "$FLOWRYN_BIN draft render <file>");
     const reportDir = reportDirFor(ctx.config(), run.task_id);
-    return checkDraftPage(ctx.delivery.git, run.worktree_path, checkReviewPage(page, reportDir, { widget: false }), reportDir);
+    const draft = await checkDraftPage(ctx.delivery.git, run.worktree_path, checkReviewPage(page, reportDir, { widget: false }), reportDir);
+    return { draft, head } satisfies StageDonePrepared;
   },
   apply(ctx, args, prepared) {
     const run = workerRun(ctx);
     const pos = positionOf(ctx.db, run, run.kind);
     const now = ctx.now();
-    const draft = prepared as DraftFile | null;
+    const { draft, head: reviewHead } = (prepared as StageDonePrepared | null) ?? { draft: null, head: null };
     if (run.stage_state === "waiting") throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} has not started yet; it waits for capacity`, "end your turn; a steer says when it starts");
     if (run.stage_state === "review") throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} is already waiting for its review`, "end your turn; a steer brings the verdict");
     if (run.stage_state === "done") throw new FlowrynError("wrong_stage", "you delivered already");
@@ -726,10 +740,12 @@ const stageDone: VerbSpec = {
     if (page !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `--page rides with a review gate; stage ${pos.stage.id} has none`);
     const questions = questionsText !== undefined ? parseGateQuestions(questionsText) : null;
     const reportDir = reportDirFor(ctx.config(), run.task_id);
-    const pagePath = page !== undefined ? checkReviewPage(page, reportDir, { widget: questions !== null }) : null;
+    // Every review page mounts the widget: its Approve button, and its questions when it has any.
+    const pagePath = page !== undefined ? checkReviewPage(page, reportDir, { widget: true }) : null;
     const title = taskTitle(ctx.db, run.task_id);
     let gateReview: string | null = null;
     let listened: string | null = null;
+    let source: string | null = null;
     let spec: DesignSpec | null = null;
     if (pos.stage.gate === "review") {
       if (!review) throw new FlowrynError("bad_args", `stage ${pos.stage.id} has a review gate: pass --review <lavish url>`);
@@ -738,12 +754,27 @@ const stageDone: VerbSpec = {
       const lavish = resolveTool(ctx.config(), "lavish_axi");
       const checked = checkReviewUrl(review, { page: qaPage ?? pagePath, reportDir, lavishInstalled: lavish !== null && existsSync(lavish) });
       if (pos.stage.skill === DESIGN_SKILL) {
-        checkDesignPage(checked.page, { widget: questions !== null });
+        checkDesignPage(checked.page, { widget: true });
         spec = readDesignSpec(reportDir, { required: enforce });
         if (spec) requireSpecLinked(checked.page, spec);
       }
+      // Every Lavish review page carries the widget, its Approve button (one click, src/policy/pass-key.ts).
+      if (lavishUrlKey(checked.url) && !pageMountsWidget(readFileSync(checked.page, "utf8"))) throw new FlowrynError("bad_args", "the review page does not mount Flowryn's widget (its Approve button, and any questions)", `add ${MOUNT_SNIPPET}`);
       gateReview = checked.url;
       listened = checked.page;
+      // The user reviews the daemon's checked copy of a Lavish page, never the worker's file (src/lavish/snapshot.ts).
+      if (lavishUrlKey(checked.url)) {
+        const taken = takeSnapshot(checked.page, snapshotPathFor(ctx.config().state_dir, run.id, reportDir, checked.page));
+        if (!taken.ok) throw new FlowrynError("review_invalid", `${checked.page}: ${refusalText(taken.problems)}`, `${REFUSAL_HINT}; fix the page, then run stage done again`);
+        source = checked.page;
+        listened = taken.page;
+        gateReview = snapshotUrl(checked.url, taken.page);
+      }
+      if (spec) {
+        const shown = specAsShown(spec, { page_path: listened, source_page: source });
+        if (!shown) throw new FlowrynError("spec_invalid", "the review page's copy does not carry the build spec the page links", "keep the spec in the design page's folder, at most 3 folders down, then run stage done again");
+        spec = shown;
+      }
     }
     releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
     if (gateReview !== null) {
@@ -751,17 +782,17 @@ const stageDone: VerbSpec = {
       // The daemon opens the page in your browser once its poll listens (src/lavish/opener.ts), unless [review] turns that off.
       const browser = reviewConfig(ctx.config()).open_browser ? { state: "pending", detail: null } : { state: "off", detail: "[review] open_browser = false" };
       ctx.db
-        .query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state, open_detail) VALUES (?1, ?2, ?3, 'review', ?4, 'open', ?5, ?6, ?7)")
-        .run(gateId, run.id, pos.stage.id, gateReview, now, browser.state, browser.detail);
+        .query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state, open_detail, pass_head) VALUES (?1, ?2, ?3, 'review', ?4, 'open', ?5, ?6, ?7, ?8)")
+        .run(gateId, run.id, pos.stage.id, gateReview, now, browser.state, browser.detail, reviewHead);
       ctx.db.query("UPDATE runs SET stage_state = 'review', updated_at = ?2 WHERE id = ?1").run(run.id, now);
       // The daemon listens on the page itself (src/lavish/poller.ts): the one the review URL names.
-      if (listened) ctx.db.query("UPDATE gates SET page_path = ?2 WHERE id = ?1").run(gateId, listened);
+      if (listened) ctx.db.query("UPDATE gates SET page_path = ?2, source_page = ?3 WHERE id = ?1").run(gateId, listened, source);
       // A design review approves its page and build spec together, pinned by digest; later stages read the gate's copy.
       if (spec && listened) pinDesign(ctx.db, gateId, listened, spec);
       const handoffId = handoff !== null ? recordHandoff(ctx.db, run, pos.stage.id, handoff, now) : null;
       // A draft review approves this file's exact bytes: the delivery must carry them (src/lifecycle/draft.ts).
       if (draft) ctx.db.query("UPDATE gates SET draft_path = ?2, draft_blob = ?3, draft_page = ?4 WHERE id = ?1").run(gateId, draft.path, draft.blob, draftPageDigest(draft));
-      const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, pagePath, questions, now) : [];
+      const asked = questions && pagePath ? openGateQuestions(ctx.db, run, { id: gateId, stage: pos.stage.id, review_url: gateReview }, listened ?? pagePath, questions, now) : [];
       let plan: string | null = null;
       if (planText !== undefined) {
         const project = getProject(ctx.db, run.project_id);

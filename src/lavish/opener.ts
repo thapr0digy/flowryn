@@ -5,7 +5,9 @@ import type { Db } from "../db/db.ts";
 import { tx } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { MAX_LINE_CHARS, sanitizeLine } from "../util/sanitize.ts";
+import { keyedUrl, mintPassKey, redactKey } from "../policy/pass-key.ts";
 import { lavishUrlKey } from "./session-key.ts";
+import { hostedUrl } from "./snapshot.ts";
 
 /**
  * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md). A review
@@ -20,7 +22,16 @@ import { lavishUrlKey } from "./session-key.ts";
  * opened". A file:// page (no lavish-axi) has nothing to listen for and opens at once.
  *
  * Once per page per run: a gate whose run already opened the same URL for an earlier gate (a
- * resubmission after changes; Lavish live-reloads the tab you have) is `skipped`. Plain code.
+ * resubmission after changes; Lavish live-reloads the tab you have) is `skipped`, and takes that
+ * tab's pass key hash.
+ *
+ * One-click approve (src/policy/pass-key.ts): the claim mints the tab's pass key, keeps its hash
+ * on the gate in the claim's transaction, and only the address handed to `open` carries the key.
+ * Only a Lavish page that is the daemon's checked copy (src/lavish/snapshot.ts) gets one: a
+ * worker's own page could carry a script that reads it. The copy's tab is probed and opened only at
+ * the URL lavish-axi printed when the daemon hosted it (gate.page_hosted), never a host and port
+ * the worker named: a worker's listener there would read the key from the request.
+ * Events, items and the log keep the review URL without it. Plain code.
  */
 
 export const GATE_OPEN_STATES = ["pending", "opening", "opened", "failed", "off", "skipped"] as const;
@@ -46,6 +57,8 @@ export interface OpenerDeps {
   open?(browser: string, url: string): Promise<OpenResult>;
   /** Wait for Lavish to show the page's poll listening (default: its WebSocket, or the recorder). */
   presence?(url: string, waitMs: number, signal: AbortSignal): Promise<PresenceResult>;
+  /** A gate's pass key changed (minted or taken from the tab): its widget is written again. */
+  keyed?(gateId: string): void;
 }
 
 interface PendingGate {
@@ -53,6 +66,8 @@ interface PendingGate {
   run_id: string;
   task_id: string;
   review_url: string;
+  /** Set when the page is the daemon's checked copy (src/lavish/snapshot.ts): only such a tab gets a pass key. */
+  source_page: string | null;
 }
 
 export class ReviewOpener {
@@ -90,7 +105,7 @@ export class ReviewOpener {
   private pendingGate(gateId: string): PendingGate | null {
     return this.deps.db
       .query(
-        `SELECT g.id, g.run_id, r.task_id, g.review_url FROM gates g JOIN runs r ON r.id = g.run_id
+        `SELECT g.id, g.run_id, r.task_id, g.review_url, g.source_page FROM gates g JOIN runs r ON r.id = g.run_id
          WHERE g.id = ?1 AND g.kind = 'review' AND g.state = 'open' AND g.open_state = 'pending' AND g.review_url IS NOT NULL`,
       )
       .get(gateId) as PendingGate | null;
@@ -111,18 +126,36 @@ export class ReviewOpener {
   /** Move a pending gate to a state that opens nothing; true once settled. */
   private settle(gate: PendingGate, state: "off" | "skipped" | "failed", detail: string): boolean {
     const now = this.deps.now();
+    let keyed = false;
     tx(this.deps.db, () => {
       const changed = this.deps.db.query("UPDATE gates SET open_state = ?2, open_detail = ?3, open_at = ?4 WHERE id = ?1 AND open_state = 'pending'").run(gate.id, state, detail, now).changes;
       if (changed === 0) return;
-      appendEvent(this.deps.db, { source: "daemon", kind: `gate.browser_${state}`, runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, url: gate.review_url, detail }, ts: now });
+      const oneClick = state === "skipped" && this.takeTabKey(gate);
+      appendEvent(this.deps.db, { source: "daemon", kind: `gate.browser_${state}`, runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, url: gate.review_url, detail, ...(state === "skipped" ? { one_click: oneClick } : {}) }, ts: now });
       if (state === "failed") this.noteOnItem(gate, failedSuffix(detail));
+      keyed = oneClick;
     });
     this.deps.log(`browser: gate ${gate.id} ${state}: ${detail}`);
+    if (keyed) this.deps.keyed?.(gate.id);
+    return true;
+  }
+
+  /** A resubmitted page reuses the tab you have: its gate takes the tab's live pass key hash, if any. */
+  private takeTabKey(gate: PendingGate): boolean {
+    const earlier = this.deps.db
+      .query("SELECT pass_key_hash FROM gates WHERE run_id = ?1 AND review_url = ?2 AND id != ?3 AND pass_key_hash IS NOT NULL ORDER BY opened_at DESC LIMIT 1")
+      .get(gate.run_id, gate.review_url, gate.id) as { pass_key_hash: string } | null;
+    if (!earlier) return false;
+    this.deps.db.query("UPDATE gates SET pass_key_hash = ?2 WHERE id = ?1").run(gate.id, earlier.pass_key_hash);
     return true;
   }
 
   private async attempt(gate: PendingGate): Promise<void> {
-    const url = gate.review_url;
+    const url = this.pageUrl(gate);
+    if (url === null) {
+      this.settle(gate, "failed", "the daemon never hosted the page's copy with lavish-axi");
+      return;
+    }
     if (!url.startsWith("file://")) {
       const seen = await this.presence(url, PRESENCE_WAIT_MS, this.abort.signal);
       // A stopping daemon leaves the gate pending: the next one offers it again.
@@ -133,20 +166,34 @@ export class ReviewOpener {
       }
     }
     const { browser } = this.deps.review();
-    if (!this.claim(gate, browser)) return;
-    const result = await this.open(browser, url);
-    this.record(gate, browser, result);
+    const claimed = this.claim(gate, browser, url);
+    if (!claimed) return;
+    if (claimed.key) this.deps.keyed?.(gate.id);
+    const result = await this.open(browser, claimed.key ? keyedUrl(url, claimed.key) : url);
+    this.record(gate, browser, claimed.key && !result.ok ? { ok: false, why: redactKey(result.why, claimed.key) } : result);
   }
 
-  /** pending → opening, committed before the spawn: at most once. */
-  private claim(gate: PendingGate, browser: string): boolean {
+  /**
+   * pending → opening, committed before the spawn: at most once. A Lavish page's tab gets a pass
+   * key, its hash kept on the gate in the same transaction; the key itself only goes to `open`.
+   */
+  private claim(gate: PendingGate, browser: string, url: string): { key: string | null } | null {
     const now = this.deps.now();
     return tx(this.deps.db, () => {
-      const changed = this.deps.db.query("UPDATE gates SET open_state = 'opening', open_at = ?2 WHERE id = ?1 AND open_state = 'pending' AND state = 'open'").run(gate.id, now).changes;
-      if (changed === 0) return false;
-      appendEvent(this.deps.db, { source: "daemon", kind: "gate.browser_opening", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, url: gate.review_url, browser }, ts: now });
-      return true;
+      const changed = this.deps.db.query("UPDATE gates SET open_state = 'opening', open_at = ?2 WHERE id = ?1 AND open_state = 'pending' AND state = 'open' AND review_url = ?3").run(gate.id, now, url).changes;
+      if (changed === 0) return null;
+      const minted = lavishUrlKey(url) && gate.source_page !== null && hostedUrl(this.deps.db, gate.run_id, gate.id) === url ? mintPassKey() : null;
+      if (minted) this.deps.db.query("UPDATE gates SET pass_key_hash = ?2 WHERE id = ?1").run(gate.id, minted.hash);
+      appendEvent(this.deps.db, { source: "daemon", kind: "gate.browser_opening", runId: gate.run_id, taskId: gate.task_id, payload: { gate: gate.id, url: gate.review_url, browser, one_click: minted !== null }, ts: now });
+      return { key: minted?.key ?? null };
     });
+  }
+
+  /** The address to open: for the daemon's copy, only the URL lavish-axi printed when the daemon hosted it (null before). */
+  private pageUrl(gate: PendingGate): string | null {
+    if (gate.source_page === null) return gate.review_url;
+    const hosted = hostedUrl(this.deps.db, gate.run_id, gate.id);
+    return hosted === gate.review_url ? hosted : null;
   }
 
   private record(gate: PendingGate, browser: string, result: OpenResult): void {

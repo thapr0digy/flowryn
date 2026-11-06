@@ -1,4 +1,4 @@
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
 import { stateFiles } from "../config/paths.ts";
 
@@ -79,6 +79,30 @@ export function staticLayers(paths: StaticPaths): StaticLayers {
     ],
     denyWrite: [paths.backlog, paths.todos, `${paths.backlog}.lock`, `${paths.todos}.lock`],
   };
+}
+
+/**
+ * Browser profile folders under a home, where a browser keeps its history: the address the daemon
+ * opened a review tab at carries that tab's pass key (src/policy/pass-key.ts), so a worker may not
+ * read them. Claude also applies Read denies to its Bash sandbox. Chrome for Testing and the
+ * profile chrome-devtools-axi launches (under ~/.cache) are other folders and stay readable.
+ */
+export const BROWSER_PROFILE_DIRS = [
+  "Library/Application Support/Google/Chrome",
+  "Library/Application Support/Google/Chrome Beta",
+  "Library/Application Support/Google/Chrome Canary",
+  "Library/Application Support/Chromium",
+  "Library/Application Support/BraveSoftware",
+  "Library/Application Support/Microsoft Edge",
+  "Library/Application Support/Arc",
+  "Library/Application Support/Vivaldi",
+  "Library/Application Support/Firefox",
+  "Library/Safari",
+] as const;
+
+/** Claude `permissions.deny` entries keeping a worker out of the browser profiles under `home`. */
+export function browserProfileReads(home: string): string[] {
+  return BROWSER_PROFILE_DIRS.map((dir) => absoluteRule("Read", `${join(home, dir)}/**`));
 }
 
 /** The static layers for a config's own backlog, to-dos and database. */

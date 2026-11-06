@@ -1018,6 +1018,15 @@ CREATE TABLE stage_handoffs (
 CREATE INDEX stage_handoffs_task ON stage_handoffs(task_id, created_at);
 `;
 
+// One-click approve (docs/notes/2026-11-05-one-click-approve-3y.md): the SHA-256 of the pass key
+// the daemon opened the review tab with (never the key), the HEAD the review opened at, and the
+// worker's page the daemon's copy (page_path, under <state_dir>/review-pages) is taken from.
+const PAGE_PASS_KEY_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN pass_key_hash TEXT;
+ALTER TABLE gates ADD COLUMN pass_head TEXT;
+ALTER TABLE gates ADD COLUMN source_page TEXT;
+`;
+
 /**
  * Unattended mode (docs/notes/2026-11-05-unattended-mode-one-9e.md): the standing approval
  * the user grants when they leave (`flowryn away --autonomous`), one row per grant, at most
@@ -1039,16 +1048,16 @@ CREATE TABLE autonomy_grants (
   end_reason TEXT
 );
 CREATE UNIQUE INDEX autonomy_grants_live ON autonomy_grants((1)) WHERE ended_at IS NULL;
-CREATE TABLE approvals_v53 (
+CREATE TABLE approvals_v54 (
   id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
   channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','page','yolo','autonomous')),
   actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
   allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   consumed_at INTEGER);
-INSERT INTO approvals_v53 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+INSERT INTO approvals_v54 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
   SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
 DROP TABLE approvals;
-ALTER TABLE approvals_v53 RENAME TO approvals;
+ALTER TABLE approvals_v54 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 ALTER TABLE decisions ADD COLUMN autonomy_id TEXT;
 ALTER TABLE decisions ADD COLUMN autonomy_state TEXT CHECK (autonomy_state IN ('decided','parked'));
@@ -1107,7 +1116,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
   { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
   { version: 52, name: "rich-briefs", sql: RICH_BRIEFS_SQL },
-  { version: 53, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
+  { version: 53, name: "page-pass-key", sql: PAGE_PASS_KEY_SQL },
+  { version: 54, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

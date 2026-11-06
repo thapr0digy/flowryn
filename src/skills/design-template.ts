@@ -60,8 +60,8 @@ export const DESIGN_TEMPLATE = `<!doctype html>
   TITLE        what the change does, in words ("Wake the leader when a pull request is ready").
   SUBTITLE     one line: the task, and whether any part needs a model (and why).
   TLDR         two to four sentences: the problem, the change, what it means for the user.
-  ASK          approve or send changes; the two or three calls worth a look. With questions for the user, put the
-               question widget here: <section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>
+  ASK          approve or send changes; the two or three calls worth a look. Keep the widget mount after it: it
+               shows the Approve button, and your questions for the user when you have any.
   BEFORE_AFTER table rows, <tr><td>what</td><td>before</td><td>after</td></tr>, as the user would notice it.
   GOALS        what the change must achieve.  NON_GOALS  what it could reasonably do but deliberately does not.
   DIAGRAM      an inline <svg> (both themes: use the colour tokens), an <img> or a drawn <pre>: the parts and the flow.
@@ -102,6 +102,7 @@ code{padding:1px 5px}pre{padding:10px;overflow-x:auto}
 <section data-section="ask">
 <h2>What I need from you</h2>
 {{ASK}}
+<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>
 </section>
 <section data-section="change">
 <h2>What changes for you</h2>

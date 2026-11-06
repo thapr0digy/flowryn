@@ -725,7 +725,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     };
     // Review pages open in your browser once the gate's poll listens (docs/notes/2026-10-10-review-pages-open-4b.md).
     const opener = openerMode(env);
-    const reviewOpener = new ReviewOpener({ db: database, review: () => reviewConfig(config), mode: () => opener, log, now: Date.now });
+    // A tab's pass key changed (one click, src/policy/pass-key.ts): the poller writes the gate's widget again.
+    const reviewOpener = new ReviewOpener({ db: database, review: () => reviewConfig(config), mode: () => opener, log, now: Date.now, keyed: () => lavishPoller.kick() });
     if (opener.kind === "off") log(`browser: review pages are not opened (${opener.why})`);
     else if (opener.kind === "record") log(`browser: review pages are recorded to ${opener.path} (FLOWRYN_OPENER), never opened`);
     const lavishPoller = new LavishPoller({
@@ -741,7 +742,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         bus.notify(runId);
         if (resumed) scheduler?.kick();
       },
-      // Passing a review from its page with the code sent to your notifications (src/policy/page-pass.ts).
+      // Passing a review from its page: one click with the tab's pass key, or the code sent to your notifications (src/policy/page-pass.ts).
       pagePass: {
         codes: new PageCodeStore(),
         head: async (gate) => {

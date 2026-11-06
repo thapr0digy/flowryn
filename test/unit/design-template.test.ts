@@ -161,7 +161,8 @@ describe("the design page check", () => {
 
   test("with questions, the widget must sit in What I need from you", () => {
     const widget = '<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>';
-    const below = filled({ "{{RISKS}}": `Said in plain words. ${widget}` });
+    // The template mounts it in What I need from you; move it below.
+    const below = filled({ "{{RISKS}}": `Said in plain words. ${widget}` }).replace(widget, "");
     expect(designPageProblems(below, { widget: true })).toEqual(['the question widget (<section id="flowryn-questions">) belongs in "What I need from you"']);
     expect(designPageProblems(filled({ "{{ASK}}": `Answer the questions below. ${widget}` }), { widget: true })).toEqual([]);
     const widgetFirst = filled().replace(/<h2>What I need from you<\/h2>\n\{\{ASK\}\}|<h2>What I need from you<\/h2>\n[^\n]*/, `<h2>What I need from you</h2>${widget}<p>Approve, or send changes; look at the retry choice.</p>`);
