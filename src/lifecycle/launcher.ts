@@ -45,9 +45,9 @@ import { claimOperation, confirmOperation, escalatedStart, getOperation, launchK
  */
 export type LaunchMode = "fresh" | "resume" | "stage" | "relaunch";
 
-/** The prompt a relaunched session starts with: the contract changed, so it reads its task file again. */
+/** The prompt a relaunched session starts with: its contract or stage changed, so it reads its task file again. */
 export function relaunchPrompt(instructionsFile: string): string {
-  return `Flowryn restarted you because your task changed. Read ${instructionsFile} again, then go on from there.`;
+  return `Flowryn restarted you because your task changed or a new stage started. Read ${instructionsFile} again, then go on from there.`;
 }
 
 export interface GitResult {
