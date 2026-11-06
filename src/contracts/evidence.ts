@@ -53,16 +53,16 @@ function parsed(text: string): unknown {
   }
 }
 
+function redactScreenSecrets(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return value.map(redactScreenSecrets);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactScreenSecrets(v)]));
+  return value;
+}
+
 /** Every string redacted as diag export does, then with the screen redaction. */
 export function redactEvidence<T>(value: T): T {
-  const scrubbed = scrubTokens(value);
-  const deep = (v: unknown): unknown => {
-    if (typeof v === "string") return redactSecrets(v);
-    if (Array.isArray(v)) return v.map(deep);
-    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, deep(x)]));
-    return v;
-  };
-  return deep(scrubbed) as T;
+  return redactScreenSecrets(scrubTokens(value)) as T;
 }
 
 export function transcriptTail(path: string | null): StepEvidence["transcript"] {
