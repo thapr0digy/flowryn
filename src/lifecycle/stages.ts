@@ -391,7 +391,7 @@ export function requireLastStageStarted(db: Db, run: RunWithPolicy): void {
   throw new FlowrynError(
     "stage_waiting",
     `a no-mistakes ship delivers from stage ${last.id}, which has not started: its pipeline runs under that stage's slot`,
-    `$FLOWRYN_BIN stage begin ${last.id}, then run the pipeline and deliver`,
+    `$FLOWRYN_BIN stage begin ${last.id}${pos.stage.skill === HANDOFF_REQUIRED_SKILL ? " --handoff-file <your handoff>" : ""}, then run the pipeline and deliver`,
   );
 }
 
@@ -408,11 +408,12 @@ interface Requested {
 }
 
 /** End the current stage and request a later one, skipping the ungated stages between. Call inside a transaction. */
-function requestLater(ctx: HandlerCtx, run: RunWithPolicy, pos: StagePos, index: number, note: string, reason: "deliver" | "begin"): Requested {
+function requestLater(ctx: HandlerCtx, run: RunWithPolicy, pos: StagePos, index: number, note: string, reason: "deliver" | "begin", handoff: { stage: string; text: string } | null = null): Requested {
   const stage = pos.def.stages[index]!;
   const now = ctx.now();
   releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `stage ${pos.stage.id} done`, now);
-  appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, via: ctx.via, for: reason, next: stage.id }, ts: now });
+  const handoffId = handoff !== null ? recordHandoff(ctx.db, run, handoff.stage, handoff.text, now) : null;
+  appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, via: ctx.via, for: reason, next: stage.id, ...(handoffId !== null ? { handoff: handoffId } : {}) }, ts: now });
   requestStage(ctx.db, run, pos.def, index, note, now);
   return { stage, fresh: run.pending_launch === "stage" };
 }
@@ -437,7 +438,9 @@ async function grantRequested(ctx: HandlerCtx, runId: string, requested: Request
  * and the run waits: the steer that starts the stage tells the worker to
  * deliver again.
  */
-export async function startPooledStages(ctx: HandlerCtx, runId: string): Promise<void> {
+export async function startPooledStages(ctx: HandlerCtx, runId: string, handoffText?: string): Promise<{ handoffKept: boolean }> {
+  let handoff = handoffText;
+  let handoffKept = false;
   for (;;) {
     const requested = tx(ctx.db, () => {
       const run = getRunWithPolicy(ctx.db, runId);
@@ -451,9 +454,11 @@ export async function startPooledStages(ctx: HandlerCtx, runId: string): Promise
         if (!(error instanceof FlowrynError && error.code === "stage_waiting")) throw error;
       }
       const stage = pos.def.stages[index]!;
-      return requestLater(ctx, run, pos, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, "deliver");
+      return requestLater(ctx, run, pos, index, `Your delivery waited for stage ${stage.id}, which holds a slot of ${stage.pools.join(" and ")}; it has started now: deliver again.`, "deliver", deliveryHandoff(ctx, run, handoff));
     });
-    if (!requested) return;
+    if (!requested) return { handoffKept };
+    handoffKept ||= handoff !== undefined;
+    handoff = undefined;
     await grantRequested(ctx, runId, requested, () => stageWaiting(requested.stage));
   }
 }
@@ -464,7 +469,7 @@ export async function startPooledStages(ctx: HandlerCtx, runId: string): Promise
  * no-mistakes ship calls it before its pipeline). Already started: nothing to
  * do. Refused with stage_waiting while it waits for its slots.
  */
-export async function beginLastStage(ctx: HandlerCtx, runId: string, target: string): Promise<void> {
+export async function beginLastStage(ctx: HandlerCtx, runId: string, target: string, handoffText?: string): Promise<{ handoffIgnored: boolean }> {
   const requested = tx(ctx.db, () => {
     const run = getRunWithPolicy(ctx.db, runId);
     if (!run || isTerminal(run.state)) throw new FlowrynError("run_not_active", `run ${runId} is ${run?.state ?? "gone"}`);
@@ -475,6 +480,8 @@ export async function beginLastStage(ctx: HandlerCtx, runId: string, target: str
     if (target !== last.id) throw new FlowrynError("bad_args", `stage begin starts your last stage, ${last.id}; the others start with stage done`, stageDoneHelp(pos));
     if (pos.last) {
       if (run.stage_state === "waiting") throw beginWaiting(last);
+      // A repeat call once the stage has started: the handoff was kept when the earlier stage ended.
+      if (handoffText !== undefined) checkHandoff(handoffText);
       return null;
     }
     if (run.stage_state === "waiting") throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} has not started; it waits for capacity`, "end your turn; a steer says when it starts");
@@ -484,10 +491,52 @@ export async function beginLastStage(ctx: HandlerCtx, runId: string, target: str
     if (gated) throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} comes before the ${gated.id} review; you cannot begin ${last.id} yet`, stageDoneHelp(pos));
     const pooled = before.slice(1).find((s) => s.pools.length > 0);
     if (pooled) throw new FlowrynError("wrong_stage", `stage ${pooled.id} comes first and holds a slot of ${pooled.pools.join(" and ")}`, stageDoneHelp(pos));
-    return requestLater(ctx, run, pos, lastIndex, `Stage ${last.id} has started; go on from where you stopped.`, "begin");
+    const owed = handoffOwedBy(ctx, run, before);
+    const handoff = takeHandoff(handoffText, owed, `$FLOWRYN_BIN stage begin ${last.id} --handoff-file "$TMPDIR/handoff.md"`);
+    const handoffStage = owed?.id ?? pos.stage.id;
+    return requestLater(ctx, run, pos, lastIndex, `Stage ${last.id} has started; go on from where you stopped.`, "begin", handoff !== null ? { stage: handoffStage, text: handoff } : null);
   });
-  if (!requested) return;
+  if (!requested) return { handoffIgnored: handoffText !== undefined };
   await grantRequested(ctx, runId, requested, () => (requested.stage.pools.length > 0 ? beginWaiting(requested.stage) : new FlowrynError("stage_waiting", `stage ${requested.stage.id} has not started yet`, `end your turn; a steer says when stage ${requested.stage.id} has started`)));
+  return { handoffIgnored: false };
+}
+
+/**
+ * The handoff a delivery owes when it ends a build stage (local-only and
+ * direct-PR deliver straight from build): checked like stage done's, kept
+ * under that stage. Null when none is owed nor given, from the last stage
+ * (a given one is checked, not kept), or once the stages are over (a redelivery).
+ */
+export function deliveryHandoff(ctx: { db: Db; config: () => FlowrynConfig }, run: RunWithPolicy, text: string | undefined): { stage: string; text: string } | null {
+  if (run.state === "ready" || run.stage_state === "done") return null;
+  const pos = positionOf(ctx.db, run, run.kind);
+  // From the last stage, the stage before it has ended already and kept its handoff then.
+  if (pos.last) {
+    if (text !== undefined) checkHandoff(text);
+    return null;
+  }
+  const owed = handoffOwedBy(ctx, run, pos.def.stages.slice(pos.index));
+  const command = run.delivery_mode === "local-only" ? "$FLOWRYN_BIN deliver --local" : "$FLOWRYN_BIN deliver --pr <url>";
+  const handoff = takeHandoff(text, owed, `${command} --handoff-file "$TMPDIR/handoff.md"`);
+  return handoff !== null ? { stage: owed?.id ?? pos.stage.id, text: handoff } : null;
+}
+
+/**
+ * The stage among those a call ends or skips whose handoff is owed (the last
+ * build stage), or null: none is, [briefs] enforce is off, or the run started
+ * before the rich-briefs migration and finishes as it began.
+ */
+function handoffOwedBy(ctx: { db: Db; config: () => FlowrynConfig }, run: RunWithPolicy, ending: readonly StageDef[]): StageDef | null {
+  if (!briefsConfig(ctx.config()).enforce || !startedUnderRichBriefs(ctx.db, run.started_at)) return null;
+  return ending.findLast((s) => s.skill === HANDOFF_REQUIRED_SKILL) ?? null;
+}
+
+/** The handoff a call carries, cleaned and checked; refused when one is owed and missing. One rule for stage done and stage begin. */
+function takeHandoff(text: string | undefined, owed: StageDef | null, command: string): string | null {
+  if (text === undefined && owed !== null) {
+    throw new FlowrynError("handoff_invalid", `stage ${owed.id} ends with a handoff to the next stage: what you did, deviations from the spec and why, open risks`, `$FLOWRYN_BIN template handoff > "$TMPDIR/handoff.md", fill it, then ${command}`);
+  }
+  return text !== undefined ? checkHandoff(text) : null;
 }
 
 function stageDoneHelp(pos: StagePos): string {
@@ -495,12 +544,13 @@ function stageDoneHelp(pos: StagePos): string {
 }
 
 /** The delivery ended the last stage: its pools go back and a ship's merge gate opens. Call inside a transaction. */
-export function recordStageDelivered(db: Db, run: RunWithPolicy, skipped: string[], now: number): void {
+export function recordStageDelivered(db: Db, run: RunWithPolicy, skipped: string[], now: number, handoff: { stage: string; text: string } | null = null): void {
   const def = runWorkflow(db, run, run.kind);
   const last = def.stages[def.stages.length - 1]!;
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, `stage ${last.id} delivered`, now);
+  const handoffId = handoff !== null ? recordHandoff(db, run, handoff.stage, handoff.text, now) : null;
   db.query("UPDATE runs SET stage = ?2, stage_state = 'done', waiting_since = NULL, stage_note = NULL, updated_at = ?3 WHERE id = ?1").run(run.id, last.id, now);
-  appendEvent(db, { source: "cli", kind: "stage.delivered", runId: run.id, taskId: run.task_id, payload: { stage: last.id, finished_at_delivery: skipped }, ts: now });
+  appendEvent(db, { source: "cli", kind: "stage.delivered", runId: run.id, taskId: run.task_id, payload: { stage: last.id, finished_at_delivery: skipped, ...(handoffId !== null ? { handoff: handoffId } : {}) }, ts: now });
   run.stage = last.id;
   run.stage_state = "done";
   if (run.kind === "ship" && last.gate === "merge") openMergeGate(db, run, now);
@@ -682,11 +732,7 @@ const stageDone: VerbSpec = {
     const page = stringArg(args, "page");
     const questionsText = stringArg(args, "questions");
     const enforce = briefsConfig(ctx.config()).enforce && startedUnderRichBriefs(ctx.db, run.started_at);
-    const handoffText = stringArg(args, "handoff");
-    if (handoffText === undefined && enforce && pos.stage.skill === HANDOFF_REQUIRED_SKILL) {
-      throw new FlowrynError("handoff_invalid", `stage ${pos.stage.id} ends with a handoff to the next stage: what you did, deviations from the spec and why, open risks`, "$FLOWRYN_BIN template handoff > \"$TMPDIR/handoff.md\", fill it, then $FLOWRYN_BIN stage done --handoff-file \"$TMPDIR/handoff.md\"");
-    }
-    const handoff = handoffText !== undefined ? checkHandoff(handoffText) : null;
+    const handoff = takeHandoff(stringArg(args, "handoff"), handoffOwedBy(ctx, run, [pos.stage]), '$FLOWRYN_BIN stage done --handoff-file "$TMPDIR/handoff.md"');
     if (questionsText !== undefined && page === undefined) throw new FlowrynError("bad_args", "--questions-file needs --page: the questions go on that page");
     if (questionsText !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `questions ride with a review gate; stage ${pos.stage.id} has none: decide them yourself and record your choices`);
     if (page !== undefined && pos.stage.gate !== "review") throw new FlowrynError("bad_args", `--page rides with a review gate; stage ${pos.stage.id} has none`);
@@ -785,17 +831,20 @@ const stageBegin: VerbSpec = {
   name: "stage begin",
   summary: "Start your last stage now (a no-mistakes ship: before its pipeline); stage_waiting means end your turn",
   positionals: [{ name: "stage", required: true, help: "your workflow's last stage (ship)", complete: "stage" }],
-  flags: {},
+  flags: {
+    "handoff-file": { type: "string", help: "your handoff from the stage this skips (## Done, ## Deviations, ## Risks; $FLOWRYN_BIN template handoff); required when it skips build", fileFor: "handoff" },
+  },
   kind: "mutation",
   roles: ["worker"],
   replyMs: 30_000,
   async prepare(ctx, args) {
-    await beginLastStage(ctx, workerRun(ctx).id, stringArg(args, "stage")!);
-    return null;
+    return beginLastStage(ctx, workerRun(ctx).id, stringArg(args, "stage")!, stringArg(args, "handoff"));
   },
-  apply(ctx) {
+  apply(ctx, _args, prepared) {
     const run = workerRun(ctx);
-    return { data: { stage: run.stage, state: run.stage_state, pools: runLeases(ctx.db, run.id).map((l) => l.pool) }, hints: ["go on: the stage has started"] };
+    const ignored = (prepared as { handoffIgnored: boolean } | null)?.handoffIgnored === true;
+    const hints = ignored ? [`stage ${run.stage} had started already, so this handoff was not kept; a handoff is kept when the stage before ends`, "go on"] : ["go on: the stage has started"];
+    return { data: { stage: run.stage, state: run.stage_state, pools: runLeases(ctx.db, run.id).map((l) => l.pool) }, hints };
   },
 };
 
