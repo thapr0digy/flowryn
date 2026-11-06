@@ -11,6 +11,7 @@ import { openGateQuestions } from "../../src/lifecycle/gate-questions.ts";
 import { getRun } from "../../src/lifecycle/runs.ts";
 import { HUMAN_CHANNELS, PAGE_CODE_MINTS, PAGE_CODE_TRIES, PAGE_CODE_TTL_MS, PageCodeStore } from "../../src/policy/approvals.ts";
 import { passFromPage } from "../../src/policy/page-pass.ts";
+import { keyedUrl, mintPassKey, PASS_KEY_LENGTH, passKeyMatches } from "../../src/policy/pass-key.ts";
 import { makeHome, seedRun, waitUntil, type TestHome } from "../helpers/harness.ts";
 
 /**
@@ -122,19 +123,19 @@ describe("passing from the page", () => {
     answerAll();
     const codes = new PageCodeStore();
     const { code } = codes.mint("g1", HEAD, NOW)!;
-    const result = tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW + 5));
+    const result = tx(db, () => passFromPage(db, codes, "g1", { code: code }, HEAD, NOW + 5));
     expect(result.outcome).toBe("passed");
     expect(gateState()).toBe("passed");
     expect(db.query("SELECT channel, head_sha, pr_url, action, consumed_at IS NOT NULL AS used FROM approvals").all()).toEqual([{ channel: "page", head_sha: HEAD, pr_url: "gate:g1", action: "gate", used: 1 }]);
     expect(db.query("SELECT stage FROM runs WHERE id = ?1").get(runId)).toEqual({ stage: "build" });
     // Single use: the same code again finds the gate closed.
-    expect(tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW + 6)).outcome).toBe("late");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: code }, HEAD, NOW + 6)).outcome).toBe("late");
   });
 
   test("an open question refuses, and drops the code that came with it", () => {
     const codes = new PageCodeStore();
     const { code } = codes.mint("g1", HEAD, NOW)!;
-    expect(tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW))).toEqual({ outcome: "questions_open", open: ["q1"] });
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: code }, HEAD, NOW))).toEqual({ outcome: "questions_open", open: ["q1"] });
     expect(codes.has("g1", NOW)).toBe(false);
     expect(gateState()).toBe("open");
   });
@@ -144,7 +145,7 @@ describe("passing from the page", () => {
     db.query("UPDATE gates SET draft_page = ?2 WHERE id = ?1").run("g1", "0".repeat(64));
     const codes = new PageCodeStore();
     const { code } = codes.mint("g1", HEAD, NOW)!;
-    expect(tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW))).toEqual({ outcome: "draft_changed", task: taskId });
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: code }, HEAD, NOW))).toEqual({ outcome: "draft_changed", task: taskId });
     expect(codes.has("g1", NOW)).toBe(false);
     expect(gateState()).toBe("open");
   });
@@ -154,11 +155,11 @@ describe("passing from the page", () => {
     const codes = new PageCodeStore();
     const { code } = codes.mint("g1", HEAD, NOW)!;
     const guess = code === "ZZZZ" ? "YYYY" : "ZZZZ";
-    expect(tx(db, () => passFromPage(db, codes, "g1", guess, HEAD, NOW)).outcome).toBe("wrong");
-    expect(tx(db, () => passFromPage(db, codes, "g1", code, "def456", NOW)).outcome).toBe("moved");
-    expect(tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW)).outcome).toBe("none");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: guess }, HEAD, NOW)).outcome).toBe("wrong");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: code }, "def456", NOW)).outcome).toBe("moved");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: code }, HEAD, NOW)).outcome).toBe("none");
     const late = codes.mint("g1", HEAD, NOW)!.code;
-    expect(tx(db, () => passFromPage(db, codes, "g1", late, HEAD, NOW + PAGE_CODE_TTL_MS)).outcome).toBe("expired");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: late }, HEAD, NOW + PAGE_CODE_TTL_MS)).outcome).toBe("expired");
     expect(gateState()).toBe("open");
     expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
     const payloads = (db.query("SELECT payload FROM events WHERE kind = 'gate.page_pass_refused' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).why);
@@ -173,9 +174,9 @@ describe("passing from the page", () => {
     const codes = new PageCodeStore();
     const { code } = codes.mint("g1", HEAD, NOW)!;
     db.query("UPDATE gates SET state = 'changes' WHERE id = 'g1'").run();
-    expect(tx(db, () => passFromPage(db, codes, "g1", code, HEAD, NOW)).outcome).toBe("late");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { code: code }, HEAD, NOW)).outcome).toBe("late");
     db.query("INSERT INTO gates (id, run_id, stage, kind, state, opened_at) VALUES ('g2', ?1, 'design', 'review', 'open', ?2)").run(runId, NOW + 1);
-    expect(tx(db, () => passFromPage(db, codes, "g2", code, HEAD, NOW)).outcome).toBe("none");
+    expect(tx(db, () => passFromPage(db, codes, "g2", { code: code }, HEAD, NOW)).outcome).toBe("none");
   });
 });
 
@@ -370,5 +371,179 @@ describe("the poller's side", () => {
     }
     expect(gateState()).toBe("open");
     expect(logs.some((l) => l.includes("pass requested"))).toBe(true);
+  });
+});
+
+describe("one click: the tab's pass key (docs/notes/2026-11-05-one-click-approve-3y.md)", () => {
+  let key: string;
+  beforeEach(() => {
+    const minted = mintPassKey();
+    key = minted.key;
+    db.query("UPDATE gates SET pass_key_hash = ?2, pass_head = ?3 WHERE id = ?1").run("g1", minted.hash, HEAD);
+  });
+
+  function hash(): string | null {
+    return (db.query("SELECT pass_key_hash FROM gates WHERE id = 'g1'").get() as { pass_key_hash: string | null }).pass_key_hash;
+  }
+  const otherKey = () => mintPassKey().key;
+
+  test("the tab's key passes the gate with channel page, bound to the HEAD, the approval used once, and the key spent", () => {
+    answerAll();
+    const codes = new PageCodeStore();
+    const result = tx(db, () => passFromPage(db, codes, "g1", { key }, HEAD, NOW + 5));
+    expect(result.outcome).toBe("passed");
+    expect(gateState()).toBe("passed");
+    expect(db.query("SELECT channel, head_sha, pr_url, action, consumed_at IS NOT NULL AS used FROM approvals").all()).toEqual([{ channel: "page", head_sha: HEAD, pr_url: "gate:g1", action: "gate", used: 1 }]);
+    expect(db.query("SELECT stage FROM runs WHERE id = ?1").get(runId)).toEqual({ stage: "build" });
+    expect(hash()).toBeNull();
+    expect(db.query("SELECT payload FROM events WHERE kind = 'gate.pass_key_spent'").all()).toEqual([{ payload: JSON.stringify({ gate: "g1", why: "passed" }) }]);
+  });
+
+  test("a replayed click finds the gate closed and passes nothing", () => {
+    answerAll();
+    const codes = new PageCodeStore();
+    expect(tx(db, () => passFromPage(db, codes, "g1", { key }, HEAD, NOW)).outcome).toBe("passed");
+    expect(tx(db, () => passFromPage(db, codes, "g1", { key }, HEAD, NOW + 1)).outcome).toBe("late");
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 1 });
+  });
+
+  test("a worker's key (any other) is refused, spends nothing, and no record names it", () => {
+    answerAll();
+    const codes = new PageCodeStore();
+    const guess = otherKey();
+    for (const tried of [guess, "", "x".repeat(43), key.slice(0, 42)]) expect(tx(db, () => passFromPage(db, codes, "g1", { key: tried }, HEAD, NOW)).outcome).toBe("wrong_key");
+    expect(gateState()).toBe("open");
+    expect(hash()).not.toBeNull();
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+    const all = JSON.stringify(db.query("SELECT kind, payload FROM events").all());
+    expect(all).not.toContain(guess);
+    expect(all).not.toContain(key);
+    // The right key still passes afterwards: a worker cannot spoil your button.
+    expect(tx(db, () => passFromPage(db, codes, "g1", { key }, HEAD, NOW)).outcome).toBe("passed");
+  });
+
+  test("a stale HEAD (the work moved since the review opened) refuses and spends the key; the next click has none", () => {
+    answerAll();
+    const codes = new PageCodeStore();
+    expect(tx(db, () => passFromPage(db, codes, "g1", { key }, "def456", NOW)).outcome).toBe("key_moved");
+    expect(gateState()).toBe("open");
+    expect(hash()).toBeNull();
+    expect(tx(db, () => passFromPage(db, codes, "g1", { key }, HEAD, NOW)).outcome).toBe("no_key");
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+    const refused = (db.query("SELECT payload FROM events WHERE kind = 'gate.page_pass_refused' ORDER BY seq").all() as { payload: string }[]).map((e) => JSON.parse(e.payload).why);
+    expect(refused).toEqual(["key_moved", "no_key"]);
+  });
+
+  test("a closed gate refuses and spends the key on every gate of the tab", () => {
+    answerAll();
+    db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, pass_key_hash) VALUES ('g0', ?1, 'design', 'review', 'http://127.0.0.1:4387/session/x', 'changes', ?2, ?3)").run(runId, NOW - 1, hash());
+    db.query("UPDATE gates SET state = 'changes' WHERE id = 'g1'").run();
+    expect(tx(db, () => passFromPage(db, new PageCodeStore(), "g1", { key }, HEAD, NOW)).outcome).toBe("late");
+    expect(db.query("SELECT COUNT(*) AS n FROM gates WHERE pass_key_hash IS NOT NULL").get()).toEqual({ n: 0 });
+  });
+
+  test("an open question refuses, and the key that came with it is spent", () => {
+    const codes = new PageCodeStore();
+    expect(tx(db, () => passFromPage(db, codes, "g1", { key }, HEAD, NOW))).toEqual({ outcome: "questions_open", open: ["q1"] });
+    expect(hash()).toBeNull();
+    expect(gateState()).toBe("open");
+  });
+
+  test("the key helpers: a 43-character key, its SHA-256 kept, matched in constant time, appended as the query", () => {
+    const minted = mintPassKey();
+    expect(minted.key).toHaveLength(PASS_KEY_LENGTH);
+    expect(passKeyMatches(minted.hash, minted.key)).toBe(true);
+    expect(passKeyMatches(minted.hash, otherKey())).toBe(false);
+    expect(passKeyMatches(null, minted.key)).toBe(false);
+    expect(keyedUrl("http://127.0.0.1:4387/session/0123456789abcdef", minted.key)).toBe(`http://127.0.0.1:4387/session/0123456789abcdef?flowryn_pass=${minted.key}`);
+  });
+
+  /** One poll's output: a pass Send carrying `sendKey` (with the answer), and an annotation, so the raw output lands in the notes. */
+  function keyedOutput(sendKey: string | null): string {
+    const token = encodeSend({ gate: "g1", comment: null, pass: true, key: sendKey }, [{ decision: "q1", choice: ["db"], note: null }]);
+    return `session:\n  status: feedback\nprompts[2]:\n  - prompt: "Approve\\n${ANSWER_MARK} ${token}"\n  - prompt: Nice diagram\n`;
+  }
+
+  test("the poller: one click passes, tells the daemon, and the key is nowhere a worker reads", async () => {
+    const codes = new PageCodeStore();
+    const p = pollerWith(keyedOutput(key), codes);
+    const calls = join(h.home, "calls.log");
+    try {
+      p.poller.pass();
+      await waitUntil(() => gateState() === "passed", 5_000, "the gate passed");
+    } finally {
+      p.poller.stop();
+    }
+    expect(db.query("SELECT channel FROM approvals").all()).toEqual([{ channel: "page" }]);
+    expect(p.passed).toEqual([runId]);
+    expect(p.sent).toEqual([]);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
+    expect(readable(p.logs)).not.toContain(key);
+    expect(readable(p.logs)).not.toContain(encodeSend({ gate: "g1", comment: null, pass: true, key }, [{ decision: "q1", choice: ["db"], note: null }]));
+    if (existsSync(calls)) expect(readFileSync(calls, "utf8")).not.toContain(key);
+  });
+
+  test("the poller: a worker's Send without the key is never a pass; it asks the leader and a code goes to you", async () => {
+    const codes = new PageCodeStore();
+    const p = pollerWith(keyedOutput(null), codes);
+    try {
+      p.poller.pass();
+      await waitUntil(() => p.logs.some((l) => l.includes("pass code sent")), 5_000, "the code sent");
+    } finally {
+      p.poller.stop();
+    }
+    expect(gateState()).toBe("open");
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested' AND state = 'open'").get()).toEqual({ n: 1 });
+  });
+
+  test("the poller: a worker's guessed key is refused, asks the leader, and sends you no code", async () => {
+    const codes = new PageCodeStore();
+    const p = pollerWith(keyedOutput(otherKey()), codes);
+    try {
+      p.poller.pass();
+      await waitUntil(() => p.logs.some((l) => l.includes("pass page wrong_key")), 5_000, "the poll recorded");
+    } finally {
+      p.poller.stop();
+    }
+    expect(gateState()).toBe("open");
+    expect(hash()).not.toBeNull();
+    expect(p.sent).toEqual([]);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested' AND state = 'open'").get()).toEqual({ n: 1 });
+  });
+
+  test("the poller: moved work spends the key and falls back to a code sent to you", async () => {
+    db.query("UPDATE gates SET pass_head = 'old999' WHERE id = 'g1'").run();
+    const codes = new PageCodeStore();
+    const p = pollerWith(keyedOutput(key), codes);
+    const calls = join(h.home, "calls.log");
+    try {
+      p.poller.pass();
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("one click no longer covers it"), 5_000, "the reply");
+    } finally {
+      p.poller.stop();
+    }
+    expect(gateState()).toBe("open");
+    expect(hash()).toBeNull();
+    expect(p.sent).toHaveLength(1);
+    expect(readFileSync(calls, "utf8")).toContain("A pass code went to your notifications");
+  });
+
+  test("the poller: a design page changed under its review refuses the click with no leader request and no code, as a typed code is", async () => {
+    db.query("UPDATE gates SET spec_path = ?2, spec_digest = ?3, page_digest = ?3 WHERE id = ?1").run("g1", join(h.home, "no-spec.md"), "0".repeat(64));
+    const codes = new PageCodeStore();
+    const p = pollerWith(keyedOutput(key), codes);
+    const calls = join(h.home, "calls.log");
+    try {
+      p.poller.pass();
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes("the design page or its build spec changed"), 5_000, "the reply");
+    } finally {
+      p.poller.stop();
+    }
+    expect(gateState()).toBe("open");
+    expect(p.sent).toEqual([]);
+    expect(codes.has("g1", NOW)).toBe(false);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
+    expect(db.query("SELECT COUNT(*) AS n FROM approvals").get()).toEqual({ n: 0 });
   });
 });

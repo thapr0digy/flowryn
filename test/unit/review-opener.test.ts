@@ -10,6 +10,8 @@ import { appendEvent } from "../../src/db/events.ts";
 import { MIGRATIONS } from "../../src/db/schema.ts";
 import { STAGE_SKILLS } from "../../src/skills/stages.ts";
 import { lavishPresence, recordedPresence, recordOpen, ReviewOpener, type OpenResult, type PresenceResult } from "../../src/lavish/opener.ts";
+import { hashPassKey } from "../../src/policy/pass-key.ts";
+import { recordHostedUrl } from "../../src/lavish/snapshot.ts";
 
 /**
  * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md): the
@@ -50,12 +52,14 @@ function seedRun(target: Db, runId = "r1", taskId = "web-a1"): void {
 }
 
 /** A review gate as stage done opens it, with its gate_ready item. */
-function seedGate(gateId: string, url: string, state = "pending", runId = "r1", title = "Feature"): void {
+/** A copy (source set) is hosted at `hosted` by default its own URL, as the poller records lavish-axi's; null leaves it unhosted. */
+function seedGate(gateId: string, url: string, state = "pending", runId = "r1", title = "Feature", source: string | null = "/r/design/design.html", hosted: string | null = url): void {
   const now = Date.now();
   tx(db, () => {
-    db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state) VALUES (?1, ?2, 'design', 'review', ?3, 'open', ?4, ?5)").run(gateId, runId, url, now, state);
+    db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, state, opened_at, open_state, source_page) VALUES (?1, ?2, 'design', 'review', ?3, 'open', ?4, ?5, ?6)").run(gateId, runId, url, now, state, source);
     const event = appendEvent(db, { source: "cli", kind: "stage.done", runId, taskId: "web-a1", payload: { gate: gateId } });
     openItem(db, { kind: "gate_ready", eventSeq: event.seq, taskId: "web-a1", runId, line: `design ready for review (${gateId}): ${title} (web) ${url}`, now });
+    if (source !== null && hosted !== null) recordHostedUrl(db, gateId, hosted, now);
   });
 }
 
@@ -80,13 +84,20 @@ function events(kindPrefix: string): { kind: string; payload: Record<string, unk
 
 interface Rig {
   opener: ReviewOpener;
+  /** Each open, its URL without the tab's pass key (that is in `keys`). */
   opens: { browser: string; url: string }[];
+  keys: string[];
+  keyed: string[];
   probes: string[];
   logs: string[];
 }
 
-function rig(options: { review?: Partial<ReviewConfig>; mode?: OpenerMode; open?: OpenResult; presence?: PresenceResult } = {}): Rig {
+const KEYED = /\?flowryn_pass=([A-Za-z0-9_-]{43})$/;
+
+function rig(options: { review?: Partial<ReviewConfig>; mode?: OpenerMode; open?: OpenResult | ((url: string) => OpenResult); presence?: PresenceResult } = {}): Rig {
   const opens: { browser: string; url: string }[] = [];
+  const keys: string[] = [];
+  const keyed: string[] = [];
   const probes: string[] = [];
   const logs: string[] = [];
   const opener = new ReviewOpener({
@@ -96,15 +107,18 @@ function rig(options: { review?: Partial<ReviewConfig>; mode?: OpenerMode; open?
     log: (m) => logs.push(m),
     now: Date.now,
     open: async (browser, url) => {
-      opens.push({ browser, url });
-      return options.open ?? { ok: true };
+      const key = KEYED.exec(url);
+      if (key) keys.push(key[1]!);
+      opens.push({ browser, url: url.replace(KEYED, "") });
+      return typeof options.open === "function" ? options.open(url) : (options.open ?? { ok: true });
     },
+    keyed: (gateId) => keyed.push(gateId),
     presence: async (url) => {
       probes.push(url);
       return options.presence ?? { listening: true };
     },
   });
-  return { opener, opens, probes, logs };
+  return { opener, opens, keys, keyed, probes, logs };
 }
 
 describe("the opener", () => {
@@ -442,5 +456,104 @@ describe("Lavish presence over its /events WebSocket", () => {
     } finally {
       lavish.server.stop(true);
     }
+  });
+});
+
+describe("one click: the tab's pass key (docs/notes/2026-11-05-one-click-approve-3y.md)", () => {
+  beforeEach(() => seedRun(db));
+
+  function hashOf(gateId: string): string | null {
+    return (db.query("SELECT pass_key_hash FROM gates WHERE id = ?1").get(gateId) as { pass_key_hash: string | null }).pass_key_hash;
+  }
+
+  test("the claim mints a key: only the address handed to open carries it, the gate keeps its hash, events and items never the key", async () => {
+    seedGate("g1", URL_A);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(r.keys).toHaveLength(1);
+    const key = r.keys[0]!;
+    expect(hashPassKey(key)).toBe(hashOf("g1")!);
+    expect(r.keyed).toEqual(["g1"]);
+    expect(events("gate.browser_opening")[0]!.payload).toMatchObject({ url: URL_A, one_click: true });
+    const everything = [JSON.stringify(db.query("SELECT * FROM events").all()), JSON.stringify(db.query("SELECT * FROM items").all()), JSON.stringify(db.query("SELECT * FROM gates").all()), ...r.logs].join("\n");
+    expect(everything).not.toContain(key);
+  });
+
+  test("a resubmitted page reuses the tab: its gate is skipped and takes the tab's hash", async () => {
+    seedGate("g1", URL_A);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    closeGate("g1");
+    seedGate("g2", URL_A);
+    r.opener.offer("g2");
+    await r.opener.idle();
+    expect(gate("g2").open_state).toBe("skipped");
+    expect(hashOf("g2")).toBe(hashOf("g1"));
+    expect(r.keyed).toEqual(["g1", "g2"]);
+    expect(events("gate.browser_skipped")[0]!.payload).toMatchObject({ one_click: true });
+    // A spent key is not taken again.
+    db.query("UPDATE gates SET pass_key_hash = NULL").run();
+    closeGate("g2");
+    seedGate("g3", URL_A);
+    r.opener.offer("g3");
+    await r.opener.idle();
+    expect(hashOf("g3")).toBeNull();
+    expect(events("gate.browser_skipped")[1]!.payload).toMatchObject({ one_click: false });
+  });
+
+  test("a page that is not the daemon's checked copy (a gate from before the copy) gets no key: a script on it could read one", async () => {
+    seedGate("g1", URL_A, "pending", "r1", "Feature", null);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(gate("g1").open_state).toBe("opened");
+    expect(r.keys).toEqual([]);
+    expect(hashOf("g1")).toBeNull();
+    expect(events("gate.browser_opening")[0]!.payload).toMatchObject({ one_click: false });
+  });
+
+  test("the copy's tab is probed, opened and keyed only at the URL lavish-axi printed, never the host and port the worker named", async () => {
+    const workerUrl = "http://127.0.0.1:9999/session/0123456789abcdef";
+    seedGate("g1", workerUrl, "pending", "r1", "Feature", "/r/design/design.html", URL_A);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(gate("g1").open_state).toBe("opened");
+    expect(r.probes).toEqual([URL_A]);
+    expect(r.opens.map((o) => o.url)).toEqual([URL_A]);
+    expect(r.keys).toHaveLength(1);
+    expect(events("gate.page_hosted")[0]!.payload).toMatchObject({ gate: "g1", url: URL_A, was: workerUrl });
+    expect(events("gate.browser_opening")[0]!.payload).toMatchObject({ url: URL_A, one_click: true });
+    expect(itemLine("g1")).toBe(`design ready for review (g1): Feature (web) ${URL_A} · opened in Google Chrome`);
+    expect(itemLine("g1")).not.toContain(":9999");
+  });
+
+  test("a copy the daemon never hosted opens nothing and gets no key", async () => {
+    seedGate("g1", URL_A, "pending", "r1", "Feature", "/r/design/design.html", null);
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(gate("g1").open_state).toBe("failed");
+    expect(r.probes).toEqual([]);
+    expect(r.opens).toEqual([]);
+    expect(hashOf("g1")).toBeNull();
+  });
+
+  test("a file:// page gets no key, and a failed open never shows the key in why", async () => {
+    seedGate("g1", "file:///tmp/page.html");
+    const r = rig();
+    r.opener.offer("g1");
+    await r.opener.idle();
+    expect(r.keys).toEqual([]);
+    expect(hashOf("g1")).toBeNull();
+    seedGate("g2", URL_B);
+    const failing = rig({ open: (url) => ({ ok: false, why: `cannot open ${url}` }) });
+    failing.opener.offer("g2");
+    await failing.opener.idle();
+    const key = failing.keys[0]!;
+    expect(gate("g2").open_detail).toContain("****");
+    expect(JSON.stringify(db.query("SELECT * FROM events").all()) + JSON.stringify(db.query("SELECT * FROM items").all()) + failing.logs.join("\n")).not.toContain(key);
   });
 });

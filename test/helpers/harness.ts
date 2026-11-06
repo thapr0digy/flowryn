@@ -43,13 +43,20 @@ exit 0
  * the first file in $FLOWRYN_HOME/lavish-queue/*.out (a test writes what the user "sent", in the poll's
  * own output format), claims it by renaming and prints it, or prints `status: waiting` once its
  * --timeout-ms runs out; a queued file named *.fail.out makes the poll
- * fail the way a missing session does. Nothing reaches a real Lavish server or browser.
+ * fail the way a missing session does; `<page> --no-open` (the daemon hosting its copy of a review page)
+ * prints the page's session URL. Nothing reaches a real Lavish server or browser.
  */
 const FAKE_LAVISH = `#!/bin/sh
 echo "$*" >> "$FLOWRYN_HOME/lavish-calls.log"
 if [ "$1" = "reply" ]; then
   [ -e "$FLOWRYN_HOME/lavish-reply-fail" ] && exit 1
   { cat; echo; } >> "$FLOWRYN_HOME/lavish-replies.log"
+  exit 0
+fi
+if [ "$2" = "--no-open" ]; then
+  real="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+  key=$(printf %s "$real" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)
+  printf 'session:\n  url: http://127.0.0.1:4387/session/%s\n' "$key"
   exit 0
 fi
 [ "$1" = "poll" ] || exit 0

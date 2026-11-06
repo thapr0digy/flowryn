@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { ANSWER_MARK, encodeAnswer, encodeSend } from "../../src/lavish/poll-output.ts";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
+import { hashPassKey } from "../../src/policy/pass-key.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import { tx } from "../../src/db/db.ts";
 import { failRun, getRun } from "../../src/lifecycle/runs.ts";
@@ -74,10 +75,10 @@ function queuePoll(e: FleetEnv, n: number, gate: string, answers: { d: string; c
 }
 
 /** One Send from the current widget: every answer, the comment and the pass request in one prompt. */
-function queueSend(e: FleetEnv, n: number, gate: string, answers: { d: string; c: string[]; n?: string }[], comment: string | null, pass: boolean, code: string | null = null): void {
+function queueSend(e: FleetEnv, n: number, gate: string, answers: { d: string; c: string[]; n?: string }[], comment: string | null, pass: boolean, code: string | null = null, key: string | null = null): void {
   const dir = join(e.h.home, "lavish-queue");
   mkdirSync(dir, { recursive: true });
-  const token = encodeSend({ gate, comment, pass, code }, answers.map((a) => ({ decision: a.d, choice: a.c, note: a.n ?? null })));
+  const token = encodeSend({ gate, comment, pass, code, key }, answers.map((a) => ({ decision: a.d, choice: a.c, note: a.n ?? null })));
   const prompt = `  - uid: ""\n    prompt: ${JSON.stringify(`Answers for the design review (gate ${gate}):\n${ANSWER_MARK} ${token}`)}\n    selector: ""\n    tag: choice\n    text: answers\n    target:\n      type: flowryn-answers\n      gate: ${gate}`;
   writeFileSync(join(dir, `${String(n).padStart(3, "0")}.out`), `session:\n  file: /x/design.html\n  status: feedback\nprompts[1]:\n${prompt}\nnext_step: "Apply the requested changes."\ndom_snapshot: ""\n`);
 }
@@ -166,7 +167,7 @@ describe("a review gate's questions", () => {
       expect(readFileSync(widget, "utf8")).toContain('"via":"your leader"');
       // Lavish's conversation hears what Flowryn recorded with the next poll, which keeps listening while the gate is open.
       await waitUntil(() => readFileSync(calls, "utf8").includes("--agent-reply Flowryn recorded your answer to q1. Sent to the worker; its answer will appear here. 2 questions still open."), 10_000, "the reply after q1");
-      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Sent to the worker; its answer will appear here\. A pass code went to your notifications \(good for 10 minutes\): type it in the pass code field and press Send and pass\. Your leader can also confirm the pass with you\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
+      await waitUntil(() => /--agent-reply Flowryn recorded your answer to q2\. q3 already had an answer; it stands\. Sent to the worker; its answer will appear here\. A pass code went to your notifications \(good for 10 minutes\): type it in the pass code field and press Approve\. Your leader can also confirm the pass with you\.(?! --timeout-ms)/.test(readFileSync(calls, "utf8")), 10_000, "the last reply");
       expect(one<{ line: string }>(f, "SELECT line FROM items WHERE kind = 'pass_requested' AND run_id = ?1 AND state = 'open'", run)!.line).toContain(`flowryn gate pass ${task} --gate-id ${gate.id}`);
       expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open" });
 
@@ -347,6 +348,118 @@ describe("passing a review from its page with a pass code (docs/notes/2026-10-30
   );
 });
 
+describe("one-click approve (docs/notes/2026-11-05-one-click-approve-3y.md)", () => {
+  test(
+    "a page without questions: the daemon opens its tab with a pass key; a worker's posts (no key, a guessed key) and its own CLI never pass; one click passes the gate (channel page), the build starts, and the key is written nowhere a worker reads",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const leader = await e.claude();
+      await leader.start();
+      const body = ["Feature oc", `FAKE: write design/design.html ${PAGE}`, "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html", "FAKE: verb gate pass $FLOWRYN_TASK", "FAKE: sleep 120000"].join("\n");
+      const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: body });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
+      const gate = one<{ id: string; page_path: string; source_page: string; review_url: string; pass_head: string }>(f, "SELECT id, page_path, source_page, review_url, pass_head FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+      expect(gate.pass_head).toMatch(/^[0-9a-f]{40}$/);
+      // The page the user reviews is the daemon's copy under the state directory, hosted under its own Lavish session.
+      expect(gate.source_page).toBe(join(realpathSync(join(f.h.dataDir, task)), "design", "design.html"));
+      expect(gate.page_path).toBe(join(realpathSync(f.h.stateDir), "review-pages", run, "design", "design.html"));
+      expect(gate.review_url).toBe(`http://127.0.0.1:4387/session/${lavishSessionKey(gate.page_path)}`);
+      expect(readFileSync(gate.page_path, "utf8")).toBe(readFileSync(gate.source_page, "utf8"));
+
+      // The opener hands the browser (here the recorder) the copy's address with the tab's key; the gate keeps only its hash.
+      const opens = join(f.h.home, "browser-opens.log");
+      await waitUntil(() => existsSync(opens) && /flowryn_pass=/.test(readFileSync(opens, "utf8")), 15_000, "the page opened with its key");
+      const key = /\?flowryn_pass=([A-Za-z0-9_-]{43})$/m.exec(readFileSync(opens, "utf8"))![1]!;
+      expect(readFileSync(opens, "utf8")).toContain(`${gate.review_url}?flowryn_pass=${key}`);
+      expect(one<{ pass_key_hash: string }>(f, "SELECT pass_key_hash FROM gates WHERE id = ?1", gate.id)!.pass_key_hash).toBe(hashPassKey(key));
+      const widget = join(dirname(gate.page_path), "flowryn-questions.js");
+      await waitUntil(() => existsSync(widget) && readFileSync(widget, "utf8").includes('"oneClick":true'), 10_000, "the widget with one click");
+      expect(existsSync(join(dirname(gate.source_page), "flowryn-questions.js"))).toBe(false);
+      const calls = join(f.h.home, "lavish-calls.log");
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
+      expect(readFileSync(calls, "utf8")).toContain(`${gate.page_path} --no-open`);
+
+      // The user's words wake the worker, which tries to pass its own gate through the CLI: refused.
+      queuePoll(f, 1, gate.id, [], ["Looks right to me"]);
+      const replies = join(f.h.dataDir, task, "fake-replies.jsonl");
+      await waitUntil(() => existsSync(replies) && readFileSync(replies, "utf8").includes('"gate","pass"'), 20_000, "the worker's own gate pass");
+      const own = readFileSync(replies, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { args: string[]; code: number }).find((r) => r.args[0] === "gate")!;
+      expect(own.code).not.toBe(0);
+
+      // A worker posting to Lavish itself: without the key it is only a request (a code goes to you); a guessed key is refused.
+      queueSend(f, 2, gate.id, [], null, true);
+      const notified = join(f.h.home, "notified.jsonl");
+      await waitUntil(() => existsSync(notified) && readFileSync(notified, "utf8").includes("Flowryn pass code"), 10_000, "the fallback code");
+      queueSend(f, 3, gate.id, [], null, true, null, "A".repeat(43));
+      await waitUntil(() => readFileSync(calls, "utf8").includes("was not opened with the pass key"), 10_000, "the guessed key refused");
+      expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open" });
+      expect(rows(f, "SELECT 1 FROM approvals")).toEqual([]);
+
+      // Your one click: the gate passes from the page and the build stage starts.
+      queueSend(f, 4, gate.id, [], null, true, null, key);
+      await f.waitRun(run, (r) => r.stage === "build", "the build stage");
+      const approval = one<{ channel: string; head_sha: string; used: number }>(f, "SELECT a.channel, a.head_sha, a.consumed_at IS NOT NULL AS used FROM approvals a JOIN gates g ON g.approval_id = a.id WHERE g.id = ?1", gate.id)!;
+      expect(approval).toEqual({ channel: "page", head_sha: gate.pass_head, used: 1 });
+      expect(one<{ pass_key_hash: string | null }>(f, "SELECT pass_key_hash FROM gates WHERE id = ?1", gate.id)).toEqual({ pass_key_hash: null });
+      await waitUntil(() => one(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE '%The design review passed (page).%'", run) !== null, 10_000, "the verdict steer");
+      await waitUntil(() => readFileSync(calls, "utf8").includes("Approved: the review passed; the build stage starts now."), 10_000, "the passed reply");
+
+      // Nowhere a worker reads holds the key (the open recorder stands in for your browser).
+      const readable = [...filesUnder(f.h.stateDir), ...filesUnder(f.h.dataDir), ...readdirSync(f.h.home).filter((n) => n.endsWith(".log") && n !== "browser-opens.log").map((n) => join(f.h.home, n))];
+      expect(readable.length).toBeGreaterThan(0);
+      expect(readable.filter((path) => readFileSync(path).includes(key))).toEqual([]);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "a worker's page with a script that would read the key is refused at stage done, and one it writes later never reaches the copy the user sees: the last good copy stays and the worker hears why",
+    async () => {
+      ship = await makeShipEnv({ mode: "local-only" });
+      const e = ship;
+      const f = e.fleet;
+      expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
+      const leader = await e.claude();
+      await leader.start();
+      const reader = "<script>window.lavish.queuePrompt(new URL(document.referrer).search)</script></body>";
+      const scripted = PAGE.replace("</body>", reader);
+      const handler = PAGE.replace("</body>", '<img src="x.png" onerror="window.lavish.sendQueuedPrompts()"></body>');
+      const done = "FAKE: stage-done --review lavish:design/design.html --page $FLOWRYN_REPORT_DIR/design/design.html";
+      const body = ["Feature sp", `FAKE: write design/design.html ${scripted}`, done, `FAKE: write design/design.html ${PAGE}`, done, `FAKE: write design/design.html ${handler}`, "FAKE: sleep 120000"].join("\n");
+      const dispatched = await f.json(["dispatch", "web", "--kind", "ship", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: body });
+      expect(dispatched.code).toBe(0);
+      const { task, run } = dispatched.reply.data as { task: string; run: string };
+      await f.waitRun(run, (r) => r.stage === "design" && r.stage_state === "review", "the design review");
+      const replies = join(f.h.dataDir, task, "fake-replies.jsonl");
+      const first = JSON.parse(readFileSync(replies, "utf8").split("\n")[0]!) as { code: number; reply: string };
+      expect(first.code).not.toBe(0);
+      expect(first.reply).toContain("<script> other than Flowryn's widget mount");
+      expect(rows(f, "SELECT id FROM gates WHERE run_id = ?1", run)).toHaveLength(1);
+      const gate = one<{ id: string; page_path: string; source_page: string }>(f, "SELECT id, page_path, source_page FROM gates WHERE run_id = ?1 AND state = 'open'", run)!;
+      const calls = join(f.h.home, "lavish-calls.log");
+      await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
+
+      const shown = readFileSync(gate.page_path, "utf8");
+      expect(shown).not.toContain("<script>window.lavish");
+      // The user's words wake the worker, which rewrites its page with an event handler: the copy keeps the clean page.
+      queuePoll(f, 1, gate.id, [], ["Looks right to me"]);
+      await waitUntil(() => readFileSync(gate.source_page, "utf8").includes("onerror="), 20_000, "the worker's rewrite");
+      await waitUntil(() => one(f, "SELECT 1 FROM events WHERE kind = 'gate.page_refused' AND json_extract(payload, '$.gate') = ?1", gate.id) !== null, 10_000, "the refused revision");
+      expect(readFileSync(gate.page_path, "utf8")).toBe(shown);
+      expect(shown).not.toContain("onerror=");
+      await waitUntil(() => one(f, "SELECT 1 FROM messages WHERE run_id = ?1 AND body LIKE '%was not shown to the user%onerror=%'", run) !== null, 10_000, "the worker's steer");
+      expect(one<{ state: string }>(f, "SELECT state FROM gates WHERE id = ?1", gate.id)).toEqual({ state: "open" });
+      expect(rows(f, "SELECT 1 FROM approvals")).toEqual([]);
+    },
+    { timeout: 120_000 },
+  );
+});
+
 describe("review-channel health", () => {
   test(
     "while the page's polls fail the questions wait with one review_channel item; once Lavish delivers again the answer is recorded as usual and the gate stays open",
@@ -409,7 +522,9 @@ describe("the daemon listens on every review page", () => {
       // No question to answer, yet the daemon listens, so Lavish never says the agent is not listening.
       const calls = join(f.h.home, "lavish-calls.log");
       await waitUntil(() => existsSync(calls) && readFileSync(calls, "utf8").includes(`poll ${gate.page_path}`), 10_000, "the lavish-axi poll");
-      expect(existsSync(join(gate.page_path, "..", "flowryn-questions.js"))).toBe(false);
+      // Its widget holds only the Approve button: no questions.
+      await waitUntil(() => existsSync(join(gate.page_path, "..", "flowryn-questions.js")), 10_000, "the widget");
+      expect(readFileSync(join(gate.page_path, "..", "flowryn-questions.js"), "utf8")).toContain('"questions":[]');
 
       queuePoll(f, 1, gate.id, [], ["approved, ship it"]);
       // The worker gets the words and answers in the page; the leader is not woken for it.

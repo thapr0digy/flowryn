@@ -1018,6 +1018,15 @@ CREATE TABLE stage_handoffs (
 CREATE INDEX stage_handoffs_task ON stage_handoffs(task_id, created_at);
 `;
 
+// One-click approve (docs/notes/2026-11-05-one-click-approve-3y.md): the SHA-256 of the pass key
+// the daemon opened the review tab with (never the key), the HEAD the review opened at, and the
+// worker's page the daemon's copy (page_path, under <state_dir>/review-pages) is taken from.
+const PAGE_PASS_KEY_SQL = /* sql */ `
+ALTER TABLE gates ADD COLUMN pass_key_hash TEXT;
+ALTER TABLE gates ADD COLUMN pass_head TEXT;
+ALTER TABLE gates ADD COLUMN source_page TEXT;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1071,6 +1080,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
   { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
   { version: 52, name: "rich-briefs", sql: RICH_BRIEFS_SQL },
+  { version: 53, name: "page-pass-key", sql: PAGE_PASS_KEY_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

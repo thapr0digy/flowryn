@@ -1,7 +1,7 @@
 # Pass a review gate from its page with a pass code
 
 - Status: partial
-- Open: the one-click pass (a code carried in the URL the daemon opens) needs lavish-axi to hand the page its fragment; the user chose the typed code now and one-click as its own later task. Not yet run live against a real notification or `[notify] command`.
+- Open: the one-click pass is built (docs/notes/2026-11-05-one-click-approve-3y.md): a key in the URL's query, which the page reads as its referrer, since the fragment never reaches it; the typed code stays as its fallback. Not yet run live against a real notification or `[notify] command`.
 
 A review page could only *request* a pass: the user then confirmed it again in chat or with `flowryn approve`. Now the page's "Send and pass" button passes the gate itself when the user types the pass code Flowryn sent to their notifications. Plain code throughout (a code store, fixed checks); no model.
 
@@ -27,7 +27,7 @@ The database (no column, no event payload: `gate.pass_code_sent` and `gate.page_
 
 ## Limits
 
-- Only a gate with questions has the widget, so only those pages can pass this way (as before, a page without questions has no form).
+- Every review page now mounts the widget, questions or not, and its button is Approve (docs/notes/2026-11-05-one-click-approve-3y.md); the code is the fallback where the tab has no live pass key.
 - The macOS notification's `osascript` command line shows the code to process listings for a moment, the same class as the browser open's command line.
 - docs/cutover-notes.md "C1 · Decisions" limit (d) is edited in place for the page pass.
 
