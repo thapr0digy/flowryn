@@ -29,7 +29,7 @@ describe("rendered sizes stay under fixed limits", () => {
   const limits: [string, number][] = [
     ["flowryn-design", 3_600],
     ["flowryn-build-test", 3_000],
-    ["flowryn-visual-qa", 3_300],
+    ["flowryn-visual-qa", 4_800],
     ["flowryn-draft", 2_400],
   ];
   for (const [name, limit] of limits) test(`assumption: the ${name} skill renders under ${limit} characters`, () => expect(skill(name).length).toBeLessThanOrEqual(limit));

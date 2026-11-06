@@ -144,6 +144,8 @@ describe("workflow stages and review gates", () => {
         "FAKE: commit two.txt first try",
         "FAKE: stage-done",
         "FAKE: verb stage done --review lavish:qa/evidence.html",
+        "FAKE: qa-page works blocker",
+        "FAKE: verb stage done --review lavish:qa/evidence.html",
         "FAKE: qa-page",
         "FAKE: stage-done --review lavish:qa/evidence.html",
         "FAKE: commit two.txt second try",
@@ -163,9 +165,13 @@ describe("workflow stages and review gates", () => {
       expect((await e.approve(task, { gate: "design" })).ok).toBe(true);
       await f.waitRun(run, (r) => r.stage === "qa" && r.stage_state === "review", "the first QA review");
       // The QA review needs its page: without qa/evidence.html and its filled card, stage done is refused.
-      const noPage = (await e.replies(task, 5)).find((r) => r.args.includes("lavish:qa/evidence.html"))!;
-      expect(noPage.code).toBe(3);
-      expect((noPage.reply.error as { code: string }).code).toBe("qa_page_invalid");
+      const [noPage, softVerdict] = (await e.replies(task, 6)).filter((r) => r.args.includes("lavish:qa/evidence.html"));
+      expect(noPage!.code).toBe(3);
+      expect((noPage!.reply.error as { code: string }).code).toBe("qa_page_invalid");
+      // A page whose verdict is softer than its worst finding is refused too: a blocker means broken.
+      expect(softVerdict!.code).toBe(3);
+      expect(softVerdict!.reply.error).toMatchObject({ code: "qa_page_invalid" });
+      expect(JSON.stringify(softVerdict!.reply.error)).toContain("a blocker means broken");
       const changes = await f.json(["gate", "changes", task, "--body-file", "-"], { stdin: "The button is off-screen on a phone." });
       expect(changes.code).toBe(0);
       expect(changes.reply.data).toMatchObject({ state: "changes", to: "build" });
