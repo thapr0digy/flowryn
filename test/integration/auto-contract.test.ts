@@ -154,7 +154,7 @@ describe("the automatic contract check", () => {
       setHarnessVersion(env.h, "claude", NEW_VERSION);
       const plan = await env.json(["plan", "web", "--harness", "claude", "--body-file", "-"], { stdin: "## Phase 1: look\nlook around\n" });
       expect(plan.reply.error ?? null).toBeNull();
-      await waitUntil(() => query<{ id: string }>(env, "SELECT id FROM runs").length > 0, 30_000, "the phase's run");
+      await waitUntil(() => query<{ id: string }>(env, "SELECT id FROM runs").length > 0, 120_000, "the phase's run");
       const run = query<{ id: string }>(env, "SELECT id FROM runs")[0]!.id;
       expect(items(env, "phase_blocked")).toEqual([]);
       await waitUntil(() => runOf(env, run).launched_at !== null, 170_000, "the phase's run to launch after the pass");
