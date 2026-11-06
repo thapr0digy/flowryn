@@ -25,7 +25,7 @@ import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { getRunWithPolicy, holdReason, isTerminal, runBase, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
-import { deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
+import { deliveryHandoff, deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 import { landScout } from "./landing.ts";
 import { requireApprovedDraft } from "./draft.ts";
 import { startAutoMerge } from "../verify/auto-merge.ts";
@@ -434,6 +434,7 @@ const deliver: VerbSpec = {
     report: { type: "string", help: "the scout report file", placeholder: "path" },
     pr: { type: "string", help: "the pull request URL (ship: no-mistakes, direct-PR)", placeholder: "url" },
     local: { type: "boolean", help: "your committed branch (ship: local-only)" },
+    "handoff-file": { type: "string", help: "your handoff from the build stage this delivery ends (## Done, ## Deviations, ## Risks; $FLOWRYN_BIN template handoff); required when it ends build", fileFor: "handoff" },
   },
   kind: "mutation",
   roles: ["worker"],
@@ -444,9 +445,15 @@ const deliver: VerbSpec = {
     const asked = deliveryAsked(ctx, activeRun(ctx), args);
     // A delivery ends the last stage (design section 11); from an earlier one only past stages without a review gate.
     const before = activeRun(ctx);
+    const handoffText = stringArg(args, "handoff");
+    let handoffKept = false;
     if (before.state !== "ready") {
       if (pipelineNeedsLastStage(ctx.db, before)) requireLastStageStarted(ctx.db, before);
-      else await startPooledStages(ctx, before.id);
+      else {
+        // Refused before anything moves or GitHub and git are asked; kept where the stage ends.
+        if (before.kind === "ship") deliveryHandoff(ctx, before, handoffText);
+        ({ handoffKept } = await startPooledStages(ctx, before.id, handoffText));
+      }
     }
     const run = activeRun(ctx);
     if (run.state !== "ready") deliveryStages(ctx.db, run);
@@ -456,24 +463,25 @@ const deliver: VerbSpec = {
     const seen = deliveryBasis(ctx.db, run.id);
     // A run that passed a draft review lands that file as approved (src/lifecycle/draft.ts).
     await requireApprovedDraft(ctx.db, deps.git, run, project.default_branch);
-    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen };
+    if (asked.kind === "local") return { ship: await verifyLocalDelivery(deps, run, project), seen, handoffKept };
     const ship = await verifyPrDelivery(deps, run, project, asked.url);
-    return { ship, seen, carry: await carryOf(ctx, deps.git, run, runBase(run, project), ship) };
+    return { ship, seen, handoffKept, carry: await carryOf(ctx, deps.git, run, runBase(run, project), ship) };
   },
-  apply(ctx, _args, prepared) {
+  apply(ctx, args, prepared) {
     const run = activeRun(ctx);
     const now = ctx.now();
-    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis; carry?: Carry | null };
+    const outcome = prepared as { report?: DeliveredReport; ship?: VerifiedPr | VerifiedLocal; seen?: DeliveryBasis; carry?: Carry | null; handoffKept?: boolean };
     if (outcome.seen) requireDeliveryBasis(ctx.db, outcome.seen, DELIVER_PARTS, "deliver", "cli", now, "read your steers, then deliver again");
     if (run.state !== "ready" && pipelineNeedsLastStage(ctx.db, run)) requireLastStageStarted(ctx.db, run);
     const finished = run.state === "ready" ? [] : deliveryStages(ctx.db, run);
     if (outcome.ship) {
+      const handoff = deliveryHandoff(ctx, run, outcome.handoffKept ? undefined : stringArg(args, "handoff"));
       const previous = deliveredOf(ctx.db, run.task_id);
       const data = recordDelivery(ctx.db, run, outcome.ship, ctx.via, now, outcome.carry ?? null);
       // Runs stacked on this task are told to take its new head (src/lifecycle/stacks.ts).
       const steered = outcome.ship.kind === "pr" ? steerStackedOnRedelivery(ctx.db, run.task_id, previous?.head ?? null, outcome.ship.pr.headSha, run.branch, now) : [];
       if (steered.length > 0) data.stacked_steered = steered.join(" ");
-      if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now);
+      if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now, handoff);
       const ship = outcome.ship;
       // A queue project's PR waits its turn in the landing queue (src/verify/landing-queue.ts), which merges it.
       if (ship.kind === "pr" && deliveredToQueue(ctx.db, ctx.config(), run, ship.pr.headSha, now)) {

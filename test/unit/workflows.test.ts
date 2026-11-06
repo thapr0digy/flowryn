@@ -304,7 +304,7 @@ describe("stage text", () => {
     };
     const delivery = { kind: "ship" as const, mode: "no-mistakes" as const, defaultBranch: "main", lastStage: { id: "publish", pools: [] } };
     const contract = deliveryLines(delivery).join("\n");
-    expect(contract).toContain("Before the pipeline: $FLOWRYN_BIN stage begin publish.");
+    expect(contract).toContain("Before the pipeline: $FLOWRYN_BIN stage begin publish; skipping build, add --handoff-file <your handoff>.");
     expect(contract).not.toContain("stage_waiting");
     const code = stageInstructions({ def: release, index: 0, stage: release.stages[0]!, last: false }, { stateDir: "/none", delivery });
     expect(code).toContain("it runs in stage publish, once that stage has started");
@@ -313,7 +313,7 @@ describe("stage text", () => {
     expect(publish).not.toContain("stage begin");
 
     const pooled = deliveryLines({ ...delivery, lastStage: { id: "ship", pools: ["validation"] } }).join("\n");
-    expect(pooled).toContain("stage begin ship; it holds a slot of validation.");
+    expect(pooled).toContain("stage begin ship; it holds a slot of validation; skipping build, add --handoff-file <your handoff>.");
     expect(pooled).toContain("On stage_waiting, end your turn");
   });
 
