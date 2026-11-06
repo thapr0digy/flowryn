@@ -110,7 +110,7 @@ describe("the posture", () => {
     expect(tx(db, () => takePendingBrief(db, now))).toBeNull();
   });
 
-  test("a new away after an expiry whose brief was never shown folds it in: one brief from the old start, wakes only from its own start", () => {
+  test("a new away after an expiry whose brief was never shown folds it in: one brief from the old start", () => {
     const now = Date.now();
     away(now - 10 * HOUR, now - HOUR, "night");
     tx(db, () => expireAway(db, now));
@@ -119,8 +119,9 @@ describe("the posture", () => {
     expect(extended).toBe(false);
     expect(getAway(db, now + 1)?.since).toBe(now);
     expect(posture.brief_since).toBe(now - 10 * HOUR);
-    expect(p0Candidate(db, "L1", now + 1, DAY, posture.since)).toBeNull();
-    expect(p0Candidate(db, "L1", now + 1, DAY, now - 10 * HOUR)?.id).toBe(gap);
+    // What wakes the leader does not depend on away (steer m569): the gate is a P1 action item, in the batch.
+    expect(p0Candidate(db, "L1", now + 1, DAY)).toBeNull();
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual([gap]);
     expect(tx(db, () => takePendingBrief(db, now + 1_000))).toBeNull();
     const started = db.query("SELECT payload FROM events WHERE kind = 'away.started' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
     expect(JSON.parse(started.payload).folded).toBe(true);
@@ -160,68 +161,55 @@ describe("the posture", () => {
   });
 });
 
-describe("the wake rule while away", () => {
+describe("the wake rule, away or not (steer m569: away no longer changes what wakes the leader)", () => {
   const AGE = DAY;
 
-  test("assumption: an item only the user can move, opened after away began, counts as a P0; its stored lane stays P1", () => {
+  test("an item only the user can move is a P1 action item: it wakes in the batch, never as a P0; its lane stays P1", () => {
     const now = Date.now();
     const gate = open("gate_ready", now);
     expect(p0Candidate(db, "L1", now, AGE)).toBeNull();
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)?.id).toBe(gate);
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual([gate]);
     expect((db.query("SELECT lane FROM items WHERE id = ?1").get(gate) as { lane: string }).lane).toBe("P1");
   });
 
-  test("assumption: only new items: one opened before away began does not wake", () => {
+  test("an item opened before away began wakes all the same", () => {
     const now = Date.now();
-    open("gate_ready", now - 5_000);
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
+    const gate = open("gate_ready", now - 5_000);
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual([gate]);
   });
 
-  test("gate_ready and checks_red wake; idle, progress and info kinds never do", () => {
+  test("every action kind wakes, idle and capacity waits included; info kinds never do", () => {
     const now = Date.now();
-    for (const kind of ["worker_idle", "phase_started", "steer_unacked", "capacity_wait"] as const) open(kind, now);
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
-    for (const kind of ["gate_ready", "checks_red"] as const) {
-      const id = open(kind, now);
-      expect(p0Candidate(db, "L1", now, AGE, now - 1_000)?.id).toBe(id);
-      db.query("UPDATE items SET state = 'resolved' WHERE id = ?1").run(id);
-    }
+    for (const kind of ["phase_started", "progress", "steer_acked"] as const) open(kind, now);
+    expect(followUpBatch(db, "L1", 0)).toBeNull();
+    const ids = (["worker_idle", "steer_unacked", "capacity_wait", "gate_ready"] as const).map((kind) => open(kind, now));
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual(ids);
+    expect(p0Candidate(db, "L1", now, AGE)).toBeNull();
   });
 
-  test("the leader follow-ups (pass_requested, user_acted, landed) count as away wake kinds, but wake as one batch, not as a P0", () => {
+  test("the leader follow-ups (pass_requested, user_acted, landed) count as away wake kinds, and wake as one batch, not as a P0", () => {
     const now = Date.now();
     const ids = (["pass_requested", "user_acted", "landed"] as const).map((kind) => open(kind, now));
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
-    expect(followUpBatch(db, "L1")?.items.map((i) => i.id)).toEqual(ids);
+    expect(p0Candidate(db, "L1", now, AGE)).toBeNull();
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual(ids);
     const counted = db.query(`SELECT COUNT(*) AS n FROM items i WHERE ${awayWakeSql("?1")}`).get(now - 1_000) as { n: number };
     expect(counted.n).toBe(3);
     expect(AWAY_WAKE_KINDS).toEqual(expect.arrayContaining(["pass_requested", "user_acted", "landed"]));
   });
 
-  test("assumption: a yolo PR merges without the user, so only a non-yolo pr_ready wakes as a P0 (a yolo one is a leader follow-up)", () => {
+  test("a pr_ready wakes in the batch, yolo or not", () => {
     const now = Date.now();
     const yolo = open("pr_ready", now, task("web-yolo", 1));
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
-    expect(followUpBatch(db, "L1")?.items.map((i) => i.id)).toEqual([yolo]);
     const manual = open("pr_ready", now, task("web-manual", 0));
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)?.id).toBe(manual);
+    expect(p0Candidate(db, "L1", now, AGE)).toBeNull();
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual([yolo, manual]);
   });
 
-  test("assumption: a report wakes only when it opened a decision reserved for the user", () => {
-    const now = Date.now();
-    const scout = task("web-scout", 0);
-    const report = open("report_ready", now, scout);
-    db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, origin, reserved_reason) VALUES ('k1', 'k1', 'drop it?', '[]', 0, 'open', ?1, NULL)").run(scout);
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)).toBeNull();
-    db.query("INSERT INTO decisions (id, task_id, question, options, blocking, state, origin, reserved_reason) VALUES ('k2', 'k2', 'delete the data?', '[]', 0, 'open', ?1, 'destructive')").run(scout);
-    expect(p0Candidate(db, "L1", now, AGE, now - 1_000)?.id).toBe(report);
-  });
-
-  test("a real P0 still goes first", () => {
+  test("a real P0 goes first, on its own", () => {
     const now = Date.now();
     open("gate_ready", now);
     const failure = open("failure_needs_you", now + 1);
-    expect(p0Candidate(db, "L1", now + 1, AGE, now - 1_000)?.id).toBe(failure);
+    expect(p0Candidate(db, "L1", now + 1, AGE)?.id).toBe(failure);
   });
 });
 
@@ -400,13 +388,13 @@ describe("automatic away", () => {
     expect(brief.split("\n")[0]).toContain("automatic away, the user returned");
   });
 
-  test("assumption: items that opened while the user was inactive, before it started, wake the leader once it starts", () => {
+  test("items that opened while the user was inactive wake the leader whether or not automatic away started", () => {
     const now = Date.now();
     awayHolder(now - 3 * HOUR, now);
     const gate = open("gate_ready", now - HOUR);
-    expect(p0Candidate(db, "L1", now, DAY, getAway(db, now)?.since ?? null)).toBeNull();
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual([gate]);
     auto(now);
-    expect(p0Candidate(db, "L1", now, DAY, getAway(db, now)!.since)?.id).toBe(gate);
+    expect(followUpBatch(db, "L1", 0)?.items.map((i) => i.id)).toEqual([gate]);
   });
 
   test("assumption: started after an away whose brief was never shown, it folds that brief in", () => {

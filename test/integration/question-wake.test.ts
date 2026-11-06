@@ -119,7 +119,7 @@ describe("worker questions wake the leader", () => {
   );
 
   test(
-    "question wakes have their own hourly budget: over it, your next message carries them",
+    "the retired [notify] max_question_wakes_per_hour caps nothing: a second question batch wakes the leader too, and a P0 after it",
     async () => {
       env = await makeLeaderEnv({ extraConfig: `${questionConfig()}\n[notify]\nmax_question_wakes_per_hour = 1` });
       const lead = await env.claude();
@@ -131,15 +131,14 @@ describe("worker questions wake the leader", () => {
       await waitFor("the woken turn to end", 10_000, () => presentations(env!, first).some((p) => p.state === "presented"));
       await lead.goInactive();
       const second = await ask(env, "FLOWRYN-MARK-QCAP2 two?");
-      await Bun.sleep(BATCH_MS + 1_500);
-      expect(await lead.saw("FLOWRYN-MARK-QCAP2")).toBe(0);
-      // A P0 is on its own budget, so it still wakes the leader.
+      await waitFor("the second wake", 10_000, async () => (await lead.saw("FLOWRYN-MARK-QCAP2")) > 0);
+      expect(presentations(env, second)[0]?.path).toBe("waiter");
+      await waitFor("the second woken turn to end", 10_000, () => presentations(env!, second).some((p) => p.state === "presented"));
       const p0 = await env.openP0("FLOWRYN-MARK-QCAPP0 cannot finish");
       await waitFor("the P0 wake", 10_000, async () => (await lead.saw("FLOWRYN-MARK-QCAPP0")) > 0);
       expect(presentations(env, p0)[0]?.path).toBe("waiter");
-      await lead.prompt("back");
-      expect(await lead.saw("FLOWRYN-MARK-QCAP2")).toBe(1);
-      expect(presentations(env, second).map((p) => p.path)).toEqual(["digest"]);
+      // Let the woken turn end before cleanup, so none of its hooks outlives the home.
+      await waitFor("the P0's woken turn to end", 10_000, () => presentations(env!, p0).some((p) => p.state === "presented"));
     },
     T,
   );

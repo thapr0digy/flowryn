@@ -1,9 +1,9 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
-import { awaySuggestion, endAutoAway, expireAway, getAway, takePendingBrief, type AwayPosture } from "../attention/away.ts";
+import { awaySuggestion, endAutoAway, expireAway, takePendingBrief } from "../attention/away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
-import { LEADER_WAKE_KINDS, QUESTION_KINDS, type ItemKind } from "../attention/items.ts";
+import { LEADER_WAKE_KINDS, QUESTION_KINDS, RELAY_KINDS, type ItemKind } from "../attention/items.ts";
 import {
   composeDigest,
   digestCandidates,
@@ -45,6 +45,7 @@ import { isNotificationPrompt } from "../policy/notifications.ts";
 import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { readShellWords } from "../util/shell-word.ts";
+import { syncWakeCeiling } from "./wake-ceiling.ts";
 import { rewakesLastHour } from "./wake-state.ts";
 import { learningsBlock } from "./learnings.ts";
 
@@ -187,72 +188,90 @@ function interruptedByTranscript(ctx: HandlerCtx, s: LeaderSessionRow): boolean 
   return offset !== undefined && transcriptShowsInterrupt(s.transcript_path, offset);
 }
 
-/**
- * How a push would reach this session now, or null when nothing may be
- * pushed to it. Away counts as inactive: your remote-control chat never
- * fires idle_prompt on the Mac.
- */
 /** The items this session may be handed, and how it sees them: its scope's (src/leader/scope.ts). */
 function visibleTo(ctx: PushCtx, s: LeaderSessionRow): ScopeLens {
   return sessionLens(ctx.db, ctx.config(), s.session_id);
 }
 
-function pushMode(s: LeaderSessionRow, now: number, away: AwayPosture | null): PushMode | null {
+/**
+ * How a push would reach this session now, or null when nothing may be
+ * pushed to it. Busy: Pi's extension follows up (a Claude turn takes it at
+ * its Stop). Idle: a Claude waiter wakes it, a Pi extension with the TUI
+ * triggers a turn, whether or not you were recently active (steer m569).
+ */
+function pushMode(s: LeaderSessionRow, now: number): PushMode | null {
   if (busyNow(s, now)) return s.harness === "pi" ? "continuation" : null;
-  if (s.user_inactive_since === null && away === null) return null;
   if (s.harness === "pi" && s.has_ui !== 1) return null;
   return s.harness === "pi" ? "trigger" : "waiter";
 }
 
-/** What a push carries: one P0, a batch of leader follow-ups (LEADER_WAKE_KINDS), or a batch of worker questions. */
+/** What a push carries: one P0, a batch of the leader's action items (LEADER_WAKE_KINDS), or a batch of worker questions. */
 export type PushKind = "p0" | "follow_up" | "questions";
 
 export interface Push {
   items: RankedItem[];
   mode: PushMode;
   kind: PushKind;
-  /** Follow-ups or questions left for the next push. */
+  /** Action items or questions left for the next push. */
   more: number;
 }
 
 /** What leaderPush reads: a handler's context, or the daemon's rewake. */
 export type PushCtx = Pick<HandlerCtx, "db" | "attention" | "config">;
 
+export interface PushDecision {
+  push: Push | null;
+  /** When a batch comes due, so a waiter wakes then; null when none waits. */
+  dueAt: number | null;
+  /** A push was due but the session hit [leader] wake_ceiling_per_hour (syncWakeCeiling records it). */
+  ceiling: { started: number; limit: number } | null;
+}
+
+/** Turns pushes started in this session in the last hour: waiter wakes, Pi triggers and typed rewakes. */
+export function wakesLastHour(db: Db, session: string, now: number): number {
+  return startedTurnsLastHour(db, session, now) + rewakesLastHour(db, session, now);
+}
+
 /**
- * Should something be pushed to this session now, and how (design section 9)?
- * Busy: Claude's Stop continuation takes it (not a waiter), Pi's extension
- * follows up. Idle and you inactive: a Claude waiter wakes the session, a Pi
- * extension triggers a turn if it has the TUI. Idle and you active: nothing
- * is pushed; it tops your next digest. A P0 goes first, one at a time. Worker
- * questions go as a batch, and start a turn only once the oldest has waited
- * question_batch_ms (`dueAt` says when, so the waiter wakes then). Started
- * turns are capped per hour, P0s and question batches each on their own budget.
- * While you are away, items only you can move count as P0s (p0Candidate) and
- * the P0 budget is [away] max_wakes_per_hour. Leader follow-ups (something you
- * did outside the session, a merge that landed) go after a P0, as one batch,
- * on the P0 budget. A rewake the daemon typed counts against the budget of
- * the push that caused it (src/leader/rewake.ts).
+ * Should something be pushed to this session now, and how (design section 9,
+ * task no-idle-workers-23)? Every item whose next move is the leader's
+ * (LEADER_ROUTE) is pushed: a P0 first, one at a time and at once; then the
+ * leader's P1 action items as one batch, once the oldest has waited
+ * action_batch_ms; then worker questions as one batch, once the oldest has
+ * waited question_batch_ms (`dueAt` says when, so the waiter wakes then). An
+ * item is pushed to a session once. There is no hourly cap: a session that
+ * started wake_ceiling_per_hour turns in the last hour (typed rewakes
+ * included) is woken no more until the hour drains (`ceiling`), the runaway
+ * guard. A push that rides a running turn (Pi's continuation) is never held.
  */
-export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): { push: Push | null; dueAt: number | null } {
-  if (!isHolder(ctx.db, s.session_id)) return { push: null, dueAt: null };
-  const away = getAway(ctx.db, now);
-  const mode = pushMode(s, now, away);
-  const startsTurn = mode === "waiter" || mode === "trigger";
-  const budgets = ctx.attention.notify();
-  const p0Budget = away ? awayConfig(ctx.config()).max_wakes_per_hour : budgets.max_triggered_turns_per_hour;
-  const visible = visibleTo(ctx, s);
-  if (mode && !(startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "p0") + rewakesLastHour(ctx.db, s.session_id, now, "p0") >= p0Budget)) {
-    const item = p0Candidate(ctx.db, s.session_id, now, ctx.attention.timing().age_ms, away?.since ?? null, visible);
-    if (item) return { push: { items: [item], mode, kind: "p0", more: 0 }, dueAt: null };
-    const follow = followUpBatch(ctx.db, s.session_id, visible);
-    if (follow) return { push: { items: follow.items, mode, kind: "follow_up", more: follow.more }, dueAt: null };
+export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): PushDecision {
+  const none: PushDecision = { push: null, dueAt: null, ceiling: null };
+  if (!isHolder(ctx.db, s.session_id)) return none;
+  const mode = pushMode(s, now);
+  if (!mode) {
+    const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms, visibleTo(ctx, s));
+    return { ...none, dueAt: batch?.dueAt ?? null };
   }
-  const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms, visible);
-  if (!batch) return { push: null, dueAt: null };
-  if (!mode) return { push: null, dueAt: batch.dueAt };
-  if (startsTurn && now < batch.dueAt) return { push: null, dueAt: batch.dueAt };
-  if (startsTurn && startedTurnsLastHour(ctx.db, s.session_id, now, "questions") + rewakesLastHour(ctx.db, s.session_id, now, "questions") >= budgets.max_question_wakes_per_hour) return { push: null, dueAt: null };
-  return { push: { items: batch.items, mode, kind: "questions", more: batch.more }, dueAt: null };
+  const startsTurn = mode === "waiter" || mode === "trigger";
+  const timing = ctx.attention.timing();
+  const visible = visibleTo(ctx, s);
+  const candidates: { push: Push; dueAt: number }[] = [];
+  const item = p0Candidate(ctx.db, s.session_id, now, timing.age_ms, visible);
+  if (item) candidates.push({ push: { items: [item], mode, kind: "p0", more: 0 }, dueAt: now });
+  const follow = followUpBatch(ctx.db, s.session_id, timing.action_batch_ms, visible);
+  if (follow) candidates.push({ push: { items: follow.items, mode, kind: "follow_up", more: follow.more }, dueAt: follow.dueAt });
+  const questions = questionBatch(ctx.db, s.session_id, timing.question_batch_ms, visible);
+  if (questions) candidates.push({ push: { items: questions.items, mode, kind: "questions", more: questions.more }, dueAt: questions.dueAt });
+  // A running turn takes what waits at once; only a push that starts a turn waits for its batch window.
+  const ready = candidates.find((c) => !startsTurn || c.dueAt <= now);
+  const later = candidates.filter((c) => c.dueAt > now).map((c) => c.dueAt);
+  const dueAt = later.length > 0 ? Math.min(...later) : null;
+  if (!ready) return { ...none, dueAt };
+  if (startsTurn) {
+    const started = wakesLastHour(ctx.db, s.session_id, now);
+    if (started >= timing.wake_ceiling_per_hour) return { push: null, dueAt: null, ceiling: { started, limit: timing.wake_ceiling_per_hour } };
+  }
+  return { push: ready.push, dueAt, ceiling: null };
 }
 
 function pushTurn(s: LeaderSessionRow, mode: PushMode): number {
@@ -854,7 +873,7 @@ export function stop(ctx: HandlerCtx): HandlerResult {
   heartbeat(ctx.db, s.session_id, now);
   if (s.harness === "claude" && s.continuations < MAX_LEADER_CONTINUATIONS && isHolder(ctx.db, s.session_id)) {
     const visible = visibleTo(ctx, s);
-    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), getAway(ctx.db, now)?.since ?? null, visible);
+    const item = p0Candidate(ctx.db, s.session_id, now, ageMs(ctx), visible);
     if (item && carry(ctx.db, { itemId: item.id, session: s.session_id, turn: s.turn_no, path: "continuation", now })) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
       appendEvent(ctx.db, { source: "hook", kind: "leader.p0_pushed", payload: { session: s.session_id, item: item.id, path: "continuation", turn: s.turn_no }, ts: now });
@@ -867,7 +886,11 @@ export function stop(ctx: HandlerCtx): HandlerResult {
     const questions = (batch?.items ?? []).filter(carryNow);
     const relay = relayBatch(ctx.db, s.session_id, visible);
     const relayed = (relay?.items ?? []).filter(carryNow);
-    if (questions.length > 0 || relayed.length > 0) {
+    // The leader's other action items ride it too, like questions: the batch window only holds back a wake.
+    // Items to relay go in the relay lines alone, at most a batch per Stop.
+    const follow = followUpBatch(ctx.db, s.session_id, ctx.attention.timing().action_batch_ms, visible);
+    const actions = (follow?.items ?? []).filter((i) => !RELAY_KINDS.includes(i.kind as ItemKind)).filter(carryNow);
+    if (questions.length > 0 || relayed.length > 0 || actions.length > 0) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
       const texts: string[] = [];
       if (questions.length > 0) {
@@ -878,7 +901,11 @@ export function stop(ctx: HandlerCtx): HandlerResult {
         appendEvent(ctx.db, { source: "hook", kind: "leader.relay_pushed", payload: { session: s.session_id, items: relayed.map((r) => r.id), path: "continuation", turn: s.turn_no }, ts: now });
         texts.push(relayText(relayed, relay!.more));
       }
-      return { data: { context: texts.join("\n"), item: (questions[0] ?? relayed[0])!.id, presented } };
+      if (actions.length > 0) {
+        appendEvent(ctx.db, { source: "hook", kind: "leader.follow_ups_pushed", payload: { session: s.session_id, items: actions.map((a) => a.id), path: "continuation", turn: s.turn_no }, ts: now });
+        texts.push(followUpText(actions, follow!.more));
+      }
+      return { data: { context: texts.join("\n"), item: (questions[0] ?? relayed[0] ?? actions[0])!.id, presented } };
     }
   }
   markIdle(ctx, s, now, "stop");
@@ -965,7 +992,9 @@ export async function waitForP0(ctx: HandlerCtx, waiter: string): Promise<WaitOu
         s.busy_until = now;
         expireBusy(ctx.db, s, now, "interrupt marker in the transcript");
       } else expireBusy(ctx.db, s, now, "busy lease expired");
-      return leaderPush(ctx, s, now);
+      const decision = leaderPush(ctx, s, now);
+      syncWakeCeiling(ctx.db, s.session_id, decision.ceiling, "hook", now);
+      return decision;
     });
     beat = false;
     if (push.push) return { push: { item: push.push.items[0]!.id, mode: push.push.mode } };

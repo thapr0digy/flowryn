@@ -35,10 +35,11 @@ afterEach(() => {
   h.cleanup();
 });
 
+/** Open an item; by default one batch window old, so its wake is due. */
 function open(kind: ItemKind, line: string, opts: { task?: string; at?: number } = {}): string {
   return tx(db, () => {
     const event = appendEvent(db, { source: "cli", kind: "test.item", payload: {} });
-    return openItem(db, { kind, eventSeq: event.seq, line, taskId: opts.task ?? null, now: opts.at ?? clock });
+    return openItem(db, { kind, eventSeq: event.seq, line, taskId: opts.task ?? null, now: opts.at ?? clock - DEFAULT_LEADER_TIMING.action_batch_ms });
   });
 }
 
@@ -68,11 +69,11 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
   });
 
-  test("with the user active, nothing is pushed and the follow-up tops the next digest's P1 lines", () => {
+  test("with the user active, an idle leader is still woken (steer m569), and the follow-up tops the next digest's P1 lines", () => {
     const s = holder({ user_inactive_since: null });
-    open("pr_ready", "an older PR waits", { at: clock - 60_000 });
-    const acted = open("user_acted", "The user declined t2", { at: clock });
-    expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
+    const older = open("pr_ready", "an older PR waits", { at: clock - 120_000 });
+    const acted = open("user_acted", "The user declined t2");
+    expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "follow_up", mode: "waiter", items: [{ id: older }, { id: acted }] });
     const digest = composeDigest(digestCandidates(db, s.session_id, clock, DEFAULT_LEADER_TIMING.age_ms))!;
     expect(digest.shown[0]!.id).toBe(acted);
   });
@@ -80,7 +81,7 @@ describe("leader follow-ups: your own actions wake the leader", () => {
   test("several actions inside one wait go in one push, at most four, oldest first", () => {
     const s = holder();
     const ids = [1, 2, 3, 4, 5].map((n) => open(n % 2 ? "user_acted" : "landed", `item ${n}`, { at: clock + n }));
-    const batch = followUpBatch(db, s.session_id)!;
+    const batch = followUpBatch(db, s.session_id, 0)!;
     expect(batch.items.map((i) => i.id)).toEqual(ids.slice(0, 4));
     expect(batch.more).toBe(1);
     const line = followUpWakeLine(batch.items);
@@ -102,13 +103,16 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     );
   });
 
-  test("a P0 goes first; follow-ups use the P0 hourly budget, never a loop", () => {
+  test("a P0 goes first; the retired hourly cap limits nothing, and an item is pushed once", () => {
     const s = holder();
-    open("user_acted", "acted");
+    const acted = open("user_acted", "acted");
     const p0 = open("failure_needs_you", "broken");
     expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "p0", items: [{ id: p0 }] });
     tx(db, () => carry(db, { itemId: p0, session: s.session_id, turn: s.turn_no + 1, path: "waiter", now: clock }));
-    expect(leaderPush({ ...pushCtx(), attention: inertAttention({ notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) }) }, s, clock).push).toBeNull();
+    const oldCap = { ...pushCtx(), attention: inertAttention({ notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) }) };
+    expect(leaderPush(oldCap, s, clock).push).toMatchObject({ kind: "follow_up", items: [{ id: acted }] });
+    tx(db, () => carry(db, { itemId: acted, session: s.session_id, turn: s.turn_no + 2, path: "waiter", now: clock }));
+    expect(leaderPush(oldCap, s, clock).push).toBeNull();
   });
 
   test("assumption: only the user's own actions open one; the leader's never do", () => {
@@ -147,33 +151,32 @@ describe("ready work wakes the idle leader (docs/notes/2026-10-22-wake-the-idle-
     const id = open("pr_ready", "PR ready: web (t-yolo) #12", { task: policy("t-yolo", 1) });
     const { push } = leaderPush(pushCtx(), s, clock);
     expect(push).toMatchObject({ kind: "follow_up", mode: "waiter", items: [{ id }] });
-    expect(followUpWakeLine(push!.items)).toBe(`Flowryn follow-up [${id}]: a yolo PR is ready to verify and merge. Details: flowryn fleet`);
+    expect(followUpWakeLine(push!.items)).toBe(`Flowryn follow-up [${id}]: a PR is ready. Details: flowryn fleet`);
     tx(db, () => carry(db, { itemId: id, session: s.session_id, turn: s.turn_no + 1, path: "waiter", now: clock }));
     expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
   });
 
-  test("assumption: a pr_ready that waits on the user (not yolo, or no policy) does not wake a leader that is only inactive", () => {
+  test("a pr_ready that waits on the user (not yolo, or no policy) wakes the leader too: putting it to the user is its move", () => {
     const s = holder();
-    open("pr_ready", "PR ready: web (t-manual)", { task: policy("t-manual", 0) });
-    open("pr_ready", "PR ready: no policy");
-    expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
-    expect(followUpBatch(db, s.session_id)).toBeNull();
+    const manual = open("pr_ready", "PR ready: web (t-manual)", { task: policy("t-manual", 0), at: clock - 120_000 });
+    const bare = open("pr_ready", "PR ready: no policy");
+    expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "follow_up", items: [{ id: manual }, { id: bare }] });
   });
 
-  test("assumption: a ready-PR wake counts on the P0 budget ([notify] max_triggered_turns_per_hour): the next PR in the hour waits", () => {
+  test("the runaway guard: past [leader] wake_ceiling_per_hour started turns in the hour, nothing starts a turn and the hit is reported", () => {
     const s = holder();
     const first = open("pr_ready", "PR ready: one", { task: policy("t-one", 1) });
     tx(db, () => carry(db, { itemId: first, session: s.session_id, turn: s.turn_no + 1, path: "waiter", now: clock }));
     open("pr_ready", "PR ready: two", { task: policy("t-two", 1) });
-    const capped = { ...pushCtx(), attention: inertAttention({ notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) }) };
-    expect(leaderPush(capped, s, clock).push).toBeNull();
+    const ceiling = { ...pushCtx(), attention: inertAttention({ timing: () => ({ ...DEFAULT_LEADER_TIMING, wake_ceiling_per_hour: 1 }) }) };
+    expect(leaderPush(ceiling, s, clock)).toEqual({ push: null, dueAt: null, ceiling: { started: 1, limit: 1 } });
     expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "follow_up" });
   });
 
   test("assumption: a worker's non-blocking question already wakes an inactive idle leader, on the question budget, so it is not a follow-up", () => {
     const s = holder();
     const id = open("worker_question", "web asks: which color?", { at: clock - DEFAULT_LEADER_TIMING.question_batch_ms });
-    expect(followUpBatch(db, s.session_id)).toBeNull();
+    expect(followUpBatch(db, s.session_id, 0)).toBeNull();
     expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "questions", mode: "waiter", items: [{ id }] });
   });
 
@@ -193,7 +196,7 @@ describe("ready work wakes the idle leader (docs/notes/2026-10-22-wake-the-idle-
       { id: "i99994", kind: "pr_ready" },
     ]);
     expect(line.length).toBeLessThanOrEqual(P0_LINE_MAX);
-    expect(line).toContain("a yolo PR is ready to verify and merge");
+    expect(line).toContain("a PR is ready");
   });
 });
 
@@ -322,24 +325,29 @@ describe("rewake: a leader whose waiter is gone", () => {
     expect(runtime.typed).toHaveLength(2);
   });
 
-  test("rewakes count against the P0 hourly budget", async () => {
-    holder();
+  test("rewakes count against the runaway guard, and its hit opens one leader_wake_runaway P0", async () => {
+    const s = holder();
     open("failure_needs_you", "broken");
     const runtime = new StubRuntime();
-    const attention = inertAttention({ timing: () => ({ ...DEFAULT_LEADER_TIMING, waiter_grace_ms: GRACE }), notify: () => ({ ...inertAttention().notify(), max_triggered_turns_per_hour: 1 }) });
+    const attention = inertAttention({ timing: () => ({ ...DEFAULT_LEADER_TIMING, waiter_grace_ms: GRACE, wake_ceiling_per_hour: 1 }) });
     const r = rewaker(runtime, { attention });
     await ticks(r, 2);
     tx(db, () => db.query("UPDATE leader_sessions SET last_event_at = ?1").run(clock + 1));
     clock += GRACE * 2;
     await ticks(r, 4);
     expect(runtime.typed).toHaveLength(1);
+    const runaway = db.query("SELECT line FROM items WHERE kind = 'leader_wake_runaway' AND state = 'open'").all() as { line: string }[];
+    expect(runaway).toHaveLength(1);
+    expect(runaway[0]!.line).toContain(`Leader session ${s.session_id} was woken 1 times in the last hour`);
+    await ticks(r, 4);
+    expect((db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'leader_wake_runaway'").get() as { n: number }).n).toBe(1);
   });
 
-  test("rewakes for worker questions stop at [notify] max_question_wakes_per_hour while the waiter stays broken", async () => {
+  test("rewakes for worker questions are not capped by the retired [notify] max_question_wakes_per_hour, only by the ceiling", async () => {
     holder();
     const runtime = new StubRuntime();
     const attention = inertAttention({
-      timing: () => ({ ...DEFAULT_LEADER_TIMING, waiter_grace_ms: GRACE, question_batch_ms: 1 }),
+      timing: () => ({ ...DEFAULT_LEADER_TIMING, waiter_grace_ms: GRACE, question_batch_ms: 1, wake_ceiling_per_hour: 3 }),
       notify: () => ({ ...inertAttention().notify(), max_question_wakes_per_hour: 2, max_triggered_turns_per_hour: 10 }),
     });
     const r = rewaker(runtime, { attention });
@@ -353,10 +361,10 @@ describe("rewake: a leader whose waiter is gone", () => {
       });
       clock += GRACE * 2;
     }
-    expect(runtime.typed).toHaveLength(2);
+    expect(runtime.typed).toHaveLength(3);
     const budgets = db.query("SELECT payload FROM events WHERE kind = 'leader.rewake_typed'").all() as { payload: string }[];
-    expect(budgets.map((b) => (JSON.parse(b.payload) as { budget: string }).budget)).toEqual(["questions", "questions"]);
-    // The P0 budget is untouched by them: a P0 still gets its rewake.
+    expect(budgets.map((b) => (JSON.parse(b.payload) as { budget: string }).budget)).toEqual(["questions", "questions", "questions"]);
+    // The ceiling counts every kind: a P0 now waits for the hour to drain.
     open("failure_needs_you", "broken");
     await ticks(r, 3);
     expect(runtime.typed).toHaveLength(3);
@@ -386,12 +394,12 @@ describe("rewake: a leader whose waiter is gone", () => {
     expect(runtime.typed).toEqual([]);
   });
 
-  test("the user active: nothing is due, so no keys", async () => {
+  test("the user active: a due wake is typed all the same (steer m569)", async () => {
     holder({ user_inactive_since: null });
-    open("user_acted", "acted");
+    const id = open("user_acted", "acted");
     const runtime = new StubRuntime();
     await ticks(rewaker(runtime), 3);
-    expect(runtime.typed).toEqual([]);
+    expect(runtime.typed).toEqual([{ pane: "p1", line: rewakeLine([id]) }]);
   });
 
   const refusals: [string, (rt: StubRuntime) => void, string][] = [

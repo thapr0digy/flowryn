@@ -50,12 +50,10 @@ export interface AwayEnded {
 }
 
 /**
- * The items that wake the leader while you are away, on top of the P0 lane
- * and the worker-question batch (which wake already once you are inactive):
- * what only you can move. A yolo, non-sensitive PR merges without you, and a
- * report waits on you only when it opened a decision reserved for you. The
- * leader follow-ups (LEADER_WAKE_KINDS) wake it whether you are away or only
- * inactive; they are listed here so the away suggestion and brief count them.
+ * The items only you can move: they count toward the away suggestion and
+ * brief. A yolo, non-sensitive PR merges without you, and a report waits on
+ * you only when it opened a decision reserved for you. What wakes the leader
+ * no longer depends on away: every action item does (LEADER_ROUTE in items.ts).
  */
 export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed", "auto_merge_held"];
 
