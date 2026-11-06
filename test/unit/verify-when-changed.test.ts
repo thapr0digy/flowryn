@@ -164,9 +164,9 @@ describe("glob matching", () => {
   });
 });
 
-describe("a verify step with when_changed", () => {
-  const gated = (globs: string) => read(`["true", { run = "echo ran > ran.txt", when_changed = [${globs}] }]`);
+const gated = (globs: string) => read(`["true", { run = "echo ran > ran.txt", when_changed = [${globs}] }]`);
 
+describe("a verify step with when_changed", () => {
   test("a match runs the step", async () => {
     const f = fixture(["src/lifecycle/worker.ts", "docs/a.md"]);
     const v = await f.run(gated('"src/lifecycle/**"'));
@@ -204,7 +204,7 @@ describe("a verify step with when_changed", () => {
     git(f.repo, ["mv", "src/harness/a.ts", "docs/a.ts"]);
     git(f.repo, ["commit", "-q", "-m", "move"]);
     const changed = await changedSinceBase(gitRunner("git", 30_000), f.repo, "main");
-    expect("files" in changed && changed.files.sort()).toEqual(["docs/a.ts", "src/harness/a.ts"]);
+    expect("files" in changed && changed.files.toSorted()).toEqual(["docs/a.ts", "src/harness/a.ts"]);
   });
 
   test("when the changed files cannot be read, the step runs and says why", async () => {
