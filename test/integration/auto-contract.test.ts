@@ -96,7 +96,8 @@ describe("the automatic contract check", () => {
   test(
     "relaxed: a new Claude version is checked by the daemon from its pinned build and recorded, with no P1",
     async () => {
-      const env = await fleet("relaxed");
+      // A capacity alert after 1s: the check takes longer, and a run waiting on it is the check's to report, never a capacity P1.
+      const env = await fleet("relaxed", undefined, { extraConfig: "[sched]\npass_ms = 300\nwait_alert_ms = 1000" });
       setHarnessVersion(env.h, "claude", NEW_VERSION);
       const run = await dispatchWaiting(env, NEW_VERSION);
       try {
@@ -112,6 +113,7 @@ describe("the automatic contract check", () => {
       expect(events(env, "contract.passed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, by: "daemon", build })]);
       expect(items(env, "contract_recorded")).toEqual([expect.objectContaining({ class: "info", line: expect.stringContaining(`claude ${NEW_VERSION} passed, recorded automatically (build ${build})`) })]);
       expect(items(env, "harness_unverified")).toEqual([]);
+      expect(seqOf(env, "sched.waiting").filter((seq) => seq < seqOf(env, "contract.passed")[0]!)).toEqual([]);
       // The dispatch that waited launches by itself once the pass is recorded, never before it.
       await waitUntil(() => runOf(env, run).launched_at !== null, 30_000, "the waiting run to launch");
       expect(runOf(env, run).harness_version).toBe(NEW_VERSION);

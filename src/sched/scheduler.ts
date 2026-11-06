@@ -13,7 +13,7 @@ import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, signInOf, storedBase, type StartDeps } from "../lifecycle/dispatch.ts";
 import { reviveReview, revivalBlocked, revivalsDue } from "../lifecycle/review-revival.ts";
-import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import { activeAutoAttempt, autoChecksOn, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import type { PhaseRow } from "../lifecycle/plans.ts";
 import { phaseReadiness } from "../lifecycle/stacks.ts";
@@ -777,24 +777,27 @@ export class Scheduler {
     });
   }
 
-  /** Work that waits for a grant longer than wait_alert_ms: one P1 (design section 16), closed once nothing waits that long. */
+  /** Work that waits for a grant longer than wait_alert_ms: one P1 (design section 16), closed once nothing waits that long. A run on an untested harness version while automatic checks are on is the check's to report: its pass releases the run, its final failure opens its own P1. */
   private alerts(): void {
     const { db, now } = this.deps;
     const t = now();
-    const threshold = schedTiming(this.deps.config()).wait_alert_ms;
-    const oldest = db
-      .query(
-        `SELECT task_id, waiting_since FROM runs WHERE state NOT IN ('cleaned','failed','cancelled')
+    const config = this.deps.config();
+    const threshold = schedTiming(config).wait_alert_ms;
+    const auto = autoChecksOn(db, config);
+    const checked = HARNESS_IDS.filter((h) => auto && unverifiedVersion(db, h) !== null);
+    const checking = JSON.stringify(checked);
+    const waits = `state NOT IN ('cleaned','failed','cancelled')
            AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead')
-           AND waiting_since IS NOT NULL ORDER BY waiting_since LIMIT 1`,
-      )
-      .get() as { task_id: string; waiting_since: number } | null;
+           AND harness NOT IN (SELECT value FROM json_each(?1))`;
+    const oldest = db
+      .query(`SELECT task_id, waiting_since FROM runs WHERE ${waits} AND waiting_since IS NOT NULL ORDER BY waiting_since LIMIT 1`)
+      .get(checking) as { task_id: string; waiting_since: number } | null;
     const open = findOpenItem(db, "capacity_wait", null);
     if (oldest && t - oldest.waiting_since >= threshold) {
       if (open) return;
-      const count = (db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead') AND waiting_since <= ?1").get(t - threshold) as { n: number }).n;
+      const count = (db.query(`SELECT COUNT(*) AS n FROM runs WHERE ${waits} AND waiting_since <= ?2`).get(checking, t - threshold) as { n: number }).n;
       const host = hostState(db);
-      const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
+      const untested = HARNESS_IDS.filter((h) => !checked.includes(h)).map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
       const paused = pausedAccounts(db, t);
       const low = heldQuotaAccounts(db);
       const signedOut = signedOutAccounts(db);
