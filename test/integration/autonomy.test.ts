@@ -122,6 +122,26 @@ describe("unattended mode", () => {
   );
 
   test(
+    "on a project that merges by hand (no landing queue, auto_merge off) a delivered, not-yolo PR is verified and merged under the grant, and only while it lasts",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: false, extraConfig: `[projects.web]\nverify = ${JSON.stringify(STEPS)}\n` });
+      const e = env;
+      e.github.repo("acme/web").defaultChecks = [];
+      const steps = ["FAKE: commit manual.txt manual", "FAKE: push", `FAKE: pr ${e.github.apiUrl} acme/web`, "FAKE: deliver-pr"];
+      // Delivered before the grant: nothing merges by itself.
+      const before = await dispatch(e, "Manual merge", steps);
+      await e.fleet.waitRun(before.run, (r) => r.state === "ready", "the delivery");
+      expect(rows(e, "SELECT 1 FROM auto_merges WHERE run_id = ?1", before.run)).toHaveLength(0);
+      await grantFromTerminal(e, { projects: "web", until: "+2h" });
+      await waitUntil(() => rows(e, "SELECT 1 FROM runs WHERE id = ?1 AND state IN ('landed','cleaned')", before.run).length === 1, 90_000, "the merge under the grant");
+      const merge = rows<{ channel: string; actor: string }>(e, "SELECT a.channel, a.actor FROM merges m JOIN approvals a ON a.id = m.approval_id WHERE m.task_id = ?1", before.task);
+      expect(merge).toEqual([expect.objectContaining({ channel: "autonomous" })]);
+      expect(merge[0]!.actor).toContain("standing approval u1");
+    },
+    { timeout: 150_000 },
+  );
+
+  test(
     "a worker can neither start autonomy nor reach its terminal verbs; a leader cannot without the user's chat answer; your socket call without the /dev/tty code grants nothing",
     async () => {
       env = await makeShipEnv({ mode: "direct-PR", yolo: false, extraConfig: CONFIG });

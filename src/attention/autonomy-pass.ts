@@ -210,7 +210,7 @@ function gateCandidates(db: Db, now: number): { gate: GateRow; run: RunWithPolic
   const out: { gate: GateRow; run: RunWithPolicy }[] = [];
   for (const gate of gates) {
     const run = getRunWithPolicy(db, gate.run_id);
-    if (!run || isTerminal(run.state) || !autonomyFor(db, run.project_id, now)) continue;
+    if (!run || isTerminal(run.state) || !autonomyFor(db, run.project_id, now) || !startedUnderAutonomy(db, run.started_at)) continue;
     if (getMeta(db, parkedGateKey(gate.id))) continue;
     if (db.query("SELECT 1 FROM decisions WHERE gate_id = ?1 AND state = 'open'").get(gate.id)) continue;
     out.push({ gate, run });
@@ -286,14 +286,26 @@ function startMerges(db: Db, config: FlowrynConfig, now: number, out: AutonomyOu
   }
 }
 
-/** Read the default branch's .no-mistakes.yaml of each covered project. */
-async function readNoCi(db: Db, git: GitRunner, projects: string[]): Promise<Map<string, boolean | null>> {
+/** How long a project's no_ci reading is reused: the pass runs every second, the file rarely changes. */
+const NO_CI_TTL_MS = 60_000;
+const noCiCache = new Map<string, { at: number; value: boolean | null }>();
+
+/** Read the default branch's .no-mistakes.yaml of each covered project (a minute's reading is reused). */
+async function readNoCi(db: Db, git: GitRunner, projects: string[], now: number): Promise<Map<string, boolean | null>> {
   const out = new Map<string, boolean | null>();
   for (const id of projects) {
     const project = getProject(db, id);
     if (!project) continue;
+    const key = `${id}\n${project.path}\n${project.default_branch}`;
+    const cached = noCiCache.get(key);
+    if (cached && now - cached.at < NO_CI_TTL_MS) {
+      out.set(id, cached.value);
+      continue;
+    }
     const shown = await git(["show", `origin/${project.default_branch}:.no-mistakes.yaml`], project.path).catch(() => null);
-    out.set(id, shown === null ? null : shown.code === 0 ? declaresNoCi(shown.stdout) : false);
+    const value = shown === null ? null : shown.code === 0 ? declaresNoCi(shown.stdout) : false;
+    noCiCache.set(key, { at: now, value });
+    out.set(id, value);
   }
   return out;
 }
@@ -307,7 +319,7 @@ export async function autonomyPass(deps: AutonomyPassDeps): Promise<AutonomyOutc
   const { db } = deps;
   const live = liveAutonomy(db, deps.now());
   if (!live) return EMPTY;
-  const noCi = await readNoCi(db, deps.git, projectsOf(live));
+  const noCi = await readNoCi(db, deps.git, projectsOf(live), deps.now());
   const heads: GateCandidate[] = [];
   for (const { gate, run } of gateCandidates(db, deps.now())) {
     const head = await deps.git(["rev-parse", "HEAD"], run.worktree_path).catch(() => null);
