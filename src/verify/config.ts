@@ -52,7 +52,7 @@ export interface VerifyConfig {
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
 // scope and account are read by src/config/accounts.ts, max_workers by src/config/workflows.ts.
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "landing", "scope", "account", "max_workers"]);
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "scope", "account", "max_workers"]);
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
@@ -111,6 +111,7 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const raw = projectTable(config, projectId);
   for (const key of Object.keys(raw)) if (!KNOWN.has(key)) throw new FlowrynError("config_invalid", `${where} ${key} is not a known setting (${[...KNOWN].join(", ")})`);
   if (raw.auto_merge !== undefined && typeof raw.auto_merge !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_merge must be true or false`);
+  if (raw.auto_verify !== undefined && typeof raw.auto_verify !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_verify must be true or false`);
   if (raw.landing !== undefined && !LANDING_MODES.includes(raw.landing as LandingMode)) throw new FlowrynError("config_invalid", `${where} landing must be "queue" or "manual"`);
   if (raw.verify === undefined) {
     // Without verify steps the merge gate passes a PR that has no checks: auto-merge would land anything.
@@ -132,6 +133,16 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const timeout_ms = positiveMinutes(raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN, where, "verify_timeout_min");
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
   return { steps: read.items, review: read.review, binary, timeout_ms, step_timeout_ms };
+}
+
+/**
+ * `[projects.<id>] auto_verify` (docs/notes/2026-11-06-auto-verify-every-t8.md): a delivery that
+ * does not auto-merge still has its verify queued by the daemon. True unless set false; false
+ * leaves those verifies to `flowryn verify` (an auto-merge and the landing queue still verify).
+ */
+export function autoVerifyEnabled(config: FlowrynConfig, projectId: string): boolean {
+  if (!verifyConfig(config, projectId)) return false;
+  return projectTable(config, projectId).auto_verify !== false;
 }
 
 /** `[projects.<id>] auto_merge` as written: true, false, or null when unset. Throws config_invalid like verifyConfig. */

@@ -12,7 +12,7 @@ import { sendBack } from "../lifecycle/send-back.ts";
 import { DAEMON_CALLER, latestMerge, type MergeRow } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergeServices } from "../policy/merge-path.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { autoMergeEnabled, REVIEW_STEP, verifyConfig } from "./config.ts";
+import { autoMergeEnabled, autoVerifyEnabled, REVIEW_STEP, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
 import { endedAtDeadline, readTail, REVIEW_NO_VERDICT } from "./runner.ts";
@@ -213,9 +213,9 @@ function optedIn(db: Db, config: FlowrynConfig, projectId: string): boolean {
   }
 }
 
-function hasVerifySteps(config: FlowrynConfig, projectId: string): boolean {
+function autoVerifies(config: FlowrynConfig, projectId: string): boolean {
   try {
-    return verifyConfig(config, projectId) !== null;
+    return autoVerifyEnabled(config, projectId);
   } catch {
     return false;
   }
@@ -239,11 +239,12 @@ export function startAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy
 /**
  * A delivery that does not auto-merge (approval work, sensitive work, a project
  * that opted out, or one the landing queue lands) still has its verify queued
- * by itself, when the project has verify steps: a `merge = 0` row. The caller
+ * by itself, when the project has verify steps and does not set
+ * `auto_verify = false`: a `merge = 0` row. The caller
  * has superseded any live row. Call inside the deliver transaction.
  */
 export function startAutoVerify(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number): AutoMergeRow | null {
-  if (run.kind !== "ship" || run.stacked_on || !hasVerifySteps(config, run.project_id)) return null;
+  if (run.kind !== "ship" || run.stacked_on || !autoVerifies(config, run.project_id)) return null;
   return createAutoMerge(db, config, run, d, now, { merge: false });
 }
 

@@ -175,6 +175,15 @@ describe("the deliver-time trigger", () => {
     expect(none.db.query("SELECT COUNT(*) AS n FROM verify_queue").get()).toEqual({ n: 0 });
   });
 
+  test("auto_verify = false leaves a delivery that does not auto-merge to flowryn verify; an auto-merge still verifies", () => {
+    const off = fixture({ yolo: 0 });
+    expect(tx(off.db, () => startAutoMerge(off.db, config(`[projects.web]\nverify = ["true"]\nauto_verify = false\n`), off.run(), off.delivery, 5_000))).toBeNull();
+    expect(off.db.query("SELECT COUNT(*) AS n FROM verify_queue").get()).toEqual({ n: 0 });
+    const merges = fixture();
+    expect(tx(merges.db, () => startAutoMerge(merges.db, config(`[projects.web]\nverify = ["true"]\nauto_verify = false\n`), merges.run(), merges.delivery, 5_000))).toMatchObject({ merge: 1 });
+    expect(() => verifyConfig(config(`[projects.web]\nverify = ["true"]\nauto_verify = "no"\n`), "web")).toThrow("auto_verify must be true or false");
+  });
+
   test("assumption: unset, auto_merge follows the project's yolo posture", () => {
     const yolo = fixture();
     expect(tx(yolo.db, () => startAutoMerge(yolo.db, config(`[projects.web]\nverify = ["true"]\n`), yolo.run(), yolo.delivery, 5_000))).toMatchObject({ merge: 1 });

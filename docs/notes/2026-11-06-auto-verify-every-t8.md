@@ -1,7 +1,7 @@
 # Auto-verify every delivery and auto-merge every yolo project
 
 - Status: done
-- Config: `[projects.<id>] auto_merge`, `[projects.<id>] verify` (`{ review = true, max_usd, timeout_min, harness, model }`)
+- Config: `[projects.<id>] auto_merge`, `[projects.<id>] auto_verify`, `[projects.<id>] verify` (`{ review = true, max_usd, timeout_min, harness, model }`)
 
 The leader audit of 2026-11-06 found about 89 h of 130 h lost to work that silently stopped: about 52 h on deliveries whose merge read "merge waits for a local verify of this head" (next: the leader) that no one ran, and about 10 h on yolo tasks sitting ready for a leader to merge. This change removes both waits from the routine path, and adds the one judgement step a project like portwarden lands by hand for today: an independent review before the merge.
 
@@ -13,11 +13,13 @@ Every ship delivery (`deliver --pr`, `deliver --local`, a head delivered again, 
 |---|---|---|
 | yolo, not sensitive, project auto-merges, not a queue project | `merge = 1` (auto-merge, unchanged) | `merged`, or held |
 | anything else: approval work, sensitive work, a project with `auto_merge = false`, a queue project's PR | `merge = 0` (auto-verify) | `verified` on a pass |
-| a stacked run, or a project with no verify steps | none | - |
+| a stacked run, a project with no verify steps, or one with `auto_verify = false` | none (an auto-merge or the landing queue still verifies) | - |
 
 An auto-verify runs the same states as an auto-merge up to the verify (`queued`, `verifying`). A pass ends it `verified`; the pr_ready line then reads `; auto-verify: verify v<N> passed`, and the merge waits for what it always waited for (your approval, or the landing queue's turn). A failing step sends the ship back to its worker once per head with the step and its tail, and a second failure, a timeout or an error holds it (`auto_merge_held`, its line reading "Auto-verify held"), exactly as an auto-merge's do. The human-waits explanation of a merge reads the queued or running verify as flowryn's to run, never the leader's.
 
 On a queue project the delivery joins the landing queue as before and also gets an auto-verify, so a failure goes back to the worker before its turn comes. The queue's own landing supersedes the auto-verify and follows its verify when the head did not change (an integrated head is verified again, as before). The landing queue's "a merge already asked for" check counts only `merge = 1` rows, and so does unattended mode's "once per head" check: unattended mode supersedes a live auto-verify and starts the merge, which follows the same verify.
+
+`[projects.<id>] auto_verify` (default true) turns the auto-verify rows off: `auto_verify = false` leaves a delivery that does not auto-merge to `flowryn verify`, as before this change. It does not stop an auto-merge's or the landing queue's own verify. The brief did not ask for it; it is there so a project (and the suite's tests of the by-hand `flowryn verify` flow) can keep verifies on demand.
 
 Migration 55 (`auto-verify`) rebuilds `auto_merges` with the `merge` column (`1` for every existing row) and the `verified` state.
 
