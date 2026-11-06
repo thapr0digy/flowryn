@@ -15,6 +15,8 @@ import { askContract, askEnv, capBytes, claudeAskArgs, firstSentence, NEEDS_SCOU
 import { abortAsk, drainAsks, recoverAsks, resetAskRunner, settledAsks, type AskDeps } from "../../src/ask/runner.ts";
 import { getAsk, insertAsk, markStarted, MAX_ASK_ATTEMPTS, recordAnswer, recordCancelled, recoverInterrupted, type AskRow } from "../../src/ask/store.ts";
 import { usd } from "../../src/ask/view.ts";
+import { recordPass } from "../../src/contracts/verbs.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { composeReturnBrief } from "../../src/attention/briefing.ts";
 import { taskProject } from "../../src/leader/scope.ts";
 import type { StartDeps } from "../../src/lifecycle/dispatch.ts";
@@ -224,14 +226,14 @@ describe("the store", () => {
 });
 
 /** The runner's call seam: answers as the fake decides, records what it was given. */
-function deps(answer: (argv: string[], opts: BoundedOptions) => Promise<BoundedResult>): AskDeps & { kicks: number } {
+function deps(answer: (argv: string[], opts: BoundedOptions) => Promise<BoundedResult>, harnessVersion: StartDeps["harnessVersion"] = async () => null): AskDeps & { kicks: number } {
   const loaded = loadConfig(h.home).config;
   const out: AskDeps & { kicks: number } = {
     db,
     config: () => loaded,
     now: Date.now,
     log: () => {},
-    startDeps: { db, config: () => loaded, runtime: () => null, harnessVersion: async () => null, git: async () => null, now: Date.now } as StartDeps,
+    startDeps: { db, config: () => loaded, runtime: () => null, harnessVersion, git: async () => null, now: Date.now } as StartDeps,
     kick: () => {
       out.kicks++;
     },
@@ -261,6 +263,25 @@ describe("the runner", () => {
     expect(seen[0]!.opts).toMatchObject({ cwd: h.home, stdin: "Q?", timeoutMs: DEFAULT_ASK.timeout_ms, label: "ask a1" });
     expect(readFileSync(join(h.stateDir, "asks", "a1", "contract.md"), "utf8")).toContain("You are a Flowryn ask");
     expect(d.kicks).toBe(1);
+  });
+
+  test("an ask on an untested harness version stays queued with no call, and starts once that version passes its contract suite", async () => {
+    const calls: string[][] = [];
+    const d = deps(async (argv) => {
+      calls.push(argv);
+      return result(CLAUDE_SUCCESS);
+    }, async () => "9.9.10");
+    const a = newAsk();
+    expect(await drainAsks(d)).toBe(0);
+    expect(getAsk(db, a.id)!.state).toBe("queued");
+    expect(calls).toEqual([]);
+    tx(db, () =>
+      recordPass(db, { harness: "claude", version: "9.9.10", revision: contractRevision("claude"), report: null, by: "human", build: null, session: null, source: "cli", platform: null, herdr_version: null, launch_profile: null }, Date.now()),
+    );
+    expect(await drainAsks(d)).toBe(1);
+    await settledAsks();
+    expect(getAsk(db, a.id)!.state).toBe("answered");
+    expect(calls).toHaveLength(1);
   });
 
   test("at most max_concurrent calls at once; the rest stay queued", async () => {

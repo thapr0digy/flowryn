@@ -229,7 +229,7 @@ const resume: VerbSpec = {
     const check = await gateHarness(ctx.db, ctx.config(), run.harness, ctx.fleet.harnessVersion, "cli", "resume", ctx.now);
     // An untested version the daemon checks itself (relaxed): the resume waits on the scheduler's grant, which gates it again.
     if (waitsOnAutoCheck(ctx.db, ctx.config(), check)) return { waitsOnCheck: true };
-    if (check.state !== "verified") throw harnessRefusal(check, ctx.db, ctx.config(), check.flaggedNow);
+    if (check.state !== "verified") throw harnessRefusal(check, ctx.db, ctx.config());
     return null;
   },
   apply(ctx, args, prepared) {

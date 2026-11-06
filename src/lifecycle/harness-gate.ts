@@ -98,18 +98,15 @@ export function harnessUnblock(gate: Exclude<HarnessCheck, { state: "verified" }
 /**
  * What a dispatch, a resume or a launch gets when the harness is not verified.
  * With the database and config, the help names an automatic check that is
- * queued or running, or (`flaggedNow`: this same call flagged the version,
- * with automatic checks on) the one about to start.
+ * queued or running.
  */
-export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>, db?: Db, config?: FlowrynConfig, flaggedNow = false): FlowrynError {
+export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>, db?: Db, config?: FlowrynConfig): FlowrynError {
   if (check.state === "missing") return new FlowrynError("tool_missing", check.detail, "flowryn init");
   const attempt = db && config ? activeAutoAttempt(db, config, check.harness) : null;
   const help =
     attempt?.version === check.version && attemptRevision(attempt) === check.revision && (attempt.state === "running" || attempt.state === "waiting")
       ? `an automatic contract check is ${attempt.state === "running" ? "running" : `queued (${attempt.wait ?? "waiting"})`}; dispatch and resume work once it passes`
-      : flaggedNow && db && config && autoChecksOn(db, config)
-        ? `an automatic contract check of ${check.harness} ${check.version} starts within seconds; dispatch and resume work once it passes`
-        : `run the contract suite: ${contractsCommand(check.harness)}`;
+      : `run the contract suite: ${contractsCommand(check.harness)}`;
   return new FlowrynError("contract_unverified", unverifiedReason(check.harness, check.version, check.revision, check.stale), help);
 }
 

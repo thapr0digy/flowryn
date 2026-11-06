@@ -305,15 +305,6 @@ describe("relaxed: the daemon runs the recording check itself", () => {
     expect(items("harness_unverified")).toHaveLength(1);
   });
 
-  test("a refusal from the call that flagged the version names the check about to start, not the doctor command", () => {
-    checker().init();
-    const check = { harness: "claude" as const, state: "unverified" as const, version: "2.1.300", revision: CLAUDE_REVISION, stale: [] };
-    expect(harnessRefusal(check, db, config, true).help).toBe("an automatic contract check of claude 2.1.300 starts within seconds; dispatch and resume work once it passes");
-    expect(harnessRefusal(check, db, config).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
-    useConfig("strict");
-    expect(harnessRefusal(check, db, config, true).help).toBe("run the contract suite: flowryn doctor --contracts --harness claude");
-  });
-
   test("a run that wrote no report fails, naming its log", async () => {
     const auto = checker();
     auto.init();

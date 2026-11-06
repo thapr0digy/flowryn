@@ -41,7 +41,7 @@ export async function prepareAsk(ctx: HandlerCtx, args: Record<string, unknown>,
   const deps = startDepsOf(ctx);
   const check = await gateHarness(ctx.db, config, account.harness, deps.harnessVersion, "cli", "dispatch", ctx.now);
   // An untested version the daemon checks itself (relaxed): the ask is queued and waits for the pass at launch.
-  if (check.state !== "verified" && !waitsOnAutoCheck(ctx.db, config, check)) throw harnessRefusal(check, ctx.db, config, check.flaggedNow);
+  if (check.state !== "verified" && !waitsOnAutoCheck(ctx.db, config, check)) throw harnessRefusal(check, ctx.db, config);
   return { mode: "ask", project, account, pins, maxUsd };
 }
 

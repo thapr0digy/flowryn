@@ -1,4 +1,4 @@
-import { contractsConfig } from "../config/contracts.ts";
+import { contractsConfig, DEFAULT_CONTRACTS } from "../config/contracts.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { gateHarness, harnessesInUse, type GateCheck, type VersionOf } from "../lifecycle/harness-gate.ts";
@@ -45,7 +45,7 @@ export class HarnessVersionPoller {
       return contractsConfig(this.deps.config()).version_poll_ms;
     } catch (error) {
       this.deps.log(`contracts: version poll: ${(error as Error).message}; polling at the default`);
-      return 600_000;
+      return DEFAULT_CONTRACTS.version_poll_ms;
     }
   }
 

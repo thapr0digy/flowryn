@@ -157,7 +157,7 @@ export async function checkStart(deps: StartDeps, project: ProjectRow, account: 
   // The installed version, checked at every dispatch (sections 5 and 16). An untested one refuses and opens its P1, unless
   // the daemon checks it itself (relaxed): then the run is created and waits on the scheduler's grant, which gates it again.
   const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
-  if (check.state !== "verified" && !waitsOnAutoCheck(deps.db, deps.config(), check)) throw harnessRefusal(check, deps.db, deps.config(), check.flaggedNow);
+  if (check.state !== "verified" && !waitsOnAutoCheck(deps.db, deps.config(), check)) throw harnessRefusal(check, deps.db, deps.config());
   const version = check.version;
   const branch = await deps.git(project.path, ["branch", "--show-current"]);
   if (branch !== project.default_branch) {

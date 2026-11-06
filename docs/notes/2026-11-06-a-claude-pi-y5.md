@@ -16,8 +16,6 @@ In relaxed mode (`[policy] mode = "relaxed"`), on a daemon that can run the auto
 
 Strict mode, or a daemon that cannot run the check (a development command, no pinned copy): the refusal is unchanged. A harness that is not installed, or whose version cannot be read, still refuses (`tool_missing`) in every mode.
 
-`harnessRefusal` takes `flaggedNow`, set when `gateHarness` flagged the version in this same call. With automatic checks on, its help then reads "an automatic contract check of claude 2.1.319 starts within seconds; …" rather than the doctor command. With waiting in place, few paths still refuse under relaxed mode, but those that do now say the right thing.
-
 ## Never on an untested version
 
 The grant gates the installed binary at grant time (`gateHarness`, `where: "launch"`). So if Claude updates again while a run waits, the grant refuses it with the newer version's reason, and the run launches only after that version passes. The grant also writes the version it verified into `runs.harness_version` when that differs from the one recorded at dispatch, with a `run.harness_version` event (`{harness, from, to}`), so the run's record names what actually launched. Passes are recorded only as before: by the daemon from its own build's report, or by `contracts.record` from your terminal. No worker or reader verb can mark a version verified.

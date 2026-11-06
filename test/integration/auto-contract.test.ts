@@ -89,6 +89,9 @@ async function dispatchWaiting(env: FleetEnv, version: string): Promise<string> 
   return run;
 }
 
+/** A worker up in its pane with a stored session. */
+const live = (r: { liveness: string; agent_session: string | null; pane_id: string | null }) => r.liveness !== "starting" && r.liveness !== "dead" && r.agent_session !== null && r.pane_id !== null;
+
 describe("the automatic contract check", () => {
   test(
     "relaxed: a new Claude version is checked by the daemon from its pinned build and recorded, with no P1",
@@ -162,6 +165,34 @@ describe("the automatic contract check", () => {
       expect(items(env, "phase_blocked")).toEqual([]);
     },
     200_000,
+  );
+
+  test(
+    "relaxed: a resume on an untested version replies waiting and launches only after the automatic pass",
+    async () => {
+      const env = await fleet("relaxed");
+      const dispatched = await dispatchClaude(env);
+      expect(dispatched.code).toBe(0);
+      const run = String(dispatched.data.run);
+      const first = await env.waitRun(run, live, "the worker running", 60_000);
+      // The first death is resumed by the reconciler on the tested version; the second is yours to resume.
+      env.herdr.killHarness(first.pane_id!, "SIGKILL");
+      await env.waitRun(run, (r) => r.resume_count === 1 && live(r), "the automatic resume running", 60_000);
+      setHarnessVersion(env.h, "claude", NEW_VERSION);
+      env.herdr.killHarness(env.run(run).pane_id!, "SIGKILL");
+      await env.waitRun(run, (r) => r.liveness === "dead" && r.pending_launch === null, "the second death left for you", 60_000);
+      const launchesBefore = seqOf(env, "run.launched", `run_id = '${run}'`).length;
+
+      const resumed = await env.json(["resume", run]);
+      expect(resumed.code).toBe(0);
+      expect(resumed.reply.data).toMatchObject({ state: "waiting", waits: `waits on the automatic contract check for claude ${NEW_VERSION}; starts by itself once it passes` });
+      expect(runOf(env, run).pending_launch).toBe("resume");
+      await waitUntil(() => seqOf(env, "run.launched", `run_id = '${run}'`).length > launchesBefore, 170_000, "the resume to launch after the pass");
+      const newerPass = seqOf(env, "contract.passed", `json_extract(payload, '$.version') = '${NEW_VERSION}'`)[0]!;
+      expect(newerPass).toBeLessThan(seqOf(env, "run.launched", `run_id = '${run}'`).at(-1)!);
+      expect(runOf(env, run).harness_version).toBe(NEW_VERSION);
+    },
+    300_000,
   );
 
   test(
