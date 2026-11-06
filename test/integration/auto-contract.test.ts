@@ -100,6 +100,7 @@ describe("the automatic contract check", () => {
       const env = await fleet("relaxed", undefined, { extraConfig: "[sched]\npass_ms = 300\nwait_alert_ms = 1000" });
       setHarnessVersion(env.h, "claude", NEW_VERSION);
       const run = await dispatchWaiting(env, NEW_VERSION);
+      const since = query<{ waiting_since: number }>(env, "SELECT waiting_since FROM runs WHERE id = ?1", run)[0]!.waiting_since;
       try {
         await waitUntil(() => versions(env).includes(NEW_VERSION), 120_000, `the daemon to record claude ${NEW_VERSION}`);
       } catch (error) {
@@ -113,6 +114,8 @@ describe("the automatic contract check", () => {
       expect(events(env, "contract.passed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, by: "daemon", build })]);
       expect(items(env, "contract_recorded")).toEqual([expect.objectContaining({ class: "info", line: expect.stringContaining(`claude ${NEW_VERSION} passed, recorded automatically (build ${build})`) })]);
       expect(items(env, "harness_unverified")).toEqual([]);
+      const passedAt = query<{ ts: number }>(env, "SELECT ts FROM events WHERE kind = 'contract.passed' ORDER BY seq LIMIT 1")[0]!.ts;
+      expect(passedAt - since).toBeGreaterThan(1_000 + 2 * 300);
       expect(seqOf(env, "sched.waiting").filter((seq) => seq < seqOf(env, "contract.passed")[0]!)).toEqual([]);
       // The dispatch that waited launches by itself once the pass is recorded, never before it.
       await waitUntil(() => runOf(env, run).launched_at !== null, 30_000, "the waiting run to launch");

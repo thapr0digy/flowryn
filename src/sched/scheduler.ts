@@ -777,7 +777,7 @@ export class Scheduler {
     });
   }
 
-  /** Work that waits for a grant longer than wait_alert_ms: one P1 (design section 16), closed once nothing waits that long. A run on an untested harness version while automatic checks are on is the check's to report: its pass releases the run, its final failure opens its own P1. */
+  /** Work that waits for a grant longer than wait_alert_ms: one P1 (design section 16), closed once nothing waits that long. A launch held on an untested harness version while automatic checks are on is the check's to report: its pass releases the run, its final failure opens its own P1. */
   private alerts(): void {
     const { db, now } = this.deps;
     const t = now();
@@ -788,7 +788,7 @@ export class Scheduler {
     const checking = JSON.stringify(checked);
     const waits = `state NOT IN ('cleaned','failed','cancelled')
            AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead')
-           AND harness NOT IN (SELECT value FROM json_each(?1))`;
+           AND NOT (pending_launch IS NOT NULL AND harness IN (SELECT value FROM json_each(?1)))`;
     const oldest = db
       .query(`SELECT task_id, waiting_since FROM runs WHERE ${waits} AND waiting_since IS NOT NULL ORDER BY waiting_since LIMIT 1`)
       .get(checking) as { task_id: string; waiting_since: number } | null;
