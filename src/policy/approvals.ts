@@ -33,7 +33,7 @@ export const PAGE_CODE_TRIES = 3;
 /** Pass codes one gate may mint in the daemon's life; a pass asked for after that opens the leader's request only. */
 export const PAGE_CODE_MINTS = 5;
 
-export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "page" | "yolo";
+export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "page" | "yolo" | "autonomous";
 export type ApprovalAction = "merge" | "discard" | "gate" | "decide";
 export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "claude-chat", "pi-confirm", "cli-tty", "board", "page"];
 
@@ -101,7 +101,7 @@ export function insertApproval(db: Db, a: NewApproval): ApprovalRow {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
   ).run(id, a.task, a.ref, a.head, a.channel, a.actor, a.action, a.allowRed ?? null, a.now, a.now + APPROVAL_TTL_MS);
   appendEvent(db, {
-    source: a.channel === "cli-tty" || a.channel === "board" ? "cli" : a.channel === "yolo" || a.channel === "page" ? "daemon" : "hook",
+    source: a.channel === "cli-tty" || a.channel === "board" ? "cli" : a.channel === "yolo" || a.channel === "page" || a.channel === "autonomous" ? "daemon" : "hook",
     kind: "approval.recorded",
     taskId: a.task,
     payload: { approval: id, channel: a.channel, actor: a.actor, action: a.action, ref: a.ref, head: a.head, allow_red: a.allowRed ?? null },
@@ -259,13 +259,15 @@ export interface Challenge {
   code: string;
   /** The task, or for a repin the leader session. */
   task: string;
-  action: ApprovalAction | "repin";
+  action: ApprovalAction | "repin" | "autonomy";
   ref: string;
   head: string;
   allowRed: string | null;
   channel: "cli-tty" | "board";
   /** A repin (`flowryn leader repin`): exactly the pin you were shown. */
   repin?: { oldCwd: string | null; newCwd: string; transcript: string };
+  /** Unattended mode (`flowryn away --autonomous`): exactly the terms and words you were shown. */
+  autonomy?: { projects: string[]; until: number; words: string | null };
   expiresAt: number;
 }
 

@@ -1,11 +1,14 @@
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
+import { ATTENTION_VERBS } from "../attention/verbs.ts";
 import { DECISION_VERBS } from "../lifecycle/decision-verbs.ts";
 import { DIVERGENCE_VERBS } from "../lifecycle/divergences.ts";
+import { parseAutonomyRef, stampOf } from "./autonomy.ts";
 import { chatForm, parseRef } from "./chat-questions.ts";
 import { GATE_VERBS } from "./gates.ts";
 import { claudeLeaderSession, getGrant, GRANT_ARG, type GrantRow } from "./grants.ts";
 import { POLICY_VERBS } from "./verbs.ts";
+import { projectRefScope, requireInScope } from "../leader/scope.ts";
 
 /**
  * The leader's side of chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md):
@@ -16,14 +19,17 @@ import { POLICY_VERBS } from "./verbs.ts";
 
 const chatQuestion: VerbSpec = {
   name: "chat-question",
-  summary: "The AskUserQuestion question that lets the user's chat answer authorise an item (q<N>, k<N>, g<N>, d<N>, merge:<task>)",
-  positionals: [{ name: "item", required: true, help: "a decision, review gate, divergence, or merge:<task>" }],
+  summary: "The AskUserQuestion question that lets the user's chat answer authorise an item (q<N>, k<N>, g<N>, d<N>, merge:<task>, autonomy:<projects>@<until>)",
+  positionals: [{ name: "item", required: true, help: "a decision, review gate, divergence, merge:<task>, or autonomy:<projects>@<until> (flowryn away --autonomous names it)" }],
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
   scope: { kind: "ref", arg: "item" },
   read(ctx, args) {
-    const form = chatForm(ctx.db, parseRef(stringArg(args, "item")!));
+    const ref = parseRef(stringArg(args, "item")!);
+    // An autonomy item names projects, not a task: each must be in the caller's scope.
+    for (const project of parseAutonomyRef(ref)?.projects ?? []) requireInScope(ctx.config, ctx.caller, projectRefScope(ctx.db, ctx.config, project), `project ${project}`);
+    const form = chatForm(ctx.db, ref);
     return {
       data: { item: form.ref, action: form.action, question: JSON.stringify(form.question) },
       hints: ["pass question unchanged as the one element of AskUserQuestion's questions (up to 4 such questions per call); then flowryn grant use <grant>"],
@@ -32,7 +38,7 @@ const chatQuestion: VerbSpec = {
 };
 
 /** The commands a grant can run (a function: the lists are read after every module has loaded). */
-const TARGETS = (): VerbSpec[] => [...DECISION_VERBS, ...GATE_VERBS, ...DIVERGENCE_VERBS, ...POLICY_VERBS];
+const TARGETS = (): VerbSpec[] => [...DECISION_VERBS, ...GATE_VERBS, ...DIVERGENCE_VERBS, ...POLICY_VERBS, ...ATTENTION_VERBS];
 
 function verb(list: VerbSpec[], name: string): VerbSpec {
   const found = list.find((v) => v.name === name);
@@ -54,6 +60,11 @@ function targetOf(g: GrantRow, body: string | undefined): { spec: VerbSpec; args
       return { spec: verb(DIVERGENCE_VERBS, "divergence resolve"), args: { id: g.item, resolution: g.choice, [GRANT_ARG]: g.id } };
     case "merge":
       return { spec: verb(POLICY_VERBS, "merge"), args: { task: g.task_id!, [GRANT_ARG]: g.id } };
+    case "autonomy": {
+      const terms = parseAutonomyRef(g.item);
+      if (!terms) throw new FlowrynError("bad_args", `grant ${g.id} names no autonomy terms`);
+      return { spec: verb(ATTENTION_VERBS, "away"), args: { autonomous: true, until: stampOf(terms.until).replace("T", " "), projects: terms.projects.join(","), ...withBody, [GRANT_ARG]: g.id } };
+    }
   }
 }
 
@@ -75,7 +86,7 @@ function targetFor(ctx: HandlerCtx, args: Args): { g: GrantRow; spec: VerbSpec; 
 
 const grantUse: VerbSpec = {
   name: "grant use",
-  summary: "Run the one action the user's chat answer granted (decide, gate pass or changes, divergence resolve, merge)",
+  summary: "Run the one action the user's chat answer granted (decide, gate pass or changes, divergence resolve, merge, start unattended mode)",
   positionals: [{ name: "grant", required: true, help: "the grant id, such as c7" }],
   flags: { "body-file": { type: "string", help: "your relay of the user's words (gate changes needs some)", fileFor: "body" } },
   kind: "mutation",

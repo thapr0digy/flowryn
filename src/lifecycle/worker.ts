@@ -181,6 +181,7 @@ const ask: VerbSpec = {
     blocking: { type: "boolean", help: "you cannot continue without the answer" },
     key: { type: "string", help: "a short slug for this question, for show", placeholder: "key" },
     recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
+    why: { type: "string", help: "why you recommend it, in a line (unattended mode keeps it with the answer)", placeholder: "text" },
     reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
     blocks: { type: "string", help: "required: the choice in your work that waits on the answer", placeholder: "text" },
     nomistakes: { type: "boolean", help: "a no-mistakes ask-user finding: a rule may settle it ([decisions] nomistakes_rules), else only the user answers" },
@@ -215,6 +216,7 @@ const ask: VerbSpec = {
     const bad = options.find((o) => !OPTION.test(o));
     if (bad) throw new FlowrynError("bad_args", `option "${bad}" must be short: letters, digits, spaces, _ . -`);
     const blocking = boolArg(args, "blocking");
+    const why = sanitizeLine(stringArg(args, "why") ?? "", MAX_WHY_CHARS) || null;
     const now = ctx.now();
     const key = stringArg(args, "key") ?? null;
     if (key && !DECISION_KEY.test(key)) throw new FlowrynError("bad_args", "--key must be lowercase letters, digits and dashes");
@@ -243,8 +245,8 @@ const ask: VerbSpec = {
     // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask no floor kept for the user.
     const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : !facts?.ok ? "nomistakes-unread" : verdict.floored ? "nomistakes-floor" : "nomistakes"));
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13)")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks);
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks, why);
     const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via, ...(verdict ? { nomistakes: true } : {}) } });
     if (verdict?.settled && reserved === null) {
       appendEvent(ctx.db, { source: "daemon", kind: "decision.settled_by_rule", runId: run.id, taskId: run.task_id, payload: { decision: id, step: facts!.ok ? facts!.step : "", rules: verdict.rules, answer: verdict.answer, findings: verdict.findings } });
@@ -273,6 +275,9 @@ const ask: VerbSpec = {
 };
 
 /** `flowryn inbox`: the steers you have not acknowledged yet. */
+/** An ask's --why is kept to one line of this many characters. */
+const MAX_WHY_CHARS = 300;
+
 const inbox: VerbSpec = {
   name: "inbox",
   summary: "List steers from your leader you have not acknowledged",

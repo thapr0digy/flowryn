@@ -31,6 +31,7 @@ import { noteMergedAfterEnd } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-health.ts";
 import { shellWord } from "../util/shell-word.ts";
 import { grantActor, takeGrant, voidItemGrants } from "./grants.ts";
+import { autonomyFor, mintAutonomyApproval, type AutonomyRow } from "./autonomy.ts";
 import { shortPolicy } from "../verify/policy.ts";
 import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification } from "../verify/store.ts";
 
@@ -193,6 +194,8 @@ export type ApprovalChoice =
   | { kind: "key"; session: string; allowRed: string | null }
   /** Your chat answer (docs/notes/2026-10-10-chat-answers-authorise-5g.md), already checked against Claude's transcript; never a waiver. */
   | { kind: "grant"; grant: string; session: string }
+  /** Unattended mode's standing approval (src/policy/autonomy.ts): for the daemon's own merge only, never a waiver. */
+  | { kind: "autonomy"; autonomy: string }
   | { kind: "yolo" };
 
 /**
@@ -273,6 +276,11 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
   }
   if (allowRed !== null) reasons.push(`waiving ${JSON.stringify(allowRed)} needs your word; yolo never waives a check`);
   const policy = db.query("SELECT yolo FROM task_policy WHERE task_id = ?1").get(task) as { yolo: number } | null;
+  // The daemon's merge of work yolo does not cover (not yolo, or sensitive) under your standing approval for this project.
+  if (ask.caller.role === "daemon" && action === "merge" && allowRed === null && (policy?.yolo !== 1 || facts.run.sensitive)) {
+    const standing = autonomyFor(db, facts.run.project_id, now);
+    if (standing) return { choice: { kind: "autonomy", autonomy: standing.id }, why: "" };
+  }
   if (action === "merge" && allowRed === null && policy?.yolo === 1) return { choice: { kind: "yolo" }, why: "" };
   const stale = staleApprovals(db, { task, action, head: facts.head, now });
   if (stale.length > 0) reasons.unshift(`your approval ${stale[0]!.id} was for head ${stale[0]!.head_sha.slice(0, 8)}; the head is now ${facts.head.slice(0, 8)}`);
@@ -438,7 +446,15 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
 }
 
 export function channelOf(choice: ApprovalChoice): Channel {
+  if (choice.kind === "autonomy") return "autonomous";
   return choice.kind === "row" ? choice.row.channel : choice.kind === "attempt" ? "claude-ask" : choice.kind === "key" ? "pi-confirm" : choice.kind === "grant" ? "claude-chat" : "yolo";
+}
+
+/** The live standing approval a choice names, or a refusal: it ended or expired since the choice. */
+function liveStanding(db: Db, facts: MergeFacts, id: string, now: number): AutonomyRow {
+  const row = autonomyFor(db, facts.run.project_id, now);
+  if (!row || row.id !== id) throw new FlowrynError("approval_required", `merge refused: the standing approval ${id} ended or expired`, `approve in your shell: flowryn approve ${facts.run.task_id}`);
+  return row;
 }
 
 function user(): string {
@@ -448,6 +464,11 @@ function user(): string {
 /** Use up the approval that allowed the merge, and return its id. Call inside a transaction. */
 export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, action: "merge" | "discard", now: number): string {
   const task = facts.run.task_id;
+  if (choice.kind === "autonomy") {
+    const minted = mintAutonomyApproval(db, liveStanding(db, facts, choice.autonomy, now), { task, ref: facts.ref, head: facts.head, action: "merge", runId: facts.run.id }, now);
+    consumeApproval(db, minted.id, now, `${action} ${task}`);
+    return minted.id;
+  }
   if (choice.kind === "row") {
     const fresh = db.query("SELECT consumed_at FROM approvals WHERE id = ?1").get(choice.row.id) as { consumed_at: number | null } | null;
     if (!fresh || fresh.consumed_at !== null) throw new FlowrynError("approval_required", `approval ${choice.row.id} was just used by another merge`);
@@ -478,6 +499,7 @@ export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, 
 export function standingApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, now: number): string | null {
   const task = facts.run.task_id;
   if (choice.kind === "yolo") return null;
+  if (choice.kind === "autonomy") return mintAutonomyApproval(db, liveStanding(db, facts, choice.autonomy, now), { task, ref: facts.ref, head: facts.head, action: "merge", runId: facts.run.id }, now).id;
   if (choice.kind === "row") {
     const fresh = db.query("SELECT consumed_at FROM approvals WHERE id = ?1").get(choice.row.id) as { consumed_at: number | null } | null;
     if (!fresh || fresh.consumed_at !== null) throw new FlowrynError("approval_required", `approval ${choice.row.id} was just used by another merge`);

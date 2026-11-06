@@ -134,6 +134,7 @@ export const LANE_TABLE = {
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
   auto_merge_held: { lane: "P1", class: "actionable" },
+  autonomy_parked: { lane: "P1", class: "actionable" },
   review_unanswered: { lane: "P1", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },

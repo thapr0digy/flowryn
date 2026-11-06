@@ -3,6 +3,8 @@ import type { Db } from "../db/db.ts";
 import { captainAnswerable, getDecision } from "../lifecycle/decisions.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
+import { getProject } from "../lifecycle/projects.ts";
+import { parseAutonomyRef, stampOf } from "./autonomy.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
 import { getDivergence, isBacklogDivergence } from "../reconcile/divergence.ts";
@@ -19,7 +21,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
  */
 
 /** What an answer to a binding question can authorise. */
-export type GrantAction = "decide" | "gate" | "divergence" | "merge";
+export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "autonomy";
 
 export interface ChatOption {
   label: string;
@@ -35,7 +37,7 @@ export interface ChatQuestion {
 }
 
 export interface ChatForm {
-  /** The item: q42, k3, g81, d13 or merge:<task>. */
+  /** The item: q42, k3, g81, d13, merge:<task> or autonomy:<projects>@<until>. */
   ref: string;
   action: GrantAction;
   task: string | null;
@@ -53,13 +55,14 @@ const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const SEPARATOR = " · ";
 const RECOMMENDED = " (Recommended)";
-const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|merge [A-Za-z0-9][\w.-]*) · /;
+const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|merge [A-Za-z0-9][\w.-]*|autonomy [a-z0-9,-]+@\S+) · /;
 
 /** The item a question binds to, from its prefix (`q42 · `, `merge T17 · `), or null for an ordinary question. */
 export function bindingRef(question: string): string | null {
   const match = BINDING_PREFIX.exec(question);
   if (!match) return null;
   const head = match[1]!;
+  if (head.startsWith("autonomy ")) return `autonomy:${head.slice("autonomy ".length)}`;
   return head.startsWith("merge ") ? `merge:${head.slice("merge ".length)}` : head;
 }
 
@@ -69,7 +72,11 @@ export function parseRef(typed: string): string {
   const merge = /^merge[: ]\s*([A-Za-z0-9][\w.-]*)$/.exec(trimmed);
   if (merge) return `merge:${merge[1]}`;
   if (/^[qkgd]\d+$/.test(trimmed)) return trimmed;
-  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N> or merge:<task>, not "${sanitizeLine(trimmed, 60)}"`);
+  if (trimmed.startsWith("autonomy:")) {
+    if (!parseAutonomyRef(trimmed)) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`, "flowryn away --autonomous --until <time> --projects <ids> prints the item to ask");
+    return trimmed;
+  }
+  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task> or autonomy:<projects>@<until>, not "${sanitizeLine(trimmed, 60)}"`);
 }
 
 function option(label: string, description: string): ChatOption {
@@ -183,8 +190,38 @@ function mergeForm(db: Db, task: string): ChatForm {
   };
 }
 
+/** What unattended mode does, as the chat question tells the user before they answer. */
+export const AUTONOMY_SUMMARY =
+  "While it lasts the daemon passes review gates of tasks dispatched with a full brief whose pinned page and spec are unchanged, merges verified pull requests (sensitive ones included) and takes the worker's recommendation on ordinary questions. A question about a destructive, irreversible, security, credential or outward step parks only its task for you. It never waives a red check or force-pushes; flowryn back ends it.";
+
+function autonomyForm(db: Db, ref: string): ChatForm {
+  const terms = parseAutonomyRef(ref);
+  if (!terms) throw new FlowrynError("bad_args", `${sanitizeLine(ref, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`);
+  for (const id of terms.projects) if (!getProject(db, id)) throw new FlowrynError("not_found", `no project ${id}`, "flowryn project list");
+  const until = stampOf(terms.until).replace("T", " ");
+  const head = `autonomy ${ref.slice("autonomy:".length)}`;
+  return {
+    ref,
+    action: "autonomy",
+    task: null,
+    question: {
+      question: `${head}${SEPARATOR}Start unattended mode until ${until} (at most 16 hours) for ${terms.projects.length === 1 ? "project" : "projects"} ${terms.projects.join(", ")}? ${AUTONOMY_SUMMARY}`,
+      header: "autonomy",
+      options: [option("Start autonomy", `Grant the standing approval for ${terms.projects.join(", ")} until ${until}`), option("No", "Grant nothing; away mode alone still wakes the leader")],
+      multiSelect: false,
+    },
+    choices: [
+      { label: "Start autonomy", choice: "start" },
+      { label: "No", choice: null },
+    ],
+    binds: null,
+    freeText: null,
+  };
+}
+
 /** The binding form for an item, from what flowrynd knows now. Throws when the item cannot be asked. */
 export function chatForm(db: Db, ref: string): ChatForm {
+  if (ref.startsWith("autonomy:")) return autonomyForm(db, ref);
   if (ref.startsWith("merge:")) return mergeForm(db, ref.slice("merge:".length));
   if (/^[qk]\d+$/.test(ref)) return decisionForm(db, ref);
   if (/^g\d+$/.test(ref)) return gateForm(db, ref);
