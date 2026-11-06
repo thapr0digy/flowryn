@@ -175,7 +175,9 @@ export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropp
 /**
  * Whose move an item is (task no-idle-workers-23, steer m569): `act`, the
  * leader's (act on it, or relay it to you); `question`, a question the leader
- * puts to you (QUESTION_KINDS, their own batch); `info`, nobody's. Every
+ * puts to you (QUESTION_KINDS, their own batch); `user`, yours alone and on
+ * purpose not now (unattended mode parked it for your morning brief), so it
+ * never wakes the leader; `info`, nobody's. Every
  * `act` and `question` item wakes an idle leader session, whether or not you
  * were recently active, with no hourly cap: a P0 at once (p0Candidate), the
  * rest batched (followUpBatch, questionBatch in router.ts). Each item wakes a
@@ -183,7 +185,7 @@ export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropp
  * [leader] wake_ceiling_per_hour is the runaway guard. Explicit per kind, so a
  * new kind must say whose move it is (a unit test lists them all).
  */
-export type LeaderRoute = "act" | "question" | "info";
+export type LeaderRoute = "act" | "question" | "user" | "info";
 
 export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   worker_question_blocking: "question",
@@ -238,6 +240,7 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   landed: "act",
   pr_conflict: "act",
   auto_merge_held: "act",
+  autonomy_parked: "user",
   review_unanswered: "act",
   leader_wake_runaway: "act",
   yolo_merged: "info",

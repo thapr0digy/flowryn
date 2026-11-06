@@ -64,9 +64,10 @@ describe("the leader route table", () => {
     expect(Object.keys(LEADER_ROUTE).toSorted()).toEqual(Object.keys(LANE_TABLE).toSorted());
   });
 
-  test("info kinds are nobody's move; questions are the question batch's; every other actionable kind is the leader's", () => {
+  test("info kinds are nobody's move; questions are the question batch's; what unattended mode parked is the user's; every other actionable kind is the leader's", () => {
+    const userOnly: readonly ItemKind[] = ["autonomy_parked"];
     for (const kind of Object.keys(LANE_TABLE) as ItemKind[]) {
-      const expected = LANE_TABLE[kind].class === "info" ? "info" : QUESTION_KINDS.includes(kind) ? "question" : "act";
+      const expected = LANE_TABLE[kind].class === "info" ? "info" : QUESTION_KINDS.includes(kind) ? "question" : userOnly.includes(kind) ? "user" : "act";
       expect(`${kind}:${LEADER_ROUTE[kind]}`).toBe(`${kind}:${expected}`);
     }
   });
@@ -76,6 +77,8 @@ describe("the leader route table", () => {
     for (const kind of LEADER_WAKE_KINDS) expect(LANE_TABLE[kind].lane).toBe("P1");
     expect(LEADER_WAKE_KINDS).not.toContain("worker_question");
     expect(LEADER_WAKE_KINDS).not.toContain("steer_acked");
+    // Unattended mode parks it for the morning brief: no wake (docs/notes/2026-11-05-unattended-mode-one-9e.md).
+    expect(LEADER_WAKE_KINDS).not.toContain("autonomy_parked");
   });
 });
 
