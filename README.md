@@ -27,12 +27,12 @@ ln -sf "$PWD/dist/flowryn" ~/.local/bin/flowryn
 flowryn init                 # interactive: tools (one y/N installs the missing axi tools, acli, treehouse),
                              # data and state dirs, tasks-axi files, launchd agent, [policy] mode, notifications
 flowryn doctor               # checks config, tools (with install commands), database, daemon, service
-flowryn doctor --contracts   # run the harness contract suites; needed before any dispatch
+flowryn doctor --contracts   # run the harness contract suites; strict mode needs a pass to dispatch
 flowryn project add ~/code/web   # reads origin and the default branch
 ```
 
 - zsh tab completion: add `source <(flowryn completion zsh)` to `~/.zshrc` after `compinit` ([docs/notes/2026-10-29-zsh-completions-for-49.md](docs/notes/2026-10-29-zsh-completions-for-49.md)).
-- Re-run `flowryn doctor --contracts` after installing or updating Claude Code or Pi. Dispatch refuses an untested harness version.
+- Re-run `flowryn doctor --contracts` after installing or updating Claude Code or Pi. In strict mode dispatch refuses an untested harness version; in relaxed mode the daemon checks it by itself and the work waits ([docs/notes/2026-11-06-a-claude-pi-y5.md](docs/notes/2026-11-06-a-claude-pi-y5.md)).
 - Run `doctor` in your own terminal.
 - GitHub token: `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`. It is sent only to GitHub's API.
 - Moved the binary? Run `flowryn daemon uninstall && flowryn daemon install`: the launchd plist records the binary path.
