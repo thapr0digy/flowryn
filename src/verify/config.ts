@@ -39,7 +39,7 @@ const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
-  return `[projects.${projectId}]\nverify = ["bun install --frozen-lockfile", ["bun run typecheck", "npx oxlint"], "bun test", "bun run build"]`;
+  return `[projects.${projectId}]\nverify = ["bun install --frozen-lockfile", ["bun run typecheck", "npx oxlint", "bun run build"], "bun test"]`;
 }
 
 function projectTable(config: FlowrynConfig, projectId: string): Record<string, unknown> {
