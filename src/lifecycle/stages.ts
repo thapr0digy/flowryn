@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
@@ -13,7 +13,7 @@ import { appendEvent } from "../db/events.ts";
 import { deliveryLines, type ContractDelivery } from "../harness/contract-text.ts";
 import { grantLeases, holdsLease, releaseLeases, runLeases, type ProjectLimit } from "../sched/pools.ts";
 import { DESIGN_TEMPLATE_FILE, designPageProblems } from "../skills/design-template.ts";
-import { QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaPageProblems } from "../skills/qa-template.ts";
+import { QA_CHECKLIST, QA_CHECKLIST_MAX_BYTES, QA_PAGE_MAX_BYTES, QA_TEMPLATE_FILE, qaChecklistProblems, qaNothingVisible, qaPageProblems } from "../skills/qa-template.ts";
 import { skillPath } from "../skills/stages.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import type { GateOpenState } from "../lavish/opener.ts";
@@ -636,7 +636,9 @@ const QA_SKILL = "flowryn-visual-qa";
 /**
  * A QA stage's review page must open with its filled plain-language card
  * (src/skills/qa-template.ts). It lives at `$FLOWRYN_REPORT_DIR/qa/evidence.html`,
- * as the skill says; a symlink there is refused rather than followed.
+ * as the skill says; a symlink there is refused rather than followed. Unless
+ * the card says "Nothing visible.", the checklist the page was checked
+ * against must sit beside it (`qa/checklist.md`), with at least one item.
  */
 export function checkQaPage(reportDir: string): string {
   const path = join(reportDir, "qa", "evidence.html");
@@ -649,14 +651,36 @@ export function checkQaPage(reportDir: string): string {
   }
   if (!st.isFile()) throw new FlowrynError("qa_page_invalid", `${path} is not a regular file`, hint);
   if (st.size > QA_PAGE_MAX_BYTES) throw new FlowrynError("qa_page_invalid", `${path} is over ${QA_PAGE_MAX_BYTES / 1024 / 1024} MB`);
-  const problems = qaPageProblems(readFileSync(path, "utf8"));
+  const html = readFileSync(path, "utf8");
+  const problems = qaPageProblems(html);
   if (problems.length > 0) throw new FlowrynError("qa_page_invalid", `${path}: ${problems.join("; ")}`, "fix the page, host it again, then run stage done");
+  let page: string;
   try {
-    return checkReviewPage(path, reportDir, { widget: false });
+    page = checkReviewPage(path, reportDir, { widget: false });
   } catch (error) {
     if (error instanceof FlowrynError) throw new FlowrynError("qa_page_invalid", error.message, error.help);
     throw error;
   }
+  if (!qaNothingVisible(html)) checkQaChecklist(reportDir);
+  return page;
+}
+
+/** The QA checklist: a regular file inside the report dir (a symlink is refused), at most 256 KB, with at least one item. */
+function checkQaChecklist(reportDir: string): void {
+  const path = join(reportDir, QA_CHECKLIST);
+  const hint = `step 0 of the flowryn-visual-qa skill: write ${path} from DESIGN.md, the design page and its mockups, one numbered item per expectation ending "(source: …)"; a change with nothing to see says "Nothing visible." in the card instead`;
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    throw new FlowrynError("qa_page_invalid", `no QA checklist at ${path}`, hint);
+  }
+  if (!st.isFile()) throw new FlowrynError("qa_page_invalid", `${path} is not a regular file`, hint);
+  if (st.size > QA_CHECKLIST_MAX_BYTES) throw new FlowrynError("qa_page_invalid", `${path} is over ${QA_CHECKLIST_MAX_BYTES / 1024} KB`, hint);
+  const rel = relative(realpathSync(reportDir), realpathSync(path));
+  if (rel.startsWith("..") || isAbsolute(rel)) throw new FlowrynError("qa_page_invalid", `${path} resolves outside $FLOWRYN_REPORT_DIR`, hint);
+  const problems = qaChecklistProblems(readFileSync(path, "utf8"));
+  if (problems.length > 0) throw new FlowrynError("qa_page_invalid", problems.join("; "), hint);
 }
 
 const DESIGN_SKILL = "flowryn-design";
