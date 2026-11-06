@@ -206,4 +206,11 @@ describe("the no-mistakes finding table", () => {
     expect(classifyAsk({ step: "review", findings: [f("r-1", "tighten")], options: ["fix"], sensitive: true })).toMatchObject({ owner: "user", reason: "sensitive task" });
     expect(classifyAsk({ step: "review", findings: [{ ...f("r-1", "tighten"), action: "auto-fix" }], options: ["fix"], sensitive: false })).toMatchObject({ owner: "user" });
   });
+
+  test("a ci or rebase gate stays the user's even when its finding has a leader kind on a diff line", () => {
+    const f = { id: "c-1", action: "ask-user", description: "tighten the loop", category: "test", severity: "warning", cls: "diff-line" as const };
+    expect(classifyAsk({ step: "review", findings: [f], options: ["fix", "skip"], sensitive: false })).toEqual({ owner: "leader", findings: ["c-1"] });
+    expect(classifyAsk({ step: "ci", findings: [f], options: ["fix", "skip"], sensitive: false })).toEqual({ owner: "user", klass: "unknown", reason: "ci gate" });
+    expect(classifyAsk({ step: "rebase", findings: [f], options: ["fix", "skip"], sensitive: false })).toEqual({ owner: "user", klass: "unknown", reason: "rebase gate" });
+  });
 });

@@ -92,6 +92,9 @@ export const LEADER_KINDS: readonly string[] = [
   "performance", "types", "typing", "typecheck",
 ];
 
+/** The gate steps whose findings the leader may judge; any other gate (ci, rebase, push) stays reserved whatever a finding's category. */
+export const LEADER_STEPS: readonly string[] = ["review", "lint", "test", "document", "docs", "format"];
+
 /** The file classes inside the branch's own change: a finding there is about this change. */
 const INSIDE: readonly FileClass[] = ["added", "diff-line", "touched"];
 
@@ -115,6 +118,7 @@ export function classifyAsk(input: { step: string; findings: readonly (FindingFa
   const asks = input.findings.filter((f) => f.action === "ask-user");
   if (asks.length === 0) return { owner: "user", klass: "unknown", reason: `no ask-user finding at the ${input.step || "parked"} gate` };
   if (input.sensitive) return { owner: "user", klass: "unknown", reason: "sensitive task" };
+  if (!LEADER_STEPS.includes(input.step.trim().toLowerCase())) return { owner: "user", klass: "unknown", reason: `${input.step || "unknown"} gate` };
   for (const f of asks) {
     const verdict = classifyFinding({ finding: f, file: f.cls, step: input.step, options: input.options });
     if (verdict.owner === "user") return verdict;
