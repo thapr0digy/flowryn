@@ -14,6 +14,7 @@ import { recordIntent } from "../journal/journal.ts";
 import { CI_WAIT_ORIGIN } from "../lifecycle/ci-wait.ts";
 import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
+import { settleAutonomyParked } from "./items.ts";
 import { AWAY_MAX_MS, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief, type AwayPosture } from "./away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "./briefing.ts";
 import type { CommandMessage, CommandOutcome } from "./notify.ts";
@@ -100,6 +101,7 @@ const dismiss: VerbSpec = {
       ctx.db.query("UPDATE decisions SET state = 'dismissed', answered_via = ?2, answered_at = ?3 WHERE id = ?1").run(decision.id, ctx.caller.role, now);
       appendEvent(ctx.db, { source: "cli", kind: "decision.dismissed", runId: decision.run_id, taskId: decision.task_id, payload: { decision: decision.id, by: ctx.caller.role } });
       if (decision.blocking) recordIntent(ctx.db, { file: "backlog", verb: "unhold", taskId: decision.task_id, positional: [decision.task_id], now });
+      if (decision.run_id) settleAutonomyParked(ctx.db, decision.run_id, `decision.dismissed ${decision.id}`, now);
       const run = decision.run_id ? getRun(ctx.db, decision.run_id) : null;
       // The CI-wait watchdog's question was not the worker's: nothing to tell it (the watchdog asks again later).
       if (run && !isTerminal(run.state) && decision.origin !== CI_WAIT_ORIGIN) {

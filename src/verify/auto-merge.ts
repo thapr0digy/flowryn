@@ -6,7 +6,7 @@ import type { FlowrynConfig } from "../config/config.ts";
 import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
-import { autonomyFor } from "../policy/autonomy.ts";
+import { autonomyForRun } from "../policy/autonomy.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { DAEMON_CALLER, latestMerge, type MergeRow } from "../policy/merge.ts";
@@ -421,7 +421,7 @@ export class AutoMerger {
     // The landing queue's head of line: the queue ends it when the project leaves the queue.
     if (db.query("SELECT 1 FROM landing_queue WHERE auto_merge_id = ?1 AND state = 'landing'").get(row.id)) return null;
     // Unattended mode started it (src/attention/autonomy-pass.ts): it lasts while the standing approval covers the project.
-    if (autonomyFor(db, row.project_id, this.deps.now())) return null;
+    if (autonomyForRun(db, run, this.deps.now())) return null;
     let enabled: boolean;
     try {
       enabled = autoMergeEnabled(this.deps.config(), row.project_id);

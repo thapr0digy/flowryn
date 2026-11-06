@@ -15,7 +15,7 @@ import { dispatchedBody } from "../lifecycle/launcher.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, holdReason, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { openGate, runWorkflow, type GateRow } from "../lifecycle/stages.ts";
-import { AUTONOMOUS_CHANNEL, autonomyActor, autonomyFor, liveAutonomy, projectsOf, type AutonomyRow } from "../policy/autonomy.ts";
+import { AUTONOMOUS_CHANNEL, autonomyActor, autonomyForRun, liveAutonomy, startedUnderAutonomy, projectsOf, type AutonomyRow } from "../policy/autonomy.ts";
 import { recordGatePass } from "../policy/gates.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { createAutoMerge } from "../verify/auto-merge.ts";
@@ -58,12 +58,6 @@ export type QuestionVerdict = { action: "decide"; choice: string } | { action: "
 export interface QuestionFacts {
   /** The default branch's .no-mistakes.yaml declares no_ci: true (null: not read). */
   noCi: boolean | null;
-}
-
-/** Was this run started under the autonomy migration? Older runs finish as they began. */
-export function startedUnderAutonomy(db: Db, startedAt: number): boolean {
-  const row = db.query("SELECT applied_at FROM schema_migrations WHERE name = 'autonomy'").get() as { applied_at: number | null } | null;
-  return row?.applied_at != null && startedAt >= row.applied_at;
 }
 
 /** The recommendation as an answer, or null when it names no option (a text question takes its text). */
@@ -182,7 +176,7 @@ function passQuestions(db: Db, row: AutonomyRow, cfg: DecisionsConfig, noCi: Map
   const open = db.query("SELECT * FROM decisions WHERE state = 'open' AND run_id IS NOT NULL AND autonomy_state IS NULL ORDER BY created_at, id").all() as DecisionRow[];
   for (const d of open) {
     const run = getRunWithPolicy(db, d.run_id!);
-    if (!run || !autonomyFor(db, run.project_id, now) || !startedUnderAutonomy(db, run.started_at)) continue;
+    if (!run || !autonomyForRun(db, run, now)) continue;
     const verdict = autonomyVerdict(d, run, cfg, { noCi: noCi.get(run.project_id) ?? null });
     if (verdict.action === "skip") continue;
     if (verdict.action === "park") {
@@ -210,7 +204,7 @@ function gateCandidates(db: Db, now: number): { gate: GateRow; run: RunWithPolic
   const out: { gate: GateRow; run: RunWithPolicy }[] = [];
   for (const gate of gates) {
     const run = getRunWithPolicy(db, gate.run_id);
-    if (!run || isTerminal(run.state) || !autonomyFor(db, run.project_id, now) || !startedUnderAutonomy(db, run.started_at)) continue;
+    if (!run || isTerminal(run.state) || !autonomyForRun(db, run, now)) continue;
     if (getMeta(db, parkedGateKey(gate.id))) continue;
     if (db.query("SELECT 1 FROM decisions WHERE gate_id = ?1 AND state = 'open'").get(gate.id)) continue;
     out.push({ gate, run });
@@ -234,7 +228,7 @@ function passGates(db: Db, row: AutonomyRow, heads: GateCandidate[], now: number
   for (const c of heads) {
     const run = getRunWithPolicy(db, c.run);
     const gate = run ? openGate(db, run.id, "review") : null;
-    if (!run || !gate || gate.id !== c.gate || !autonomyFor(db, run.project_id, now)) continue;
+    if (!run || !gate || gate.id !== c.gate || !autonomyForRun(db, run, now)) continue;
     if (db.query("SELECT 1 FROM decisions WHERE gate_id = ?1 AND state = 'open'").get(gate.id)) continue;
     const verdict = autonomyGateVerdict(run, gate, gateFacts(db, run, gate));
     if (verdict.action === "skip") continue;
@@ -263,7 +257,7 @@ function startMerges(db: Db, config: FlowrynConfig, now: number, out: AutonomyOu
   const ready = db.query("SELECT id FROM runs WHERE state = 'ready'").all() as { id: string }[];
   for (const { id } of ready) {
     const run = getRunWithPolicy(db, id);
-    if (!run || run.kind !== "ship" || run.stacked_on || !autonomyFor(db, run.project_id, now) || landingQueued(config, run.project_id)) continue;
+    if (!run || run.kind !== "ship" || run.stacked_on || !autonomyForRun(db, run, now) || landingQueued(config, run.project_id)) continue;
     let steps: ReturnType<typeof verifyConfig> = null;
     try {
       steps = verifyConfig(config, run.project_id);

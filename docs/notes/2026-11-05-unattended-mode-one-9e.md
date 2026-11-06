@@ -40,7 +40,7 @@ The attention tick (1 s) runs one pass at a time, and only for the grant's proje
      - the task is sensitive;
      - its recommendation would skip CI (a CI wait's `accept-without-ci`, or a no-mistakes `approve`/`skip` on a CI finding) and the default branch's `.no-mistakes.yaml` does not say `no_ci: true`.
 
-     Parking marks the decision `autonomy_state = parked` and records an `autonomy.parked` event. A run question that did not already hold its task becomes blocking and holds it (`recordIntent`), so your answer unholds it. It opens one `autonomy_parked` item per run (P1, actionable), which names `flowryn decide <q> <choice> --by captain`. Only that task waits; the other tasks go on. As you chose in the review (q144), a parked run keeps the capacity slots it holds, as a run at a review gate does.
+     Parking marks the decision `autonomy_state = parked` and records an `autonomy.parked` event. A run question that did not already hold its task becomes blocking and holds it (`recordIntent`), so your answer unholds it. It opens one `autonomy_parked` item per run (P1, actionable), which names `flowryn decide <q> <choice> --by captain`; it is resolved once no question or review gate of the run is still parked and open (`settleAutonomyParked`, src/attention/items.ts). Only that task waits; the other tasks go on. As you chose in the review (q144), a parked run keeps the capacity slots it holds, as a run at a review gate does.
    - It **decides** any other question that has a recommendation among its options (a multi question's list, or a text question's text), with `answered_by = worker` and `answered_via = autonomous`. The rationale is "Decided under unattended mode (u<N>) as the worker recommended: <its why>". The why is `ask --why <text>` (new, optional, at most 300 characters, kept in `decisions.note`, the column a review gate's question already uses for its why). The event is `autonomy.decided`. A `merge`-class question is decided too: that class exists only to get your record, which the grant is.
    - It **leaves** a question with no usable recommendation to the leader, as today.
 
@@ -56,7 +56,7 @@ The attention tick (1 s) runs one pass at a time, and only for the grant's proje
    - A **landing-queue** project's line takes a ready PR on a minted approval. Its catch-up merge of main re-mints one at the new head, sensitive work included (`src/verify/landing-queue.ts`).
    - A **manual** project's ready ship gets the verify-backed auto-merge, once per head.
 
-   A leader's `flowryn merge` never takes the grant. Each mint appends `autonomy.merge_approved`.
+   A leader's `flowryn merge` never takes the grant, and neither does a run started before migration 53 (`autonomyForRun`): it still needs your own approval per PR. Each mint appends `autonomy.merge_approved`.
 
 ## The morning report (`src/attention/autonomy-report.ts`)
 
@@ -94,7 +94,8 @@ The away line says `--autonomous` names the chat question to ask once. The refus
   - the chat form;
   - every question rule alone (each protected class by class and by wording, a narrowed `reserved_classes`, merge class, worker `--reserved`, sensitive, no recommendation, multi and text, `no_ci` for a CI wait and a no-mistakes CI finding, skipped states);
   - every gate rule (pins, loose brief, no page, runs from before the migration);
-  - the merge choice: the daemon only, never a leader, never a waiver, red checks still refused, nothing after the end;
+  - the merge choice: the daemon only, never a leader, never a waiver, never a run from before the migration, red checks still refused, nothing after the end;
+  - the parked item closing with the run's last parked question;
   - the report: lens, sanitising, empty window.
 - `test/integration/autonomy.test.ts`, through the real daemon and CLI:
   - with the grant from your terminal, two spec'd ships (one sensitive) go dispatch → automatic design pass → build → ship → landing-queue merge with no input; a third that asks to drop a table parks alone; `flowryn back` prints the Autonomous section with the two gates, the two merges and the parked task;

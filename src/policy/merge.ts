@@ -31,7 +31,7 @@ import { noteMergedAfterEnd } from "../reconcile/delivery.ts";
 import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-health.ts";
 import { shellWord } from "../util/shell-word.ts";
 import { grantActor, takeGrant, voidItemGrants } from "./grants.ts";
-import { autonomyFor, mintAutonomyApproval, type AutonomyRow } from "./autonomy.ts";
+import { autonomyForRun, mintAutonomyApproval, type AutonomyRow } from "./autonomy.ts";
 import { shortPolicy } from "../verify/policy.ts";
 import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification } from "../verify/store.ts";
 
@@ -278,7 +278,7 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
   const policy = db.query("SELECT yolo FROM task_policy WHERE task_id = ?1").get(task) as { yolo: number } | null;
   // The daemon's merge of work yolo does not cover (not yolo, or sensitive) under your standing approval for this project.
   if (ask.caller.role === "daemon" && action === "merge" && allowRed === null && (policy?.yolo !== 1 || facts.run.sensitive)) {
-    const standing = autonomyFor(db, facts.run.project_id, now);
+    const standing = autonomyForRun(db, facts.run, now);
     if (standing) return { choice: { kind: "autonomy", autonomy: standing.id }, why: "" };
   }
   if (action === "merge" && allowRed === null && policy?.yolo === 1) return { choice: { kind: "yolo" }, why: "" };
@@ -452,7 +452,7 @@ export function channelOf(choice: ApprovalChoice): Channel {
 
 /** The live standing approval a choice names, or a refusal: it ended or expired since the choice. */
 function liveStanding(db: Db, facts: MergeFacts, id: string, now: number): AutonomyRow {
-  const row = autonomyFor(db, facts.run.project_id, now);
+  const row = autonomyForRun(db, facts.run, now);
   if (!row || row.id !== id) throw new FlowrynError("approval_required", `merge refused: the standing approval ${id} ended or expired`, `approve in your shell: flowryn approve ${facts.run.task_id}`);
   return row;
 }

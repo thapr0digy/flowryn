@@ -274,9 +274,20 @@ export function resolveItems(db: Db, kind: ItemKind, taskId: string | null, reso
 
 /** Resolve the open items that carry one decision. */
 export function resolveDecisionItems(db: Db, decisionId: string, resolvedBy: string, now = Date.now()): number {
-  return db
+  const changes = db
     .query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE decision_id = ?1 AND state IN ('open','presented')")
     .run(decisionId, resolvedBy, now).changes;
+  const parked = db.query("SELECT run_id FROM decisions WHERE id = ?1 AND autonomy_state = 'parked' AND run_id IS NOT NULL").get(decisionId) as { run_id: string } | null;
+  if (parked) settleAutonomyParked(db, parked.run_id, resolvedBy, now);
+  return changes;
+}
+
+/** Resolve a run's unattended-mode park item once none of its questions or review gates is still parked and open. */
+export function settleAutonomyParked(db: Db, runId: string, resolvedBy: string, now = Date.now()): void {
+  if (!findOpenRunItem(db, "autonomy_parked", runId)) return;
+  const question = db.query("SELECT 1 FROM decisions WHERE run_id = ?1 AND state = 'open' AND autonomy_state = 'parked'").get(runId);
+  const gate = db.query("SELECT 1 FROM gates g JOIN meta m ON m.key = 'autonomy_parked:' || g.id WHERE g.run_id = ?1 AND g.state = 'open'").get(runId);
+  if (!question && !gate) resolveRunItems(db, runId, ["autonomy_parked"], resolvedBy, now);
 }
 
 /** Open items of a kind for one run. */

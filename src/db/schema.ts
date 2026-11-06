@@ -1107,7 +1107,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 50, name: "notes-projects", sql: NOTES_PROJECTS_SQL },
   { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
   { version: 52, name: "rich-briefs", sql: RICH_BRIEFS_SQL },
-  { version: 53, name: "autonomy", sql: AUTONOMY_SQL },
+  { version: 53, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -148,6 +148,17 @@ export function autonomyFor(db: Db, projectId: string, now: number): AutonomyRow
   return live && projectsOf(live).includes(projectId) ? live : null;
 }
 
+/** Was this run started under the autonomy migration? Older runs finish as they began. */
+export function startedUnderAutonomy(db: Db, startedAt: number): boolean {
+  const row = db.query("SELECT applied_at FROM schema_migrations WHERE name = 'autonomy'").get() as { applied_at: number | null } | null;
+  return row?.applied_at != null && startedAt >= row.applied_at;
+}
+
+/** The grant in force now that covers this run: its project is named and the run started after the migration. */
+export function autonomyForRun(db: Db, run: { project_id: string; started_at: number }, now: number): AutonomyRow | null {
+  return startedUnderAutonomy(db, run.started_at) ? autonomyFor(db, run.project_id, now) : null;
+}
+
 function nextId(db: Db): string {
   const next = Number(getMeta(db, "next_autonomy_no") ?? "1");
   setMeta(db, "next_autonomy_no", String(next + 1));

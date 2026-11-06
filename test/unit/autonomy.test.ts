@@ -3,11 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
-import { autonomyGateVerdict, autonomyVerdict, PARKING_CLASSES, startedUnderAutonomy } from "../../src/attention/autonomy-pass.ts";
+import { autonomyGateVerdict, autonomyVerdict, PARKING_CLASSES } from "../../src/attention/autonomy-pass.ts";
 import { autonomyLines } from "../../src/attention/autonomy-report.ts";
+import { findOpenRunItem, openItem, resolveDecisionItems } from "../../src/attention/items.ts";
 import { decisionsConfig, RESERVED_CLASSES } from "../../src/attention/decisions-policy.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { SEES_ALL } from "../../src/leader/scope.ts";
 import { CI_WAIT_ORIGIN, CI_WAIT_OPTIONS, CI_WAIT_RESERVED } from "../../src/lifecycle/ci-wait.ts";
 import type { DecisionRow } from "../../src/lifecycle/decisions.ts";
@@ -19,6 +21,7 @@ import { insertApproval } from "../../src/policy/approvals.ts";
 import {
   AUTONOMY_MAX_MS,
   autonomyFor,
+  autonomyForRun,
   autonomyRef,
   canonicalTerms,
   checkTerms,
@@ -28,6 +31,7 @@ import {
   mintAutonomyApproval,
   parseAutonomyRef,
   startAutonomy,
+  startedUnderAutonomy,
 } from "../../src/policy/autonomy.ts";
 import { bindingRef, chatForm, mapAnswer, parseRef } from "../../src/policy/chat-questions.ts";
 import { checkGate, chooseApproval, takeApproval, type MergeFacts } from "../../src/policy/merge.ts";
@@ -279,8 +283,27 @@ describe("which review gates autonomy passes", () => {
   });
 });
 
-function facts(sensitive = 0): MergeFacts {
-  const run = { id: "r1", task_id: "t", project_id: "web", sensitive, branch: "flowryn/t", state: "ready" } as unknown as RunWithPolicy;
+describe("the parked task's morning item", () => {
+  test("it closes when the last parked question of its run closes, not before", () => {
+    tx(db, () => {
+      for (const id of ["q1", "q2"]) db.query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, autonomy_state, autonomy_id) VALUES (?1, 't', 'r1', 'Drop the table?', '[]', 1, 'open', 'parked', 'u1')").run(id);
+      const event = appendEvent(db, { source: "daemon", kind: "autonomy.parked", runId: "r1", taskId: "t", payload: {}, ts: NOW });
+      openItem(db, { kind: "autonomy_parked", eventSeq: event.seq, taskId: "t", runId: "r1", line: "Parked under unattended mode", now: NOW });
+    });
+    const answer = (id: string) =>
+      tx(db, () => {
+        db.query("UPDATE decisions SET state = 'answered' WHERE id = ?1").run(id);
+        resolveDecisionItems(db, id, `decision.answered ${id}`, NOW + HOUR);
+      });
+    answer("q1");
+    expect(findOpenRunItem(db, "autonomy_parked", "r1")).not.toBeNull();
+    answer("q2");
+    expect(findOpenRunItem(db, "autonomy_parked", "r1")).toBeNull();
+  });
+});
+
+function facts(sensitive = 0, startedAt = Date.now() + 1000): MergeFacts {
+  const run = { id: "r1", task_id: "t", project_id: "web", sensitive, branch: "flowryn/t", state: "ready", started_at: startedAt } as unknown as RunWithPolicy;
   const project = { id: "web", path: "/p", default_branch: "main" } as unknown as ProjectRow;
   return {
     run,
@@ -329,6 +352,14 @@ describe("the merge takes the standing approval", () => {
     expect(chooseApproval(db, facts(1), { caller: daemon }, "merge", NOW + 3 * HOUR).choice).toBeNull();
     tx(db, () => endAutonomy(db, NOW + 90 * 60_000));
     expect(chooseApproval(db, facts(1), { caller: daemon }, "merge", NOW + 100 * 60_000).choice).toBeNull();
+  });
+
+  test("assumption: a run started before the autonomy migration still needs your own approval to merge", () => {
+    grant(["web"]);
+    expect(autonomyForRun(db, { project_id: "web", started_at: 0 }, NOW + HOUR)).toBeNull();
+    expect(autonomyForRun(db, { project_id: "web", started_at: Date.now() + 1000 }, NOW + HOUR)?.id).toBe("u1");
+    expect(chooseApproval(db, facts(1, 0), { caller: daemon }, "merge", NOW + HOUR).choice).toBeNull();
+    expect(chooseApproval(db, facts(1), { caller: daemon }, "merge", NOW + HOUR).choice).toEqual({ kind: "autonomy", autonomy: "u1" });
   });
 
   test("assumption: a red check is still refused under the standing approval", () => {
