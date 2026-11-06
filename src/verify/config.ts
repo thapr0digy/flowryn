@@ -51,8 +51,8 @@ export interface VerifyConfig {
 
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
-// scope and account are read by src/config/accounts.ts, max_workers by src/config/workflows.ts.
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "scope", "account", "max_workers"]);
+// scope and account are read by src/config/accounts.ts, max_workers and review_model by src/config/workflows.ts.
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "scope", "account", "max_workers", "review_model"]);
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {

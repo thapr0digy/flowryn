@@ -12,7 +12,7 @@ import { upkeepConfig } from "./upkeep.ts";
 import { parseTomlText } from "./toml-parse.ts";
 import { validationConfig } from "./validation.ts";
 import { herdrConfig, timingConfig, workersConfig } from "./workers.ts";
-import { capacityConfig, defaultAutonomy, DEFAULT_WORKFLOWS, projectMaxWorkers, schedTiming, styleBlock, workflowsConfig } from "./workflows.ts";
+import { capacityConfig, defaultAutonomy, DEFAULT_WORKFLOWS, projectMaxWorkers, projectReviewModel, schedTiming, styleBlock, workflowsConfig } from "./workflows.ts";
 
 /**
  * The effective configuration (docs/notes/2026-10-12-next-steps-md-it.md):
@@ -50,7 +50,8 @@ function projectsView(config: FlowrynConfig): Record<string, unknown> {
   for (const id of Object.keys(table(config.extra.projects, "[projects]"))) {
     const verify = verifyConfig(config, id);
     const maxWorkers = projectMaxWorkers(config, id);
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landingMode(config, id) === "queue" ? { landing: "queue" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}) };
+    const reviewModel = projectReviewModel(config, id);
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landingMode(config, id) === "queue" ? { landing: "queue" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
   }
   return out;
 }

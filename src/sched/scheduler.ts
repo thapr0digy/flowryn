@@ -502,29 +502,19 @@ export class Scheduler {
   }
 
   /**
-   * A relaunch (a scout promoted in place): the live worker exits by its
-   * identity, and its own session resumes in the same worktree, so its context
-   * survives while its contract, task file and sandbox settings change.
+   * A relaunch (a scout promoted in place, or a stage with its own model or
+   * effort): the live worker exits by its identity, and its own session resumes
+   * in the same worktree, so its context survives while its contract, task
+   * file, sandbox settings or launch flags change.
    */
   private async relaunchWorker(runId: string, operation: string | undefined): Promise<void> {
     const { db, now } = this.deps;
-    this.relaunching.add(runId);
-    try {
-      const exited = await this.deps.exitWorker(runId);
-      // Never a second process in the same session: a worker that did not stop is tried again on the next pass.
-      if (!exited.ok) {
-        this.deps.log(`sched: relaunch of ${runId} waits: the worker did not exit (${exited.detail ?? "unverified"})`);
-        return;
-      }
-      tx(db, () => {
-        db.query("UPDATE runs SET proc_pid = NULL, proc_start = NULL, proc_exe = NULL, busy_until = NULL, idle_since = NULL, liveness = 'starting', updated_at = ?2 WHERE id = ?1").run(runId, now());
-        const run = getRunWithPolicy(db, runId);
-        appendEvent(db, { source: "daemon", kind: "run.relaunch", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null, session: run?.agent_session ?? null }, ts: now() });
-      });
-      this.deps.launch(runId, "relaunch", operation);
-    } finally {
-      this.relaunching.delete(runId);
-    }
+    await this.replaceWorker(runId, operation, "relaunch", () => {
+      db.query("UPDATE runs SET proc_pid = NULL, proc_start = NULL, proc_exe = NULL, busy_until = NULL, idle_since = NULL, liveness = 'starting', updated_at = ?2 WHERE id = ?1").run(runId, now());
+      const run = getRunWithPolicy(db, runId);
+      appendEvent(db, { source: "daemon", kind: "run.relaunch", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null, session: run?.agent_session ?? null }, ts: now() });
+      resolveRunItems(db, runId, ["worker_not_exited"], "run.relaunch", now());
+    });
   }
 
   /** The harness gate before a launch: an untested version waits, with its P1; a check that fails counts as missing. */
@@ -564,32 +554,41 @@ export class Scheduler {
    */
   private async freshWorker(runId: string, operation: string | undefined): Promise<void> {
     const { db, now } = this.deps;
+    await this.replaceWorker(runId, operation, "stage", () => {
+      db.query(
+        `UPDATE runs SET agent_session = ?2, proc_pid = NULL, proc_start = NULL, proc_exe = NULL, worker_started_at = NULL,
+           busy_until = NULL, idle_since = NULL, transcript_path = NULL, liveness = 'starting', updated_at = ?3 WHERE id = ?1`,
+      ).run(runId, randomUUID(), now());
+      const run = getRunWithPolicy(db, runId);
+      appendEvent(db, { source: "daemon", kind: "run.fresh_worker", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null }, ts: now() });
+      resolveRunItems(db, runId, ["worker_not_exited"], "run.fresh_worker", now());
+    });
+  }
+
+  /**
+   * The old worker's verified exit, then the replacement's identity change in
+   * one transaction. A refused exit backs off and raises its P1; a cancel that
+   * superseded the operation meanwhile gets no new session.
+   */
+  private async replaceWorker(runId: string, operation: string | undefined, mode: "stage" | "relaunch", clearIdentity: () => void): Promise<void> {
+    const { db } = this.deps;
     this.relaunching.add(runId);
     try {
       const exited = await this.verifiedExit(runId);
       if (!exited.ok) {
-        this.freshWorkerRefused(runId, exited.detail ?? "unverified");
+        this.replacementRefused(runId, exited.detail ?? "unverified");
         return;
       }
       this.exitRefusals.delete(runId);
-      // A cancel that superseded the replacement while the old worker exited: no new session for it.
       if (operation && getOperation(db, operation)?.phase !== "requested") return;
-      tx(db, () => {
-        db.query(
-          `UPDATE runs SET agent_session = ?2, proc_pid = NULL, proc_start = NULL, proc_exe = NULL, worker_started_at = NULL,
-             busy_until = NULL, idle_since = NULL, transcript_path = NULL, liveness = 'starting', updated_at = ?3 WHERE id = ?1`,
-        ).run(runId, randomUUID(), now());
-        const run = getRunWithPolicy(db, runId);
-        appendEvent(db, { source: "daemon", kind: "run.fresh_worker", runId, taskId: run?.task_id ?? null, payload: { stage: run?.stage ?? null }, ts: now() });
-        resolveRunItems(db, runId, ["worker_not_exited"], "run.fresh_worker", now());
-      });
-      this.deps.launch(runId, "stage", operation);
+      tx(db, clearIdentity);
+      this.deps.launch(runId, mode, operation);
     } finally {
       this.relaunching.delete(runId);
     }
   }
 
-  /** A refused fresh-stage replacement waits out its backoff: no exit attempt holds the pass meanwhile. */
+  /** A refused worker replacement waits out its backoff: no exit attempt holds the pass meanwhile. */
   private backingOff(runId: string, t: number): boolean {
     const refusals = this.exitRefusals.get(runId);
     return refusals !== undefined && t < refusals.nextAt;
@@ -604,13 +603,13 @@ export class Scheduler {
     }
   }
 
-  /** One refused fresh-stage replacement: an event when the episode starts, one P1 once it has lasted EXIT_REFUSALS_FOR_ITEM attempts. */
-  private freshWorkerRefused(runId: string, detail: string): void {
+  /** One refused worker replacement: an event when the episode starts, one P1 once it has lasted EXIT_REFUSALS_FOR_ITEM attempts. */
+  private replacementRefused(runId: string, detail: string): void {
     const { db, now } = this.deps;
     const attempts = (this.exitRefusals.get(runId)?.attempts ?? 0) + 1;
     const backoff = Math.min(schedTiming(this.deps.config()).pass_ms * 2 ** (attempts - 1), EXIT_BACKOFF_MAX_MS);
     this.exitRefusals.set(runId, { attempts, nextAt: now() + backoff });
-    this.deps.log(`sched: fresh worker for ${runId} waits: the old worker did not exit (${detail}; attempt ${attempts})`);
+    this.deps.log(`sched: the replacement worker for ${runId} waits: the old worker did not exit (${detail}; attempt ${attempts})`);
     if (attempts !== 1 && attempts < EXIT_REFUSALS_FOR_ITEM) return;
     tx(db, () => {
       const run = getRunWithPolicy(db, runId);
@@ -623,7 +622,7 @@ export class Scheduler {
         eventSeq: event.seq,
         taskId: run?.task_id ?? null,
         runId,
-        line: `${title}: stage ${run?.stage ?? "?"} waits for a fresh worker; the old worker (pid ${run?.proc_pid ?? "?"}) did not exit after ${attempts} tries (${detail})`,
+        line: `${title}: stage ${run?.stage ?? "?"} waits for its worker to restart; the old worker (pid ${run?.proc_pid ?? "?"}) did not exit after ${attempts} tries (${detail})`,
         now: now(),
       });
     });
@@ -832,7 +831,8 @@ function newPass(): GrantPass {
  * with the run). Call inside the grant's transaction.
  */
 function overflowRun(db: Db, config: FlowrynConfig, run: RunWithPolicy, from: string, to: Account, why: string, now: number): void {
-  const choice = resolveModelChoice(config, { pins: { model: run.model_pin, effort: run.effort_pin }, workflow: currentWorkflow(config, run.workflow), account: to });
+  const stage = positionOf(db, run, run.kind).stage;
+  const choice = resolveModelChoice(config, { pins: { model: run.model_pin, effort: run.effort_pin }, workflow: currentWorkflow(config, run.workflow), account: to, stage });
   db.query("UPDATE runs SET account = ?2, model = ?3, effort = ?4, updated_at = ?5 WHERE id = ?1").run(run.id, to.id, choice.model, choice.effort, now);
   appendEvent(db, { source: "daemon", kind: "sched.overflow", runId: run.id, taskId: run.task_id, payload: { from, to: to.id, why, at: "grant", ...choice }, ts: now });
 }
