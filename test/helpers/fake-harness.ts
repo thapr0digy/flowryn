@@ -46,8 +46,9 @@
  * (http://127.0.0.1:4387/session/<its key>, src/lavish/session-key.ts), as a worker hosting the page gets it.
  * The page is written when missing (a filled design page, test/helpers/design-page.ts, which a design stage's
  * check accepts), except a QA page (qa/evidence.html), which a test writes with qa-page or leaves missing on purpose.
- *   FAKE: qa-page [verdict]          write $FLOWRYN_REPORT_DIR/qa/evidence.html: the QA template, every slot filled
- *                                    (verdict works unless named), as the visual QA skill asks
+ *   FAKE: qa-page [verdict] [sev]    write $FLOWRYN_REPORT_DIR/qa/evidence.html: the QA template, every slot filled
+ *                                    (verdict works unless named; one finding of severity sev when named), and a
+ *                                    one-item qa/checklist.md, as the visual QA skill asks
  *   FAKE: plan-phase <title...>      append a "## <title>" phase (workflow fix) to $FLOWRYN_REPORT_DIR/plan.md
  *   FAKE: docker-up <name> [project] a running container labelled flowryn.run=$FLOWRYN_RUN, in the fake
  *                                    docker's list ($FLOWRYN_HOME/docker-ps.txt), in a compose project if named
@@ -467,8 +468,10 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
       const dir = join(env.FLOWRYN_REPORT_DIR ?? ".", "qa");
       mkdirSync(dir, { recursive: true });
       let page = QA_TEMPLATE.replace("{{VERDICT}}", rest[0] ?? "works");
+      if (rest[1]) page = page.replace("{{FINDINGS}}", `<ul><li data-severity="${rest[1]}" id="F1">A ${rest[1]} finding from the fake worker.</li></ul>`);
       for (const slot of QA_PLACEHOLDERS) page = page.replaceAll(slot, "Filled by the fake worker.");
       writeFileSync(join(dir, "evidence.html"), page);
+      writeFileSync(join(dir, "checklist.md"), "1. The changed screen renders without errors (source: design page, How it works)\n");
       return "continue";
     }
     case "plan-phase": {
