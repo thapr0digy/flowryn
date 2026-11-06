@@ -98,6 +98,7 @@ The away line says `--autonomous` names the chat question to ask once. The refus
   - the parked item closing with the run's last parked question;
   - the report: lens, sanitising, empty window.
 - `test/integration/autonomy.test.ts`, through the real daemon and CLI:
+  - from your terminal, in a real pty (`test/helpers/pty.ts`): piped input is refused, a wrong code grants nothing, and the code read from `/dev/tty` grants `u1` on `cli-tty`;
   - with the grant from your terminal, two spec'd ships (one sensitive) go dispatch → automatic design pass → build → ship → landing-queue merge with no input; a third that asks to drop a table parks alone; `flowryn back` prints the Autonomous section with the two gates, the two merges and the parked task;
   - a worker's `away --autonomous` and `back` are refused (exit 77);
   - the leader without a grant, a socket call without the code, the leader's call of the terminal verb, a wrong code and 17 h are all refused;
