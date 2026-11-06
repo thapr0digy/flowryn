@@ -543,8 +543,8 @@ export class AutoMerger {
     };
     const to = headMovedTo(from?.detail ?? null);
     const stale = to !== null && staleRead(db, { task_id: row.task_id, head_sha: row.head_sha }, to);
-    const moved = to !== null && !stale && evidence?.head.startsWith(to) ? evidence.head : null;
-    if (to !== null && !stale && !moved) return row;
+    if (to !== null && !stale && evidence?.head === row.head_sha) return row;
+    const moved = to !== null && !stale && evidence && !staleRead(db, { task_id: row.task_id, head_sha: row.head_sha }, evidence.head) ? evidence.head : null;
     const head = moved ?? row.head_sha;
     const verified = verifyOfHead(db, run, policy, { ...where, head }, now);
     appendEvent(db, {

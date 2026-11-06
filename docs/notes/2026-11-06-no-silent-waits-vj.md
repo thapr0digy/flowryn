@@ -19,7 +19,7 @@ The auto-merge used to wait up to 6 h on a request cancelled because its head mo
 - **The head GitHub read.**
   - If it is an earlier delivered head of the task (`staleRead`, typically the head a carry started from), GitHub has not caught up. The delivered head is verified again. A carried head follows the existing carried rule: its re-verify is never skipped.
   - If it really moved (the watcher's evidence shows a new head that was never delivered), that head's verify is queued. The row is superseded (`head_moved`), and the delivery of that head starts the next auto-merge on the verify already queued. If no delivery comes, the watcher's head-moved item tells the leader.
-  - If the watcher's evidence does not show that head yet, the row is left as it is for that pass, and no requeue is counted. The registry's `auto_merge` deadline bounds this.
+  - If the watcher's evidence still shows the delivered head (it has not re-read the PR yet), the row is left as it is for that pass, and no requeue is counted. The registry's `auto_merge` deadline bounds this. Evidence showing any other head that was never delivered (the head moved again) counts as moved. A local-only move has no evidence to wait for, so the delivered head is verified again, up to the cap.
 - **The cap.** After `MAX_VERIFY_REQUEUES` (3) requeues of one row, the row holds (`auto_merge_held`) with `flowryn verify <task>, then flowryn merge <task>`.
 - **The landing queue.** It drives its head of line through the same rows, so lq4 and lq5 get the same recovery.
 
@@ -86,7 +86,7 @@ Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`
   - A cancelled verify is queued again at once, up to `MAX_VERIFY_REQUEUES`, then held.
   - A stale GitHub read re-verifies the delivered head.
   - A head that really moved gets its verify queued, and its delivery follows it.
-  - A moved head the watcher's evidence does not show yet leaves the row for that pass and counts no requeue.
+  - A moved head the watcher's evidence does not show yet leaves the row for that pass and counts no requeue; evidence newer than the cancel's head supersedes at once; a local move is requeued.
   - A request that is gone is requeued; a final cancel holds.
   - A second interruption by a stop is requeued.
 - `test/unit/auto-merge.test.ts` also covers the 30-min head-moved hold and the 1 h no_ci checks limit.
