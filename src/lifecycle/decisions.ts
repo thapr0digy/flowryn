@@ -40,7 +40,8 @@ export interface DecisionRow {
   reserved_class: string | null;
   defer_until: string | null;
   /** policy: a `[decisions] nomistakes_rules` rule settled it (answered_via names the rule), or a deadline default took the recommendation (answered_via `deadline`). */
-  answered_by: "captain" | "leader" | "policy" | null;
+  /** worker: unattended mode took the worker's own recommendation (answered_via autonomous). */
+  answered_by: "captain" | "leader" | "policy" | "worker" | null;
   rationale: string | null;
   created_at: number | null;
   /** single (NULL), multi or text: a review gate's question may take more than one choice, or free text. */
@@ -51,6 +52,9 @@ export interface DecisionRow {
   note: string | null;
   /** The choice in the worker's work that waits on the answer. */
   blocks: string | null;
+  /** Unattended mode (src/attention/autonomy-pass.ts): the grant that decided or parked it, and which. */
+  autonomy_id?: string | null;
+  autonomy_state?: "decided" | "parked" | null;
 }
 
 /** answered_via of a deadline default (src/attention/deadline-defaults.ts): a policy answer the user may undo. */
@@ -58,8 +62,8 @@ export const DEADLINE_VIA = "deadline";
 
 /** A rule's answer the user may still undo (decide --by captain on an answered_by policy decision). */
 export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by">): boolean {
-  // A deadline default (DEADLINE_VIA) is a policy answer too, undone the same way.
-  return d.state === "answered" && d.answered_by === "policy";
+  // A deadline default (DEADLINE_VIA) is a policy answer too, undone the same way; so is unattended mode's take of the worker's recommendation.
+  return d.state === "answered" && (d.answered_by === "policy" || d.answered_by === "worker");
 }
 
 /** The user may answer it: open, or a rule's answer to undo. */

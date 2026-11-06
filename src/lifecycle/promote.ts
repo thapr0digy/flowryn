@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
-import { resolveRunItems } from "../attention/items.ts";
+import { resolveRunItems, settleAutonomyParked } from "../attention/items.ts";
 import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -116,6 +116,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
     discardPlansOfGate(db, open.id, now);
     dismissGateQuestions(db, run, open.id, now, "promoted", "cli");
     resolveRunItems(db, run.id, REVIEW_ITEMS, "run.promoted", now);
+    settleAutonomyParked(db, run.id, "run.promoted", now);
     summarizeReview(db, open.id, "promoted", now);
   }
   // A worker that runs is stopped and its session resumed under the ship contract; one not launched yet starts as a ship.

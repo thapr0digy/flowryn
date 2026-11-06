@@ -6,6 +6,7 @@ import { HOOK_CLI_VERBS } from "./commands/hook.ts";
 import { LEAD_VERBS } from "./commands/lead.ts";
 import { BOARD_VERBS } from "./commands/board.ts";
 import { APPROVE_VERBS } from "./commands/approve.ts";
+import { AWAY_CLI_VERBS } from "./commands/away.ts";
 import { LEADER_REPIN_VERBS } from "./commands/leader-repin.ts";
 import { VERIFY_CLI_VERBS } from "./commands/verify.ts";
 import { DIAG_CLI_VERBS } from "./commands/diag.ts";
@@ -17,7 +18,9 @@ import { COMPLETION_VERBS } from "./commands/completion.ts";
  * contain a dot are internal (the handshake, stop) and never parsed from argv.
  */
 export const CLI_VERBS: readonly VerbSpec[] = [
-  ...SERVER_VERBS.filter((v) => !v.name.includes(".")),
+  // away runs locally first: its --autonomous asks for your /dev/tty code (src/cli/commands/away.ts).
+  ...SERVER_VERBS.filter((v) => !v.name.includes(".") && !AWAY_CLI_VERBS.some((l) => l.name === v.name)),
+  ...AWAY_CLI_VERBS,
   ...DAEMON_VERBS,
   ...SETUP_VERBS,
   ...HOOK_CLI_VERBS,

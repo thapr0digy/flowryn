@@ -12,7 +12,9 @@ import type { ItemKind } from "./items.ts";
  * would, so it reaches you in the remote-control chat. It changes delivery,
  * and one decision rule: deadline defaults (attention/deadline-defaults.ts)
  * answer an opted-in question only while you are away or inactive. No
- * approval, gate or merge rule reads it. After `[away]
+ * approval, gate or merge rule reads it: unattended mode (`away --autonomous`,
+ * src/policy/autonomy.ts) is its own standing approval that only rides along
+ * with it. After `[away]
  * auto_after_min` with no input from you, the daemon starts it by itself
  * (autoAway, `by: "auto"`), and your next own message ends that one.
  */

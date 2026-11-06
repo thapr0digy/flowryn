@@ -68,7 +68,7 @@ function blockTargetExists(ctx: HandlerCtx, id: string): boolean {
  * every answer at once (gate-questions.ts).
  */
 
-export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader" | "policy"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
+export function answerDecision(ctx: { db: Db; now(): number }, d: DecisionRow, a: { choice: string; words: string | null; by: "captain" | "leader" | "policy" | "worker"; via: string }): { steer: string | null; run: string | null; dependents: string[]; held: boolean } {
   const now = ctx.now();
   ctx.db
     .query("UPDATE decisions SET state = 'answered', answer = ?2, answered_via = ?3, answered_at = ?4, answered_by = ?5, rationale = ?6 WHERE id = ?1")
@@ -115,7 +115,7 @@ export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRo
     const instruction = ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) ?? "Leave the pipeline as it now stands and keep driving it; the watchdog asks again if CI still has no checks.";
     return { steer: createSteer(ctx.db, run, `The user changed the answer to ${d.id} from ${before} to ${a.choice}. ${instruction}`, now, d.id).id, run: run.id, dependents: [], held: false };
   }
-  const committed = d.answered_via === DEADLINE_VIA ? "what you did on the deadline default's answer is" : "the rule's fix is";
+  const committed = d.answered_via === DEADLINE_VIA ? "what you did on the deadline default's answer is" : d.answered_via === "autonomous" ? "what you did on your own recommendation is" : "the rule's fix is";
   const text = `The user changed the answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}") from ${before} to ${a.choice}.${a.words ? ` ${a.words}` : ""} Act on ${a.choice} instead: if ${committed} already committed, undo it with git revert (new commits, never a rewrite), then respond to the gate or run the pipeline again.`;
   return { steer: createSteer(ctx.db, run, text, now, d.id).id, run: run.id, dependents: [], held: false };
 }

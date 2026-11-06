@@ -156,7 +156,16 @@ export interface PostAsk {
 
 /** A question line that names your answer and what it does. */
 function grantLine(g: GrantRow): string {
-  const what = g.action === "decide" ? `your answer to ${g.item} is "${g.choice}"` : g.action === "gate" ? `${g.choice} for gate ${g.item}` : g.action === "divergence" ? `${g.choice} for ${g.item}` : `merge ${g.task_id} at ${g.binds?.slice(0, 8) ?? "?"}`;
+  const what =
+    g.action === "decide"
+      ? `your answer to ${g.item} is "${g.choice}"`
+      : g.action === "gate"
+        ? `${g.choice} for gate ${g.item}`
+        : g.action === "divergence"
+          ? `${g.choice} for ${g.item}`
+          : g.action === "autonomy"
+            ? `start unattended mode (${g.item})`
+            : `merge ${g.task_id} at ${g.binds?.slice(0, 8) ?? "?"}`;
   return `Grant ${g.id}: ${what}. Run it now: flowryn grant use ${g.id}${g.action === "gate" && g.choice === "changes" && !g.words ? " --body-file - (the user's words: what to change)" : ""}. It ends with this turn.`;
 }
 

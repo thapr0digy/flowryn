@@ -7,6 +7,7 @@ import { carryLanding, deliveredOf, prEvidence, type Delivered } from "../lifecy
 import { getProject } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, runBase, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { findHumanApproval, insertApproval, isRoutineMerge, type ApprovalRow } from "../policy/approvals.ts";
+import { autonomyForRun, mintAutonomyApproval } from "../policy/autonomy.ts";
 import { cleanMainMerge, type CleanMergeStep } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
@@ -306,7 +307,10 @@ export class LandingQueue implements LandingHooks {
       // A merge already asked for, or a direct auto-merge from before the project queued: leave it be.
       if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND state IN ('queued','verifying','waiting_checks','merging')").get(run.id)) continue;
       const routine = isRoutineMerge(db, run.task_id);
-      const approval = routine ? null : findHumanApproval(db, { task: run.task_id, action: "merge", ref: delivered.ref, head: delivered.head, now });
+      let approval = routine ? null : findHumanApproval(db, { task: run.task_id, action: "merge", ref: delivered.ref, head: delivered.head, now });
+      // Unattended mode: your standing approval for the project stands in for your word at this head.
+      const standing = routine || approval ? null : autonomyForRun(db, run, now);
+      if (standing) approval = mintAutonomyApproval(db, standing, { task: run.task_id, ref: delivered.ref, head: delivered.head, action: "merge", runId: run.id }, now);
       if (!routine && !approval) continue;
       enqueueLanding(db, run, delivered, approval?.id ?? null, now);
     }
@@ -463,7 +467,11 @@ export class LandingQueue implements LandingHooks {
         }
         head = integrated.head;
         approval = null;
-        if (before && before.consumed_at === null && before.expires_at > now) {
+        // Unattended mode: the standing approval covers the new head as it covered the old one, sensitive work included.
+        const standing = isRoutineMerge(db, current.task_id) ? null : autonomyForRun(db, current, now);
+        if (standing) {
+          approval = mintAutonomyApproval(db, standing, { task: current.task_id, ref: before?.pr_url ?? delivered.ref, head, action: "merge", runId: current.id }, now).id;
+        } else if (before && before.consumed_at === null && before.expires_at > now) {
           // Your answer in the design review (q130): an approval carries across the queue's clean merge of the base, unless the work is sensitive.
           if (current.sensitive) {
             leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of origin/${integrated.base} moved the head to ${head.slice(0, 8)}, so your approval of ${fresh.head_sha.slice(0, 8)} does not carry`, now, {
