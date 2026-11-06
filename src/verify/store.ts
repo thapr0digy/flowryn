@@ -10,8 +10,11 @@ import type { TestCounts } from "./summary.ts";
  */
 
 export type VerificationState = "running" | "passed" | "failed" | "error";
-/** `stopped`: a step of a parallel group ended early because another step of its group failed. */
-export type StepState = "waiting" | "running" | "passed" | "failed" | "stopped";
+/**
+ * `stopped`: a step of a parallel group ended early because another step of its group failed.
+ * `skipped`: no file changed against the base matches its when_changed globs; its detail says so.
+ */
+export type StepState = "waiting" | "running" | "passed" | "failed" | "stopped" | "skipped";
 
 export interface VerifyStep {
   name: string;
@@ -31,6 +34,8 @@ export interface VerifyStep {
   attempts?: number;
   /** How many of its attempts were killed at the step's own deadline. Absent on older rows. */
   hangs?: number;
+  /** The step runs only when a changed file matches one of these globs. Absent: it always runs. */
+  when_changed?: readonly string[];
 }
 
 export interface VerificationRow {
