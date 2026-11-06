@@ -1,5 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
-import { findOpenRunItem, openItem, resolveRunItems } from "../attention/items.ts";
+import { findOpenRunItem, openItem, resolveRunItems, settleAutonomyParked } from "../attention/items.ts";
 import type { Account } from "../config/accounts.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
@@ -119,6 +119,7 @@ export function reviveReview(db: Db, config: FlowrynConfig, r: Revival): Revived
   db.query("UPDATE gates SET state = 'changes', feedback = ?2, replaced_by = ?3, closed_at = ?4 WHERE id = ?1").run(gate.id, words ?? `replaced by run ${newRun}`, newRun, r.now);
   appendEvent(db, { source: r.by === "review page" ? "daemon" : "cli", kind: "gate.replaced", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage: gate.stage, new_run: newRun, start: stage, by: r.by }, ts: r.now });
   resolveRunItems(db, run.id, [...REVIEW_ITEMS, "failure_needs_you"], `gate.replaced ${gate.id}`, r.now);
+  settleAutonomyParked(db, run.id, `gate.replaced ${gate.id}`, r.now);
   discardPlansOfGate(db, gate.id, r.now);
   const summary = summarizeReview(db, gate.id, "replaced", r.now, r.log, newRun);
   const note = revivalNote({ oldRun: run.id, stage, gateStage: gate.stage, page: gate.page_path, conversation: conversationPath(db, gate.id), notes: gate.notes_path, words });

@@ -368,6 +368,19 @@ describe("migrations", () => {
     db.close();
   });
 
+  test("autonomy: migration 54 rebuilds approvals for channel autonomous on a database whose merges reference approvals", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 53));
+    db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('a1', 't1', 'u', 'h', 'cli-tty', 'me', 'merge', 1, 2)");
+    db.exec("INSERT INTO merges (id, task_id, pr_url, head_sha, approval_id, requested_at, state) VALUES ('m1', 't1', 'u', 'h', 'a1', 1, 'merged')");
+    expect(migrate(db, MIGRATIONS.slice(0, 54))).toEqual([54]);
+    expect(db.query("SELECT id, channel FROM approvals").all()).toEqual([{ id: "a1", channel: "cli-tty" }]);
+    db.exec("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, created_at, expires_at) VALUES ('a2', 't', 'u', 'h', 'autonomous', 'daemon', 1, 2)");
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect((db.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
+    db.close();
+  });
+
   test("leader repin: migration 19 adds pinned_at to a database in use; sessions opened before it were never repinned", () => {
     const db = openDb(join(tempDir(), "flowryn.db"));
     migrate(db, MIGRATIONS.slice(0, 18));

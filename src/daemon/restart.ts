@@ -112,7 +112,7 @@ export function restartGuards(db: Db, work: InMemoryWork, now: number): Guard[] 
   }
   for (const runId of work.cleanups) guards.push({ kind: "cleanup", task: taskOfRun(db, runId), detail: "cleanup is running" });
   for (const runId of work.launching) guards.push({ kind: "launching", task: taskOfRun(db, runId), detail: "its worker is being launched" });
-  for (const c of work.challenges) guards.push({ kind: "approval", task: c.task, detail: c.action === "repin" ? "flowryn leader repin is waiting for its code" : "flowryn approve is waiting for its code" });
+  for (const c of work.challenges) guards.push({ kind: "approval", task: c.task, detail: c.action === "repin" ? "flowryn leader repin is waiting for its code" : c.action === "autonomy" ? "flowryn away --autonomous is waiting for its code" : "flowryn approve is waiting for its code" });
   for (const c of work.contractChecks ?? []) guards.push({ kind: "contract_check", task: null, detail: `automatic contract check ${c.harness} ${c.version} running for ${ago(now - c.startedAt)}` });
   const verifying = db.query("SELECT id, task_id, pr_url, started_at FROM verifications WHERE state = 'running' ORDER BY started_at").all() as { id: string; task_id: string | null; pr_url: string; started_at: number }[];
   for (const v of verifying) guards.push({ kind: "verifying", task: v.task_id, detail: `flowryn verify ${v.id} of ${v.pr_url} has run for ${ago(now - v.started_at)}` });

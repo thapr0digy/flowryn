@@ -1027,6 +1027,42 @@ ALTER TABLE gates ADD COLUMN pass_head TEXT;
 ALTER TABLE gates ADD COLUMN source_page TEXT;
 `;
 
+/**
+ * Unattended mode (docs/notes/2026-11-05-unattended-mode-one-9e.md): the standing approval
+ * the user grants when they leave (`flowryn away --autonomous`), one row per grant, at most
+ * one live; the approvals channel `autonomous` for what it allowed (each gate pass and merge
+ * mints its own row); and on a decision, the grant that decided or parked it.
+ */
+const AUTONOMY_SQL = /* sql */ `
+CREATE TABLE autonomy_grants (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL CHECK (channel IN ('cli-tty','claude-chat')),
+  actor TEXT NOT NULL,
+  grant_id TEXT,
+  projects TEXT NOT NULL,
+  words TEXT,
+  terms_hash TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  end_reason TEXT
+);
+CREATE UNIQUE INDEX autonomy_grants_live ON autonomy_grants((1)) WHERE ended_at IS NULL;
+CREATE TABLE approvals_v54 (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','page','yolo','autonomous')),
+  actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
+  allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed_at INTEGER);
+INSERT INTO approvals_v54 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+  SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
+DROP TABLE approvals;
+ALTER TABLE approvals_v54 RENAME TO approvals;
+CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
+ALTER TABLE decisions ADD COLUMN autonomy_id TEXT;
+ALTER TABLE decisions ADD COLUMN autonomy_state TEXT CHECK (autonomy_state IN ('decided','parked'));
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1081,6 +1117,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 51, name: "worktree-lease", sql: WORKTREE_LEASE_SQL },
   { version: 52, name: "rich-briefs", sql: RICH_BRIEFS_SQL },
   { version: 53, name: "page-pass-key", sql: PAGE_PASS_KEY_SQL },
+  { version: 54, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
