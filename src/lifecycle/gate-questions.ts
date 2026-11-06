@@ -62,7 +62,7 @@ export function checkReviewPage(page: string, reportDir: string, opts: { widget:
   if (extname(real).toLowerCase() !== ".html") throw new FlowrynError("bad_args", "--page must be the review page's .html file");
   const st = statSync(real);
   if (!st.isFile() || st.size > MAX_PAGE_BYTES) throw new FlowrynError("bad_args", `--page ${page} is not a regular file of at most 5 MB`);
-  if (opts.widget && !pageMountsWidget(readFileSync(real, "utf8"))) throw new FlowrynError("bad_args", "the review page does not mount the question widget", `add ${MOUNT_SNIPPET}`);
+  if (opts.widget && !pageMountsWidget(readFileSync(real, "utf8"))) throw new FlowrynError("bad_args", "the review page does not mount Flowryn's widget (its Approve button, and any questions)", `add ${MOUNT_SNIPPET}`);
   return real;
 }
 
@@ -279,12 +279,13 @@ interface GateWidgetRow {
   state: "open" | "passed" | "changes";
   page_path: string;
   decided: string | null;
+  one_click: number;
   task_id: string;
 }
 
-/** A gate's widget state, or null when it carries no questions. */
+/** A gate's widget state, or null when it has no page. */
 export function widgetState(db: Db, gateId: string): { page: string; state: WidgetState } | null {
-  const gate = db.query("SELECT g.id, g.run_id, g.stage, g.state, g.page_path, g.decided, r.task_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1 AND g.page_path IS NOT NULL").get(gateId) as GateWidgetRow | null;
+  const gate = db.query("SELECT g.id, g.run_id, g.stage, g.state, g.page_path, g.decided, g.pass_key_hash IS NOT NULL AS one_click, r.task_id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.id = ?1 AND g.page_path IS NOT NULL").get(gateId) as GateWidgetRow | null;
   if (!gate) return null;
   const questions = gateQuestions(db, gateId).map((d) => ({
     id: d.id,
@@ -299,12 +300,14 @@ export function widgetState(db: Db, gateId: string): { page: string; state: Widg
     answer: d.answer,
     via: d.answered_via === "lavish" ? "the review page" : d.answered_via ? "your leader" : null,
   }));
-  return { page: gate.page_path, state: { gate: gate.id, task: gate.task_id, stage: gate.stage, gateState: gate.state, decided: gate.decided ? JSON.parse(gate.decided) : [], questions } };
+  return { page: gate.page_path, state: { gate: gate.id, task: gate.task_id, stage: gate.stage, gateState: gate.state, oneClick: gate.one_click === 1, decided: gate.decided ? JSON.parse(gate.decided) : [], questions } };
 }
 
 export interface PolledGate {
   id: string;
   page_path: string;
+  /** The worker's page, when page_path is the daemon's copy that must be hosted before a poll (src/lavish/snapshot.ts). */
+  source_page: string | null;
 }
 
 export const LIVE_RUN = "r.state NOT IN ('cleaned','failed','cancelled')";
@@ -327,7 +330,7 @@ const PAGE_RUN = `r.state NOT IN ('cleaned','cancelled') AND (r.state != 'failed
 export function gatesToPoll(db: Db): PolledGate[] {
   return db
     .query(
-      `SELECT g.id, g.page_path FROM gates g JOIN runs r ON r.id = g.run_id
+      `SELECT g.id, g.page_path, g.source_page FROM gates g JOIN runs r ON r.id = g.run_id
        WHERE g.state = 'open' AND ${PAGE_RUN} AND g.page_path IS NOT NULL AND g.lavish_ended = 0 ORDER BY g.opened_at`,
     )
     .all() as PolledGate[];
@@ -342,11 +345,11 @@ export function readsAsPass(text: string): boolean {
   return PASS_WORDS.test(text) && !CHANGES_CLAUSE.test(text);
 }
 
-/** Gates with a widget (a page carrying questions) whose state may still change, for the widget writer. */
+/** Gates with a widget (every review page: its Approve, and its questions) whose state may still change, for the widget writer. */
 export function gatesWithWidget(db: Db, alsoIds: Iterable<string>): string[] {
   const open = (
     db
-      .query(`SELECT g.id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL AND EXISTS (SELECT 1 FROM decisions d WHERE d.gate_id = g.id)`)
+      .query(`SELECT g.id FROM gates g JOIN runs r ON r.id = g.run_id WHERE g.state = 'open' AND ${LIVE_RUN} AND g.page_path IS NOT NULL`)
       .all() as { id: string }[]
   ).map((g) => g.id);
   return [...new Set([...open, ...alsoIds])];

@@ -1,3 +1,5 @@
+import { autonomyLines } from "../attention/autonomy-report.ts";
+import { getAutonomy, latestAutonomy, projectsShown } from "../policy/autonomy.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
@@ -762,11 +764,29 @@ function timelineView(ctx: ReadCtx, target: string, full: boolean): { data: Reco
   };
 }
 
+/**
+ * `flowryn show autonomy` (the latest grant) or `show u<N>`: unattended mode's terms and its
+ * morning report, the same section the return brief carries (src/attention/autonomy-report.ts).
+ */
+function autonomyView(ctx: ReadCtx, target: string): HandlerResult | null {
+  const row = target === "autonomy" ? latestAutonomy(ctx.db) : getAutonomy(ctx.db, target);
+  if (!row) {
+    if (target === "autonomy") throw new FlowrynError("not_found", "unattended mode was never granted", "flowryn away --autonomous");
+    return null;
+  }
+  const lens = lensFor(ctx.db, ctx.config, ctx.caller.scope);
+  const lines = autonomyLines(ctx.db, { since: row.started_at - 1, until: row.ended_at ?? ctx.now, now: ctx.now, lens });
+  return {
+    data: { autonomy: row.id, state: row.ended_at !== null ? `ended (${row.end_reason ?? "?"})` : row.expires_at <= ctx.now ? "expired" : "live", projects: projectsShown(row, lens), until: new Date(row.expires_at).toISOString(), channel: row.channel, words: row.words && !lens.restricted ? sanitizeLine(row.words, 500) : "-", report: lines },
+    hints: row.ended_at === null ? ["flowryn back ends it"] : ["flowryn away --autonomous grants it again"],
+  };
+}
+
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
-  summary: "One task, run, item, decision, plan, divergence, review gate, chat-answer grant or leader session in detail; --full for untruncated text",
-  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>) or leader session (L<N>) id", complete: "task" }],
+  summary: "One task, run, item, decision, plan, divergence, review gate, chat-answer grant, leader session or unattended-mode grant (autonomy, u<N>) in detail; --full for untruncated text",
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>), leader session (L<N>) id, or autonomy (the latest unattended-mode grant) / u<N>", complete: "task" }],
   flags: {
     full: { type: "boolean", help: "untruncated titles, lines and bodies" },
     why: { type: "boolean", help: "each recorded reason the run waits, whole: its rule, facts with their observation times, and who can end it" },
@@ -780,6 +800,10 @@ const show: VerbSpec = {
     let target = asked;
     const text = new ShowText(boolArg(args, "full"));
     if (boolArg(args, "timeline")) return timelineView(ctx, target, text.full);
+    if (target === "autonomy" || /^u\d+$/.test(target)) {
+      const view = autonomyView(ctx, target);
+      if (view) return view;
+    }
     if (/^[kq]\d+$/.test(target)) {
       const d = getDecision(ctx.db, target);
       if (d) return { data: { ...decisionView(d, text), ...grantsField(ctx, { item: d.id }), ...text.pointer(asked) }, hints: d.state === "open" ? [`flowryn decide ${d.id} <choice> --rationale <why>`] : ["flowryn decision list"] };

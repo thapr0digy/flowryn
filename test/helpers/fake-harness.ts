@@ -16,7 +16,7 @@
  *   FAKE: tmpdir <file>              write the $TMPDIR it was started with to $FLOWRYN_REPORT_DIR/<file>, and a file in it
  *   FAKE: write <file> <text...>     write $FLOWRYN_REPORT_DIR/<file> (literal \n tokens become newlines): a review
  *                                    page, a questions file
- *   FAKE: verb <args...>             run flowryn <args> --json ($FLOWRYN_REPORT_DIR and lavish:<file> expand, as in
+ *   FAKE: verb <args...>             run flowryn <args> --json ($FLOWRYN_REPORT_DIR, $FLOWRYN_TASK and lavish:<file> expand, as in
  *                                    stage-done); the reply goes to $FLOWRYN_REPORT_DIR/fake-replies.jsonl
  *   FAKE: ask <a,b> <question...>    ask (blocking), then end the turn
  *   FAKE: fail <reason...>           fail
@@ -43,7 +43,8 @@
  *                                    review's verdict)
  *
  * In stage-done and verb arguments, lavish:<file> becomes lavish-axi's review URL for $FLOWRYN_REPORT_DIR/<file>
- * (http://127.0.0.1:4387/session/<its key>, src/lavish/session-key.ts), as a worker hosting the page gets it.
+ * (http://127.0.0.1:4387/session/<its key>, src/lavish/session-key.ts), as a worker hosting the page gets it;
+ * lavish@<host:port>:<file> is the same session on another origin (a worker naming its own listener).
  * The page is written when missing (a filled design page, test/helpers/design-page.ts, which a design stage's
  * check accepts), except a QA page (qa/evidence.html), which a test writes with qa-page or leaves missing on purpose.
  *   FAKE: qa-page [verdict] [sev]    write $FLOWRYN_REPORT_DIR/qa/evidence.html: the QA template, every slot filled
@@ -91,10 +92,12 @@ import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
 
 const [kind = "claude", ...args] = process.argv.slice(2);
 
-/** lavish:<file> → lavish-axi's URL for that page under the report directory (see the header). */
+/** lavish:<file> → lavish-axi's URL for that page under the report directory; lavish@<host:port>:<file> names it on that origin (see the header). */
 function lavishArg(arg: string): string {
-  if (!arg.startsWith("lavish:")) return arg;
-  const file = arg.slice("lavish:".length);
+  const named = /^lavish(?:@([^/:\s]+:\d+))?:(.+)$/.exec(arg);
+  if (!named) return arg;
+  const origin = named[1] ?? "127.0.0.1:4387";
+  const file = named[2]!;
   const dir = process.env.FLOWRYN_REPORT_DIR ?? ".";
   const path = join(dir, file);
   if (!existsSync(path) && file !== "qa/evidence.html") {
@@ -102,7 +105,7 @@ function lavishArg(arg: string): string {
     writeFileSync(path, `${filledDesignPage()}\n`);
   }
   mkdirSync(dirname(path), { recursive: true });
-  return `http://127.0.0.1:4387/session/${lavishSessionKey(join(realpathSync(dirname(path)), basename(path)))}`;
+  return `http://${origin}/session/${lavishSessionKey(join(realpathSync(dirname(path)), basename(path)))}`;
 }
 const env = process.env;
 const BIN = env.FLOWRYN_BIN ?? "";
@@ -353,7 +356,7 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
     case "verb": {
       const dir = env.FLOWRYN_REPORT_DIR ?? ".";
       await tool(async () => {
-        const result = await flowryn([...rest.map((a) => lavishArg(a.replaceAll("$FLOWRYN_REPORT_DIR", env.FLOWRYN_REPORT_DIR ?? "."))), "--json"]);
+        const result = await flowryn([...rest.map((a) => lavishArg(a.replaceAll("$FLOWRYN_REPORT_DIR", env.FLOWRYN_REPORT_DIR ?? ".").replaceAll("$FLOWRYN_TASK", env.FLOWRYN_TASK ?? ""))), "--json"]);
         mkdirSync(dir, { recursive: true });
         appendFileSync(join(dir, "fake-replies.jsonl"), JSON.stringify({ args: rest, code: result.code, reply: result.stdout.trim() }) + "\n");
       });

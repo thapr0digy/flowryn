@@ -65,7 +65,7 @@ export const QA_PLACEHOLDERS = [
 ] as const;
 
 export const QA_TEMPLATE = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en" data-lavish-live-reload-root><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>QA: {{TITLE}}</title>
 <!--
   Fill every {{SLOT}}; stage done refuses the page while one is left.
@@ -80,7 +80,8 @@ export const QA_TEMPLATE = `<!doctype html>
                  leave it to you (nits alone are works).
   VERDICT_DETAIL each caveat or failure spelled out, or "No caveats."
   DECISIONS      each question with your recommendation (an <ol> of <li>), or "Nothing to decide."; for questions
-                 only the user can answer, "Answer the questions below." and the gate-question widget right after the card
+                 only the user can answer, "Answer the questions below." The widget mount right after the card
+                 shows the Approve button and those questions; keep it.
   REFERENCES     what the checks came from: DESIGN.md (or "No DESIGN.md in this project; checked against the design page
                  and mockups"), the approved design page, each mockup; and a link to checklist.md.
   CONFORMANCE    a table, one row per checklist item: <tr><td>3. Primary button uses the accent colour</td>
@@ -129,6 +130,7 @@ table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:4px 8p
 <dd data-slot="decisions">{{DECISIONS}}</dd>
 </dl>
 </section>
+<section id="flowryn-questions"></section><script src="flowryn-questions.js"></script>
 <details data-qa="references"><summary>What it was checked against</summary>
 {{REFERENCES}}
 </details>

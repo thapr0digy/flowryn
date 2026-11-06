@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../util/fsx.ts";
+import { PASS_KEY_PARAM } from "../policy/pass-key.ts";
 import { ANSWER_MARK } from "./poll-output.ts";
 import { OTHER_ANSWER, type DecidedChoice, type QuestionKind } from "./questions.ts";
 
@@ -13,10 +14,14 @@ import { OTHER_ANSWER, type DecidedChoice, type QuestionKind } from "./questions
  * for a multi choice, an "Other" choice beside the options (the user says what
  * in the question's note), a text field for a free answer, one "anything else
  * for the worker" box, and one Send that queues a single prompt carrying every
- * answer (`flowryn-answers v2 <token>`) and sends it. "Send and pass" adds a
- * pass: with the field for the pass code empty it asks for one (the daemon
- * sends it to your notifications, and opens the leader's pass request); with
- * the code typed in, the daemon passes the gate (src/policy/page-pass.ts).
+ * answer (`flowryn-answers v2 <token>`) and sends it. Every review page has
+ * it, questions or not, for its Approve: on the tab the daemon opened (the
+ * address carries the tab's pass key, read here as `document.referrer`,
+ * src/policy/pass-key.ts) one click sends the key and the daemon passes the
+ * gate (src/policy/page-pass.ts). Without a live key Approve falls back to a
+ * pass code: with the field empty it asks for one (the daemon sends it to your
+ * notifications, and opens the leader's pass request); with the code typed in,
+ * the daemon passes the gate.
  * Flowryn rewrites the file whenever a question's
  * state changes; a page whose root carries data-lavish-live-reload-root
  * reloads, and an answered question shows locked, whichever channel answered.
@@ -44,6 +49,8 @@ export interface WidgetState {
   task: string;
   stage: string;
   gateState: "open" | "passed" | "changes";
+  /** The gate's tab has a live pass key: Approve takes one click where the page reads it. */
+  oneClick: boolean;
   decided: DecidedChoice[];
   questions: WidgetQuestion[];
 }
@@ -63,7 +70,7 @@ export function widgetPath(pagePath: string): string {
 // The renderer runs in the reviewer's browser, inside Lavish's sandboxed frame.
 // It never reaches Flowryn: answers leave only through window.lavish.queuePrompt.
 const RENDERER = String.raw`
-(function (S, MARK, OTHER) {
+(function (S, MARK, OTHER, PARAM) {
   var mount = document.getElementById("flowryn-questions");
   if (!mount) return;
   var css = ".fq{font:inherit;color:inherit;display:grid;gap:1rem}.fq h3{margin:0;font-size:1.15em}" +
@@ -94,11 +101,20 @@ const RENDERER = String.raw`
     return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
+  // The tab's pass key: in the address Flowryn opened this tab at, which Lavish's frame sees as its referrer.
+  var KEY = "";
+  if (S.oneClick) {
+    try {
+      var found = new URL(document.referrer).searchParams.get(PARAM);
+      if (found && /^[A-Za-z0-9_-]{43}$/.test(found)) KEY = found;
+    } catch (e) { KEY = ""; }
+  }
   var form = el("form", { "class": "fq", "data-lavish-question": "flowryn-" + S.gate });
   var openCount = S.questions.filter(function (q) { return q.state === "open"; }).length;
-  var asking = openCount > 0 && S.gateState === "open";
-  form.appendChild(el("h3", { text: S.gateState !== "open" ? "Questions, review closed" : openCount > 0 ? "Questions for you" : "Questions, all answered" }));
-  form.appendChild(el("div", { "class": "fq-meta", text: "Only you can answer these. The recommended answer is picked already: change any you disagree with, then press Send once for all of them. You can also answer in chat with your leader; the first answer counts." }));
+  var hasQuestions = S.questions.length > 0;
+  var asking = S.gateState === "open";
+  form.appendChild(el("h3", { text: S.gateState !== "open" ? (hasQuestions ? "Questions, review closed" : "Review closed") : openCount > 0 ? "Questions for you" : hasQuestions ? "Questions, all answered" : "Approve this review" }));
+  if (hasQuestions) form.appendChild(el("div", { "class": "fq-meta", text: "Only you can answer these. The recommended answer is picked already: change any you disagree with, then press Send once for all of them. You can also answer in chat with your leader; the first answer counts." }));
   form.appendChild(el("div", { "class": "fq-meta", text: "The " + S.stage + " review, gate " + S.gate + "." }));
   if (S.decided.length) {
     form.appendChild(el("div", { "class": "fq-meta", text: "Already decided by the worker (send the review back if you disagree):" }));
@@ -140,13 +156,17 @@ const RENDERER = String.raw`
   if (asking) {
     form.appendChild(el("label", { "class": "fq-meta", "for": "fq-comment-" + S.gate, text: "Anything else for the worker (optional)" }));
     commentBox = form.appendChild(el("textarea", { id: "fq-comment-" + S.gate, name: "fq-comment", rows: "3", "aria-label": "Anything else for the worker" }));
-    form.appendChild(el("label", { "class": "fq-meta", "for": "fq-code-" + S.gate, text: "Pass code (from your notification)" }));
-    codeBox = form.appendChild(el("input", { type: "text", id: "fq-code-" + S.gate, name: "fq-code", maxlength: "8", autocomplete: "off", autocapitalize: "characters", spellcheck: "false", "aria-label": "Pass code", style: "max-width:8rem;text-transform:uppercase;letter-spacing:.2em" }));
-    form.appendChild(el("div", { "class": "fq-actions" }, [
+    if (!KEY) {
+      form.appendChild(el("label", { "class": "fq-meta", "for": "fq-code-" + S.gate, text: "Pass code (from your notification)" }));
+      codeBox = form.appendChild(el("input", { type: "text", id: "fq-code-" + S.gate, name: "fq-code", maxlength: "8", autocomplete: "off", autocapitalize: "characters", spellcheck: "false", "aria-label": "Pass code", style: "max-width:8rem;text-transform:uppercase;letter-spacing:.2em" }));
+    }
+    form.appendChild(el("div", { "class": "fq-actions" }, openCount > 0 ? [
       el("button", { type: "submit", value: "send", text: "Send answers" }),
-      el("button", { type: "submit", value: "pass", "data-pass": true, text: "Send and pass" }),
-    ]));
-    form.appendChild(el("div", { "class": "fq-meta", text: "To pass here: press Send and pass with the code empty, and Flowryn sends a 4-letter code to your notifications; type it in and press Send and pass again. Without a code, your leader asks you to confirm the pass instead." }));
+      el("button", { type: "submit", value: "pass", "data-pass": true, text: "Send answers and approve" }),
+    ] : [el("button", { type: "submit", value: "pass", "data-pass": true, text: "Approve" })]));
+    form.appendChild(el("div", { "class": "fq-meta", text: KEY
+      ? "Approve passes the review at once; only this tab, the one Flowryn opened, can."
+      : "To approve here: press Approve with the code empty, and Flowryn sends a 4-letter code to your notifications; type it in and press Approve again. Without a code, your leader asks you to confirm instead." }));
   }
   form.appendChild(status);
   form.addEventListener("submit", function (event) {
@@ -168,28 +188,29 @@ const RENDERER = String.raw`
       shown.push(q.id + ": " + choice.join(", "));
     });
     var comment = String(data.get("fq-comment") || "").trim();
-    var code = pass ? String(data.get("fq-code") || "").trim().toUpperCase() : "";
+    var key = pass ? KEY : "";
+    var code = pass && !key ? String(data.get("fq-code") || "").trim().toUpperCase() : "";
     if (problems.length) { status.textContent = "Nothing sent. " + problems.join("; ") + "."; return; }
     if (pass && empty.length) { status.textContent = "Nothing sent. A pass needs every question answered: " + empty.join(", ") + " is empty."; return; }
     if (!answers.length && !comment && !pass) { status.textContent = "Nothing to send: every open question is empty."; return; }
-    var text = "Answers for the " + S.stage + " review (gate " + S.gate + "):\n" + (lines.length ? lines.join("\n") : "- (no answers)") +
-      (comment ? "\nAnything else: " + comment : "") + (pass ? (code ? "\nPass this review (with the pass code)." : "\nPlease pass this review; send me a pass code.") : "") +
-      "\n" + MARK + " " + b64url(JSON.stringify(code ? { g: S.gate, a: answers, m: comment, p: pass, k: code } : { g: S.gate, a: answers, m: comment, p: pass }));
+    var text = (hasQuestions ? "Answers for the " + S.stage + " review (gate " + S.gate + "):\n" + (lines.length ? lines.join("\n") : "- (no answers)") : "The " + S.stage + " review (gate " + S.gate + ").") +
+      (comment ? "\nAnything else: " + comment : "") + (pass ? (key ? "\nApprove this review." : code ? "\nPass this review (with the pass code)." : "\nPlease pass this review; send me a pass code.") : "") +
+      "\n" + MARK + " " + b64url(JSON.stringify(key ? { g: S.gate, a: answers, m: comment, p: pass, t: key } : code ? { g: S.gate, a: answers, m: comment, p: pass, k: code } : { g: S.gate, a: answers, m: comment, p: pass }));
     window.lavish.queuePrompt(text, {
-      tag: "choice", text: (shown.length ? shown.join("; ") : "No answers") + (pass ? (code ? " · pass with code" : " · pass code requested") : ""), queueKey: "flowryn:" + S.gate, target: { type: "flowryn-answers", gate: S.gate },
+      tag: "choice", text: (shown.length ? shown.join("; ") : "No answers") + (pass ? (key ? " · approve" : code ? " · pass with code" : " · pass code requested") : ""), queueKey: "flowryn:" + S.gate, target: { type: "flowryn-answers", gate: S.gate },
     });
     if (commentBox) commentBox.value = "";
     if (codeBox) codeBox.value = "";
     if (window.lavish.sendQueuedPrompts) window.lavish.sendQueuedPrompts();
     status.textContent = "Sent to Flowryn: " + (shown.length ? shown.join("; ") : "no answers") + (comment ? "; your note for the worker" : "") +
-      (pass ? (code ? "; your pass code (Flowryn checks it and replies here)" : "; a pass request (a code goes to your notifications)") : "") + ". Each question locks here once recorded." + (empty.length ? " Still open: " + empty.join(", ") + "." : "");
+      (pass ? (key ? "; your approval (Flowryn passes the review and replies here)" : code ? "; your pass code (Flowryn checks it and replies here)" : "; a pass request (a code goes to your notifications)") : "") + ". Each question locks here once recorded." + (empty.length ? " Still open: " + empty.join(", ") + "." : "");
   });
   mount.replaceChildren(form);
 })`;
 
 /** The widget file for a gate's state. */
 export function renderWidget(state: WidgetState): string {
-  return `// Written by Flowryn for gate ${state.gate}; it is rewritten when a question's state changes.\n${RENDERER.trim()}(${JSON.stringify(state)}, ${JSON.stringify(ANSWER_MARK)}, ${JSON.stringify(OTHER_ANSWER)});\n`;
+  return `// Written by Flowryn for gate ${state.gate}; it is rewritten when a question's state changes.\n${RENDERER.trim()}(${JSON.stringify(state)}, ${JSON.stringify(ANSWER_MARK)}, ${JSON.stringify(OTHER_ANSWER)}, ${JSON.stringify(PASS_KEY_PARAM)});\n`;
 }
 
 /**

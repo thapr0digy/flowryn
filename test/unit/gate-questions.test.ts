@@ -18,6 +18,7 @@ import { cancelRun, failRun, getRun, getRunWithPolicy } from "../../src/lifecycl
 import { activateStage, passReviewGate, positionOf, stageInstructions, stageTextContext, type GateRow } from "../../src/lifecycle/stages.ts";
 import { getMessage, MAX_STEER_CHARS } from "../../src/lifecycle/steers.ts";
 import { insertApproval } from "../../src/policy/approvals.ts";
+import { PASS_KEY_LENGTH, PASS_KEY_PARAM } from "../../src/policy/pass-key.ts";
 import { chatForm } from "../../src/policy/chat-questions.ts";
 import { createRun } from "../../src/lifecycle/dispatch.ts";
 import { getProject } from "../../src/lifecycle/projects.ts";
@@ -197,7 +198,7 @@ describe("what lavish-axi poll printed", () => {
       { gate: "g4", decision: "q1", choice: ["db"], note: null },
       { gate: "g4", decision: "q2", choice: ["claude", "other"], note: "both, plus codex" },
     ]);
-    expect(out.sends).toEqual([{ gate: "g4", comment: 'line one\nline "two"', pass: true, code: null }]);
+    expect(out.sends).toEqual([{ gate: "g4", comment: 'line one\nline "two"', pass: true, code: null, key: null }]);
     expect(out).toMatchObject({ malformed: 0, otherPrompts: 1 });
     // The Send's prompt is not the user's own feedback; the chat beside it is.
     expect(out.feedback).toEqual(["chat"]);
@@ -218,8 +219,8 @@ describe("what lavish-axi poll printed", () => {
     const parsed = parsePollOutput(`status: feedback\nprompts[3]:\n  - prompt: "${ANSWER_MARK} ${full}"\n  - prompt: "${ANSWER_MARK} ${late}"\n  - prompt: "flowryn-answer v1 ${v1}"\n`);
     expect(parsed.answers).toHaveLength(50);
     expect(parsed.sends).toEqual([
-      { gate: "g1", comment: null, pass: false, code: null },
-      { gate: "g1", comment: "ship it small", pass: true, code: null },
+      { gate: "g1", comment: null, pass: false, code: null, key: null },
+      { gate: "g1", comment: "ship it small", pass: true, code: null, key: null },
     ]);
     expect(parsed).toMatchObject({ malformed: 0, otherPrompts: 0 });
   });
@@ -288,13 +289,13 @@ const DOM_GLOBALS = ["document", "window", "FormData"] as const;
 let savedGlobals: Record<string, unknown> | null = null;
 
 /** Run the widget file against a DOM stand-in; the globals stay until the test ends (restoreDom). */
-function runWidget(state: WidgetState) {
+function runWidget(state: WidgetState, referrer = "") {
   const g = globalThis as Record<string, unknown>;
   savedGlobals ??= Object.fromEntries(DOM_GLOBALS.map((k) => [k, g[k]]));
   const mount = new StubEl("section");
   const queued: Queued[] = [];
   const counter = { sent: 0 };
-  g.document = { getElementById: (id: string) => (id === "flowryn-questions" ? mount : null), createElement: (tag: string) => new StubEl(tag), head: new StubEl("head") };
+  g.document = { referrer, getElementById: (id: string) => (id === "flowryn-questions" ? mount : null), createElement: (tag: string) => new StubEl(tag), head: new StubEl("head") };
   g.window = { lavish: { queuePrompt: (text: string, opts: Record<string, unknown>) => queued.push({ text, opts }), sendQueuedPrompts: () => (counter.sent += 1) } };
   g.FormData = StubFormData;
   new Function(renderWidget(state))();
@@ -322,6 +323,7 @@ const STATE: WidgetState = {
   task: "web-x",
   stage: "design",
   gateState: "open",
+  oneClick: false,
   decided: [{ choice: "poller home", picked: "src/lavish/poller.ts", why: "one child per gate" }],
   questions: [
     { id: "q1", key: "token-store", kind: "single", question: "Where?", options: ["db", "file"], recommend: ["db"], blocks: "which store TokenCache writes to", why: "why", state: "open", answer: null, via: null },
@@ -355,7 +357,7 @@ describe("the question widget", () => {
     expect(mount.all().filter((e) => e.tag === "textarea").map((e) => e.attrs.name)).toEqual(["fq-comment"]);
     expect(mount.text()).toContain("Answered via your leader: no");
     expect(mount.text()).toContain("poller home: src/lavish/poller.ts");
-    expect(mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Send answers", "Send and pass"]);
+    expect(mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Send answers", "Send answers and approve"]);
   });
 
   test("assumption: one Send queues one prompt whose token decodes to every answer and the comment, then sends", () => {
@@ -373,7 +375,7 @@ describe("the question widget", () => {
       { gate: "g7", decision: "q1", choice: ["db"], note: "ünïcode note" },
       { gate: "g7", decision: "q2", choice: ["claude", "pi"], note: null },
     ]);
-    expect(parsed.sends).toEqual([{ gate: "g7", comment: "Keep it small.\nThanks", pass: false, code: null }]);
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: "Keep it small.\nThanks", pass: false, code: null, key: null }]);
     expect(parsed.otherPrompts).toBe(0);
     expect(run.status()).toContain("Still open: q3");
   });
@@ -382,11 +384,11 @@ describe("the question widget", () => {
     const run = runWidget(STATE);
     run.field("fq-comment").value = "Keep it small";
     run.submit();
-    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: "Keep it small", pass: false, code: null }]);
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: "Keep it small", pass: false, code: null, key: null }]);
     expect(run.field("fq-comment").value).toBe("");
     run.submit();
     expect(run.queued).toHaveLength(2);
-    expect(decodeQueued(run.queued.slice(1)).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null }]);
+    expect(decodeQueued(run.queued.slice(1)).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null, key: null }]);
     run.field("fq-comment").value = "Not lost";
     ((globalThis as Record<string, unknown>).window as { lavish: { queuePrompt: () => void } }).lavish.queuePrompt = () => {
       throw new Error("the frame is gone");
@@ -418,7 +420,7 @@ describe("the question widget", () => {
     expect(run.queued[0]!.text).toContain("Please pass this review; send me a pass code.");
     const parsed = decodeQueued(run.queued);
     expect(parsed.answers.map((a) => a.decision)).toEqual(["q1", "q2", "q3"]);
-    expect(parsed.sends).toEqual([{ gate: "g7", comment: null, pass: true, code: null }]);
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: null, pass: true, code: null, key: null }]);
     expect(run.status()).toContain("a pass request (a code goes to your notifications)");
   });
 
@@ -428,16 +430,56 @@ describe("the question widget", () => {
     run.field("fq-code").attrs.value = " abcd ";
     // Send answers alone never carries the code.
     run.submit();
-    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null }]);
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null, key: null }]);
     run.field("fq-code").attrs.value = "abcd";
     run.submit(true);
     const sent = run.queued[run.queued.length - 1]!;
     expect(sent.text).toContain("Pass this review (with the pass code).");
     expect(sent.text.split("\n").filter((l) => !l.startsWith("flowryn-answers v2 ")).join("\n")).not.toContain("ABCD");
     expect(JSON.stringify(sent.opts)).not.toContain("ABCD");
-    expect(decodeQueued([sent]).sends).toEqual([{ gate: "g7", comment: null, pass: true, code: "ABCD" }]);
+    expect(decodeQueued([sent]).sends).toEqual([{ gate: "g7", comment: null, pass: true, code: "ABCD", key: null }]);
     expect(run.field("fq-code").attrs.value).toBe("");
     expect(run.status()).toContain("your pass code");
+  });
+
+  const KEY = "k".repeat(PASS_KEY_LENGTH);
+  const OPENED = `http://127.0.0.1:4387/session/0123456789abcdef?${PASS_KEY_PARAM}=${KEY}`;
+  const NO_QUESTIONS: WidgetState = { ...STATE, decided: [], questions: [] };
+
+  test("one click: on the tab Flowryn opened, Approve sends the tab's pass key in the token only, with no code field", () => {
+    const run = runWidget({ ...STATE, oneClick: true }, OPENED);
+    expect(run.inputs().some((i) => i.attrs.name === "fq-code")).toBe(false);
+    run.field("q3").attrs.value = "flowryn keys";
+    // Send answers alone never carries the key.
+    run.submit();
+    expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: null, pass: false, code: null, key: null }]);
+    run.submit(true);
+    const sent = run.queued[run.queued.length - 1]!;
+    expect(sent.text).toContain("Approve this review.");
+    expect(sent.text.split("\n").filter((l) => !l.startsWith("flowryn-answers v2 ")).join("\n")).not.toContain(KEY);
+    expect(JSON.stringify(sent.opts)).not.toContain(KEY);
+    expect(decodeQueued([sent]).sends).toEqual([{ gate: "g7", comment: null, pass: true, code: null, key: KEY }]);
+    expect(run.status()).toContain("your approval");
+  });
+
+  test("a page without questions has one Approve button, and one click passes it", () => {
+    const run = runWidget({ ...NO_QUESTIONS, oneClick: true }, OPENED);
+    expect(run.mount.text()).toContain("Approve this review");
+    expect(run.mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Approve"]);
+    run.submit(true);
+    expect(run.queued).toHaveLength(1);
+    const parsed = decodeQueued(run.queued);
+    expect(parsed.answers).toEqual([]);
+    expect(parsed.sends).toEqual([{ gate: "g7", comment: null, pass: true, code: null, key: KEY }]);
+  });
+
+  test("without a live key (a hand-opened page, a spent key, a malformed one) Approve falls back to the pass code", () => {
+    for (const [oneClick, referrer] of [[true, ""], [true, "http://127.0.0.1:4387/session/0123456789abcdef"], [false, OPENED], [true, `${OPENED.slice(0, -1)}`]] as const) {
+      const run = runWidget({ ...NO_QUESTIONS, oneClick }, referrer);
+      expect(run.inputs().some((i) => i.attrs.name === "fq-code")).toBe(true);
+      run.submit(true);
+      expect(decodeQueued(run.queued).sends).toEqual([{ gate: "g7", comment: null, pass: true, code: null, key: null }]);
+    }
   });
 
   test("a closed gate shows every question locked, with no Send, comment box or pass", () => {
@@ -505,7 +547,7 @@ describe("a gate's questions as decisions", () => {
       ["worker_question", "q3"],
     ]);
     expect(items[0]!.line).toContain("flowryn decide q1 <choice> --by captain");
-    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page, source_page: null }]);
   });
 
   test("a page answer is the user's (captain via lavish), held from the worker while the gate is open; the first answer counts", () => {
@@ -821,14 +863,14 @@ describe("a gate's questions as decisions", () => {
     open();
     tx(db, () => failRun(db, getRun(db, runId)!, "dead", "daemon", NOW));
     expect(["q1", "q2", "q3"].map((id) => getDecision(db, id)!.state)).toEqual(["open", "open", "open"]);
-    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page, source_page: null }]);
     expect(gatesWithWidget(db, [])).toEqual([]);
     db.query("UPDATE runs SET cleanup = 'done' WHERE id = ?1").run(runId);
-    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page, source_page: null }]);
     db.query("UPDATE runs SET cleanup = NULL WHERE id = ?1").run(runId);
     db.query("UPDATE runs SET state = 'running', liveness = 'busy', ended_at = NULL WHERE id = ?1").run(runId);
     expect(() => requireGateAnswered(db, { id: "g1", stage: "design" })).toThrow(/3 open questions/);
-    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page }]);
+    expect(gatesToPoll(db)).toEqual([{ id: "g1", page_path: page, source_page: null }]);
   });
 
   test("a new run of the task ends a failed run's questions for good", () => {
