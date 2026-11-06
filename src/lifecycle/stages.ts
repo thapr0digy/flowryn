@@ -95,6 +95,30 @@ export interface StageTextContext {
   delivery: ContractDelivery;
 }
 
+/**
+ * What ends a stage with a review gate, said once here rather than in each
+ * stage skill (the skills say how to build the page, never how the gate runs).
+ */
+export const REVIEW_GATE_TEXT = [
+  "When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict.",
+  "Keep the page's Flowryn widget mount (it shows the user's Approve button; stage done refuses a page without it).",
+  "Flowryn listens on the page itself and opens it in the user's browser: do not hold a lavish-axi poll open; lavish-axi's status: opened is its session, not a browser tab, so never say the page is open in their browser.",
+  "lavish-axi failing: run it once more, then report blocked with its output.",
+  "While it waits, a steer may bring the user's words from the page: answer with $FLOWRYN_BIN review reply --body-file - (never lavish-axi poll or reply yourself), revise the page if asked, then end your turn.",
+  "Only a question you cannot proceed without goes to the user: add --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.",
+].join(" ");
+
+/** An ungated stage goes straight on to the next one in the same turn (`stage begin`); only a stage that waits for its slots ends the turn. */
+function beginNextText(next: StageDef, stage: StageDef): string {
+  const handoff = stage.skill === HANDOFF_REQUIRED_SKILL ? " --handoff-file <your handoff>" : "";
+  return `When it is done: $FLOWRYN_BIN stage begin ${next.id}${handoff} and go on at once with the steps its reply gives; end your turn only on stage_waiting (a steer then starts it).`;
+}
+
+/** The steer line that replaces the stage's whole text when the worker's stage has not changed: its task file already holds the steps. */
+export function stagePointer(stage: string): string {
+  return `Then: follow the stage ${stage} steps in $FLOWRYN_TASK_FILE.`;
+}
+
 /** What the worker needs to run a stage: where it is, the skill to follow, and what ends it. One paragraph. */
 export function stageInstructions(pos: StagePos, ctx: StageTextContext): string {
   const { def, index, stage } = pos;
@@ -106,12 +130,12 @@ export function stageInstructions(pos: StagePos, ctx: StageTextContext): string 
     parts.push(`This is the last stage. ${deliveryLines({ ...ctx.delivery, inLastStage: true }).map((l) => l.replace(/^-\s*/, "").trim()).join(" ")}`);
     return parts.join(" ");
   }
-  if (ctx.delivery.kind === "ship" && ctx.delivery.mode === "no-mistakes") parts.push(`Do not run the no-mistakes pipeline yet: it runs in stage ${def.stages[def.stages.length - 1]!.id}, once that stage has started.`);
   if (stage.gate === "review") {
-    parts.push("When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict. Flowryn listens on the page itself and opens it in the user's browser: do not hold a lavish-axi poll open, and never say the page is open in their browser. While it waits, a steer may bring the user's words from the page: answer with $FLOWRYN_BIN review reply --body-file - (never lavish-axi poll or reply yourself), revise the page if asked, then end your turn.");
-    parts.push("Only a question you cannot proceed without goes to the user: add --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.");
+    parts.push(REVIEW_GATE_TEXT);
+    return parts.join(" ");
   }
-  else parts.push("When it is done: $FLOWRYN_BIN stage done, then end your turn; a steer starts the next stage.");
+  if (ctx.delivery.kind === "ship" && ctx.delivery.mode === "no-mistakes") parts.push(`Do not run the no-mistakes pipeline yet: it runs in stage ${def.stages[def.stages.length - 1]!.id}, once that stage has started.`);
+  parts.push(beginNextText(def.stages[index + 1]!, stage));
   return parts.join(" ");
 }
 
@@ -166,6 +190,14 @@ export function neededPools(db: Db, run: RunRow, pos: StagePos): string[] {
   return needs;
 }
 
+/** Was this stage requested again from itself (a send-back, review changes, a nudge)? Then the worker's task file already holds its steps. */
+function stageUnchanged(db: Db, runId: string, stage: string): boolean {
+  const row = db.query("SELECT payload FROM events WHERE run_id = ?1 AND kind = 'stage.requested' ORDER BY seq DESC LIMIT 1").get(runId) as { payload: string } | null;
+  if (!row) return false;
+  const payload = JSON.parse(row.payload) as { stage?: string; from?: string | null };
+  return payload.stage === stage && payload.from === stage;
+}
+
 export interface Activated {
   /** The launch the grant starts, if any. */
   launch: PendingLaunch | null;
@@ -201,7 +233,9 @@ export function activateStage(db: Db, config: FlowrynConfig, run: RunWithPolicy,
     }
   }
   if (starting && opts.steer !== false && run.stage_note !== null && !noteInFile) {
-    const text = [run.stage_note, stageInstructions(pos, stageTextContext(db, config, run))].filter((t) => t.length > 0).join(" ");
+    // The stage's whole text only on a stage change; a send-back to the same stage points at the task file, which holds it.
+    const steps = stageUnchanged(db, run.id, pos.stage.id) ? stagePointer(pos.stage.id) : stageInstructions(pos, stageTextContext(db, config, run));
+    const text = [run.stage_note, steps].filter((t) => t.length > 0).join(" ");
     steer = createSteer(db, run, text, now).id;
   }
   db.query(
@@ -362,11 +396,8 @@ function stageWaiting(stage: StageDef): FlowrynError {
 }
 
 function beginWaiting(stage: StageDef): FlowrynError {
-  return new FlowrynError(
-    "stage_waiting",
-    `stage ${stage.id} waits for a slot of ${stage.pools.join(" and ")}`,
-    `end your turn; a steer says when stage ${stage.id} has started; do not run the pipeline before`,
-  );
+  const why = stage.pools.length > 0 ? `waits for a slot of ${stage.pools.join(" and ")}` : "has not started yet";
+  return new FlowrynError("stage_waiting", `stage ${stage.id} ${why}`, `end your turn; a steer says when stage ${stage.id} has started; do not run the pipeline before`);
 }
 
 /**
@@ -466,7 +497,23 @@ export async function startPooledStages(ctx: HandlerCtx, runId: string, handoffT
 }
 
 /**
- * `stage begin <last stage>`: start the stage the delivery ends now, from an
+ * The stage `stage begin` may start: the next one (an ungated stage goes
+ * straight on) or the last one (a no-mistakes ship, before its pipeline), or
+ * the current one once it has started or while it waits (a repeat call).
+ */
+function beginTarget(pos: StagePos, target: string): number {
+  const lastIndex = pos.def.stages.length - 1;
+  if (pos.stage.id === target) return pos.index;
+  if (pos.def.stages[pos.index + 1]?.id === target) return pos.index + 1;
+  if (pos.def.stages[lastIndex]!.id === target) return lastIndex;
+  const next = pos.def.stages[pos.index + 1];
+  const names = [...new Set([next?.id, pos.def.stages[lastIndex]!.id].filter((id): id is string => id !== undefined))].join(" or ");
+  throw new FlowrynError("bad_args", `stage begin starts your next or last stage (${names}), not ${target}`, stageDoneHelp(pos));
+}
+
+/**
+ * `stage begin <next or last stage>`: end an ungated stage and start the next
+ * one in the same turn, or start the stage the delivery ends now, from an
  * earlier stage with no review gate and no pooled stage between (a
  * no-mistakes ship calls it before its pipeline). Already started: nothing to
  * do. Refused with stage_waiting while it waits for its slots.
@@ -477,29 +524,28 @@ export async function beginLastStage(ctx: HandlerCtx, runId: string, target: str
     if (!run || isTerminal(run.state)) throw new FlowrynError("run_not_active", `run ${runId} is ${run?.state ?? "gone"}`);
     if (run.state === "ready" || run.stage_state === "done") throw new FlowrynError("wrong_stage", "you delivered already");
     const pos = positionOf(ctx.db, run, run.kind);
-    const lastIndex = pos.def.stages.length - 1;
-    const last = pos.def.stages[lastIndex]!;
-    if (target !== last.id) throw new FlowrynError("bad_args", `stage begin starts your last stage, ${last.id}; the others start with stage done`, stageDoneHelp(pos));
-    if (pos.last) {
-      if (run.stage_state === "waiting") throw beginWaiting(last);
+    const targetIndex = beginTarget(pos, target);
+    const begun = pos.def.stages[targetIndex]!;
+    if (targetIndex === pos.index && run.stage_state !== "review") {
+      if (run.stage_state === "waiting") throw beginWaiting(begun);
       // A repeat call once the stage has started: the handoff was kept when the earlier stage ended.
       if (handoffText !== undefined) checkHandoff(handoffText);
       return null;
     }
     if (run.stage_state === "waiting") throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} has not started; it waits for capacity`, "end your turn; a steer says when it starts");
     if (run.stage_state === "review") throw new FlowrynError("wrong_stage", `the ${pos.stage.id} review gate is open`, "end your turn; a steer brings the verdict");
-    const before = pos.def.stages.slice(pos.index, lastIndex);
+    const before = pos.def.stages.slice(pos.index, targetIndex);
     const gated = before.find((s) => s.gate === "review");
-    if (gated) throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} comes before the ${gated.id} review; you cannot begin ${last.id} yet`, stageDoneHelp(pos));
+    if (gated) throw new FlowrynError("wrong_stage", `stage ${pos.stage.id} comes before the ${gated.id} review; you cannot begin ${begun.id} yet`, stageDoneHelp(pos));
     const pooled = before.slice(1).find((s) => s.pools.length > 0);
     if (pooled) throw new FlowrynError("wrong_stage", `stage ${pooled.id} comes first and holds a slot of ${pooled.pools.join(" and ")}`, stageDoneHelp(pos));
     const owed = handoffOwedBy(ctx, run, before);
-    const handoff = takeHandoff(handoffText, owed, `$FLOWRYN_BIN stage begin ${last.id} --handoff-file "$TMPDIR/handoff.md"`);
+    const handoff = takeHandoff(handoffText, owed, `$FLOWRYN_BIN stage begin ${begun.id} --handoff-file "$TMPDIR/handoff.md"`);
     const handoffStage = owed?.id ?? pos.stage.id;
-    return requestLater(ctx, run, pos, lastIndex, `Stage ${last.id} has started; go on from where you stopped.`, "begin", handoff !== null ? { stage: handoffStage, text: handoff } : null);
+    return requestLater(ctx, run, pos, targetIndex, `Stage ${begun.id} has started; go on from where you stopped.`, "begin", handoff !== null ? { stage: handoffStage, text: handoff } : null);
   });
   if (!requested) return { handoffIgnored: handoffText !== undefined };
-  await grantRequested(ctx, runId, requested, () => (requested.stage.pools.length > 0 ? beginWaiting(requested.stage) : new FlowrynError("stage_waiting", `stage ${requested.stage.id} has not started yet`, `end your turn; a steer says when stage ${requested.stage.id} has started`)));
+  await grantRequested(ctx, runId, requested, () => beginWaiting(requested.stage));
   return { handoffIgnored: false };
 }
 
@@ -824,15 +870,16 @@ const stageDone: VerbSpec = {
 };
 
 /**
- * `flowryn stage begin <stage>`: start your last stage now, before the work
- * that must run under its slots (a no-mistakes ship's pipeline). It returns
- * once the stage has started, or stage_waiting: end your turn, and a steer
- * says when it has.
+ * `flowryn stage begin <stage>`: end an ungated stage and start the next one
+ * in the same turn, or start your last stage now, before the work that must
+ * run under its slots (a no-mistakes ship's pipeline). It returns once the
+ * stage has started, with that stage's steps, or stage_waiting: end your
+ * turn, and a steer says when it has.
  */
 const stageBegin: VerbSpec = {
   name: "stage begin",
-  summary: "Start your last stage now (a no-mistakes ship: before its pipeline); stage_waiting means end your turn",
-  positionals: [{ name: "stage", required: true, help: "your workflow's last stage (ship)", complete: "stage" }],
+  summary: "End this stage and start the next (or your last) now, then go on with its steps; stage_waiting means end your turn",
+  positionals: [{ name: "stage", required: true, help: "your workflow's next stage, or its last (ship)", complete: "stage" }],
   flags: {
     "handoff-file": { type: "string", help: "your handoff from the stage this skips (## Done, ## Deviations, ## Risks; $FLOWRYN_BIN template handoff); required when it skips build", fileFor: "handoff" },
   },
@@ -845,8 +892,9 @@ const stageBegin: VerbSpec = {
   apply(ctx, _args, prepared) {
     const run = workerRun(ctx);
     const ignored = (prepared as { handoffIgnored: boolean } | null)?.handoffIgnored === true;
-    const hints = ignored ? [`stage ${run.stage} had started already, so this handoff was not kept; a handoff is kept when the stage before ends`, "go on"] : ["go on: the stage has started"];
-    return { data: { stage: run.stage, state: run.stage_state, pools: runLeases(ctx.db, run.id).map((l) => l.pool) }, hints };
+    const hints = ignored ? [`stage ${run.stage} had started already, so this handoff was not kept; a handoff is kept when the stage before ends`, "go on"] : ["go on at once with the steps below: the stage has started"];
+    const steps = stageInstructions(positionOf(ctx.db, run, run.kind), stageTextContext(ctx.db, ctx.config(), run));
+    return { data: { stage: run.stage, state: run.stage_state, pools: runLeases(ctx.db, run.id).map((l) => l.pool), steps }, hints };
   },
 };
 

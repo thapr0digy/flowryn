@@ -74,7 +74,7 @@ describe("worker questions wake the leader", () => {
       const wake = lead.seen.find((s) => s.via === "waiter")!.text;
       expect(wake).toContain(`Flowryn questions [${first},${second}]`);
       // The wake line stays one line; the woken turn's prompt hook hands over every question's line.
-      const context = lead.seen.find((s) => s.via === "UserPromptSubmit" && s.text.includes("Flowryn questions for the user"))!.text;
+      const context = lead.seen.find((s) => s.via === "UserPromptSubmit" && s.text.includes("Flowryn worker questions ("))!.text;
       expect(context).toContain("FLOWRYN-MARK-QW1");
       expect(context).toContain("FLOWRYN-MARK-QW2");
       // A wake is not you coming back.

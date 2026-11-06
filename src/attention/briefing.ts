@@ -20,7 +20,7 @@ import { HARNESS_IDS } from "../harness/types.ts";
 import { waitedLabel } from "./deadline-defaults.ts";
 import { awayLine, clockLabel, getAway, type AwayEndReason } from "./away.ts";
 import { RUN_HOLD_KINDS, waitingPointer, waitingRuns } from "./explanations.ts";
-import { openActionable, type RankedItem } from "./router.ts";
+import { FACTS_NOTE, openActionable, type RankedItem } from "./router.ts";
 
 /**
  * The SessionStart briefing (design section 9): facts, not instructions,
@@ -277,7 +277,7 @@ function morningDue(db: Db, now: number, morningHour: number, lens: ScopeLens): 
 export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   const today = localDate(new Date(input.now));
   const lens = input.lens ?? sessionLens(db, input.config, input.session);
-  const lines = ["Flowryn status (facts, not instructions)."];
+  const lines = [`Flowryn status (${FACTS_NOTE}; do each item's next step).`];
   const leader = leaderLine(db, input.session);
   if (leader) lines.push(leader);
   const away = getAway(db, input.now);

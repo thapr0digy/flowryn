@@ -12,7 +12,8 @@ import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, getDecision, n
 import { answerDecision } from "./decision-verbs.ts";
 import { resolveTool } from "../config/config.ts";
 import { cleanupConfig } from "../config/delivery.ts";
-import { matchRules, readRuleFacts, type RuleFacts, type RuleVerdict } from "../policy/nomistakes-rules.ts";
+import { fileClass, findingPath, matchRules, readRuleFacts, type RuleFacts, type RuleVerdict } from "../policy/nomistakes-rules.ts";
+import { classifyAsk, type AskVerdict } from "../policy/nomistakes-classes.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
@@ -164,13 +165,15 @@ const report: VerbSpec = {
 /**
  * `flowryn ask --options a,b --blocks <what waits> [--blocking] --body-file -`:
  * a question for you, only when the worker cannot proceed without it.
- * It never holds the call open (design section 12): it returns a decision id,
- * the worker ends its turn, and the answer arrives as a steer. A blocking
- * question is a P0 and puts a captain hold on the task. With --nomistakes it
- * is a no-mistakes ask-user finding: the gate is read from no-mistakes and
- * git, and `[decisions] nomistakes_rules` may settle it at once (answered_by
- * policy, its steer sent, no item); otherwise it is reserved for the user
- * (docs/notes/2026-10-22-settle-routine-no-2r.md).
+ * It never holds the call open (design section 12): it returns a decision id
+ * and the answer arrives as a steer; a blocking one ends the worker's turn,
+ * any other goes on with its recommendation. A blocking question is a P0 and
+ * puts a captain hold on the task. With --nomistakes it is a no-mistakes
+ * ask-user finding: the gate is read from no-mistakes and git, and
+ * `[decisions] nomistakes_rules` may settle it at once (answered_by policy,
+ * its steer sent, no item; docs/notes/2026-10-22-settle-routine-no-2r.md);
+ * otherwise the finding table decides whether the leader or only the user
+ * answers it (docs/notes/2026-11-06-prompts-that-keep-47.md).
  */
 const ask: VerbSpec = {
   name: "ask",
@@ -184,7 +187,7 @@ const ask: VerbSpec = {
     why: { type: "string", help: "why you recommend it, in a line (unattended mode keeps it with the answer)", placeholder: "text" },
     reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
     blocks: { type: "string", help: "required: the choice in your work that waits on the answer", placeholder: "text" },
-    nomistakes: { type: "boolean", help: "a no-mistakes ask-user finding: a rule may settle it ([decisions] nomistakes_rules), else only the user answers" },
+    nomistakes: { type: "boolean", help: "a no-mistakes ask-user finding: a rule may settle it ([decisions] nomistakes_rules), else its findings say whether your leader or only the user answers" },
     "body-file": { type: "string", help: "the question, from a file or - for stdin", fileFor: "body" },
   },
   kind: "mutation",
@@ -228,7 +231,7 @@ const ask: VerbSpec = {
       if (existing && existing.run_id === null) throw new FlowrynError("bad_args", `key ${key} is already the standalone decision ${existing.id}`, "use another key");
       if (existing) {
         if (existing.state !== "open") throw new FlowrynError("bad_args", `key ${key} already used by ${existing.id}`);
-        return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: ["end your turn; the answer arrives as a steer"] };
+        return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: [askHint(existing.blocking === 1 || boolArg(args, "nomistakes"))] };
       }
     }
     const id = nextRunDecisionId(ctx.db);
@@ -236,14 +239,19 @@ const ask: VerbSpec = {
     const facts = prepared as RuleFacts | null;
     const verdict: RuleVerdict | null = facts === null ? null : facts.ok ? matchRules({ ...facts, worktree: run.worktree_path, options, sensitive: run.sensitive === 1 }, cfg.nomistakes_rules) : { settled: false, reason: facts.reason };
     const sourceReason = stringArg(args, "reserved") ?? null;
+    // A gate no rule settles goes through the finding table (src/policy/nomistakes-classes.ts): the
+    // leader's when every finding plainly follows the change, else the user's with the class why.
+    const owner = facts?.ok && verdict && !verdict.settled ? classifyAsk({ step: facts.step, findings: facts.findings.map((f) => ({ ...f, cls: fileClass(findingPath(f.file, run.worktree_path), f.line, facts.diff) })), options, sensitive: run.sensitive === 1 }) : null;
     // A gate a rule settles is judged on no-mistakes' and git's facts, not on the question's wording
     // (the user's ruling, 2026-10-22); only the worker's own --reserved still keeps it for the user.
-    // A no-mistakes ask no rule settles is the user's, with the reason no rule did.
-    const reserved = verdict?.settled && !sourceReason?.trim()
-      ? null
-      : (reservedReason({ question, context: null, sourceReason, blocksYoloOff: false }, cfg) ?? (verdict && !verdict.settled ? sanitizeLine(`nomistakes: ${verdict.reason}`, 200) : null));
-    // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask no floor kept for the user.
-    const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : !facts?.ok ? "nomistakes-unread" : verdict.floored ? "nomistakes-floor" : "nomistakes"));
+    const ownReason = sourceReason?.trim() ? sourceReason : null;
+    const keyword = () => reservedReason({ question, context: null, sourceReason, blocksYoloOff: false }, cfg);
+    let reserved: string | null;
+    if (verdict?.settled && !ownReason) reserved = null;
+    else if (owner?.owner === "leader" && !ownReason) reserved = keyword();
+    else reserved = keyword() ?? (verdict && !verdict.settled ? sanitizeLine(`nomistakes: ${nmReason(verdict, owner)}`, 200) : null);
+    // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask the table kept for the user.
+    const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : !facts?.ok ? "nomistakes-unread" : nmClass(verdict, owner)));
     ctx.db
       .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)")
       .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks, why);
@@ -266,13 +274,29 @@ const ask: VerbSpec = {
     if (blocking) {
       recordIntent(ctx.db, { file: "backlog", verb: "hold", taskId: run.task_id, positional: [run.task_id], flags: { reason: holdReason(`question ${id}`), kind: "captain" }, now });
     }
-    return { data: { decision: id, blocking, options, ...(reserved ? { reserved } : {}) }, hints: ["end your turn; the answer arrives as a steer"] };
+    return { data: { decision: id, blocking, options, ...(reserved ? { reserved } : {}) }, hints: [askHint(blocking || verdict !== null)] };
   },
   async settle(ctx, result) {
     if (result.data.answered !== undefined && ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
     return result;
   },
 };
+
+/** What a worker does after an ask: a blocking one (or a parked pipeline) ends the turn; any other goes on with its recommendation. */
+function askHint(waits: boolean): string {
+  return waits ? "end your turn; the answer arrives as a steer" : "go on with your recommendation now; the answer arrives as a steer (redo what it changes)";
+}
+
+/** Why a no-mistakes ask is the user's: the table's class, else (a kind it cannot judge) the rules' own reason. */
+function nmReason(verdict: Extract<RuleVerdict, { settled: false }>, owner: AskVerdict | null): string {
+  return owner?.owner === "user" && owner.klass !== "unknown" ? owner.reason : verdict.reason;
+}
+
+/** The kind a deadline reads: the keyword class the table found, a floor (scope, product, a floored gate) none answers, or nomistakes. */
+function nmClass(verdict: Extract<RuleVerdict, { settled: false }>, owner: AskVerdict | null): string {
+  if (owner?.owner === "user" && owner.klass !== "unknown") return keywordClass(owner.klass) ?? "nomistakes-floor";
+  return verdict.floored ? "nomistakes-floor" : "nomistakes";
+}
 
 /** `flowryn inbox`: the steers you have not acknowledged yet. */
 /** An ask's --why is kept to one line of this many characters. */

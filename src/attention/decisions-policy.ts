@@ -12,7 +12,8 @@ import { table } from "../config/config.ts";
 export const RESERVED_CLASSES = ["merge", "destructive", "irreversible", "security", "credential", "outward"] as const;
 export type ReservedClass = (typeof RESERVED_CLASSES)[number];
 
-const PATTERNS: Record<Exclude<ReservedClass, "merge">, RegExp> = {
+/** The keyword classes' patterns, shared with the no-mistakes finding table (src/policy/nomistakes-classes.ts). */
+export const RESERVED_PATTERNS: Readonly<Record<Exclude<ReservedClass, "merge">, RegExp>> = {
   irreversible: /\b(force[- ]push|rewrite (the )?history|irreversibl\w*|cannot be undone|permanent(ly)?)\b/i,
   destructive: /\b(delete|drop|destroy|wipe|purge|erase|truncate|discard|remove (the )?(data|rows|bucket|database))\b/i,
   credential: /\b(credential|secret|api[- ]?key|token|password|signing key|private key|rotate (the )?key|revoke)\b/i,
@@ -134,7 +135,7 @@ function nmRules(value: unknown): NmRule[] {
 
 /** The text names a history rewrite or another irreversible step: no rule settles such a finding. */
 export function irreversibleText(text: string): boolean {
-  return PATTERNS.irreversible.test(text);
+  return RESERVED_PATTERNS.irreversible.test(text);
 }
 
 export interface ReservedInput {
@@ -158,7 +159,7 @@ export function reservedReason(input: ReservedInput, cfg: DecisionsConfig): stri
   if (input.blocksYoloOff && enabled.has("merge")) return "merge";
   const text = `${input.question}\n${input.context ?? ""}`;
   for (const klass of ["irreversible", "destructive", "credential", "security", "outward"] as const) {
-    if (enabled.has(klass) && PATTERNS[klass].test(text)) return klass;
+    if (enabled.has(klass) && RESERVED_PATTERNS[klass].test(text)) return klass;
   }
   return null;
 }
