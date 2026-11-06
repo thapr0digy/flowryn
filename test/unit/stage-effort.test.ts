@@ -35,6 +35,16 @@ model = "opus"
 effort = "medium"
 `;
 
+function stages(stage: string): string {
+  return `[workflows.x]\nstages = [${stage}, { id = "ship", gate = "merge" }]`;
+}
+
+type RunChoice = { harness: "claude" | "pi"; model: string | null; effort: string | null; model_pin: string | null; effort_pin: string | null };
+
+function run(over: Partial<RunChoice> = {}): RunChoice {
+  return { harness: "claude", model: "opus", effort: "high", model_pin: null, effort_pin: null, ...over };
+}
+
 function stageOf(text: string, id: string): StageDef {
   return workflowsConfig(config(text)).tiered!.stages.find((s) => s.id === id)!;
 }
@@ -62,7 +72,6 @@ describe("config: a stage's effort and review flag", () => {
   });
 
   test("a stage never runs at max, and an unknown level or a non-boolean review refuses", () => {
-    const stages = (stage: string) => `[workflows.x]\nstages = [${stage}, { id = "ship", gate = "merge" }]`;
     expect(() => workflowsConfig(config(stages('{ id = "build", effort = "max" }')))).toThrow(/never runs at max/);
     expect(() => workflowsConfig(config(stages('{ id = "build", effort = "minimal" }')))).toThrow(/effort must be one of low, medium, high, xhigh/);
     expect(() => workflowsConfig(config(stages('{ id = "build", effort = 3 }')))).toThrow(/effort must be one of/);
@@ -120,14 +129,6 @@ describe("lookup: the stage's effort and the review model", () => {
 describe("a stage start relaunches the live worker only when its model or effort changes", () => {
   const frozen = freezeWorkflow(workflowsConfig(config(TIERED)).tiered!, "sonnet");
   const at = (id: string) => frozen.stages.find((s) => s.id === id)!;
-  const run = (over: Partial<{ harness: "claude" | "pi"; model: string | null; effort: string | null; model_pin: string | null; effort_pin: string | null }> = {}) => ({
-    harness: "claude" as const,
-    model: "opus",
-    effort: "high",
-    model_pin: null,
-    effort_pin: null,
-    ...over,
-  });
 
   test("design (high) to build (low) changes; to a stage asking what the worker already runs does not", () => {
     expect(stageChoiceChanges(run(), at("design"), at("build"))).toBe(true);

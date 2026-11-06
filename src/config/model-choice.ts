@@ -6,8 +6,9 @@ import type { StageDef, WorkflowDef } from "./workflows.ts";
 
 /**
  * A worker's model and effort (docs/notes/2026-10-24-model-and-effort-sc.md).
- * Each is looked up on its own, first set wins: the task's own choice
- * (`dispatch --model/--effort`, a plan phase's lines), the workflow's default
+ * Each is looked up on its own, first set wins: for the model, a review stage's
+ * `review_model` on Claude (docs/notes/2026-11-06-effort-and-model-gn.md); the task's own choice
+ * (`dispatch --model/--effort`, a plan phase's lines); for the effort, the stage's own; the workflow's default
  * for the harness (`[workflows.<id>.<harness>]`), the account's
  * (`[accounts.<id>]`), the harness's (`[workers.<harness>]`). Plain lookups:
  * the launcher resolves at every launch, so a resume keeps the task's choice

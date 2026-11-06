@@ -175,8 +175,12 @@ function stageLaunch(run: RunRow, def: WorkflowDef, stage: StageDef): PendingLau
  */
 export function stageChoiceChanges(run: Pick<RunRow, "harness" | "model" | "effort" | "model_pin" | "effort_pin">, from: StageDef | null, to: StageDef): boolean {
   const pins = { model: run.model_pin, effort: run.effort_pin };
-  const changed = (wanted: string | null, before: string | null, current: string | null): boolean => (wanted !== null ? wanted !== current : before !== null);
   return changed(stageEffort(to, pins), stageEffort(from, pins), run.effort) || changed(stageModel(to, run.harness), stageModel(from, run.harness), run.model);
+}
+
+/** A stage's own value against the worker's, or (none) whether the stage before had one. */
+function changed(wanted: string | null, before: string | null, current: string | null): boolean {
+  return wanted !== null ? wanted !== current : before !== null;
 }
 
 /** The project's worker limit, `[projects.<id>] max_workers`, or null when it has none. */
