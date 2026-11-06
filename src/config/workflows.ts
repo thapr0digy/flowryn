@@ -3,7 +3,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { STYLE_BLOCK } from "../harness/contract-text.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import type { FlowrynConfig } from "./config.ts";
-import { checkEffort, checkModelName, type ModelPins } from "./model-choice.ts";
+import { checkEffort, checkModelName, STAGE_EFFORT_LEVELS, type ModelPins } from "./model-choice.ts";
 import { toAbsolute } from "./paths.ts";
 
 /**
@@ -26,6 +26,15 @@ export interface StageDef {
   pools: string[];
   /** Start this stage with a new worker session in the same worktree. */
   fresh: boolean;
+  /**
+   * The stage's own effort (docs/notes/2026-11-06-effort-and-model-gn.md): over the workflow's, the
+   * account's and the harness's, under the task's own. Absent in a workflow frozen before it existed.
+   */
+  effort?: string | null;
+  /** A review stage: its worker runs on the project's `review_model` (Claude only), when one is set. */
+  review?: boolean;
+  /** The project's `review_model`, frozen onto a review stage when the run is dispatched (never a config key). */
+  review_model?: string | null;
 }
 
 export interface WorkflowDef {
@@ -209,6 +218,25 @@ export function projectMaxWorkers(config: FlowrynConfig, projectId: string): num
   return value;
 }
 
+/**
+ * `[projects.<id>] review_model` (docs/notes/2026-11-06-effort-and-model-gn.md): the Claude model a review
+ * stage (`review = true`) of the project's runs uses; null without the key, so a review runs on the
+ * builder's model. A model name, else config_invalid.
+ */
+export function projectReviewModel(config: FlowrynConfig, projectId: string): string | null {
+  const projects = table(config.extra.projects, "[projects]");
+  const value = table(projects[projectId], `[projects.${projectId}]`).review_model;
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length === 0) throw new FlowrynError("config_invalid", `[projects.${projectId}] review_model must be a model name such as sonnet`);
+  return checkModelName(value, `[projects.${projectId}] review_model`, "config_invalid");
+}
+
+/** The workflow as a run freezes it: each review stage carries the project's review model (none: the builder's). */
+export function freezeWorkflow(wf: WorkflowDef, reviewModel: string | null): WorkflowDef {
+  if (reviewModel === null || !wf.stages.some((s) => s.review === true)) return wf;
+  return { ...wf, stages: wf.stages.map((s) => (s.review === true ? { ...s, review_model: reviewModel } : s)) };
+}
+
 /** Every project's worker limit that is set, in config order. */
 export function projectWorkerLimits(config: FlowrynConfig): { project: string; max: number }[] {
   const out: { project: string; max: number }[] = [];
@@ -221,7 +249,7 @@ export function projectWorkerLimits(config: FlowrynConfig): { project: string; m
 
 function parseStage(raw: unknown, where: string, pools: Record<string, number>): StageDef {
   const t = table(raw, where);
-  unknownKeys(t, ["id", "skill", "gate", "pools", "fresh"], where);
+  unknownKeys(t, ["id", "skill", "gate", "pools", "fresh", "effort", "review"], where);
   if (typeof t.id !== "string" || !STAGE_ID.test(t.id)) throw new FlowrynError("config_invalid", `${where} id must be a stage id such as build`);
   const skill = t.skill === undefined ? null : t.skill;
   if (skill !== null && (typeof skill !== "string" || !SKILL_NAME.test(skill))) throw new FlowrynError("config_invalid", `${where} skill must be a skill name such as flowryn-design`);
@@ -234,7 +262,22 @@ function parseStage(raw: unknown, where: string, pools: Record<string, number>):
     if (!(pool in pools)) throw new FlowrynError("config_invalid", `${where}: pool ${pool} is not in [capacity]`);
   }
   if (t.fresh !== undefined && typeof t.fresh !== "boolean") throw new FlowrynError("config_invalid", `${where} fresh must be true or false`);
-  return { id: t.id, skill: skill as string | null, gate: gate as GateKind, pools: [...new Set(stagePools as string[])], fresh: t.fresh === true };
+  if (t.review !== undefined && typeof t.review !== "boolean") throw new FlowrynError("config_invalid", `${where} review must be true or false`);
+  return { id: t.id, skill: skill as string | null, gate: gate as GateKind, pools: [...new Set(stagePools as string[])], fresh: t.fresh === true, ...optionalStageKeys(t, where) };
+}
+
+/** `effort` and `review`, present only when set, so a stage without them reads as it always did. */
+function optionalStageKeys(t: Record<string, unknown>, where: string): Pick<StageDef, "effort" | "review"> {
+  const effort = stageEffortOf(t.effort, where);
+  return { ...(effort !== null ? { effort } : {}), ...(t.review === true ? { review: true } : {}) };
+}
+
+/** A stage's `effort`: one both harnesses take, and never max. */
+function stageEffortOf(value: unknown, where: string): string | null {
+  if (value === undefined) return null;
+  if (value === "max") throw new FlowrynError("config_invalid", `${where} effort: a stage never runs at max; use xhigh, or dispatch --effort max for the one task that needs it`);
+  if (typeof value !== "string" || !STAGE_EFFORT_LEVELS.includes(value)) throw new FlowrynError("config_invalid", `${where} effort must be one of ${STAGE_EFFORT_LEVELS.join(", ")}`);
+  return value;
 }
 
 /** A workflow's shape: at least one stage, unique ids, a merge gate only on the last stage. */
@@ -368,7 +411,8 @@ export function styleBlock(config: FlowrynConfig): string | null {
 /** Validate every section M5 owns; returns the problems (empty when sound). */
 export function workflowConfigProblems(config: FlowrynConfig): string[] {
   const problems: string[] = [];
-  for (const check of [() => capacityConfig(config), () => workflowsConfig(config), () => defaultAutonomy(config), () => schedTiming(config), () => styleBlock(config)]) {
+  const reviewModels = () => Object.keys(table(config.extra.projects, "[projects]")).forEach((id) => projectReviewModel(config, id));
+  for (const check of [() => capacityConfig(config), () => workflowsConfig(config), reviewModels, () => defaultAutonomy(config), () => schedTiming(config), () => styleBlock(config)]) {
     try {
       check();
     } catch (error) {
