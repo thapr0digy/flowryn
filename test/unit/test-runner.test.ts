@@ -13,20 +13,28 @@ describe("the fast test runner", () => {
     for (const file of SERIAL_FILES) expect(existsSync(join(ROOT, file))).toBe(true);
   });
 
-  test("all is unit, then integration in parallel ignoring the serial files, then those alone", () => {
+  test("all is each directory in parallel ignoring its serial files, then those alone: unit first, then integration", () => {
     const runs = plan("all", 6, { timings: true, updateTimings: false });
-    expect(runs).toHaveLength(3);
-    const [unit, integration, serial] = runs as [string[], string[], string[]];
-    expect(unit).toEqual(["bun", "test", "--parallel=6", "--timeout=30000", "--timings=test/timings.json", "test/unit"]);
+    expect(runs).toHaveLength(4);
+    const [unit, unitSerial, integration, integrationSerial] = runs as [string[], string[], string[], string[]];
+    const unitFiles = ["test/unit/gate-questions.test.ts"];
+    const integrationFiles = SERIAL_FILES.filter((file) => file.startsWith("test/integration/"));
+    expect(unit).toEqual(["bun", "test", "--parallel=6", "--timeout=30000", "--timings=test/timings.json", "--path-ignore-patterns=test/unit/gate-questions.test.ts", "test/unit"]);
+    expect(unitSerial).toEqual(["bun", "test", "--timeout=30000", ...unitFiles]);
     expect(integration.slice(0, 4)).toEqual(["bun", "test", "--parallel=6", "--timeout=30000"]);
     expect(integration.at(-1)).toBe("test/integration");
-    for (const file of SERIAL_FILES) expect(integration).toContain(`--path-ignore-patterns=${file}`);
-    expect(serial).toEqual(["bun", "test", "--timeout=30000", ...SERIAL_FILES]);
+    for (const file of integrationFiles) expect(integration).toContain(`--path-ignore-patterns=${file}`);
+    expect(integration).not.toContain("--path-ignore-patterns=test/unit/gate-questions.test.ts");
+    expect(integrationSerial).toEqual(["bun", "test", "--timeout=30000", ...integrationFiles]);
+    expect(integrationFiles).toHaveLength(5);
   });
 
-  test("unit has no serial part; without a timings file none is passed", () => {
+  test("unit runs its serial file after the parallel part; without a timings file none is passed", () => {
     const runs = plan("unit", 4, { timings: false, updateTimings: false });
-    expect(runs).toEqual([["bun", "test", "--parallel=4", "--timeout=30000", "test/unit"]]);
+    expect(runs).toEqual([
+      ["bun", "test", "--parallel=4", "--timeout=30000", "--path-ignore-patterns=test/unit/gate-questions.test.ts", "test/unit"],
+      ["bun", "test", "--timeout=30000", "test/unit/gate-questions.test.ts"],
+    ]);
   });
 
   test("workers: FLOWRYN_TEST_JOBS, else two thirds of the cores within 2 to 8", () => {

@@ -30,6 +30,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * share the CPU, so they run one at a time after the parallel part.
  */
 export const SERIAL_FILES = [
+  "test/unit/gate-questions.test.ts",
   "test/integration/races.test.ts",
   "test/integration/urgent.test.ts",
   "test/integration/question-wake.test.ts",

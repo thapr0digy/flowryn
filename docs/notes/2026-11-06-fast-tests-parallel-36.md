@@ -10,15 +10,16 @@ Leader audit of 2026-11-06: `bun test` took 25–27 min, one file at a time, and
 
 `scripts/test.ts` (`bun run test`, `bun run test:unit`, `bun run test:integration`):
 
-1. `bun test --parallel=N --timeout=30000 test/unit`
-2. `bun test --parallel=N --timeout=30000 --path-ignore-patterns=<serial files> test/integration`
-3. `bun test --timeout=30000 <serial files>`, one at a time
+1. `bun test --parallel=N --timeout=30000 --path-ignore-patterns=<serial files> test/unit`
+2. `bun test --timeout=30000 <unit serial files>`, one at a time
+3. `bun test --parallel=N --timeout=30000 --path-ignore-patterns=<serial files> test/integration`
+4. `bun test --timeout=30000 <integration serial files>`, one at a time
 
 It stops at the first failing part, so a unit failure shows in a minute or two. With more than one part it ends with one summary in bun's format, the parts added, so `flowryn verify` records every test's count.
 
 - **N** is `FLOWRYN_TEST_JOBS` when set, else two thirds of the cores, from 2 to 8 (8 on a 12-core Mac). 12 was no faster than 8 on this machine and failed more timing windows.
 - **The 30 s default timeout.** Under `--parallel` each file ran 3–4 times slower than alone (per-file times summed to 7,244 s against about 1,600 s serially), and 28 tests that pass alone hit bun's 5 s default. A test that sets its own timeout keeps it. `bunfig.toml` cannot set it, nor `parallel` (Bun 1.4.4 ignores both keys), so the flags are in the script.
-- **The serial files** (`SERIAL_FILES` in the script): `races`, `urgent`, `question-wake`, `treehouse-pool` and `asks` in test/integration. Each asserts on a wall-clock window (a fixed sleep before "nothing happened yet", or a race between two deliveries). They passed alone and in parallel among themselves (38/38) but missed their windows beside a dozen daemons. A unit test checks that every listed file exists.
+- **The serial files** (`SERIAL_FILES` in the script): `gate-questions` in test/unit, and `races`, `urgent`, `question-wake`, `treehouse-pool` and `asks` in test/integration. Each asserts on a wall-clock window (a fixed sleep before "nothing happened yet", or a race between two deliveries). They passed alone and in parallel among themselves (38/38) but missed their windows beside a dozen daemons. `gate-questions`' review-channel health test asserts on an event window too, and once saw an extra `gate.channel_ok` event under a parallel unit run. A unit test checks that every listed file exists.
 - **Isolation.** Every test home already has its own temp dir, socket and database, and no fixed ports were found, so nothing else needed changing. `bun test` alone still works and runs one file at a time.
 - **test/timings.json** holds per-file durations, so `--parallel` starts the slowest files first. Refresh it with `bun scripts/test.ts --update-timings` in a PR of its own, because every PR that updated it would conflict.
 
@@ -73,5 +74,5 @@ That is about 2.3 times faster than the serial suite, not the 5 min target. Thes
 ## Tests
 
 - `test/unit/verify-when-changed.test.ts`: config tables and groups; refusals of bad globs and bad tables; the policy identity (unchanged without globs, different with them); the glob matcher table; a match runs the step; no match skips it with the reason and a `pr.verify_step` event; a skip does not stop a later failure; renames count both paths; unknown changes run the step; the fallback to origin's default branch.
-- `test/unit/test-runner.test.ts`: the plan (unit, integration without the serial files, then the serial files), that the serial files exist, the worker count, and the combined summary read by verify's parser.
+- `test/unit/test-runner.test.ts`: the plan (each directory without its serial files, then those files), that the serial files exist, the worker count, and the combined summary read by verify's parser.
 - `test/integration/auto-contract-{pass,stop,strict}.test.ts`: the old file's five tests, unchanged in what they assert.
