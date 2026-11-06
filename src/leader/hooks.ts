@@ -894,8 +894,8 @@ export function stop(ctx: HandlerCtx): HandlerResult {
     const relayed = (relay?.items ?? []).filter(carryNow);
     // The leader's other action items ride it too, like questions: the batch window only holds back a wake.
     // Items to relay go in the relay lines alone, at most a batch per Stop.
-    const follow = followUpBatch(ctx.db, s.session_id, ctx.attention.timing().action_batch_ms, visible);
-    const actions = (follow?.items ?? []).filter((i) => !RELAY_KINDS.includes(i.kind as ItemKind)).filter(carryNow);
+    const follow = followUpBatch(ctx.db, s.session_id, ctx.attention.timing().action_batch_ms, visible, RELAY_KINDS);
+    const actions = (follow?.items ?? []).filter(carryNow);
     if (questions.length > 0 || relayed.length > 0 || actions.length > 0) {
       setSession(ctx.db, s.session_id, { continuations: s.continuations + 1, busy: 1, busy_until: now + ctx.attention.timing().busy_lease_ms });
       const texts: string[] = [];

@@ -277,6 +277,8 @@ describe("the idle suggestion", () => {
     const line = tx(db, () => awaySuggestion(db, input))!;
     expect(line).toContain("inactive 2h 0m while 1 item waited");
     expect(line).toContain("never set it");
+    expect(line).toContain("a brief of the absence on return");
+    expect(line).not.toContain("would have woken the leader");
     expect(tx(db, () => awaySuggestion(db, input))).toBeNull();
     expect(tx(db, () => awaySuggestion(db, { ...input, today: "2026-10-06" }))).not.toBeNull();
   });

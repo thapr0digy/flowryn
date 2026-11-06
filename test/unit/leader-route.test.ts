@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { LANE_TABLE, LEADER_ROUTE, LEADER_WAKE_KINDS, openItem, QUESTION_KINDS, type ItemKind } from "../../src/attention/items.ts";
+import { LANE_TABLE, LEADER_ROUTE, LEADER_WAKE_KINDS, openItem, QUESTION_KINDS, RELAY_KINDS, type ItemKind } from "../../src/attention/items.ts";
 import { carry } from "../../src/attention/presentations.ts";
-import { followUpBatch } from "../../src/attention/router.ts";
+import { FOLLOW_UP_BATCH_MAX, followUpBatch } from "../../src/attention/router.ts";
 import { inertAttention } from "../../src/attention/services.ts";
 import { parseConfig } from "../../src/config/config.ts";
 import { DEFAULT_LEADER_TIMING, leaderTiming } from "../../src/config/leader.ts";
@@ -125,6 +125,14 @@ describe("action items wake an idle leader", () => {
     expect(followUpBatch(db, s.session_id, 0)).toBeNull();
   });
 
+  test("leaving out relay kinds happens before the batch is cut, so a newer action item rides and more counts only action items", () => {
+    const s = holder();
+    for (let n = 0; n < FOLLOW_UP_BATCH_MAX + 2; n++) open("worker_report", `report ${n}`, clock - 20_000 + n);
+    const red = open("checks_red", "checks red on t1", clock - 1_000);
+    expect(followUpBatch(db, s.session_id, 0)?.items.map((i) => i.id)).not.toContain(red);
+    expect(followUpBatch(db, s.session_id, 0, undefined, RELAY_KINDS)).toMatchObject({ items: [{ id: red }], more: 0 });
+  });
+
   test("the loop guard: an item that woke this session never wakes it again", () => {
     const s = holder();
     const id = open("pr_conflict", "PR conflicts");
@@ -157,6 +165,19 @@ describe("the runaway ceiling", () => {
     expect(row.line).toContain("wake_ceiling_per_hour = 1");
     expect((db.query("SELECT COUNT(*) AS n FROM events WHERE kind = ?1").get(WAKE_CEILING_EVENT) as { n: number }).n).toBe(1);
     expect(tx(db, () => syncWakeCeiling(db, s.session_id, null, "hook", clock))).toBeNull();
+  });
+
+  test("an open runaway P0 for one session never keeps another session's from opening", () => {
+    const hit = { started: 60, limit: 60 };
+    const first = tx(db, () => syncWakeCeiling(db, "L-scope-a", hit, "hook", clock));
+    expect(first).not.toBeNull();
+    expect(tx(db, () => syncWakeCeiling(db, "L-scope-a", hit, "hook", clock))).toBeNull();
+    const second = tx(db, () => syncWakeCeiling(db, "L-scope-b", hit, "hook", clock));
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+    const line = (db.query("SELECT line FROM items WHERE id = ?1").get(second!) as { line: string }).line;
+    expect(line).toContain("Leader session L-scope-b");
+    expect((db.query("SELECT COUNT(*) AS n FROM events WHERE kind = ?1").get(WAKE_CEILING_EVENT) as { n: number }).n).toBe(2);
   });
 
   test("a push that rides a running turn is never held by the ceiling", () => {

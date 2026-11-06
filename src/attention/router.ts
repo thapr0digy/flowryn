@@ -211,17 +211,18 @@ export interface FollowUpBatch {
 /**
  * The leader's P1 action items a push may carry to this session
  * (LEADER_WAKE_SQL): open, not shown to it yet, and not leased to a push path
- * anywhere, oldest first. Due once the oldest is `batchMs` old, so items that
- * open in a burst share one wake.
+ * anywhere, oldest first, leaving out `excludeKinds`. Due once the oldest is
+ * `batchMs` old, so items that open in a burst share one wake.
  */
-export function followUpBatch(db: Db, session: string, batchMs: number, view: ItemView = ALL_ITEMS): FollowUpBatch | null {
+export function followUpBatch(db: Db, session: string, batchMs: number, view: ItemView = ALL_ITEMS, excludeKinds: readonly ItemKind[] = []): FollowUpBatch | null {
+  const excluded = excludeKinds.length > 0 ? `AND i.kind NOT IN (${excludeKinds.map((k) => `'${k}'`).join(", ")})` : "";
   const rows = seen(db
     .query(
       `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
        FROM items i
        LEFT JOIN task_policy tp ON tp.task_id = i.task_id
        LEFT JOIN projects p ON p.id = tp.project_id
-       WHERE ${LEADER_WAKE_SQL} AND i.class = 'actionable' AND i.state IN ('open','presented')
+       WHERE ${LEADER_WAKE_SQL} AND i.class = 'actionable' AND i.state IN ('open','presented') ${excluded}
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?1 AND s.state IN ('presented','carried','offered'))
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
        ORDER BY i.opened_at ASC, i.rowid ASC`,
