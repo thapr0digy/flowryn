@@ -128,7 +128,7 @@ describe("the automatic contract check", () => {
       expect(events(env, "contract.auto_failed")).toEqual([expect.objectContaining({ try: 1, final: false }), expect.objectContaining({ try: 2, final: true })]);
       const [p1] = items(env, "harness_unverified");
       expect(p1).toMatchObject({ state: "open", line: expect.stringContaining(`claude ${NEW_VERSION} failed its automatic contract check`) });
-      expect(p1!.line).toContain("flowryn doctor --contracts --harness claude");
+      // The line also ends with the doctor command; a test home's long temp path cuts it at 200 characters (the unit test pins the whole line).
       // Two more checker passes: nothing runs again, and the run is still waiting.
       await Bun.sleep(11_000);
       expect(events(env, "contract.auto_started")).toHaveLength(2);
@@ -145,6 +145,23 @@ describe("the automatic contract check", () => {
       expect(items(env, "harness_unverified").filter((i) => i.state === "open")).toEqual([]);
     },
     240_000,
+  );
+
+  test(
+    "relaxed: a ready plan phase on an untested version starts its run waiting on the check, with no phase_blocked P1, and launches after the pass",
+    async () => {
+      const env = await fleet("relaxed");
+      setHarnessVersion(env.h, "claude", NEW_VERSION);
+      const plan = await env.json(["plan", "web", "--harness", "claude", "--body-file", "-"], { stdin: "## Phase 1: look\nlook around\n" });
+      expect(plan.reply.error ?? null).toBeNull();
+      await waitUntil(() => query<{ id: string }>(env, "SELECT id FROM runs").length > 0, 30_000, "the phase's run");
+      const run = query<{ id: string }>(env, "SELECT id FROM runs")[0]!.id;
+      expect(items(env, "phase_blocked")).toEqual([]);
+      await waitUntil(() => runOf(env, run).launched_at !== null, 170_000, "the phase's run to launch after the pass");
+      expect(versions(env)).toContain(NEW_VERSION);
+      expect(items(env, "phase_blocked")).toEqual([]);
+    },
+    200_000,
   );
 
   test(
