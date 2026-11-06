@@ -12,10 +12,10 @@ import { sendBack } from "../lifecycle/send-back.ts";
 import { DAEMON_CALLER, latestMerge, type MergeRow } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergeServices } from "../policy/merge-path.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { autoMergeEnabled, verifyConfig } from "./config.ts";
+import { autoMergeEnabled, REVIEW_STEP, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, findQueued, getRequest, insertRequest, positionOf, requeuedFrom } from "./queue.ts";
-import { endedAtDeadline, readTail } from "./runner.ts";
+import { endedAtDeadline, readTail, REVIEW_NO_VERDICT } from "./runner.ts";
 import { headMovedCancelled } from "./start.ts";
 import { finishedAtHead, getVerification, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
 
@@ -35,10 +35,18 @@ import { finishedAtHead, getVerification, runningVerifications, type Verificatio
  * back, cancelled or redelivered, or a project that turns it off, supersedes
  * the row. The merge is the `merge` verb's own path (src/policy/merge-path.ts)
  * with the daemon as caller, so it takes the yolo channel and the gate is
- * unchanged. No model is involved.
+ * unchanged. No model is involved here (a review step is the verify's own, src/verify/review.ts).
+ *
+ * Auto-verify (docs/notes/2026-11-06-auto-verify-every-t8.md): every other
+ * delivery on a project with verify steps gets a row with `merge = 0`, so its
+ * verify starts with no leader turn whatever the project's landing mode. It
+ * runs the same states up to the verify: a pass ends it `verified` (the merge
+ * then waits as it did, on an approval or the landing queue), and a failure
+ * goes back to the worker or is held exactly as an auto-merge's. Unset,
+ * `auto_merge` follows the project's yolo posture.
  */
 
-export const AUTO_MERGE_STATES = ["queued", "verifying", "waiting_checks", "merging", "merged", "held", "superseded", "sent_back"] as const;
+export const AUTO_MERGE_STATES = ["queued", "verifying", "waiting_checks", "merging", "merged", "held", "superseded", "sent_back", "verified"] as const;
 export type AutoMergeState = (typeof AUTO_MERGE_STATES)[number];
 export const LIVE_AUTO_MERGE_STATES: readonly AutoMergeState[] = ["queued", "verifying", "waiting_checks", "merging"];
 
@@ -50,8 +58,10 @@ export const AUTO_MERGE_TICK_MS = 60_000;
 const SEND_BACK_TAIL_LINES = 40;
 /** How much of a hold's reason its item line keeps, so the next command after it stays on the line (the row keeps it whole). */
 const HELD_DETAIL_CHARS = 120;
-/** What joins the pr_ready line and the auto-merge's progress. */
+/** What joins the pr_ready line and the auto-merge's progress (an auto-verify's says so). */
 const READY_SEPARATOR = "; auto-merge: ";
+const VERIFY_SEPARATOR = "; auto-verify: ";
+const SEPARATORS = /; auto-(?:merge|verify): /;
 
 export interface AutoMergeRow {
   id: string;
@@ -70,6 +80,8 @@ export interface AutoMergeRow {
   detail: string | null;
   /** held: the command its auto_merge_held item names (NULL on a row held before migration 43). */
   next?: string | null;
+  /** 1: verify, then merge; 0: verify only (auto-verify, migration 55). */
+  merge: number;
   created_at: number;
   state_since: number;
   updated_at: number;
@@ -116,6 +128,8 @@ function progressOf(db: Db, row: AutoMergeRow): string | null {
       return `merging (${row.merge_id ?? "-"})`;
     case "held":
       return `held (${row.reason ?? "-"})`;
+    case "verified":
+      return `verify ${row.verification_id ?? "-"} passed`;
     default:
       return null;
   }
@@ -123,15 +137,15 @@ function progressOf(db: Db, row: AutoMergeRow): string | null {
 
 /** Keep the run's open pr_ready line ending in the auto-merge's progress; true when it changed. Call inside a transaction. */
 function refreshReadyLine(db: Db, row: AutoMergeRow): boolean {
-  return setReadyProgress(db, row.run_id, progressOf(db, row));
+  return setReadyProgress(db, row.run_id, progressOf(db, row), row.merge === 0 ? VERIFY_SEPARATOR : READY_SEPARATOR);
 }
 
 /** End the run's open pr_ready line in `progress` (the auto-merge's, or the landing queue's place), or nothing; true when it changed. Call inside a transaction. */
-export function setReadyProgress(db: Db, runId: string, progress: string | null): boolean {
+export function setReadyProgress(db: Db, runId: string, progress: string | null, separator = READY_SEPARATOR): boolean {
   const item = findOpenRunItem(db, "pr_ready", runId);
   if (!item) return false;
-  const base = (item.full_line ?? item.line).split(READY_SEPARATOR)[0]!;
-  const lines = itemLines(progress ? `${base}${READY_SEPARATOR}${progress}` : base);
+  const base = (item.full_line ?? item.line).split(SEPARATORS)[0]!;
+  const lines = itemLines(progress ? `${base}${separator}${progress}` : base);
   if (lines.line === item.line && lines.full_line === item.full_line) return false;
   db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(item.id, lines.line, lines.full_line);
   return true;
@@ -181,11 +195,28 @@ function isYolo(db: Db, taskId: string): boolean {
   return (db.query("SELECT yolo FROM task_policy WHERE task_id = ?1").get(taskId) as { yolo: number } | null)?.yolo === 1;
 }
 
-function optedIn(config: FlowrynConfig, projectId: string): boolean {
+function projectYolo(db: Db, projectId: string): boolean {
+  return (db.query("SELECT yolo FROM projects WHERE id = ?1").get(projectId) as { yolo: number } | null)?.yolo === 1;
+}
+
+/** Whether the project auto-merges: `auto_merge`, else its yolo posture (src/verify/config.ts). */
+export function autoMergeOn(db: Db, config: FlowrynConfig, projectId: string): boolean {
+  return autoMergeEnabled(config, projectId, projectYolo(db, projectId));
+}
+
+function optedIn(db: Db, config: FlowrynConfig, projectId: string): boolean {
   try {
-    return autoMergeEnabled(config, projectId);
+    return autoMergeOn(db, config, projectId);
   } catch {
     // An invalid [projects.<id>] table: the daemon refused that config, and nothing merges by itself on it.
+    return false;
+  }
+}
+
+function hasVerifySteps(config: FlowrynConfig, projectId: string): boolean {
+  try {
+    return verifyConfig(config, projectId) !== null;
+  } catch {
     return false;
   }
 }
@@ -194,14 +225,26 @@ function optedIn(config: FlowrynConfig, projectId: string): boolean {
  * The delivery's auto-merge, in the deliver transaction: a live row of the
  * run is superseded (a redelivery), and an opted-in, yolo, non-sensitive ship
  * gets a new one, following a verify of this head that passed, is running or
- * is queued, or else queuing one (source auto). Returns the new row, if any.
+ * is queued, or else queuing one (source auto). Any other ship on a project
+ * with verify steps gets an auto-verify (startAutoVerify). Returns the new row, if any.
  */
 export function startAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number): AutoMergeRow | null {
   supersedeAutoMerge(db, run.id, "redelivered", `delivered again at ${d.head.slice(0, 8)}`, now, "cli");
-  if (run.kind !== "ship" || run.sensitive || !isYolo(db, run.task_id) || !optedIn(config, run.project_id)) return null;
   // A stacked run cannot merge until the task beneath it lands; its delivery after the retarget starts one.
-  if (run.stacked_on) return null;
-  return createAutoMerge(db, config, run, d, now);
+  if (run.kind !== "ship" || run.stacked_on) return null;
+  if (!run.sensitive && isYolo(db, run.task_id) && optedIn(db, config, run.project_id)) return createAutoMerge(db, config, run, d, now);
+  return startAutoVerify(db, config, run, d, now);
+}
+
+/**
+ * A delivery that does not auto-merge (approval work, sensitive work, a project
+ * that opted out, or one the landing queue lands) still has its verify queued
+ * by itself, when the project has verify steps: a `merge = 0` row. The caller
+ * has superseded any live row. Call inside the deliver transaction.
+ */
+export function startAutoVerify(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number): AutoMergeRow | null {
+  if (run.kind !== "ship" || run.stacked_on || !hasVerifySteps(config, run.project_id)) return null;
+  return createAutoMerge(db, config, run, d, now, { merge: false });
 }
 
 /** Supersede the run's live row, if any. Call inside a transaction. */
@@ -217,7 +260,8 @@ export function supersedeAutoMerge(db: Db, runId: string, reason: string, detail
  * queues one (source auto). The caller has superseded any live row. Call
  * inside a transaction.
  */
-export function createAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number): AutoMergeRow {
+export function createAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolicy, d: AutoMergeDelivery, now: number, opts: { merge?: boolean } = {}): AutoMergeRow {
+  const merge = opts.merge ?? true;
   const policy = verifyPolicyId(verifyConfig(config, run.project_id)!);
   const next = Number(getMeta(db, "next_auto_merge_no") ?? "1");
   setMeta(db, "next_auto_merge_no", String(next + 1));
@@ -228,7 +272,7 @@ export function createAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolic
   const passed = finishedAtHead(db, d.ref, d.head, policy);
   const running = runningVerifications(db).find((v) => v.pr_url === d.ref && v.head_sha === d.head && v.policy_id === policy);
   if (passed?.state === "passed") {
-    state = "waiting_checks";
+    state = merge ? "waiting_checks" : "verified";
     verificationId = passed.id;
   } else if (running) {
     state = "verifying";
@@ -252,16 +296,21 @@ export function createAutoMerge(db: Db, config: FlowrynConfig, run: RunWithPolic
     requestId = request.id;
   }
   db.query(
-    `INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, request_id, verification_id, created_at, state_since, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10)`,
-  ).run(id, run.id, run.task_id, run.project_id, d.ref, d.head, state, requestId, verificationId, now);
-  appendEvent(db, { source: d.source ?? "cli", kind: "auto_merge.started", runId: run.id, taskId: run.task_id, payload: { auto_merge: id, ref: d.ref, head: d.head, state, request: requestId, verification: verificationId, policy }, ts: now });
+    `INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, request_id, verification_id, created_at, state_since, updated_at, merge)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10, ?11)`,
+  ).run(id, run.id, run.task_id, run.project_id, d.ref, d.head, state, requestId, verificationId, now, merge ? 1 : 0);
+  appendEvent(db, { source: d.source ?? "cli", kind: "auto_merge.started", runId: run.id, taskId: run.task_id, payload: { auto_merge: id, ref: d.ref, head: d.head, state, request: requestId, verification: verificationId, policy, merge }, ts: now });
   const row = getAutoMerge(db, id)!;
   refreshReadyLine(db, row);
   return row;
 }
 
 // --- the controller -------------------------------------------------------------------------
+
+/** What a held row's next command adds after the verify: the merge, for a row that merges. */
+function thenMerge(row: AutoMergeRow): string {
+  return row.merge === 0 ? "" : `, then flowryn merge ${row.task_id}`;
+}
 
 /** How a finished verify that did not pass ends the auto-merge. */
 export type VerifyVerdict = { sendBack: VerifyStep } | { hold: "verify_failed" | "verify_timeout" | "verify_error"; detail: string };
@@ -274,16 +323,26 @@ export type VerifyVerdict = { sendBack: VerifyStep } | { hold: "verify_failed" |
 export function verifyVerdict(v: Verification): VerifyVerdict {
   if (v.state === "error") return { hold: "verify_error", detail: `verify ${v.id} ended in an error: ${v.detail ?? "no detail"}` };
   const step = v.steps.find((s) => s.state === "failed");
+  // A review with no verdict (its call failed or went over its cap) is not the worker's to fix.
+  if (step && step.name === REVIEW_STEP && step.exit === REVIEW_NO_VERDICT && !endedAtDeadline(step)) return { hold: "verify_error", detail: `verify ${v.id}: ${step.detail ?? "the review gave no verdict"}` };
   if (step && endedAtDeadline(step)) return { hold: "verify_timeout", detail: `verify ${v.id} timed out in \`${step.name}\`` };
   if (!step || step.exit === null || step.exit === 0) return { hold: "verify_failed", detail: `verify ${v.id} failed: ${v.detail ?? step?.detail ?? "no failing step recorded"}` };
   return { sendBack: step };
 }
 
 /** The steer a sent-back ship gets: the failing step, its exit and its last lines. */
-export function sendBackText(v: Verification, step: VerifyStep): string {
+export function sendBackText(v: Verification, step: VerifyStep, label = "Auto-merge"): string {
+  if (step.name === REVIEW_STEP) {
+    const findings = sanitizeBlock(readTail(join(v.dir, step.log), 16 * 1024)).trimEnd();
+    return [
+      `${label}: the independent review in the daemon's flowryn verify ${v.id} of your delivery at ${v.head_sha.slice(0, 8)} failed it.`,
+      findings ? `Its findings:\n\n${findings}\n` : "It gave no findings.",
+      "Fix what holds up, commit, and deliver again; say in your handoff why a finding does not apply. A second failure at the same head goes to your leader instead.",
+    ].join("\n");
+  }
   const tail = sanitizeBlock(readTail(join(v.dir, step.log), 16 * 1024)).split("\n").slice(-SEND_BACK_TAIL_LINES).join("\n").trimEnd();
   return [
-    `Auto-merge: the daemon's flowryn verify ${v.id} of your delivery at ${v.head_sha.slice(0, 8)} failed: step \`${step.name}\` exited ${step.exit}.`,
+    `${label}: the daemon's flowryn verify ${v.id} of your delivery at ${v.head_sha.slice(0, 8)} failed: step \`${step.name}\` exited ${step.exit}.`,
     tail ? `Its last lines:\n\n${tail}\n` : "It printed nothing.",
     "Fix it, commit, and deliver again. A second failure at the same head goes to your leader instead.",
   ].join("\n");
@@ -418,13 +477,21 @@ export class AutoMerger {
     if (row.state !== "merging" && run.state !== "ready") return `the run is ${run.state} (sent back)`;
     const delivered = deliveredOf(db, run.task_id);
     if (!delivered || delivered.head !== row.head_sha) return "redelivered";
+    // An auto-verify lasts while the project has verify steps (an invalid config keeps the last good one).
+    if (row.merge === 0) {
+      try {
+        return verifyConfig(this.deps.config(), row.project_id) ? null : `project ${row.project_id} has no verify steps now`;
+      } catch {
+        return null;
+      }
+    }
     // The landing queue's head of line: the queue ends it when the project leaves the queue.
     if (db.query("SELECT 1 FROM landing_queue WHERE auto_merge_id = ?1 AND state = 'landing'").get(row.id)) return null;
     // Unattended mode started it (src/attention/autonomy-pass.ts): it lasts while the standing approval covers the project.
     if (autonomyForRun(db, run, this.deps.now())) return null;
     let enabled: boolean;
     try {
-      enabled = autoMergeEnabled(this.deps.config(), row.project_id);
+      enabled = autoMergeOn(db, this.deps.config(), row.project_id);
     } catch {
       // The daemon refuses an invalid config and keeps the last good one; this one is what it runs.
       return null;
@@ -447,14 +514,14 @@ export class AutoMerger {
     const { db } = this.deps;
     const held = move(db, row, "held", { reason, detail, next }, now);
     if (!findOpenRunItem(db, "auto_merge_held", row.run_id)) {
-      openItem(db, { kind: "auto_merge_held", eventSeq: held.seq, taskId: row.task_id, runId: row.run_id, line: `Auto-merge held: ${taskTitle(db, row.task_id)} (${row.task_id}): ${sanitizeLine(detail, HELD_DETAIL_CHARS)}; ${next}`, now });
+      openItem(db, { kind: "auto_merge_held", eventSeq: held.seq, taskId: row.task_id, runId: row.run_id, line: `${row.merge === 0 ? "Auto-verify" : "Auto-merge"} held: ${taskTitle(db, row.task_id)} (${row.task_id}): ${sanitizeLine(detail, HELD_DETAIL_CHARS)}; ${next}`, now });
     }
     return held.row;
   }
 
   private fromQueued(row: AutoMergeRow, now: number): AutoMergeRow {
     const request = row.request_id ? getRequest(this.deps.db, row.request_id) : null;
-    if (!request) return this.hold(row, "verify_cancelled", `its verify request ${row.request_id ?? "-"} is gone`, `flowryn verify ${row.task_id}, then flowryn merge ${row.task_id}`, now);
+    if (!request) return this.hold(row, "verify_cancelled", `its verify request ${row.request_id ?? "-"} is gone`, `flowryn verify ${row.task_id}${thenMerge(row)}`, now);
     if (request.state === "cancelled") {
       // The worker pushed past the delivered head before its verify started: its redelivery supersedes this row.
       if (headMovedCancelled(request.detail) && now - row.state_since <= CHECKS_WAIT_MS) return row;
@@ -479,14 +546,14 @@ export class AutoMerger {
   private fromVerifying(row: AutoMergeRow, now: number): AutoMergeRow {
     const { db } = this.deps;
     const v = row.verification_id ? getVerification(db, row.verification_id) : null;
-    if (!v) return this.hold(row, "verify_error", `its verification ${row.verification_id ?? "-"} is gone`, `flowryn verify ${row.task_id}, then flowryn merge ${row.task_id}`, now);
+    if (!v) return this.hold(row, "verify_error", `its verification ${row.verification_id ?? "-"} is gone`, `flowryn verify ${row.task_id}${thenMerge(row)}`, now);
     if (v.state === "running") return row;
-    if (v.state === "passed") return move(db, row, "waiting_checks", {}, now).row;
+    if (v.state === "passed") return move(db, row, row.merge === 0 ? "verified" : "waiting_checks", {}, now).row;
     // Interrupted by a daemon stop: startup recovery queued it again once (phase 1); follow that request.
     const requeued = v.state === "error" ? requeuedFrom(db, v.id) : null;
     if (requeued) return move(db, row, "queued", { request_id: requeued.id, verification_id: null }, now).row;
     const verdict = verifyVerdict(v);
-    const next = `flowryn verify show ${v.id}; once fixed: flowryn verify ${row.task_id}, then flowryn merge ${row.task_id}`;
+    const next = `flowryn verify show ${v.id}; once fixed: flowryn verify ${row.task_id}${thenMerge(row)}`;
     if ("hold" in verdict) return this.hold(row, verdict.hold, verdict.detail, next, now);
     const sentBefore = (db.query("SELECT COUNT(*) AS n FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2 AND state = 'sent_back'").get(row.run_id, row.head_sha) as { n: number }).n;
     if (sentBefore > 0) return this.hold(row, "verify_failed", `verify ${v.id} failed again at ${row.head_sha.slice(0, 8)} (\`${verdict.sendBack.name}\` exited ${verdict.sendBack.exit}) after a send-back`, next, now);
@@ -495,9 +562,9 @@ export class AutoMerger {
       db,
       run,
       {
-        text: sendBackText(v, verdict.sendBack),
-        feedback: `auto-merge verify ${v.id} failed`,
-        why: `the auto-merge's verify ${v.id} failed`,
+        text: sendBackText(v, verdict.sendBack, row.merge === 0 ? "Auto-verify" : "Auto-merge"),
+        feedback: `${row.merge === 0 ? "auto-verify" : "auto-merge"} verify ${v.id} failed`,
+        why: `the ${row.merge === 0 ? "auto-verify" : "auto-merge"}'s verify ${v.id} failed`,
         event: { source: "daemon", kind: "auto_merge.verify_failed", payload: { auto_merge: row.id, verification: v.id, step: verdict.sendBack.name, exit: verdict.sendBack.exit } },
       },
       now,

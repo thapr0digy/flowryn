@@ -28,7 +28,7 @@ import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
 import { deliveryHandoff, deliveryStages, pipelineNeedsLastStage, recordStageDelivered, requireLastStageStarted, startPooledStages } from "./stages.ts";
 import { landScout } from "./landing.ts";
 import { requireApprovedDraft } from "./draft.ts";
-import { startAutoMerge } from "../verify/auto-merge.ts";
+import { startAutoMerge, startAutoVerify } from "../verify/auto-merge.ts";
 import { deliveredToQueue } from "../verify/landing-queue.ts";
 
 const STATUS = /^[a-z][a-z-]{0,23}$/;
@@ -488,13 +488,15 @@ const deliver: VerbSpec = {
       if (steered.length > 0) data.stacked_steered = steered.join(" ");
       if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now, handoff);
       const ship = outcome.ship;
-      // A queue project's PR waits its turn in the landing queue (src/verify/landing-queue.ts), which merges it.
+      // A queue project's PR waits its turn in the landing queue (src/verify/landing-queue.ts), which merges it;
+      // its verify starts now all the same, so a failure goes back to the worker before its turn comes.
       if (ship.kind === "pr" && deliveredToQueue(ctx.db, ctx.config(), run, ship.pr.headSha, now)) {
+        const verify = startAutoVerify(ctx.db, ctx.config(), run, { ref: ship.url, head: ship.pr.headSha, prNumber: ship.pr.number, headRef: ship.pr.headRef, worktree: null }, now);
         // The watcher's pass kicks the auto-merger, whose pass takes it into the line.
         ctx.delivery.watch(run.id);
-        return { data: { ...data, landing: "queue" }, hints: ["end your turn"] };
+        return { data: { ...data, landing: "queue", ...(verify ? { auto_verify: verify.id } : {}) }, hints: ["end your turn"] };
       }
-      // An opted-in yolo project's delivery is verified and merged by the daemon (src/verify/auto-merge.ts).
+      // A yolo delivery on a project that auto-merges is verified and merged by the daemon; any other is verified by it (src/verify/auto-merge.ts).
       const auto = startAutoMerge(
         ctx.db,
         ctx.config(),
@@ -504,7 +506,7 @@ const deliver: VerbSpec = {
           : { ref: `local:${run.branch}`, head: ship.head, prNumber: null, headRef: null, worktree: run.worktree_path },
         now,
       );
-      return { data: auto ? { ...data, auto_merge: auto.id } : data, hints: ["end your turn"] };
+      return { data: auto ? { ...data, [auto.merge === 0 ? "auto_verify" : "auto_merge"]: auto.id } : data, hints: ["end your turn"] };
     }
     const delivered = outcome.report!;
     if (run.state === "ready") {

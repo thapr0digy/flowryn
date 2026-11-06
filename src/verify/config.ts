@@ -1,6 +1,8 @@
 import { isAbsolute, normalize } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
+import { checkUsd } from "../config/ask.ts";
 import { table, type FlowrynConfig } from "../config/config.ts";
+import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 
 /**
  * A project's verify steps, from config.toml `[projects.<id>]`: the commands
@@ -8,6 +10,9 @@ import { table, type FlowrynConfig } from "../config/config.ts";
  * live in your config, never in the repository, so a PR cannot change the
  * check that lets it through the merge gate. A nested list is a group whose
  * steps run at the same time (docs/notes/2026-10-22-verify-reliability-per-xe.md).
+ * A `{ review = true }` entry is the review step: one capped, read-only model
+ * review of the PR diff against the task's brief and approved spec
+ * (src/verify/review.ts, docs/notes/2026-11-06-auto-verify-every-t8.md).
  */
 
 /** One entry of `verify`: a step, or a group of two or more steps run in parallel. */
@@ -16,8 +21,26 @@ export type VerifyItem = string | string[];
 export const LANDING_MODES = ["queue", "manual"] as const;
 export type LandingMode = (typeof LANDING_MODES)[number];
 
+/** The review step's name in a verification's steps: no shell command is ever spelled like this. */
+export const REVIEW_STEP = "flowryn:review";
+/** The review step's spend cap and deadline when its entry sets none. */
+export const DEFAULT_REVIEW_USD = 2;
+export const DEFAULT_REVIEW_TIMEOUT_MIN = 10;
+
+/** `{ review = true, max_usd?, timeout_min?, harness?, model? }`: who reviews, and its bounds. */
+export interface ReviewConfig {
+  max_usd: number;
+  timeout_ms: number;
+  harness: HarnessId;
+  /** A model other than the builder's, where one is set; null: the harness's configured model. */
+  model: string | null;
+}
+
 export interface VerifyConfig {
+  /** In order; the review step appears as REVIEW_STEP. */
   steps: VerifyItem[];
+  /** The review step's settings when `verify` has one. */
+  review: ReviewConfig | null;
   /** A file the steps build, relative to the worktree, copied out before the worktree goes. */
   binary: string | null;
   /** The whole run, every step together. */
@@ -41,18 +64,40 @@ function projectTable(config: FlowrynConfig, projectId: string): Record<string, 
   return table(projects[projectId], `[projects.${projectId}]`);
 }
 
-const isStep = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0;
+const isStep = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0 && s.trim() !== REVIEW_STEP;
+const isTable = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const REVIEW_KEYS = new Set(["review", "max_usd", "timeout_min", "harness", "model"]);
 
-/** The `verify` list, each group of one read as a plain step; null when malformed. */
-function readItems(raw: unknown): VerifyItem[] | null {
+/** A `{ review = true, ... }` entry, checked; throws config_invalid on anything else in it. */
+function readReview(raw: Record<string, unknown>, where: string): ReviewConfig {
+  for (const key of Object.keys(raw)) if (!REVIEW_KEYS.has(key)) throw new FlowrynError("config_invalid", `${where} the review step's ${key} is not a known setting (${[...REVIEW_KEYS].join(", ")})`);
+  if (raw.review !== true) throw new FlowrynError("config_invalid", `${where} a table in verify must be { review = true }`);
+  if (raw.harness !== undefined && !HARNESS_IDS.includes(raw.harness as HarnessId)) throw new FlowrynError("config_invalid", `${where} the review step's harness must be one of ${HARNESS_IDS.join(", ")}`);
+  if (raw.model !== undefined && (typeof raw.model !== "string" || raw.model.trim() === "")) throw new FlowrynError("config_invalid", `${where} the review step's model must be a model name`);
+  return {
+    max_usd: raw.max_usd === undefined ? DEFAULT_REVIEW_USD : checkUsd(raw.max_usd, `${where} the review step's max_usd`),
+    timeout_ms: positiveMinutes(raw.timeout_min ?? DEFAULT_REVIEW_TIMEOUT_MIN, where, "the review step's timeout_min"),
+    harness: (raw.harness as HarnessId | undefined) ?? "claude",
+    model: typeof raw.model === "string" ? raw.model.trim() : null,
+  };
+}
+
+/** The `verify` list, each group of one read as a plain step; null when malformed. A review entry is REVIEW_STEP, at most once, never in a group. */
+function readItems(raw: unknown, where: string): { items: VerifyItem[]; review: ReviewConfig | null } | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const items: VerifyItem[] = [];
+  let review: ReviewConfig | null = null;
   for (const item of raw) {
     if (isStep(item)) items.push(item);
     else if (Array.isArray(item) && item.length > 0 && item.every(isStep)) items.push(item.length === 1 ? item[0]! : [...item]);
+    else if (isTable(item)) {
+      if (review) throw new FlowrynError("config_invalid", `${where} verify has more than one review step`);
+      review = readReview(item, where);
+      items.push(REVIEW_STEP);
+    } else if (Array.isArray(item) && item.some(isTable)) throw new FlowrynError("config_invalid", `${where} the review step cannot run in a parallel group`);
     else return null;
   }
-  return items;
+  return { items, review };
 }
 
 function positiveMinutes(value: unknown, where: string, key: string): number {
@@ -74,8 +119,8 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
     if (raw.landing === "queue") throw new FlowrynError("config_invalid", `${where} landing = "queue" needs verify steps: the queue verifies each PR again after merging main into it`);
     return null;
   }
-  const steps = readItems(raw.verify);
-  if (!steps) throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands, or of lists of commands run in parallel`);
+  const read = readItems(raw.verify, where);
+  if (!read) throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands, or of lists of commands run in parallel`);
   let binary: string | null = null;
   if (raw.verify_binary !== undefined) {
     const value = raw.verify_binary;
@@ -86,18 +131,26 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   }
   const timeout_ms = positiveMinutes(raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN, where, "verify_timeout_min");
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
-  return { steps, binary, timeout_ms, step_timeout_ms };
+  return { steps: read.items, review: read.review, binary, timeout_ms, step_timeout_ms };
+}
+
+/** `[projects.<id>] auto_merge` as written: true, false, or null when unset. Throws config_invalid like verifyConfig. */
+export function autoMergeSetting(config: FlowrynConfig, projectId: string): boolean | null {
+  verifyConfig(config, projectId);
+  const value = projectTable(config, projectId).auto_merge;
+  return typeof value === "boolean" ? value : null;
 }
 
 /**
  * `[projects.<id>] auto_merge` (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2):
- * the daemon verifies and merges the project's yolo deliveries itself. False
- * unless set; throws config_invalid like verifyConfig (it is refused without
- * verify steps).
+ * the daemon verifies and merges the project's yolo deliveries itself. Unset,
+ * it follows the project's yolo posture (docs/notes/2026-11-06-auto-verify-every-t8.md):
+ * a yolo project auto-merges, and `auto_merge = false` opts out. Never without
+ * verify steps; throws config_invalid like verifyConfig.
  */
-export function autoMergeEnabled(config: FlowrynConfig, projectId: string): boolean {
+export function autoMergeEnabled(config: FlowrynConfig, projectId: string, projectYolo = false): boolean {
   if (!verifyConfig(config, projectId)) return false;
-  return projectTable(config, projectId).auto_merge === true;
+  return autoMergeSetting(config, projectId) ?? projectYolo;
 }
 
 /**

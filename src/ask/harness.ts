@@ -34,12 +34,14 @@ export interface AskCall {
   workers: WorkersConfig;
   contractFile: string;
   maxUsd: number;
+  /** Claude's tools for this call, narrower than CLAUDE_ASK_TOOLS (the verify review step has no web tools). */
+  tools?: readonly string[];
 }
 
 /** Claude in print mode: JSON result, no saved session, no settings files, hooks or MCP servers, reading tools only, the native spend cap. */
 export function claudeAskArgs(call: AskCall): string[] {
   const claude = call.workers.claude;
-  const tools = CLAUDE_ASK_TOOLS.join(",");
+  const tools = (call.tools ?? CLAUDE_ASK_TOOLS).join(",");
   const args = [call.binary, "-p", "--output-format", "json", "--no-session-persistence", "--restricted", "--strict-mcp-config", "--disable-slash-commands"];
   args.push("--tools", tools, "--allowedTools", tools, "--permission-mode", "dontAsk");
   args.push("--max-budget-usd", String(call.maxUsd), "--append-system-prompt-file", call.contractFile);

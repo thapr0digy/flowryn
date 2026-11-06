@@ -122,7 +122,7 @@ function merger(f: Fixture, cfg: FlowrynConfig, now = 10_000): { auto: AutoMerge
 }
 
 describe("[projects.<id>] auto_merge", () => {
-  test("is off unless set, on with verify steps, and refused without them or as a non-boolean", () => {
+  test("unset it follows the project's yolo posture (off here), on with verify steps, and refused without them or as a non-boolean", () => {
     expect(autoMergeEnabled(config(`[projects.web]\nverify = ["true"]\n`), "web")).toBe(false);
     expect(autoMergeEnabled(config(OPTED_IN), "web")).toBe(true);
     expect(autoMergeEnabled(config(""), "web")).toBe(false);
@@ -160,14 +160,30 @@ describe("the deliver-time trigger", () => {
     expect(autoVerifyPath(f.db, "web", { PATH: "/usr/bin:/bin" })).toMatch(/^\/usr\/bin:\/bin:.*\/\.bun\/bin$/);
   });
 
-  test("not opted in, not yolo, or sensitive: no auto-merge", () => {
-    const plain = fixture();
-    expect(tx(plain.db, () => startAutoMerge(plain.db, config(`[projects.web]\nverify = ["true"]\n`), plain.run(), plain.delivery, 5_000))).toBeNull();
+  test("opted out, not yolo, or sensitive: no auto-merge, but an auto-verify (merge = 0) queues the verify all the same", () => {
+    const optedOut = fixture();
+    const out = tx(optedOut.db, () => startAutoMerge(optedOut.db, config(`[projects.web]\nverify = ["true"]\nauto_merge = false\n`), optedOut.run(), optedOut.delivery, 5_000));
     const notYolo = fixture({ yolo: 0 });
-    expect(tx(notYolo.db, () => startAutoMerge(notYolo.db, config(OPTED_IN), notYolo.run(), notYolo.delivery, 5_000))).toBeNull();
+    const plain = tx(notYolo.db, () => startAutoMerge(notYolo.db, config(OPTED_IN), notYolo.run(), notYolo.delivery, 5_000));
     const sensitive = fixture({ sensitive: 1 });
-    expect(tx(sensitive.db, () => startAutoMerge(sensitive.db, config(OPTED_IN), sensitive.run(), sensitive.delivery, 5_000))).toBeNull();
-    for (const f of [plain, notYolo, sensitive]) expect(f.db.query("SELECT COUNT(*) AS n FROM verify_queue").get()).toEqual({ n: 0 });
+    const held = tx(sensitive.db, () => startAutoMerge(sensitive.db, config(OPTED_IN), sensitive.run(), sensitive.delivery, 5_000));
+    for (const row of [out, plain, held]) expect(row).toMatchObject({ merge: 0, state: "queued" });
+    for (const f of [optedOut, notYolo, sensitive]) expect(f.db.query("SELECT COUNT(*) AS n FROM verify_queue WHERE source = 'auto'").get()).toEqual({ n: 1 });
+    // No verify steps: nothing to verify, nothing queued.
+    const none = fixture();
+    expect(tx(none.db, () => startAutoMerge(none.db, config(""), none.run(), none.delivery, 5_000))).toBeNull();
+    expect(none.db.query("SELECT COUNT(*) AS n FROM verify_queue").get()).toEqual({ n: 0 });
+  });
+
+  test("assumption: unset, auto_merge follows the project's yolo posture", () => {
+    const yolo = fixture();
+    expect(tx(yolo.db, () => startAutoMerge(yolo.db, config(`[projects.web]\nverify = ["true"]\n`), yolo.run(), yolo.delivery, 5_000))).toMatchObject({ merge: 1 });
+    const careful = fixture();
+    careful.db.query("UPDATE projects SET yolo = 0 WHERE id = 'web'").run();
+    expect(tx(careful.db, () => startAutoMerge(careful.db, config(`[projects.web]\nverify = ["true"]\n`), careful.run(), careful.delivery, 5_000))).toMatchObject({ merge: 0 });
+    expect(autoMergeEnabled(config(`[projects.web]\nverify = ["true"]\n`), "web", true)).toBe(true);
+    expect(autoMergeEnabled(config(`[projects.web]\nverify = ["true"]\nauto_merge = false\n`), "web", true)).toBe(false);
+    expect(autoMergeEnabled(config(`[projects.web]\nauto_merge = false\n`), "web", true)).toBe(false);
   });
 
   test("it follows a passed, running or queued verify of the head rather than queueing another", () => {
@@ -198,9 +214,9 @@ describe("the deliver-time trigger", () => {
     const second = tx(f.db, () => startAutoMerge(f.db, config(OPTED_IN), f.run(), { ...f.delivery, head: "b".repeat(40) }, 6_000))!;
     expect(getAutoMerge(f.db, first.id)).toMatchObject({ state: "superseded", reason: "redelivered", detail: "delivered again at bbbbbbbb" });
     expect(liveAutoMerge(f.db, f.run().id)?.id).toBe(second.id);
-    // Even a project that opted out since: the old row still ends.
-    const third = tx(f.db, () => startAutoMerge(f.db, config(`[projects.web]\nverify = ["true"]\n`), f.run(), f.delivery, 7_000));
-    expect(third).toBeNull();
+    // Even a project that opted out since: the old row still ends, and the new one only verifies.
+    const third = tx(f.db, () => startAutoMerge(f.db, config(`[projects.web]\nverify = ["true"]\nauto_merge = false\n`), f.run(), f.delivery, 7_000));
+    expect(third).toMatchObject({ merge: 0 });
     expect(getAutoMerge(f.db, second.id)?.state).toBe("superseded");
     expect(() => f.db.query("INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, created_at, state_since, updated_at) VALUES ('x1', 'r1', 't1', 'web', 'u', 'h', 'queued', 1, 1, 1), ('x2', 'r1', 't1', 'web', 'u', 'h', 'merging', 1, 1, 1)").run()).toThrow();
   });
@@ -384,7 +400,7 @@ describe("the controller, without GitHub", () => {
     const cases: [string, (f: Fixture) => void, FlowrynConfig | null, string][] = [
       ["sent back", (f) => f.db.query("UPDATE runs SET state = 'running' WHERE id = 'r1'").run(), null, "the run is running (sent back)"],
       ["cancelled", (f) => f.db.query("UPDATE runs SET state = 'cancelled' WHERE id = 'r1'").run(), null, "the run is cancelled"],
-      ["opted out", () => {}, config(`[projects.web]\nverify = ${JSON.stringify(STEPS)}\n`), "auto_merge is off for project web"],
+      ["opted out", () => {}, config(`[projects.web]\nverify = ${JSON.stringify(STEPS)}\nauto_merge = false\n`), "auto_merge is off for project web"],
     ];
     for (const [name, change, after, why] of cases) {
       const f = fixture();
