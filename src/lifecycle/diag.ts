@@ -57,7 +57,7 @@ function hidden(value: unknown): string {
  * kept as-is (a failure reason, a channel error, a cleanup detail) still
  * never carries a credential.
  */
-function scrubTokens(value: unknown): unknown {
+export function scrubTokens(value: unknown): unknown {
   if (typeof value === "string") return redactUrlSecrets(value).replace(TOKEN_ANYWHERE, REDACTED);
   if (Array.isArray(value)) return value.map(scrubTokens);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubTokens(v)]));

@@ -22,9 +22,10 @@
  * named cause, as a warning that leaves doctor's exit code and the record alone.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { StepEvidence } from "../../src/contracts/evidence.ts";
 import { contractSteps } from "../../src/contracts/suite.ts";
 import type { HarnessId } from "../../src/harness/types.ts";
 import { FAKE_VERSION, makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
@@ -128,6 +129,37 @@ describe("the harness contract suite against fakes", () => {
       if (process.env.FLOWRYN_TEST_KEEP !== "1") expect(scratchHomes().filter((name) => !before.has(name))).toEqual([]);
     }, 90_000);
   }
+
+  test("claude: a worker that delivers at a turn end its steer said asks for no outcome fails the step, and the failure keeps its evidence", async () => {
+    fleet.h.env.FAKE_CONTRACT_IGNORE_END_TURN_NOTE = "1";
+    try {
+      const { code, checks, screen } = await doctorContracts("claude");
+      const failed = checks.find((c) => c.status === "fail" && c.check.startsWith("contract claude "));
+      // The run landed in its first turn, so liveness never reads idle (the live v153 failure on 2026-11-06).
+      expect(failed, screen).toMatchObject({ check: "contract claude idle" });
+      expect(failed!.detail).toMatch(/waiting for liveness idle after the turn|delivered during its first turn/);
+      expect(code).not.toBe(0);
+      const verdict = checks.find((c) => c.check === "contract claude")!;
+      const report = /report (\S+\.json);/.exec(verdict.detail)![1]!;
+      const evidencePath = /evidence (\S+\.evidence\.json)/.exec(verdict.detail)![1]!;
+      expect((JSON.parse(readFileSync(report, "utf8")) as { evidence?: string }).evidence).toBe(evidencePath);
+      expect(statSync(evidencePath).mode & 0o777).toBe(0o600);
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as StepEvidence;
+      expect(evidence.step).toBe("idle");
+      expect(evidence.error).toBe(failed!.detail.replace(/ \([\d.]+s\)$/, ""));
+      expect(evidence.events.map((e) => e.kind)).toContain("run.delivered");
+      expect(evidence.steers.map((m) => [m.id, m.end_turn])).toEqual([["m1", 1]]);
+      expect(evidence.transcript.path).toEndWith(".jsonl");
+      expect(evidence.transcript.lines.length).toBeGreaterThan(0);
+      expect(evidence.screen.pane).not.toBeNull();
+      expect(evidence.run).not.toHaveProperty("token_hash");
+      // A failed run records nothing: the version the passing run recorded stays the only one.
+      expect(recorded("claude").map((r) => r.version)).toEqual([FAKE_VERSION]);
+      expect(openPanes()).toEqual([]);
+    } finally {
+      delete fleet.h.env.FAKE_CONTRACT_IGNORE_END_TURN_NOTE;
+    }
+  }, 90_000);
 
   test("pi: --model adds an informational real-model pass that names the ignored steer and gates nothing", async () => {
     const before = new Set(scratchHomes());
