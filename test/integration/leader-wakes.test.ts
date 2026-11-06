@@ -56,20 +56,19 @@ describe("your own actions wake the leader", () => {
   );
 
   test(
-    "with you active, the follow-up waits out its batch window, then wakes the idle leader all the same (steer m569)",
+    "with you at the composer, the follow-up waits; once you go inactive it wakes the idle leader",
     async () => {
-      env = await makeLeaderEnv({ extraConfig: "[leader]\naction_batch_ms = 1500\n" });
+      env = await makeLeaderEnv({ extraConfig: QUICK });
       const lead = await env.claude();
       await lead.start();
       await lead.prompt("first");
       expect((await env.call("decline", { task: env.worker.taskId, body: "again" }, null)).ok).toBe(true);
       const item = env.withDb((db) => (db.query("SELECT id FROM items WHERE kind = 'user_acted' AND task_id = ?1").get(env!.worker.taskId) as { id: string }).id);
-      // Inside the window nothing is pushed.
-      await Bun.sleep(500);
+      await Bun.sleep(QUIET_MS);
       expect(followUpPushes(env)).toEqual([]);
+      await lead.goInactive();
       await waitFor("the follow-up wake", 15_000, () => lead.seen.some((s) => s.via === "waiter"));
       expect(followUpPushes(env)).toEqual([[item]]);
-      expect(env.withDb((db) => (db.query("SELECT user_inactive_since FROM leader_sessions").get() as { user_inactive_since: number | null }).user_inactive_since)).toBeNull();
       await waitFor("the woken turn to end", 10_000, () => env!.withDb((db) => db.query("SELECT 1 FROM presentations WHERE item_id = ?1 AND state = 'presented'").get(item) !== null));
     },
     T,
@@ -88,12 +87,13 @@ async function report(e: LeaderEnv, body: string): Promise<string> {
 
 describe("the leader's action items wake it", () => {
   test(
-    "a worker's report wakes the idle leader with the user active, past the retired hourly cap; the woken turn gets its line",
+    "a worker's report wakes the idle leader past the retired hourly cap; the woken turn gets its line",
     async () => {
       env = await makeLeaderEnv({ extraConfig: `${QUICK}[notify]\nmax_triggered_turns_per_hour = 1\n` });
       const lead = await env.claude();
       await lead.start();
       await lead.prompt("first");
+      await lead.goInactive();
       const ids: string[] = [];
       for (const mark of ["FLOWRYN-MARK-RW1", "FLOWRYN-MARK-RW2"]) {
         const id = await report(env, `${mark} the contract step fails`);

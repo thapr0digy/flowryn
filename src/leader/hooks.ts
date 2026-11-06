@@ -1,6 +1,6 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerCtx, HandlerResult } from "../api/verbs.ts";
-import { awaySuggestion, endAutoAway, expireAway, takePendingBrief } from "../attention/away.ts";
+import { awaySuggestion, endAutoAway, expireAway, getAway, takePendingBrief } from "../attention/away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "../attention/briefing.ts";
 import { acceptOffer, carry, confirmTurn, loseCarried, offer, releaseOffer, startedTurnsLastHour, type PresentationPath } from "../attention/presentations.ts";
 import { LEADER_WAKE_KINDS, QUESTION_KINDS, RELAY_KINDS, type ItemKind } from "../attention/items.ts";
@@ -197,10 +197,15 @@ function visibleTo(ctx: PushCtx, s: LeaderSessionRow): ScopeLens {
  * How a push would reach this session now, or null when nothing may be
  * pushed to it. Busy: Pi's extension follows up (a Claude turn takes it at
  * its Stop). Idle: a Claude waiter wakes it, a Pi extension with the TUI
- * triggers a turn, whether or not you were recently active (steer m569).
+ * triggers a turn. While you are at the composer (typing, a draft, or the
+ * minute after a turn before Claude's idle_prompt), nothing is pushed: the
+ * wake comes once you are inactive, so it never lands on a draft (the leader
+ * bridge contract's "a P0 while idle and you active" step). Away counts as
+ * inactive: your remote-control chat never fires idle_prompt on the Mac.
  */
-function pushMode(s: LeaderSessionRow, now: number): PushMode | null {
+function pushMode(s: LeaderSessionRow, now: number, away: boolean): PushMode | null {
   if (busyNow(s, now)) return s.harness === "pi" ? "continuation" : null;
+  if (s.user_inactive_since === null && !away) return null;
   if (s.harness === "pi" && s.has_ui !== 1) return null;
   return s.harness === "pi" ? "trigger" : "waiter";
 }
@@ -243,11 +248,12 @@ export function wakesLastHour(db: Db, session: string, now: number): number {
  * started wake_ceiling_per_hour turns in the last hour (typed rewakes
  * included) is woken no more until the hour drains (`ceiling`), the runaway
  * guard. A push that rides a running turn (Pi's continuation) is never held.
+ * While you are at the composer nothing is pushed (pushMode).
  */
 export function leaderPush(ctx: PushCtx, s: LeaderSessionRow, now: number): PushDecision {
   const none: PushDecision = { push: null, dueAt: null, ceiling: null };
   if (!isHolder(ctx.db, s.session_id)) return none;
-  const mode = pushMode(s, now);
+  const mode = pushMode(s, now, getAway(ctx.db, now) !== null);
   if (!mode) {
     const batch = questionBatch(ctx.db, s.session_id, ctx.attention.timing().question_batch_ms, visibleTo(ctx, s));
     return { ...none, dueAt: batch?.dueAt ?? null };

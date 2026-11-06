@@ -69,11 +69,11 @@ describe("leader follow-ups: your own actions wake the leader", () => {
     expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
   });
 
-  test("with the user active, an idle leader is still woken (steer m569), and the follow-up tops the next digest's P1 lines", () => {
+  test("with the user at the composer, nothing is pushed and the follow-up tops the next digest's P1 lines", () => {
     const s = holder({ user_inactive_since: null });
-    const older = open("pr_ready", "an older PR waits", { at: clock - 120_000 });
+    open("pr_ready", "an older PR waits", { at: clock - 120_000 });
     const acted = open("user_acted", "The user declined t2");
-    expect(leaderPush(pushCtx(), s, clock).push).toMatchObject({ kind: "follow_up", mode: "waiter", items: [{ id: older }, { id: acted }] });
+    expect(leaderPush(pushCtx(), s, clock).push).toBeNull();
     const digest = composeDigest(digestCandidates(db, s.session_id, clock, DEFAULT_LEADER_TIMING.age_ms))!;
     expect(digest.shown[0]!.id).toBe(acted);
   });
@@ -394,12 +394,12 @@ describe("rewake: a leader whose waiter is gone", () => {
     expect(runtime.typed).toEqual([]);
   });
 
-  test("the user active: a due wake is typed all the same (steer m569)", async () => {
+  test("the user active: nothing is due, so no keys", async () => {
     holder({ user_inactive_since: null });
-    const id = open("user_acted", "acted");
+    open("user_acted", "acted");
     const runtime = new StubRuntime();
     await ticks(rewaker(runtime), 3);
-    expect(runtime.typed).toEqual([{ pane: "p1", line: rewakeLine([id]) }]);
+    expect(runtime.typed).toEqual([]);
   });
 
   const refusals: [string, (rt: StubRuntime) => void, string][] = [

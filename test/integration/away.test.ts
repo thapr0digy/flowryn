@@ -64,7 +64,8 @@ describe("away mode", () => {
       const lead = await env.claude();
       await lead.start();
       await lead.prompt("first");
-      // Present, not away: the gate wakes the idle leader all the same, as an action item (not a P0).
+      await lead.goInactive();
+      // Inactive, not away: the gate wakes the idle leader, as an action item (not a P0).
       const before = openGate(env, "FLOWRYN-MARK-AW0");
       await waitFor("the present-user wake", 15_000, () => presentedByWaiter(env!, before));
       expect(followUpPushes(env)).toEqual([before]);

@@ -46,7 +46,7 @@ function holder(fields: Partial<LeaderSessionRow> = {}, harness: "claude" | "pi"
   return tx(db, () => {
     const { session } = openSession(db, { harness, pane: "p1", cwd: "/x", now: clock - 60_000 });
     claim(db, session, "vacant", clock - 60_000);
-    const set = { proc_pid: 4242, user_inactive_since: null, last_event_at: clock - 60_000, has_ui: 1, ...fields } as Record<string, unknown>;
+    const set = { proc_pid: 4242, user_inactive_since: clock - 120_000, last_event_at: clock - 60_000, has_ui: 1, ...fields } as Record<string, unknown>;
     const keys = Object.keys(set);
     db.query(`UPDATE leader_sessions SET ${keys.map((k, i) => `${k} = ?${i + 2}`).join(", ")} WHERE session_id = ?1`).run(session, ...(keys.map((k) => set[k]) as (string | number | null)[]));
     return getSession(db, session)!;
@@ -80,7 +80,7 @@ describe("the leader route table", () => {
 });
 
 describe("action items wake an idle leader", () => {
-  test("a worker report wakes the idle leader past the retired hourly cap, with the user recently active", () => {
+  test("a worker report wakes the idle leader past the retired hourly cap", () => {
     const s = holder();
     const capped = ctx({ max_triggered_turns_per_hour: 3, max_question_wakes_per_hour: 1 });
     for (let n = 1; n <= 4; n++) {
@@ -104,6 +104,14 @@ describe("action items wake an idle leader", () => {
     const s = holder({ busy: 1, busy_until: clock + 60_000 }, "pi");
     const id = open("worker_report", "a finding", clock);
     expect(leaderPush(ctx(), s, clock).push).toMatchObject({ kind: "follow_up", mode: "continuation", items: [{ id }] });
+  });
+
+  test("while the user is at the composer nothing is pushed; once inactive, or away, the wake goes", () => {
+    const active = holder({ user_inactive_since: null });
+    const id = open("worker_report", "a finding");
+    expect(leaderPush(ctx(), active, clock).push).toBeNull();
+    const inactive = { ...active, user_inactive_since: clock - 1_000 };
+    expect(leaderPush(ctx(), inactive, clock).push).toMatchObject({ kind: "follow_up", items: [{ id }] });
   });
 
   test("an info item never wakes the leader", () => {
