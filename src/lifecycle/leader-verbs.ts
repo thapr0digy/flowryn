@@ -9,6 +9,7 @@ import { landingProgress, latestLanding } from "../verify/landing-queue.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
+import { collectWaits, deadlineLabel, shortDuration, type Wait } from "../reconcile/waits.ts";
 import { explanationDetail, openExplanations, taskExplanations, timelineEntry, waitingField, waitingPointer, waitingRuns } from "../attention/explanations.ts";
 import { appendEvent } from "../db/events.ts";
 import { recordIntent } from "../journal/journal.ts";
@@ -423,6 +424,16 @@ function queuedRow(ctx: ReadCtx, q: QueuedTask): Record<string, unknown> {
   };
 }
 
+/** The wait registry's waits now; an invalid `[waits]` table (the daemon refused it) shows none rather than failing the read. */
+function registryWaits(ctx: ReadCtx): Wait[] {
+  try {
+    return collectWaits(ctx.db, ctx.config, ctx.now);
+  } catch (error) {
+    if (error instanceof FlowrynError) return [];
+    throw error;
+  }
+}
+
 /**
  * `flowryn fleet`: every open run and today's finished ones, at most 20 rows
  * (design section 12), then the queued work no run has started yet, ready
@@ -473,7 +484,20 @@ const fleet: VerbSpec = {
     const queued = queuedWork(ctx.db).filter((q) => lens.task(q.id));
     // Why each waiting run waits, from its recorded explanation (docs/notes/2026-10-13-next-steps-md-wq.md); detail is show --why.
     const held = waitingRuns(ctx.db).filter((w) => lens.task(w.task_id));
-    if (held.length > 0) data.waiting = held.map((w) => ({ task: w.task_id, ...waitingPointer(w) }));
+    // Every wait's age and deadline from the wait registry (src/reconcile/waits.ts), so nobody has to guess when it acts.
+    const waits = registryWaits(ctx).filter((w) => (w.task_id === null ? !lens.restricted : lens.task(w.task_id)));
+    const timing = (w: Wait) => ({ wait: w.kind, age: shortDuration(ctx.now - w.since), deadline: deadlineLabel(w, ctx.now) });
+    // A run's recorded explanation keeps its words; the registry adds the clock. Waits with no explanation get the registry's words.
+    const runWait = (runId: string) => waits.find((w) => w.key === `run:${runId}`);
+    const shown: Record<string, string>[] = held.map((h) => {
+      const w = runWait(h.run_id);
+      return { task: h.task_id, ...waitingPointer(h), ...(w ? timing(w) : {}) };
+    });
+    for (const w of waits) {
+      if (w.key.startsWith("run:") && held.some((h) => `run:${h.run_id}` === w.key)) continue;
+      shown.push({ task: w.task_id ?? "-", waiting: sanitizeLine(`${w.what}: ${w.cause}`, 80), next: sanitizeLine(w.fix, 60), ...timing(w) });
+    }
+    if (shown.length > 0) data.waiting = shown;
     // Asks (src/ask/) still queued or running: one line each, since an ask has no run to list.
     const asks = askLines(ctx.db, ctx.now, (projectId) => lens.project(projectId));
     if (asks.length > 0) data.asks = asks;

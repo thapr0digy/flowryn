@@ -14,7 +14,7 @@ import { verifyConfig } from "../../src/verify/config.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { cancelRequest, findQueued, getRequest, insertRequest, positionOf, queuedRequests, RECOVERED_RANK, requeuedFrom, type NewRequest } from "../../src/verify/queue.ts";
 import { isVerifying, recoverVerifications, stopVerifications, type VerifyDeps } from "../../src/verify/runner.ts";
-import { admitRequest, drainVerifyQueue, queueHold, waitingOn, type QueueDeps } from "../../src/verify/start.ts";
+import { admitRequest, drainVerifyQueue, queueHold, STALE_READ_WAIT_MS, staleRead, waitingOn, type QueueDeps } from "../../src/verify/start.ts";
 import { getVerification, insertVerification } from "../../src/verify/store.ts";
 import { verificationView } from "../../src/verify/verbs.ts";
 import { initialSteps } from "../../src/verify/runner.ts";
@@ -287,6 +287,35 @@ describe("draining the queue", () => {
     f.config = parseConfig("[projects.other]\nverify = [\"true\"]\n", tempDir());
     expect(await drainVerifyQueue(f.deps)).toBe(0);
     expect(getRequest(f.db, outage.id)).toMatchObject({ state: "cancelled", detail: "project web has no verify steps now" });
+  });
+
+  test("a request that must wait on its own PR steps aside: the requests behind it start", async () => {
+    const f = fixture();
+    const outage = f.request(3);
+    const behind = f.request(4);
+    f.prs.set(3, new ForgeError("unreachable", "connect ECONNREFUSED"));
+    expect(await drainVerifyQueue(f.deps)).toBe(1);
+    expect(getRequest(f.db, outage.id)!.state).toBe("queued");
+    expect(getRequest(f.db, behind.id)!.state).toBe("started");
+    await settled(f.db, [getRequest(f.db, behind.id)!.verification_id!]);
+  });
+
+  test("assumption: GitHub still showing the head a delivery was carried from waits (up to STALE_READ_WAIT_MS), not cancels", async () => {
+    const f = fixture();
+    const older = "e".repeat(40);
+    f.db.exec(`INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a0', 't1', 'pr', '${PR(5)}', '${older}', 1)`);
+    f.db.exec(`INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES ('a1', 't1', 'pr', '${PR(5)}', '${f.head}', 2, '${older}')`);
+    const carried = f.request(5, { task_id: "t1" });
+    f.prs.set(5, { headSha: older });
+    expect(staleRead(f.db, carried, older)).toBe(true);
+    expect(staleRead(f.db, { ...carried, head_sha: older }, f.head)).toBe(false);
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(getRequest(f.db, carried.id)!.state).toBe("queued");
+    expect(f.logs.some((l) => l.includes(`verify ${carried.id}: waits: GitHub still shows ${older.slice(0, 8)}`))).toBe(true);
+    // GitHub never catches up: past the bound the request is cancelled as a moved head (the auto-merge queues it again).
+    f.deps = { ...f.deps, now: () => carried.requested_at + STALE_READ_WAIT_MS };
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(getRequest(f.db, carried.id)).toMatchObject({ state: "cancelled", detail: `the PR head moved from ${f.head.slice(0, 8)} to ${older.slice(0, 8)}; verify the new head` });
   });
 
   test("once the daemon is stopping, nothing starts; the queue is left as it was", async () => {
