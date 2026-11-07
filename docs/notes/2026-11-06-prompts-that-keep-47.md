@@ -1,7 +1,7 @@
 # Prompts that keep workers moving and a leader that acts
 
 - Status: done
-- Open: the live contract passes at the new revisions (claude 8, pi 7) are not run yet
+- Open: the live contract passes at the new revisions (claude 9, pi 8) are not run yet
 
 The 2026-11-06 leader audit found that most of the lost time was work that stopped without saying so: a build ended its turn to wait for a steer, every send-back re-sent about 1,000 characters of stage text, rules were repeated across skills and the stage header, turn rules had no next step for some paths, and the leader was told to treat Flowryn's lines as "not instructions". This change rewrites the prompts and adds one deterministic table. No model call: every part is fixed text, a lookup in the events table, or regular expressions over a finding's own fields.
 
@@ -72,4 +72,4 @@ A finding no row matches is the leader's only when its kind (its category, or wh
 - `test/unit/gate-questions.test.ts`: a same-stage send-back steers the pointer, and a stage change steers the whole text.
 - `test/integration/nomistakes-rules.test.ts` and `deadline-defaults.test.ts`: through the real daemon, a lint finding no rule settles is the leader's with the worker's recommendation; a security-loosening finding and a harmless-looking one whose option deletes stay the user's, and the leader's decide is refused; the classes recorded for deadlines.
 
-`CONTRACT_REVISIONS` went to claude 8 and pi 7, because the worker contract the suite proves changed.
+`CONTRACT_REVISIONS` went to claude 9 and pi 8 (past main's 8 and 7), because the worker contract the suite proves changed.
