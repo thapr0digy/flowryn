@@ -5,6 +5,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type HandlerCtx, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { openItem, resolveRunItems, settleAutonomyParked } from "../attention/items.ts";
 import { resolveTool, type FlowrynConfig } from "../config/config.ts";
+import { stageEffort, stageModel } from "../config/model-choice.ts";
 import { reviewConfig } from "../config/leader.ts";
 import { capacityConfig, DEFAULT_WORKFLOWS, projectMaxWorkers, WORKER_POOL, type StageDef, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
@@ -140,17 +141,46 @@ export function stageTextContext(db: Db, config: FlowrynConfig, run: RunWithPoli
  */
 export function requestStage(db: Db, run: RunRow, def: WorkflowDef, index: number, note: string | null, now: number): void {
   const stage = def.stages[index]!;
-  const launch: PendingLaunch | null = run.pending_launch ?? (stage.fresh && run.stage !== stage.id ? "stage" : null);
+  const launch: PendingLaunch | null = run.pending_launch ?? stageLaunch(run, def, stage);
   db.query(
     `UPDATE runs SET stage = ?2, stage_state = 'waiting', waiting_since = ?3, stage_note = ?4, stage_started_at = NULL,
        pending_launch = ?5, updated_at = ?3 WHERE id = ?1`,
   ).run(run.id, stage.id, now, note, launch);
-  appendEvent(db, { source: "daemon", kind: "stage.requested", runId: run.id, taskId: run.task_id, payload: { stage: stage.id, index, from: run.stage, pools: stage.pools, fresh: launch === "stage" }, ts: now });
+  appendEvent(db, { source: "daemon", kind: "stage.requested", runId: run.id, taskId: run.task_id, payload: { stage: stage.id, index, from: run.stage, pools: stage.pools, fresh: launch === "stage", ...(launch === "relaunch" ? { relaunch: true } : {}) }, ts: now });
   run.stage = stage.id;
   run.stage_state = "waiting";
   run.waiting_since = now;
   run.stage_note = note;
   run.pending_launch = launch;
+}
+
+/**
+ * The launch a stage start needs when the worker carries on: a new session for a stage with fresh = true;
+ * a relaunch (its own session resumed, so its context survives) when the stage's model or effort differs
+ * from the one the worker runs on, since Claude and Pi take both only as launch flags; else none, and a
+ * steer starts the stage.
+ */
+function stageLaunch(run: RunRow, def: WorkflowDef, stage: StageDef): PendingLaunch | null {
+  if (run.stage === stage.id) return null;
+  if (stage.fresh) return "stage";
+  const from = def.stages.find((s) => s.id === run.stage) ?? null;
+  return run.proc_pid !== null && stageChoiceChanges(run, from, stage) ? "relaunch" : null;
+}
+
+/**
+ * Whether stage `to` runs on another model or effort than the worker that ran stage `from`. Read from the
+ * frozen workflow alone: a stage's own value against what the worker launched with (runs.model, runs.effort),
+ * and a stage that sets nothing after one that did counts as a change, so the relaunch looks the defaults up
+ * again (docs/notes/2026-11-06-effort-and-model-gn.md).
+ */
+export function stageChoiceChanges(run: Pick<RunRow, "harness" | "model" | "effort" | "model_pin" | "effort_pin">, from: StageDef | null, to: StageDef): boolean {
+  const pins = { model: run.model_pin, effort: run.effort_pin };
+  return changed(stageEffort(to, pins), stageEffort(from, pins), run.effort) || changed(stageModel(to, run.harness), stageModel(from, run.harness), run.model);
+}
+
+/** A stage's own value against the worker's, or (none) whether the stage before had one. */
+function changed(wanted: string | null, before: string | null, current: string | null): boolean {
+  return wanted !== null ? wanted !== current : before !== null;
 }
 
 /** The project's worker limit, `[projects.<id>] max_workers`, or null when it has none. */
@@ -417,7 +447,8 @@ function requestLater(ctx: HandlerCtx, run: RunWithPolicy, pos: StagePos, index:
   const handoffId = handoff !== null ? recordHandoff(ctx.db, run, handoff.stage, handoff.text, now) : null;
   appendEvent(ctx.db, { source: "cli", kind: "stage.done", runId: run.id, taskId: run.task_id, payload: { stage: pos.stage.id, via: ctx.via, for: reason, next: stage.id, ...(handoffId !== null ? { handoff: handoffId } : {}) }, ts: now });
   requestStage(ctx.db, run, pos.def, index, note, now);
-  return { stage, fresh: run.pending_launch === "stage" };
+  // A relaunch, like a fresh stage worker, is never granted under the call in flight: the worker ends its turn first.
+  return { stage, fresh: run.pending_launch === "stage" || run.pending_launch === "relaunch" };
 }
 
 /**
