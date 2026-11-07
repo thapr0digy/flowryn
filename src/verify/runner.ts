@@ -17,7 +17,7 @@ import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
-import { finishVerification, getVerification, recordSteps, runningVerifications, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
+import { finishVerification, getVerification, recordSteps, runningVerifications, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
 /**
@@ -496,6 +496,69 @@ function stepDetail(step: VerifyStep, result: StepResult, deadline: StepDeadline
   return outcome === null ? hung : `${hung}; ${outcome}`;
 }
 
+/** A step this verification kept from the one it resumes: not run again. */
+function kept(step: VerifyStep): boolean {
+  return step.resumed_from !== undefined && (step.state === "passed" || step.state === "skipped");
+}
+
+/** The logs of the kept steps, copied from the resumed verification's directory into this one's (a missing one is noted on its step). */
+function copyKeptLogs(from: Verification, v: Verification, steps: VerifyStep[]): void {
+  for (const step of steps.filter(kept)) {
+    const logs = (step.attempts ?? 1) > 1 ? [step.log.replace(/\.retry\.log$/, ".log"), step.log] : [step.log];
+    for (const log of logs) {
+      try {
+        copyFileSync(join(from.dir, log), join(v.dir, log));
+      } catch {
+        step.detail = `${step.detail ?? ""}; its log ${log} was not kept`;
+      }
+    }
+  }
+}
+
+/** Back to a fresh run: the kept steps wait again, with an event saying why. */
+function dropResume(deps: VerifyDeps, v: Verification, steps: VerifyStep[], from: string, why: string): void {
+  steps.forEach((step, i) => {
+    if (!step.resumed_from) return;
+    const fresh: VerifyStep = { name: step.name, state: "waiting", exit: null, ms: null, log: logName(i, step.name), tests: null, detail: null };
+    if (step.group !== undefined) fresh.group = step.group;
+    if (step.when_changed) fresh.when_changed = step.when_changed;
+    steps[i] = fresh;
+  });
+  tx(deps.db, () => {
+    deps.db.query("UPDATE verifications SET steps = ?2 WHERE id = ?1 AND state = 'running'").run(v.id, JSON.stringify(steps));
+    appendEvent(deps.db, { source: "daemon", kind: "pr.verify_resume_dropped", taskId: v.task_id, payload: { verification: v.id, from, why }, ts: deps.now() });
+  });
+}
+
+/**
+ * A resumed verification takes over the worktree of the one it resumes (a `git worktree move`
+ * into its own directory), so the steps it keeps keep what they built, and copies their logs.
+ * True when it did; false (the kept steps reset, an event saying why) when the source's worktree
+ * is gone, will not move, or is not at the head: then it starts fresh.
+ */
+async function takeOverWorktree(deps: VerifyDeps, v: Verification, steps: VerifyStep[]): Promise<boolean> {
+  const fromId = steps.find((s) => s.resumed_from)?.resumed_from;
+  if (!fromId) return false;
+  const from = getVerification(deps.db, fromId);
+  if (!from || !existsSync(from.worktree_path) || !ownPath(deps.root, from.worktree_path, "wt")) {
+    dropResume(deps, v, steps, fromId, `the worktree of ${fromId} is gone`);
+    return false;
+  }
+  const moved = await withRepoLock(v.project_path, () => deps.git(["worktree", "move", from.worktree_path, v.worktree_path], v.project_path));
+  if (moved.code !== 0) {
+    dropResume(deps, v, steps, fromId, `git worktree move failed: ${moved.stderr.trim() || moved.stdout.trim()}`);
+    return false;
+  }
+  const head = await deps.git(["rev-parse", "HEAD"], v.worktree_path);
+  if (head.code !== 0 || head.stdout.trim() !== v.head_sha) {
+    dropResume(deps, v, steps, fromId, `the worktree of ${fromId} is at ${head.stdout.trim().slice(0, 8) || "an unknown head"}, not ${v.head_sha.slice(0, 8)}`);
+    await removeWorktree(deps, v);
+    return false;
+  }
+  copyKeptLogs(from, v, steps);
+  return true;
+}
+
 /** Run a verification to its end. Never throws: whatever happens is recorded on its row. */
 export async function runVerification(deps: VerifyDeps, v: Verification, plan: VerifyPlan, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (active.has(v.id)) return;
@@ -514,7 +577,12 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     }
   };
   const record = (changed: VerifyStep) => tx(deps.db, () => recordSteps(deps.db, v, steps, changed, deps.now()));
-  const stoppedMidRun = () => finish({ state: "error", detail: "the daemon stopped mid-run", binary: null }, true);
+  // Its worktree stays for a resume (src/verify/start.ts resumableFrom): the steps that passed keep what they built.
+  let interrupted = false;
+  const stoppedMidRun = () => {
+    interrupted = true;
+    finish({ state: "error", detail: STOPPED_MID_RUN, binary: null }, true);
+  };
   let worktreeAdded = false;
   try {
     mkdirSync(v.dir, { recursive: true, mode: 0o700 });
@@ -522,11 +590,15 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     // Shutdown kills the setup's git (its fetch or worktree add): that failure is the stop, not the head's.
     if (job.aborted) return stoppedMidRun();
     if (missing) return finish({ state: "error", detail: missing, binary: null });
-    // One worktree change at a time per repository: concurrent adds collide in git itself.
-    const added = await withRepoLock(v.project_path, () => deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path));
-    worktreeAdded = added.code === 0;
+    worktreeAdded = await takeOverWorktree(deps, v, steps);
     if (job.aborted) return stoppedMidRun();
-    if (!worktreeAdded) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
+    if (!worktreeAdded) {
+      // One worktree change at a time per repository: concurrent adds collide in git itself.
+      const added = await withRepoLock(v.project_path, () => deps.git(["worktree", "add", "--detach", v.worktree_path, v.head_sha], v.project_path));
+      worktreeAdded = added.code === 0;
+      if (job.aborted) return stoppedMidRun();
+      if (!worktreeAdded) return finish({ state: "error", detail: `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, binary: null });
+    }
     const childEnv = stepEnv(env, plan.path);
     const deadlines = stepDeadlines(deps.db, v.project_id, steps.map((s) => s.name), plan.stepTimeoutMs ?? null);
     steps.forEach((s, i) => (s.deadline_ms = deadlines[i]?.ms ?? null));
@@ -537,6 +609,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     /** One step to its end: run, and once more when its own deadline killed it and the run has time left. */
     const runOne = async (i: number, handle: StepHandle, stoppedBy: () => string | null): Promise<void> => {
       const step = steps[i]!;
+      if (kept(step)) return;
       const gate = changeGate(step, changed);
       if ("skip" in gate) {
         Object.assign(step, { state: "skipped", ms: 0, detail: gate.skip });
@@ -630,7 +703,8 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     finish({ state: "error", detail: `verify failed: ${(error as Error).message}`, binary: null });
   } finally {
     try {
-      if (worktreeAdded || existsSync(v.worktree_path)) await removeWorktree(deps, v);
+      if (interrupted && worktreeAdded) deps.log(`verify ${v.id}: interrupted; its worktree stays for a resume`);
+      else if (worktreeAdded || existsSync(v.worktree_path)) await removeWorktree(deps, v);
       pruneDirs(deps, v.project_id);
     } catch (error) {
       deps.log(`verify ${v.id}: cleanup failed: ${(error as Error).message}`);
@@ -708,7 +782,7 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
   const stepGone = left.length === 0;
   let recorded = false;
   if (v && v.state === "running") {
-    const detail = stepGone ? "the daemon stopped mid-run" : `the daemon stopped mid-run; its step${left.length > 1 ? "s" : ""} (pid ${left.join(", ")}) did not exit`;
+    const detail = stepGone ? STOPPED_MID_RUN : `${STOPPED_MID_RUN}; its step${left.length > 1 ? "s" : ""} (pid ${left.join(", ")}) did not exit`;
     recorded = tx(deps.db, () => {
       const finished = finishVerification(deps.db, v, { state: "error", steps: v.steps, tests: lastTests(v.steps), detail, binary: null }, deps.now());
       if (finished) requeueInterrupted(deps, v);
@@ -716,7 +790,8 @@ async function recoverOne(deps: VerifyDeps, end: NonNullable<VerifyDeps["termina
     });
   }
   if (!stepGone) return recorded;
-  if (v) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
+  // One just recorded as interrupted keeps its worktree for a resume; anything else left behind goes.
+  if (v && !recorded) await removeWorktree(deps, v).catch((error: unknown) => deps.log(`verify ${id}: cleanup failed: ${(error as Error).message}`));
   if (lease) {
     const job = { kind: "verify" as const, id, taskId: lease.task_id };
     tx(deps.db, () => releaseJobLeases(deps.db, job, "recovered at startup", deps.now()));

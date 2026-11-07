@@ -58,7 +58,7 @@ export interface VerifyConfig {
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
 // scope and account are read by src/config/accounts.ts, max_workers and review_model by src/config/workflows.ts.
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "scope", "account", "max_workers", "review_model"]);
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "scope", "account", "max_workers", "review_model"]);
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
@@ -166,6 +166,7 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   if (raw.auto_merge !== undefined && typeof raw.auto_merge !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_merge must be true or false`);
   if (raw.auto_verify !== undefined && typeof raw.auto_verify !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_verify must be true or false`);
   if (raw.landing !== undefined && !LANDING_MODES.includes(raw.landing as LandingMode)) throw new FlowrynError("config_invalid", `${where} landing must be "queue" or "manual"`);
+  if (raw.landing_train_depth !== undefined) checkTrainDepth(raw.landing_train_depth, where);
   if (raw.verify === undefined) {
     // Without verify steps the merge gate passes a PR that has no checks: auto-merge would land anything.
     if (raw.auto_merge === true) throw new FlowrynError("config_invalid", `${where} auto_merge needs verify steps: without them the merge gate passes a PR that has no checks`);
@@ -228,6 +229,33 @@ export function autoMergeEnabled(config: FlowrynConfig, projectId: string, proje
 export function landingMode(config: FlowrynConfig, projectId: string): LandingMode {
   if (!verifyConfig(config, projectId)) return "manual";
   return projectTable(config, projectId).landing === "queue" ? "queue" : "manual";
+}
+
+/** The deepest landing train a project may set: each car beyond the first holds a validation slot. */
+export const MAX_TRAIN_DEPTH = 5;
+/** How many entries of a line verify at once when unset: the head of line and one speculative car. */
+export const DEFAULT_TRAIN_DEPTH = 2;
+
+function checkTrainDepth(value: unknown, where: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_TRAIN_DEPTH) {
+    throw new FlowrynError("config_invalid", `${where} landing_train_depth must be an integer from 1 (no train) to ${MAX_TRAIN_DEPTH}`);
+  }
+  return value;
+}
+
+/**
+ * `[projects.<id>] landing_train_depth` (docs/notes/2026-11-07-faster-landing-test-q7.md): how
+ * many entries of a queue project's line verify at once, the head of line included; 1 turns the
+ * train off. Never throws: an invalid table was refused by the daemon, and no train runs on it.
+ */
+export function landingTrainDepth(config: FlowrynConfig, projectId: string): number {
+  try {
+    if (!landingQueued(config, projectId)) return 1;
+    const raw = projectTable(config, projectId).landing_train_depth;
+    return raw === undefined ? DEFAULT_TRAIN_DEPTH : checkTrainDepth(raw, `[projects.${projectId}]`);
+  } catch {
+    return 1;
+  }
 }
 
 /** landingMode for a pass that must not throw: an invalid table was refused by the daemon, and nothing queues on it. */
