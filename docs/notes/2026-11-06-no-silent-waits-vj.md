@@ -40,7 +40,7 @@ The leader's audit (steer m576) added these:
 
 | kind | what waits | counted from | deadline |
 |---|---|---|---|
-| `verify_queue` | the first request in the verify queue | its expected start: the later of its request time, the queue's last move, and each running verify's usual end (its project's slowest of the last 5 passes, else its timeout) | 20 min |
+| `verify_queue` | the first request in the verify queue | its expected start: the later of its request time, the last move of a request ahead of it, and the usual end of each running verify not started from a request behind it (its project's slowest of the last 5 passes, else its timeout) | 20 min |
 | `capacity` | a run waiting for a grant (pools, project limit, usage limit, quota, sign-in) | `runs.waiting_since` | 10 min |
 | `host` | a run whose latest refusal is `capacity.host_check` | `runs.waiting_since` | 10 min |
 | `harness_check` | a run whose latest refusal is `capacity.harness_unverified` (the automatic contract check) | `runs.waiting_since` | 20 min |
@@ -78,6 +78,7 @@ Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`
 
 - Waits are computed from the live tables on every pass, not stored as their own state machine. Only expired waits get a row, so the registry cannot drift from what it describes.
 - The auto-merge's own recovery runs on its next pass with no deadline. A lost request is never something to wait out. The registry's `auto_merge` deadline covers what is left: checks pending, a merge unproven, or a head moved with nothing delivered.
+- A verify started from a request behind the first is not counted in the first's expected start, so requests that step past a waiting first never slide its deadline. The cost: a first request waiting on a full pool that such a verify holds can get a `wait_expired` P1, which resolves itself once it starts. A bounded false P1 beats a silent stuck request.
 - The phase deadline counts from the blocker's cleanup as well as its landing, because a phase becomes ready only once its blocker's run is cleaned (`hasLanded`).
 
 ## Tests
