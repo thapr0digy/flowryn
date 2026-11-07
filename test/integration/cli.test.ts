@@ -216,6 +216,44 @@ describe("when the daemon is down", () => {
     daemons.push(again);
   });
 
+  test("a reserved question ends the turn like a blocking one; a plain one goes on with the recommendation", async () => {
+    const { h } = await setup();
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const ask = (question: string, ...extra: string[]) => cliJson(h, ["ask", "--options", "drop,keep", "--recommend", "drop", "--blocks", "the migration step", ...extra, "--body-file", "-"], { env: worker, stdin: question });
+    const destructive = await ask("Drop the legacy table?");
+    expect(destructive.code).toBe(0);
+    expect((destructive.reply.data as { reserved?: string }).reserved).toBeString();
+    expect(destructive.reply.hints).toEqual(["end your turn; the answer arrives as a steer"]);
+    const own = await ask("Which naming do you prefer for the column?", "--reserved", "the user owns the schema");
+    expect(own.reply.hints).toEqual(["end your turn; the answer arrives as a steer"]);
+    const plain = await ask("Which naming do you prefer for the column?");
+    expect((plain.reply.data as { reserved?: string }).reserved).toBeUndefined();
+    expect(plain.reply.hints).toEqual(["go on with your recommendation now; the answer arrives as a steer (redo what it changes)"]);
+  });
+
+  test("a spooled outcome or waiting question says end your turn; any other spooled call says go on", async () => {
+    const { h, d } = await setup();
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    await d.stop();
+    const help = async (args: string[]) => {
+      const spooled = await cli(h, args, { env: worker, stdin: "x" });
+      expect(spooled.code).toBe(75);
+      return /help: (.*)/.exec(spooled.stdout)![1];
+    };
+    const goOn = "queued, delivered when the daemon is back; go on with your work, never retry it";
+    const endTurn = "queued, delivered when the daemon is back; end your turn, never retry it";
+    const ask = ["ask", "--options", "yes,no", "--blocks", "the next step of the task", "--body-file", "-"];
+    expect(await help(["report", "finding", "--body-file", "-"])).toBe(goOn);
+    expect(await help(ask)).toBe(goOn);
+    expect(await help([...ask, "--blocking"])).toBe(endTurn);
+    expect(await help([...ask, "--reserved", "the user owns it"])).toBe(endTurn);
+    expect(await help(["fail", "--body-file", "-"])).toBe(endTurn);
+    expect(await help(["stage", "done"])).toBe(endTurn);
+    expect(await help(["deliver", "--local"])).toBe(endTurn);
+  });
+
   test("a spooled call the daemon refuses is kept under spool/rejected, not lost", async () => {
     const { h, d } = await setup();
     await d.stop();

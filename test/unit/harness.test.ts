@@ -187,7 +187,7 @@ describe("worker contract text", () => {
     const text = workerContract("claude", null, { defaultBranch: "main" });
     expect(text).toContain("- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take main by git merge origin/main, plain push.");
     expect(text).toContain('- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.');
-    expect(text).toContain("- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; go on, never retry.");
+    expect(text).toContain("- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; never retry.");
     for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null, { defaultBranch: "main" })).toContain("scratch goes in $TMPDIR");
     expect(text).toContain("never end a turn to wait on a job: run it in the foreground.");
   });

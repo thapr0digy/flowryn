@@ -163,6 +163,8 @@ export interface VerbSpec {
   scope?: VerbScope;
   /** Worker verbs spool to disk when the daemon is down (exit 75). */
   spool?: boolean;
+  /** A spooled call that is the worker's outcome (or waits on an answer) tells it to end its turn, not go on. */
+  endsTurn?: (args: Args) => boolean;
   /**
    * How long the CLI waits for the reply. Worker verbs default to 2 s before
    * they spool (design section 12); a verb that must ask GitHub (deliver --pr)

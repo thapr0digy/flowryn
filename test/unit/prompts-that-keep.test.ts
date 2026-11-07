@@ -98,9 +98,9 @@ describe("worker turn rules say what to do next on every path", () => {
     expect(contract).not.toContain("background job");
   });
 
-  test("after a non-blocking ask, go on; exit 75 is queued; a call refused twice is reported blocked", () => {
-    expect(contract).toContain("not blocking: go on with your pick.");
-    expect(contract).toContain("Exit 75: queued; go on, never retry.");
+  test("after a non-blocking, unreserved ask, go on; exit 75 is queued, never retried; a call refused twice is reported blocked", () => {
+    expect(contract).toContain("not blocking or reserved: go on with your pick.");
+    expect(contract).toContain("Exit 75: queued; never retry.");
     expect(contract).toContain("a call refused twice: report blocked.");
   });
 

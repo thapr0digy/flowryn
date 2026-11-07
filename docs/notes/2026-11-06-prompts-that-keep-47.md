@@ -35,14 +35,14 @@ The contract grew by the turn rules below. Its budget in `test/unit/harness.test
 
 ## Turn rules for every path
 
-The contract now says: work on until an outcome (stage done, deliver, ask --blocking, report, fail, or a reply that says end your turn); never end a turn to wait on a job, so run it in the foreground (this is the one rule on background jobs, and it replaces "or on your own background job"); after a non-blocking ask, go on with your pick; a call refused twice gets `report blocked`; exit 75 means queued, so go on and never retry. The CLI's spooled hint says the same. Each failure fallback lives where that failure happens:
+The contract now says: work on until an outcome (stage done, deliver, ask --blocking, report, fail, or a reply that says end your turn); never end a turn to wait on a job, so run it in the foreground (this is the one rule on background jobs, and it replaces "or on your own background job"); after an ask that is neither blocking nor reserved, go on with your pick; a call refused twice gets `report blocked`; exit 75 means queued, so never retry. The CLI's spooled hint says what comes next: "end your turn" for a call that ends the turn or waits on an answer (`ask --blocking`, `--reserved` or `--nomistakes`, `stage done`, `deliver`, `fail`; the verb's `endsTurn` in its spec) and "go on with your work" for any other. Each failure fallback lives where that failure happens:
 
 - No-mistakes pipeline fails with an error (not a gate): fix, commit, run it again; failed twice at the same head: `report failed`. This is in the ship's delivery lines.
 - lavish-axi fails: run it once more, then `report blocked` with its output. This is in the review gate text.
 - A test fails the same way on the base branch: `report finding` and go on. This is in the build skill.
 - Docker fails in QA: run it once more, then the README way; if neither works, `report blocked`. This is in the QA skill.
 
-`ask` now replies "go on with your recommendation now" for a non-blocking question, and "end your turn" for a blocking one or a `--nomistakes` one (the pipeline is parked). The no-mistakes ask line in the delivery steps adds `--recommend <your pick>`.
+`ask` now replies "go on with your recommendation now" for a non-blocking question, and "end your turn" for a blocking one, a reserved one (a keyword class such as destructive, or `--reserved`: only the user answers it, so the worker must not act first) or a `--nomistakes` one (the pipeline is parked). The no-mistakes ask line in the delivery steps adds `--recommend <your pick>`.
 
 ## The leader acts
 

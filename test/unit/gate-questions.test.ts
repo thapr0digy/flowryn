@@ -759,8 +759,8 @@ describe("a gate's questions as decisions", () => {
     const same = steerFor("ship", "ship");
     expect(same).toBe("Your PR conflicts with main. Then: follow the stage ship steps in $FLOWRYN_TASK_FILE.");
     const changed = steerFor("build", "ship");
-    const run = getRunWithPolicy(db, runId)!;
-    expect(changed).toBe(`Your PR conflicts with main. ${stageInstructions(positionOf(db, run, run.kind), stageTextContext(db, config, run))}`);
+    expect(changed.startsWith("Your PR conflicts with main. Flowryn stage ship (3 of 3; workflow feature")).toBe(true);
+    expect(changed).toContain("This is the last stage.");
     expect(changed.length).toBeGreaterThan(same.length * 5);
   });
 

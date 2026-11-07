@@ -8,7 +8,7 @@ import { enforceScope } from "../leader/scope.ts";
 import { errorReply, okReply, type Envelope, type Reply } from "../api/envelope.ts";
 import { EXIT, FlowrynError, toErrorBody, type ErrorBody, type ExitCode } from "../api/errors.ts";
 import { writeSpoolFile } from "../api/spool.ts";
-import { validateArgs, type CliIo, type VerbSpec } from "../api/verbs.ts";
+import { validateArgs, type Args, type CliIo, type VerbSpec } from "../api/verbs.ts";
 import { request, TransportError, type RequestTimeouts } from "../transport/unix.ts";
 import { ulid } from "../util/ulid.ts";
 import { PROTO } from "../version.ts";
@@ -136,7 +136,7 @@ export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown
   const outcome = await sendServerVerb(spec, args, io);
   if ("spooled" in outcome) {
     if (io.json) io.stdout(JSON.stringify({ ok: true, spooled: outcome.spooled }) + "\n");
-    else io.stdout(`spooled: ${outcome.spooled}\nhelp: queued, delivered when the daemon is back; go on with your work, never retry it\n`);
+    else io.stdout(`spooled: ${outcome.spooled}\nhelp: queued, delivered when the daemon is back; ${spec.endsTurn?.(args as Args) ? "end your turn" : "go on with your work"}, never retry it\n`);
     return EXIT.spooled;
   }
   return print(io, outcome.reply, outcome.banner);

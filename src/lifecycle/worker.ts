@@ -193,6 +193,7 @@ const ask: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
+  endsTurn: (args) => boolArg(args, "blocking") || boolArg(args, "nomistakes") || Boolean(stringArg(args, "reserved")?.trim()),
   // A --nomistakes ask reads no-mistakes' status and git first; give it time before it spools.
   replyMs: 30_000,
   async prepare(ctx, args): Promise<RuleFacts | null> {
@@ -227,11 +228,11 @@ const ask: VerbSpec = {
     // unique index as a raw SQLite error, and a spooled ask would fail on replay. Idempotent: an
     // open decision for the same (origin, key) is returned again; an already-settled one refuses.
     if (key) {
-      const existing = ctx.db.query("SELECT id, run_id, state, blocking, options FROM decisions WHERE origin = ?1 AND key = ?2").get(run.task_id, key) as { id: string; run_id: string | null; state: string; blocking: number; options: string } | null;
+      const existing = ctx.db.query("SELECT id, run_id, state, blocking, options, reserved_reason FROM decisions WHERE origin = ?1 AND key = ?2").get(run.task_id, key) as { id: string; run_id: string | null; state: string; blocking: number; options: string; reserved_reason: string | null } | null;
       if (existing && existing.run_id === null) throw new FlowrynError("bad_args", `key ${key} is already the standalone decision ${existing.id}`, "use another key");
       if (existing) {
         if (existing.state !== "open") throw new FlowrynError("bad_args", `key ${key} already used by ${existing.id}`);
-        return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: [askHint(existing.blocking === 1 || boolArg(args, "nomistakes"))] };
+        return { data: { decision: existing.id, blocking: existing.blocking === 1, options: JSON.parse(existing.options) as string[], already: true }, hints: [askHint(existing.blocking === 1 || boolArg(args, "nomistakes") || existing.reserved_reason !== null)] };
       }
     }
     const id = nextRunDecisionId(ctx.db);
@@ -274,7 +275,7 @@ const ask: VerbSpec = {
     if (blocking) {
       recordIntent(ctx.db, { file: "backlog", verb: "hold", taskId: run.task_id, positional: [run.task_id], flags: { reason: holdReason(`question ${id}`), kind: "captain" }, now });
     }
-    return { data: { decision: id, blocking, options, ...(reserved ? { reserved } : {}) }, hints: [askHint(blocking || verdict !== null)] };
+    return { data: { decision: id, blocking, options, ...(reserved ? { reserved } : {}) }, hints: [askHint(blocking || verdict !== null || reserved !== null)] };
   },
   async settle(ctx, result) {
     if (result.data.answered !== undefined && ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);
@@ -282,7 +283,7 @@ const ask: VerbSpec = {
   },
 };
 
-/** What a worker does after an ask: a blocking one (or a parked pipeline) ends the turn; any other goes on with its recommendation. */
+/** What a worker does after an ask: a blocking or reserved one (or a parked pipeline) ends the turn; any other goes on with its recommendation. */
 function askHint(waits: boolean): string {
   return waits ? "end your turn; the answer arrives as a steer" : "go on with your recommendation now; the answer arrives as a steer (redo what it changes)";
 }
@@ -468,6 +469,7 @@ const deliver: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
+  endsTurn: () => true,
   // The named-head gate asks GitHub and the remote; a slow answer must not turn a refusal into a spool.
   replyMs: 60_000,
   async prepare(ctx, args) {
@@ -607,6 +609,7 @@ const fail: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
+  endsTurn: () => true,
   apply(ctx, args) {
     const run = activeRun(ctx);
     const reason = sanitizeBlock(stringArg(args, "body") ?? "").trim().slice(0, MAX_REPORT_CHARS);
