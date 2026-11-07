@@ -49,8 +49,9 @@ export type ItemClass = "actionable" | "info";
  * (REPORT_EFFECT in src/lifecycle/worker.ts), such as a finding or a blocker.
  * validation_stuck: a ship holds its validation slot with no progress (its
  * no-mistakes step quiet, or its run gone or ended with nothing delivered).
- * worker_not_exited: a fresh stage's old worker did not exit after several
- * scheduler attempts, so its replacement waits (src/sched/scheduler.ts).
+ * worker_not_exited: the old worker of a fresh stage or a relaunch did not
+ * exit after several scheduler attempts, so its replacement waits
+ * (src/sched/scheduler.ts).
  * operation_escalated: recovery of a launch, resume or cancel could not tell
  * from the evidence what happened (src/lifecycle/operation-recovery.ts), so the
  * run waits for you.
