@@ -212,6 +212,18 @@ describe("timing and the stall", () => {
     expect((db.query("SELECT ts FROM events WHERE kind = ?1").get(STALLED_KIND) as { ts: number }).ts).toBe(start + 180 * MIN);
   });
 
+  test("the first nudge sent during a failed read, then good reads: 1, 2, 3, then the stall", () => {
+    stopped();
+    const start = clock;
+    const unknown: GitFacts = { ...NO_GIT_FACTS, head: "h1", unknown: "git rev-parse refs/remotes/origin/b: exit 124" };
+    for (let minute = 1; minute <= 200; minute++) {
+      clock = start + minute * MIN;
+      look(minute <= 10 ? unknown : UNPUSHED(1));
+    }
+    expect(nudges().map((n) => n.n)).toEqual([1, 2, 3]);
+    expect(count(STALLED_KIND)).toBe(1);
+  });
+
   test("a nudge sent during a failed read, then a good read: the count goes on", () => {
     stopped();
     const start = clock;
