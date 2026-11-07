@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { boolArg, stringArg, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems, settleAutonomyParked } from "../attention/items.ts";
-import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
+import { freezeWorkflow, projectReviewModel, workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import type { Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { deliveryLines } from "../harness/contract-text.ts";
@@ -103,7 +103,7 @@ function promoteLive(ctx: HandlerCtx, args: Record<string, unknown>, runId: stri
   if (ctx.fleet.isLaunching(run.id)) throw new FlowrynError("not_ready", `${run.task_id}'s worker is still launching`, "flowryn promote again once it runs");
   const project = projectOf(db, run);
   const config = ctx.config();
-  const workflow = workflowFor(config, stringArg(args as never, "workflow") ?? project.workflow, "ship");
+  const workflow = freezeWorkflow(workflowFor(config, stringArg(args as never, "workflow") ?? project.workflow, "ship"), projectReviewModel(config, project.id));
   const now = ctx.now();
   const words = sanitizeBlock(stringArg(args as never, "body") ?? "").trim();
   becomeShip(db, run.task_id, project, workflow, boolArg(args as never, "sensitive"), now);
