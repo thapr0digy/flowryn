@@ -97,16 +97,17 @@ flowryn help                 # every verb; `flowryn <verb> --help` for one
 bun install
 bun run typecheck            # tsc --noEmit
 bunx oxlint                  # lint
-bun test                     # unit and integration tests
+bun run test                 # unit, then integration, in parallel (bun test alone runs one file at a time)
+bun test --changed=origin/main   # only the tests your change affects
 bun run build                # dist/flowryn plus the dist/flowrynd link
 fixtures/cleanup-guard/run.sh --impl "bun $PWD/scripts/guard/landed-impl.ts"   # 21 landed-work fixtures
 fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"  # 23 cleanup-order fixtures
 ```
 
 - Requires `jq` for the fixtures.
-- Run `bun test` outside any command sandbox: it starts daemons on Unix sockets, uses FSEvents, runs the real tasks-axi and drives a pty. It never reaches GitHub, Herdr or a real harness.
+- Run the tests outside any command sandbox: it starts daemons on Unix sockets, uses FSEvents, runs the real tasks-axi and drives a pty. It never reaches GitHub, Herdr or a real harness.
 - A rebuild from `origin/<default branch>` is applied by the daemon by itself (`[daemon] auto_restart`); `flowryn daemon restart` applies any build now.
-- CI runs on `ubuntu-latest`; macOS-only tests are skipped there, so run `bun test` on the Mac before a PR. **CI is off until about 2026-11-07** ([how to re-enable](docs/v1-status.md#ci-is-off-2026-10-07)).
+- CI runs on `ubuntu-latest`; macOS-only tests are skipped there, so run `bun run test` on the Mac before a PR. **CI is off until about 2026-11-07** ([how to re-enable](docs/v1-status.md#ci-is-off-2026-10-07)).
 - Source layout follows section 4 of the design (`src/<component>`).
 
 ## Running the live runs

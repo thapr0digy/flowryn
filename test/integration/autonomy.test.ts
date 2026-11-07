@@ -163,7 +163,7 @@ describe("unattended mode", () => {
       // Delivered before the grant: nothing merges by itself.
       const before = await dispatch(e, "Manual merge", steps);
       await e.fleet.waitRun(before.run, (r) => r.state === "ready", "the delivery");
-      expect(rows(e, "SELECT 1 FROM auto_merges WHERE run_id = ?1", before.run)).toHaveLength(0);
+      expect(rows(e, "SELECT 1 FROM auto_merges WHERE run_id = ?1 AND merge = 1", before.run)).toHaveLength(0);
       await grantFromTerminal(e, { projects: "web", until: "+2h" });
       await waitUntil(() => rows(e, "SELECT 1 FROM runs WHERE id = ?1 AND state IN ('landed','cleaned')", before.run).length === 1, 90_000, "the merge under the grant");
       const merge = rows<{ channel: string; actor: string }>(e, "SELECT a.channel, a.actor FROM merges m JOIN approvals a ON a.id = m.approval_id WHERE m.task_id = ?1", before.task);
@@ -210,7 +210,7 @@ describe("unattended mode", () => {
       const e = env;
       const leader: FakeClaudeLeader = await e.claude();
       await leader.start();
-      const refused = await e.fleet.json(["away", "--autonomous", "--projects", "web", "--until", "+8h"], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      const refused = await e.fleet.json(["away", "--autonomous", "--projects", "web", "--until", "+2h"], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
       expect(refused.code).toBe(2);
       const help = String((refused.reply.error as { help: string }).help);
       const ref = /flowryn chat-question (autonomy:\S+)/.exec(help)?.[1];

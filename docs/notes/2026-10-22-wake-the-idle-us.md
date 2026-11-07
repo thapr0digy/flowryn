@@ -8,7 +8,7 @@ Scout finding 3 (`scout-efficiency-and-fz`). Before this change, a yolo PR that 
 
 ## A yolo PR ready wakes the leader
 
-`pr_ready` is now a leader follow-up (`LEADER_WAKE_KINDS`, src/attention/items.ts). The SQL predicate `LEADER_WAKE_SQL` counts a `pr_ready` only when its task is yolo, because the leader can verify and merge that PR with no prompt. A `pr_ready` is never sensitive work: sensitive work opens `sensitive_action_waiting` instead. The predicate replaces the plain kind list in all three router reads:
+`pr_ready` is now a leader follow-up (`LEADER_WAKE_KINDS`, src/attention/items.ts). The SQL predicate `LEADER_WAKE_SQL` counts a `pr_ready` only when its task is yolo, because the leader can verify and merge that PR with no prompt. (Superseded 2026-11-06: every `pr_ready` the daemon is not already merging wakes the leader; docs/notes/2026-11-06-no-idle-workers-23.md.) A `pr_ready` is never sensitive work: sensitive work opens `sensitive_action_waiting` instead. The predicate replaces the plain kind list in all three router reads:
 
 - `followUpBatch` takes a yolo `pr_ready`, so an idle leader wakes for it once you are inactive or away.
 - `p0Candidate` skips only those items, so a `pr_ready` that waits on you still wakes as a P0 while you are away (`awayWakeSql`).
@@ -21,7 +21,7 @@ Scout finding 3 (`scout-efficiency-and-fz`). Before this change, a yolo PR that 
 | `worker_question` | digest | wakes (question batch, unchanged) | unchanged |
 | `gate_ready`, `checks_red`, … | digest | digest only | wakes (as before), now also after `auto_after_min` |
 
-The wake line names it: `Flowryn follow-up [i41]: a yolo PR is ready to verify and merge. Details: flowryn fleet`. The follow-up header and footer say the same, and the leader skill says to verify, then merge. A ready-PR wake counts on the P0 push budget, which follow-ups already use: `[notify] max_triggered_turns_per_hour`, or `[away] max_wakes_per_hour` while you are away. There is no new budget.
+The wake line names it: `Flowryn follow-up [i41]: a yolo PR is ready to verify and merge. Details: flowryn fleet`. The follow-up header and footer say the same, and the leader skill says to verify, then merge. A ready-PR wake counts on the P0 push budget, which follow-ups already use: `[notify] max_triggered_turns_per_hour`, or `[away] max_wakes_per_hour` while you are away. There is no new budget. (Superseded 2026-11-06: leader wakes have no hourly cap, only the runaway ceiling `[leader] wake_ceiling_per_hour`; docs/notes/2026-11-06-no-idle-workers-23.md.)
 
 A follow-up wakes only for an item that has not been shown to the session. A PR that a digest already showed (as #95 and #96 were) does not wake the leader again later. The change covers a PR that becomes ready while you are inactive.
 

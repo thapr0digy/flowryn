@@ -305,7 +305,8 @@ export class LandingQueue implements LandingHooks {
       // Once per head: an entry that left at this head (held, conflicted) is not taken again until something changes.
       if (db.query("SELECT 1 FROM landing_queue WHERE run_id = ?1 AND (head_sha = ?2 OR entered_head = ?2)").get(run.id, delivered.head)) continue;
       // A merge already asked for, or a direct auto-merge from before the project queued: leave it be.
-      if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND state IN ('queued','verifying','waiting_checks','merging')").get(run.id)) continue;
+      // An auto-verify (merge = 0) is not one: the landing supersedes it and follows its verify.
+      if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND merge = 1 AND state IN ('queued','verifying','waiting_checks','merging')").get(run.id)) continue;
       const routine = isRoutineMerge(db, run.task_id);
       let approval = routine ? null : findHumanApproval(db, { task: run.task_id, action: "merge", ref: delivered.ref, head: delivered.head, now });
       // Unattended mode: your standing approval for the project stands in for your word at this head.

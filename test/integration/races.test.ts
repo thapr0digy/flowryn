@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { openItem } from "../../src/attention/items.ts";
+import { tx } from "../../src/db/db.ts";
+import { appendEvent } from "../../src/db/events.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
 
 /**
@@ -75,8 +78,11 @@ describe("design section 9 races", () => {
       env = await makeLeaderEnv();
       const opened = await env.openSession("claude");
       await hook(env, opened.token, "session-start", { source: "startup" });
-      // Not a question: a question would ride the Stop below (worker-questions-wake), and this race is the digest's.
-      const item = env.openPlainP1("FLOWRYN-MARK-R2 go ahead?");
+      // An informational item: a question or a leader action item would ride the Stop below
+      // (worker-questions-wake, no-idle-workers-23), and this race is the digest's.
+      const item = env.withDb((db) =>
+        tx(db, () => openItem(db, { kind: "phase_started", eventSeq: appendEvent(db, { source: "cli", kind: "test.item", payload: {} }).seq, line: "FLOWRYN-MARK-R2 phase 2 started" })),
+      );
       // The hook process started 40 s ago: past the budget, Claude would already have dropped its context.
       const late = await hook(env, opened.token, "prompt", { prompt: "hi" }, { "started-at": Date.now() - 40_000 });
       expect(late.context).toBeUndefined();

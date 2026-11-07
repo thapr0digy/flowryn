@@ -19,6 +19,7 @@ import type { RunRow } from "../lifecycle/runs.ts";
 import type { MessageRow } from "../lifecycle/steers.ts";
 import { descendantCommands, isAlive, readIdentity, readProcessTable, terminate } from "../runtime/proc.ts";
 import { contractPrefix } from "./cleanup.ts";
+import { collectEvidence, type StepEvidence } from "./evidence.ts";
 import { contractContext, type ContractContext } from "./context.ts";
 import { RELEASE_LIMITS, SCRATCH_CONFIG_HEADER, createdWorkspaces, harnessProcesses, releaseOwned, withScratchIds, writeManifest, type CleanupOutcome, type OwnedResources } from "./owned.ts";
 import { piAgentDir, piAgentSource, realPiTable, scriptedPiTable, seedAgentDir, writeScriptedProvider, type PiProfile } from "./pi-profile.ts";
@@ -74,6 +75,8 @@ export interface ContractResult {
   scratch: string;
   /** Whether the run released everything it created: separate from `passed`, the suite's own result. */
   cleanup: CleanupOutcome;
+  /** A failed step's evidence, read before cleanup (src/contracts/evidence.ts); the report writer keeps it in its own file. */
+  evidence?: StepEvidence;
 }
 
 /**
@@ -300,6 +303,7 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   const steps: StepResult[] = [];
+  let evidence: StepEvidence | undefined;
   let cleanupOutcome: CleanupOutcome;
   try {
     note({ runner: await readIdentity(process.pid).catch(() => null) });
@@ -384,13 +388,16 @@ export async function runContract(options: ContractOptions): Promise<ContractRes
       workerTmpDir: () => workerTmpDir(options.harness, runTmpDir(tmpRoot(options.config), runId)),
     };
     steps.push(...(await runContractSteps(contractSteps(options.harness), contractEnv, state, options.log, drift)));
+    const failed = steps.find((s) => !s.ok);
+    // Read before cleanup removes the scratch home: the transcript, the pane and the database go with it.
+    if (failed) evidence = await collectEvidence(failed.step, failed.detail, { db: readDb, runId, herdrSocket: options.herdrSocket });
   } finally {
     cleanupOutcome = await cleanup();
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
   const passed = steps.length === contractSteps(options.harness).length && steps.every((s) => s.ok);
-  return { harness: options.harness, version, revision, context, passed, steps, scratch: home, cleanup: cleanupOutcome };
+  return { harness: options.harness, version, revision, context, passed, steps, scratch: home, cleanup: cleanupOutcome, ...(evidence ? { evidence } : {}) };
 }
 
 /**

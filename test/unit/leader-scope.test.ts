@@ -259,8 +259,8 @@ describe("what a scoped leader is handed", () => {
     const s = tx(db, () => openSession(db, { harness: "claude", pane: null, cwd: null, now: 1, account: "claude-personal", scope: "personal" }));
     tx(db, () => claim(db, s.session, "vacant", 2));
     const lens = lensFor(db, config, "personal");
-    expect(p0Candidate(db, s.session, Date.now(), 86_400_000, null, lens)).toBeNull();
-    expect(p0Candidate(db, s.session, Date.now(), 86_400_000, null, lensFor(db, config, "work"))?.id).toBe(workP0);
+    expect(p0Candidate(db, s.session, Date.now(), 86_400_000, lens)).toBeNull();
+    expect(p0Candidate(db, s.session, Date.now(), 86_400_000, lensFor(db, config, "work"))?.id).toBe(workP0);
     expect(digestCandidates(db, s.session, Date.now(), 86_400_000, lens).map((i) => i.id)).toEqual([homeP1]);
     const briefing = composeBriefing(db, { session: s.session, now: Date.now(), morningHour: 9, ageMs: 86_400_000, markMorning: false, config });
     expect(briefing.text).not.toContain("WORKSECRET");

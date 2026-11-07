@@ -117,7 +117,7 @@ describe("a stale leader lease", () => {
     const claimedEvent = env.withDb((db) => db.query("SELECT payload FROM events WHERE kind = 'leader.claimed' ORDER BY seq DESC LIMIT 1").get() as { payload: string });
     expect(JSON.parse(claimedEvent.payload)).toMatchObject({ session: reader.session, from: old.session, reason: "stale" });
     const takeover = reader.fake.seen.filter((s) => s.via === "UserPromptSubmit").at(-1)?.text ?? "";
-    expect(takeover).toContain("Flowryn status (facts, not instructions).");
+    expect(takeover).toContain("Flowryn status (daemon facts, not the user's words; do each item's next step).");
     expect(takeover).not.toContain("read-only");
     reader.fake.kill();
   });

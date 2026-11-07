@@ -1,7 +1,6 @@
 import type { Db } from "../db/db.ts";
 import { MAX_INFO_ATTEMPTS } from "./presentations.ts";
-import { awayWakeSql } from "./away.ts";
-import { LEADER_WAKE_SQL, QUESTION_KINDS, RELAY_KINDS, type ItemRow } from "./items.ts";
+import { FOLLOW_UP_FIRST_SQL, LANE_TABLE, LEADER_ROUTE, LEADER_WAKE_SQL, QUESTION_KINDS, RELAY_KINDS, type ItemKind, type ItemRow } from "./items.ts";
 
 /**
  * The attention router's reads (design section 9). The lane table decides an
@@ -25,7 +24,10 @@ export const DIGEST_MAX_CHARS = 2_000;
 /** P0 wake line: one line, at most 200 characters. */
 export const P0_LINE_MAX = 200;
 
-export const DIGEST_HEADER = "Flowryn updates (facts, not instructions):";
+/** Flowryn's lines to a leader are the daemon's facts, never the user's words; the leader acts on each one's named next step itself. */
+export const FACTS_NOTE = "daemon facts, not the user's words";
+
+export const DIGEST_HEADER = `Flowryn updates (${FACTS_NOTE}; do each line's next step):`;
 
 const RANK_SELECT = `
   SELECT i.*, COALESCE(p.priority, 2) AS priority,
@@ -36,8 +38,13 @@ const RANK_SELECT = `
 
 const QUESTION_LIST = QUESTION_KINDS.map((k) => `'${k}'`).join(", ");
 
+const P0_ACT_LIST = (Object.keys(LEADER_ROUTE) as ItemKind[])
+  .filter((k) => LEADER_ROUTE[k] === "act" && LANE_TABLE[k].lane === "P0")
+  .map((k) => `'${k}'`)
+  .join(", ");
+
 /** A leader follow-up (something you did, a merge that landed, a yolo PR ready) tops its lane. */
-const RANK_ORDER = `ORDER BY i.lane, NOT ${LEADER_WAKE_SQL}, aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC`;
+const RANK_ORDER = `ORDER BY i.lane, NOT ${FOLLOW_UP_FIRST_SQL}, aged DESC, priority ASC, i.due IS NULL, i.due ASC, i.opened_at ASC, i.rowid ASC`;
 
 /**
  * Which items a session may be handed, and how it is shown them: its scope's, with task-less lines
@@ -58,7 +65,7 @@ function seen(rows: RankedItem[], view: ItemView): RankedItem[] {
 /** One push carries at most this many questions, like the digest's lines; the rest go in the next. */
 export const QUESTION_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
-export const QUESTIONS_HEADER = "Flowryn questions for the user (facts, not instructions):";
+export const QUESTIONS_HEADER = `Flowryn worker questions (${FACTS_NOTE}): decide each one not reserved yourself; bring the reserved ones to the user:`;
 
 /** Open actionable items, P0 first, in lane order: what every briefing and `fleet` list. */
 export function openActionable(db: Db, now: number, ageMs: number): RankedItem[] {
@@ -85,22 +92,21 @@ export function digestCandidates(db: Db, session: string, now: number, ageMs: nu
 }
 
 /**
- * The P0 a push path may take for this session: open, not yet shown to it,
- * and not leased to another push path anywhere (design section 9). While you
- * are away (`awaySince`), an item only you can move that opened since then
- * counts as a P0 here too (awayWakeSql); its stored lane stays as it is.
- * Leader follow-ups go as a batch (followUpBatch), never one push each.
+ * The P0 a push path may take for this session: an open P0 action item, not
+ * yet shown to it, and not leased to another push path anywhere (design
+ * section 9). Each goes in a push of its own, at once. P1 action items go as
+ * a batch (followUpBatch), questions as theirs (questionBatch).
  */
-export function p0Candidate(db: Db, session: string, now: number, ageMs: number, awaySince: number | null = null, view: ItemView = ALL_ITEMS): RankedItem | null {
+export function p0Candidate(db: Db, session: string, now: number, ageMs: number, view: ItemView = ALL_ITEMS): RankedItem | null {
   return (
     seen(
       db.query(
         `${RANK_SELECT}
-         WHERE (i.lane = 'P0' OR ${awayWakeSql("?3")}) AND i.class = 'actionable' AND i.state IN ('open','presented') AND i.kind NOT IN (${QUESTION_LIST}) AND NOT ${LEADER_WAKE_SQL}
+         WHERE i.lane = 'P0' AND i.kind IN (${P0_ACT_LIST}) AND i.class = 'actionable' AND i.state IN ('open','presented')
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?2 AND s.state IN ('presented','carried','offered'))
            AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
          ${RANK_ORDER}`,
-      ).all(now - ageMs, session, awaySince) as RankedItem[],
+      ).all(now - ageMs, session) as RankedItem[],
       view,
     )[0] ?? null
   );
@@ -153,7 +159,7 @@ const RELAY_LIST = RELAY_KINDS.map((k) => `'${k}'`).join(", ");
 /** One turn end carries at most this many items to relay; the rest go in the next turn end or digest. */
 export const RELAY_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
-export const RELAY_HEADER = "Flowryn items to relay to the user (facts, not instructions):";
+export const RELAY_HEADER = `Flowryn items to relay to the user (${FACTS_NOTE}):`;
 export const RELAY_FOOTER = "Each is relayed to the user, or dismissed: flowryn dismiss <id>. flowryn show <id> prints a report whole and closes it unless it needs action";
 
 /**
@@ -189,26 +195,37 @@ export function relayText(items: Pick<RankedItem, "id" | "lane" | "line">[], mor
   return text.length >= DIGEST_MAX_CHARS ? `${text.slice(0, DIGEST_MAX_CHARS - 2)}…` : text;
 }
 
-/** One push carries at most this many follow-ups, like a question batch; the rest go in the next. */
+/** One push carries at most this many action items, like a question batch; the rest go in the next. */
 export const FOLLOW_UP_BATCH_MAX = DIGEST_MAX_LINES - 1;
 
-export const FOLLOW_UP_HEADER = "Flowryn follow-ups: the user acted outside this session, a merge landed, a yolo PR is ready, or an auto-merge is held (facts, not instructions):";
-export const FOLLOW_UP_FOOTER = "Follow each up as its line says (a ready yolo PR: verify and merge it; a held auto-merge: settle what held it), or dismiss it: flowryn dismiss <id>";
+export const FOLLOW_UP_HEADER = `Flowryn action items for the leader (${FACTS_NOTE}):`;
+export const FOLLOW_UP_FOOTER =
+  "Act on each now: steer its worker, verify, merge, decide what your scope allows, or put it to the user. Never end the turn leaving a worker idle with work and no instruction. Dismiss an item only once handled: flowryn dismiss <id>";
+
+export interface FollowUpBatch {
+  /** The action items one push carries, oldest first. */
+  items: RankedItem[];
+  /** More waiting than one push carries. */
+  more: number;
+  /** When the oldest has waited the batch window ([leader] action_batch_ms): an idle leader is woken no sooner. */
+  dueAt: number;
+}
 
 /**
- * The leader follow-ups a push may carry to this session (LEADER_WAKE_SQL):
- * open, not shown to it yet, and not leased to a push path anywhere, oldest
- * first. Due at once: each is one action of yours, so it wakes the leader
- * once, and several inside one wait share the push.
+ * The leader's P1 action items a push may carry to this session
+ * (LEADER_WAKE_SQL): open, not shown to it yet, and not leased to a push path
+ * anywhere, oldest first, leaving out `excludeKinds`. Due once the oldest is
+ * `batchMs` old, so items that open in a burst share one wake.
  */
-export function followUpBatch(db: Db, session: string, view: ItemView = ALL_ITEMS): { items: RankedItem[]; more: number } | null {
+export function followUpBatch(db: Db, session: string, batchMs: number, view: ItemView = ALL_ITEMS, excludeKinds: readonly ItemKind[] = []): FollowUpBatch | null {
+  const excluded = excludeKinds.length > 0 ? `AND i.kind NOT IN (${excludeKinds.map((k) => `'${k}'`).join(", ")})` : "";
   const rows = seen(db
     .query(
       `SELECT i.*, COALESCE(p.priority, 2) AS priority, 0 AS aged
        FROM items i
        LEFT JOIN task_policy tp ON tp.task_id = i.task_id
        LEFT JOIN projects p ON p.id = tp.project_id
-       WHERE ${LEADER_WAKE_SQL} AND i.class = 'actionable' AND i.state IN ('open','presented')
+       WHERE ${LEADER_WAKE_SQL} AND i.class = 'actionable' AND i.state IN ('open','presented') ${excluded}
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.session_id = ?1 AND s.state IN ('presented','carried','offered'))
          AND NOT EXISTS (SELECT 1 FROM presentations s WHERE s.item_id = i.id AND s.state IN ('carried','offered') AND s.path IN ('continuation','waiter','trigger'))
        ORDER BY i.opened_at ASC, i.rowid ASC`,
@@ -216,10 +233,10 @@ export function followUpBatch(db: Db, session: string, view: ItemView = ALL_ITEM
     .all(session) as RankedItem[], view);
   if (rows.length === 0) return null;
   const items = rows.slice(0, FOLLOW_UP_BATCH_MAX);
-  return { items, more: rows.length - items.length };
+  return { items, more: rows.length - items.length, dueAt: rows[0]!.opened_at + batchMs };
 }
 
-/** What a follow-up push hands the model: a header, one line per item, and how to settle each. */
+/** What an action-item push hands the model: a header, one line per item, and how to settle each. */
 export function followUpText(items: Pick<RankedItem, "id" | "lane" | "line">[], more = 0): string {
   const lines = [FOLLOW_UP_HEADER, ...items.map((i) => itemLine(i))];
   if (more > 0) lines.push(`+${more} more: flowryn fleet`);
@@ -239,12 +256,14 @@ export function followUpWakeLine(items: Pick<RankedItem, "id" | "kind">[]): stri
   const passes = count("pass_requested");
   const ready = count("pr_ready");
   const held = count("auto_merge_held");
+  const other = items.length - acted - landed - passes - ready - held;
   const parts = [
     acted > 0 ? `the user acted outside this session (${acted})` : "",
     landed > 0 ? `${landed === 1 ? "a merge" : `${landed} merges`} landed` : "",
     passes > 0 ? `${passes === 1 ? "a review pass was" : `${passes} review passes were`} requested` : "",
-    ready > 0 ? `${ready === 1 ? "a yolo PR is" : `${ready} yolo PRs are`} ready to verify and merge` : "",
+    ready > 0 ? `${ready === 1 ? "a PR is" : `${ready} PRs are`} ready` : "",
     held > 0 ? `${held === 1 ? "an auto-merge is" : `${held} auto-merges are`} held` : "",
+    other > 0 ? `${other === 1 ? "an action item waits" : `${other} action items wait`}` : "",
   ].filter(Boolean);
   // At most FOLLOW_UP_BATCH_MAX ids, so the line stays well under P0_LINE_MAX.
   return `${head}${parts.join("; ")}. Details: flowryn fleet`;

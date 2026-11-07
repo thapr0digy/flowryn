@@ -25,6 +25,7 @@ import { MANIFEST_ENV, type CleanupOutcome } from "../../contracts/owned.ts";
 import { HARNESS_IDS, type HarnessId } from "../../harness/types.ts";
 import { resolveTool } from "../../config/config.ts";
 import { resolveHerdrSocket } from "../../runtime/herdr/socket.ts";
+import { evidencePathFor } from "../../contracts/evidence.ts";
 import { dataDirReport } from "../../contracts/report.ts";
 import { contractEstimateSeconds, contractSteps } from "../../contracts/suite.ts";
 import { isScriptedModel, piAgentSource } from "../../contracts/pi-profile.ts";
@@ -130,7 +131,7 @@ async function contractRun(args: Parameters<NonNullable<VerbSpec["local"]>>[0], 
       for (const step of result.steps) checks.push({ check: `contract ${harness} ${step.step}`, status: step.ok ? "ok" : "fail", detail: `${step.detail} (${step.seconds}s)` });
       checks.push(cleanupCheck(`contract ${harness} cleanup`, result.cleanup));
       if (!result.passed) {
-        checks.push({ check: `contract ${harness}`, status: "fail", detail: `${result.version} did not pass; report ${report}${boolArg(args, "keep") ? `; scratch ${result.scratch}` : ""}` });
+        checks.push({ check: `contract ${harness}`, status: "fail", detail: `${result.version} did not pass; report ${report}${result.evidence ? `; evidence ${evidencePathFor(report)}` : ""}${boolArg(args, "keep") ? `; scratch ${result.scratch}` : ""}` });
         continue;
       }
       if (verifyOnly) {
