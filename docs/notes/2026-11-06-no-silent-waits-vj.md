@@ -102,7 +102,7 @@ Each entry of `waiting[]` now carries `wait` (the kind), `age` and `deadline` (`
   - A host-held launch is recovered at 10 min, then itemized with the numbers, wakes the leader, and the item resolves when the wait ends.
   - A covered usage-limit wait, itemized once its cover closes.
   - A phase that did not start after its blocker landed is re-kicked, then itemized; its run starting ends the wait.
-  - The verify queue's expected start.
+  - The verify queue's expected start; requests that go past a waiting first request never move its deadline.
   - An auto-merge waiting on checks.
 - `test/integration/no-silent-waits.test.ts`, with a real daemon and the fake GitHub:
   - A verify cancelled mid-auto-merge is queued again at once and both PRs land.

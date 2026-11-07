@@ -13,7 +13,8 @@ export type WaitKind = (typeof WAIT_KINDS)[number];
 
 /**
  * The deadlines. verify_queue counts from the request's expected start (the
- * queue's last move, or the expected end of the verifies running ahead of it);
+ * last move of a request ahead of it, or the expected end of the verifies not
+ * started from a request behind it);
  * phase_start from its last blocker's landing or cleanup (it is ready once cleaned); auto_merge from its last state
  * change; the others from when the wait began.
  */
