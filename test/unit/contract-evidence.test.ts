@@ -77,7 +77,7 @@ describe("a steer sent with --end-turn", () => {
     const rule = workerContract("claude", null, { base: null, defaultBranch: "main" })
       .split("\n")
       .find((l) => l.startsWith("- End each turn with an outcome"))!;
-    expect(rule).toContain("where a steer asks for no outcome");
+    expect(rule).toContain("or as a steer says");
     expect(END_TURN_NOTE).toContain("asks for no outcome");
   });
 });

@@ -105,7 +105,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
   const lines = [
     "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
     `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
-    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -), on your own background job, or where a steer asks for no outcome.",
+    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -), on your own background job, or as a steer says.",
     "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
     "- A confirmation prompt: never answer it; ask --blocking naming it.",
     "- For your leader to act on: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -",
