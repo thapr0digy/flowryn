@@ -231,6 +231,10 @@ export interface NudgeOutcome {
   skipped: string | null;
 }
 
+function none(skipped: string | null, episodeActive = false): NudgeOutcome {
+  return { steer: null, episodeActive, skipped };
+}
+
 /**
  * Judge one stopped, running worker. Call inside the reconciler's observed
  * transition, after liveness was set idle and the run is not waiting on
@@ -238,7 +242,6 @@ export interface NudgeOutcome {
  * stall item, all in that transaction.
  */
 export function runIdleNudge(db: Db, run: RunRow, input: NudgeInput, now: number): NudgeOutcome {
-  const none = (skipped: string | null, episodeActive = false): NudgeOutcome => ({ steer: null, episodeActive, skipped });
   if (run.state !== "running" || run.idle_since === null) return none("not stopped");
   if (input.restartBusy) return none("restart handoff");
   const wait = pendingWait(db, run, now, "reconciler");
