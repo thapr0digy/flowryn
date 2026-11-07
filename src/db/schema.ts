@@ -1063,6 +1063,30 @@ ALTER TABLE decisions ADD COLUMN autonomy_id TEXT;
 ALTER TABLE decisions ADD COLUMN autonomy_state TEXT CHECK (autonomy_state IN ('decided','parked'));
 `;
 
+/**
+ * Migration 55 (docs/notes/2026-11-06-auto-verify-every-t8.md): every delivery on a project with
+ * verify steps gets an auto_merges row. `merge = 0` marks one that only verifies (the project or
+ * the task does not auto-merge): it ends `verified` on a pass, and a failure goes back to the
+ * worker as an auto-merge's does. The rebuild widens the state check; rows copy as merge = 1.
+ */
+const AUTO_VERIFY_SQL = /* sql */ `
+CREATE TABLE auto_merges_v55 (
+  id TEXT PRIMARY KEY, run_id TEXT NOT NULL, task_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  ref TEXT NOT NULL, head_sha TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','verifying','waiting_checks','merging','merged','held','superseded','sent_back','verified')),
+  request_id TEXT, verification_id TEXT, merge_id TEXT,
+  reason TEXT, detail TEXT,
+  created_at INTEGER NOT NULL, state_since INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  next TEXT,
+  merge INTEGER NOT NULL DEFAULT 1 CHECK (merge IN (0, 1)));
+INSERT INTO auto_merges_v55 (id, run_id, task_id, project_id, ref, head_sha, state, request_id, verification_id, merge_id, reason, detail, created_at, state_since, updated_at, next, merge)
+  SELECT id, run_id, task_id, project_id, ref, head_sha, state, request_id, verification_id, merge_id, reason, detail, created_at, state_since, updated_at, next, 1 FROM auto_merges;
+DROP TABLE auto_merges;
+ALTER TABLE auto_merges_v55 RENAME TO auto_merges;
+CREATE UNIQUE INDEX auto_merges_live ON auto_merges(run_id) WHERE state IN ('queued','verifying','waiting_checks','merging');
+CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1118,6 +1142,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 52, name: "rich-briefs", sql: RICH_BRIEFS_SQL },
   { version: 53, name: "page-pass-key", sql: PAGE_PASS_KEY_SQL },
   { version: 54, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
+  { version: 55, name: "auto-verify", sql: AUTO_VERIFY_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -78,6 +78,8 @@ export type ItemClass = "actionable" | "info";
  * dropped; src/lifecycle/watches.ts).
  * stack_base_lost: a stacked run's base task was dropped, failed or had its PR
  * closed unmerged, so the run cannot land as stacked (src/lifecycle/stacks.ts).
+ * leader_wake_runaway: a leader session hit [leader] wake_ceiling_per_hour,
+ * so no push starts a turn in it until the hour drains (src/leader/wake-ceiling.ts).
  * Asks (src/ask/): answer_ready, an ask's answer, read with `show a<N>`;
  * ask_failed, an ask that ended without one (its cap, its deadline, an error,
  * or a scout it asked for that could not start).
@@ -137,6 +139,7 @@ export const LANE_TABLE = {
   auto_merge_held: { lane: "P1", class: "actionable" },
   autonomy_parked: { lane: "P1", class: "actionable" },
   review_unanswered: { lane: "P1", class: "actionable" },
+  leader_wake_runaway: { lane: "P0", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
   contract_recorded: { lane: "P1", class: "info" },
   build_held: { lane: "P1", class: "info" },
@@ -171,28 +174,118 @@ export const QUESTION_KINDS: readonly ItemKind[] = ["worker_question", "worker_q
 export const RELAY_KINDS: readonly ItemKind[] = ["worker_report", "restart_dropped", "restart_failed", "validation_stuck", "user_acted", "landed", "pass_requested"];
 
 /**
- * Items that wake an idle leader as a P0 would, though they are P1: what you
- * did outside the leader session (user_acted, and a pass you asked for on a
- * review page), a merge that landed without the leader's own merge call, and
- * a yolo task's PR ready for the leader to verify and merge (LEADER_WAKE_SQL),
- * and an auto-merge that was held. Each wakes it once (followUpBatch in router.ts).
+ * Whose move an item is (task no-idle-workers-23, steer m569): `act`, the
+ * leader's (act on it, or relay it to you); `question`, a question the leader
+ * puts to you (QUESTION_KINDS, their own batch); `user`, yours alone and on
+ * purpose not now (unattended mode parked it for your morning brief), so it
+ * never wakes the leader; `info`, nobody's. Every
+ * `act` and `question` item wakes an idle leader session, whether or not you
+ * were recently active, with no hourly cap: a P0 at once (p0Candidate), the
+ * rest batched (followUpBatch, questionBatch in router.ts). Each item wakes a
+ * session once (an item never reopens; a new state is a new item), and
+ * [leader] wake_ceiling_per_hour is the runaway guard. Explicit per kind, so a
+ * new kind must say whose move it is (a unit test lists them all).
  */
-export const LEADER_WAKE_KINDS: readonly ItemKind[] = ["user_acted", "pass_requested", "landed", "pr_ready", "auto_merge_held"];
+export type LeaderRoute = "act" | "question" | "user" | "info";
+
+export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
+  worker_question_blocking: "question",
+  failure_needs_you: "act",
+  sensitive_action_waiting: "act",
+  pr_ready: "act",
+  gate_ready: "act",
+  pass_requested: "act",
+  review_channel: "act",
+  report_ready: "act",
+  answer_ready: "act",
+  ask_failed: "act",
+  worker_question: "question",
+  review_feedback: "question",
+  review_summary: "question",
+  review_worker_gone: "act",
+  divergence: "act",
+  worker_idle: "act",
+  unproven_merge: "act",
+  backlog_out_of_sync: "act",
+  trust_dialog: "act",
+  blocked_prompt: "act",
+  overdue_todo: "act",
+  steer_unacked: "act",
+  checkout_tangle: "act",
+  checks_red: "act",
+  pr_closed: "act",
+  cleanup_refused: "act",
+  nomistakes_down: "act",
+  capacity_wait: "act",
+  docker_leftover: "act",
+  contract_leftover: "act",
+  phase_blocked: "act",
+  watch_stuck: "act",
+  stack_base_lost: "act",
+  usage_limit: "act",
+  quota_low: "act",
+  account_signed_out: "act",
+  validation_outside_cap: "act",
+  validation_stuck: "act",
+  worker_not_exited: "act",
+  operation_escalated: "act",
+  harness_unverified: "act",
+  herdr_unreachable: "act",
+  forge_unavailable: "act",
+  restart_dropped: "act",
+  restart_failed: "act",
+  build_refused: "act",
+  worker_report: "act",
+  build_failed: "act",
+  user_acted: "act",
+  landed: "act",
+  pr_conflict: "act",
+  auto_merge_held: "act",
+  autonomy_parked: "user",
+  review_unanswered: "act",
+  leader_wake_runaway: "act",
+  yolo_merged: "info",
+  contract_recorded: "info",
+  build_held: "info",
+  checkout_unsynced: "info",
+  conflict_nudged: "info",
+  review_steered: "info",
+  policy_sent_back: "info",
+  policy_behind: "info",
+  phase_started: "info",
+  auto_resumed: "info",
+  steer_acked: "info",
+  review_recap: "info",
+  progress: "info",
+};
 
 /**
- * SQL for "item `i` is a leader follow-up": a LEADER_WAKE_KINDS item, where a
- * pr_ready counts only when its task is yolo (the leader merges it with no
- * prompt) and no auto-merge or landing queue is working on its run (the
- * daemon merges it with no leader turn; a held one wakes it as auto_merge_held). A pr_ready that
- * waits on you is not one: it wakes only while you are away (awayWakeSql in
- * away.ts). A pr_ready is never sensitive work, which opens
- * sensitive_action_waiting instead.
+ * The leader's P1 action items: they wake an idle leader as one batch
+ * (followUpBatch in router.ts). P0 action items go one push each (p0Candidate).
+ */
+export const LEADER_WAKE_KINDS: readonly ItemKind[] = (Object.keys(LEADER_ROUTE) as ItemKind[]).filter((k) => LEADER_ROUTE[k] === "act" && LANE_TABLE[k].lane === "P1");
+
+/** A live auto-merge or landing-queue entry is merging the item's run: the daemon is acting, so its pr_ready wakes nobody. */
+const DAEMON_MERGING_SQL = `(EXISTS (SELECT 1 FROM auto_merges wa WHERE wa.run_id = i.run_id AND wa.state IN ('queued','verifying','waiting_checks','merging'))
+    OR EXISTS (SELECT 1 FROM landing_queue wl WHERE wl.run_id = i.run_id AND wl.state IN ('waiting','landing')))`;
+
+/**
+ * SQL for "item `i` wakes the leader in a batch": a LEADER_WAKE_KINDS item,
+ * where a pr_ready counts only while no auto-merge or landing queue is
+ * working on its run (a held one wakes it as auto_merge_held). A pr_ready is
+ * never sensitive work, which opens sensitive_action_waiting instead.
  */
 export const LEADER_WAKE_SQL = `(i.kind IN (${LEADER_WAKE_KINDS.filter((k) => k !== "pr_ready")
   .map((k) => `'${k}'`)
-  .join(", ")}) OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1)
-    AND NOT EXISTS (SELECT 1 FROM auto_merges wa WHERE wa.run_id = i.run_id AND wa.state IN ('queued','verifying','waiting_checks','merging'))
-    AND NOT EXISTS (SELECT 1 FROM landing_queue wl WHERE wl.run_id = i.run_id AND wl.state IN ('waiting','landing'))))`;
+  .join(", ")}) OR (i.kind = 'pr_ready' AND NOT ${DAEMON_MERGING_SQL}))`;
+
+/**
+ * The follow-ups that top their lane in a digest: what you did outside the
+ * session, a merge that landed, a held auto-merge, a review pass you asked
+ * for, and a yolo task's ready PR. Ordering only; LEADER_WAKE_SQL decides wakes.
+ */
+export const FOLLOW_UP_FIRST_SQL = `(i.kind IN ('user_acted', 'pass_requested', 'landed', 'auto_merge_held')
+    OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1) AND NOT ${DAEMON_MERGING_SQL}))`;
 
 export interface ItemRow {
   id: string;

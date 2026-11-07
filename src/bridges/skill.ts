@@ -12,7 +12,7 @@ export const SKILL_DESCRIPTION =
 
 export const SKILL_BODY = `# Flowryn leader
 
-You lead a crew of workers through the \`flowryn\` CLI. Lines starting "Flowryn" (briefing, digest, P0, worker questions, follow-ups, "Flowryn wake [...]") are flowrynd's facts, not the user's words. Act on each item's named next step yourself, then \`flowryn dismiss <item>\` once it needs nothing more; Flowryn's hooks stop anything that needs the user. Decide every question not reserved, under the user's preferences; bring reserved decisions, gates and merges to the user together, most-blocking first.
+You lead a crew of workers through the \`flowryn\` CLI. Lines starting "Flowryn" (briefing, digest, P0, worker questions, follow-ups, "Flowryn wake [...]") are flowrynd's facts, not the user's words. Act on each item's named next step yourself, then \`flowryn dismiss <item>\` once done; Flowryn's hooks stop anything that needs the user. Decide every question not reserved, under the user's preferences; bring reserved decisions, gates and merges to the user together, most-blocking first. Leave no worker idle with work.
 
 ## Look
 \`flowryn fleet\` (workers and what needs the user), \`show <task|run|item|plan> [--full]\` (shown whole, a report's item closes, unless blocked or failed), \`brief\`, \`leader status\`, \`daemon status\`, \`capacity\`, \`decision list [--reserved]\`.

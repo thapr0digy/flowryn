@@ -9,6 +9,9 @@ import type { VerifyConfig, VerifyItem } from "./config.ts";
  * or reordered step, or a changed artifact, does. The time limit is not part
  * of it: it does not change what a pass proved. A parallel group is hashed as
  * a nested list, so a flat list hashes exactly as it did before groups existed.
+ * A review step's reviewer (harness and model) is part of it, since another
+ * reviewer proves something else; its spend cap and deadline are not, like the
+ * time limit. A config with no review step hashes exactly as before it existed.
  */
 
 const TAG = "flowryn-verify-policy";
@@ -62,8 +65,10 @@ function canonicalSteps(config: Pick<VerifyConfig, "steps" | "when_changed">): (
 }
 
 /** "vp1:<sha256 hex>" of the normalized steps, in order, and the artifact. */
-export function verifyPolicyId(config: Pick<VerifyConfig, "steps" | "binary" | "when_changed">): string {
-  const canonical = JSON.stringify([TAG, ENCODING, canonicalSteps(config), config.binary]);
+export function verifyPolicyId(config: Pick<VerifyConfig, "steps" | "binary" | "when_changed"> & { review?: VerifyConfig["review"] }): string {
+  const parts: unknown[] = [TAG, ENCODING, canonicalSteps(config), config.binary];
+  if (config.review) parts.push({ reviewer: config.review.harness, model: config.review.model });
+  const canonical = JSON.stringify(parts);
   return `vp${ENCODING}:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 

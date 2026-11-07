@@ -9,6 +9,7 @@ import { settledStatus } from "../lifecycle/idle-carry.ts";
 import { DIALOG_QUESTION } from "../lifecycle/prompt-wedge.ts";
 import type { HerdrRuntime } from "../runtime/herdr/runtime.ts";
 import { leaderPush } from "./hooks.ts";
+import { syncWakeCeiling } from "./wake-ceiling.ts";
 import { lastRewakeAt, rewakeState, saveRewakeState, type WakeBudget } from "./wake-state.ts";
 
 /**
@@ -19,7 +20,7 @@ import { lastRewakeAt, rewakeState, saveRewakeState, type WakeBudget } from "./w
  * is gone, nothing wakes the leader until you type to it. So the attention
  * tick checks the lease holder: no waiter for [leader] waiter_grace_ms, over
  * at least two ticks, and a wake due (leaderPush would wake it now, within
- * the hourly budget), then the daemon types one fixed line into the leader's
+ * the runaway ceiling), then the daemon types one fixed line into the leader's
  * pane. The turn it starts gets the items in its digest, and its Stop arms a
  * new waiter.
  *
@@ -176,7 +177,8 @@ export class LeaderRewake {
     if (attention.bus.hasWaiter(s.session_id)) return null;
     const seen = Math.max(attention.bus.lastSeen(s.session_id) ?? 0, this.deps.startedAt);
     if (t - seen < attention.timing().waiter_grace_ms) return null;
-    const { push } = leaderPush({ db, attention, config: this.deps.config }, s, t);
+    const { push, ceiling } = leaderPush({ db, attention, config: this.deps.config }, s, t);
+    if (ceiling) tx(db, () => syncWakeCeiling(db, s.session_id, ceiling, "daemon", t));
     if (!push || (push.mode !== "waiter" && push.mode !== "trigger")) return null;
     return { s, ids: push.items.map((i) => i.id), budget: push.kind === "questions" ? "questions" : "p0" };
   }
