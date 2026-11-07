@@ -503,7 +503,7 @@ function kept(step: VerifyStep): boolean {
 
 /** The logs of the kept steps, copied from the resumed verification's directory into this one's (a missing one is noted on its step). */
 function copyKeptLogs(from: Verification, v: Verification, steps: VerifyStep[]): void {
-  for (const step of steps.filter(kept)) {
+  for (const step of steps.filter((s) => kept(s) && s.state === "passed")) {
     const logs = (step.attempts ?? 1) > 1 ? [step.log.replace(/\.retry\.log$/, ".log"), step.log] : [step.log];
     for (const log of logs) {
       try {

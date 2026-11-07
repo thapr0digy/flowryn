@@ -433,7 +433,8 @@ export class LandingQueue implements LandingHooks {
    * (merge-tree, then commit-tree with the delivered head as first parent),
    * in the project's object store, so its verify finds it; recorded on the
    * entry with its request and a landing.train_built event. Null when the
-   * merge conflicts or git fails (the entry waits its turn as before).
+   * merge conflicts (recorded once per pair) or git fails (logged, tried
+   * again on a later pass); the entry waits its turn as before.
    */
   private async buildCandidate(row: LandingRow, base: string, position: number): Promise<string | null> {
     const { db, git } = this.deps;
@@ -445,13 +446,17 @@ export class LandingQueue implements LandingHooks {
     if (!policy) return null;
     // A pair that would not merge is tried once, not on every pass.
     const skipped = db
-      .query("SELECT 1 FROM events WHERE kind = 'landing.train_skipped' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.head') = ?2 AND json_extract(payload, '$.base') = ?3 LIMIT 1")
-      .get(row.id, row.head_sha, base);
+      .query("SELECT 1 FROM events WHERE run_id = ?4 AND kind = 'landing.train_skipped' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.head') = ?2 AND json_extract(payload, '$.base') = ?3 LIMIT 1")
+      .get(row.id, row.head_sha, base, row.run_id);
     if (skipped) return null;
     const merged = await git(["merge-tree", "--write-tree", "--no-messages", row.head_sha, base], project.path);
-    if (merged.code !== 0) {
-      const why = merged.code === 1 ? `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts` : `git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`;
+    if (merged.code === 1) {
+      const why = `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts`;
       tx(db, () => appendEvent(db, { source: "daemon", kind: "landing.train_skipped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, head: row.head_sha, base, why }, ts: this.deps.now() }));
+      return null;
+    }
+    if (merged.code !== 0) {
+      this.deps.log(`landing queue ${row.id}: git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`);
       return null;
     }
     const tree = merged.stdout.split("\n")[0]?.trim() ?? "";

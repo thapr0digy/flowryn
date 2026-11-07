@@ -14,6 +14,7 @@ import { DEFAULT_TRAIN_DEPTH, landingTrainDepth, verifyConfig } from "../../src/
 import { getLanding, LandingQueue, liveLanding, TRAIN_RANK, trainBaseHolds, type LandingRow } from "../../src/verify/landing-queue.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { getRequest } from "../../src/verify/queue.ts";
+import { finishVerification, insertVerification } from "../../src/verify/store.ts";
 import { GIT_ENV, mergeOnOrigin, scratchRepos, sh } from "../helpers/scratch-git.ts";
 
 /**
@@ -220,7 +221,7 @@ describe("a train of three", () => {
 });
 
 describe("a car that leaves", () => {
-  test("assumption: a middle failure re-bases the one behind it on the head ahead, without the failed one, and re-verifies it", async () => {
+  test("assumption: a middle car sent back re-bases the one behind it on the head ahead, without it, and re-verifies it", async () => {
     const s1 = ship(1, "one.txt", "one\n");
     const s2 = ship(2, "two.txt", "two\n");
     const s3 = ship(3, "three.txt", "three\n");
@@ -228,7 +229,7 @@ describe("a car that leaves", () => {
     await lq.pass();
     const before = row(s3);
     const c2 = row(s2);
-    // The middle one is sent back (its candidate's verify failed, or its worker took it back).
+    // The middle one is sent back: its run is no longer ready.
     tx(db, () => db.query("UPDATE runs SET state = 'running' WHERE id = ?1").run(s2.run));
     await lq.pass();
     expect(row(s2)).toMatchObject({ state: "left", reason: "sent_back", train_head: null });
@@ -245,6 +246,38 @@ describe("a car that leaves", () => {
     squashLand(s1);
     await lq.pass();
     expect(row(s3)).toMatchObject({ state: "landing", head_sha: after.train_head, train_base: s1.head });
+  });
+
+  test("a middle car whose candidate's verify failed stays in line: the train ends there, and it is integrated on main as before", async () => {
+    const s1 = ship(1, "one.txt", "one\n");
+    const s2 = ship(2, "two.txt", "two\n");
+    const s3 = ship(3, "three.txt", "three\n");
+    const lq = queue();
+    await lq.pass();
+    const c2 = row(s2);
+    const c3 = row(s3);
+    expect(c3.train_base).toBe(c2.train_head);
+    tx(db, () => {
+      const v = insertVerification(db, { project_id: "web", pr_url: c2.ref, task_id: s2.task, head_sha: c2.train_head!, steps: [], policy_id: policy(), dir: (id) => join(dir, id), worktree: (id) => join(dir, `vwt-${id}`), project_path: repos.primary, source: "daemon", now });
+      finishVerification(db, v, { state: "failed", steps: [], tests: null, detail: "bun test exited 1", binary: null }, now + 1);
+    });
+    await lq.pass();
+    expect(row(s2)).toMatchObject({ state: "waiting", train_head: c2.train_head, train_base: s1.head });
+    expect(row(s3)).toMatchObject({ state: "waiting", train_head: null, train_base: null });
+    expect(getRequest(db, c3.train_request!)!.state).toBe("cancelled");
+    expect(trainEvents("landing.train_dropped")).toEqual([expect.objectContaining({ landing: c3.id, why: "the train ends ahead of it" })]);
+    // Not rebuilt on a later pass either.
+    await lq.pass();
+    expect(row(s3).train_head).toBeNull();
+
+    squashLand(s1);
+    await lq.pass();
+    const landing = row(s2);
+    expect(landing).toMatchObject({ state: "landing", train_head: null, train_base: null });
+    expect(landing.head_sha).not.toBe(c2.train_head);
+    expect(parents(landing.head_sha)[0]).toBe(s2.head);
+    expect(originHead(s2.branch)).toBe(landing.head_sha);
+    expect(trainEvents("landing.train_dropped").at(-1)).toMatchObject({ landing: c2.id, why: `its verify at ${c2.train_head!.slice(0, 8)} failed` });
   });
 
   test("the head of line leaving: the one behind is integrated on main as before, its candidate never pushed", async () => {
