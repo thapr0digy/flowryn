@@ -102,12 +102,23 @@ function usualVerifyMs(db: Db, config: FlowrynConfig, projectId: string): number
   }
 }
 
-/** The first request in line: it should start once the queue last moved, or the verifies ahead of it are expected to end. */
+/** The first request in line: it should start once the queue ahead of it last moved, or the verifies running ahead of it are expected to end; requests that went past it never reset its clock. */
 function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitKind, number>, now: number): Wait[] {
   const first = queuedRequests(db)[0];
   if (!first) return [];
-  const moved = (db.query("SELECT MAX(ended_at) AS t FROM verify_queue WHERE ended_at IS NOT NULL").get() as { t: number | null }).t ?? 0;
-  const ends = runningVerifications(db).map((v) => v.started_at + usualVerifyMs(db, config, v.project_id));
+  const ahead = (t: string) => `(${t}.rank, ${t}.requested_at, CAST(substr(${t}.id, 3) AS INTEGER)) < (?1, ?2, ?3)`;
+  const place = [first.rank, first.requested_at, Number(first.id.slice(2))] as const;
+  const moved = (db.query(`SELECT MAX(q.ended_at) AS t FROM verify_queue q WHERE q.ended_at IS NOT NULL AND ${ahead("q")}`).get(...place) as { t: number | null }).t ?? 0;
+  const startedBehind = new Set(
+    (
+      db
+        .query(`SELECT q.verification_id FROM verify_queue q WHERE q.state = 'started' AND q.verification_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM verify_queue a WHERE a.verification_id = q.verification_id AND a.state = 'started' AND ${ahead("a")})`)
+        .all(...place) as { verification_id: string }[]
+    ).map((r) => r.verification_id),
+  );
+  const ends = runningVerifications(db)
+    .filter((v) => !startedBehind.has(v.id))
+    .map((v) => v.started_at + usualVerifyMs(db, config, v.project_id));
   const expected = Math.max(first.requested_at, moved, ...ends);
   let caps: Record<string, number>;
   try {

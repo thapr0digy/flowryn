@@ -262,6 +262,25 @@ describe("the verify queue", () => {
     tx(db, () => markStarted(db, db.query("SELECT * FROM verify_queue WHERE id = ?1").get(id) as never, running.id, 57 * MIN));
     expect(pass(db, cfg, 57 * MIN).result.cleared).toEqual([`verify:${id}`]);
   });
+
+  test("requests that go past a waiting first request never move its deadline, so its item stays open", () => {
+    const db = database();
+    const cfg = config(`[projects.web]\nverify = ["true"]\n`);
+    const first = request(db, 0);
+    function startBehind(at: number, pr: number): void {
+      const behind = tx(db, () => insertRequest(db, { project_id: "web", pr_url: `https://github.com/acme/web/pull/${pr}`, task_id: `t${pr}`, head_sha: "d".repeat(40), policy_id: POLICY, pr_number: pr, head_ref: `flowryn/t${pr}`, worktree: null, source: "auto", path: null, now: at - MIN }));
+      const v = tx(db, () => insertVerification(db, { project_id: "web", pr_url: behind.pr_url, task_id: behind.task_id, head_sha: behind.head_sha, steps: initialSteps(["true"]), policy_id: POLICY, dir: () => "/d", worktree: () => "/w", project_path: "/p", source: "daemon", now: at }));
+      tx(db, () => markStarted(db, behind, v.id, at));
+    }
+    startBehind(5 * MIN, 8);
+    expect(collectWaits(db, cfg, 5 * MIN)[0]).toMatchObject({ key: `verify:${first}`, due: 20 * MIN });
+    expect(pass(db, cfg, 20 * MIN).kicks).toEqual(["scheduler"]);
+    pass(db, cfg, 21 * MIN);
+    expect(openWaitItems(db)).toHaveLength(1);
+    startBehind(25 * MIN, 9);
+    expect(pass(db, cfg, 26 * MIN).result.cleared).toEqual([]);
+    expect(openWaitItems(db)[0]!.line).toContain(`verify ${first} of t1`);
+  });
 });
 
 describe("an auto-merge", () => {
