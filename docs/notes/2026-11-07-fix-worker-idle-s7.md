@@ -11,3 +11,5 @@ The pointer is still not held back while a reminder is unsettled. A worker that 
 The `run.idle_alert` event's `ignored_reminder` still records what was known when the alert fell due. The integration test no longer requires it to be true, because under load it can fall due before the result. It checks the pointer's line instead.
 
 Tests: `test/unit/turn-end-guard.test.ts` covers "the worker_idle pointer and the reminder result, in either order". It checks the result first, the pointer first, an obeyed result, a pointer that waits on a background job, and a resolved pointer. The tests drive the order by hand, so they do not depend on timing.
+
+The daemon's verify of this delivery (v190) failed on an unrelated timeout. `test/unit/landing-queue.test.ts` "a base that moved sends the head of line back…" runs MAX_INTEGRATIONS rounds of real git merges and pushes, which took 6.1s against the 5s default under load. It passes alone, and it now has an explicit 30s budget.
