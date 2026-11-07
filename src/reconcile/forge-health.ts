@@ -34,6 +34,12 @@ export function waitingMerges(db: Db): string[] {
   return rows.map((r) => r.task_id);
 }
 
+/** When the current GitHub outage began, or null while GitHub answers. */
+export function forgeDownSince(db: Db): number | null {
+  const since = Number(getMeta(db, DOWN_SINCE) ?? "");
+  return Number.isFinite(since) && since > 0 ? since : null;
+}
+
 function clock(ms: number): string {
   const d = new Date(ms);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;

@@ -21,6 +21,7 @@ import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { activateStage, neededPools, positionOf, projectLimit, type StagePos } from "../lifecycle/stages.ts";
 import { explainHumanWaits } from "../attention/human-waits.ts";
+import { queuedRequests } from "../verify/queue.ts";
 import { checkHost, type HostVerdict } from "./host.ts";
 import { fullPools, OverCapacity, projectAtLimit, ProjectAtLimit } from "./pools.ts";
 import { forgetQuota, heldQuotaAccounts, probeQuota, quotaTarget, quotaHolds, quotaLine, quotaState, quotaStates, recordQuota, type QuotaReading } from "./quota.ts";
@@ -774,17 +775,24 @@ export class Scheduler {
     const { db, now } = this.deps;
     const t = now();
     const threshold = schedTiming(this.deps.config()).wait_alert_ms;
-    const oldest = db
-      .query(
-        `SELECT task_id, waiting_since FROM runs WHERE state NOT IN ('cleaned','failed','cancelled')
-           AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead')
-           AND waiting_since IS NOT NULL ORDER BY waiting_since LIMIT 1`,
-      )
-      .get() as { task_id: string; waiting_since: number } | null;
+    const waitingRuns = `FROM runs r WHERE r.state NOT IN ('cleaned','failed','cancelled')
+           AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead') AND r.waiting_since IS NOT NULL`;
+    const oldest = db.query(`SELECT r.task_id, r.waiting_since ${waitingRuns} ORDER BY r.waiting_since LIMIT 1`).get() as { task_id: string; waiting_since: number } | null;
     const open = findOpenItem(db, "capacity_wait", null);
     if (oldest && t - oldest.waiting_since >= threshold) {
       if (open) return;
-      const count = (db.query("SELECT COUNT(*) AS n FROM runs WHERE state NOT IN ('cleaned','failed','cancelled') AND (stage_state = 'waiting' OR pending_launch IS NOT NULL) AND (pending_launch IS NOT NULL OR liveness != 'dead') AND waiting_since <= ?1").get(t - threshold) as { n: number }).n;
+      // Every run waiting that long already has its own item from the wait registry (src/reconcile/waits.ts), or one another open item still carries: no second P1.
+      const uncoveredRuns = (
+        db
+          .query(
+            `SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?1 AND NOT EXISTS (SELECT 1 FROM waits w WHERE w.key = 'run:' || r.id AND w.item_id IS NOT NULL
+               AND (w.item_id NOT LIKE 'covered:%' OR EXISTS (SELECT 1 FROM items i WHERE i.id = substr(w.item_id, 9) AND i.state IN ('open','presented'))))`,
+          )
+          .get(t - threshold) as { n: number }
+      ).n;
+      if (uncoveredRuns === 0) return;
+      const count = (db.query(`SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?1`).get(t - threshold) as { n: number }).n;
+      const verify = queuedRequests(db)[0] ?? null;
       const host = hostState(db);
       const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
       const paused = pausedAccounts(db, t);
@@ -802,9 +810,16 @@ export class Scheduler {
                 : untested
                   ? `${untested[0]} ${untested[1]} has no passing contract, or full capacity pools`
                   : "full capacity pools";
+      const verifyPart = verify ? `; oldest queued verify ${verify.id}${verify.task_id ? ` (${verify.task_id})` : ""} ${Math.round((t - verify.requested_at) / 60_000)}m` : "";
       tx(db, () => {
-        const event = appendEvent(db, { source: "daemon", kind: "sched.waiting", taskId: oldest.task_id, payload: { runs: count, oldest_ms: t - oldest.waiting_since, why }, ts: t });
-        openItem(db, { kind: "capacity_wait", eventSeq: event.seq, line: `${count} run(s) waiting over ${Math.round(threshold / 60_000)}m for capacity (${why}); oldest ${taskTitle(db, oldest.task_id)}; flowryn capacity`, now: t });
+        const event = appendEvent(db, {
+          source: "daemon",
+          kind: "sched.waiting",
+          taskId: oldest.task_id,
+          payload: { runs: count, oldest_ms: t - oldest.waiting_since, verify: verify?.id ?? null, verify_ms: verify ? t - verify.requested_at : null, why },
+          ts: t,
+        });
+        openItem(db, { kind: "capacity_wait", eventSeq: event.seq, line: `${count} run(s) waiting over ${Math.round(threshold / 60_000)}m for capacity (${why}); oldest ${taskTitle(db, oldest.task_id)}${verifyPart}; flowryn capacity`, now: t });
       });
     } else if (open) {
       tx(db, () => {

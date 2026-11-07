@@ -1064,6 +1064,17 @@ ALTER TABLE decisions ADD COLUMN autonomy_state TEXT CHECK (autonomy_state IN ('
 `;
 
 /**
+ * The wait registry (src/reconcile/waits.ts, docs/notes/2026-11-06-no-silent-waits-vj.md): one row per
+ * wait past its deadline, from its recovery until it ends; item_id once it was itemized.
+ */
+const WAITS_SQL = /* sql */ `
+CREATE TABLE waits (
+  key TEXT PRIMARY KEY, kind TEXT NOT NULL, task_id TEXT, run_id TEXT,
+  since INTEGER NOT NULL, due INTEGER NOT NULL, recovered_at INTEGER NOT NULL,
+  item_id TEXT, updated_at INTEGER NOT NULL);
+`;
+
+/**
  * Migration 55 (docs/notes/2026-11-06-auto-verify-every-t8.md): every delivery on a project with
  * verify steps gets an auto_merges row. `merge = 0` marks one that only verifies (the project or
  * the task does not auto-merge): it ends `verified` on a pass, and a failure goes back to the
@@ -1143,6 +1154,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 53, name: "page-pass-key", sql: PAGE_PASS_KEY_SQL },
   { version: 54, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
   { version: 55, name: "auto-verify", sql: AUTO_VERIFY_SQL },
+  { version: 56, name: "waits", sql: WAITS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

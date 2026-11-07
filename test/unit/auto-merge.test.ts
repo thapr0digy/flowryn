@@ -16,6 +16,10 @@ import { inertDelivery } from "../../src/policy/services.ts";
 import {
   AutoMerger,
   getAutoMerge,
+  HEAD_MOVED_WAIT_MS,
+  MAX_VERIFY_REQUEUES,
+  NO_CI_CHECKS_WAIT_MS,
+  requeueCount,
   liveAutoMerge,
   sendBackText,
   startAutoMerge,
@@ -26,7 +30,7 @@ import { autoMergeEnabled, verifyConfig } from "../../src/verify/config.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { autoVerifyPath, getRequest, insertRequest, markStarted } from "../../src/verify/queue.ts";
 import { initialSteps } from "../../src/verify/runner.ts";
-import { headMovedCancelled } from "../../src/verify/start.ts";
+import { cancelIsFinal, headMovedCancelled } from "../../src/verify/start.ts";
 import { finishVerification, insertVerification, type Verification, type VerifyStep } from "../../src/verify/store.ts";
 
 /**
@@ -309,17 +313,142 @@ describe("the controller, without GitHub", () => {
     expect(moves()).toHaveLength(1);
   });
 
-  test("a request cancelled because the head moved waits for the redelivery, and holds after 6 h", async () => {
+  test("a cancelled verify is queued again at once, with one event saying why; the row follows it, and holds after MAX_VERIFY_REQUEUES", async () => {
     const f = fixture();
     const cfg = config(OPTED_IN);
+    // GitHub keeps reading bbbbbbbb, the head this task delivered before (the stale read the drain waited out).
+    tx(f.db, () => {
+      f.db.query("UPDATE artifacts SET created_at = 900 WHERE id = 'a1'").run();
+      f.db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a0', 't1', 'pr', ?1, ?2, 500)").run(PR_URL, "b".repeat(40));
+    });
     const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
     const moved = `the PR head moved from ${HEAD.slice(0, 8)} to bbbbbbbb; verify the new head`;
     expect(headMovedCancelled(moved)).toBe(true);
     expect(headMovedCancelled("the PR is closed")).toBe(false);
-    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, moved));
-    await merger(f, cfg, 5_000 + 60_000).auto.pass();
-    expect(getAutoMerge(f.db, row.id)?.state).toBe("queued");
-    await merger(f, cfg, 5_000 + 6 * 3_600_000 + 1).auto.pass();
+    let lost = row.request_id!;
+    for (let attempt = 1; attempt <= MAX_VERIFY_REQUEUES; attempt++) {
+      tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(lost, moved));
+      const { auto, kicks } = merger(f, cfg, 5_000 + 60_000 * attempt);
+      await auto.pass();
+      const after = getAutoMerge(f.db, row.id)!;
+      expect(after.state).toBe("queued");
+      expect(after.request_id).not.toBe(lost);
+      expect(getRequest(f.db, after.request_id!)).toMatchObject({ state: "queued", head_sha: HEAD, source: "auto", pr_number: 7, head_ref: "flowryn/t1" });
+      expect(kicks.length).toBe(1);
+      expect(requeueCount(f.db, row.id)).toBe(attempt);
+      lost = after.request_id!;
+    }
+    const events = f.db.query("SELECT payload FROM events WHERE kind = 'auto_merge.verify_requeued'").all() as { payload: string }[];
+    expect(JSON.parse(events[0]!.payload)).toMatchObject({ auto_merge: row.id, lost: row.request_id, head: HEAD, state: "queued", made: true, attempt: 1 });
+    expect(JSON.parse(events[0]!.payload).why).toContain(moved);
+    // The loss keeps happening: held for the leader, naming the fix.
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(lost, moved));
+    await merger(f, cfg, 5_000 + 60_000 * 9).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_cancelled", next: "flowryn verify t1, then flowryn merge t1" });
+  });
+
+  test("assumption: GitHub reading an older delivered head (a carry it has not caught up with) re-verifies the delivered head, not the old one", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const OLD = "b".repeat(40);
+    tx(f.db, () => {
+      f.db.query("UPDATE artifacts SET created_at = 900 WHERE id = 'a1'").run();
+      f.db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a0', 't1', 'pr', ?1, ?2, 500)").run(PR_URL, OLD);
+      f.db.query("UPDATE artifacts SET carried_from = ?1 WHERE id = 'a1'").run(OLD);
+      f.db.query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: OLD, head_ref: "flowryn/t1", merge_sha: null, checks: null, observed_at: 1 }));
+    });
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, `the PR head moved from ${HEAD.slice(0, 8)} to ${OLD.slice(0, 8)}; verify the new head`));
+    await merger(f, cfg).auto.pass();
+    const after = getAutoMerge(f.db, row.id)!;
+    expect(after.state).toBe("queued");
+    expect(getRequest(f.db, after.request_id!)?.head_sha).toBe(HEAD);
+  });
+
+  test("a moved head the watcher's evidence does not show yet leaves the row for that pass, counting no requeue, then supersedes it once the evidence shows it", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const NEW = "c".repeat(40);
+    const evidence = (head: string) =>
+      tx(f.db, () =>
+        f.db.query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head, head_ref: "flowryn/t1", merge_sha: null, checks: null, observed_at: 1 })),
+      );
+    evidence(HEAD);
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, `the PR head moved from ${HEAD.slice(0, 8)} to ${NEW.slice(0, 8)}; verify the new head`));
+    for (let tick = 1; tick <= MAX_VERIFY_REQUEUES + 1; tick++) await merger(f, cfg, 5_000 + 60_000 * tick).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "queued", request_id: row.request_id });
+    expect(requeueCount(f.db, row.id)).toBe(0);
+    expect(f.db.query("SELECT COUNT(*) AS n FROM verify_queue WHERE state = 'queued'").get()).toEqual({ n: 0 });
+    evidence(NEW);
+    await merger(f, cfg, 5_000 + 60_000 * 9).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "superseded", reason: "head_moved" });
+    expect((f.db.query("SELECT head_sha FROM verify_queue WHERE state = 'queued'").all() as { head_sha: string }[]).map((q) => q.head_sha)).toEqual([NEW]);
+  });
+
+  test("a local head move (no GitHub evidence to wait for) re-verifies the delivered head at once, counting a requeue", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    tx(f.db, () => f.db.query("UPDATE artifacts SET kind = 'local', ref = 'local:flowryn/t1' WHERE id = 'a1'").run());
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), { ref: "local:flowryn/t1", head: HEAD, prNumber: null, headRef: null, worktree: "/tmp/wt" }, 5_000))!;
+    expect(row.state).toBe("queued");
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, `the head moved from ${HEAD.slice(0, 8)} to cccccccc; verify the new head`));
+    await merger(f, cfg).auto.pass();
+    const after = getAutoMerge(f.db, row.id)!;
+    expect(after.state).toBe("queued");
+    expect(after.request_id).not.toBe(row.request_id);
+    expect(getRequest(f.db, after.request_id!)?.head_sha).toBe(HEAD);
+    expect(requeueCount(f.db, row.id)).toBe(1);
+  });
+
+  test("evidence newer than the cancel's head (it moved twice) supersedes the row on the newest head at once", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const NEWEST = "d".repeat(40);
+    tx(f.db, () =>
+      f.db.query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: NEWEST, head_ref: "flowryn/t1", merge_sha: null, checks: null, observed_at: 1 })),
+    );
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, `the PR head moved from ${HEAD.slice(0, 8)} to cccccccc; verify the new head`));
+    await merger(f, cfg).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "superseded", reason: "head_moved" });
+    expect((f.db.query("SELECT head_sha FROM verify_queue WHERE state = 'queued'").all() as { head_sha: string }[]).map((q) => q.head_sha)).toEqual([NEWEST]);
+  });
+
+  test("a head that really moved gets its verify queued and supersedes the row: its delivery starts the next one", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const NEW = "c".repeat(40);
+    tx(f.db, () =>
+      f.db.query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: NEW, head_ref: "flowryn/t1", merge_sha: null, checks: null, observed_at: 1 })),
+    );
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, `the PR head moved from ${HEAD.slice(0, 8)} to ${NEW.slice(0, 8)}; verify the new head`));
+    await merger(f, cfg).auto.pass();
+    const after = getAutoMerge(f.db, row.id)!;
+    expect(after).toMatchObject({ state: "superseded", reason: "head_moved" });
+    expect(after.detail).toContain(`moved to ${NEW.slice(0, 8)}`);
+    const queued = f.db.query("SELECT * FROM verify_queue WHERE state = 'queued'").all() as { head_sha: string }[];
+    expect(queued.map((q) => q.head_sha)).toEqual([NEW]);
+    // The worker delivers it: the new row follows the verify already queued.
+    tx(f.db, () => f.db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a2', 't1', 'pr', ?1, ?2, 6000)").run(PR_URL, NEW));
+    const next = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), { ...f.delivery, head: NEW }, 6_000))!;
+    expect(next).toMatchObject({ state: "queued", request_id: (f.db.query("SELECT id FROM verify_queue WHERE state = 'queued'").get() as { id: string }).id });
+  });
+
+  test("a verify request that is gone is queued again; a cancel no new request gets past (PR closed) holds at once", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    tx(f.db, () => f.db.query("DELETE FROM verify_queue WHERE id = ?1").run(row.request_id));
+    await merger(f, cfg).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "queued" });
+    expect(cancelIsFinal(`${PR_URL} is closed`)).toBe(true);
+    expect(cancelIsFinal("project web is gone")).toBe(true);
+    expect(cancelIsFinal(`cannot read the head of local:flowryn/t1 in /tmp/wt`)).toBe(false);
+    const again = getAutoMerge(f.db, row.id)!;
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(again.request_id, `${PR_URL} is closed`));
+    await merger(f, cfg).auto.pass();
     expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_cancelled" });
   });
 
@@ -359,10 +488,20 @@ describe("the controller, without GitHub", () => {
     const rerun = tx(f.db, () => insertRequest(f.db, { project_id: "web", pr_url: PR_URL, task_id: "t1", head_sha: HEAD, policy_id: POLICY, pr_number: 7, head_ref: "flowryn/t1", worktree: null, source: "recovered", path: null, rank: -1, recovered_from: v.id, now: 4_000 }));
     await merger(f, cfg).auto.pass();
     expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "queued", request_id: rerun.id, verification_id: null });
-    // Without a rerun (it was a rerun already), the error holds.
+    // Without a rerun (it was a rerun already), the work was never judged: a verify is queued once more.
     const v2 = verification(f, f.root);
+    tx(f.db, () => markStarted(f.db, rerun, v2.id, 4_500));
     tx(f.db, () => f.db.query("UPDATE auto_merges SET state = 'verifying', verification_id = ?2 WHERE id = ?1").run(row.id, v2.id));
     finish(f, v2, "error", v2.steps, "the daemon stopped mid-run");
+    await merger(f, cfg).auto.pass();
+    const after = getAutoMerge(f.db, row.id)!;
+    expect(after).toMatchObject({ state: "queued", verification_id: null });
+    expect(getRequest(f.db, after.request_id!)).toMatchObject({ state: "queued", head_sha: HEAD, source: "auto" });
+    expect(requeueCount(f.db, row.id)).toBe(1);
+    // An error the verify itself reached (not a stop) still holds.
+    const v3 = verification(f, f.root);
+    tx(f.db, () => f.db.query("UPDATE auto_merges SET state = 'verifying', verification_id = ?2 WHERE id = ?1").run(row.id, v3.id));
+    finish(f, v3, "error", v3.steps, "cannot create the worktree");
     await merger(f, cfg).auto.pass();
     expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_error" });
   });
@@ -422,6 +561,66 @@ describe("the controller, without GitHub", () => {
     }
   });
 
+  test("a head that moved past a passed verify with nothing delivered holds 30 min after the move was first seen, not 6 h; a no_ci project's checks get 1 h", async () => {
+    const f = fixture();
+    const cfg = config(OPTED_IN);
+    const v = verification(f, f.root);
+    finish(f, v, "passed");
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    const evidence = (head: string, pending: string[]) =>
+      tx(f.db, () =>
+        f.db
+          .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+          .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head, head_ref: "flowryn/t1", merge_sha: null, checks: { state: pending.length ? "pending" : "green", line: "x", red: [], pending, total: 1 }, observed_at: 1 })),
+      );
+    // Slow CI: checks pending 31 min, then the worker pushes past the delivered head.
+    evidence(HEAD, ["ci/test"]);
+    await merger(f, cfg, 5_000 + 31 * 60_000).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
+    evidence("c".repeat(40), []);
+    const seen = 5_000 + 32 * 60_000;
+    await merger(f, cfg, seen).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
+    await merger(f, cfg, seen + HEAD_MOVED_WAIT_MS).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
+    const sightings = (f.db.query("SELECT payload, ts FROM events WHERE kind = 'auto_merge.head_moved_seen'").all() as { payload: string; ts: number }[]).map((e) => ({ ...JSON.parse(e.payload), ts: e.ts }));
+    expect(sightings).toEqual([{ auto_merge: row.id, head: "c".repeat(40), ts: seen }]);
+    await merger(f, cfg, seen + HEAD_MOVED_WAIT_MS + 1).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "head_moved" });
+    expect(getAutoMerge(f.db, row.id)!.detail).toContain("over 30 min ago");
+
+    const lagging = fixture();
+    const lv = verification(lagging, lagging.root);
+    finish(lagging, lv, "passed");
+    const lrow = tx(lagging.db, () => startAutoMerge(lagging.db, cfg, lagging.run(), lagging.delivery, 5_000))!;
+    tx(lagging.db, () => {
+      lagging.db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a-earlier', 't1', 'pr', ?1, ?2, 1)").run(PR_URL, "d".repeat(40));
+      lagging.db
+        .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+        .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: "d".repeat(40), head_ref: "flowryn/t1", merge_sha: null, checks: { state: "green", line: "x", red: [], pending: [], total: 1 }, observed_at: 1 }));
+    });
+    await merger(lagging, cfg, 5_000 + 60_000).auto.pass();
+    expect(getAutoMerge(lagging.db, lrow.id)?.state).toBe("waiting_checks");
+    expect(lagging.db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'auto_merge.head_moved_seen'").get()).toEqual({ n: 0 });
+
+    const g = fixture();
+    const w = verification(g, g.root);
+    finish(g, w, "passed");
+    const other = tx(g.db, () => startAutoMerge(g.db, cfg, g.run(), g.delivery, 5_000))!;
+    tx(g.db, () =>
+      g.db
+        .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+        .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: HEAD, head_ref: "flowryn/t1", merge_sha: null, checks: { state: "pending", line: "x", red: [], pending: ["ci/test"], total: 1 }, observed_at: 1 })),
+    );
+    const at = (now: number, noCi: boolean) => new AutoMerger({ db: g.db, config: () => cfg, delivery: inertDelivery(), now: () => now, log: () => {}, kickScheduler: () => {}, noCi: async () => noCi });
+    await at(5_000 + NO_CI_CHECKS_WAIT_MS + 1, false).pass();
+    expect(getAutoMerge(g.db, other.id)?.state).toBe("waiting_checks");
+    await at(5_000 + NO_CI_CHECKS_WAIT_MS, true).pass();
+    expect(getAutoMerge(g.db, other.id)?.state).toBe("waiting_checks");
+    await at(5_000 + NO_CI_CHECKS_WAIT_MS + 1, true).pass();
+    expect(getAutoMerge(g.db, other.id)).toMatchObject({ state: "held", reason: "checks_timeout" });
+  });
+
   test("checks pending over 6 h, or a head that moved with nothing delivered since, hold", async () => {
     const f = fixture();
     const cfg = config(OPTED_IN);
@@ -456,7 +655,7 @@ describe("waking the leader", () => {
     const cfg = config(OPTED_IN);
     const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
     expect(wakes(f.db)).toEqual([]);
-    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = 'gone' WHERE id = ?1").run(row.request_id));
+    tx(f.db, () => f.db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2 WHERE id = ?1").run(row.request_id, `${PR_URL} is closed`));
     await merger(f, cfg).auto.pass();
     expect(wakes(f.db)).toEqual(["auto_merge_held", "pr_ready"]);
   });

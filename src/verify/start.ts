@@ -4,6 +4,7 @@ import { capacityConfig } from "../config/workflows.ts";
 import { restartHoldingVerifies } from "../daemon/restart.ts";
 import { tx, type Db } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
+import { deliveredOf } from "../lifecycle/delivery.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
@@ -94,9 +95,33 @@ function headMovedCancel(what: "head" | "PR head", from: string, to: string): st
   return `the ${what} moved from ${from.slice(0, 8)} to ${to.slice(0, 8)}; verify the new head`;
 }
 
-/** A request cancelled because its head moved: the worker is mid-redelivery (src/verify/auto-merge.ts waits for it). */
+const HEAD_MOVED = /^the (PR )?head moved from [0-9a-f]{1,8} to ([0-9a-f]{1,8}); verify the new head$/;
+
+/** A request cancelled because its head moved (or GitHub read an older one): src/verify/auto-merge.ts queues the verify again. */
 export function headMovedCancelled(detail: string | null): boolean {
-  return detail !== null && /^the (PR )?head moved from [0-9a-f]{1,8} to [0-9a-f]{1,8}; verify the new head$/.test(detail);
+  return detail !== null && HEAD_MOVED.test(detail);
+}
+
+/** The short head a head-moved cancel read instead, or null. */
+export function headMovedTo(detail: string | null): string | null {
+  return detail === null ? null : (HEAD_MOVED.exec(detail)?.[2] ?? null);
+}
+
+/** Cancel reasons another verify of the same work cannot get past: its PR closed or gone, its project or its verify steps gone. */
+const FINAL_CANCELS = [/^project \S+ is gone$/, /^project \S+ has no verify steps now$/, / is not a pull request URL$/, /^GitHub has no /, / is (closed|merged)$/];
+
+/** Whether a cancelled request's reason holds for any new request too (src/verify/auto-merge.ts holds then, instead of queueing again). */
+export function cancelIsFinal(detail: string | null): boolean {
+  return detail !== null && FINAL_CANCELS.some((re) => re.test(detail));
+}
+
+/** How long a request waits on GitHub to show its head when GitHub still shows the task's earlier delivered head, before it is cancelled. */
+export const STALE_READ_WAIT_MS = 5 * 60_000;
+
+/** Is `read` (a head, or its short form) an earlier delivered head of the task whose latest delivery is the request's head (GitHub lagging behind a push), not a new one? */
+export function staleRead(db: Db, request: Pick<VerifyRequest, "task_id" | "head_sha">, read: string): boolean {
+  if (!request.task_id || deliveredOf(db, request.task_id)?.head !== request.head_sha) return false;
+  return db.query("SELECT 1 FROM artifacts WHERE task_id = ?1 AND substr(head_sha, 1, length(?2)) = ?2 AND kind IN ('pr','local') LIMIT 1").get(request.task_id, read) !== null;
 }
 
 type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string };
@@ -126,7 +151,11 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     const pr = await deps.forge().pull(ref);
     base = pr.baseRef || null;
     if (pr.state !== "open") return { cancel: `${request.pr_url} is ${pr.state}` };
-    if (pr.headSha !== request.head_sha) return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
+    if (pr.headSha !== request.head_sha) {
+      // GitHub read a head this task delivered before (the one a carry started from): it has not caught up with the push yet.
+      if (staleRead(deps.db, request, pr.headSha) && deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}` };
+      return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
+    }
   } catch (error) {
     if (error instanceof ForgeError && error.kind === "not_found") return { cancel: `GitHub has no ${request.pr_url}` };
     if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})` };
@@ -163,14 +192,19 @@ function followRunning(db: Db, requestId: string, policy: string | null, now: nu
 /**
  * Start queued requests while their turn comes and a slot is free: the first
  * request in line either starts, is cancelled (its PR closed, its head moved),
- * follows a running verification of its PR and head under today's policy,
- * or holds everything behind it (FIFO). Returns how many started.
+ * follows a running verification of its PR and head under today's policy, or
+ * waits on its own PR (GitHub lagging behind a push, a read that failed) and
+ * steps aside for the ones behind it this pass. A full pool, a pending
+ * restart or the host check still hold the whole queue (FIFO). Returns how
+ * many started.
  */
 export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
   const { db } = deps;
   let started = 0;
+  // Requests that must wait on their own PR (GitHub lagging, unreadable, a bad project config): the ones behind go first.
+  const waiting = new Set<string>();
   for (;;) {
-    const first = queuedRequests(db)[0];
+    const first = queuedRequests(db).find((r) => !waiting.has(r.id));
     if (!first) return started;
     if (tx(db, () => followRunning(db, first.id, todaysPolicy(deps.config(), first.project_id), deps.now()))) continue;
     const caps = capacityConfig(deps.config()).pools;
@@ -179,7 +213,8 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
     const wanted = await stillWanted(deps, first);
     if ("wait" in wanted) {
       deps.log(`verify ${first.id}: waits: ${wanted.wait}`);
-      return started;
+      waiting.add(first.id);
+      continue;
     }
     if ("cancel" in wanted) {
       tx(db, () => cancelRequest(db, first, wanted.cancel, deps.now()));
