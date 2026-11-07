@@ -9,6 +9,9 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const AFTER_MS = 1_000;
 const envs: FleetEnv[] = [];

@@ -8,6 +8,9 @@ import { failRun } from "../../src/lifecycle/runs.ts";
 import { makeFleetEnv, makeRepo, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { readSnapshot } from "../../src/journal/snapshot.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {

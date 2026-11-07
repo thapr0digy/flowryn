@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { sh } from "../helpers/scratch-git.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The landing queue end to end (docs/notes/2026-10-30-landing-queue-the-65.md): a real daemon,

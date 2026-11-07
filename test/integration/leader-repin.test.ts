@@ -6,6 +6,9 @@ import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { REPO_ROOT } from "../helpers/harness.ts";
 import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn leader repin` end to end (docs/notes/2026-10-11-flowryn-leader-repin-xv.md): a Claude

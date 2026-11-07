@@ -11,6 +11,9 @@ import { DEFAULT_HANDSHAKE_MS } from "../../src/runtime/herdr/client.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const fleets: FleetEnv[] = [];
 const ships: ShipEnv[] = [];

@@ -10,6 +10,9 @@ import { hashPassKey } from "../../src/policy/pass-key.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import { tx } from "../../src/db/db.ts";
 import { failRun, getRun } from "../../src/lifecycle/runs.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A review gate's questions, end to end on the fake fleet (design: "A

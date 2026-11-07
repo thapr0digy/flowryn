@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { REPLY_MARKER } from "../../src/forge/feedback.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Reviews and comments on a delivered PR through the real daemon (task

@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { REPO_ROOT, realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The M5 exit test (design section 17): a two-phase feature runs design,

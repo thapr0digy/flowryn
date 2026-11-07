@@ -31,6 +31,9 @@ import type { HarnessId } from "../../src/harness/types.ts";
 import { FAKE_VERSION, makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { REPO_ROOT } from "../helpers/harness.ts";
 import { Pty } from "../helpers/pty.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /** Each step's wait, capped: the fakes answer in seconds, so a broken step fails fast. */
 const MAX_WAIT_MS = 15_000;

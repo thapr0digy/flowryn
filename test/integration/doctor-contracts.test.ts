@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { stateFiles } from "../../src/config/paths.ts";
 import { cli } from "../helpers/harness.ts";
 import { makeLeaderEnv, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn doctor --contracts` from an agent pane, through the real CLI and

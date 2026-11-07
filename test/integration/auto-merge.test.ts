@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import type { FakeCheck } from "../helpers/fake-github.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Yolo auto-merge end to end (docs/notes/2026-10-22-daemon-run-verify-y3.md,

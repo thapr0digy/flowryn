@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import type { FakeCheck } from "../helpers/fake-github.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn verify` end to end: a real daemon, the fake GitHub backed by the

@@ -11,6 +11,9 @@ import { FAKE_VERSION, setHarnessVersion } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { readManifest, type OwnedResources } from "../../src/contracts/owned.ts";
 import { isAlive } from "../../src/runtime/proc.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const fleet = autoContractSuite();
 

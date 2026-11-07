@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { BRIDGE_STEPS } from "../../src/contracts/bridge-suite.ts";
 import { makeLeaderEnv, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The shared leader bridge contract suite (design section 17, M3), against

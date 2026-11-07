@@ -367,7 +367,8 @@ describe("before the merge", () => {
     }
     expect(entries()).toEqual([{ task_id: s.task, state: "left", reason: "base_moving", integrations: MAX_INTEGRATIONS }]);
     expect(openItems("auto_merge_held")).toHaveLength(1);
-  });
+    // MAX_INTEGRATIONS rounds of real git merges and pushes: about 6 s on a loaded host, past bun's 5 s default.
+  }, 30_000);
 
   test("a head that still has its base merges; a row that is not the queue's is not asked", async () => {
     const s = ship(1, "one.txt", "one\n");
