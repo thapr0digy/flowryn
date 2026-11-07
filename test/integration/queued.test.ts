@@ -91,7 +91,8 @@ test("a queued task whose run failed can be started again with --task (cutover C
   const secondRunId = (second.reply.data as { run: string }).run;
   expect(secondRunId).not.toBe(runId);
   expect(env.run(secondRunId).task_id).toBe("web-retry-q1");
-});
+  // Two dispatches, a worker start and three waits of up to 10 s each: bun's 5 s default timed it out on a loaded verify host.
+}, 30_000);
 
 type FleetData = { fleet: { id: string }[]; queued?: { id: string; kind: string; project: string; status: string; auto: string; waits: string; next: string; age: string }[] };
 
