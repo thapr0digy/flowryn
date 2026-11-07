@@ -230,13 +230,19 @@ describe("the build after a Flowryn merge", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let reached!: () => void;
+    const atStep = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
     const held: StepRunner = async (argv, opts) => {
+      reached();
       await gate;
       return runStep(argv, opts);
     };
     const b = builder({ run: held });
     const pass = b.pass();
-    await Bun.sleep(300);
+    // The build is under way once it reaches its first step: an event, not a fixed sleep a loaded machine can outrun.
+    await atStep;
     const guards = restartGuards(db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [], builds: b.building() }, Date.now());
     expect(guards).toEqual([{ kind: "build", task: null, detail: expect.stringContaining(`building ${tip().slice(0, 8)} after a merge`) }]);
     expect(await b.pass()).toEqual({ outcome: "skipped", reason: "a build is under way" });
