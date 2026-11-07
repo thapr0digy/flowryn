@@ -9,7 +9,7 @@ On 2026-11-07 verifies v179, v180 and v181 each failed one different integration
 
 - `test/helpers/integration-timeout.ts`: `INTEGRATION_TEST_TIMEOUT_MS` (60 s) and `useIntegrationTimeout()`, which calls `setDefaultTimeout`.
 - Every `test/integration/*.test.ts` calls `useIntegrationTimeout()` at its top level, after its imports. A test that sets its own timeout keeps it.
-- Unit tests keep a short timeout: bun's 5 s under plain `bun test`, and 30 s under `bun run test`'s `--parallel` part. The one exception is a single slow git test (see Load run).
+- Unit tests keep a short timeout: bun's 5 s under plain `bun test`, and 30 s under `bun run test`'s `--parallel` part. One slow git test sets its own 30 s (see Load run).
 - Plain code, no model, no assertion touched.
 
 Why each file calls the helper itself (measured on Bun 1.4.4): `bunfig.toml` ignores a `timeout` key. `setDefaultTimeout` applies only to the file whose top-level code runs it. A preload, or a call in a helper module's body, runs once per process, so it reaches only the first file that loads it. A call from each file's own top level reaches that file, with or without `--parallel`, and wins over `--timeout`, so `bun run test` gives integration files 60 s too.
@@ -33,4 +33,4 @@ The host's load average was 29 (other sessions were also running). Two suites ra
 
 - The three named files: 19/19 pass in 84 s.
 - The parallel integration suite, serial files included: 547/547 pass in 806 s.
-- The plain unit run: 2800/2801. The one failure was `test/unit/landing-queue.test.ts` "a base that moved sends the head of line back…" at 5.96 s. It runs MAX_INTEGRATIONS rounds of real git merges and failed again when run alone while an integration suite ran. That one test now sets 30 s itself. Every other unit test keeps the default.
+- The plain unit run: 2800/2801. The one failure was `test/unit/landing-queue.test.ts` "a base that moved sends the head of line back…" at 5.96 s. It runs MAX_INTEGRATIONS rounds of real git merges and failed again when run alone while an integration suite ran. main has since given that one test 30 s. Every other unit test keeps the default.

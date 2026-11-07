@@ -448,3 +448,31 @@ describe("a verification the daemon stopped runs again", () => {
     expect(queuedRequests(f.db)).toEqual([]);
   });
 });
+
+describe("a landing train candidate's request (src/verify/landing-queue.ts)", () => {
+  test("starts while a live entry keeps the candidate, never asking GitHub (it is not pushed); is cancelled once dropped; waits behind every other request", async () => {
+    const f = fixture();
+    // GitHub shows another head: a PR request would be cancelled as moved, the candidate's must not be.
+    f.prs.set(1, { headSha: "f".repeat(40) });
+    f.db.exec(
+      `INSERT INTO landing_queue (id, project_id, run_id, task_id, ref, entered_head, head_sha, state, enqueued_at, state_since, updated_at, train_head, train_base)
+       VALUES ('lq1', 'web', 'r1', 't1', '${PR(1)}', 'aaa', 'aaa', 'waiting', 1, 1, 1, '${f.head}', 'bbb')`,
+    );
+    const ahead = f.request(2);
+    const train = f.request(1, { pr_number: null, head_ref: null, rank: 1, source: "auto" });
+    expect(queuedRequests(f.db).map((r) => r.id)).toEqual([ahead.id, train.id]);
+    expect(await drainVerifyQueue(f.deps)).toBe(2);
+    expect(getRequest(f.db, train.id)!.state).toBe("started");
+    await settled(f.db, [getRequest(f.db, train.id)!.verification_id!]);
+    expect(getVerification(f.db, getRequest(f.db, train.id)!.verification_id!)).toMatchObject({ state: "passed", pr_url: PR(1), head_sha: f.head });
+
+    f.db.exec("UPDATE landing_queue SET train_head = NULL");
+    const dropped = f.request(1, { pr_number: null, head_ref: null, rank: 1, source: "auto", policy_id: "vp1:other" });
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(getRequest(f.db, dropped.id)).toMatchObject({ state: "cancelled", detail: `the landing train no longer tests ${f.head.slice(0, 8)}` });
+  }, 30_000);
+
+  test("assumption: a restart holds queued verifies back for 10 minutes at most", () => {
+    expect(RESTART_HOLDS_VERIFIES_MS).toBe(10 * 60_000);
+  });
+});

@@ -129,6 +129,14 @@ export function markStarted(db: Db, request: VerifyRequest, verificationId: stri
   return true;
 }
 
+/** Move a queued request to another rank (a landing train's candidate that became the head of line). Call inside a transaction. */
+export function rerankRequest(db: Db, request: VerifyRequest, rank: number, now: number): boolean {
+  const changed = db.query("UPDATE verify_queue SET rank = ?2 WHERE id = ?1 AND state = 'queued' AND rank <> ?2").run(request.id, rank).changes;
+  if (changed === 0) return false;
+  appendEvent(db, { source: "daemon", kind: "verify.reranked", taskId: request.task_id, payload: { request: request.id, from: request.rank, to: rank }, ts: now });
+  return true;
+}
+
 /** Cancel a queued request, saying why. Call inside a transaction; false when it was no longer queued. */
 export function cancelRequest(db: Db, request: VerifyRequest, reason: string, now: number): boolean {
   const changed = db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2, ended_at = ?3 WHERE id = ?1 AND state = 'queued'").run(request.id, reason, now).changes;
