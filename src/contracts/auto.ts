@@ -75,6 +75,12 @@ import { openContractRecorded, recordPass } from "./verbs.ts";
 export const AUTO_MAX_RUN_MS = 2 * 60 * 60_000;
 /** How often the checker looks again. */
 export const AUTO_POLL_MS = 5_000;
+
+/** FLOWRYN_CONTRACT_POLL_MS (a positive integer of ms) shortens the checker's pass for tests; AUTO_POLL_MS otherwise. */
+export function autoPollMs(env: NodeJS.ProcessEnv): number {
+  const value = Number(env.FLOWRYN_CONTRACT_POLL_MS);
+  return Number.isInteger(value) && value > 0 ? value : AUTO_POLL_MS;
+}
 /** After SIGTERM at the deadline: the runner's whole cleanup budget, and a margin, before its group is killed. */
 export const AUTO_STOP_GRACE_MS = CONTRACT_CLEANUP_BUDGET_MS + 10_000;
 /** After SIGKILL: how long the checker waits for the child to be reaped before it releases the manifest's resources anyway. */

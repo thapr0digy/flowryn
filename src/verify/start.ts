@@ -38,7 +38,7 @@ export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfi
     pr_url: request.pr_url,
     task_id: request.task_id,
     head_sha: request.head_sha,
-    steps: initialSteps(config.steps),
+    steps: initialSteps(config.steps, config.when_changed),
     policy_id: verifyPolicyId(config),
     dir: (id) => join(root, id),
     worktree: (id) => join(root, id, "wt"),
@@ -52,8 +52,8 @@ export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfi
   return v;
 }
 
-export function planOf(request: VerifyRequest, config: VerifyConfig): VerifyPlan {
-  return { prNumber: request.pr_number, headRef: request.head_ref, binary: config.binary, timeoutMs: config.timeout_ms, stepTimeoutMs: config.step_timeout_ms, path: request.path };
+export function planOf(request: VerifyRequest, config: VerifyConfig, base: string | null = null): VerifyPlan {
+  return { prNumber: request.pr_number, headRef: request.head_ref, binary: config.binary, timeoutMs: config.timeout_ms, stepTimeoutMs: config.step_timeout_ms, path: request.path, base };
 }
 
 /** Why the queue's first request cannot start now, or null when it may (the host check aside: it is read when a start is tried). */
@@ -99,7 +99,7 @@ export function headMovedCancelled(detail: string | null): boolean {
   return detail !== null && /^the (PR )?head moved from [0-9a-f]{1,8} to [0-9a-f]{1,8}; verify the new head$/.test(detail);
 }
 
-type Wanted = { start: VerifyConfig; projectPath: string } | { cancel: string } | { wait: string };
+type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string };
 
 /** Is the request still worth running: its project still has verify steps, its PR is open at the same head (local-only work: the worktree HEAD)? */
 async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wanted> {
@@ -117,12 +117,14 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     if (!head || head.code !== 0) return { cancel: `cannot read the head of ${request.pr_url}${request.worktree ? ` in ${request.worktree}` : ""}` };
     const sha = head.stdout.trim();
     if (sha !== request.head_sha) return { cancel: headMovedCancel("head", request.head_sha, sha) };
-    return { start: config, projectPath };
+    return { start: config, projectPath, base: null };
   }
   const ref = parsePrUrl(request.pr_url, deps.webUrl());
   if (!ref) return { cancel: `${request.pr_url} is not a pull request URL` };
+  let base: string | null = null;
   try {
     const pr = await deps.forge().pull(ref);
+    base = pr.baseRef || null;
     if (pr.state !== "open") return { cancel: `${request.pr_url} is ${pr.state}` };
     if (pr.headSha !== request.head_sha) return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
   } catch (error) {
@@ -130,7 +132,7 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})` };
     return { wait: `cannot read ${request.pr_url} (${(error as Error).message})` };
   }
-  return { start: config, projectPath };
+  return { start: config, projectPath, base };
 }
 
 /** Run a started verification in the background; whatever happens is recorded on its row. */
@@ -201,7 +203,7 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
       if (getRequest(db, first.id)?.state === "queued") return started;
       continue;
     }
-    launchVerification(deps, v, planOf(first, wanted.start), deps.env);
+    launchVerification(deps, v, planOf(first, wanted.start, wanted.base), deps.env);
     started++;
   }
 }
