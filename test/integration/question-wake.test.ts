@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { cliJson } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Worker questions wake the leader (task worker-questions-wake-cd): every new

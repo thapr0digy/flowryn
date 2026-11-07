@@ -3,6 +3,9 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * M4 delivery against a fake GitHub (design section 17, the M4 exit's forge

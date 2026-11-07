@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, makeRepo, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The M5 capacity exit (design section 17, "20 workers under the caps"),

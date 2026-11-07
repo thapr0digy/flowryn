@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
 import { capacityConfig } from "../config/workflows.ts";
@@ -8,13 +9,13 @@ import { deliveredOf } from "../lifecycle/delivery.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
-import { fullPools, grantJobLease, liveCounts, OverCapacity, poolHolders } from "../sched/pools.ts";
+import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, poolHolders } from "../sched/pools.ts";
 import { hostState } from "../sched/scheduler.ts";
 import { verifyConfig, type VerifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
-import { insertVerification, runningVerifications, type Verification } from "./store.ts";
+import { insertVerification, interruptedByStop, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
 
 /**
  * Starting verifications (docs/notes/2026-10-22-daemon-run-verify-y3.md): a
@@ -32,15 +33,50 @@ export function verifyRoot(config: Pick<FlowrynConfig, "state_dir">): string {
   return join(config.state_dir, "verify");
 }
 
+/**
+ * The interrupted verification a new one of this PR, head and policy resumes
+ * (docs/notes/2026-11-07-faster-landing-test-q7.md): the newest one a daemon
+ * stop cut off, whose worktree is still there and whose slot is free (nothing
+ * of it still runs), with exactly these steps.
+ */
+export function resumableFrom(db: Db, prUrl: string, head: string, policy: string, steps: readonly VerifyStep[]): Verification | null {
+  const rows = (
+    db
+      .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state = 'error' ORDER BY started_at DESC, rowid DESC LIMIT 5")
+      .all(prUrl, head, policy) as VerificationRow[]
+  ).map(parseVerification);
+  const held = new Set(liveJobLeases(db, "verify").map((l) => l.job_id));
+  const source = rows.find((v) => interruptedByStop(v) && !held.has(v.id) && existsSync(v.worktree_path));
+  if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name)) return null;
+  return source;
+}
+
+/** The new steps with every step that passed or was skipped in `from` kept, its log named as there; null when none did. */
+export function resumeSteps(from: Verification, steps: readonly VerifyStep[]): VerifyStep[] | null {
+  let kept = 0;
+  const out = steps.map((step, i) => {
+    const old = from.steps[i]!;
+    if (old.state !== "passed" && old.state !== "skipped") return { ...step };
+    kept++;
+    return { ...old, resumed_from: from.id, detail: `kept from ${from.id}${old.detail ? `; ${old.detail}` : ""}` };
+  });
+  return kept > 0 ? out : null;
+}
+
 /** Take the request's slot and insert its running verification. Call inside a transaction; throws OverCapacity when the pool is full. */
 export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfig, caps: Record<string, number>, root: string, projectPath: string, now: number): Verification {
+  const policy = verifyPolicyId(config);
+  const fresh = initialSteps(config.steps, config.when_changed);
+  const source = resumableFrom(db, request.pr_url, request.head_sha, policy, fresh);
+  const resumed = source ? resumeSteps(source, fresh) : null;
   const v = insertVerification(db, {
     project_id: request.project_id,
     pr_url: request.pr_url,
     task_id: request.task_id,
     head_sha: request.head_sha,
-    steps: initialSteps(config.steps, config.when_changed),
-    policy_id: verifyPolicyId(config),
+    steps: resumed ?? fresh,
+    resumed_from: resumed ? source!.id : null,
+    policy_id: policy,
     dir: (id) => join(root, id),
     worktree: (id) => join(root, id, "wt"),
     project_path: projectPath,
@@ -165,6 +201,12 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     return { wait: `the [projects.${request.project_id}] config is invalid: ${(error as Error).message}`, own: { reason: "config_invalid", ref: null } };
   }
   if (!config) return { cancel: `project ${request.project_id} has no verify steps now` };
+  if (request.pr_number === null && request.worktree === null) {
+    // A landing train's candidate (src/verify/landing-queue.ts): in the object store, never pushed; wanted while its entry keeps it.
+    const kept = deps.db.query("SELECT 1 FROM landing_queue WHERE ref = ?1 AND train_head = ?2 AND state IN ('waiting','landing')").get(request.pr_url, request.head_sha);
+    if (!kept) return { cancel: `the landing train no longer tests ${request.head_sha.slice(0, 8)}` };
+    return { start: config, projectPath, base: null };
+  }
   if (request.pr_number === null) {
     const head = request.worktree ? await deps.git(["rev-parse", "HEAD"], request.worktree) : null;
     if (!head || head.code !== 0) return { cancel: `cannot read the head of ${request.pr_url}${request.worktree ? ` in ${request.worktree}` : ""}` };

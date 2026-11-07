@@ -1075,7 +1075,19 @@ CREATE TABLE waits (
 `;
 
 /**
- * Migration 57 (docs/notes/2026-11-07-verify-queue-record-p9.md): why the drain made a queued
+ * Migration 57, the landing train (docs/notes/2026-11-07-faster-landing-test-q7.md): a waiting
+ * entry's speculative candidate, its head built on the entry ahead (train_head, train_base), and
+ * the verify request that tests it. A landing entry promoted from its candidate keeps train_base:
+ * its merge needs main to hold exactly that base.
+ */
+const LANDING_TRAIN_SQL = /* sql */ `
+ALTER TABLE landing_queue ADD COLUMN train_head TEXT;
+ALTER TABLE landing_queue ADD COLUMN train_base TEXT;
+ALTER TABLE landing_queue ADD COLUMN train_request TEXT;
+`;
+
+/**
+ * Migration 58 (docs/notes/2026-11-07-verify-queue-record-p9.md): why the drain made a queued
  * request wait on its own PR and let the ones behind it go first, and since when, so the wait
  * registry gives each such request its own deadline. `wait_reason` is a fixed code
  * (src/verify/queue.ts OWN_WAIT_REASONS), `wait_ref` an id it names (a short head, a forge error
@@ -1168,7 +1180,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 54, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
   { version: 55, name: "auto-verify", sql: AUTO_VERIFY_SQL },
   { version: 56, name: "waits", sql: WAITS_SQL },
-  { version: 57, name: "verify-wait", sql: VERIFY_WAIT_SQL },
+  { version: 57, name: "landing-train", sql: LANDING_TRAIN_SQL },
+  { version: 58, name: "verify-wait", sql: VERIFY_WAIT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

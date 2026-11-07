@@ -9,6 +9,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 let ship: ShipEnv | null = null;

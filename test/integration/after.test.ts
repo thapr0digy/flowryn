@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { FakePr } from "../helpers/fake-github.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `dispatch --after` (docs/notes/2026-10-25-when-x-then-yv.md): a task filed

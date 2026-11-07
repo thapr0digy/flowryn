@@ -36,6 +36,16 @@ export interface VerifyStep {
   hangs?: number;
   /** The step runs only when a changed file matches one of these globs. Absent: it always runs. */
   when_changed?: readonly string[];
+  /** A step kept from the interrupted verification this one resumes (its id): it passed (or was skipped) there and is not run again. */
+  resumed_from?: string;
+}
+
+/** What a verification cut off by a daemon stop records (src/verify/runner.ts): never judged. */
+export const STOPPED_MID_RUN = "the daemon stopped mid-run";
+
+/** A verification recorded as an error because the daemon stopped under it: never judged, and resumable at the same head and policy. */
+export function interruptedByStop(v: Pick<Verification, "state" | "detail">): boolean {
+  return v.state === "error" && (v.detail ?? "").startsWith(STOPPED_MID_RUN);
 }
 
 export interface VerificationRow {
@@ -117,6 +127,8 @@ export interface NewVerification {
   project_path: string;
   source: EventSource;
   now: number;
+  /** The interrupted verification whose passed steps it keeps (src/verify/start.ts resumeSteps), if any. */
+  resumed_from?: string | null;
 }
 
 /** Insert a running verification and its event. Call inside a transaction. */
@@ -132,7 +144,15 @@ export function insertVerification(db: Db, v: NewVerification): Verification {
     source: v.source,
     kind: "pr.verify_started",
     taskId: v.task_id,
-    payload: { verification: id, project: v.project_id, pr: v.pr_url, head: v.head_sha, policy: v.policy_id, steps: v.steps.map((s) => s.name) },
+    payload: {
+      verification: id,
+      project: v.project_id,
+      pr: v.pr_url,
+      head: v.head_sha,
+      policy: v.policy_id,
+      steps: v.steps.map((s) => s.name),
+      ...(v.resumed_from ? { resumed_from: v.resumed_from, kept: v.steps.filter((s) => s.resumed_from).map((s) => s.name) } : {}),
+    },
     ts: v.now,
   });
   return getVerification(db, id)!;

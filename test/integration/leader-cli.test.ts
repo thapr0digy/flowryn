@@ -13,6 +13,9 @@ import { cli, cliJson, readText, REPO_ROOT } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
 import { defaultConfig, loadConfig } from "../../src/config/config.ts";
 import { configStaticLayers } from "../../src/policy/static.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 let env: LeaderEnv | null = null;
 

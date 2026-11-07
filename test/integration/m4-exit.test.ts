@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { cli, REPO_ROOT, realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The M4 exit test (design section 17): a ship goes from dispatch to merged

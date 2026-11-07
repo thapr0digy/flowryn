@@ -7,6 +7,9 @@
 import { afterEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {

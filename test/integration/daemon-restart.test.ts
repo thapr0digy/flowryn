@@ -3,6 +3,9 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tx } from "../../src/db/db.ts";
 import { cliJson, killNextDaemon, makeHome, REPO_ROOT, seedLeader, seedRun, startDaemon, superviseWithScript, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn daemon restart` end to end, with the script supervisor standing in

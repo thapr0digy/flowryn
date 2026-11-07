@@ -7,7 +7,7 @@ A follow-up to the wait registry (docs/notes/2026-11-06-no-silent-waits-vj.md). 
 
 ## What changed
 
-- **Migration 57** (`verify-wait`) adds `wait_reason`, `wait_ref` and `wait_since` to `verify_queue`. They are null while a request does not wait on its own.
+- **Migration 58** (`verify-wait`) adds `wait_reason`, `wait_ref` and `wait_since` to `verify_queue`. They are null while a request does not wait on its own.
 - **The drain** (`drainVerifyQueue`, src/verify/start.ts) records the wait whenever `stillWanted` makes a request wait (`markWaiting`, src/verify/queue.ts), with a `verify.waiting` event in the same transaction. The clock starts the first time. A new reason keeps it, since the request never stopped waiting, and the event says which reason it replaced. The same reason on a later pass writes nothing, even when its ref differs (an outage reads `unreachable`, then `unreachable 502`), and the first ref is kept, so a drain every scheduler pass adds no events. Once `stillWanted` says the request may start, the drain clears the wait (`clearWaiting`, a `verify.wait_ended` event with how long it waited). A started or cancelled request keeps its last reason as history. The registry only reads queued rows.
 - **The reasons are fixed codes**: `config_invalid`, `forge_outage`, `stale_read` and `pr_unreadable`. `wait_ref` holds the id the code names: the short head GitHub still shows (`stale_read`), or the forge error's kind and HTTP status (`refused 403`, `unreachable`). PR text, error messages and tokens are never stored. The text shown is built from the code (`ownWaitCause`). For `config_invalid`, the registry re-reads the config error from today's config.
 - **The registry** (`verifyQueueWaits`, src/reconcile/waits.ts):
@@ -25,4 +25,4 @@ A follow-up to the wait registry (docs/notes/2026-11-06-no-silent-waits-vj.md). 
 ## Tests
 
 - test/unit/waits.test.ts: R1 (an invalid config, waiting from 2 min) and R2 (a 403, waiting from 7 min) get two waits with deadlines at 22 and 27 min. They are recovered and itemized on their own clocks, each item naming its own cause. The request next in line gets the line wait. Once R2's wait clears, R2 counts from its request time.
-- test/unit/verify-queue.test.ts: migration 57 applies forward at 56. The drain records both reasons and their start with `verify.waiting` events and stores no forge message. A repeated reason writes nothing. A new reason keeps the clock. A start clears the wait with `verify.wait_ended`. A stale read records `stale_read` with the head GitHub shows.
+- test/unit/verify-queue.test.ts: migration 58 applies forward at 57. The drain records both reasons and their start with `verify.waiting` events and stores no forge message. A repeated reason writes nothing. A new reason keeps the clock. A start clears the wait with `verify.wait_ended`. A stale read records `stale_read` with the head GitHub shows.

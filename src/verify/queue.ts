@@ -43,7 +43,7 @@ export interface VerifyRequest {
   detail: string | null;
   requested_at: number;
   ended_at: number | null;
-  /** Why the drain made it wait on its own PR (migration 57); null while it does not. */
+  /** Why the drain made it wait on its own PR (migration 58); null while it does not. */
   wait_reason: OwnWaitReason | null;
   /** The id that reason names: the short head GitHub shows (stale_read), the forge error kind and status. */
   wait_ref: string | null;
@@ -145,6 +145,14 @@ export function markStarted(db: Db, request: VerifyRequest, verificationId: stri
   const changed = db.query("UPDATE verify_queue SET state = 'started', verification_id = ?2, ended_at = ?3 WHERE id = ?1 AND state = 'queued'").run(request.id, verificationId, now).changes;
   if (changed === 0) return false;
   appendEvent(db, { source: "daemon", kind: "verify.dequeued", taskId: request.task_id, payload: { request: request.id, verification: verificationId, waited_ms: now - request.requested_at }, ts: now });
+  return true;
+}
+
+/** Move a queued request to another rank (a landing train's candidate that became the head of line). Call inside a transaction. */
+export function rerankRequest(db: Db, request: VerifyRequest, rank: number, now: number): boolean {
+  const changed = db.query("UPDATE verify_queue SET rank = ?2 WHERE id = ?1 AND state = 'queued' AND rank <> ?2").run(request.id, rank).changes;
+  if (changed === 0) return false;
+  appendEvent(db, { source: "daemon", kind: "verify.reranked", taskId: request.task_id, payload: { request: request.id, from: request.rank, to: rank }, ts: now });
   return true;
 }
 

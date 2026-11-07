@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { FOLLOW_UP_HEADER } from "../../src/attention/router.ts";
 import { cliJson } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Leader wakes reliably (docs/notes/2026-10-17-leader-wakes-reliably-vn.md):
