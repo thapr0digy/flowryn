@@ -121,6 +121,8 @@ describe("a host-held launch", () => {
     expect(item!.line).toContain("7.8 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb)");
     expect(item!.line).toContain("Waiting 11m, past its 10m deadline");
     expect(item!.line).toContain("[capacity.host] min_free_mem_gb in config.toml");
+    // The daemon reads config.toml only on SIGHUP, so the fix says how to reload it.
+    expect(item!.line).toContain("then reload it (SIGHUP to the daemon, or flowryn daemon restart)");
     // The digest keeps the fix: it comes before the cause.
     expect(item!.digest).toContain("free the host, or change [capacity.host] min_free_mem_gb");
     expect(item).toMatchObject({ task_id: "t1", run_id: "r1" });

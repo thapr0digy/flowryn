@@ -62,7 +62,7 @@ The reconciler runs `checkWaits` on each full pass (the `checkWaits` dep wired i
 2. **Still there on a later pass (at least `RECOVERY_GRACE_MS`, 30 s, after the recovery): one item.**
    - A `wait.expired` event, and one `wait_expired` item (P1, actionable, routed `act` in `LEADER_ROUTE`, so it wakes an idle leader once).
    - Its line puts the command before the cause, so a digest that cuts the line keeps the fix: `Waiting 11m, past its 10m deadline: <what> (<title>); <fix>; why: <cause>`.
-   - A host wait gives the measured value, the floor and the key: `7.8 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb)`. Its fix is `free the host, or change [capacity.host] min_free_mem_gb in config.toml (the daemon reloads it); flowryn capacity`.
+   - A host wait gives the measured value, the floor and the key: `7.8 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb)`. Its fix is `free the host, or change [capacity.host] min_free_mem_gb in config.toml, then reload it (SIGHUP to the daemon, or flowryn daemon restart); flowryn capacity`.
    - A run that is a plan phase is named `phase N of "<plan>" (<task>), stage <stage>`, so when a phase waits for a grant the item says why.
    - The first verify request names what the drain waits on: an invalid `[projects.<id>]` config (its fix starts with `flowryn config`), a GitHub outage, else its place in the queue, a restart, a full pool or the host check.
    - A phase with no run says why it has not started: not in the backlog snapshot, not queued, held, its `phase_blocked` reason, or that the scheduler has not started it. Its fix is `flowryn dispatch <project> --task <id>`.

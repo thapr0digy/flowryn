@@ -201,7 +201,7 @@ export function hostCause(db: Db, config: FlowrynConfig): { cause: string; fix: 
     keys.push("max_load_per_core");
   }
   const cause = `the host check fails: ${parts.length > 0 ? parts.join("; ") : (host?.reason ?? "no reading yet")}`;
-  const fix = keys.length > 0 ? `free the host, or change [capacity.host] ${keys.join(" / ")} in config.toml (the daemon reloads it); flowryn capacity` : "flowryn capacity";
+  const fix = keys.length > 0 ? `free the host, or change [capacity.host] ${keys.join(" / ")} in config.toml, then reload it (SIGHUP to the daemon, or flowryn daemon restart); flowryn capacity` : "flowryn capacity";
   return { cause, fix };
 }
 
