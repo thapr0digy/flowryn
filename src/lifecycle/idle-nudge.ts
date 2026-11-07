@@ -110,6 +110,7 @@ export function deliveredHeadOf(db: Db, run: RunRow): string | null {
 
 interface NudgeEvent {
   ts: number;
+  n: number;
   steer: string;
   head: string | null;
   remote: string | null;
@@ -117,8 +118,8 @@ interface NudgeEvent {
 
 function nudgeEvents(db: Db, runId: string): NudgeEvent[] {
   return (db.query("SELECT ts, payload FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY seq").all(runId, NUDGE_KIND) as { ts: number; payload: string }[]).map((e) => {
-    const p = JSON.parse(e.payload) as { steer: string; head?: string | null; remote?: string | null };
-    return { ts: e.ts, steer: p.steer, head: p.head ?? null, remote: p.remote ?? null };
+    const p = JSON.parse(e.payload) as { n: number; steer: string; head?: string | null; remote?: string | null };
+    return { ts: e.ts, n: p.n, steer: p.steer, head: p.head ?? null, remote: p.remote ?? null };
   });
 }
 
@@ -247,7 +248,7 @@ export function runIdleNudge(db: Db, run: RunRow, input: NudgeInput, now: number
   if (inFlight || dueSteers(db, run.id, now, input.timing).some((m) => !nudgeIds.has(m.id))) return none("a steer ring in flight");
   const progress = progressAt(db, run, nudgeIds);
   const last = nudges.at(-1);
-  const sent = headMoved(last, input.facts) ? 0 : nudges.filter((n) => n.ts > progress).length;
+  const sent = headMoved(last, input.facts) || !last || last.ts <= progress ? 0 : last.n;
   const outstanding = outstandingWork(db, run, input.facts, nudgeIds);
   if (input.facts.unknown !== null && db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = ?2 AND ts > ?3").get(run.id, UNKNOWN_KIND, progress) === null) {
     appendEvent(db, { source: "reconciler", kind: UNKNOWN_KIND, runId: run.id, taskId: run.task_id, payload: { detail: input.facts.unknown }, ts: now });
@@ -262,7 +263,7 @@ export function runIdleNudge(db: Db, run: RunRow, input: NudgeInput, now: number
     const stalledAlready = db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = ?2 AND ts > ?3").get(run.id, STALLED_KIND, last?.ts ?? progress) !== null;
     if (stalledAlready) return none(null, true);
     const idleMs = now - idleEpisodeStart(db, run);
-    const ids = nudges.filter((n) => n.ts > progress).map((n) => n.steer);
+    const ids = nudges.slice(-sent).map((n) => n.steer);
     const event = appendEvent(db, { source: "reconciler", kind: STALLED_KIND, runId: run.id, taskId: run.task_id, payload: { outstanding: labels, nudges: ids, idle_ms: idleMs }, ts: now });
     openRunItemOnce(
       db,
@@ -280,7 +281,7 @@ export function runIdleNudge(db: Db, run: RunRow, input: NudgeInput, now: number
     kind: NUDGE_KIND,
     runId: run.id,
     taskId: run.task_id,
-    payload: { n: sent + 1, steer: steer.id, outstanding: labels, idle_ms: now - windowFrom, head: input.facts.head, remote: input.facts.remote },
+    payload: { n: sent + 1, steer: steer.id, outstanding: labels, idle_ms: now - windowFrom, ...(input.facts.unknown !== null && last ? { head: last.head, remote: last.remote } : { head: input.facts.head, remote: input.facts.remote }) },
     ts: now,
   });
   return { steer, episodeActive: true, skipped: null };

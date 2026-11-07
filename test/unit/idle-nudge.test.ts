@@ -196,6 +196,34 @@ describe("outstanding work", () => {
 });
 
 describe("timing and the stall", () => {
+  test("a new HEAD with no other progress restarts the count for good: 1, 2, 3, then the stall", () => {
+    stopped();
+    const start = clock;
+    const at: number[] = [];
+    for (let minute = 1; minute <= 200; minute++) {
+      clock = start + minute * MIN;
+      if (look(UNPUSHED(1, minute < 35 ? "h1" : "h2")).steer) at.push(minute);
+    }
+    expect(at).toEqual([10, 30, 40, 60, 100]);
+    expect(nudges().map((n) => n.n)).toEqual([1, 2, 1, 2, 3]);
+    const stalled = stalledItems();
+    expect(stalled).toHaveLength(1);
+    expect(stalled[0]!.line).toContain("after 3 nudges");
+    expect((db.query("SELECT ts FROM events WHERE kind = ?1").get(STALLED_KIND) as { ts: number }).ts).toBe(start + 180 * MIN);
+  });
+
+  test("a nudge sent during a failed read, then a good read: the count goes on", () => {
+    stopped();
+    const start = clock;
+    const unknown: GitFacts = { ...NO_GIT_FACTS, head: "h1", unknown: "git rev-parse refs/remotes/origin/b: exit 124" };
+    for (let minute = 1; minute <= 200; minute++) {
+      clock = start + minute * MIN;
+      look(minute > 10 && minute <= 30 ? unknown : UNPUSHED(1));
+    }
+    expect(nudges().map((n) => n.n)).toEqual([1, 2, 3]);
+    expect(count(STALLED_KIND)).toBe(1);
+  });
+
   test("a failed git read after a nudge neither resets the count nor is recorded again", () => {
     stopped();
     clock += 10 * MIN;
