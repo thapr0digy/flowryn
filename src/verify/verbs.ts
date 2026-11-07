@@ -35,7 +35,7 @@ export function verifyRoot(ctx: Pick<HandlerCtx, "config">): string {
 export { VERIFY_POOL };
 
 function verifyDeps(ctx: HandlerCtx): VerifyDeps {
-  return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx), released: () => ctx.sched.kick() };
+  return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx), released: () => ctx.sched.kick(), config: ctx.config };
 }
 
 interface Target {
@@ -216,7 +216,9 @@ const verifyStart: VerbSpec = {
     // It starts now only when nothing waits ahead of it, no restart holds verifies back, a slot is free and the host check passes; else it waits its turn.
     if (ahead || !host.ok || queueHold(ctx.db, caps, now)) return { data: { ...requestView(ctx.db, request, caps, now, host), attached: false } };
     const v = admitRequest(ctx.db, request, config, caps, verifyRoot(ctx), target.project.path, now);
-    return { data: { ...verificationView(v, now), request: request.id, attached: false, started: true } };
+    // The PR's base, which when_changed diffs against; settle hands it to the job.
+    const base = "baseRef" in pr && pr.baseRef ? pr.baseRef : null;
+    return { data: { ...verificationView(v, now), request: request.id, attached: false, started: true, base } };
   },
   async settle(ctx, result) {
     if (result.data.queued === true) {
@@ -229,9 +231,9 @@ const verifyStart: VerbSpec = {
     // A replay of the call, or an attach to a running job, starts nothing.
     if (v && request && v.state === "running" && !isVerifying(id)) {
       const config = verifyConfig(ctx.config(), v.project_id);
-      if (config) launchVerification(verifyDeps(ctx), v, planOf(request, config));
+      if (config) launchVerification(verifyDeps(ctx), v, planOf(request, config, typeof result.data.base === "string" ? result.data.base : null));
     }
-    const { started: _s, ...data } = result.data;
+    const { started: _s, base: _b, ...data } = result.data;
     return { data, hints: [`flowryn verify show ${id}`] };
   },
 };

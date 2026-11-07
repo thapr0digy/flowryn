@@ -78,7 +78,8 @@ describe("the landing queue", () => {
         { task_id: first.task, state: "landing" },
         { task_id: second.task, state: "waiting" },
       ]);
-      expect(query(e, "SELECT 1 FROM auto_merges WHERE task_id = ?1", second.task)).toHaveLength(0);
+      // The second waits its turn: no merge of its own, only the auto-verify of its delivered head.
+      expect(query(e, "SELECT 1 FROM auto_merges WHERE task_id = ?1 AND merge = 1", second.task)).toHaveLength(0);
       const shown = JSON.stringify((await e.fleet.json(["show", second.task])).reply.data);
       expect(shown).toContain(`landing queue: 2 of 2, behind ${first.task}`);
 

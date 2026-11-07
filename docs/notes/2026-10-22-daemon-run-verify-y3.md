@@ -39,7 +39,7 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
 
 The user's answer in the design review (q78): a verify that fails because a step exited non-zero sends the ship back to its worker once per head, with the failing step and its tail. A timeout, an `error`, or a second failure at the same head opens `auto_merge_held` for the leader.
 
-- **Config.** `[projects.<id>] auto_merge = true` (default false). It is refused (`config_invalid`) when it is not a boolean, or when the project has no `verify` steps, since without them the gate passes a PR that has no checks. `verifyConfig` checks it, so the daemon refuses such a config at start and on SIGHUP, and `flowryn config` shows `auto_merge: true` beside the steps. It is not part of the verify policy, so turning it on keeps earlier verifications valid.
+- **Config.** `[projects.<id>] auto_merge = true` (unset, it now follows the project's yolo posture: docs/notes/2026-11-06-auto-verify-every-t8.md). It is refused (`config_invalid`) when it is not a boolean, or when the project has no `verify` steps, since without them the gate passes a PR that has no checks. `verifyConfig` checks it, so the daemon refuses such a config at start and on SIGHUP, and `flowryn config` shows `auto_merge: true` beside the steps. It is not part of the verify policy, so turning it on keeps earlier verifications valid.
   ```toml
   [projects.fathom]
   verify = ["bun install --frozen-lockfile", "bun run typecheck", "bun test"]

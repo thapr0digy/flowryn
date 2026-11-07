@@ -230,7 +230,8 @@ describe("M5 exit: 20 workers under the caps, the host check and the queue", () 
       const steps = [`while [ ! -f ${go} ]; do sleep 0.05; done`, "true"];
       ship = await makeShipEnv({
         mode: "direct-PR",
-        extraConfig: `[projects.web]\nverify = ${JSON.stringify(steps)}\n[capacity]\nvalidation = 1\n[sched]\npass_ms = 300\n`,
+        // The verify is started by hand here, so the daemon's own verify of the delivery is off.
+        extraConfig: `[projects.web]\nverify = ${JSON.stringify(steps)}\nauto_verify = false\nauto_merge = false\n[capacity]\nvalidation = 1\n[sched]\npass_ms = 300\n`,
       });
       const s = ship;
       const f = s.fleet;

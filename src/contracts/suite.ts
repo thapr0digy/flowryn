@@ -132,8 +132,19 @@ function rungPaths(env: ContractEnv, steer: string): string[] {
     .map((e) => String(e.payload.path));
 }
 
-async function sendSteer(env: ContractEnv, state: ContractState, text: string, urgent = false): Promise<string> {
-  const reply = await env.call("steer", { target: state.task, body: text, ...(urgent ? { urgent: true } : {}) });
+/**
+ * How a contract steer goes. `endTurn` for every steer whose work ends the
+ * turn with no outcome (steer --end-turn): its line then tells the worker so,
+ * and the worker contract's "End each turn with an outcome" stops pulling a
+ * real model towards delivering early (docs/notes/2026-11-06-live-contract-check-bf.md).
+ */
+interface SteerOptions {
+  urgent?: boolean;
+  endTurn?: boolean;
+}
+
+async function sendSteer(env: ContractEnv, state: ContractState, text: string, options: SteerOptions = {}): Promise<string> {
+  const reply = await env.call("steer", { target: state.task, body: text, ...(options.urgent ? { urgent: true } : {}), ...(options.endTurn ? { "end-turn": true } : {}) });
   if (!reply.ok) throw new Error(`steer refused: ${reply.error?.code} ${reply.error?.message}`);
   return String(reply.data.steer);
 }
@@ -290,7 +301,7 @@ const tmpDirStep: ContractStep = {
   name: "temp dir",
   typicalSeconds: 15,
   async run(env, state) {
-    const id = await sendSteer(env, state, `Acknowledge this steer. Then run exactly this command with your shell tool: ${TMPDIR_COMMAND}. Then reply with the single word SEVEN and end your turn.`);
+    const id = await sendSteer(env, state, `Acknowledge this steer. Then run exactly this command with your shell tool: ${TMPDIR_COMMAND}. Then reply with the single word SEVEN and end your turn.`, { endTurn: true });
     await waitAcked(env, id, LONG_MS);
     const file = join(env.reportDir(), "tmpdir.txt");
     const seen = await env.waitFor("the worker to write its $TMPDIR", LONG_MS, () => {
@@ -320,6 +331,7 @@ const toolkitStep: ContractStep = {
       env,
       state,
       "Acknowledge this steer. Then run exactly this command once: gh --version. Flowryn's toolkit refuses it on purpose and that refusal is the test: do not retry it or run anything else. Then reply with the single word SIX and end your turn.",
+      { endTurn: true },
     );
     await waitAcked(env, id, LONG_MS);
     const denied = await env.waitFor("the toolkit to deny gh", LONG_MS, () =>
@@ -380,7 +392,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
       async run(env, state) {
         // Sent once the sleep is running, so the expected delivery is the rest of that tool call.
         await waitToolStart(env, "the worker to start its first tool call", env.run().launched_at ?? 0, MID_MS);
-        const id = await sendSteer(env, state, "This steer only needs an acknowledgement; then carry on with your current step.");
+        const id = await sendSteer(env, state, "This steer only needs an acknowledgement; then carry on with your current step.", { endTurn: true });
         await waitAcked(env, id, LONG_MS);
         const paths = rungPaths(env, id);
         const expected = harness === "claude" ? ["post-tool", "stop"] : ["extension"];
@@ -400,7 +412,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
       name: "deliver while idle",
       typicalSeconds: 10,
       async run(env, state) {
-        const id = await sendSteer(env, state, "Acknowledge this steer, then reply with the single word TWO and end your turn.");
+        const id = await sendSteer(env, state, "Acknowledge this steer, then reply with the single word TWO and end your turn.", { endTurn: true });
         await waitAcked(env, id, LONG_MS);
         const paths = rungPaths(env, id);
         const expected = harness === "claude" ? "waiter" : "extension";
@@ -423,7 +435,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
           env,
           state,
           "Urgent: the 60-second command is cancelled; do not run it again. Acknowledge this steer, then reply with the single word FIVE and end your turn.",
-          true,
+          { urgent: true, endTurn: true },
         );
         const steer = await waitAcked(env, id, MID_MS);
         if (steer.preempted_at === null) throw new Error(`${id} was acknowledged without cutting the running tool`);
@@ -446,7 +458,7 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
         const run = env.run();
         if (!(await env.isAlive(run.proc_pid!, run.proc_start!, run.proc_exe!))) throw new Error("the worker died on interrupt");
         // An interrupted worker is idle: a steer now must reach it at once, through the waiter armed at its turn start.
-        const after = await sendSteer(env, state, "The 120-second command was only a test of the interrupt and is cancelled; do not run it again. Acknowledge this steer, then reply with the single word FOUR and end your turn.");
+        const after = await sendSteer(env, state, "The 120-second command was only a test of the interrupt and is cancelled; do not run it again. Acknowledge this steer, then reply with the single word FOUR and end your turn.", { endTurn: true });
         await waitAcked(env, after, MID_MS);
         return `verified by ${String(reply.data.evidence)}; the worker stayed alive; then ${timings(env, after)}`;
       },

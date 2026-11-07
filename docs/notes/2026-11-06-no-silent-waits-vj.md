@@ -1,7 +1,7 @@
 # No silent waits: every wait has a deadline, and an expired wait acts by itself
 
 - Status: done
-- Open: not yet run against a live home; the wake rides `LEADER_WAKE_KINDS` until no-idle-workers-23 lands its own loop guard
+- Open: not yet run against a live home
 - Config: `[waits] verify_queue_min`, `[waits] capacity_min`, `[waits] host_min`, `[waits] harness_check_min`, `[waits] phase_start_min`, `[waits] auto_merge_min`, `[waits] landing_min`
 
 Two stalls on 2026-11-06 went unnoticed for hours. In the first, auto-merge am4 waited 2.5 h on verify request vq128. The verify queue had cancelled that request: GitHub still showed the head the delivery was carried from, so the drain read it as "the PR head moved". In the second, phase 2 of a plan waited about 2 h on the host check (7.8 GB free against an 8 GB floor), and the only signal was the 30-minute capacity P1. Both had the same cause. A wait ended only when some event arrived, and nothing timed it out when that event never came. This change fixes it with plain code (a table, timers and the reconciler) and no model.
@@ -20,8 +20,9 @@ The auto-merge used to wait up to 6 h on a request cancelled because its head mo
   - If it is an earlier delivered head of the task (`staleRead`, typically the head a carry started from), GitHub has not caught up. The delivered head is verified again. A carried head follows the existing carried rule: its re-verify is never skipped.
   - If it really moved (the watcher's evidence shows a new head that was never delivered), that head's verify is queued. The row is superseded (`head_moved`), and the delivery of that head starts the next auto-merge on the verify already queued. If no delivery comes, the watcher's head-moved item tells the leader.
   - If the watcher's evidence still shows the delivered head (it has not re-read the PR yet), the row is left as it is for that pass, and no requeue is counted. The registry's `auto_merge` deadline bounds this. Evidence showing any other head that was never delivered (the head moved again) counts as moved. A local-only move has no evidence to wait for, so the delivered head is verified again, up to the cap.
-- **The cap.** After `MAX_VERIFY_REQUEUES` (3) requeues of one row, the row holds (`auto_merge_held`) with `flowryn verify <task>, then flowryn merge <task>`.
+- **The cap.** After `MAX_VERIFY_REQUEUES` (3) requeues of one row, the row holds (`auto_merge_held`) with `flowryn verify <task>, then flowryn merge <task>` (just `flowryn verify <task>` for an auto-verify row, `merge = 0`).
 - **The landing queue.** It drives its head of line through the same rows, so lq4 and lq5 get the same recovery.
+- **Auto-verify rows** (`merge = 0`, docs/notes/2026-11-06-auto-verify-every-t8.md) get the same recovery: a requeued verify that has already passed moves the row to `verified`, not `waiting_checks`.
 
 The drain no longer cancels on a stale read. When GitHub shows an earlier delivered head of a task whose latest delivery is the request's head, the request waits instead. It waits up to `STALE_READ_WAIT_MS` (5 min) from when it was requested, and is cancelled after that.
 
@@ -55,11 +56,11 @@ The leader's audit (steer m576) added these:
 The reconciler runs `checkWaits` on each full pass (the `checkWaits` dep wired in `src/daemon/daemon.ts`). Each wait goes through these steps:
 
 1. **Past its deadline: recovery first.**
-   - A row in `waits` (migration 55) records it, with a `wait.recovered` event.
+   - A row in `waits` (migration 56) records it, with a `wait.recovered` event.
    - The pass then kicks the scheduler (`verify_queue`, `capacity`, `host`, `harness_check`, `phase_start`) or the auto-merger (`auto_merge`, `landing`). A scheduler pass drains the verify queue, re-reads the host check, grants, and re-evaluates every phase's blockers (`autoDispatch`). An auto-merger pass re-queues a lost verify as above and moves the landing queue.
    - Recovery never passes a gate, answers a decision or merges.
 2. **Still there on a later pass (at least `RECOVERY_GRACE_MS`, 30 s, after the recovery): one item.**
-   - A `wait.expired` event, and one `wait_expired` item (P1, actionable, in `LEADER_WAKE_KINDS`, so it wakes an idle leader once).
+   - A `wait.expired` event, and one `wait_expired` item (P1, actionable, routed `act` in `LEADER_ROUTE`, so it wakes an idle leader once).
    - Its line puts the command before the cause, so a digest that cuts the line keeps the fix: `Waiting 11m, past its 10m deadline: <what> (<title>); <fix>; why: <cause>`.
    - A host wait gives the measured value, the floor and the key: `7.8 GB free memory, under the 8 GB floor ([capacity.host] min_free_mem_gb)`. Its fix is `free the host, or change [capacity.host] min_free_mem_gb in config.toml (the daemon reloads it); flowryn capacity`.
    - A run that is a plan phase is named `phase N of "<plan>" (<task>), stage <stage>`, so when a phase waits for a grant the item says why.

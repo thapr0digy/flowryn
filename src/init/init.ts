@@ -18,7 +18,7 @@ export const LATER_SECTION_DEFAULTS: Record<string, unknown> = {
   style: { terse: true },
   capacity: { worker: 20, validation: 5, docker_env: 5, browser: 5, host: { min_free_mem_gb: 8, max_load_per_core: 1.5 } },
   autonomy: { default: "plan" },
-  notify: { macos: true, herdr: true, min_interval_min: 30, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 },
+  notify: { macos: true, herdr: true, min_interval_min: 30, p0_coalesce_s: 60 },
 };
 
 function isTable(value: unknown): value is Record<string, unknown> {

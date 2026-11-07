@@ -747,6 +747,23 @@ describe("a gate's questions as decisions", () => {
     expect(text).not.toContain("(stale)");
   });
 
+  test("a send-back to the same stage steers a one-line pointer, not the stage's whole text; a stage change still gets it whole", () => {
+    const config = { ...defaultConfig(h.home), state_dir: h.home };
+    mkdirSync(join(h.home, "runs", runId), { recursive: true });
+    const steerFor = (from: string, stage: string) => {
+      db.query("UPDATE runs SET workflow = 'feature', stage = ?2, stage_state = 'waiting', stage_note = 'Your PR conflicts with main.', pending_launch = NULL WHERE id = ?1").run(runId, stage);
+      tx(db, () => appendEvent(db, { source: "daemon", kind: "stage.requested", runId, taskId, payload: { stage, index: 2, from, pools: [] }, ts: NOW }));
+      const steer = tx(db, () => activateStage(db, config, getRunWithPolicy(db, runId)!, NOW).steer);
+      return getMessage(db, steer!)!.body;
+    };
+    const same = steerFor("ship", "ship");
+    expect(same).toBe("Your PR conflicts with main. Then: follow the stage ship steps in $FLOWRYN_TASK_FILE.");
+    const changed = steerFor("build", "ship");
+    expect(changed.startsWith("Your PR conflicts with main. Flowryn stage ship (3 of 3; workflow feature")).toBe(true);
+    expect(changed).toContain("This is the last stage.");
+    expect(changed.length).toBeGreaterThan(same.length * 5);
+  });
+
   test("a task file that cannot be written does not stop the stage: it starts, steers, and records why", () => {
     db.query("UPDATE runs SET workflow = 'feature', stage = 'build', stage_state = 'waiting', stage_note = 'Go on from the design.', pending_launch = NULL WHERE id = ?1").run(runId);
     const config = { ...defaultConfig(h.home), state_dir: h.home };

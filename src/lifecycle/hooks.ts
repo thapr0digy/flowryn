@@ -486,7 +486,7 @@ const preTool = signalVerb(
     const urgent = dueUrgent(ctx.db, run.id, ctx.now(), ctx.fleet.timing());
     if (urgent) {
       markRung(ctx.db, urgent, run, "pre-tool", ctx.now(), false, ctx.fleet.timing());
-      return { data: { run: run.id, steer: urgent.id, permission: "deny", reason: urgentBlockLine(urgent.id, urgent.body) } };
+      return { data: { run: run.id, steer: urgent.id, permission: "deny", reason: urgentBlockLine(urgent.id, urgent.body, urgent.end_turn === 1) } };
     }
     if (!denied) ctx.fleet.urgent.tools.start(run.id, tool, ctx.now());
     return { data: { run: run.id } };
@@ -525,7 +525,7 @@ const postTool = signalVerb(
     const background = backgroundStartOf(input);
     if (background) recordBackgroundStart(ctx.db, run, background, typeof input.transcript_path === "string" ? input.transcript_path : null, ctx.now());
     const steer = takeSteer(ctx, run, "post-tool");
-    return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } : { run: run.id } };
+    return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body, steer.end_turn === 1) } : { run: run.id } };
   },
   (ctx, input) => leader.postToolUse(ctx, input),
 );
@@ -566,7 +566,7 @@ const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pend
     if (steer) {
       ctx.fleet.continuations.set(run.id, used + 1);
       markBusy(ctx, run, "continued");
-      return { data: { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body) } };
+      return { data: { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body, steer.end_turn === 1) } };
     }
   }
   // No steer taken: the turn-end guard may continue it once per episode (Claude) or follow it up (Pi).
@@ -815,8 +815,8 @@ const waitSteer: VerbSpec = {
     const message = getMessage(ctx.db, due.id)!;
     if (harness === "claude") return { data: { fire: { id: message.id, line: steerPointer(message.id) } } };
     // An urgent steer: the extension blocks the next tool call and cuts a tool past the threshold (asking hook preempt).
-    if (message.urgent !== 1) return { data: { fire: { id: message.id, line: steerLine(message.id, message.body) } } };
-    return { data: { fire: { id: message.id, line: urgentCutLine(message.id, message.body), urgent: true, preempt_after_ms: ctx.fleet.timing().steer_preempt_after_ms } } };
+    if (message.urgent !== 1) return { data: { fire: { id: message.id, line: steerLine(message.id, message.body, message.end_turn === 1) } } };
+    return { data: { fire: { id: message.id, line: urgentCutLine(message.id, message.body, message.end_turn === 1), urgent: true, preempt_after_ms: ctx.fleet.timing().steer_preempt_after_ms } } };
   },
 };
 

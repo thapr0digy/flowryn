@@ -144,9 +144,9 @@ describe("run worktrees from the treehouse pool", () => {
         expect.arrayContaining([expect.objectContaining({ check: "worktree fallbacks", status: "warn", detail: expect.stringContaining("max_trees = 1") })]),
       );
 
-      // Its cleanup is today's: the guard, then git removes the worktree. Cancel only once the
-      // worker's commit is in, or the cancel can cut it off and leave a.txt uncommitted.
-      await waitUntil(() => git(busy.worktree_path, ["log", "--oneline", "-1"]).out.includes("a.txt") && git(busy.worktree_path, ["status", "--porcelain"]).out === "", 10_000, "the worker's commit");
+      // Its cleanup is today's: the guard, then git removes the worktree.
+      // Busy comes before the worker's commit lands; cancelling mid-commit would leave a.txt uncommitted.
+      await waitUntil(() => git(env.repo, ["log", "--oneline", "-1", busy.branch]).out.includes("a.txt"), 10_000, "the commit");
       expect((await env.json(["cancel", task])).code).toBe(0);
       expect(git(env.repo, ["merge", "-q", "--ff-only", busy.branch]).code).toBe(0);
       const cleaned = await env.json(["cleanup", task]);

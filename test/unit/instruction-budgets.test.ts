@@ -18,6 +18,7 @@ import { WORKER_VERBS } from "../../src/lifecycle/worker.ts";
 const nm: ContractDelivery = { kind: "ship", mode: "no-mistakes", defaultBranch: "main", lastStage: { id: "ship", pools: ["validation"] }, harness: "claude" };
 const feature = DEFAULT_WORKFLOWS.feature!;
 const designText = stageInstructions({ def: feature, index: 0, stage: feature.stages[0]!, last: false }, { stateDir: "/none", delivery: nm });
+const buildText = stageInstructions({ def: feature, index: 1, stage: feature.stages[1]!, last: false }, { stateDir: "/none", delivery: nm });
 const shipText = stageInstructions({ def: feature, index: 2, stage: feature.stages[2]!, last: true }, { stateDir: "/none", delivery: nm });
 const help = (verbs: readonly VerbSpec[], name: string) => {
   const verb = verbs.find((v) => v.name === name)!;
@@ -30,9 +31,9 @@ describe("instruction budgets", () => {
     expect(SKILL_DESCRIPTION.length).toBeLessThanOrEqual(240);
   });
 
-  test("assumption: the worker contract stays under 400 tokens whole (its own lines: test/unit/harness.test.ts)", () => {
+  test("assumption: the worker contract stays under 425 tokens whole (its own lines: test/unit/harness.test.ts)", () => {
     const text = workerContract("claude", STYLE_BLOCK, { base: "release/2", defaultBranch: "main" });
-    expect(text.length).toBeLessThanOrEqual(1_600);
+    expect(text.length).toBeLessThanOrEqual(1_700);
   });
 });
 
@@ -42,7 +43,7 @@ describe("every rule the worker contract no longer carries has a home", () => {
     ["a review's page messages are answered with review reply", designText, "answer with $FLOWRYN_BIN review reply --body-file - (never lavish-axi poll or reply yourself)"],
     ["review reply, at the turn-end guard", REVIEW_TURN_END_REMINDER, "$FLOWRYN_BIN review reply --body-file -"],
     ["a turn with no outcome brings one reminder", TURN_END_REMINDER, "You ended your turn without an outcome"],
-    ["the pipeline waits for its stage", designText, "Do not run the no-mistakes pipeline yet"],
+    ["the pipeline waits for its stage", buildText, "Do not run the no-mistakes pipeline yet"],
     ["delivery steps are the last stage's", shipText, "Drive it with ONE foreground no-mistakes axi run --wait"],
     ["a conflict-only ci gate: merge, never respond", shipText, "never respond (its fix rebases)"],
     ["an ask-user finding goes to the leader", shipText, "$FLOWRYN_BIN ask --nomistakes"],

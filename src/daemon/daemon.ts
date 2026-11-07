@@ -83,7 +83,7 @@ import { alertHerdrIfDue, herdrEpisode, noteHerdrDown, noteHerdrUp } from "../re
 import { clearRestartFailure, failureLine, readRestartFailure } from "../service/restart-failure.ts";
 import { InFlight, settleWithin, type Draining } from "./inflight.ts";
 import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestartFailure, recordRestarted, scriptSupervisor } from "./restart.ts";
-import { AutoContractChecker } from "../contracts/auto.ts";
+import { AutoContractChecker, autoPollMs } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
@@ -92,7 +92,7 @@ import { verifyPolicyId } from "../verify/policy.ts";
 import { drainVerifyQueue, verifyRoot } from "../verify/start.ts";
 import { adoptLegacyScope } from "../leader/scope.ts";
 import { refreshScopeGuard } from "../leader/scope-guard.ts";
-import { AutoMerger, startAutoMerge } from "../verify/auto-merge.ts";
+import { AutoMerger, startAutoMerge, startAutoVerify } from "../verify/auto-merge.ts";
 import { deliveredToQueue, LANDING_NET_TIMEOUT_MS, LandingQueue } from "../verify/landing-queue.ts";
 
 export interface DaemonOptions {
@@ -544,6 +544,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       autoMerge: (run, d, now) => {
         // A queue project's carried head waits its turn in the landing queue instead.
         if (!deliveredToQueue(database, config, run, d.head, now)) startAutoMerge(database, config, run, d, now);
+        else startAutoVerify(database, config, run, d, now);
       },
       log,
       now: Date.now,
@@ -721,6 +722,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       db: database,
       config: () => config,
       env,
+      pollMs: autoPollMs(env),
       now: Date.now,
       log,
       info: () => info,

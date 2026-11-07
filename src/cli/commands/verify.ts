@@ -41,7 +41,7 @@ function seconds(ms: number | string): string {
   return ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}s`;
 }
 
-const MARKS: Record<string, string> = { passed: "✓", failed: "✗", stopped: "·" };
+const MARKS: Record<string, string> = { passed: "✓", failed: "✗", stopped: "·", skipped: "–" };
 
 /** A step that ended: its mark, time and counts, and why (a failure, or a hang it recovered from). */
 function stepLine(s: StepView): string {

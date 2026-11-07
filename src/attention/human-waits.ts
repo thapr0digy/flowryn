@@ -181,7 +181,8 @@ export function mergeWait(db: Db, config: FlowrynConfig, run: LiveRun, now: numb
   const auto = latestAutoMerge(db, run.id);
   if (run.state === "merging") return mergingWait(db, task, headFact, base);
   if (auto && auto.head_sha === head && auto.state === "held" && findOpenRunItem(db, "auto_merge_held", run.id)) return heldWait(auto, task, headFact);
-  if (auto && auto.head_sha === head && LIVE_AUTO_MERGE_STATES.includes(auto.state)) return autoWait(auto, headFact);
+  // An auto-verify (merge = 0) waits as any verify does, below: flowryn runs it.
+  if (auto && auto.head_sha === head && auto.merge !== 0 && LIVE_AUTO_MERGE_STATES.includes(auto.state)) return autoWait(auto, headFact);
   const landing = liveLanding(db, run.id);
   if (landing && landing.state === "waiting") return landingWait(db, landing, headFact);
   const evidence = delivered.kind === "pr" ? prEvidence(db, run.id) : null;
