@@ -66,13 +66,13 @@ Goal: the change the approved design describes, with tests that prove it and tes
    - Back end: unit tests for new functions; an API test per changed endpoint covering the status, the body, the errors and the auth.
    - Database: migrations apply forward on a scratch database; queries run against the real schema (a container, or the in-memory engine the project already uses). No test touches a shared database.
 3. For each design assumption, write at least one test that fails when the assumption is wrong, and name it after the assumption.
-4. Build in small commits on your branch. Run the whole test suite and the linters; everything green before you finish.
+4. Build in small commits on your branch. Run the tests your change affects, not the whole suite (bun: \`bun test --changed=origin/main\`; other stacks: the tests of the files you touched), plus the type checker and the linters; everything green before you finish. The project's verify is the single full run.
 5. Principal-level bar, checked before you finish:
    - The change matches the spec; every deviation has a reason.
    - Threat-model it: who controls each input, what an attacker gains; validate inputs at the boundary, enforce authorization where the data is.
    - No secrets in logs, errors, storage, task files or commits.
    - Errors are explicit, never swallowed; each failure path has a test.
-6. Self-review: read your whole diff as a reviewer would (\`git diff <base>...HEAD\`), fix what you find, run the suite again.
+6. Self-review: read your whole diff as a reviewer would (\`git diff <base>...HEAD\`), fix what you find, run the affected tests again.
 7. Finish: commit everything, write the handoff (\`$FLOWRYN_BIN template handoff\`: ## Done, ## Deviations from the spec and why, ## Risks), then \`$FLOWRYN_BIN stage done --handoff-file <file>\` and end your turn. Going straight on instead, the same handoff goes with that call: \`$FLOWRYN_BIN stage begin <last stage> --handoff-file <file>\` before a no-mistakes pipeline, \`$FLOWRYN_BIN deliver --pr <url> --handoff-file <file>\` or \`deliver --local --handoff-file <file>\` for a direct-PR or local-only delivery. The next stage gets your handoff.
 
 Rules:
