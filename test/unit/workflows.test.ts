@@ -16,7 +16,7 @@ import { environments, parseDockerPs } from "../../src/reconcile/docker.ts";
 import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.ts";
 import { fullPools, grantJobLease, grantLeases, leaseProcesses, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
 import { EXIT_BACKOFF_MAX_MS, Scheduler } from "../../src/sched/scheduler.ts";
-import { claimProbe, clearUsageLimit, noteUsageLimit, resumeCommand, usageGate, usagePause } from "../../src/sched/usage.ts";
+import { claimProbe, clearUsageLimit, noteProbeReply, noteUsageLimit, resumeCommand, usageGate, usagePause } from "../../src/sched/usage.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
 const HOME = "/tmp/fw-m5";
@@ -368,14 +368,41 @@ describe("the Claude usage-limit pause (design section 16)", () => {
     db.close();
   });
 
-  test("a probe that died, or outlived the backoff, frees the probe for another run", () => {
+  test("a live probe holds the slot however long it takes to answer; one that died or finished frees it for another run", () => {
     const db = scratchDb();
     tx(db, () => noteUsageLimit(db, "claude", "r1", "429", 0, BACKOFF));
     tx(db, () => claimProbe(db, "claude", "r1", 1_000));
     expect(usageGate(db, 1_500, "claude", "r2")).toBe("paused");
-    expect(usageGate(db, 2_000, "claude", "r2")).toBe("probe");
+    // A launch slower than the backoff (a loaded host) is still the one probe: its rate_limit may yet come.
+    for (const t of [2_000, 2_001, 10_000, 1_000_000]) {
+      expect(usageGate(db, t, "claude", "r2")).toBe("paused");
+      expect(usageGate(db, t, "claude", null)).toBe("paused");
+    }
+    expect(usageGate(db, 1_000_000, "claude", "r1")).toBe("open");
+    // Its late rate_limit re-arms the pause; nothing else had gone in.
+    expect(tx(db, () => noteUsageLimit(db, "claude", "r1", "429", 1_000_000, BACKOFF))).toBe(true);
+    expect((db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'sched.usage_probe'").get() as { n: number }).n).toBe(1);
+    tx(db, () => claimProbe(db, "claude", "r1", 1_002_000));
     db.query("UPDATE runs SET liveness = 'dead' WHERE id = 'r1'").run();
-    expect(usageGate(db, 1_500, "claude", "r2")).toBe("probe");
+    expect(usageGate(db, 1_002_001, "claude", "r2")).toBe("probe");
+    db.query("UPDATE runs SET liveness = 'busy', state = 'cancelled' WHERE id = 'r1'").run();
+    expect(usageGate(db, 1_002_001, "claude", "r2")).toBe("probe");
+    db.close();
+  });
+
+  test("the probe's own tool call lifts the pause; another run's, or one before the probe, does not", () => {
+    const db = scratchDb();
+    tx(db, () => noteUsageLimit(db, "claude", "r1", "429", 0, BACKOFF));
+    expect(tx(db, () => noteProbeReply(db, "claude", "r1", "worker t1", 500))).toBe(false);
+    tx(db, () => claimProbe(db, "claude", "r2", 1_000));
+    expect(tx(db, () => noteProbeReply(db, "claude", "r1", "worker t1", 1_100))).toBe(false);
+    expect(tx(db, () => noteProbeReply(db, "other", "r2", "worker t2", 1_100))).toBe(false);
+    expect(usagePause(db, "claude")).not.toBeNull();
+    expect(tx(db, () => noteProbeReply(db, "claude", "r2", "worker t2", 1_200))).toBe(true);
+    expect(usagePause(db, "claude")).toBeNull();
+    expect(usageItem(db)).toMatchObject({ state: "resolved", resolved_by: "usage resumed: the probe worker t2 got a reply (a tool call)" });
+    expect(usageEvents(db)).toEqual(["sched.usage_limit", "sched.usage_probe", "sched.usage_resumed"]);
+    expect(tx(db, () => noteProbeReply(db, "claude", "r2", "worker t2", 1_300))).toBe(false);
     db.close();
   });
 

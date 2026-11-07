@@ -155,10 +155,12 @@ describe("review pages open in your browser", () => {
     const e = ship;
     const f = e.fleet;
     const { task, gate } = await handIn(e);
-    await waitUntil(() => existsSync(join(f.h.home, "lavish-calls.log")), 10_000, "the lavish-axi poll");
+    // The poll starts with stage done's own kick (about 150 ms idle); 30 s leaves room for a loaded host
+    // (docs/notes/2026-11-07-fix-two-integration-iq.md).
+    await waitUntil(() => existsSync(join(f.h.home, "lavish-calls.log")), 30_000, "the lavish-axi poll");
     await Bun.sleep(300);
     expect(one<{ open_state: string; open_detail: string }>(f, "SELECT open_state, open_detail FROM gates WHERE id = ?1", gate.id)).toEqual({ open_state: "off", open_detail: "[review] open_browser = false" });
     expect(existsSync(join(f.h.home, "browser-opens.log"))).toBe(false);
     expect(await gateLine(e, task, gate.id)).toContain(`; browser: off ([review] open_browser = false); open by hand: ${gate.review_url}`);
-  });
+  }, 60_000);
 });
