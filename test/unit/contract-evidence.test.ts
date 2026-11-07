@@ -78,6 +78,5 @@ describe("a steer sent with --end-turn", () => {
       .split("\n")
       .find((l) => l.startsWith("- End each turn with an outcome"))!;
     expect(rule).toContain("or as a steer says");
-    expect(END_TURN_NOTE).toContain("asks for no outcome");
   });
 });

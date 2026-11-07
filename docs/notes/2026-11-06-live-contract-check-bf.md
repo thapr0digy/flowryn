@@ -37,4 +37,4 @@ Each part that cannot be read says why rather than failing the run. Every string
 
 ## Live results (2026-11-06, Claude 2.1.319, Pi 0.87.1)
 
-After the fix, the Claude suite passed five times in a row (23:33, 23:35, 23:37, 23:39, 23:41) and the Pi gate passed.
+After the fix, the Claude suite passed five times in a row (23:33, 23:35, 23:37, 23:39, 23:41), and a sixth run on the final worker-contract wording passed at 00:13 on 2026-11-07 (report `claude-2.1.319-2026-11-07T00-13-54-569Z-verify-only.json`), so six in a row. The Pi gate passed.
