@@ -10,7 +10,7 @@ import { taskTitle } from "../lifecycle/runs.ts";
 import { phaseReadiness } from "../lifecycle/stacks.ts";
 import { hostState } from "../sched/scheduler.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { autoMergeProgress, CHECKS_WAIT_MS, checksPending, HEAD_MOVED_WAIT_MS, headMovedSeenAt, liveAutoMerges, NO_CI_CHECKS_WAIT_MS, type AutoMergeRow } from "../verify/auto-merge.ts";
+import { autoMergeProgress, CHECKS_WAIT_MS, checksPending, evidenceHead, HEAD_MOVED_WAIT_MS, headMovedSeenAt, liveAutoMerges, NO_CI_CHECKS_WAIT_MS, type AutoMergeRow } from "../verify/auto-merge.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { getRequest, queuedRequests, type VerifyRequest } from "../verify/queue.ts";
 import { waitingOn } from "../verify/start.ts";
@@ -87,7 +87,7 @@ export type NoCiReading = (projectId: string) => boolean;
 /** Every wait there is now, oldest first. */
 export function collectWaits(db: Db, config: FlowrynConfig, now: number, noCi: NoCiReading = () => false): Wait[] {
   const deadlines = waitDeadlines(config);
-  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, now, noCi), ...landingWaits(db, deadlines)].toSorted(
+  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, noCi), ...landingWaits(db, deadlines)].toSorted(
     (a, b) => a.since - b.since || a.key.localeCompare(b.key),
   );
 }
@@ -319,7 +319,7 @@ function phaseWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
 // --- auto-merges and the landing queue ----------------------------------------------------------
 
 /** A live auto-merge that waits on something no other wait covers (its queued verify is the queue's, a running verify has its own deadline). */
-function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>, now: number, noCi: NoCiReading): Wait[] {
+function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>, noCi: NoCiReading): Wait[] {
   const waits: Wait[] = [];
   for (const row of liveAutoMerges(db)) {
     if (row.state === "queued" && row.request_id && getRequest(db, row.request_id)?.state === "queued") continue;
@@ -330,7 +330,7 @@ function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>, now: number
       task_id: row.task_id,
       run_id: row.run_id,
       since: row.state_since,
-      due: autoMergeDue(db, row, deadlines, now, noCi),
+      due: autoMergeDue(db, row, deadlines, noCi),
       what: `auto-merge ${row.id} of ${row.task_id}`,
       cause: `${autoMergeProgress(db, row) ?? row.state} since its last change${pendingChecks(db, row)}`,
       fix: row.state === "waiting_checks" ? `flowryn show ${row.task_id}; once its checks finish: flowryn merge ${row.task_id}` : `flowryn show ${row.task_id}`,
@@ -342,13 +342,16 @@ function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>, now: number
 /**
  * When a live auto-merge is overdue: the table's deadline from its last change, except where the
  * auto-merger has a longer bound of its own on a PR waiting on checks (its checks limit, or
- * HEAD_MOVED_WAIT_MS from when it first saw the PR head move), which it holds at.
+ * HEAD_MOVED_WAIT_MS from when it first saw the PR head move), which it holds at. Evidence still showing an
+ * earlier delivered head (GitHub catching up) is not a move: the table's deadline.
  */
-function autoMergeDue(db: Db, row: AutoMergeRow, deadlines: Record<WaitKind, number>, now: number, noCi: NoCiReading): number {
+function autoMergeDue(db: Db, row: AutoMergeRow, deadlines: Record<WaitKind, number>, noCi: NoCiReading): number {
   const table = row.state_since + deadlines.auto_merge;
   if (row.state !== "waiting_checks" || deliveredOf(db, row.task_id)?.kind !== "pr") return table;
   const pr = prEvidence(db, row.run_id);
-  if (pr && pr.head !== row.head_sha) return Math.max(table, (headMovedSeenAt(db, row.id) ?? now) + HEAD_MOVED_WAIT_MS);
+  const seen = pr ? evidenceHead(db, row, pr) : "delivered";
+  if (seen === "stale") return table;
+  if (seen === "moved") return Math.max(table, (headMovedSeenAt(db, row.id) ?? row.state_since) + HEAD_MOVED_WAIT_MS);
   if (checksPending(pr)) return row.state_since + (noCi(row.project_id) ? NO_CI_CHECKS_WAIT_MS : CHECKS_WAIT_MS);
   return table;
 }

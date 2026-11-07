@@ -589,6 +589,20 @@ describe("the controller, without GitHub", () => {
     expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "head_moved" });
     expect(getAutoMerge(f.db, row.id)!.detail).toContain("over 30 min ago");
 
+    const lagging = fixture();
+    const lv = verification(lagging, lagging.root);
+    finish(lagging, lv, "passed");
+    const lrow = tx(lagging.db, () => startAutoMerge(lagging.db, cfg, lagging.run(), lagging.delivery, 5_000))!;
+    tx(lagging.db, () => {
+      lagging.db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a-earlier', 't1', 'pr', ?1, ?2, 1)").run(PR_URL, "d".repeat(40));
+      lagging.db
+        .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+        .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: "d".repeat(40), head_ref: "flowryn/t1", merge_sha: null, checks: { state: "green", line: "x", red: [], pending: [], total: 1 }, observed_at: 1 }));
+    });
+    await merger(lagging, cfg, 5_000 + 60_000).auto.pass();
+    expect(getAutoMerge(lagging.db, lrow.id)?.state).toBe("waiting_checks");
+    expect(lagging.db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'auto_merge.head_moved_seen'").get()).toEqual({ n: 0 });
+
     const g = fixture();
     const w = verification(g, g.root);
     finish(g, w, "passed");

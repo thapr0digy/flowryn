@@ -330,11 +330,21 @@ describe("an auto-merge", () => {
     const db = database();
     const cfg = config();
     waitingChecks(db, "c".repeat(40), []);
-    // Not seen yet: the auto-merger's next pass records it, so it is not due now.
-    expect(pass(db, cfg, 1_000 + 40 * MIN).kicks).toEqual([]);
-    tx(db, () => appendEvent(db, { source: "daemon", kind: "auto_merge.head_moved_seen", runId: "r1", taskId: "t1", payload: { auto_merge: "am4", head: "c".repeat(40) }, ts: 1_000 + 41 * MIN }));
-    expect(pass(db, cfg, 1_000 + 71 * MIN - 1).kicks).toEqual([]);
-    expect(pass(db, cfg, 1_000 + 71 * MIN).kicks).toEqual(["auto_merger"]);
+    // Not seen yet: the table's deadline from its last change, so the recovery kicks the auto-merger, which records the sighting.
+    expect(pass(db, cfg, 1_000 + 30 * MIN - 1).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 30 * MIN).kicks).toEqual(["auto_merger"]);
+    tx(db, () => appendEvent(db, { source: "daemon", kind: "auto_merge.head_moved_seen", runId: "r1", taskId: "t1", payload: { auto_merge: "am4", head: "c".repeat(40) }, ts: 1_000 + 30 * MIN }));
+    expect(pass(db, cfg, 1_000 + 30 * MIN + RECOVERY_GRACE_MS).result).toMatchObject({ itemized: [], cleared: ["auto_merge:am4"] });
+    expect(pass(db, cfg, 1_000 + 60 * MIN - 1).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 60 * MIN).kicks).toEqual(["auto_merger"]);
+    expect(openWaitItems(db)).toEqual([]);
+  });
+
+  test("one whose evidence still shows an earlier delivered head (GitHub catching up) is no move: the table's deadline, not the checks limit", () => {
+    const db = database();
+    waitingChecks(db, "0".repeat(40), ["ci/test"]);
+    tx(db, () => db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a0', 't1', 'pr', 'u', ?1, -1)").run("0".repeat(40)));
+    expect(collectWaits(db, config(), 1_000 + 10 * MIN)[0]).toMatchObject({ key: "auto_merge:am4", due: 1_000 + 30 * MIN });
   });
 
   test("one following a queued or running verify is the verify's wait, not its own", () => {

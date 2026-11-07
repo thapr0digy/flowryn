@@ -83,6 +83,12 @@ function headMovedSince(db: Db, row: AutoMergeRow, head: string | null, now: num
   return now;
 }
 
+/** What the watcher's PR evidence shows against the row's head: it, an earlier delivered head of the task GitHub has not caught up from, or a move past it. */
+export function evidenceHead(db: Db, row: Pick<AutoMergeRow, "task_id" | "head_sha">, pr: Pick<PrEvidence, "head">): "delivered" | "stale" | "moved" {
+  if (pr.head === row.head_sha) return "delivered";
+  return staleRead(db, row, pr.head) ? "stale" : "moved";
+}
+
 /** Whether the PR's checks are still running on GitHub. */
 export function checksPending(pr: Pick<PrEvidence, "checks"> | null): boolean {
   return !!pr?.checks && (pr.checks.state === "pending" || pr.checks.pending.length > 0);
@@ -689,8 +695,10 @@ export class AutoMerger {
     const delivered = deliveredOf(db, row.task_id);
     if (delivered?.kind === "pr") {
       const pr = prEvidence(db, row.run_id);
+      const seen = pr ? evidenceHead(db, row, pr) : "delivered";
+      if (seen === "stale") return row;
       // The worker pushed past the delivered head: its redelivery supersedes this row.
-      if (pr && pr.head !== row.head_sha) {
+      if (pr && seen === "moved") {
         const since = tx(db, () => headMovedSince(db, row, pr.head, now));
         if (now - since <= HEAD_MOVED_WAIT_MS) return row;
         return tx(db, () => this.hold(row, "head_moved", `the PR head moved from ${row.head_sha.slice(0, 8)} (delivered) to ${pr.head.slice(0, 8)} over ${HEAD_MOVED_WAIT_MS / 60_000} min ago, and nothing was delivered since`, `flowryn steer ${row.task_id} --body-file -`, now));
