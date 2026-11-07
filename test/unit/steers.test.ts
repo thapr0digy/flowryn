@@ -60,13 +60,58 @@ describe("steer rings", () => {
     const m = tx(db, () => createSteer(db, run, "x", 0));
     for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at, false, timing));
     tx(db, () => flagUnackedSteers(db, 3_000, timing));
-    expect(tx(db, () => ackSteer(db, run, getMessage(db, m.id)!, 4_000))).toEqual({ already: false });
-    expect(tx(db, () => ackSteer(db, run, getMessage(db, m.id)!, 5_000))).toEqual({ already: true });
+    expect(tx(db, () => ackSteer(db, run, getMessage(db, m.id)!, 4_000))).toEqual({ already: false, superseded: [] });
+    expect(tx(db, () => ackSteer(db, run, getMessage(db, m.id)!, 5_000))).toEqual({ already: true, superseded: [] });
     const items = db.query("SELECT kind, class, state FROM items ORDER BY opened_at, id").all();
     expect(items).toEqual([
       { kind: "steer_unacked", class: "actionable", state: "resolved" },
       { kind: "steer_acked", class: "info", state: "open" },
     ]);
+  });
+
+  test("acking a newer steer settles every older unacked one on the run, so none of them is flagged", () => {
+    const old1 = tx(db, () => createSteer(db, run, "first nudge", 0));
+    const old2 = tx(db, () => createSteer(db, run, "second nudge", 0));
+    for (const at of [0, 1_000, 2_000]) {
+      tx(db, () => markRung(db, getMessage(db, old1.id)!, run, "waiter", at, false, timing));
+      tx(db, () => markRung(db, getMessage(db, old2.id)!, run, "waiter", at, false, timing));
+    }
+    const newer = tx(db, () => createSteer(db, run, "third nudge", 2_500));
+    expect(tx(db, () => ackSteer(db, run, getMessage(db, newer.id)!, 2_600))).toEqual({ already: false, superseded: [old1.id, old2.id] });
+    expect(getMessage(db, old1.id)!.acked_at).toBe(2_600);
+    expect(getMessage(db, old2.id)!.acked_at).toBe(2_600);
+    expect(events("steer.superseded")).toEqual([
+      { steer: old1.id, by: newer.id, rings: 3 },
+      { steer: old2.id, by: newer.id, rings: 3 },
+    ]);
+    expect(tx(db, () => flagUnackedSteers(db, 9_000, timing))).toEqual([]);
+    expect(db.query("SELECT kind FROM items WHERE kind = 'steer_unacked'").all()).toEqual([]);
+  });
+
+  test("acking a newer steer resolves an open P1 for an older one and leaves later steers ringing", () => {
+    const old = tx(db, () => createSteer(db, run, "old", 0));
+    for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, old.id)!, run, "waiter", at, false, timing));
+    expect(tx(db, () => flagUnackedSteers(db, 3_000, timing))).toEqual(["r1"]);
+    const acked = tx(db, () => createSteer(db, run, "acked", 3_100));
+    const later = tx(db, () => createSteer(db, run, "later", 3_200));
+    tx(db, () => ackSteer(db, run, getMessage(db, acked.id)!, 3_300));
+    expect(db.query("SELECT state, resolved_by FROM items WHERE kind = 'steer_unacked'").all()).toEqual([{ state: "resolved", resolved_by: `steer.acked ${acked.id}` }]);
+    expect(getMessage(db, later.id)!.acked_at).toBeNull();
+    expect(dueSteers(db, "r1", 3_300, timing).map((m) => m.id)).toEqual([later.id]);
+  });
+
+  test("a dismissed steer_unacked item is not reopened for the same steer, but a different steer can still flag", () => {
+    const m = tx(db, () => createSteer(db, run, "x", 0));
+    for (const at of [0, 1_000, 2_000]) tx(db, () => markRung(db, getMessage(db, m.id)!, run, "waiter", at, false, timing));
+    expect(tx(db, () => flagUnackedSteers(db, 3_000, timing))).toEqual(["r1"]);
+    db.query("UPDATE items SET state = 'dismissed', resolved_at = 3_500 WHERE kind = 'steer_unacked'").run();
+    for (const at of [4_000, 60_000, 600_000]) expect(tx(db, () => flagUnackedSteers(db, at, timing))).toEqual([]);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'steer_unacked'").get()).toEqual({ n: 1 });
+
+    const other = tx(db, () => createSteer(db, run, "y", 10_000));
+    for (const at of [10_000, 11_000, 12_000]) tx(db, () => markRung(db, getMessage(db, other.id)!, run, "waiter", at, false, timing));
+    expect(tx(db, () => flagUnackedSteers(db, 13_000, timing))).toEqual(["r1"]);
+    expect(events("steer.unacked").map((e) => e.steer)).toEqual([m.id, other.id]);
   });
 });
 
@@ -142,12 +187,11 @@ describe("seen and lost carries", () => {
   });
 
   test("recentSteers keeps every unacknowledged steer and the latest acknowledged ones", () => {
-    const first = tx(db, () => createSteer(db, run, "old, never acked", 0));
-    for (let i = 1; i <= 6; i++) {
-      const m = tx(db, () => createSteer(db, run, `n${i}`, i));
-      tx(db, () => ackSteer(db, run, m, i + 1));
-    }
-    expect(recentSteers(db, "r1", 3).map((m) => m.id)).toEqual([first.id, "m5", "m6", "m7"]);
+    // An ack settles every older steer, so unacknowledged ones are always the newest.
+    for (let i = 1; i <= 3; i++) tx(db, () => ackSteer(db, run, createSteer(db, run, `acked ${i}`, i), i));
+    for (let i = 4; i <= 7; i++) tx(db, () => createSteer(db, run, `open ${i}`, i));
+    expect(recentSteers(db, "r1", 2).map((m) => m.id)).toEqual(["m4", "m5", "m6", "m7"]);
+    expect(recentSteers(db, "r1", 6).map((m) => m.id)).toEqual(["m2", "m3", "m4", "m5", "m6", "m7"]);
   });
 });
 
