@@ -12,6 +12,7 @@ import { withRepoLock } from "../runtime/repo-lock.ts";
 import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
 import { appendEvent } from "../db/events.ts";
 import type { FlowrynConfig } from "../config/config.ts";
+import { anyMatches, changedSinceBase, type ChangedFiles } from "./changed.ts";
 import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
@@ -68,6 +69,8 @@ export interface VerifyPlan {
   path: string | null;
   /** The review step's settings, when the steps have one (REVIEW_STEP). */
   review?: ReviewConfig | null;
+  /** The PR's base branch, which when_changed diffs against; null or absent: origin's default branch. */
+  base?: string | null;
 }
 
 /** Finished verification directories kept per project (binary and logs); older ones are removed. */
@@ -124,13 +127,25 @@ export function logName(index: number, step: string): string {
 }
 
 
-/** One waiting row per step, groups flattened in order; `group` is the entry of `verify` it came from. */
-export function initialSteps(items: readonly VerifyItem[]): VerifyStep[] {
+/** One waiting row per step, groups flattened in order; `group` is the entry of `verify` it came from, `when_changed` its globs by flattened place. */
+export function initialSteps(items: readonly VerifyItem[], whenChanged: readonly (readonly string[] | null)[] = []): VerifyStep[] {
   const steps: VerifyStep[] = [];
   items.forEach((item, group) => {
-    for (const name of typeof item === "string" ? [item] : item) steps.push({ name, state: "waiting", exit: null, ms: null, log: logName(steps.length, name), tests: null, detail: null, group });
+    for (const name of typeof item === "string" ? [item] : item) {
+      const when = whenChanged[steps.length] ?? null;
+      steps.push({ name, state: "waiting", exit: null, ms: null, log: logName(steps.length, name), tests: null, detail: null, group, ...(when ? { when_changed: [...when] } : {}) });
+    }
   });
   return steps;
+}
+
+/** A conditioned step's fate once the changed files are known: skip it (with why), or run it (with a note when the files are unknown). */
+export function changeGate(step: Pick<VerifyStep, "when_changed">, changed: ChangedFiles | null): { skip: string } | { note: string | null } {
+  if (!step.when_changed || step.when_changed.length === 0 || changed === null) return { note: null };
+  if ("error" in changed) return { note: `ran: the changed files are unknown (${changed.error})` };
+  if (anyMatches(step.when_changed, changed.files)) return { note: null };
+  const globs = step.when_changed.join(", ");
+  return { skip: `skipped: none of the ${changed.files.length} file${changed.files.length === 1 ? "" : "s"} changed against ${changed.base} matches its when_changed (${globs})` };
 }
 
 /** "2-bun-run-typecheck.log" -> "2-bun-run-typecheck.retry.log". */
@@ -515,10 +530,19 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
     const childEnv = stepEnv(env, plan.path);
     const deadlines = stepDeadlines(deps.db, v.project_id, steps.map((s) => s.name), plan.stepTimeoutMs ?? null);
     steps.forEach((s, i) => (s.deadline_ms = deadlines[i]?.ms ?? null));
+    // Read once per verification, and only when a step has when_changed globs.
+    const changed = steps.some((s) => (s.when_changed?.length ?? 0) > 0) ? await changedSinceBase(deps.git, v.worktree_path, plan.base ?? null) : null;
+    if (job.aborted) return stoppedMidRun();
 
     /** One step to its end: run, and once more when its own deadline killed it and the run has time left. */
     const runOne = async (i: number, handle: StepHandle, stoppedBy: () => string | null): Promise<void> => {
       const step = steps[i]!;
+      const gate = changeGate(step, changed);
+      if ("skip" in gate) {
+        Object.assign(step, { state: "skipped", ms: 0, detail: gate.skip });
+        record(step);
+        return;
+      }
       const deadline = deadlines[i] ?? null;
       const firstLog = step.log;
       const began = Date.now();
@@ -560,7 +584,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       step.exit = result.exit;
       step.tests = parseBunSummary(readTail(join(v.dir, step.log)));
       step.state = result.stopped ? "stopped" : result.exit === 0 && result.timedOut === null ? "passed" : "failed";
-      step.detail = stepDetail(step, result, deadline, plan, firstLog, stoppedBy());
+      step.detail = [gate.note, stepDetail(step, result, deadline, plan, firstLog, stoppedBy())].filter((d) => d !== null).join("; ") || null;
       if (result.note !== undefined && result.timedOut !== "run") step.detail = `${result.timedOut === "step" ? "the review timed out" : "the review gave no verdict"}: ${result.note}`;
       record(step);
     };

@@ -3,6 +3,7 @@ import { FlowrynError } from "../api/errors.ts";
 import { checkUsd } from "../config/ask.ts";
 import { table, type FlowrynConfig } from "../config/config.ts";
 import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
+import { compileGlob } from "./changed.ts";
 
 /**
  * A project's verify steps, from config.toml `[projects.<id>]`: the commands
@@ -41,6 +42,11 @@ export interface VerifyConfig {
   steps: VerifyItem[];
   /** The review step's settings when `verify` has one. */
   review: ReviewConfig | null;
+  /**
+   * Each step's `when_changed` globs, by its place in the flattened list (groups in order),
+   * or null: it always runs. Absent or empty: no step has any (docs/notes/2026-11-06-fast-tests-parallel-36.md).
+   */
+  when_changed?: (readonly string[] | null)[];
   /** A file the steps build, relative to the worktree, copied out before the worktree goes. */
   binary: string | null;
   /** The whole run, every step together. */
@@ -56,7 +62,7 @@ const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
-  return `[projects.${projectId}]\nverify = ["bun install --frozen-lockfile", ["bun run typecheck", "npx oxlint"], "bun test", "bun run build"]`;
+  return `[projects.${projectId}]\nverify = ["bun install --frozen-lockfile", ["bun run typecheck", "npx oxlint", "bun run build"], "bun test"]`;
 }
 
 function projectTable(config: FlowrynConfig, projectId: string): Record<string, unknown> {
@@ -82,22 +88,69 @@ function readReview(raw: Record<string, unknown>, where: string): ReviewConfig {
   };
 }
 
-/** The `verify` list, each group of one read as a plain step; null when malformed. A review entry is REVIEW_STEP, at most once, never in a group. */
-function readItems(raw: unknown, where: string): { items: VerifyItem[]; review: ReviewConfig | null } | null {
+/** One step: its command, and its when_changed globs or null. */
+interface ReadStep {
+  run: string;
+  when: string[] | null;
+}
+
+/**
+ * A step as written: a command, or a table `{ run = "...", when_changed = ["src/x/**"] }`.
+ * Null when it is neither; throws config_invalid on a table whose globs are malformed.
+ */
+function readStep(raw: unknown, where: string): ReadStep | null {
+  if (isStep(raw)) return { run: raw, when: null };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const entry = raw as Record<string, unknown>;
+  for (const key of Object.keys(entry)) if (key !== "run" && key !== "when_changed") throw new FlowrynError("config_invalid", `${where} verify: a step table takes run and when_changed, not ${key}`);
+  if (!isStep(entry.run)) throw new FlowrynError("config_invalid", `${where} verify: a step table needs run, the command`);
+  const globs = entry.when_changed;
+  if (globs === undefined) return { run: entry.run, when: null };
+  if (!Array.isArray(globs) || globs.length === 0 || !globs.every((g) => typeof g === "string")) {
+    throw new FlowrynError("config_invalid", `${where} verify: when_changed of "${entry.run}" must be a non-empty list of globs`);
+  }
+  for (const glob of globs as string[]) {
+    try {
+      compileGlob(glob);
+    } catch (error) {
+      throw new FlowrynError("config_invalid", `${where} verify: when_changed glob "${glob}" of "${entry.run}" ${(error as Error).message}`);
+    }
+  }
+  return { run: entry.run, when: [...(globs as string[])] };
+}
+
+/**
+ * The `verify` list, each group of one read as a plain step, with each step's globs in flattened order; null when malformed.
+ * A `{ review = true }` entry is REVIEW_STEP, at most once, never in a group, and has no globs.
+ */
+function readItems(raw: unknown, where: string): { items: VerifyItem[]; when: (string[] | null)[]; review: ReviewConfig | null } | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const items: VerifyItem[] = [];
+  const when: (string[] | null)[] = [];
   let review: ReviewConfig | null = null;
   for (const item of raw) {
-    if (isStep(item)) items.push(item);
-    else if (Array.isArray(item) && item.length > 0 && item.every(isStep)) items.push(item.length === 1 ? item[0]! : [...item]);
-    else if (isTable(item)) {
+    if (isTable(item) && "review" in item) {
       if (review) throw new FlowrynError("config_invalid", `${where} verify has more than one review step`);
       review = readReview(item, where);
       items.push(REVIEW_STEP);
-    } else if (Array.isArray(item) && item.some(isTable)) throw new FlowrynError("config_invalid", `${where} the review step cannot run in a parallel group`);
-    else return null;
+      when.push(null);
+      continue;
+    }
+    const single = readStep(item, where);
+    if (single) {
+      items.push(single.run);
+      when.push(single.when);
+      continue;
+    }
+    if (!Array.isArray(item) || item.length === 0) return null;
+    if (item.some((step) => isTable(step) && "review" in step)) throw new FlowrynError("config_invalid", `${where} the review step cannot run in a parallel group`);
+    const group = item.map((step) => readStep(step, where));
+    if (group.some((step) => step === null)) return null;
+    const steps = group as ReadStep[];
+    items.push(steps.length === 1 ? steps[0]!.run : steps.map((step) => step.run));
+    when.push(...steps.map((step) => step.when));
   }
-  return { items, review };
+  return { items, when, review };
 }
 
 function positiveMinutes(value: unknown, where: string, key: string): number {
@@ -121,7 +174,7 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
     return null;
   }
   const read = readItems(raw.verify, where);
-  if (!read) throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands, or of lists of commands run in parallel`);
+  if (!read) throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands (or { run, when_changed } tables, or one { review = true }), or of lists of commands run in parallel`);
   let binary: string | null = null;
   if (raw.verify_binary !== undefined) {
     const value = raw.verify_binary;
@@ -132,7 +185,8 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   }
   const timeout_ms = positiveMinutes(raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN, where, "verify_timeout_min");
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
-  return { steps: read.items, review: read.review, binary, timeout_ms, step_timeout_ms };
+  const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
+  return { steps: read.items, ...(when_changed ? { when_changed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms };
 }
 
 /**

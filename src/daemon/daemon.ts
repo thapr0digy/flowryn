@@ -81,7 +81,7 @@ import { alertHerdrIfDue, herdrEpisode, noteHerdrDown, noteHerdrUp } from "../re
 import { clearRestartFailure, failureLine, readRestartFailure } from "../service/restart-failure.ts";
 import { InFlight, settleWithin, type Draining } from "./inflight.ts";
 import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestartFailure, recordRestarted, scriptSupervisor } from "./restart.ts";
-import { AutoContractChecker } from "../contracts/auto.ts";
+import { AutoContractChecker, autoPollMs } from "../contracts/auto.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
@@ -704,6 +704,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       db: database,
       config: () => config,
       env,
+      pollMs: autoPollMs(env),
       now: Date.now,
       log,
       info: () => info,
