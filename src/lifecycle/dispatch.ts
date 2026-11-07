@@ -10,7 +10,7 @@ import { resolveAccount, type Account } from "../config/accounts.ts";
 import { herdrConfig, plannedWorktree, workersConfig } from "../config/workers.ts";
 import { accountSignIn } from "../harness/sign-in.ts";
 import { alertHerdrIfDue, noteHerdrNeeded, noteHerdrUp } from "../reconcile/herdr-health.ts";
-import { workflowFor, type WorkflowDef } from "../config/workflows.ts";
+import { freezeWorkflow, projectReviewModel, workflowFor, type WorkflowDef } from "../config/workflows.ts";
 import { checkPins, EFFORT_CHOICES, NO_PINS, overPins, pinsOf, resolveModelChoice, type ModelPins } from "../config/model-choice.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
@@ -257,14 +257,16 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
   if (isDropped(db, r.taskId)) throw new FlowrynError("not_found", `${r.taskId} was dropped`, `flowryn show ${r.taskId}`);
   const { harness } = r.account;
   const pins = r.pins ?? NO_PINS;
-  const choice = resolveModelChoice(config, { pins, workflow: r.workflow, account: r.account });
+  // Frozen with the run, like its stages: a review stage carries the project's review model as it is now.
+  const workflow = freezeWorkflow(r.workflow, projectReviewModel(config, r.project.id));
+  const first = r.stage === undefined ? workflow.stages[0]! : workflow.stages.find((s) => s.id === r.stage);
+  if (!first) throw new FlowrynError("bad_args", `workflow ${workflow.id} has no stage ${r.stage}`);
+  const choice = resolveModelChoice(config, { pins, workflow, account: r.account, stage: first });
   db.query(
     `INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, auto, created_at, base_branch)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)
      ON CONFLICT(task_id) DO UPDATE SET workflow = excluded.workflow, sensitive = MAX(sensitive, excluded.sensitive)`,
   ).run(r.taskId, r.project.id, r.kind, r.project.delivery_mode, r.project.yolo, r.sensitive ? 1 : 0, r.workflow.id, r.now, r.baseBranch ?? null);
-  const first = r.stage === undefined ? r.workflow.stages[0]! : r.workflow.stages.find((s) => s.id === r.stage);
-  if (!first) throw new FlowrynError("bad_args", `workflow ${r.workflow.id} has no stage ${r.stage}`);
   // The run token is minted at launch and kept in the run's private directory; this hash is a placeholder no token matches.
   db.query(
     `INSERT INTO runs (id, task_id, harness, harness_version, model, effort, state, liveness, workflow, stage,
@@ -298,7 +300,7 @@ export function createRun(db: Db, config: FlowrynConfig, r: NewRun): string {
       worktree,
       intent: intent.id,
       by: r.by,
-      workflow_def: r.workflow,
+      workflow_def: workflow,
       ...(r.stage !== undefined ? { stage: first.id } : {}),
       ...(r.override ? { mode: r.override.mode, mode_reason: r.override.reason } : {}),
     },
