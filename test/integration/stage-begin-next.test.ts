@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Build goes straight on (docs/notes/2026-11-06-prompts-that-keep-47.md): an

@@ -8,6 +8,9 @@ import { exitCodeFor } from "../../src/api/errors.ts";
 import { PING_VERB } from "../../src/daemon/system-verbs.ts";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { cli, cliJson, makeHome, pingSocket, REPO_ROOT, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const homes: TestHome[] = [];
 const daemons: DaemonProc[] = [];

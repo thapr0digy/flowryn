@@ -13,8 +13,10 @@ import type { GitRunner } from "../policy/landed.ts";
 import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { createAutoMerge, getAutoMerge, setReadyProgress, supersedeAutoMerge, type AutoMergeRow, type LandingHooks } from "./auto-merge.ts";
-import { landingQueued, verifyConfig } from "./config.ts";
+import { landingQueued, landingTrainDepth, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
+import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
+import { finishedAtHead, interruptedByStop } from "./store.ts";
 
 /**
  * The landing queue (docs/notes/2026-10-30-landing-queue-the-65.md): on a
@@ -36,6 +38,18 @@ import { verifyPolicyId } from "./policy.ts";
  * sends it. A base that moves again before the merge sends the entry back to
  * integrate (MAX_INTEGRATIONS times at most). One entry per project lands at a
  * time.
+ *
+ * The train (docs/notes/2026-11-07-faster-landing-test-q7.md): while the head
+ * of line verifies, up to `landing_train_depth - 1` entries behind it verify
+ * ahead of their turn, each on a candidate built with git plumbing (never in
+ * the worktree, never pushed): the entry's delivered head merged with the head
+ * of the entry ahead (train_base). Its verify request waits behind every other
+ * one (TRAIN_RANK), so it takes only a free validation slot. When the entry
+ * ahead lands, the candidate is promoted, pushed as a fast-forward and landed
+ * on its pass, only if git proves main holds exactly its base and merging it
+ * into main writes exactly the tree that was verified (trainBaseHolds). A base
+ * that changed (the entry ahead left, was sent back, merged again) drops the
+ * candidate; the entry is built again on its new base, or integrated as before.
  */
 
 export const LANDING_STATES = ["waiting", "landing", "landed", "left"] as const;
@@ -52,6 +66,12 @@ export const BLOCKED_HOLD_MS = 30 * 60_000;
 export function landingMergeMessage(base: string, branch: string): string {
   return `Merge origin/${base} into ${branch} (Flowryn landing queue)`;
 }
+/** A train candidate's message: the head it builds on, which lands before it. */
+export function trainMergeMessage(base: string, branch: string): string {
+  return `Merge ${base.slice(0, 8)}, the PR ahead in the landing train, into ${branch}`;
+}
+/** A candidate's verify waits behind every other request (rank 0, recovered -1): it runs only on a free slot. */
+export const TRAIN_RANK = 1;
 
 export interface LandingRow {
   id: string;
@@ -71,6 +91,12 @@ export interface LandingRow {
   enqueued_at: number;
   state_since: number;
   updated_at: number;
+  /** A waiting entry's speculative candidate (migration 57); a landing entry promoted from one keeps it. */
+  train_head: string | null;
+  /** The head the candidate builds on: the entry ahead's, which must land first. */
+  train_base: string | null;
+  /** The candidate's verify request. */
+  train_request: string | null;
 }
 
 export function getLanding(db: Db, id: string): LandingRow | null {
@@ -111,7 +137,8 @@ export function landingProgress(db: Db, row: LandingRow): string {
   if (row.state === "landing") return `landing queue: first in line (${row.id})`;
   if (row.state === "waiting") {
     const place = placeOf(db, row);
-    return `landing queue: ${place ? `${place.position} of ${place.of}${place.ahead ? `, behind ${place.ahead}` : ""}` : "waiting"} (${row.id})`;
+    const train = row.train_head ? `, verifying ahead at ${row.train_head.slice(0, 8)}` : "";
+    return `landing queue: ${place ? `${place.position} of ${place.of}${place.ahead ? `, behind ${place.ahead}` : ""}` : "waiting"}${train} (${row.id})`;
   }
   return `landing queue ${row.state}${row.reason ? ` (${row.reason})` : ""}${row.detail ? `: ${row.detail}` : ""}`;
 }
@@ -124,20 +151,35 @@ interface MoveFields {
   reason?: string | null;
   detail?: string | null;
   blocked_since?: number | null;
+  train_head?: string | null;
+  train_base?: string | null;
+  train_request?: string | null;
 }
 
 /** Move an entry to `to` with its `landing.<to>` event. Call inside a transaction. */
 function move(db: Db, row: LandingRow, to: LandingState, fields: MoveFields, now: number, source: EventSource = "daemon"): { row: LandingRow; seq: number } {
   const next: LandingRow = { ...row, ...fields, state: to, state_since: to === row.state ? row.state_since : now, updated_at: now };
   db.query(
-    `UPDATE landing_queue SET state = ?2, head_sha = ?3, approval_id = ?4, auto_merge_id = ?5, integrations = ?6, reason = ?7, detail = ?8, blocked_since = ?9, state_since = ?10, updated_at = ?11 WHERE id = ?1`,
-  ).run(row.id, to, next.head_sha, next.approval_id, next.auto_merge_id, next.integrations, next.reason, next.detail, next.blocked_since, next.state_since, now);
+    `UPDATE landing_queue SET state = ?2, head_sha = ?3, approval_id = ?4, auto_merge_id = ?5, integrations = ?6, reason = ?7, detail = ?8, blocked_since = ?9, state_since = ?10, updated_at = ?11,
+       train_head = ?12, train_base = ?13, train_request = ?14 WHERE id = ?1`,
+  ).run(row.id, to, next.head_sha, next.approval_id, next.auto_merge_id, next.integrations, next.reason, next.detail, next.blocked_since, next.state_since, now, next.train_head, next.train_base, next.train_request);
   const event = appendEvent(db, {
     source,
     kind: `landing.${to}`,
     runId: row.run_id,
     taskId: row.task_id,
-    payload: { landing: row.id, from: row.state, head: next.head_sha, approval: next.approval_id, auto_merge: next.auto_merge_id, integrations: next.integrations, reason: next.reason, detail: next.detail },
+    payload: {
+      landing: row.id,
+      from: row.state,
+      head: next.head_sha,
+      approval: next.approval_id,
+      auto_merge: next.auto_merge_id,
+      integrations: next.integrations,
+      reason: next.reason,
+      detail: next.detail,
+      train_head: next.train_head,
+      train_base: next.train_base,
+    },
     ts: now,
   });
   return { row: next, seq: event.seq };
@@ -146,6 +188,20 @@ function move(db: Db, row: LandingRow, to: LandingState, fields: MoveFields, now
 /** Rewrite the pr_ready line of every waiting entry of a project: their places moved. Call inside a transaction. */
 function refreshLine(db: Db, projectId: string): void {
   for (const row of projectLine(db, projectId)) if (row.state === "waiting") setReadyProgress(db, row.run_id, landingProgress(db, row));
+}
+
+/**
+ * Let go of an entry's train candidate: its queued verify is cancelled (one
+ * already running ends on its own; nothing follows it), with one
+ * landing.train_dropped event. Call inside a transaction; returns the row as it is now.
+ */
+function dropCandidate(db: Db, row: LandingRow, why: string, now: number): LandingRow {
+  if (!row.train_head) return row;
+  const request = row.train_request ? getRequest(db, row.train_request) : null;
+  if (request) cancelRequest(db, request, `the landing train dropped ${row.train_head.slice(0, 8)}: ${why}`, now);
+  db.query("UPDATE landing_queue SET train_head = NULL, train_base = NULL, train_request = NULL, updated_at = ?2 WHERE id = ?1").run(row.id, now);
+  appendEvent(db, { source: "daemon", kind: "landing.train_dropped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, head: row.train_head, base: row.train_base, request: row.train_request, why }, ts: now });
+  return { ...row, train_head: null, train_base: null, train_request: null, updated_at: now };
 }
 
 /**
@@ -179,7 +235,7 @@ export function enqueueLanding(db: Db, run: RunWithPolicy, delivered: Delivered,
  * opens auto_merge_held, as a held auto-merge does. Call inside a transaction.
  */
 function leave(db: Db, row: LandingRow, reason: string, detail: string, now: number, hold?: { next: string }): LandingRow {
-  const left = move(db, row, "left", { reason, detail, blocked_since: null }, now);
+  const left = move(db, row.state === "waiting" ? dropCandidate(db, row, `it left the line (${reason})`, now) : row, "left", { reason, detail, blocked_since: null }, now);
   if (row.auto_merge_id) supersedeAutoMerge(db, row.run_id, "landing_left", `the landing queue let it go: ${reason}`, now);
   if (hold && !findOpenRunItem(db, "auto_merge_held", row.run_id)) {
     openItem(db, { kind: "auto_merge_held", eventSeq: left.seq, taskId: row.task_id, runId: row.run_id, line: `Landing held: ${taskTitle(db, row.task_id)} (${row.task_id}): ${sanitizeLine(detail, 120)}; ${hold.next}`, now });
@@ -227,7 +283,7 @@ export interface LandingQueueDeps {
   netGit: GitRunner;
   now(): number;
   log(message: string): void;
-  /** A ship sent back for a conflict waits for a grant: the scheduler looks now. */
+  /** A ship sent back for a conflict waits for a grant, and a train candidate's verify for a slot: the scheduler looks now. */
   kickScheduler(): void;
 }
 
@@ -278,7 +334,7 @@ export class LandingQueue implements LandingHooks {
     if (run.state !== "ready") return void leave(db, row, "sent_back", `the run is ${run.state}`, now);
     const delivered = deliveredOf(db, run.task_id);
     if (delivered && delivered.head !== row.head_sha && row.state === "waiting" && delivered.carriedFrom === row.head_sha) {
-      move(db, row, "waiting", { head_sha: delivered.head, detail: `carried to ${delivered.head.slice(0, 8)}` }, now);
+      move(db, dropCandidate(db, row, `its head was carried to ${delivered.head.slice(0, 8)}`, now), "waiting", { head_sha: delivered.head, detail: `carried to ${delivered.head.slice(0, 8)}` }, now);
       return;
     }
     if (!delivered || delivered.head !== row.head_sha) return void leave(db, row, "redelivered", `delivered again at ${delivered?.head.slice(0, 8) ?? "-"}`, now);
@@ -320,11 +376,161 @@ export class LandingQueue implements LandingHooks {
   /** Bring the first entry that can go up to date and start its landing; the rest wait their turn. */
   private async advanceProject(projectId: string): Promise<void> {
     const line = projectLine(this.deps.db, projectId);
-    if (line.some((r) => r.state === "landing")) return;
-    for (const row of line) {
-      const outcome = await this.integrate(row);
-      if (outcome === "started") return;
+    if (!line.some((r) => r.state === "landing")) {
+      for (const row of line) {
+        const outcome = row.train_head ? await this.promote(row) : await this.integrate(row);
+        if (outcome === "started") break;
+      }
     }
+    await this.speculate(projectId);
+  }
+
+  /**
+   * Build the train behind the head of line: each waiting entry within the
+   * depth gets a candidate on the head ahead of it (the head of line's, then
+   * the candidate ahead's), and its verify queued at TRAIN_RANK. A candidate
+   * on the right base stays; one on another base is dropped and built again.
+   * A merge that conflicts, or a candidate ahead whose verify failed, ends
+   * the train there: what is behind waits its turn as before.
+   */
+  private async speculate(projectId: string): Promise<void> {
+    const { db } = this.deps;
+    const depth = landingTrainDepth(this.deps.config(), projectId);
+    const line = projectLine(db, projectId);
+    const head = line.find((r) => r.state === "landing");
+    if (!head) return;
+    let base: string | null = head.head_sha;
+    let built = 0;
+    for (const [i, row] of line.filter((r) => r.state === "waiting").entries()) {
+      if (base === null || i >= depth - 1) {
+        const why = base === null ? "the train ends ahead of it" : `it is beyond the train's depth of ${depth}`;
+        if (row.train_head) tx(db, () => dropCandidate(db, getLanding(db, row.id) ?? row, why, this.deps.now()));
+        continue;
+      }
+      if (row.train_head && row.train_base === base) {
+        base = this.candidateFailed(row) ? null : row.train_head;
+        continue;
+      }
+      if (row.train_head) tx(db, () => dropCandidate(db, getLanding(db, row.id) ?? row, `its base moved from ${row.train_base?.slice(0, 8) ?? "-"} to ${base!.slice(0, 8)}`, this.deps.now()));
+      const candidate = await this.buildCandidate(row, base, i + 2);
+      base = candidate;
+      if (candidate) built++;
+    }
+    if (built > 0) this.deps.kickScheduler();
+  }
+
+  /** Whether the candidate's newest finished verify failed: the train goes no further behind it. */
+  private candidateFailed(row: LandingRow): boolean {
+    const { db } = this.deps;
+    const policy = todaysPolicy(this.deps.config(), row.project_id);
+    if (!policy || !row.train_head) return true;
+    const finished = finishedAtHead(db, row.ref, row.train_head, policy);
+    return finished !== null && finished.state !== "passed" && !interruptedByStop(finished);
+  }
+
+  /**
+   * One candidate: git's own merge of the entry's delivered head and `base`
+   * (merge-tree, then commit-tree with the delivered head as first parent),
+   * in the project's object store, so its verify finds it; recorded on the
+   * entry with its request and a landing.train_built event. Null when the
+   * merge conflicts (recorded once per pair) or git fails (logged, tried
+   * again on a later pass); the entry waits its turn as before.
+   */
+  private async buildCandidate(row: LandingRow, base: string, position: number): Promise<string | null> {
+    const { db, git } = this.deps;
+    const run = getRunWithPolicy(db, row.run_id);
+    const project = run ? getProject(db, run.project_id) : null;
+    const delivered = run ? deliveredOf(db, run.task_id) : null;
+    if (!run || !project || run.state !== "ready" || delivered?.head !== row.head_sha) return null;
+    const policy = todaysPolicy(this.deps.config(), row.project_id);
+    if (!policy) return null;
+    // A pair that would not merge is tried once, not on every pass.
+    const skipped = db
+      .query("SELECT 1 FROM events WHERE run_id = ?4 AND kind = 'landing.train_skipped' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.head') = ?2 AND json_extract(payload, '$.base') = ?3 LIMIT 1")
+      .get(row.id, row.head_sha, base, row.run_id);
+    if (skipped) return null;
+    const merged = await git(["merge-tree", "--write-tree", "--no-messages", row.head_sha, base], project.path);
+    if (merged.code === 1) {
+      const why = `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts`;
+      tx(db, () => appendEvent(db, { source: "daemon", kind: "landing.train_skipped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, head: row.head_sha, base, why }, ts: this.deps.now() }));
+      return null;
+    }
+    if (merged.code !== 0) {
+      this.deps.log(`landing queue ${row.id}: git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`);
+      return null;
+    }
+    const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
+    const commit = await git(["commit-tree", tree, "-p", row.head_sha, "-p", base, "-m", trainMergeMessage(base, run.branch)], project.path);
+    const sha = commit.stdout.trim();
+    if (commit.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
+      this.deps.log(`landing queue ${row.id}: git commit-tree failed: ${commit.stderr.trim()}`);
+      return null;
+    }
+    return tx(db, () => {
+      const fresh = getLanding(db, row.id);
+      if (!fresh || fresh.state !== "waiting" || fresh.head_sha !== row.head_sha || fresh.train_head) return null;
+      const now = this.deps.now();
+      const request =
+        findQueued(db, fresh.ref, sha, policy) ??
+        insertRequest(db, { project_id: fresh.project_id, pr_url: fresh.ref, task_id: fresh.task_id, head_sha: sha, policy_id: policy, pr_number: null, head_ref: null, worktree: null, source: "auto", path: autoVerifyPath(db, fresh.project_id), rank: TRAIN_RANK, now });
+      db.query("UPDATE landing_queue SET train_head = ?2, train_base = ?3, train_request = ?4, updated_at = ?5 WHERE id = ?1").run(fresh.id, sha, base, request.id, now);
+      appendEvent(db, { source: "daemon", kind: "landing.train_built", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: sha, from: fresh.head_sha, base, request: request.id, position }, ts: now });
+      refreshLine(db, fresh.project_id);
+      return sha;
+    });
+  }
+
+  /**
+   * The entry ahead landed: land this one at its candidate when git proves
+   * the candidate's base is what landed (trainBaseHolds) and its verify has
+   * not failed. The worktree fast-forwards to it and it is pushed (a plain
+   * push: it descends from the delivered head). Anything else drops the
+   * candidate and the entry is integrated as before.
+   */
+  private async promote(row: LandingRow): Promise<HeadOutcome> {
+    const { db, git, netGit } = this.deps;
+    const run = getRunWithPolicy(db, row.run_id);
+    const project = run ? getProject(db, run.project_id) : null;
+    const delivered = run ? deliveredOf(db, run.task_id) : null;
+    if (!run || !project || !delivered || run.state !== "ready" || delivered.head !== row.head_sha || !row.train_head || !row.train_base) return "left";
+    const notReady = await this.workable(row, run);
+    if (notReady) return notReady;
+    const wt = run.worktree_path;
+    const base = runBase(run, project);
+    const fetched = await netGit(["fetch", "--quiet", "--no-tags", "origin", base], wt);
+    if (fetched.code !== 0) {
+      this.deps.log(`landing queue ${row.id}: fetch origin ${base} failed: ${fetched.stderr.trim()}`);
+      return "blocked";
+    }
+    const why = await this.unpromotable(row, wt, base);
+    if (why !== null) {
+      const dropped = tx(db, () => {
+        const fresh = getLanding(db, row.id);
+        return fresh && fresh.state === "waiting" ? dropCandidate(db, fresh, why, this.deps.now()) : null;
+      });
+      return dropped ? this.integrate(dropped) : "left";
+    }
+    const forwarded = await git(["merge", "--ff-only", "--quiet", row.train_head], wt);
+    if (forwarded.code !== 0) return this.blocked(row, `git could not fast-forward the worktree to the candidate ${row.train_head.slice(0, 8)}: ${forwarded.stderr.trim()}`);
+    const headRef = prEvidence(db, run.id)?.head_ref || run.branch;
+    const pushed = await netGit(["push", "origin", `HEAD:refs/heads/${headRef}`], wt);
+    if (pushed.code !== 0) return this.held(row, "push_refused", `git push refused the landing train's candidate: ${pushed.stderr.trim().split("\n").at(-1) ?? ""}`, `flowryn show ${run.task_id}`);
+    const tree = (await git(["rev-parse", `${row.train_head}^{tree}`], wt)).stdout.trim();
+    return this.startLanding(row, run, { head: row.train_head, steps: [{ commit: row.train_head, main: row.train_base, tree }], base, train: row.train_base });
+  }
+
+  /** Why a candidate may not land now, or null when it may: the entry ahead landed at its base, git proves the base holds, its verify did not fail. */
+  private async unpromotable(row: LandingRow, wt: string, base: string): Promise<string | null> {
+    const { db, git } = this.deps;
+    const landed = db.query("SELECT * FROM landing_queue WHERE project_id = ?1 AND state = 'landed' ORDER BY state_since DESC, CAST(substr(id, 3) AS INTEGER) DESC LIMIT 1").get(row.project_id) as LandingRow | null;
+    if (!landed || landed.head_sha !== row.train_base) return `the entry it was built on (${row.train_base!.slice(0, 8)}) is not the last that landed`;
+    if (this.candidateFailed(row)) return `its verify at ${row.train_head!.slice(0, 8)} failed`;
+    const head = (await git(["rev-parse", "HEAD"], wt)).stdout.trim();
+    if (head !== row.head_sha) return `the worktree is at ${head.slice(0, 8)}, not the delivered ${row.head_sha.slice(0, 8)}`;
+    const parents = (await git(["rev-list", "--parents", "-n", "1", row.train_head!], wt)).stdout.trim().split(/\s+/).slice(1);
+    if (parents.length !== 2 || parents[0] !== row.head_sha || parents[1] !== row.train_base) return `the candidate ${row.train_head!.slice(0, 8)} is not the delivered head merged with its base`;
+    const proof = await trainBaseHolds(git, wt, { head: row.train_head!, base: row.train_base!, main: `refs/remotes/origin/${base}` });
+    return proof.ok ? null : proof.why;
   }
 
   /** Hold the head of line on a busy worker or a changed worktree, up to BLOCKED_HOLD_MS. */
@@ -356,6 +562,18 @@ export class LandingQueue implements LandingHooks {
     });
   }
 
+  /** Whether the daemon may work in the run's worktree now: null when it may, else what the entry does meanwhile. */
+  private async workable(row: LandingRow, run: RunWithPolicy): Promise<HeadOutcome | null> {
+    const wt = run.worktree_path;
+    if (!existsSync(wt)) return this.held(row, "no_worktree", `the run's worktree ${wt} is gone`, `flowryn merge ${run.task_id}`);
+    if (run.liveness === "busy" || run.liveness === "blocked_dialog") return this.blocked(row, `the worker is ${run.liveness === "busy" ? "busy" : "showing a dialog"}`);
+    const status = await this.deps.git(["status", "--porcelain"], wt);
+    if (status.code !== 0) return this.blocked(row, `git status failed: ${status.stderr.trim()}`);
+    const dirty = status.stdout.split("\n").filter((l) => l.length > 0 && !l.startsWith("?? .claude/"));
+    if (dirty.length > 0) return this.blocked(row, `the worktree has ${dirty.length} uncommitted change(s)`);
+    return null;
+  }
+
   /**
    * Bring one waiting entry up to date with its base, in the run's worktree:
    * no merge when it already has the base's tip, else a plain merge commit,
@@ -367,13 +585,9 @@ export class LandingQueue implements LandingHooks {
     const project = run ? getProject(db, run.project_id) : null;
     const delivered = run ? deliveredOf(db, run.task_id) : null;
     if (!run || !project || !delivered || run.state !== "ready" || delivered.head !== row.head_sha) return "left";
+    const notReady = await this.workable(row, run);
+    if (notReady) return notReady;
     const wt = run.worktree_path;
-    if (!existsSync(wt)) return this.held(row, "no_worktree", `the run's worktree ${wt} is gone`, `flowryn merge ${run.task_id}`);
-    if (run.liveness === "busy" || run.liveness === "blocked_dialog") return this.blocked(row, `the worker is ${run.liveness === "busy" ? "busy" : "showing a dialog"}`);
-    const status = await git(["status", "--porcelain"], wt);
-    if (status.code !== 0) return this.blocked(row, `git status failed: ${status.stderr.trim()}`);
-    const dirty = status.stdout.split("\n").filter((l) => l.length > 0 && !l.startsWith("?? .claude/"));
-    if (dirty.length > 0) return this.blocked(row, `the worktree has ${dirty.length} uncommitted change(s)`);
     const base = runBase(run, project);
     const fetched = await netGit(["fetch", "--quiet", "--no-tags", "origin", base], wt);
     if (fetched.code !== 0) {
@@ -444,7 +658,7 @@ export class LandingQueue implements LandingHooks {
    * (when there was a merge), keep or void its approval, and start the
    * auto-merge row that verifies and merges it.
    */
-  private startLanding(row: LandingRow, run: RunWithPolicy, integrated: { head: string; steps: CleanMergeStep[]; base: string } | null): HeadOutcome {
+  private startLanding(row: LandingRow, run: RunWithPolicy, integrated: { head: string; steps: CleanMergeStep[]; base: string; train?: string } | null): HeadOutcome {
     const { db } = this.deps;
     const now = this.deps.now();
     const config = this.deps.config();
@@ -490,9 +704,14 @@ export class LandingQueue implements LandingHooks {
         }
       }
       const evidence = prEvidence(db, current.id);
+      // A promoted candidate's verify is the head of line's now: it goes ahead of the queue's other requests.
+      const trainRequest = integrated?.train && fresh.train_request ? getRequest(db, fresh.train_request) : null;
+      if (trainRequest?.state === "queued") rerankRequest(db, trainRequest, 0, now);
+      const kept = integrated?.train ? fresh : dropCandidate(db, fresh, "it lands at its own merge of the base", now);
       supersedeAutoMerge(db, current.id, "landing", `the landing queue lands it at ${head.slice(0, 8)}`, now);
       const auto = createAutoMerge(db, config, current, { ref: delivered.ref, head, prNumber: evidence?.number ?? null, headRef: evidence?.head_ref ?? current.branch, worktree: null, source: "daemon" }, now);
-      move(db, fresh, "landing", { head_sha: head, approval_id: approval, auto_merge_id: auto.id, integrations: fresh.integrations + (integrated ? 1 : 0), blocked_since: null, detail: integrated ? `merged origin/${integrated.base} at ${head.slice(0, 8)}` : null }, now);
+      const detail = !integrated ? null : integrated.train ? `the landing train's candidate on ${integrated.train.slice(0, 8)}, at ${head.slice(0, 8)}` : `merged origin/${integrated.base} at ${head.slice(0, 8)}`;
+      move(db, kept, "landing", { head_sha: head, approval_id: approval, auto_merge_id: auto.id, integrations: fresh.integrations + (integrated ? 1 : 0), blocked_since: null, detail }, now);
       // Time blocked counts only while an entry is tried: the others wait out this landing.
       for (const other of projectLine(db, current.project_id)) if (other.state === "waiting" && other.blocked_since !== null) move(db, other, "waiting", { blocked_since: null }, now);
       refreshLine(db, current.project_id);
@@ -520,9 +739,16 @@ export class LandingQueue implements LandingHooks {
       this.deps.log(`landing queue ${row.id}: fetch origin ${base} before the merge failed: ${fetched.stderr.trim()}`);
       return false;
     }
-    const has = await git(["merge-base", "--is-ancestor", `refs/remotes/origin/${base}`, auto.head_sha], cwd);
-    if (has.code === 0) return true;
-    if (has.code !== 1) return false;
+    if (row.train_base) {
+      // A promoted candidate never has main's own landing commit: main must hold exactly its base, and merging it must write its tree.
+      const proof = await trainBaseHolds(git, cwd, { head: auto.head_sha, base: row.train_base, main: `refs/remotes/origin/${base}` });
+      if (proof.ok) return true;
+      if (proof.unknown) return false;
+    } else {
+      const has = await git(["merge-base", "--is-ancestor", `refs/remotes/origin/${base}`, auto.head_sha], cwd);
+      if (has.code === 0) return true;
+      if (has.code !== 1) return false;
+    }
     tx(db, () => {
       const fresh = getLanding(db, row.id);
       if (!fresh || fresh.state !== "landing") return;
@@ -532,9 +758,43 @@ export class LandingQueue implements LandingHooks {
         return;
       }
       supersedeAutoMerge(db, fresh.run_id, "base_moved", `origin/${base} moved past ${auto.head_sha.slice(0, 8)} before the merge`, now);
-      move(db, fresh, "waiting", { auto_merge_id: null, detail: `origin/${base} moved; merging it in again` }, now);
+      move(db, fresh, "waiting", { auto_merge_id: null, detail: `origin/${base} moved; merging it in again`, train_head: null, train_base: null, train_request: null }, now);
       appendEvent(db, { source: "daemon", kind: "landing.base_moved", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: auto.head_sha, base }, ts: now });
     });
     return false;
+  }
+}
+
+export type TrainProof = { ok: true; tree: string } | { ok: false; why: string; unknown?: boolean };
+
+/**
+ * Whether a candidate built on `base` may land on `main` as verified, proven
+ * with git: main's tree is exactly the base's (what landed is the base, by
+ * any merge method, nothing else with it), and git's own merge of the
+ * candidate into main finishes without a conflict and writes exactly the
+ * candidate's tree, so what lands is what was verified. A git call that
+ * fails is `unknown` (the caller retries), never a pass.
+ */
+export async function trainBaseHolds(git: GitRunner, cwd: string, q: { head: string; base: string; main: string }): Promise<TrainProof> {
+  const trees = await git(["rev-parse", `${q.main}^{tree}`, `${q.base}^{tree}`, `${q.head}^{tree}`], cwd);
+  if (trees.code !== 0) return { ok: false, unknown: true, why: `git rev-parse exited ${trees.code}: ${trees.stderr.trim()}` };
+  const [main, base, head] = trees.stdout.trim().split("\n").map((t) => t.trim());
+  if (!main || !base || !head) return { ok: false, unknown: true, why: "git rev-parse did not print three trees" };
+  if (main !== base) return { ok: false, why: `${q.main.replace("refs/remotes/", "")} does not hold exactly the base ${q.base.slice(0, 8)} it was verified on` };
+  const merged = await git(["merge-tree", "--write-tree", "--no-messages", q.main, q.head], cwd);
+  if (merged.code === 1) return { ok: false, why: `merging ${q.head.slice(0, 8)} into ${q.main.replace("refs/remotes/", "")} conflicts` };
+  if (merged.code !== 0) return { ok: false, unknown: true, why: `git merge-tree exited ${merged.code}: ${merged.stderr.trim()}` };
+  const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
+  if (tree !== head) return { ok: false, why: `merging ${q.head.slice(0, 8)} into ${q.main.replace("refs/remotes/", "")} writes another tree than the one verified` };
+  return { ok: true, tree };
+}
+
+/** Today's verify policy for a project, or null when it has none or its config is invalid. */
+function todaysPolicy(config: FlowrynConfig, projectId: string): string | null {
+  try {
+    const verify = verifyConfig(config, projectId);
+    return verify ? verifyPolicyId(verify) : null;
+  } catch {
+    return null;
   }
 }

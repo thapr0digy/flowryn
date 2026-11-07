@@ -6,6 +6,9 @@ import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { REPO_ROOT, waitUntil } from "../helpers/harness.ts";
 import { Pty } from "../helpers/pty.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Unattended mode end to end (docs/notes/2026-11-05-unattended-mode-one-9e.md): a real daemon,

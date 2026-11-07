@@ -9,6 +9,9 @@ import { join } from "node:path";
 import type { IntentRow } from "../../src/journal/journal.ts";
 import { listTasks, processRunner, type BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { cliJson, makeHome, makePausingTasksAxi, realTasksAxi, seedLeader, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const homes: TestHome[] = [];
 const daemons: DaemonProc[] = [];
