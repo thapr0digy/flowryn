@@ -17,7 +17,7 @@ import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, findQueued, getRequest, insertRequest, positionOf, requeuedFrom, type VerifyRequest } from "./queue.ts";
 import { endedAtDeadline, readTail, REVIEW_NO_VERDICT } from "./runner.ts";
 import { cancelIsFinal, headMovedTo, staleRead } from "./start.ts";
-import { finishedAtHead, getVerification, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
+import { finishedAtHead, getVerification, interruptedByStop, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
 
 /**
  * Yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2):
@@ -59,10 +59,7 @@ export function requeueCount(db: Db, autoMergeId: string): number {
   return (db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'auto_merge.verify_requeued' AND json_extract(payload, '$.auto_merge') = ?1").get(autoMergeId) as { n: number }).n;
 }
 
-/** A verification recorded as an error because the daemon stopped under it (src/verify/runner.ts recoverOne): never judged. */
-export function interruptedByStop(v: Pick<Verification, "state" | "detail">): boolean {
-  return v.state === "error" && (v.detail ?? "").startsWith("the daemon stopped mid-run");
-}
+export { interruptedByStop } from "./store.ts";
 
 /** How long a passed verify waits on GitHub's checks before the auto-merge is held. */
 export const CHECKS_WAIT_MS = 6 * 60 * 60_000;
