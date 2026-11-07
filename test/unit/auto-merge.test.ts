@@ -561,7 +561,7 @@ describe("the controller, without GitHub", () => {
     }
   });
 
-  test("a head that moved past a passed verify with nothing delivered holds after 30 min, not 6 h; a no_ci project's checks get 1 h", async () => {
+  test("a head that moved past a passed verify with nothing delivered holds 30 min after the move was first seen, not 6 h; a no_ci project's checks get 1 h", async () => {
     const f = fixture();
     const cfg = config(OPTED_IN);
     const v = verification(f, f.root);
@@ -573,10 +573,19 @@ describe("the controller, without GitHub", () => {
           .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
           .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head, head_ref: "flowryn/t1", merge_sha: null, checks: { state: pending.length ? "pending" : "green", line: "x", red: [], pending, total: 1 }, observed_at: 1 })),
       );
-    evidence("c".repeat(40), []);
-    await merger(f, cfg, 5_000 + HEAD_MOVED_WAIT_MS).auto.pass();
+    // Slow CI: checks pending 31 min, then the worker pushes past the delivered head.
+    evidence(HEAD, ["ci/test"]);
+    await merger(f, cfg, 5_000 + 31 * 60_000).auto.pass();
     expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
-    await merger(f, cfg, 5_000 + HEAD_MOVED_WAIT_MS + 1).auto.pass();
+    evidence("c".repeat(40), []);
+    const seen = 5_000 + 32 * 60_000;
+    await merger(f, cfg, seen).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
+    await merger(f, cfg, seen + HEAD_MOVED_WAIT_MS).auto.pass();
+    expect(getAutoMerge(f.db, row.id)?.state).toBe("waiting_checks");
+    const sightings = (f.db.query("SELECT payload, ts FROM events WHERE kind = 'auto_merge.head_moved_seen'").all() as { payload: string; ts: number }[]).map((e) => ({ ...JSON.parse(e.payload), ts: e.ts }));
+    expect(sightings).toEqual([{ auto_merge: row.id, head: "c".repeat(40), ts: seen }]);
+    await merger(f, cfg, seen + HEAD_MOVED_WAIT_MS + 1).auto.pass();
     expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "head_moved" });
     expect(getAutoMerge(f.db, row.id)!.detail).toContain("over 30 min ago");
 

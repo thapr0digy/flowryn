@@ -16,7 +16,8 @@ export type WaitKind = (typeof WAIT_KINDS)[number];
  * last move of a request ahead of it, or the expected end of the verifies not
  * started from a request behind it);
  * phase_start from its last blocker's landing or cleanup (it is ready once cleaned); auto_merge from its last state
- * change; the others from when the wait began.
+ * change, except a PR waiting on checks: pending checks are due at the auto-merger's checks limit, and a head
+ * that moved 30 min after the auto-merger first saw it move; the others from when the wait began.
  */
 export const WAIT_DEADLINES_MS: Readonly<Record<WaitKind, number>> = {
   verify_queue: 20 * MIN,

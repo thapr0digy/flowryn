@@ -61,9 +61,9 @@ function seedRun(db: Db, run: { id: string; task: string; state?: string; stageS
   });
 }
 
-function pass(db: Db, cfg: FlowrynConfig, now: number): { result: ReturnType<typeof checkWaits>; kicks: string[] } {
+function pass(db: Db, cfg: FlowrynConfig, now: number, noCi = false): { result: ReturnType<typeof checkWaits>; kicks: string[] } {
   const kicks: string[] = [];
-  const deps: WaitPassDeps = { db, config: () => cfg, now: () => now, kickScheduler: () => kicks.push("scheduler"), kickAutoMerger: () => kicks.push("auto_merger") };
+  const deps: WaitPassDeps = { db, config: () => cfg, now: () => now, kickScheduler: () => kicks.push("scheduler"), kickAutoMerger: () => kicks.push("auto_merger"), noCi: () => noCi };
   return { result: checkWaits(deps), kicks };
 }
 
@@ -281,23 +281,60 @@ describe("the verify queue", () => {
     expect(pass(db, cfg, 26 * MIN).result.cleared).toEqual([]);
     expect(openWaitItems(db)[0]!.line).toContain(`verify ${first} of t1`);
   });
+
+  test("a first request the drain holds names an invalid project config and its fix, or a GitHub outage", () => {
+    const db = database();
+    const id = request(db, 0);
+    const invalid = collectWaits(db, config(`[projects.web]\nverify = "true"\n`), 21 * MIN)[0]!;
+    expect(invalid.cause).toContain("the [projects.web] config is invalid");
+    expect(invalid.fix).toBe(`flowryn config; flowryn verify show ${id}`);
+    tx(db, () => setMeta(db, "forge_down_since", String(MIN)));
+    const down = collectWaits(db, config(`[projects.web]\nverify = ["true"]\n`), 21 * MIN)[0]!;
+    expect(down.cause).toBe("first in the verify queue and not started: GitHub has not answered for 20m, so its PR cannot be read");
+    expect(down.fix).toBe(`flowryn verify show ${id}`);
+  });
 });
 
 describe("an auto-merge", () => {
-  test("waiting on checks 30 min with no change kicks the auto-merger, then is itemized with the checks pending", () => {
-    const db = database();
-    const cfg = config();
+  function waitingChecks(db: Db, head: string, pending: string[]): void {
     seedRun(db, { id: "r1", task: "t1", state: "ready", stageState: "done" });
     tx(db, () => {
+      db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'pr', 'u', ?1, 0)").run("a".repeat(40));
       db.query("INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, created_at, state_since, updated_at) VALUES ('am4', 'r1', 't1', 'web', 'u', ?1, 'waiting_checks', 0, 1000, 1000)").run("a".repeat(40));
-      db.query("INSERT INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ head: "a".repeat(40), checks: { state: "pending", pending: ["ci/test"] } }));
+      db.query("INSERT INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ head, checks: { state: pending.length ? "pending" : "green", pending } }));
     });
-    expect(pass(db, cfg, 1_000 + 30 * MIN).kicks).toEqual(["auto_merger"]);
-    pass(db, cfg, 1_000 + 31 * MIN);
+  }
+
+  test("waiting on pending checks is due at the auto-merger's checks limit (6 h, 1 h under no_ci), then kicks it and is itemized with the checks pending", () => {
+    const db = database();
+    const cfg = config();
+    waitingChecks(db, "a".repeat(40), ["ci/test"]);
+    expect(pass(db, cfg, 1_000 + 31 * MIN).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 60 * MIN - 1, true).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 6 * 60 * MIN - 1).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 6 * 60 * MIN).kicks).toEqual(["auto_merger"]);
+    pass(db, cfg, 1_000 + 6 * 60 * MIN + MIN);
     const [item] = openWaitItems(db);
     expect(item!.line).toContain("auto-merge am4 of t1");
     expect(item!.line).toContain("GitHub checks pending: ci/test");
     expect(item!.digest).toContain("flowryn merge t1");
+  });
+
+  test("under no_ci its pending checks are due at 1 h", () => {
+    const db = database();
+    waitingChecks(db, "a".repeat(40), ["ci/test"]);
+    expect(pass(db, config(), 1_000 + 60 * MIN, true).kicks).toEqual(["auto_merger"]);
+  });
+
+  test("one whose PR head moved is due 30 min after the auto-merger first saw the move, not 30 min after it began waiting", () => {
+    const db = database();
+    const cfg = config();
+    waitingChecks(db, "c".repeat(40), []);
+    // Not seen yet: the auto-merger's next pass records it, so it is not due now.
+    expect(pass(db, cfg, 1_000 + 40 * MIN).kicks).toEqual([]);
+    tx(db, () => appendEvent(db, { source: "daemon", kind: "auto_merge.head_moved_seen", runId: "r1", taskId: "t1", payload: { auto_merge: "am4", head: "c".repeat(40) }, ts: 1_000 + 41 * MIN }));
+    expect(pass(db, cfg, 1_000 + 71 * MIN - 1).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 71 * MIN).kicks).toEqual(["auto_merger"]);
   });
 
   test("one following a queued or running verify is the verify's wait, not its own", () => {

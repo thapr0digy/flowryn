@@ -319,6 +319,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const git = (args: string[], cwd?: string) => runTool(resolveTool(config, "git"), args, cwd);
     let reconciler: Reconciler | null = null;
     let scheduler: Scheduler | null = null;
+    // A no_ci project's checks get NO_CI_CHECKS_WAIT_MS: its default branch's .no-mistakes.yaml, read through bounded git by the auto-merger, kept a minute; the wait registry uses the same reading.
+    const noCiRead = new Map<string, { at: number; value: boolean }>();
     const launcher = new Launcher({
       db: database,
       config: () => config,
@@ -400,7 +402,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         return snapshot !== null && snapshot.contentHash === hashFile(config.tasks.backlog);
       },
       checkWaits: () => {
-        const outcome = checkWaits({ db: database, config: () => config, now: Date.now, kickScheduler: () => scheduler?.kick(), kickAutoMerger: () => autoMerger?.kick() });
+        const outcome = checkWaits({ db: database, config: () => config, now: Date.now, kickScheduler: () => scheduler?.kick(), kickAutoMerger: () => autoMerger?.kick(), noCi: (projectId) => noCiRead.get(projectId)?.value ?? false });
         if (outcome.recovered.length + outcome.itemized.length > 0) log(`waits: recovered ${outcome.recovered.join(", ") || "none"}; itemized ${outcome.itemized.join(", ") || "none"}`);
       },
     });
@@ -615,8 +617,6 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       log,
       kickScheduler: () => scheduler?.kick(),
     });
-    // A no_ci project's checks get NO_CI_CHECKS_WAIT_MS: its default branch's .no-mistakes.yaml, read through bounded git, kept a minute.
-    const noCiRead = new Map<string, { at: number; value: boolean }>();
     const noCi = async (projectId: string): Promise<boolean> => {
       const project = getProject(database, projectId);
       if (!project) return false;

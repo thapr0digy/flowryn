@@ -5,15 +5,17 @@ import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { getProject } from "../lifecycle/projects.ts";
+import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
 import { phaseReadiness } from "../lifecycle/stacks.ts";
 import { hostState } from "../sched/scheduler.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { autoMergeProgress, liveAutoMerges, type AutoMergeRow } from "../verify/auto-merge.ts";
+import { autoMergeProgress, CHECKS_WAIT_MS, checksPending, HEAD_MOVED_WAIT_MS, headMovedSeenAt, liveAutoMerges, NO_CI_CHECKS_WAIT_MS, type AutoMergeRow } from "../verify/auto-merge.ts";
 import { verifyConfig } from "../verify/config.ts";
-import { getRequest, queuedRequests } from "../verify/queue.ts";
+import { getRequest, queuedRequests, type VerifyRequest } from "../verify/queue.ts";
 import { waitingOn } from "../verify/start.ts";
 import { getVerification, runningVerifications } from "../verify/store.ts";
+import { forgeDownSince } from "./forge-health.ts";
 import { waitDeadlines, type WaitKind } from "./wait-deadlines.ts";
 
 /**
@@ -79,10 +81,13 @@ const ENDED = "('cleaned','failed','cancelled')";
 /** The item_id prefix of a wait another open item carries (usage_limit, quota_low, ...). */
 const COVERED = "covered:";
 
+/** Whether a project's default branch declares no_ci, as the auto-merger last read it (unknown: no). */
+export type NoCiReading = (projectId: string) => boolean;
+
 /** Every wait there is now, oldest first. */
-export function collectWaits(db: Db, config: FlowrynConfig, now: number): Wait[] {
+export function collectWaits(db: Db, config: FlowrynConfig, now: number, noCi: NoCiReading = () => false): Wait[] {
   const deadlines = waitDeadlines(config);
-  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines), ...landingWaits(db, deadlines)].toSorted(
+  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, now, noCi), ...landingWaits(db, deadlines)].toSorted(
     (a, b) => a.since - b.since || a.key.localeCompare(b.key),
   );
 }
@@ -126,6 +131,7 @@ function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitK
   } catch {
     caps = {};
   }
+  const { cause, fix } = verifyWaitCause(db, config, first, caps, now);
   return [
     {
       key: `verify:${first.id}`,
@@ -135,10 +141,23 @@ function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitK
       since: first.requested_at,
       due: expected + deadlines.verify_queue,
       what: `verify ${first.id}${first.task_id ? ` of ${first.task_id}` : ""} at ${first.head_sha.slice(0, 8)}`,
-      cause: `first in the verify queue and not started: ${waitingOn(db, first, caps, now)}`,
-      fix: `flowryn verify show ${first.id}`,
+      cause: `first in the verify queue and not started: ${cause}`,
+      fix,
     },
   ];
+}
+
+/** Why the first request has not started: the drain's own checks that make it wait (its project's config, GitHub's outage), else what it waits on in the queue. */
+function verifyWaitCause(db: Db, config: FlowrynConfig, first: VerifyRequest, caps: Record<string, number>, now: number): { cause: string; fix: string } {
+  const show = `flowryn verify show ${first.id}`;
+  try {
+    verifyConfig(config, first.project_id);
+  } catch (error) {
+    return { cause: `the [projects.${first.project_id}] config is invalid: ${(error as Error).message}`, fix: `flowryn config; ${show}` };
+  }
+  const down = first.pr_number !== null ? forgeDownSince(db) : null;
+  if (down !== null) return { cause: `GitHub has not answered for ${shortDuration(now - down)}, so its PR cannot be read`, fix: show };
+  return { cause: waitingOn(db, first, caps, now), fix: show };
 }
 
 // --- runs waiting for a grant ------------------------------------------------------------------
@@ -300,7 +319,7 @@ function phaseWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
 // --- auto-merges and the landing queue ----------------------------------------------------------
 
 /** A live auto-merge that waits on something no other wait covers (its queued verify is the queue's, a running verify has its own deadline). */
-function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
+function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>, now: number, noCi: NoCiReading): Wait[] {
   const waits: Wait[] = [];
   for (const row of liveAutoMerges(db)) {
     if (row.state === "queued" && row.request_id && getRequest(db, row.request_id)?.state === "queued") continue;
@@ -311,13 +330,27 @@ function autoMergeWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
       task_id: row.task_id,
       run_id: row.run_id,
       since: row.state_since,
-      due: row.state_since + deadlines.auto_merge,
+      due: autoMergeDue(db, row, deadlines, now, noCi),
       what: `auto-merge ${row.id} of ${row.task_id}`,
       cause: `${autoMergeProgress(db, row) ?? row.state} since its last change${pendingChecks(db, row)}`,
       fix: row.state === "waiting_checks" ? `flowryn show ${row.task_id}; once its checks finish: flowryn merge ${row.task_id}` : `flowryn show ${row.task_id}`,
     });
   }
   return waits;
+}
+
+/**
+ * When a live auto-merge is overdue: the table's deadline from its last change, except where the
+ * auto-merger has a longer bound of its own on a PR waiting on checks (its checks limit, or
+ * HEAD_MOVED_WAIT_MS from when it first saw the PR head move), which it holds at.
+ */
+function autoMergeDue(db: Db, row: AutoMergeRow, deadlines: Record<WaitKind, number>, now: number, noCi: NoCiReading): number {
+  const table = row.state_since + deadlines.auto_merge;
+  if (row.state !== "waiting_checks" || deliveredOf(db, row.task_id)?.kind !== "pr") return table;
+  const pr = prEvidence(db, row.run_id);
+  if (pr && pr.head !== row.head_sha) return Math.max(table, (headMovedSeenAt(db, row.id) ?? now) + HEAD_MOVED_WAIT_MS);
+  if (checksPending(pr)) return row.state_since + (noCi(row.project_id) ? NO_CI_CHECKS_WAIT_MS : CHECKS_WAIT_MS);
+  return table;
 }
 
 function pendingChecks(db: Db, row: AutoMergeRow): string {
@@ -374,6 +407,8 @@ export interface WaitPassDeps {
   now(): number;
   kickScheduler(): void;
   kickAutoMerger(): void;
+  /** The auto-merger's no_ci reading, for a PR's checks deadline. */
+  noCi?: NoCiReading;
 }
 
 export interface WaitPassResult {
@@ -427,7 +462,7 @@ export function checkWaits(deps: WaitPassDeps): WaitPassResult {
   const result: WaitPassResult = { recovered: [], itemized: [], cleared: [] };
   const kicks = new Set<"scheduler" | "auto_merger">();
   tx(db, () => {
-    const waits = collectWaits(db, config, now);
+    const waits = collectWaits(db, config, now, deps.noCi);
     const expired = new Map(waits.filter((w) => now >= w.due).map((w) => [w.key, w]));
     for (const row of db.query("SELECT * FROM waits").all() as WaitRow[]) {
       const w = expired.get(row.key);
