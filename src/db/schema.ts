@@ -1075,6 +1075,18 @@ CREATE TABLE waits (
 `;
 
 /**
+ * Migration 57, the landing train (docs/notes/2026-11-07-faster-landing-test-q7.md): a waiting
+ * entry's speculative candidate, its head built on the entry ahead (train_head, train_base), and
+ * the verify request that tests it. A landing entry promoted from its candidate keeps train_base:
+ * its merge needs main to hold exactly that base.
+ */
+const LANDING_TRAIN_SQL = /* sql */ `
+ALTER TABLE landing_queue ADD COLUMN train_head TEXT;
+ALTER TABLE landing_queue ADD COLUMN train_base TEXT;
+ALTER TABLE landing_queue ADD COLUMN train_request TEXT;
+`;
+
+/**
  * Migration 55 (docs/notes/2026-11-06-auto-verify-every-t8.md): every delivery on a project with
  * verify steps gets an auto_merges row. `merge = 0` marks one that only verifies (the project or
  * the task does not auto-merge): it ends `verified` on a pass, and a failure goes back to the
@@ -1155,6 +1167,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 54, name: "autonomy", sql: AUTONOMY_SQL, rebuildsReferencedTable: true },
   { version: 55, name: "auto-verify", sql: AUTO_VERIFY_SQL },
   { version: 56, name: "waits", sql: WAITS_SQL },
+  { version: 57, name: "landing-train", sql: LANDING_TRAIN_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

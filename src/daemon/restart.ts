@@ -409,11 +409,13 @@ export function handoffPending(db: Db): boolean {
 
 /**
  * How long a restart that was asked for holds queued verifies back
- * (src/verify/start.ts): long enough for the running ones to end (a
- * project's verify_timeout_min), never so long that a restart waiting on
- * something else (a confirmation dialog) stops every verify.
+ * (src/verify/start.ts), so the running ones can end and the restart go.
+ * Short (docs/notes/2026-11-07-faster-landing-test-q7.md): a verify the
+ * restart interrupts resumes from its first unfinished step, so starting one
+ * costs little, and a restart waiting on something else (a confirmation
+ * dialog) must not stop every verify for long.
  */
-export const RESTART_HOLDS_VERIFIES_MS = 60 * 60_000;
+export const RESTART_HOLDS_VERIFIES_MS = 10 * 60_000;
 
 /** A restart asked for and not yet done (a parked request, or a handoff under way): since when, while it still holds queued verifies back. */
 export function restartHoldingVerifies(db: Db, now: number): { since: number; by: string } | null {
