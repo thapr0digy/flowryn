@@ -25,7 +25,7 @@ A static pass over `test/integration` (each test's literal `waitUntil` deadlines
 - The verify logs agree for two of the three failures. v180 failed `queued.test.ts` "a queued task whose run failed can be started again with --task" at 5124 ms, and bun killed its 2 dangling processes. v181 failed `accounts.test.ts` "a usage limit on one account…" at 5054 ms: its CLI call ended with exit 143 when bun stopped the test. Both relied on the 5 s default, with inner waits of 10 to 15 s.
 - v179's log has been pruned. `operations.test.ts`' "the same resume request twice" test already sets 120 s, and every test in that file sets 90 to 120 s, so a 5.1 s failure there was not bun's per-test timeout. That one is left for a separate look if it recurs.
 
-`test/unit/integration-timeout.test.ts` keeps this true. It fails when an integration file does not call `useIntegrationTimeout()`. It also fails when a file has a `waitUntil` deadline at or past 60 s and no explicit test timeout longer than that deadline. The second check is per file and coarse on purpose, so it never misreads a test body.
+`test/unit/integration-timeout.test.ts` keeps this true. It fails when an integration file does not call `useIntegrationTimeout()`. It also fails when a file passes a literal deadline at or past 60 s to `waitUntil`, `waitRun`, `waitFor` or `waitAuto` and has no explicit test timeout longer than that deadline. The second check is per file and coarse on purpose, so it never misreads a test body.
 
 ## Load run
 

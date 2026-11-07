@@ -15,16 +15,17 @@ test("every integration test file sets the integration timeout at its top level"
 
 const toMs = (literal: string) => Number(literal.replaceAll("_", ""));
 
-// A file-level check, kept coarse so it never misreads a test body: a waitUntil deadline at or past the
-// default needs some explicit test timeout in its file longer than it (the test that waits that long sets one).
-test("a waitUntil deadline at or past the integration timeout has a longer explicit test timeout in its file", () => {
+// A file-level check, kept coarse so it never misreads a test body: a literal deadline passed to waitUntil, waitRun,
+// waitFor or waitAuto at or past the default needs some explicit test timeout in its file longer than it (the test
+// that waits that long sets one).
+test("a wait deadline at or past the integration timeout has a longer explicit test timeout in its file", () => {
   const uncovered: string[] = [];
   for (const name of integrationFiles) {
     const source = readFileSync(join(INTEGRATION_DIR, name), "utf8");
-    const waits = [...source.matchAll(/waitUntil\([^;]*?,\s*([0-9][0-9_]*)\s*,/g)].map((m) => toMs(m[1]!));
+    const waits = [...source.matchAll(/\b(waitUntil|waitRun|waitFor|waitAuto)\([^;]*?,\s*([0-9][0-9_]*)\s*[,)]/g)].map((m) => ({ helper: m[1]!, ms: toMs(m[2]!) }));
     const explicit = [...source.matchAll(/\},\s*([0-9][0-9_]*)\s*,?\s*\)|\{\s*timeout:\s*([0-9][0-9_]*)/g)].map((m) => toMs((m[1] ?? m[2])!));
     const longestExplicit = Math.max(0, ...explicit);
-    for (const wait of waits) if (wait >= INTEGRATION_TEST_TIMEOUT_MS && wait >= longestExplicit) uncovered.push(`${name}: waitUntil ${wait} ms`);
+    for (const wait of waits) if (wait.ms >= INTEGRATION_TEST_TIMEOUT_MS && wait.ms >= longestExplicit) uncovered.push(`${name}: ${wait.helper} ${wait.ms} ms`);
   }
   expect(uncovered).toEqual([]);
 });
