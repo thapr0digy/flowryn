@@ -31,7 +31,7 @@ The 2026-11-06 leader audit found that most of the lost time was work that stopp
 | Leader skill body | 5,999 | 5,982 |
 | Same-stage send-back steer (ship stage text) | about 1,010 + note | 58 + note |
 
-The contract grew by the turn rules below. Its budget in `test/unit/harness.test.ts` and `test/unit/instruction-budgets.test.ts` went from 1,000 to 1,100 characters for Flowryn's own lines and from 1,600 to 1,700 whole. The leader skill stayed inside its 6,000 by cutting. The QA skill's limit in `test/unit/prompts-that-keep.test.ts` is 4,800: main's visual QA rewrite (make-the-visual-nx) grew it to 4,767 with this de-duplication applied.
+The contract grew by the turn rules below. Its budget in `test/unit/harness.test.ts` and `test/unit/instruction-budgets.test.ts` went from 1,000 to 1,100 characters for Flowryn's own lines and from 1,600 to 1,700 whole. The leader skill stayed inside its 6,000 by cutting. The QA skill's limit in `test/unit/prompts-that-keep.test.ts` is 4,800: main's visual QA rewrite (make-the-visual-nx) grew it to 4,767 with this de-duplication applied. The build skill's limit is 3,200: main's later build-skill changes grew it to 3,052 with stage begin in place.
 
 ## Turn rules for every path
 
