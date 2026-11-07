@@ -1087,6 +1087,19 @@ ALTER TABLE landing_queue ADD COLUMN train_request TEXT;
 `;
 
 /**
+ * Migration 58 (docs/notes/2026-11-07-verify-queue-record-p9.md): why the drain made a queued
+ * request wait on its own PR and let the ones behind it go first, and since when, so the wait
+ * registry gives each such request its own deadline. `wait_reason` is a fixed code
+ * (src/verify/queue.ts OWN_WAIT_REASONS), `wait_ref` an id it names (a short head, a forge error
+ * kind and status), never PR text; both are null while the request is not waiting on its own.
+ */
+const VERIFY_WAIT_SQL = /* sql */ `
+ALTER TABLE verify_queue ADD COLUMN wait_reason TEXT;
+ALTER TABLE verify_queue ADD COLUMN wait_ref TEXT;
+ALTER TABLE verify_queue ADD COLUMN wait_since INTEGER;
+`;
+
+/**
  * Migration 55 (docs/notes/2026-11-06-auto-verify-every-t8.md): every delivery on a project with
  * verify steps gets an auto_merges row. `merge = 0` marks one that only verifies (the project or
  * the task does not auto-merge): it ends `verified` on a pass, and a failure goes back to the
@@ -1168,6 +1181,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 55, name: "auto-verify", sql: AUTO_VERIFY_SQL },
   { version: 56, name: "waits", sql: WAITS_SQL },
   { version: 57, name: "landing-train", sql: LANDING_TRAIN_SQL },
+  { version: 58, name: "verify-wait", sql: VERIFY_WAIT_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

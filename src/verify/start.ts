@@ -13,7 +13,7 @@ import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, pool
 import { hostState } from "../sched/scheduler.ts";
 import { verifyConfig, type VerifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
-import { cancelRequest, getRequest, markStarted, positionOf, queuedRequests, type VerifyRequest } from "./queue.ts";
+import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
 import { insertVerification, interruptedByStop, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
 
@@ -101,11 +101,39 @@ export function queueHold(db: Db, caps: Record<string, number>, now: number): st
   return null;
 }
 
-/** What a queued request waits on, for `verify show` and the queued reply. */
+/** A forge error as a wait_ref: its kind and HTTP status ("refused 403"), never its message. */
+function forgeRef(error: unknown): string {
+  if (error instanceof ForgeError) return error.status === null ? error.kind : `${error.kind} ${error.status}`;
+  return "error";
+}
+
+/**
+ * The request's own wait in plain words, from its recorded code and id
+ * (`detail` adds what only the caller knows now, such as the config error).
+ */
+export function ownWaitCause(request: Pick<VerifyRequest, "project_id" | "pr_url" | "head_sha" | "wait_reason" | "wait_ref">, detail?: string): string {
+  switch (request.wait_reason) {
+    case "config_invalid":
+      return `the [projects.${request.project_id}] config is invalid${detail ? `: ${detail}` : ""}`;
+    case "forge_outage":
+      return `GitHub is unavailable (${request.wait_ref ?? "no answer"}), so its PR cannot be read`;
+    case "stale_read":
+      return `GitHub still shows ${request.wait_ref ?? "an older head"}, a head delivered before ${request.head_sha.slice(0, 8)}`;
+    case "pr_unreadable":
+      return `cannot read ${request.pr_url} (${request.wait_ref ?? "error"})`;
+    default:
+      return "-";
+  }
+}
+
+/** What a queued request waits on, for `verify show` and the queued reply: its own PR, else the requests ahead that do not step aside. */
 export function waitingOn(db: Db, request: VerifyRequest, caps: Record<string, number>, now: number): string {
   const place = positionOf(db, request.id);
   if (!place) return "-";
-  if (place.ahead.length > 0) return `behind ${place.ahead.join(", ")}`;
+  const fresh = getRequest(db, request.id) ?? request;
+  if (fresh.wait_reason) return `waits on its own PR, the ones behind go first: ${ownWaitCause(fresh)}`;
+  const ahead = place.ahead.filter((id) => !getRequest(db, id)?.wait_reason);
+  if (ahead.length > 0) return `behind ${ahead.join(", ")}`;
   const hold = queueHold(db, caps, now);
   if (hold) return hold;
   const host = hostState(db);
@@ -160,7 +188,7 @@ export function staleRead(db: Db, request: Pick<VerifyRequest, "task_id" | "head
   return db.query("SELECT 1 FROM artifacts WHERE task_id = ?1 AND substr(head_sha, 1, length(?2)) = ?2 AND kind IN ('pr','local') LIMIT 1").get(request.task_id, read) !== null;
 }
 
-type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string };
+type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string; own: OwnWait };
 
 /** Is the request still worth running: its project still has verify steps, its PR is open at the same head (local-only work: the worktree HEAD)? */
 async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wanted> {
@@ -170,7 +198,7 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
   try {
     config = verifyConfig(deps.config(), request.project_id);
   } catch (error) {
-    return { wait: `the [projects.${request.project_id}] config is invalid: ${(error as Error).message}` };
+    return { wait: `the [projects.${request.project_id}] config is invalid: ${(error as Error).message}`, own: { reason: "config_invalid", ref: null } };
   }
   if (!config) return { cancel: `project ${request.project_id} has no verify steps now` };
   if (request.pr_number === null && request.worktree === null) {
@@ -195,13 +223,13 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
     if (pr.state !== "open") return { cancel: `${request.pr_url} is ${pr.state}` };
     if (pr.headSha !== request.head_sha) {
       // GitHub read a head this task delivered before (the one a carry started from): it has not caught up with the push yet.
-      if (staleRead(deps.db, request, pr.headSha) && deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}` };
+      if (staleRead(deps.db, request, pr.headSha) && deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}`, own: { reason: "stale_read", ref: pr.headSha.slice(0, 8) } };
       return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
     }
   } catch (error) {
     if (error instanceof ForgeError && error.kind === "not_found") return { cancel: `GitHub has no ${request.pr_url}` };
-    if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})` };
-    return { wait: `cannot read ${request.pr_url} (${(error as Error).message})` };
+    if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})`, own: { reason: "forge_outage", ref: forgeRef(error) } };
+    return { wait: `cannot read ${request.pr_url} (${(error as Error).message})`, own: { reason: "pr_unreadable", ref: forgeRef(error) } };
   }
   return { start: config, projectPath, base };
 }
@@ -236,7 +264,9 @@ function followRunning(db: Db, requestId: string, policy: string | null, now: nu
  * request in line either starts, is cancelled (its PR closed, its head moved),
  * follows a running verification of its PR and head under today's policy, or
  * waits on its own PR (GitHub lagging behind a push, a read that failed) and
- * steps aside for the ones behind it this pass. A full pool, a pending
+ * steps aside for the ones behind it this pass; that wait, its reason and when
+ * it began are recorded on the request (markWaiting), so the wait registry
+ * gives it its own deadline, and cleared once the request may start. A full pool, a pending
  * restart or the host check still hold the whole queue (FIFO). Returns how
  * many started.
  */
@@ -255,9 +285,11 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
     const wanted = await stillWanted(deps, first);
     if ("wait" in wanted) {
       deps.log(`verify ${first.id}: waits: ${wanted.wait}`);
+      tx(db, () => markWaiting(db, first, wanted.own, deps.now()));
       waiting.add(first.id);
       continue;
     }
+    if ("start" in wanted && first.wait_reason) tx(db, () => clearWaiting(db, first, deps.now()));
     if ("cancel" in wanted) {
       tx(db, () => cancelRequest(db, first, wanted.cancel, deps.now()));
       continue;
