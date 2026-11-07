@@ -105,10 +105,10 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
   const lines = [
     "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
     `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
-    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -), on your own background job, or as a steer says.",
+    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -), on your own background job, or as a steer says; never with work left.",
     "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
     "- A confirmation prompt: never answer it; ask --blocking naming it.",
-    "- For your leader to act on: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -",
+    "- For your leader: report <finding|blocked|failed> --body-file -",
     `- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take ${base} by git merge origin/${base}, plain push.`,
     '- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.',
     "- Never merge, clean up or approve. Exit 75: spooled, do not retry.",

@@ -1,10 +1,10 @@
-# No idle workers with work left: the leader wakes for every action item
+# No idle workers with work left: the leader wakes for every action item, and idle workers are nudged
 
 - Status: partial
-- Open: phase 2 (idle-with-work nudges, the worker's long-command wording) and phase 3 (verify failures route themselves) are plan p23's later phases
-- Config: `[leader] action_batch_ms`, `[leader] wake_ceiling_per_hour`
+- Open: phase 3 (verify failures route themselves) is plan p23's last phase
+- Config: `[leader] action_batch_ms`, `[leader] wake_ceiling_per_hour`, `[workers] idle_nudge_min`, `[workers] idle_nudge_max`
 
-Task no-idle-workers-23, phase 1 of 3. The user (2026-11-06): workers sit stopped with work left, and the leader should hear of everything it must act on and tell the workers what next. Steer m569 made the leader wake the core of this phase: "I need the leader to wake when there is a new action item to complete".
+Task no-idle-workers-23, phases 1 and 2 of 3 (phase 2 is task nudge-idle-workers-eg; see "Phase 2" below). The user (2026-11-06): workers sit stopped with work left, and the leader should hear of everything it must act on and tell the workers what next. Steer m569 made the leader wake the core of this phase: "I need the leader to wake when there is a new action item to complete".
 
 ## What changed
 
@@ -36,3 +36,36 @@ Now:
 - `test/unit/leader-wakes.test.ts`, `test/unit/away.test.ts`: updated to the new rule.
 - `test/integration/leader-wakes.test.ts`: a worker report wakes an idle leader with you active, past the retired cap; a busy Claude leader's Stop carries an action item; a follow-up wakes after its window with you active.
 - `test/integration/away.test.ts`, `test/integration/question-wake.test.ts`: gates and questions wake whether you are present or away; the retired caps cap nothing.
+
+## Phase 2: idle-with-work nudges
+
+Before, a worker that stopped with work left sat there: the turn-end guard reminded it once, and after 15 minutes the leader got a `worker_idle` pointer, whatever the worker still owed.
+
+Now the reconciler nudges it (`src/lifecycle/idle-nudge.ts`, called from the live check right after liveness is set, inside the same observed transition, so a newer hook voids it):
+
+- **Who.** A run in state `running` that stopped (`idle_since` set, no busy lease), for which `pendingWait` finds nothing: no review gate (except an unanswered page message), no capacity or other non-active stage state, no pending launch, no open question (reserved ones included), no open permission dialog, no end-turn steer, no background job of its own still running. Never while a daemon restart is asked for or under way (its handoff owns the workers), and never while another steer is carried and not yet seen, or due to ring: the ring machinery owns that.
+- **What counts as work left** (any of them):
+  - a steer the worker saw (its latest ring is `seen`) and never acknowledged, other than a nudge;
+  - for a ship, commits on HEAD not on `refs/remotes/origin/<branch>` (only once that branch was pushed at all), or commits past the head it delivered. These are local ref reads (`git rev-parse`, `git rev-list --count`) through `gitRunner`, so `runBounded`, with a 30 s deadline and no network;
+  - its stage is `active` with no `stage.done` since the stage started;
+  - the latest verification of its delivered head failed and no steer reached the run after it.
+- **When.** The window runs from the latest of: the idle episode's start (`idleEpisodeStart`), the last `run.background_ended`, the last nudge. The first nudge comes `[workers] idle_nudge_min` (10) minutes in. Each later one waits twice the last window (20, then 40 minutes after the one before). At most `[workers] idle_nudge_max` (3) go in one episode.
+- **The nudge** is a plain steer (`createSteer`: no decision, never urgent, never end-turn) with a fixed text, and a `run.idle_nudge` event `{n, steer, outstanding, idle_ms, head, remote}` in the same transaction. The bus is notified after commit, so it rides the ordinary carry (a Claude waiter, the idle carry, the Pi extension). For example: `Flowryn: you are idle with work left: unacked steer m556 (read it again: $FLOWRYN_BIN inbox); 2 commits not pushed (push, then deliver); stage build not done. Continue now; end with an outcome.`
+- **Progress ends an episode** and resets the count: an outcome event (`OUTCOME_KINDS`), the ack of a steer that is not a nudge, a new stage, a (re)started worker, or a HEAD or remote ref that moved since the last nudge.
+- **Stalled.** After the last nudge and one more window (80 minutes at the defaults) with no progress, one P1 `worker_stalled` (route `act`, so it wakes the leader) names the work left and the nudges, with event `run.idle_stalled`. Once per episode.
+- **worker_idle** is not opened while a nudge episode is under way for the run (one nudge sent since the last progress); `worker_stalled` takes its place. It still opens for an idle run with no work left, or before the first nudge when `[reconcile] idle_alert_ms` is shorter than the first window.
+- **A git read that fails or times out** makes the unpushed condition unknown, never outstanding; the other conditions still apply. It is recorded once per episode as `run.idle_nudge_unknown {detail}`.
+
+The stage skills (build and visual QA) now say: a command that may run over about 5 minutes goes in the background (Claude: Bash `run_in_background`), and the worker waits for its notice; never end a turn with your own job running for no reason, or with commits unpushed or undelivered; no-mistakes' `axi run --wait` stays in the foreground. The worker contract's outcome line ends "never with work left".
+
+### Phase 2 choices
+
+- **The long-command rule lives in the stage skills, not the worker contract.** The spec put it in both. The contract is held to the design's budget by a test (1,600 characters in all), and it was at 1,598. So the contract gets only "never with work left" on its outcome line. To make room, two lines drop a `$FLOWRYN_BIN`/"to act on" word ("For your leader: report ..."). The full rule is in the build and QA skills, which are read at every stage start. `CONTRACT_REVISIONS` is unchanged: the contract suite does not prove this wording.
+- **An earlier nudge never holds the next.** A nudge the worker never acks rings on its own like any steer (and opens `steer_unacked` after `max_rings`). Only a carried or due steer that is not a nudge holds a nudge back. A nudge's own ack is not progress, or acking it would reset the count forever.
+- **Unpushed needs a remote branch.** A branch never pushed has no `origin/<branch>` ref. Its unpushed condition is then not counted (a build stage before the ship stage owes no push, and a local-only ship never pushes); the stage condition covers it.
+- **`[workers] idle_nudge_min` takes a fraction** (tests use 0.01 to 0.02 minutes); `idle_nudge_max` is a positive integer.
+
+### Phase 2 tests
+
+- `test/unit/idle-nudge.test.ts`: each condition, the template, the 10/30/70-minute schedule and the stall 80 minutes later, progress resetting the count (not a nudge's ack), a background job's end starting the window, no nudge on a review gate, a capacity wait, a pending launch, an open or reserved question, a blocked dialog, an end-turn steer, a restart handoff or a ring in flight, and the git reads against a real repository (unpushed, undelivered, never pushed, behind its remote, timed out).
+- `test/integration/idle-nudge.test.ts`: a fake worker that left a commit unpushed is nudged, pushes and delivers, and gets no second nudge; one that ignores its nudges gets three, then one `worker_stalled`.

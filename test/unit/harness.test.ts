@@ -189,7 +189,7 @@ describe("worker contract text", () => {
     expect(text).toContain("- Never merge, clean up or approve. Exit 75: spooled, do not retry.");
     for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null, { defaultBranch: "main" })).toContain("scratch goes in $TMPDIR");
     expect(text).toContain("- A confirmation prompt: never answer it; ask --blocking naming it.");
-    expect(text).toContain("fail --body-file -), on your own background job, or as a steer says.");
+    expect(text).toContain("fail --body-file -), on your own background job, or as a steer says; never with work left.");
   });
 
   test("assumption: a task with no base gets the same contract text as one with no base given", () => {

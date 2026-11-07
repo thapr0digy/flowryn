@@ -78,6 +78,8 @@ export type ItemClass = "actionable" | "info";
  * dropped; src/lifecycle/watches.ts).
  * stack_base_lost: a stacked run's base task was dropped, failed or had its PR
  * closed unmerged, so the run cannot land as stacked (src/lifecycle/stacks.ts).
+ * worker_stalled: a stopped worker still idle with work left after its idle
+ * nudges (src/lifecycle/idle-nudge.ts), so the leader steers it or says why.
  * leader_wake_runaway: a leader session hit [leader] wake_ceiling_per_hour,
  * so no push starts a turn in it until the hour drains (src/leader/wake-ceiling.ts).
  * Asks (src/ask/): answer_ready, an ask's answer, read with `show a<N>`;
@@ -101,6 +103,7 @@ export const LANE_TABLE = {
   review_worker_gone: { lane: "P1", class: "actionable" },
   divergence: { lane: "P1", class: "actionable" },
   worker_idle: { lane: "P1", class: "actionable" },
+  worker_stalled: { lane: "P1", class: "actionable" },
   unproven_merge: { lane: "P1", class: "actionable" },
   backlog_out_of_sync: { lane: "P1", class: "actionable" },
   trust_dialog: { lane: "P1", class: "actionable" },
@@ -205,6 +208,7 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   review_worker_gone: "act",
   divergence: "act",
   worker_idle: "act",
+  worker_stalled: "act",
   unproven_merge: "act",
   backlog_out_of_sync: "act",
   trust_dialog: "act",
