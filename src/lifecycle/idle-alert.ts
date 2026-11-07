@@ -68,15 +68,16 @@ export function idleAlertLine(title: string, idleMs: number, why: IdleWhy): stri
 export function noteIgnoredReminder(db: Db, run: RunRow, now: number): string | null {
   const item = db
     .query(
-      `SELECT i.id, e.ts, e.payload FROM items i JOIN events e ON e.seq = i.event_seq
+      `SELECT i.id, i.opened_at, e.payload FROM items i JOIN events e ON e.seq = i.event_seq
        WHERE i.kind = 'worker_idle' AND i.run_id = ?1 AND i.state IN ('open','presented') AND e.kind = 'run.idle_alert'
        ORDER BY i.opened_at DESC LIMIT 1`,
     )
-    .get(run.id) as { id: string; ts: number; payload: string } | null;
+    .get(run.id) as { id: string; opened_at: number; payload: string } | null;
   if (!item) return null;
   const alert = JSON.parse(item.payload) as { idle_ms: number; ignored_reminder?: boolean; background_jobs?: unknown[] };
   if (alert.ignored_reminder === true || alert.background_jobs !== undefined) return null;
-  const idleFrom = item.ts - alert.idle_ms;
+  // opened_at and idle_ms both come from the reconciler's clock for that pass.
+  const idleFrom = item.opened_at - alert.idle_ms;
   const lines = itemLines(idleAlertLine(taskTitle(db, run.task_id), Math.max(0, now - idleFrom), { ignoredReminder: true }));
   db.query("UPDATE items SET line = ?2, full_line = ?3 WHERE id = ?1").run(item.id, lines.line, lines.full_line);
   return item.id;
