@@ -106,7 +106,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
   const lines = [
     "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
     `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
-    "- Work on until an outcome (stage done, deliver, ask --blocking, report, fail, a reply or steer saying end your turn); never end a turn to wait on a job: run it in the foreground.",
+    "- Work on until an outcome (stage done, deliver, ask --blocking, report, fail, a reply/steer saying end your turn); never end a turn to wait on a job: run it in foreground.",
     "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -; not blocking or reserved: go on with your pick.",
     "- For your leader: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -; a call refused twice: report blocked.",
     `- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take ${base} by git merge origin/${base}, plain push.`,

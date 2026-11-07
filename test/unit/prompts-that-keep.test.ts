@@ -94,7 +94,7 @@ describe("worker turn rules say what to do next on every path", () => {
   const contract = workerContract("claude", STYLE_BLOCK, { defaultBranch: "main" });
 
   test("keep working until an outcome; never end a turn to wait on a job; one rule on background jobs", () => {
-    expect(contract).toContain("- Work on until an outcome (stage done, deliver, ask --blocking, report, fail, a reply saying end your turn); never end a turn to wait on a job: run it in the foreground.");
+    expect(contract).toContain("- Work on until an outcome (stage done, deliver, ask --blocking, report, fail, a reply/steer saying end your turn); never end a turn to wait on a job: run it in foreground.");
     expect(contract).not.toContain("background job");
   });
 
