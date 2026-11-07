@@ -159,12 +159,13 @@ export function cancelRequest(db: Db, request: VerifyRequest, reason: string, no
 /**
  * Record that a queued request waits on its own PR, with a `verify.waiting` event. Call inside a
  * transaction. Its clock starts the first time; a new reason keeps it (the request is still
- * waiting). The same reason again writes nothing. False when it was no longer queued or unchanged.
+ * waiting). The same reason again writes nothing and keeps its first ref, even when the reading
+ * differs (`refused 403`, then `refused 500`). False when it was no longer queued or unchanged.
  */
 export function markWaiting(db: Db, request: VerifyRequest, wait: OwnWait, now: number): boolean {
   const fresh = getRequest(db, request.id);
   if (fresh?.state !== "queued") return false;
-  if (fresh.wait_reason === wait.reason && fresh.wait_ref === wait.ref) return false;
+  if (fresh.wait_reason === wait.reason) return false;
   const since = fresh.wait_since ?? now;
   db.query("UPDATE verify_queue SET wait_reason = ?2, wait_ref = ?3, wait_since = ?4 WHERE id = ?1").run(request.id, wait.reason, wait.ref, since);
   appendEvent(db, { source: "daemon", kind: "verify.waiting", taskId: request.task_id, payload: { request: request.id, reason: wait.reason, ref: wait.ref, since, was: fresh.wait_reason }, ts: now });

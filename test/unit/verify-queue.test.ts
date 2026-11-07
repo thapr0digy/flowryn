@@ -337,6 +337,12 @@ describe("draining the queue", () => {
     now = 20_000;
     expect(await drainVerifyQueue(f.deps)).toBe(0);
     expect(events(f.db, "verify.waiting")).toHaveLength(2);
+    // The same reason with another reading writes nothing and keeps the first ref.
+    f.prs.set(4, new ForgeError("refused", "Server Error", 500));
+    now = 25_000;
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(events(f.db, "verify.waiting")).toHaveLength(2);
+    expect(getRequest(f.db, r2.id)).toMatchObject({ wait_reason: "pr_unreadable", wait_ref: "refused 403", wait_since: 10_000 });
     // A new reason keeps the request's clock.
     f.prs.set(4, new ForgeError("unreachable", "connect ECONNREFUSED"));
     now = 30_000;
