@@ -11,9 +11,11 @@ import { readIdentity, terminate, type ProcIdentity, type PsRunner, type Termina
 import { withRepoLock } from "../runtime/repo-lock.ts";
 import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
 import { appendEvent } from "../db/events.ts";
+import type { FlowrynConfig } from "../config/config.ts";
 import { anyMatches, changedSinceBase, type ChangedFiles } from "./changed.ts";
-import type { VerifyItem } from "./config.ts";
+import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
+import { reviewLog, runReview, type ReviewInput } from "./review.ts";
 import { insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
 import { finishVerification, getVerification, recordSteps, runningVerifications, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
@@ -49,6 +51,10 @@ export interface VerifyDeps {
   terminate?(proc: ProcIdentity, options: TerminateOptions): Promise<TerminateResult>;
   /** A step's process group as ps lists it, for its log at a deadline (tests); by default ps through runBounded. */
   groupTable?(pgid: number): Promise<string>;
+  /** The daemon's config: the review step reads its harness, account and tools there; without it a review step fails with no verdict. */
+  config?(): FlowrynConfig;
+  /** Tests: the review step's model call (default: runBounded). */
+  reviewCall?: ReviewInput["call"];
 }
 
 export interface VerifyPlan {
@@ -61,6 +67,8 @@ export interface VerifyPlan {
   stepTimeoutMs?: number | null;
   /** The PATH of whoever ran `flowryn verify` (launchd's is short: it has no ~/.bun/bin); the daemon's when none came. */
   path: string | null;
+  /** The review step's settings, when the steps have one (REVIEW_STEP). */
+  review?: ReviewConfig | null;
   /** The PR's base branch, which when_changed diffs against; null or absent: origin's default branch. */
   base?: string | null;
 }
@@ -81,6 +89,8 @@ interface Job {
   aborted: boolean;
   /** Every step process running now: several while a parallel group runs. */
   children: Set<ChildProcess>;
+  /** A review step's model call, ended with the job. */
+  calls: Set<AbortController>;
 }
 
 const active = new Map<string, Job>();
@@ -224,6 +234,8 @@ interface StepResult {
   timedOut: "step" | "run" | null;
   /** Killed because another step of its group failed. */
   stopped: boolean;
+  /** A review step with no verdict: why. */
+  note?: string;
 }
 
 interface Attempt {
@@ -304,6 +316,44 @@ function runStep(job: Job, a: Attempt, handle: StepHandle): Promise<StepResult> 
     child.once("exit", (code, signal) => done(code ?? 128 + (signal ? (constants.signals[signal] ?? 0) : 0)));
   });
 }
+
+/**
+ * The review step (src/verify/review.ts): one capped model call instead of a shell command,
+ * its reply written to the step's log. A verdict is exit 0 (pass) or 1 (fail: the findings go
+ * back to the worker as a failed step's tail does); no verdict is exit REVIEW_NO_VERDICT, and at
+ * its deadline a step timeout, so the auto-merge holds it for the leader instead of sending it back.
+ */
+async function reviewStep(deps: VerifyDeps, job: Job, v: Verification, plan: VerifyPlan, logPath: string, runDeadline: number): Promise<StepResult> {
+  const write = (text: string) => {
+    const fd = openSync(logPath, LOG_FLAGS, 0o600);
+    try {
+      appendFileSync(fd, text);
+    } finally {
+      closeSync(fd);
+    }
+  };
+  if (!plan.review || !deps.config) {
+    const note = plan.review ? "this verify has no daemon config to run it with" : "the plan carries no review settings";
+    write(`flowryn review: no verdict: ${note}\n`);
+    return { exit: REVIEW_NO_VERDICT, timedOut: null, stopped: false, note };
+  }
+  const left = runDeadline - Date.now();
+  const timeoutMs = Math.max(1, Math.min(plan.review.timeout_ms, left));
+  const controller = new AbortController();
+  job.calls.add(controller);
+  try {
+    const result = await runReview({ db: deps.db, git: deps.git, config: deps.config(), review: plan.review, projectId: v.project_id, taskId: v.task_id, worktree: v.worktree_path, dir: v.dir, timeoutMs, signal: controller.signal, call: deps.reviewCall });
+    write(reviewLog(result, plan.review));
+    if (result.verdict !== null) return { exit: result.verdict === "pass" ? 0 : 1, timedOut: null, stopped: false };
+    const which = !result.timedOut ? null : timeoutMs < plan.review.timeout_ms ? "run" : "step";
+    return { exit: REVIEW_NO_VERDICT, timedOut: which, stopped: false, note: result.reason };
+  } finally {
+    job.calls.delete(controller);
+  }
+}
+
+/** A review step that ended with no verdict: not the worker's to fix (src/verify/auto-merge.ts holds it). */
+export const REVIEW_NO_VERDICT = 3;
 
 /** Copy the built binary (and the symlinks beside it that name it, such as flowrynd) out of the worktree. */
 export function keepBinary(worktree: string, binary: string, dir: string): string {
@@ -449,7 +499,7 @@ function stepDetail(step: VerifyStep, result: StepResult, deadline: StepDeadline
 /** Run a verification to its end. Never throws: whatever happens is recorded on its row. */
 export async function runVerification(deps: VerifyDeps, v: Verification, plan: VerifyPlan, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (active.has(v.id)) return;
-  const job: Job = { aborted: false, children: new Set() };
+  const job: Job = { aborted: false, children: new Set(), calls: new Set() };
   active.set(v.id, job);
   const runDeadline = Date.now() + plan.timeoutMs;
   const steps = v.steps.map((s) => ({ ...s }));
@@ -507,6 +557,11 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
         step.log = attempt === 1 ? firstLog : retryLogName(firstLog);
         step.state = "running";
         record(step);
+        if (step.name === REVIEW_STEP) {
+          result = await reviewStep(deps, job, v, plan, join(v.dir, step.log), runDeadline);
+          if (result.timedOut === "step") step.hangs++;
+          break;
+        }
         result = await runStep(
           job,
           {
@@ -530,6 +585,7 @@ export async function runVerification(deps: VerifyDeps, v: Verification, plan: V
       step.tests = parseBunSummary(readTail(join(v.dir, step.log)));
       step.state = result.stopped ? "stopped" : result.exit === 0 && result.timedOut === null ? "passed" : "failed";
       step.detail = [gate.note, stepDetail(step, result, deadline, plan, firstLog, stoppedBy())].filter((d) => d !== null).join("; ") || null;
+      if (result.note !== undefined && result.timedOut !== "run") step.detail = `${result.timedOut === "step" ? "the review timed out" : "the review gave no verdict"}: ${result.note}`;
       record(step);
     };
 
@@ -591,6 +647,7 @@ export function stopVerifications(): void {
   for (const job of active.values()) {
     job.aborted = true;
     for (const child of job.children) killGroup(child, "SIGKILL");
+    for (const call of job.calls) call.abort();
   }
 }
 

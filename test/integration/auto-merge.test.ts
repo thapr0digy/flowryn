@@ -54,6 +54,7 @@ interface AutoRow {
   detail: string | null;
   merge_id: string | null;
   verification_id: string | null;
+  merge: number;
 }
 
 function autoRows(e: ShipEnv, run: string): AutoRow[] {
@@ -80,6 +81,8 @@ async function ship(e: ShipEnv, title: string, steps: string[], opts: { sensitiv
   if (dispatched.code !== 0) throw new Error(`dispatch: ${JSON.stringify(dispatched.reply)}`);
   return dispatched.reply.data as { task: string; run: string };
 }
+
+const verifyOnlyConfig = (steps: string[], extra = "") => `[projects.web]\nverify = ${JSON.stringify(steps)}\n${extra}`;
 
 const prSteps = (e: ShipEnv, file = "a.txt") => [`FAKE: commit ${file} change`, "FAKE: push", `FAKE: pr ${e.github.apiUrl} acme/web`, "FAKE: deliver-pr"];
 
@@ -120,7 +123,9 @@ describe("yolo auto-merge", () => {
       const e = env;
       const sensitive = await ship(e, "Sensitive", prSteps(e), { sensitive: true });
       await e.fleet.waitRun(sensitive.run, (r) => r.state === "ready", "the sensitive delivery");
-      expect(autoRows(e, sensitive.run)).toEqual([]);
+      // No auto-merge: its verify runs by itself (an auto-verify), and the merge still waits for you.
+      const [verifyOnly] = await waitAuto(e, sensitive.run, (rows) => rows[0]?.state === "verified", "the sensitive delivery's auto-verify to pass");
+      expect(verifyOnly).toMatchObject({ merge: 0 });
       expect(openItems(e, "sensitive_action_waiting", sensitive.run)).toHaveLength(1);
 
       // The second PR's checks stay pending, so its passed verify waits while it turns sensitive.
@@ -203,5 +208,69 @@ describe("yolo auto-merge", () => {
       expect(rows[1]!.head_sha).toBe(e.github.pr("acme/web", 1).headSha);
     },
     { timeout: 120_000 },
+  );
+});
+
+describe("auto-verify and the yolo default (docs/notes/2026-11-06-auto-verify-every-t8.md)", () => {
+  test(
+    "a delivery on a project that neither queues nor auto-merges starts its verify by itself; a pass ends verified and the merge waits for you",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: false, extraConfig: verifyOnlyConfig(PASSING) });
+      const e = env;
+      const { task, run } = await ship(e, "Verified by itself", prSteps(e));
+      const [row] = await waitAuto(e, run, (rows) => rows[0]?.state === "verified", "the auto-verify to pass", 60_000);
+      expect(row).toMatchObject({ merge: 0, head_sha: e.github.pr("acme/web", 1).headSha });
+      expect(row!.verification_id).toMatch(/^v\d+$/);
+      expect(query(e, "SELECT id FROM verify_queue WHERE task_id = ?1 AND source <> 'auto'", task)).toEqual([]);
+      expect(query(e, "SELECT session_id FROM leader_sessions")).toEqual([]);
+      expect(e.github.pr("acme/web", 1).merged).toBe(false);
+      expect(e.fleet.run(run).state).toBe("ready");
+      expect(openItems(e, "pr_ready", run)[0]!.line).toContain(`auto-verify: verify ${row!.verification_id} passed`);
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "a yolo project with no auto_merge key auto-merges its passing PR",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: verifyOnlyConfig(PASSING) });
+      const e = env;
+      const { run } = await ship(e, "Lands by default", prSteps(e));
+      await e.fleet.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "the default auto-merge to land it", 60_000);
+      const [row] = await waitAuto(e, run, (rows) => rows[0]?.state === "merged", "the row merged");
+      expect(row).toMatchObject({ merge: 1 });
+      expect(e.github.pr("acme/web", 1).merged).toBe(true);
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "auto_merge = false on a yolo project holds: its verify runs by itself and nothing merges",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: verifyOnlyConfig(PASSING, "auto_merge = false\n") });
+      const e = env;
+      const { run } = await ship(e, "Opted out", prSteps(e));
+      const [row] = await waitAuto(e, run, (rows) => rows[0]?.state === "verified", "the auto-verify to pass", 60_000);
+      expect(row).toMatchObject({ merge: 0 });
+      expect(e.github.pr("acme/web", 1).merged).toBe(false);
+      expect(e.fleet.run(run).state).toBe("ready");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "an auto-verify's failure goes back to the worker like an auto-merge's",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR", yolo: false, extraConfig: verifyOnlyConfig(FAILING_UNTIL_FIXED) });
+      const e = env;
+      const { run } = await ship(e, "Fails its verify", prSteps(e));
+      const [row] = await waitAuto(e, run, (rows) => rows[0]?.state === "sent_back", "the send-back", 60_000);
+      expect(row).toMatchObject({ merge: 0, reason: "verify_failed" });
+      await e.fleet.waitRun(run, (r) => r.state === "running" && r.stage === "ship" && r.stage_state === "active", "the ship stage to start again");
+      const steer = query<{ body: string }>(e, "SELECT body FROM messages WHERE run_id = ?1 ORDER BY created_at DESC LIMIT 1", run)[0]!.body;
+      expect(steer).toContain("Auto-verify:");
+      expect(steer).toContain("boom: fixed.txt is missing");
+    },
+    { timeout: 90_000 },
   );
 });

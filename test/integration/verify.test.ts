@@ -50,7 +50,8 @@ const STEPS = [
   "mkdir -p dist && printf fake-binary > dist/flowryn && chmod 755 dist/flowryn",
 ];
 
-const VERIFY_CONFIG = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\nverify_binary = "dist/flowryn"\n`;
+// These tests drive `flowryn verify` by hand: the daemon's own verify of a delivery is off (docs/notes/2026-11-06-auto-verify-every-t8.md).
+const VERIFY_CONFIG = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\nverify_binary = "dist/flowryn"\nauto_verify = false\n`;
 
 async function unstartedShip(e: ShipEnv, title: string, checks: FakeCheck[] = [{ name: CI, state: "red", notStarted: true }]): Promise<{ task: string; run: string }> {
   e.github.repo("acme/web").defaultChecks = checks;
@@ -280,7 +281,7 @@ describe("flowryn verify", () => {
   test(
     "assumption: two verifies in one repository run at once, up to the validation pool: the same PR and head attaches to the running job, another PR starts beside it, and both pass",
     async () => {
-      const slow = `[projects.web]\nverify = ${JSON.stringify(["sleep 3", ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
+      const slow = `[projects.web]\nverify = ${JSON.stringify(["sleep 3", ...STEPS])}\nverify_binary = "dist/flowryn"\nauto_verify = false\n`;
       env = await makeShipEnv({ mode: "direct-PR", extraConfig: slow });
       const e = env;
       await unstartedShip(e, "side-by-side");
@@ -317,7 +318,7 @@ describe("flowryn verify", () => {
     async () => {
       const go = join(scratch(), "go");
       const gate = `while [ ! -f ${go} ]; do sleep 0.05; done`;
-      env = await makeShipEnv({ mode: "direct-PR", extraConfig: `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS])}\nverify_binary = "dist/flowryn"\n[capacity]\nvalidation = 1\n` });
+      env = await makeShipEnv({ mode: "direct-PR", extraConfig: `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS])}\nverify_binary = "dist/flowryn"\nauto_verify = false\n[capacity]\nvalidation = 1\n` });
       const e = env;
       await unstartedShip(e, "in-line");
       e.github.addPr("acme/web", { number: 51, headRef: "main" });
@@ -363,7 +364,7 @@ describe("flowryn verify", () => {
     async () => {
       const go = join(scratch(), "go");
       const host = hostProbe();
-      const gated = `[projects.web]\nverify = ${JSON.stringify([`while [ ! -f ${go} ]; do sleep 0.05; done`, ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
+      const gated = `[projects.web]\nverify = ${JSON.stringify([`while [ ! -f ${go} ]; do sleep 0.05; done`, ...STEPS])}\nverify_binary = "dist/flowryn"\nauto_verify = false\n`;
       env = await makeShipEnv({
         mode: "direct-PR",
         extraConfig: `${gated}[capacity]\nvalidation = 1\n[capacity.host]\nmin_free_mem_gb = 8\nmax_load_per_core = 1.5\nprobe = ${JSON.stringify(host.probe)}\n[sched]\nhost_cache_ms = 1\npass_ms = 250\n`,
@@ -446,7 +447,7 @@ describe("flowryn verify", () => {
       }
 
       // Strengthen the steps: the same head, another policy. The old pass no longer counts.
-      const strengthened = `[projects.web]\nverify = ${JSON.stringify([...STEPS, "true"])}\nverify_binary = "dist/flowryn"\n`;
+      const strengthened = `[projects.web]\nverify = ${JSON.stringify([...STEPS, "true"])}\nverify_binary = "dist/flowryn"\nauto_verify = false\n`;
       await reloadVerify(e, VERIFY_CONFIG, strengthened);
       const stale = await e.call("merge", { task });
       expect(stale.ok).toBe(false);
@@ -456,7 +457,7 @@ describe("flowryn verify", () => {
       expect(query(e, "SELECT task_id FROM merges")).toEqual([]);
 
       // Back to the same steps, only reformatted: the same policy, so the pass at this head is reused.
-      const reformatted = `[projects.web]\nverify = ${JSON.stringify(STEPS.map((step) => `  ${step} `))}\nverify_binary = "./dist/flowryn"\nverify_timeout_min = 7\n`;
+      const reformatted = `[projects.web]\nverify = ${JSON.stringify(STEPS.map((step) => `  ${step} `))}\nverify_binary = "./dist/flowryn"\nauto_verify = false\nverify_timeout_min = 7\n`;
       await reloadVerify(e, strengthened, reformatted);
       const merged = await e.call("merge", { task });
       expect(merged.ok).toBe(true);
@@ -471,7 +472,7 @@ describe("flowryn verify", () => {
     async () => {
       const go = join(scratch(), "go");
       const gate = `while [ ! -f ${go} ]; do sleep 0.05; done`;
-      const gated = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS])}\nverify_binary = "dist/flowryn"\n`;
+      const gated = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS])}\nverify_binary = "dist/flowryn"\nauto_verify = false\n`;
       env = await makeShipEnv({ mode: "direct-PR", extraConfig: gated });
       const e = env;
       await unstartedShip(e, "attach-policy");
@@ -480,7 +481,7 @@ describe("flowryn verify", () => {
       expect(first.code).toBe(0);
       expect(first.reply.data).toMatchObject({ verification: "v1", attached: false });
 
-      const strengthened = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS, "true"])}\nverify_binary = "dist/flowryn"\n`;
+      const strengthened = `[projects.web]\nverify = ${JSON.stringify([gate, ...STEPS, "true"])}\nverify_binary = "dist/flowryn"\nauto_verify = false\n`;
       await reloadVerify(e, gated, strengthened);
       const other = await e.fleet.json(["verify", "1", "--detach"]);
       expect(other.code).toBe(0);
