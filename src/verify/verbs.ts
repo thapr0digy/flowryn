@@ -35,7 +35,7 @@ export function verifyRoot(ctx: Pick<HandlerCtx, "config">): string {
 export { VERIFY_POOL };
 
 function verifyDeps(ctx: HandlerCtx): VerifyDeps {
-  return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx), released: () => ctx.sched.kick() };
+  return { db: ctx.db, git: ctx.delivery.git, now: ctx.now, log: ctx.log, root: verifyRoot(ctx), released: () => ctx.sched.kick(), config: ctx.config };
 }
 
 interface Target {

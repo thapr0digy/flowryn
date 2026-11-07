@@ -1,6 +1,6 @@
 import { decisionsConfig } from "../attention/decisions-policy.ts";
 import { accountsConfig, accountsView } from "./accounts.ts";
-import { autoMergeEnabled, landingMode, verifyConfig } from "../verify/config.ts";
+import { autoMergeSetting, landingMode, verifyConfig } from "../verify/config.ts";
 import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./config.ts";
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
@@ -51,7 +51,7 @@ function projectsView(config: FlowrynConfig): Record<string, unknown> {
     const verify = verifyConfig(config, id);
     const maxWorkers = projectMaxWorkers(config, id);
     const reviewModel = projectReviewModel(config, id);
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeEnabled(config, id) ? { auto_merge: true } : {}), ...(landingMode(config, id) === "queue" ? { landing: "queue" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landingMode(config, id) === "queue" ? { landing: "queue" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
   }
   return out;
 }

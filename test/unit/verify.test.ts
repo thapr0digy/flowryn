@@ -77,7 +77,7 @@ describe("[projects.<id>] verify", () => {
   test("a project without verify steps has none; a full table reads", () => {
     expect(verifyConfig(config(""), "web")).toBeNull();
     expect(verifyConfig(config("[projects.other]\nverify = [\"true\"]\n"), "web")).toBeNull();
-    expect(verifyConfig(config('[projects.web]\nverify = ["bun install", "bun test"]\nverify_binary = "dist/flowryn"\nverify_timeout_min = 5\n'), "web")).toEqual({ steps: ["bun install", "bun test"], binary: "dist/flowryn", timeout_ms: 300_000, step_timeout_ms: null });
+    expect(verifyConfig(config('[projects.web]\nverify = ["bun install", "bun test"]\nverify_binary = "dist/flowryn"\nverify_timeout_min = 5\n'), "web")).toEqual({ steps: ["bun install", "bun test"], review: null, binary: "dist/flowryn", timeout_ms: 300_000, step_timeout_ms: null });
     expect(verifyConfig(config('[projects.web]\nverify = ["true"]\n'), "web")!.timeout_ms).toBe(30 * 60_000);
   });
 

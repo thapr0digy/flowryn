@@ -24,7 +24,8 @@ afterEach(async () => {
 }, 30_000);
 
 const STEPS = ["printf ' 1 pass\\n 0 fail\\n 1 expect() calls\\nRan 1 tests across 1 file. [1.00ms]\\n'"];
-const VERIFY_CONFIG = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\n`;
+// Merged by hand here: a yolo project with verify steps auto-merges unless it opts out (docs/notes/2026-11-06-auto-verify-every-t8.md).
+const VERIFY_CONFIG = `[projects.web]\nverify = ${JSON.stringify(STEPS)}\nauto_merge = false\n`;
 
 function query<T>(e: ShipEnv, sql: string, ...params: string[]): T[] {
   const db = e.fleet.h.db();
@@ -138,7 +139,8 @@ describe("a clean merge of main into a delivered routine PR", () => {
       const [summary] = query<{ summary: string }>(e, "SELECT summary FROM divergences WHERE summary LIKE 'the PR head moved%'").map((d) => d.summary);
       expect(summary).toContain(`not carried: not only a clean merge of main (${head.slice(0, 8)} holds changes beyond the clean merge of main)`);
       expect(query(e, "SELECT 1 FROM events WHERE kind = 'run.head_carried'")).toHaveLength(0);
-      expect(query(e, "SELECT 1 FROM verify_queue")).toHaveLength(0);
+      // The delivered head's own auto-verify aside, nothing verifies the head that was not carried.
+      expect(query(e, "SELECT 1 FROM verify_queue WHERE head_sha = ?1", head)).toHaveLength(0);
       const merge = await e.call("merge", { task });
       expect(merge.ok).toBe(false);
       expect(merge.error).toMatchObject({ code: "head_moved" });

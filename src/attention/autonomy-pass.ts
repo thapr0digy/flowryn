@@ -18,8 +18,10 @@ import { openGate, runWorkflow, type GateRow } from "../lifecycle/stages.ts";
 import { AUTONOMOUS_CHANNEL, autonomyActor, autonomyForRun, liveAutonomy, startedUnderAutonomy, projectsOf, type AutonomyRow } from "../policy/autonomy.ts";
 import { recordGatePass } from "../policy/gates.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { createAutoMerge } from "../verify/auto-merge.ts";
+import { createAutoMerge, supersedeAutoMerge } from "../verify/auto-merge.ts";
 import { landingQueued, verifyConfig } from "../verify/config.ts";
+import { verifyPolicyId } from "../verify/policy.ts";
+import { finishedAtHead } from "../verify/store.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { openItem, findOpenRunItem } from "./items.ts";
 import { RESERVED_CLASSES, reservedReason, type DecisionsConfig } from "./decisions-policy.ts";
@@ -268,9 +270,13 @@ function startMerges(db: Db, config: FlowrynConfig, now: number, out: AutonomyOu
     const delivered = deliveredOf(db, run.task_id);
     if (!delivered) continue;
     const ref = delivered.kind === "pr" ? delivered.ref : `local:${delivered.ref}`;
-    if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2").get(run.id, delivered.head)) continue;
+    if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2 AND merge = 1").get(run.id, delivered.head)) continue;
+    const stoppedVerify = db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2 AND state IN ('held', 'sent_back')").get(run.id, delivered.head);
+    if (stoppedVerify && finishedAtHead(db, ref, delivered.head, verifyPolicyId(steps))?.state !== "passed") continue;
     const evidence = delivered.kind === "pr" ? prEvidence(db, run.id) : null;
     try {
+      // The delivery's auto-verify gives way to the merge, which follows its verify.
+      supersedeAutoMerge(db, run.id, "autonomy", "unattended mode merges it", now);
       const row = createAutoMerge(db, config, run, { ref, head: delivered.head, prNumber: evidence?.number ?? null, headRef: evidence?.head_ref ?? (delivered.kind === "pr" ? run.branch : null), worktree: delivered.kind === "local" ? run.worktree_path : null, source: "daemon" }, now);
       out.merges.push(row.id);
     } catch (error) {
