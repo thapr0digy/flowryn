@@ -23,7 +23,7 @@ The 2026-11-06 leader audit found that most of the lost time was work that stopp
 
 | Text | Before | After |
 |---|---|---|
-| Worker contract (Claude, with style block) | 1,570 | 1,683 |
+| Worker contract (Claude, with style block) | 1,588 | 1,690 |
 | flowryn-design | 5,405 | 3,558 |
 | flowryn-build-test | 2,878 | 2,855 |
 | flowryn-visual-qa | 3,499 | 3,165 |
