@@ -1,5 +1,4 @@
 import type { Db } from "../db/db.ts";
-import { QUESTION_KINDS } from "./items.ts";
 
 /**
  * Presentations (design section 9). No harness can observe that the leader
@@ -152,17 +151,12 @@ export function presentationsOf(db: Db, itemId: string): { session_id: string; t
 
 /**
  * Turns a push started in this session in the last hour (waiter wakes and Pi
- * triggers), for the caps of design section 9: a question batch is one turn
- * however many questions it carries, and counts against its own budget, not
- * the P0 one.
+ * triggers): a batch is one turn however many items it carries. The runaway
+ * guard ([leader] wake_ceiling_per_hour) counts them all.
  */
-export function startedTurnsLastHour(db: Db, session: string, now: number, budget: "p0" | "questions" = "p0"): number {
-  const kinds = QUESTION_KINDS.map((k) => `'${k}'`).join(", ");
+export function startedTurnsLastHour(db: Db, session: string, now: number): number {
   const row = db
-    .query(
-      `SELECT COUNT(DISTINCT s.turn_no) AS n FROM presentations s JOIN items i ON i.id = s.item_id
-       WHERE s.session_id = ?1 AND s.path IN ('waiter','trigger') AND s.carried_at > ?2 AND i.kind ${budget === "questions" ? "IN" : "NOT IN"} (${kinds})`,
-    )
+    .query("SELECT COUNT(DISTINCT s.turn_no) AS n FROM presentations s WHERE s.session_id = ?1 AND s.path IN ('waiter','trigger') AND s.carried_at > ?2")
     .get(session, now - 3_600_000) as { n: number };
   return row.n;
 }

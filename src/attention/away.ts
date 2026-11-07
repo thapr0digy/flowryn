@@ -8,10 +8,13 @@ import type { ItemKind } from "./items.ts";
 /**
  * Away mode (autonomy spec 2, ship B): `flowryn away` stores a posture, an
  * expiry and your words in the meta table; `flowryn back` or the expiry ends
- * it. While away, every new item that needs you wakes the leader as a P0
- * would, so it reaches you in the remote-control chat. It changes delivery,
- * and one decision rule: deadline defaults (attention/deadline-defaults.ts)
- * answer an opted-in question only while you are away or inactive. No
+ * it. It no longer changes what wakes the leader (LEADER_ROUTE in items.ts:
+ * every action item wakes an idle leader once you are not at the composer);
+ * away counts as not at the composer, so items reach the leader, and you in
+ * the remote-control chat, without waiting on the composer hold, and your
+ * return brings a brief. It changes delivery, and one decision rule:
+ * deadline defaults (attention/deadline-defaults.ts) answer an opted-in
+ * question only while you are away or inactive. No
  * approval, gate or merge rule reads it: unattended mode (`away --autonomous`,
  * src/policy/autonomy.ts) is its own standing approval that only rides along
  * with it. After `[away]
@@ -52,12 +55,10 @@ export interface AwayEnded {
 }
 
 /**
- * The items that wake the leader while you are away, on top of the P0 lane
- * and the worker-question batch (which wake already once you are inactive):
- * what only you can move. A yolo, non-sensitive PR merges without you, and a
- * report waits on you only when it opened a decision reserved for you. The
- * leader follow-ups (LEADER_WAKE_KINDS) wake it whether you are away or only
- * inactive; they are listed here so the away suggestion and brief count them.
+ * The items only you can move: they count toward the away suggestion and
+ * brief. A yolo, non-sensitive PR merges without you, and a report waits on
+ * you only when it opened a decision reserved for you. What wakes the leader
+ * no longer depends on away: every action item does (LEADER_ROUTE in items.ts).
  */
 export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed", "auto_merge_held"];
 
@@ -147,8 +148,7 @@ const END_SOURCE: Record<AwayEndReason, "cli" | "daemon" | "hook"> = { back: "cl
  * Start away by itself once you have been inactive `afterMs` (`[away]
  * auto_after_min`; 0 never): the lease holder's `user_inactive_since`, set by
  * Claude's idle_prompt or the Pi extension, is at least that old and no away
- * is on. It starts when you went inactive, so what opened while you were
- * gone and still waits wakes the leader now, and the brief covers the whole
+ * is on. It starts when you went inactive, so the brief covers the whole
  * absence. It runs until your next own message (endAutoAway), `flowryn back`
  * or AWAY_MAX_MS. After `back` it stays off for the rest of that inactive
  * spell. Null when it did not start. Call inside a transaction.
@@ -242,9 +242,8 @@ const SUGGESTED_KEY = "away_suggested";
 
 /**
  * The idle_prompt signal may suggest away, never set it: your first message
- * after `suggestAfterMs` inactive, while not away, when an item that would
- * have woken the leader opened in that time and still waits, gets one line,
- * at most once a day. Call inside a transaction (it records the day).
+ * after `suggestAfterMs` inactive, while not away, when an action item opened
+ * in that time and still waits, gets one line, at most once a day. Call inside a transaction (it records the day).
  */
 export function awaySuggestion(db: Db, input: { inactiveSince: number | null; now: number; suggestAfterMs: number; today: string }): string | null {
   if (input.inactiveSince === null || input.now - input.inactiveSince < input.suggestAfterMs) return null;
@@ -257,5 +256,5 @@ export function awaySuggestion(db: Db, input: { inactiveSince: number | null; no
   appendEvent(db, { source: "hook", kind: "away.suggested", payload: { waited: waited.n, inactive_since: input.inactiveSince }, ts: input.now });
   const minutes = Math.round((input.now - input.inactiveSince) / 60_000);
   const span = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
-  return `Flowryn: the user was inactive ${span} while ${waited.n} item${waited.n === 1 ? "" : "s"} waited for them; \`flowryn away\` would have woken the leader for them (a fact; suggest it, never set it).`;
+  return `Flowryn: the user was inactive ${span} while ${waited.n} item${waited.n === 1 ? "" : "s"} waited for them; \`flowryn away\` would bring them a brief of the absence on return, and while they are gone, even chatting through remote control, items wake the leader without waiting on the composer (a fact; suggest it, never set it).`;
 }

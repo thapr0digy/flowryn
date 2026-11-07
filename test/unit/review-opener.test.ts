@@ -9,6 +9,7 @@ import { migrate, openDb, tx, type Db } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { MIGRATIONS } from "../../src/db/schema.ts";
 import { STAGE_SKILLS } from "../../src/skills/stages.ts";
+import { REVIEW_GATE_TEXT } from "../../src/lifecycle/stages.ts";
 import { lavishPresence, recordedPresence, recordOpen, ReviewOpener, type OpenResult, type PresenceResult } from "../../src/lavish/opener.ts";
 import { hashPassKey } from "../../src/policy/pass-key.ts";
 import { recordHostedUrl } from "../../src/lavish/snapshot.ts";
@@ -333,8 +334,10 @@ test("the design and QA skills host pages with --no-open and never trust lavish-
     const body = STAGE_SKILLS.find((s) => s.name === id)!.body;
     expect(body).toContain("lavish-axi --no-open $FLOWRYN_REPORT_DIR/");
     expect(body).not.toMatch(/`lavish-axi \$FLOWRYN_REPORT_DIR/);
-    expect(body).toContain("Flowryn opens");
   }
+  // Opening the page, and never trusting lavish-axi's opened, is the review gate's own rule, said once in the stage header.
+  expect(REVIEW_GATE_TEXT).toContain("Flowryn listens on the page itself and opens it in the user's browser");
+  expect(REVIEW_GATE_TEXT).toContain("status: opened is its session, not a browser tab");
 });
 
 describe("[review] config", () => {

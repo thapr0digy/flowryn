@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
+import { evidencePathFor, writeEvidence } from "./evidence.ts";
 import type { ReportStamp } from "./grant.ts";
 import { BASELINE_REVISION, storedRevision } from "./revision.ts";
 import type { ContractResult } from "./runner.ts";
@@ -9,7 +10,9 @@ import type { ContractResult } from "./runner.ts";
  * Write a contract run's result to `<data_dir>/contracts/` and return the
  * path. The stamp says whether the run may record (`mode`), which build ran
  * it and who asked; a verify-only run's file name says so too. `extra.model`
- * marks a real-model Pi pass's report (always verify-only).
+ * marks a real-model Pi pass's report (always verify-only). A failed run's
+ * step evidence is written to `<report>.evidence.json` and its path kept
+ * under `evidence`.
  */
 export function dataDirReport(config: FlowrynConfig, result: ContractResult, stamp: ReportStamp, extra: { model?: string } = {}): string {
   const dir = join(config.data_dir, "contracts");
@@ -17,7 +20,10 @@ export function dataDirReport(config: FlowrynConfig, result: ContractResult, sta
   const when = new Date().toISOString().replace(/[:.]/g, "-");
   const suffix = stamp.mode === "verify-only" ? "-verify-only" : "";
   const path = join(dir, `${result.harness}-${result.version}-${when}${suffix}.json`);
-  writeFileSync(path, JSON.stringify({ ...result, ...stamp, ...extra }, null, 2) + "\n", { mode: 0o600 });
+  // A failed step's evidence goes in its own 0600 file beside the report, which names it.
+  const { evidence, ...rest } = result;
+  const evidenceFile = evidence ? writeEvidence(evidencePathFor(path), evidence) : undefined;
+  writeFileSync(path, JSON.stringify({ ...rest, ...(evidenceFile ? { evidence: evidenceFile } : {}), ...stamp, ...extra }, null, 2) + "\n", { mode: 0o600 });
   return path;
 }
 

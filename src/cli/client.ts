@@ -136,7 +136,7 @@ export async function runServerVerb(spec: VerbSpec, args: Record<string, unknown
   const outcome = await sendServerVerb(spec, args, io);
   if ("spooled" in outcome) {
     if (io.json) io.stdout(JSON.stringify({ ok: true, spooled: outcome.spooled }) + "\n");
-    else io.stdout(`spooled: ${outcome.spooled}\nhelp: delivered when the daemon is back; do not retry in a loop\n`);
+    else io.stdout(`spooled: ${outcome.spooled}\nhelp: queued, delivered when the daemon is back; ${spec.endsTurn ? "end your turn" : "go on with your work"}, never retry it\n`);
     return EXIT.spooled;
   }
   return print(io, outcome.reply, outcome.banner);

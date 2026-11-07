@@ -33,6 +33,15 @@ export interface LeaderTiming {
    * (src/leader/rewake.ts); at most once per this window.
    */
   waiter_grace_ms: number;
+  /** The leader's P1 action items opened within this long of the first one wake an idle leader once, together. */
+  action_batch_ms: number;
+  /**
+   * The runaway guard: a leader session that started this many turns from
+   * pushes in the last hour (waiter wakes, Pi triggers and typed rewakes) is
+   * woken no more until the hour drains, and one P0 leader_wake_runaway opens.
+   * Leader wakes have no other hourly cap.
+   */
+  wake_ceiling_per_hour: number;
 }
 
 export const DEFAULT_LEADER_TIMING: LeaderTiming = {
@@ -43,6 +52,8 @@ export const DEFAULT_LEADER_TIMING: LeaderTiming = {
   age_ms: 24 * 60 * 60_000,
   question_batch_ms: 30_000,
   waiter_grace_ms: 30_000,
+  action_batch_ms: 60_000,
+  wake_ceiling_per_hour: 60,
 };
 
 export interface NotifyConfig {
@@ -54,11 +65,11 @@ export interface NotifyConfig {
   min_interval_min: number;
   /** P0 notifications arriving within this window are coalesced into one. */
   p0_coalesce_s: number;
-  /** Turns a P0 may start in a leader per hour; beyond that, notification only. */
+  /** Retired: leader wakes have no hourly cap now ([leader] wake_ceiling_per_hour is the runaway guard). Still read, so older configs load. */
   max_triggered_turns_per_hour: number;
   /** An unresolved P0 notifies again after this long. */
   p0_renotify_min: number;
-  /** Turns a batch of worker questions may start in a leader per hour, apart from the P0 budget; beyond that, your next message carries them. */
+  /** Retired like max_triggered_turns_per_hour: still read, limits nothing. */
   max_question_wakes_per_hour: number;
   /** A shell command run for every P0 notification and, while you are away, the batched one, with the text on stdin; empty is off. */
   command: string;
@@ -125,7 +136,7 @@ export function notifyConfig(config: FlowrynConfig): NotifyConfig {
 
 /** [away]: away mode (`flowryn away`), which changes how items reach you, never who may act. */
 export interface AwayConfig {
-  /** Turns the P0 push path may start in a leader per hour while you are away, in place of max_triggered_turns_per_hour. */
+  /** Retired like [notify] max_triggered_turns_per_hour: still read, limits nothing. */
   max_wakes_per_hour: number;
   /** How long away lasts when `flowryn away` names no --until. */
   default_hours: number;

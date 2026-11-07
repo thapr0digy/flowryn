@@ -121,7 +121,7 @@ describe("the wake line", () => {
 });
 
 describe("question pushes in presentations", () => {
-  test("a batch is one started turn, counted on the questions budget, not the P0 one", () => {
+  test("a batch is one started turn; the runaway guard counts every started turn, questions and P0s alike", () => {
     const now = Date.now();
     const a = open("worker_question", "a", now);
     const b = open("worker_question", "b", now);
@@ -131,9 +131,8 @@ describe("question pushes in presentations", () => {
       carry(db, { itemId: b, session: "L1", turn: 2, path: "waiter", now });
       carry(db, { itemId: p0, session: "L1", turn: 4, path: "waiter", now });
     });
-    expect(startedTurnsLastHour(db, "L1", now + 1, "questions")).toBe(1);
-    expect(startedTurnsLastHour(db, "L1", now + 1, "p0")).toBe(1);
-    expect(startedTurnsLastHour(db, "L1", now + 3_600_001, "questions")).toBe(0);
+    expect(startedTurnsLastHour(db, "L1", now + 1)).toBe(2);
+    expect(startedTurnsLastHour(db, "L1", now + 3_600_001)).toBe(0);
   });
 
   test("a Pi delivery or decline of the lead item covers every item offered in the same push", () => {

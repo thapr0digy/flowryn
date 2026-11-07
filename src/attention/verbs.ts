@@ -186,7 +186,7 @@ const away: VerbSpec = {
     const words = stringArg(args, "body") ?? null;
     const { posture, extended } = startAway(ctx.db, { until, words, by: ctx.caller.role, now });
     return {
-      data: { away: extended ? "extended" : "started", since: clockLabel(posture.since, now), until: clockLabel(posture.until, now), words: posture.words ?? "-", wake_cap_per_hour: cfg.max_wakes_per_hour },
+      data: { away: extended ? "extended" : "started", since: clockLabel(posture.since, now), until: clockLabel(posture.until, now), words: posture.words ?? "-", wake_ceiling_per_hour: leaderTiming(ctx.config()).wake_ceiling_per_hour },
       hints: ["flowryn back ends it and prints the return brief"],
     };
   },

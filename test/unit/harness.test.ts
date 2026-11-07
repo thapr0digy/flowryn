@@ -175,9 +175,10 @@ describe("worker contract text", () => {
         const text = workerContract(harness, STYLE_BLOCK, { base, defaultBranch: "main" });
         const own = ownLines(text);
         expect(own.length).toBeLessThanOrEqual(10);
-        // About 4 characters a token: Flowryn's own lines under 250 tokens, the whole contract (shared blocks included) under 400.
-        expect(own.join("\n").length).toBeLessThanOrEqual(1_000);
-        expect(text.length).toBeLessThanOrEqual(1_600);
+        // About 4 characters a token: Flowryn's own lines under 275 tokens, the whole contract (shared blocks included) under 425
+        // (raised from 250 and 400 for the turn rules that say what to do next on every path: docs/notes/2026-11-06-prompts-that-keep-47.md).
+        expect(own.join("\n").length).toBeLessThanOrEqual(1_100);
+        expect(text.length).toBeLessThanOrEqual(1_700);
       }
     }
   });
@@ -186,10 +187,11 @@ describe("worker contract text", () => {
     const text = workerContract("claude", null, { defaultBranch: "main" });
     expect(text).toContain("- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take main by git merge origin/main, plain push.");
     expect(text).toContain('- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.');
-    expect(text).toContain("- Never merge, clean up or approve. Exit 75: spooled, do not retry.");
+    expect(text).toContain("- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; never retry.");
     for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null, { defaultBranch: "main" })).toContain("scratch goes in $TMPDIR");
-    expect(text).toContain("- A confirmation prompt: never answer it; ask --blocking naming it.");
-    expect(text).toContain("fail --body-file -) or on your own background job.");
+    expect(text).toContain("never end a turn to wait on a job: run it in foreground.");
+    expect(text).toContain("a reply/steer saying end your turn)");
+    expect(text).toContain("answer a confirmation prompt (ask --blocking naming it)");
   });
 
   test("assumption: a task with no base gets the same contract text as one with no base given", () => {

@@ -79,8 +79,9 @@ export function deliveryLines(d: ContractDelivery): string[] {
     ...baseLines(d),
     ...beginLines(d),
     ...waitLines(d),
-    "  An ask-user finding: $FLOWRYN_BIN ask --nomistakes --options <its choices> --blocks <what waits> --body-file - with it; never answer it yourself.",
+    "  An ask-user finding: $FLOWRYN_BIN ask --nomistakes --options <its choices> --recommend <your pick> --blocks <what waits> --body-file - with it; never answer it yourself.",
     "  A rule may settle it at once: then act on the steer it names.",
+    "  A pipeline that fails (an error, not a gate): fix, commit, run it again; failed twice at the same head: report failed.",
     `  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/${targetOf(d)}, resolve, commit, plain git push, then run the pipeline again.`,
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",
@@ -105,13 +106,12 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
   const lines = [
     "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
     `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
-    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -) or on your own background job.",
-    "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
-    "- A confirmation prompt: never answer it; ask --blocking naming it.",
-    "- For your leader to act on: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -",
+    "- Work on until an outcome (stage done, deliver, ask --blocking, report, fail, a reply/steer saying end your turn); never end a turn to wait on a job: run it in foreground.",
+    "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -; not blocking or reserved: go on with your pick.",
+    "- For your leader: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -; a call refused twice: report blocked.",
     `- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take ${base} by git merge origin/${base}, plain push.`,
     '- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.',
-    "- Never merge, clean up or approve. Exit 75: spooled, do not retry.",
+    "- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; never retry.",
   ];
   return [...(style ? [style, ""] : []), TOOL_MAP, "", ...lines].join("\n") + "\n";
 }
@@ -127,19 +127,30 @@ export function promptLine(kind: "ship" | "scout", taskId: string, instructionsF
   return `Flowryn ${kind} ${taskId}. Your full task is in ${instructionsFile}; read it first, then do it.`;
 }
 
-/** A steer as the worker sees it mid-turn or in its inbox. */
-export function steerLine(id: string, body: string): string {
-  return `${STEER_PREFIX} [${id}]: ${body.replace(/\s+/g, " ").trim()} (when done: $FLOWRYN_BIN ack ${id})`;
+/**
+ * What a steer the leader sent with --end-turn adds to its line: the turn end
+ * it asks for needs no outcome. The worker contract's "End each turn with an
+ * outcome" names it, so the two never contradict (without it Claude sometimes
+ * delivered where a steer said only "end your turn",
+ * docs/notes/2026-11-06-live-contract-check-bf.md); the turn-end guard stands
+ * aside for the same steers (src/lifecycle/turn-end-guard.ts).
+ */
+export const END_TURN_NOTE = "Then end your turn: this steer asks for no outcome.";
+
+/** A steer as the worker sees it mid-turn or in its inbox; `endTurn` for one sent with --end-turn. */
+export function steerLine(id: string, body: string, endTurn = false): string {
+  const line = `${STEER_PREFIX} [${id}]: ${body.replace(/\s+/g, " ").trim()} (when done: $FLOWRYN_BIN ack ${id})`;
+  return endTurn ? `${line} ${END_TURN_NOTE}` : line;
 }
 
 /** Why a Claude worker's tool call was denied: the urgent steer itself, as the reason it reads (Tier 2). */
-export function urgentBlockLine(id: string, body: string): string {
-  return `${steerLine(id, body)} This tool call was blocked so you read this first; redo it if it still applies.`;
+export function urgentBlockLine(id: string, body: string, endTurn = false): string {
+  return `${steerLine(id, body, endTurn)} This tool call was blocked so you read this first; redo it if it still applies.`;
 }
 
 /** An urgent steer as a Pi worker gets it: it may cut short the tool call in flight (hook preempt). */
-export function urgentCutLine(id: string, body: string): string {
-  return `${steerLine(id, body)} A tool call cut short for this: redo it if it still applies.`;
+export function urgentCutLine(id: string, body: string, endTurn = false): string {
+  return `${steerLine(id, body, endTurn)} A tool call cut short for this: redo it if it still applies.`;
 }
 
 /** The turn-end guard's one reminder per episode (src/lifecycle/turn-end-guard.ts). */
