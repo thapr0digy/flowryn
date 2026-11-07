@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * No silent waits, end to end (docs/notes/2026-11-06-no-silent-waits-vj.md): a

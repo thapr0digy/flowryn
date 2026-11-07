@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeLeaderEnv, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A prompt Claude takes into a running turn (a background notice, a message typed while busy)

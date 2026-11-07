@@ -6,6 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { AUTO_TEST_POLL_MS, autoContractSuite, dispatchClaude, events, items, NEW_VERSION, versions } from "../helpers/auto-contract.ts";
 import { FAKE_VERSION, setHarnessVersion } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const fleet = autoContractSuite();
 

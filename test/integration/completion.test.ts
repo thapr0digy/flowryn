@@ -10,6 +10,9 @@ import { tx } from "../../src/db/db.ts";
 import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { cli, makeHome, REPO_ROOT, seedLeader, seedRun, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn completion values` and the zsh script driving it

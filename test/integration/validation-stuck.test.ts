@@ -5,6 +5,9 @@ import { RELAY_HEADER } from "../../src/attention/router.ts";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A validation slot held with no progress (task stuck-validations-become-y6),

@@ -15,6 +15,9 @@ import { filledDesignPage } from "../helpers/design-page.ts";
 import { listTasks, processRunner } from "../../src/journal/tasks-axi.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { checkoutChecks } from "../../src/doctor/doctor.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 let fleet: FleetEnv | null = null;
 let ship: ShipEnv | null = null;

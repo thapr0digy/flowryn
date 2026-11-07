@@ -4,6 +4,9 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from "node:path";
 import { decode } from "@toon-format/toon";
 import { cli, cliJson, makeHome, readText, REPO_ROOT, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const homes: TestHome[] = [];
 const daemons: DaemonProc[] = [];

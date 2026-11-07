@@ -3,6 +3,9 @@ import { openItem } from "../../src/attention/items.ts";
 import { tx } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * M3 exit test: every race in design section 9 has a passing test. Each
