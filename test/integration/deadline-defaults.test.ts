@@ -89,14 +89,16 @@ async function until(check: () => boolean, ms = 5_000): Promise<boolean> {
 }
 
 describe("deadline defaults", () => {
-  test("ask records the kind: no rule is nomistakes, a floor is nomistakes-floor, unread facts nomistakes-unread, the worker's own reason none", async () => {
+  test("ask records the kind: a kind the finding table cannot judge is nomistakes, a floor is nomistakes-floor, unread facts nomistakes-unread, the worker's own reason none, the leader's none", async () => {
     const { h, head, ask, row } = await setup();
+    parkAt(h, head, "rebase", ['rb-1,warning,src/old.ts,1,ask-user,"unused import"']);
+    expect(row(await ask("rb-1 in a touched file"))).toMatchObject({ state: "open", reserved_class: "nomistakes" });
     parkAt(h, head, "lint", ['lint-1,warning,src/old.ts,1,ask-user,"unused import"']);
-    expect(row(await ask("lint-1 in a touched file"))).toMatchObject({ state: "open", reserved_class: "nomistakes" });
+    expect(row(await ask("lint-1 in a touched file: the leader's"))).toMatchObject({ state: "open", reserved_class: null });
     parkAt(h, head, "review", ['r-2,warning,src/elsewhere.ts,9,ask-user,"pre-existing"']);
     expect(row(await ask("r-2 outside the diff"))).toMatchObject({ reserved_class: "nomistakes-floor" });
-    parkAt(h, head, "lint", ['lint-2,error,src/old.ts,3,ask-user,"type error"']);
-    expect(row(await ask("an error finding"))).toMatchObject({ reserved_class: "nomistakes-floor" });
+    parkAt(h, head, "ci", ['ci-1,warning,src/old.ts,3,ask-user,"flaky check"']);
+    expect(row(await ask("a ci finding"))).toMatchObject({ reserved_class: "nomistakes-floor" });
     parkAt(h, head, "lint", ['lint-3,warning,src/old.ts,1,ask-user,"unused"']);
     expect(row(await ask("worker reserved it", ["--reserved", "a scope call"]))).toMatchObject({ reserved_class: null });
     writeFileSync(join(h.home, "nm-status"), "");
@@ -105,8 +107,8 @@ describe("deadline defaults", () => {
 
   test("away: the due opted-in question is answered via deadline and steered, the floored one waits, the brief lists it, the user's undo steers again", async () => {
     const { h, run, head, ask, row, backdate } = await setup();
-    parkAt(h, head, "lint", ['lint-1,warning,src/old.ts,1,ask-user,"unused import"']);
-    const eligible = await ask("lint-1 in a touched file");
+    parkAt(h, head, "rebase", ['rb-1,warning,src/old.ts,1,ask-user,"unused import"']);
+    const eligible = await ask("rb-1 in a touched file");
     parkAt(h, head, "review", ['r-2,warning,src/elsewhere.ts,9,ask-user,"pre-existing"']);
     const floored = await ask("r-2 outside the diff");
     backdate(eligible, floored);

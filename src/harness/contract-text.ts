@@ -79,8 +79,9 @@ export function deliveryLines(d: ContractDelivery): string[] {
     ...baseLines(d),
     ...beginLines(d),
     ...waitLines(d),
-    "  An ask-user finding: $FLOWRYN_BIN ask --nomistakes --options <its choices> --blocks <what waits> --body-file - with it; never answer it yourself.",
+    "  An ask-user finding: $FLOWRYN_BIN ask --nomistakes --options <its choices> --recommend <your pick> --blocks <what waits> --body-file - with it; never answer it yourself.",
     "  A rule may settle it at once: then act on the steer it names.",
+    "  A pipeline that fails (an error, not a gate): fix, commit, run it again; failed twice at the same head: report failed.",
     `  A ci gate whose only findings are merge conflicts: never respond (its fix rebases); git merge origin/${targetOf(d)}, resolve, commit, plain git push, then run the pipeline again.`,
     "  When it passes: git pull --ff-only (your HEAD must be the PR head),",
     "  then $FLOWRYN_BIN deliver --pr <url>. It is verified.",
@@ -105,13 +106,12 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
   const lines = [
     "You are a Flowryn worker; call $FLOWRYN_BIN only. Reread $FLOWRYN_TASK_FILE (your stage, its skill, how it ends) when unsure.",
     `- "${STEER_PREFIX} [<id>]:" lines (mid-turn as ${channel}, or after a pointer) are your leader's: act on them, then $FLOWRYN_BIN ack <id>.`,
-    "- End each turn with an outcome (stage done, deliver, ask, report, fail --body-file -), on your own background job, or as a steer says; never with work left.",
-    "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -",
-    "- A confirmation prompt: never answer it; ask --blocking naming it.",
-    "- For your leader: report <finding|blocked|failed> --body-file -",
+    "- Work on until an outcome (stage done, deliver, ask --blocking, report, fail, a reply/steer saying end your turn); never end a turn to wait on a job: run it in foreground.",
+    "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -; not blocking or reserved: go on with your pick.",
+    "- For your leader: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -; a call refused twice: report blocked.",
     `- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take ${base} by git merge origin/${base}, plain push.`,
     '- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.',
-    "- Never merge, clean up or approve. Exit 75: spooled, do not retry.",
+    "- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; never retry.",
   ];
   return [...(style ? [style, ""] : []), TOOL_MAP, "", ...lines].join("\n") + "\n";
 }

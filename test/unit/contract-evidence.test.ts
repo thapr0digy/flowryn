@@ -76,7 +76,7 @@ describe("a steer sent with --end-turn", () => {
   test("is named by the worker contract's outcome rule, so the two never contradict", () => {
     const rule = workerContract("claude", null, { base: null, defaultBranch: "main" })
       .split("\n")
-      .find((l) => l.startsWith("- End each turn with an outcome"))!;
-    expect(rule).toContain("or as a steer says");
+      .find((l) => l.startsWith("- Work on until an outcome"))!;
+    expect(rule).toContain("a reply/steer saying end your turn");
   });
 });
