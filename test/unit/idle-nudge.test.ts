@@ -427,12 +427,10 @@ describe("[workers] idle_nudge_min and idle_nudge_max", () => {
 });
 
 describe("the turn-end wording", () => {
-  test("the build and visual QA skills say never end a turn with commits unpushed or undelivered, and give no background-job advice", async () => {
+  test("the build skill says never end a turn with commits unpushed or undelivered; no stage skill gives background-job advice", async () => {
     const { STAGE_SKILLS } = await import("../../src/skills/stages.ts");
-    for (const name of ["flowryn-build-test", "flowryn-visual-qa"]) {
-      const body = STAGE_SKILLS.find((s) => s.name === name)!.body;
-      expect(body).toContain("- Never end your turn with commits unpushed or undelivered.");
-      expect(body).not.toContain("run_in_background");
-    }
+    const body = (name: string) => STAGE_SKILLS.find((s) => s.name === name)!.body;
+    expect(body("flowryn-build-test")).toContain("- Never end your turn with commits unpushed or undelivered.");
+    for (const name of ["flowryn-build-test", "flowryn-visual-qa"]) expect(body(name)).not.toContain("run_in_background");
   });
 });
