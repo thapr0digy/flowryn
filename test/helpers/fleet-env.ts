@@ -142,6 +142,8 @@ export interface FleetOptions {
   supervised?: boolean;
   /** [workers] turn_end_guard (default on). */
   turnEndGuard?: boolean;
+  /** [workers] idle_nudge_min and idle_nudge_max (default 10 minutes and 3: no nudge inside a test). */
+  idleNudge?: { min: number; max?: number };
   /** [workers] worktree_provider (default git in test homes; treehouse runs the home's stand-in, test/helpers/fake-treehouse.ts). */
   worktreeProvider?: "treehouse" | "git";
   /** The fake Herdr starts these scripts in place of the FAKE: worker, per harness kind. */
@@ -171,6 +173,7 @@ export async function makeFleetEnv(options: FleetOptions = {}): Promise<FleetEnv
         "[workers]",
         `worktree_root = ${JSON.stringify(join(home, "wt"))}`,
         ...(options.turnEndGuard === false ? ["turn_end_guard = false"] : []),
+        ...(options.idleNudge ? [`idle_nudge_min = ${options.idleNudge.min}`, ...(options.idleNudge.max ? [`idle_nudge_max = ${options.idleNudge.max}`] : [])] : []),
         ...(options.worktreeProvider ? [`worktree_provider = "${options.worktreeProvider}"`] : []),
         "[workers.claude]",
         'pretrust = "register"',

@@ -381,6 +381,8 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       continuations: new Map(),
       urgent,
     };
+    // Set once the restart controller exists below; until then a nudge waits, as during a handoff.
+    let restartBusyNow: () => boolean = () => true;
     reconciler = new Reconciler({
       db: database,
       runtime: () => runtime,
@@ -394,6 +396,12 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       docker: () => resolveTool(config, "docker"),
       released: () => scheduler?.kick(),
       harnessGate: (harness) => gateHarness(database, config, harness, harnessVersion, "reconciler", "resume", Date.now),
+      idleNudge: () => {
+        const workers = workersConfig(config);
+        return { firstMs: workers.idle_nudge_min * 60_000, max: workers.idle_nudge_max };
+      },
+      git: gitRunner(resolveTool(config, "git") ?? "git", 30_000),
+      restartBusy: () => restartBusyNow(),
       // The invariant pass judges the snapshot only once it matches the file: a hand edit is diffed first.
       backlogFresh: async () => {
         await watcher.refreshIfIdle("backlog");
@@ -693,6 +701,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       logDir: stateFiles(config.state_dir).logs,
     });
     const restartBusy = () => restart.inProgress || readPending(database) !== null || handoffPending(database);
+    restartBusyNow = restartBusy;
     upkeep = new Upkeep({
       db: database,
       config: () => upkeepConfig(config),

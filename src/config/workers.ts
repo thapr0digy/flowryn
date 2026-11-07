@@ -22,6 +22,10 @@ export interface HerdrConfig {
 
 export const DEFAULT_HERDR_ALERT_MS = 60_000;
 
+/** [workers] idle_nudge_min and idle_nudge_max defaults (src/lifecycle/idle-nudge.ts). */
+export const DEFAULT_IDLE_NUDGE_MIN = 10;
+export const DEFAULT_IDLE_NUDGE_MAX = 3;
+
 export const CLAUDE_PERMISSION_MODES = ["bypassPermissions", "auto", "acceptEdits", "default", "dontAsk", "plan"] as const;
 export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
 
@@ -83,6 +87,10 @@ export interface WorkersConfig {
   branch_prefix: string;
   /** The turn-end guard's reminder on an outcome-less turn end; contract runs turn it off, since their turns end on purpose. */
   turn_end_guard: boolean;
+  /** Minutes a stopped worker with work left waits for its first idle nudge; each later one waits twice the last (src/lifecycle/idle-nudge.ts). */
+  idle_nudge_min: number;
+  /** Idle nudges per episode before the leader gets one worker_stalled item. */
+  idle_nudge_max: number;
   claude: ClaudeWorkerConfig;
   pi: PiWorkerConfig;
 }
@@ -118,6 +126,14 @@ function stringMap(value: unknown, where: string): Record<string, string> {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new FlowrynError("config_invalid", `${where}: ${key} is not an environment variable name`);
   }
   return raw as Record<string, string>;
+}
+
+function positiveNumber(value: unknown, where: string, fallback: number, integer: boolean): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || (integer && !Number.isInteger(value))) {
+    throw new FlowrynError("config_invalid", `${where} must be a positive ${integer ? "integer" : "number"}`);
+  }
+  return value;
 }
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], where: string, fallback: T): T {
@@ -176,6 +192,8 @@ export function workersConfig(config: FlowrynConfig): WorkersConfig {
     tmp_root: tmpRoot(config),
     branch_prefix: branchPrefix(optString(raw.branch_prefix, "[workers] branch_prefix") ?? "flowryn/"),
     turn_end_guard: optBool(raw.turn_end_guard, "[workers] turn_end_guard", true),
+    idle_nudge_min: positiveNumber(raw.idle_nudge_min, "[workers] idle_nudge_min", DEFAULT_IDLE_NUDGE_MIN, false),
+    idle_nudge_max: positiveNumber(raw.idle_nudge_max, "[workers] idle_nudge_max", DEFAULT_IDLE_NUDGE_MAX, true),
     claude: {
       model: optString(claude.model, "[workers.claude] model"),
       effort: optString(claude.effort, "[workers.claude] effort"),

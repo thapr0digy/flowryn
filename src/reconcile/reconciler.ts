@@ -8,7 +8,7 @@ import { identityOf } from "../lifecycle/control.ts";
 import { getRun, isTerminal, openRunItemOnce, openRuns, recordEvidence, setLiveness, taskTitle, type Liveness, type RunRow } from "../lifecycle/runs.ts";
 import { observedTransition, observeLiveness } from "../lifecycle/observed.ts";
 import { claimAutoResume, deathFacts, deferAutoResume } from "../lifecycle/auto-resume.ts";
-import { flagUnackedSteers, unackedSteers, type SteerBus } from "../lifecycle/steers.ts";
+import { flagUnackedSteers, unackedSteers, type MessageRow, type SteerBus } from "../lifecycle/steers.ts";
 import { HerdrError } from "../runtime/herdr/client.ts";
 import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/herdr/runtime.ts";
 import { aliveOrUnknown, type PsRunner } from "../runtime/proc.ts";
@@ -19,6 +19,8 @@ import { reminderIgnored } from "../lifecycle/turn-end-guard.ts";
 import { staleHooksDue } from "../lifecycle/stale-hooks.ts";
 import { describeJobs, runningBackgroundJobs } from "../lifecycle/background-jobs.ts";
 import { carryIdleSteer, idleCarryBlocker } from "../lifecycle/idle-carry.ts";
+import { deliveredHeadOf, NO_GIT_FACTS, readGitFacts, runIdleNudge, runKind, type GitFacts, type IdleNudgeConfig } from "../lifecycle/idle-nudge.ts";
+import type { GitRunner } from "../policy/landed.ts";
 import { noteHerdrUp } from "./herdr-health.ts";
 import { applyDocker, listLabelled } from "./docker.ts";
 import { checkInvariant } from "./invariant.ts";
@@ -75,6 +77,15 @@ export interface ReconcilerDeps {
    * and say whether it now matches it; absent, the invariant pass is skipped.
    */
   backlogFresh?(): Promise<boolean>;
+  /**
+   * The idle-with-work nudge's clock ([workers] idle_nudge_min, idle_nudge_max;
+   * src/lifecycle/idle-nudge.ts); absent, no worker is nudged.
+   */
+  idleNudge?(): IdleNudgeConfig;
+  /** Git for the nudge's local ref reads (HEAD against the remote branch and the delivered head). */
+  git?: GitRunner;
+  /** A daemon restart is asked for or under way: its handoff owns the workers, so nobody is nudged. */
+  restartBusy?(): boolean;
   /**
    * The wait registry's pass (src/reconcile/waits.ts): recover each wait past its deadline, itemize one
    * its recovery did not clear; absent, waits are not checked.
@@ -409,6 +420,8 @@ export class Reconciler {
       if (herdrStatus !== null) recordEvidence(db, run.id, "herdr", 5, { agent_status: herdrStatus }, t);
       return previousHerdr ? ((JSON.parse(previousHerdr.value) as { agent_status?: string }).agent_status ?? null) : null;
     });
+    const gitFacts = await this.nudgeGitFacts(run, t);
+    let nudged = null as MessageRow | null;
     const checked = observedTransition(db, run, "live_checks", "reconciler", t, () => {
       if (!started) {
         if (t - launchedAt >= tm.trust_wedge_ms) {
@@ -464,7 +477,10 @@ export class Reconciler {
       setLiveness(db, run, busy ? "busy" : "idle", "reconciler", { lease: busy ? "held" : "expired or released" }, t);
       const waiting = !busy && waitingOnOthers(db, run);
       if (busy || waiting) resolveRunItems(db, run.id, ["worker_idle"], busy ? "busy again" : "waiting on you", t);
-      const idleFrom = !busy && !waiting && run.state === "running" && run.idle_since !== null ? idleEpisodeStart(db, run) : null;
+      const nudge = !busy && !waiting && this.deps.idleNudge ? runIdleNudge(db, run, { facts: gitFacts, config: this.deps.idleNudge(), timing: tm, restartBusy: this.deps.restartBusy?.() ?? false }, t) : null;
+      nudged = nudge?.steer ?? null;
+      // A nudge episode owns this idle stretch, ending in worker_stalled: the worker_idle pointer would repeat it.
+      const idleFrom = !busy && !waiting && !nudge?.episodeActive && run.state === "running" && run.idle_since !== null ? idleEpisodeStart(db, run) : null;
       if (idleFrom !== null && t - idleFrom >= tm.idle_alert_ms && idleAlertDue(db, run.id, idleFrom, t, tm.idle_realert_ms)) {
         const ignored = reminderIgnored(db, run);
         const jobs = runningBackgroundJobs(db, run, t, "reconciler");
@@ -482,7 +498,27 @@ export class Reconciler {
     });
     // A newer hook, cancel or worker overtook this look: the next pass judges the idle carry on current state.
     if (!checked.applied) return;
+    if (nudged) {
+      this.deps.log(`reconciler: ${run.id} idle with work left; nudged with steer ${nudged.id}`);
+      this.deps.bus.notify(run.id);
+    }
     await this.idleCarry(run, runtime, herdrStatus, t);
+  }
+
+  /**
+   * A stopped ship's local git refs, for the idle nudge's unpushed and
+   * undelivered conditions: read before the observed transition (git is
+   * async), only for a run that could be nudged now.
+   */
+  private async nudgeGitFacts(run: RunRow, t: number): Promise<GitFacts> {
+    const { git, idleNudge, db } = this.deps;
+    const stopped = run.state === "running" && run.idle_since !== null && !(run.busy_until !== null && run.busy_until > t);
+    if (!git || !idleNudge || !stopped || runKind(db, run) !== "ship") return NO_GIT_FACTS;
+    try {
+      return await readGitFacts(git, run, deliveredHeadOf(db, run));
+    } catch (error) {
+      return { ...NO_GIT_FACTS, unknown: (error as Error).message };
+    }
   }
 
   /**

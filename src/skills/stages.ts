@@ -25,6 +25,9 @@ export interface StageSkill {
   files?: Record<string, string>;
 }
 
+/** The build and QA stages' rule on ending a turn (no-idle-workers-23 phase 2): the idle nudge's other half. */
+export const UNDELIVERED_WORK_RULE = "- Never end your turn with commits unpushed or undelivered.";
+
 const DESIGN_BODY = `# Flowryn design stage
 
 Goal: a design the user approves in Lavish, plus a phase plan when the feature is bigger than one change. No product code.
@@ -80,6 +83,7 @@ Rules:
 - Stay inside your worktree and your branch.
 - Write the docs the change needs where the project's AGENTS.md or CLAUDE.md says, as a new file when it says so.
 - Be autonomous: choices the design left open are yours; record each and why in the PR. Ask only when you cannot proceed.
+${UNDELIVERED_WORK_RULE}
 `;
 
 const QA_BODY = `# Flowryn visual QA stage
