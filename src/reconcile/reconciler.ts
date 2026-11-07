@@ -14,7 +14,7 @@ import { RUN_TOKEN, type HerdrRuntime, type PaneProcesses } from "../runtime/her
 import { aliveOrUnknown, type PsRunner } from "../runtime/proc.ts";
 import { openDivergence } from "./divergence.ts";
 import { clearPrompt, idleByDesign, openBlockedPrompt } from "../lifecycle/prompt-wedge.ts";
-import { idleAlertDue, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
+import { idleAlertDue, idleAlertLine, idleEpisodeStart, waitingOnOthers } from "../lifecycle/idle-alert.ts";
 import { reminderIgnored } from "../lifecycle/turn-end-guard.ts";
 import { staleHooksDue } from "../lifecycle/stale-hooks.ts";
 import { describeJobs, runningBackgroundJobs } from "../lifecycle/background-jobs.ts";
@@ -470,9 +470,8 @@ export class Reconciler {
         const jobs = runningBackgroundJobs(db, run, t, "reconciler");
         const payload = { idle_ms: t - idleFrom, ignored_reminder: ignored, ...(jobs.length > 0 ? { background_jobs: jobs.map((j) => j.job ?? j.toolUseId) } : {}) };
         const event = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: run.id, taskId: run.task_id, payload });
-        const idleFor = `has been idle ${Math.round((t - idleFrom) / 60_000)}m`;
-        const why = jobs.length > 0 ? `${idleFor} waiting on ${describeJobs(jobs, t)}` : ignored ? `got the turn-end reminder, ended its turn again, and ${idleFor} without an outcome` : `${idleFor} without an outcome`;
-        openRunItemOnce(db, "worker_idle", run, event.seq, `Worker for ${taskTitle(db, run.task_id)} ${why}`, t);
+        const why = jobs.length > 0 ? { jobs: describeJobs(jobs, t) } : { ignoredReminder: ignored };
+        openRunItemOnce(db, "worker_idle", run, event.seq, idleAlertLine(taskTitle(db, run.task_id), t - idleFrom, why), t);
       }
       const stale = staleHooksDue(db, run, herdrStatus, t, tm);
       if (stale.due) {
