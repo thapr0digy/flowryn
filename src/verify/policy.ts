@@ -46,11 +46,24 @@ export function normalizeStep(step: string): string {
   return out;
 }
 
-const normalizeItem = (item: VerifyItem): VerifyItem => (typeof item === "string" ? normalizeStep(item) : item.map(normalizeStep));
+type CanonicalStep = string | { run: string; when_changed: readonly string[] };
+
+/**
+ * The normalized steps, groups nested. A step with `when_changed` globs is `{ run, when_changed }`,
+ * since a pass that skipped it proves less; a list without any hashes exactly as before the option existed.
+ */
+function canonicalSteps(config: Pick<VerifyConfig, "steps" | "when_changed">): (CanonicalStep | CanonicalStep[])[] {
+  let flat = 0;
+  const one = (step: string): CanonicalStep => {
+    const when = config.when_changed?.[flat++] ?? null;
+    return when ? { run: normalizeStep(step), when_changed: when } : normalizeStep(step);
+  };
+  return config.steps.map((item: VerifyItem) => (typeof item === "string" ? one(item) : item.map(one)));
+}
 
 /** "vp1:<sha256 hex>" of the normalized steps, in order, and the artifact. */
-export function verifyPolicyId(config: Pick<VerifyConfig, "steps" | "binary">): string {
-  const canonical = JSON.stringify([TAG, ENCODING, config.steps.map(normalizeItem), config.binary]);
+export function verifyPolicyId(config: Pick<VerifyConfig, "steps" | "binary" | "when_changed">): string {
+  const canonical = JSON.stringify([TAG, ENCODING, canonicalSteps(config), config.binary]);
   return `vp${ENCODING}:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 

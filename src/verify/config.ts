@@ -1,6 +1,7 @@
 import { isAbsolute, normalize } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { table, type FlowrynConfig } from "../config/config.ts";
+import { compileGlob } from "./changed.ts";
 
 /**
  * A project's verify steps, from config.toml `[projects.<id>]`: the commands
@@ -18,6 +19,11 @@ export type LandingMode = (typeof LANDING_MODES)[number];
 
 export interface VerifyConfig {
   steps: VerifyItem[];
+  /**
+   * Each step's `when_changed` globs, by its place in the flattened list (groups in order),
+   * or null: it always runs. Absent or empty: no step has any (docs/notes/2026-11-06-fast-tests-parallel-36.md).
+   */
+  when_changed?: (readonly string[] | null)[];
   /** A file the steps build, relative to the worktree, copied out before the worktree goes. */
   binary: string | null;
   /** The whole run, every step together. */
@@ -33,7 +39,7 @@ const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
-  return `[projects.${projectId}]\nverify = ["bun install --frozen-lockfile", ["bun run typecheck", "npx oxlint"], "bun test", "bun run build"]`;
+  return `[projects.${projectId}]\nverify = ["bun install --frozen-lockfile", ["bun run typecheck", "npx oxlint", "bun run build"], "bun test"]`;
 }
 
 function projectTable(config: FlowrynConfig, projectId: string): Record<string, unknown> {
@@ -43,16 +49,57 @@ function projectTable(config: FlowrynConfig, projectId: string): Record<string, 
 
 const isStep = (s: unknown): s is string => typeof s === "string" && s.trim().length > 0;
 
-/** The `verify` list, each group of one read as a plain step; null when malformed. */
-function readItems(raw: unknown): VerifyItem[] | null {
+/** One step: its command, and its when_changed globs or null. */
+interface ReadStep {
+  run: string;
+  when: string[] | null;
+}
+
+/**
+ * A step as written: a command, or a table `{ run = "...", when_changed = ["src/x/**"] }`.
+ * Null when it is neither; throws config_invalid on a table whose globs are malformed.
+ */
+function readStep(raw: unknown, where: string): ReadStep | null {
+  if (isStep(raw)) return { run: raw, when: null };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const entry = raw as Record<string, unknown>;
+  for (const key of Object.keys(entry)) if (key !== "run" && key !== "when_changed") throw new FlowrynError("config_invalid", `${where} verify: a step table takes run and when_changed, not ${key}`);
+  if (!isStep(entry.run)) throw new FlowrynError("config_invalid", `${where} verify: a step table needs run, the command`);
+  const globs = entry.when_changed;
+  if (globs === undefined) return { run: entry.run, when: null };
+  if (!Array.isArray(globs) || globs.length === 0 || !globs.every((g) => typeof g === "string")) {
+    throw new FlowrynError("config_invalid", `${where} verify: when_changed of "${entry.run}" must be a non-empty list of globs`);
+  }
+  for (const glob of globs as string[]) {
+    try {
+      compileGlob(glob);
+    } catch (error) {
+      throw new FlowrynError("config_invalid", `${where} verify: when_changed glob "${glob}" of "${entry.run}" ${(error as Error).message}`);
+    }
+  }
+  return { run: entry.run, when: [...(globs as string[])] };
+}
+
+/** The `verify` list, each group of one read as a plain step, with each step's globs in flattened order; null when malformed. */
+function readItems(raw: unknown, where: string): { items: VerifyItem[]; when: (string[] | null)[] } | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const items: VerifyItem[] = [];
+  const when: (string[] | null)[] = [];
   for (const item of raw) {
-    if (isStep(item)) items.push(item);
-    else if (Array.isArray(item) && item.length > 0 && item.every(isStep)) items.push(item.length === 1 ? item[0]! : [...item]);
-    else return null;
+    const single = readStep(item, where);
+    if (single) {
+      items.push(single.run);
+      when.push(single.when);
+      continue;
+    }
+    if (!Array.isArray(item) || item.length === 0) return null;
+    const group = item.map((step) => readStep(step, where));
+    if (group.some((step) => step === null)) return null;
+    const steps = group as ReadStep[];
+    items.push(steps.length === 1 ? steps[0]!.run : steps.map((step) => step.run));
+    when.push(...steps.map((step) => step.when));
   }
-  return items;
+  return { items, when };
 }
 
 function positiveMinutes(value: unknown, where: string, key: string): number {
@@ -74,8 +121,8 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
     if (raw.landing === "queue") throw new FlowrynError("config_invalid", `${where} landing = "queue" needs verify steps: the queue verifies each PR again after merging main into it`);
     return null;
   }
-  const steps = readItems(raw.verify);
-  if (!steps) throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands, or of lists of commands run in parallel`);
+  const read = readItems(raw.verify, where);
+  if (!read) throw new FlowrynError("config_invalid", `${where} verify must be a non-empty list of commands (or { run, when_changed } tables), or of lists of them run in parallel`);
   let binary: string | null = null;
   if (raw.verify_binary !== undefined) {
     const value = raw.verify_binary;
@@ -86,7 +133,8 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   }
   const timeout_ms = positiveMinutes(raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN, where, "verify_timeout_min");
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
-  return { steps, binary, timeout_ms, step_timeout_ms };
+  const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
+  return { steps: read.items, ...(when_changed ? { when_changed } : {}), binary, timeout_ms, step_timeout_ms };
 }
 
 /**
