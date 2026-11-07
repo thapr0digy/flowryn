@@ -13,7 +13,7 @@ import { HARNESS_IDS, type HarnessId } from "../harness/types.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { checkStart, createRun, signInOf, storedBase, type StartDeps } from "../lifecycle/dispatch.ts";
 import { reviveReview, revivalBlocked, revivalsDue } from "../lifecycle/review-revival.ts";
-import { activeAutoAttempt, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
+import { activeAutoAttempt, autoChecksOn, gateHarness, unverifiedVersion, type HarnessCheck } from "../lifecycle/harness-gate.ts";
 import type { LaunchMode } from "../lifecycle/launcher.ts";
 import type { PhaseRow } from "../lifecycle/plans.ts";
 import { phaseReadiness } from "../lifecycle/stacks.ts";
@@ -67,7 +67,7 @@ export interface SchedulerDeps {
   /** Start queued verifies while slots are free (src/verify/start.ts): first in each grant, since a verify is the step closest to shipping. */
   drainVerifies?(stopped: () => boolean): Promise<number>;
   /** Start queued asks while their slots are free (src/ask/runner.ts): they hold no pool lease, so they never wait on a stage. */
-  drainAsks?(stopped: () => boolean): number;
+  drainAsks?(stopped: () => boolean): Promise<number>;
 }
 
 interface Candidate {
@@ -378,7 +378,7 @@ export class Scheduler {
   private async grant(): Promise<void> {
     // Drain before fill: a queued verify is nearer shipping than any stage, so it takes a free validation slot first.
     if (this.deps.drainVerifies && !this.stopped) await this.step("verify-queue", async () => void (await this.deps.drainVerifies!(() => this.stopped)));
-    if (this.deps.drainAsks && !this.stopped) await this.step("ask-queue", async () => void this.deps.drainAsks!(() => this.stopped));
+    if (this.deps.drainAsks && !this.stopped) await this.step("ask-queue", async () => void (await this.deps.drainAsks!(() => this.stopped)));
     const config = this.deps.config();
     // Reviews, decisions and merges waiting on you or the leader (docs/notes/2026-10-29-why-waiting-covers-fy.md), then the sweep.
     await this.explainWaits();
@@ -452,9 +452,11 @@ export class Scheduler {
       } else usage = hold.usage;
     }
     // A grant that launches a worker checks the installed harness version first (design section 5).
+    let verified: string | null = null;
     if (c.run.pending_launch) {
       const check = await this.harnessCheck(c.run.harness, config);
       if (check.state !== "verified") return this.refuse(c, harnessRefusalOf(check, activeAutoAttempt(db, config, c.run.harness), now()));
+      verified = check.version;
     }
     if (c.needs.length > 0) {
       pass.host ??= await this.hostVerdict(capacity.host);
@@ -479,7 +481,12 @@ export class Scheduler {
           if (fresh.pending_launch !== "fresh" || (fresh.account ?? fresh.harness) !== moved.from) return null;
           overflowRun(db, config, fresh, moved.from, account, moved.why, now());
         }
-        const row = moved ? getRunWithPolicy(db, fresh.id)! : fresh;
+        // The version the grant verified is the one that launches: a run that waited on an untested version records it.
+        if (verified && fresh.harness_version !== verified) {
+          db.query("UPDATE runs SET harness_version = ?2, updated_at = ?3 WHERE id = ?1").run(fresh.id, verified, now());
+          appendEvent(db, { source: "daemon", kind: "run.harness_version", runId: fresh.id, taskId: fresh.task_id, payload: { harness: fresh.harness, from: fresh.harness_version, to: verified }, ts: now() });
+        }
+        const row = moved || (verified && fresh.harness_version !== verified) ? getRunWithPolicy(db, fresh.id)! : fresh;
         const started = activateStage(db, config, row, now(), { steer });
         if (started && usage === "probe" && account) claimProbe(db, account.id, c.run.id, now());
         if (started) closeExplanations(db, c.run.id, ["capacity", "resume"], "granted", now());
@@ -770,14 +777,19 @@ export class Scheduler {
     });
   }
 
-  /** Work that waits for a grant longer than wait_alert_ms: one P1 (design section 16), closed once nothing waits that long. */
+  /** Work that waits for a grant longer than wait_alert_ms: one P1 (design section 16), closed once nothing waits that long. A launch held on an untested harness version while automatic checks are on is the check's to report: its pass releases the run, its final failure opens its own P1. */
   private alerts(): void {
     const { db, now } = this.deps;
     const t = now();
-    const threshold = schedTiming(this.deps.config()).wait_alert_ms;
+    const config = this.deps.config();
+    const threshold = schedTiming(config).wait_alert_ms;
+    const auto = autoChecksOn(db, config);
+    const checked = HARNESS_IDS.filter((h) => auto && unverifiedVersion(db, h) !== null);
+    const checking = JSON.stringify(checked);
     const waitingRuns = `FROM runs r WHERE r.state NOT IN ('cleaned','failed','cancelled')
-           AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead') AND r.waiting_since IS NOT NULL`;
-    const oldest = db.query(`SELECT r.task_id, r.waiting_since ${waitingRuns} ORDER BY r.waiting_since LIMIT 1`).get() as { task_id: string; waiting_since: number } | null;
+           AND (r.stage_state = 'waiting' OR r.pending_launch IS NOT NULL) AND (r.pending_launch IS NOT NULL OR r.liveness != 'dead') AND r.waiting_since IS NOT NULL
+           AND NOT (r.pending_launch IS NOT NULL AND r.harness IN (SELECT value FROM json_each(?1)))`;
+    const oldest = db.query(`SELECT r.task_id, r.waiting_since ${waitingRuns} ORDER BY r.waiting_since LIMIT 1`).get(checking) as { task_id: string; waiting_since: number } | null;
     const open = findOpenItem(db, "capacity_wait", null);
     if (oldest && t - oldest.waiting_since >= threshold) {
       if (open) return;
@@ -785,16 +797,16 @@ export class Scheduler {
       const uncoveredRuns = (
         db
           .query(
-            `SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?1 AND NOT EXISTS (SELECT 1 FROM waits w WHERE w.key = 'run:' || r.id AND w.item_id IS NOT NULL
+            `SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?2 AND NOT EXISTS (SELECT 1 FROM waits w WHERE w.key = 'run:' || r.id AND w.item_id IS NOT NULL
                AND (w.item_id NOT LIKE 'covered:%' OR EXISTS (SELECT 1 FROM items i WHERE i.id = substr(w.item_id, 9) AND i.state IN ('open','presented'))))`,
           )
-          .get(t - threshold) as { n: number }
+          .get(checking, t - threshold) as { n: number }
       ).n;
       if (uncoveredRuns === 0) return;
-      const count = (db.query(`SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?1`).get(t - threshold) as { n: number }).n;
+      const count = (db.query(`SELECT COUNT(*) AS n ${waitingRuns} AND r.waiting_since <= ?2`).get(checking, t - threshold) as { n: number }).n;
       const verify = queuedRequests(db)[0] ?? null;
       const host = hostState(db);
-      const untested = HARNESS_IDS.map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
+      const untested = HARNESS_IDS.filter((h) => !checked.includes(h)).map((h) => [h, unverifiedVersion(db, h)] as const).find(([, v]) => v !== null);
       const paused = pausedAccounts(db, t);
       const low = heldQuotaAccounts(db);
       const signedOut = signedOutAccounts(db);

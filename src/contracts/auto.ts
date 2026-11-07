@@ -48,8 +48,10 @@ import { openContractRecorded, recordPass } from "./verbs.ts";
  * - One at a time; never while a restart is pending or under way (and while
  *   one runs, the restart waits on its `contract_check` guard); not while
  *   Herdr is unreachable or Claude is usage-paused, since a failure is final.
- * - Once per version: a failed check opens one P1 with its report path and
- *   is never retried for that version. A check cut off by a daemon stop
+ * - Once per version, with one retry: a first failure is recorded as its own
+ *   attempt (contract.auto_failed, final false) and the check runs again; a
+ *   second failure opens one P1 with its report path and is never retried for
+ *   that version, so one flaky step never parks the work waiting on it. A check cut off by a daemon stop
  *   runs again at the next start: it never finished, so it never failed. A
  *   pass that ends after a reload to strict is not recorded (`unrecorded`)
  *   and runs again once relaxed is back.
@@ -73,6 +75,8 @@ import { openContractRecorded, recordPass } from "./verbs.ts";
 
 /** A check that has not finished after this long is stopped and counts as failed; each step has its own, shorter timeout. */
 export const AUTO_MAX_RUN_MS = 2 * 60 * 60_000;
+/** How many times a version is checked before a failure is final (the first try and one retry). */
+export const AUTO_TRIES = 2;
 /** How often the checker looks again. */
 export const AUTO_POLL_MS = 5_000;
 
@@ -256,6 +260,13 @@ function cleanupFields(cleanup: CleanupOutcome | null): Pick<AutoAttempt, "clean
   return cleanup.ok ? { cleanup: "ok" } : { cleanup: "failed", cleanup_detail: cleanup.problems.join("; ") };
 }
 
+/** Which try the next run of this version is: the retry an earlier failure queued, else the first. */
+function pendingTry(attempt: AutoAttempt | null, version: string, revision: number): number {
+  if (attempt?.version !== version || attemptRevision(attempt) !== revision) return 1;
+  if (attempt.state !== "waiting" && attempt.state !== "running") return 1;
+  return attempt.try ?? 1;
+}
+
 /** Is this attempt final for the version at this revision: passed or failed, or a pass strict left unrecorded while strict lasts? */
 function settled(attempt: AutoAttempt | null, version: string, revision: number, relaxedNow: boolean): boolean {
   if (attempt?.version !== version || attemptRevision(attempt) !== revision) return false;
@@ -311,7 +322,7 @@ export class AutoContractChecker {
         }
         // The manifest stays on the attempt until its resources are settled, so a crash mid-release finds it again.
         const revision = attemptRevision(attempt);
-        saveAutoAttempt(db, harness, { version: attempt.version, revision, state: "waiting", wait: "a rerun (the daemon stopped mid-check)", ...(attempt.manifest ? { manifest: attempt.manifest } : {}) });
+        saveAutoAttempt(db, harness, { version: attempt.version, revision, state: "waiting", wait: "a rerun (the daemon stopped mid-check)", ...(attempt.manifest ? { manifest: attempt.manifest } : {}), ...(attempt.try ? { try: attempt.try } : {}) });
         appendEvent(db, { source: "daemon", kind: "contract.auto_interrupted", payload: { harness, version: attempt.version, revision, started_at: attempt.started_at ?? null, manifest: attempt.manifest ?? null }, ts: now });
         if (attempt.manifest) this.interrupted.push({ harness, version: attempt.version, manifest: attempt.manifest });
       }
@@ -414,8 +425,10 @@ export class AutoContractChecker {
     const attempt = autoAttempt(db, harness);
     if (attempt?.version === version && attemptRevision(attempt) === revision && attempt.state === "waiting" && attempt.wait === wait) return;
     const now = this.deps.now();
+    // A retry that has to wait stays the retry.
+    const pending = pendingTry(attempt, version, revision);
     tx(db, () => {
-      saveAutoAttempt(db, harness, { version, revision, state: "waiting", wait });
+      saveAutoAttempt(db, harness, { version, revision, state: "waiting", wait, ...(pending > 1 ? { try: pending } : {}) });
       appendEvent(db, { source: "daemon", kind: "contract.auto_waiting", payload: { harness, version, revision, wait }, ts: now });
     });
   }
@@ -444,10 +457,11 @@ export class AutoContractChecker {
     const logPath = `${stem}.log`;
     const manifest = `${stem}.owned.json`;
     this.current = { harness, version, startedAt, process: null };
+    const attemptNo = pendingTry(autoAttempt(db, harness), version, revision);
     try {
       tx(db, () => {
-        saveAutoAttempt(db, harness, { version, revision, state: "running", started_at: startedAt, build, log: logPath, manifest });
-        appendEvent(db, { source: "daemon", kind: "contract.auto_started", payload: { harness, version, revision, build, log: logPath, manifest }, ts: startedAt });
+        saveAutoAttempt(db, harness, { version, revision, state: "running", started_at: startedAt, build, log: logPath, manifest, ...(attemptNo > 1 ? { try: attemptNo } : {}) });
+        appendEvent(db, { source: "daemon", kind: "contract.auto_started", payload: { harness, version, revision, build, log: logPath, manifest, try: attemptNo }, ts: startedAt });
       });
       log(`contracts: automatic check of ${harness} ${version} from build ${build}; log ${logPath}`);
       const job: AutoJob = { harness, version, binary, logPath, manifest, env: smokeEnv(this.deps.env) };
@@ -476,7 +490,7 @@ export class AutoContractChecker {
       // A stopping daemon cut it off: the next start runs it again and releases what it left (init), so nothing is final here.
       if (this.stopping) return;
       const cleanup = await this.settleCleanup(manifest);
-      this.finish(harness, version, build, logPath, startedAt, outcome, { manifest, ...cleanupFields(cleanup) });
+      this.finish(harness, version, build, logPath, startedAt, outcome, { manifest, ...cleanupFields(cleanup) }, attemptNo);
       this.recordCleanup(harness, version, manifest, cleanup);
     } finally {
       this.current = null;
@@ -549,7 +563,7 @@ export class AutoContractChecker {
     }
   }
 
-  private finish(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, outcome: AutoOutcome, extra: Partial<AutoAttempt>): void {
+  private finish(harness: HarnessId, version: string, build: string, logPath: string, startedAt: number, outcome: AutoOutcome, extra: Partial<AutoAttempt>, attemptNo = 1): void {
     const { db, log } = this.deps;
     const now = this.deps.now();
     const handed = parseHandoff(outcome.stdout);
@@ -580,9 +594,20 @@ export class AutoContractChecker {
     // The report's own path is in the line already: say "the report" in the reason.
     const why = problem!.replace(`${handed.report} `, "the report ");
     const where = handed.report ? `report ${handed.report}` : `log ${logPath}`;
+    if (attemptNo < AUTO_TRIES) {
+      // Not final yet: this attempt is recorded on its own, and the next pass runs the check again. Its manifest is settled
+      // already, so the waiting retry carries none (a waiting attempt's manifest is one a restart still has to release).
+      const { manifest: _settled, ...kept } = extra;
+      tx(db, () => {
+        appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, revision, build, report: handed.report, log: logPath, detail: why, try: attemptNo, final: false }, ts: now });
+        saveAutoAttempt(db, harness, { version: tested, revision, state: "waiting", wait: `a retry (try ${attemptNo + 1} of ${AUTO_TRIES}) after a failed first attempt`, try: attemptNo + 1, started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why, ...kept });
+      });
+      log(`contracts: the automatic check of ${harness} ${tested} did not pass (try ${attemptNo} of ${AUTO_TRIES}): ${why}; ${where}; it runs again`);
+      return;
+    }
     tx(db, () => {
-      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, revision, build, report: handed.report, log: logPath, detail: why }, ts: now });
-      saveAutoAttempt(db, harness, { version: tested, revision, state: "failed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why, ...extra });
+      const event = appendEvent(db, { source: "daemon", kind: "contract.auto_failed", payload: { harness, version: tested, revision, build, report: handed.report, log: logPath, detail: why, try: attemptNo, final: true }, ts: now });
+      saveAutoAttempt(db, harness, { version: tested, revision, state: "failed", started_at: startedAt, ended_at: now, build, report: handed.report, log: logPath, detail: why, ...extra, ...(attemptNo > 1 ? { try: attemptNo } : {}) });
       resolveItems(db, "harness_unverified", harnessItemKey(harness), `automatic contract check of ${tested} failed`, now);
       openUnverifiedItem(db, harness, tested, event.seq, now, autoFailureLine(harness, tested, handed.report ?? logPath, homedir()));
     });

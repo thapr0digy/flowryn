@@ -76,6 +76,16 @@ export interface ContractState {
 const LONG_MS = 240_000;
 const MID_MS = 120_000;
 
+/**
+ * The line that keeps a real worker from wrapping up early. Its standing
+ * rules say each turn ends with an outcome, and a scout's outcome is deliver;
+ * told only "reply ONE and end your turn", Claude sometimes delivered at the
+ * end of its first turn, so the run had landed before the idle steer existed
+ * ("the worker delivered before m2", 2026-11-06, docs/notes/2026-11-06-a-claude-pi-y5.md).
+ */
+export const CONTINUES_LINE =
+  "This task goes on through your leader's steers: a turn that ends with just the reply it asks for is this task's outcome. Do not deliver, report or run stage done until a steer tells you to deliver.";
+
 /** What the worker is told. Steer ids are predictable (m1, m2, ...) because the scratch daemon is fresh. */
 export function contractBody(harness: HarnessId, scripted: boolean): string {
   // A scout brief (src/lifecycle/brief.ts), so the dispatch passes the brief check of a real home.
@@ -87,6 +97,7 @@ export function contractBody(harness: HarnessId, scripted: boolean): string {
     "",
     "## Context",
     "Steers from your leader may arrive while you work or wait. Do what each one says, then acknowledge it with $FLOWRYN_BIN ack <id>.",
+    CONTINUES_LINE,
     "",
     "## Questions",
     "1. Run exactly this command and wait for it to finish: perl -e 'sleep 25'",
@@ -404,7 +415,14 @@ export function contractSteps(harness: HarnessId): ContractStep[] {
       name: "idle",
       typicalSeconds: harness === "claude" ? 30 : 5,
       async run(env) {
-        await env.waitFor("liveness idle after the turn", LONG_MS, () => env.run().liveness === "idle");
+        // The turn's own end (idle_since, set by the turn-end hook and cleared at a turn start), never only a lapsed busy lease;
+        // and a worker that delivered in its first turn fails here, with its cause, not at the next steer.
+        await env.waitFor("liveness idle after the turn", LONG_MS, () => {
+          const r = env.run();
+          if (r.state === "landed" || r.state === "cleaned") throw new Error(`the worker delivered during its first turn (run ${r.state}); it was told to wait for a steer`);
+          if (r.state === "failed" || r.state === "cancelled") throw new Error(`the run ${r.state} during its first turn`);
+          return r.liveness === "idle" && r.idle_since !== null;
+        });
         return "idle from the harness's own turn end";
       },
     },

@@ -3,11 +3,12 @@ import { boolArg, stringArg, type HandlerCtx, type HandlerResult } from "../api/
 import type { Account } from "../config/accounts.ts";
 import { askConfig, checkUsd } from "../config/ask.ts";
 import type { ModelPins } from "../config/model-choice.ts";
-import { gateHarness, harnessRefusal } from "../lifecycle/harness-gate.ts";
+import { autoChecksOn, autoWaitLine, gateHarness, harnessRefusal, unverifiedVersion, waitsOnAutoCheck } from "../lifecycle/harness-gate.ts";
 import { accountFor, pinsFor, startDepsOf, taskTitleFrom } from "../lifecycle/dispatch.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { getAsk, insertAsk } from "./store.ts";
+import type { HarnessId } from "../harness/types.ts";
 
 /**
  * `flowryn dispatch <project> --kind ask --body-file -`: queue a question for a headless,
@@ -39,7 +40,8 @@ export async function prepareAsk(ctx: HandlerCtx, args: Record<string, unknown>,
   // The same harness gate as a worker: the contract suite proves the ask's print-mode call too.
   const deps = startDepsOf(ctx);
   const check = await gateHarness(ctx.db, config, account.harness, deps.harnessVersion, "cli", "dispatch", ctx.now);
-  if (check.state !== "verified") throw harnessRefusal(check, ctx.db, config);
+  // An untested version the daemon checks itself (relaxed): the ask is queued and waits for the pass at launch.
+  if (check.state !== "verified" && !waitsOnAutoCheck(ctx.db, config, check)) throw harnessRefusal(check, ctx.db, config);
   return { mode: "ask", project, account, pins, maxUsd };
 }
 
@@ -71,5 +73,7 @@ export function applyAsk(ctx: HandlerCtx, args: Record<string, unknown>, plan: A
 export function withAskState(ctx: HandlerCtx, result: HandlerResult): HandlerResult {
   const id = typeof result.data.ask === "string" ? result.data.ask : null;
   const ask = id ? getAsk(ctx.db, id) : null;
-  return ask ? { ...result, data: { ...result.data, state: ask.state } } : result;
+  if (!ask) return result;
+  const version = ask.state === "queued" && autoChecksOn(ctx.db, ctx.config()) ? unverifiedVersion(ctx.db, ask.harness) : null;
+  return { ...result, data: { ...result.data, state: ask.state, ...(version ? { waits: autoWaitLine(ctx.db, ask.harness as HarnessId, version) } : {}) } };
 }

@@ -148,6 +148,8 @@ describe("run worktrees from the treehouse pool", () => {
       // Busy comes before the worker's commit lands; cancelling mid-commit would leave a.txt uncommitted.
       await waitUntil(() => git(env.repo, ["log", "--oneline", "-1", busy.branch]).out.includes("a.txt"), 10_000, "the commit");
       expect((await env.json(["cancel", task])).code).toBe(0);
+      // A cancel is carried out after its reply: cleanup waits for the run to have ended.
+      await env.waitRun(run, (r) => r.state === "cancelled", "the cancel to finish");
       expect(git(env.repo, ["merge", "-q", "--ff-only", busy.branch]).code).toBe(0);
       const cleaned = await env.json(["cleanup", task]);
       expect(cleaned.code).toBe(0);

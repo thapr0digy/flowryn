@@ -354,11 +354,11 @@ cases already have coverage.
 | 2: Stale observation guards | `test/unit/reconciler.test.ts`, `test/integration/prompt-wedge.test.ts`, `test/integration/stale-hooks.test.ts` |
 | 3: Evidence and explanations | `test/unit/reconciler.test.ts`, `test/unit/show-full.test.ts`, `test/unit/queue-view.test.ts`, `test/integration/queued.test.ts` |
 | 3: Review-channel degradation | `test/unit/gate-questions.test.ts`, `test/unit/review-opener.test.ts`, `test/integration/gate-questions.test.ts`, `test/integration/review-open.test.ts` |
-| 4: Contract compatibility identity | `test/unit/contract-record.test.ts`, `test/unit/auto-contract.test.ts`, `test/integration/harness-gate.test.ts`, `test/integration/auto-contract-{pass,stop,strict}.test.ts` |
+| 4: Contract compatibility identity | `test/unit/contract-record.test.ts`, `test/unit/auto-contract.test.ts`, `test/integration/harness-gate.test.ts`, `test/integration/auto-contract-{pass,wait,stop,strict}.test.ts` |
 | 4: Verification-policy identity | `test/unit/verify.test.ts`, `test/integration/verify.test.ts` |
 | 4: Native acceptance scaffolding | `test/unit/launchd.test.ts`, `test/unit/restart.test.ts`, `test/integration/binary.test.ts`; add an opt-in isolated Mac acceptance path |
 | 5: Effective configuration | `test/unit/config.test.ts`, `test/unit/setup.test.ts`, `test/integration/cli.test.ts` |
-| 6: Protocol and cleanup fault cases | `test/unit/runtime.test.ts`, `test/integration/outages.test.ts`, `test/unit/contracts.test.ts`, `test/unit/auto-contract.test.ts`, `test/integration/contracts-offline.test.ts`, `test/integration/auto-contract-{pass,stop,strict}.test.ts` |
+| 6: Protocol and cleanup fault cases | `test/unit/runtime.test.ts`, `test/integration/outages.test.ts`, `test/unit/contracts.test.ts`, `test/unit/auto-contract.test.ts`, `test/integration/contracts-offline.test.ts`, `test/integration/auto-contract-{pass,wait,stop,strict}.test.ts` |
 | 7: Verification capacity | `test/unit/workflows.test.ts`, `test/unit/verify.test.ts`, `test/integration/capacity.test.ts`, `test/integration/verify.test.ts` |
 
 Extend `test/unit/db.test.ts` for any new migration. Useful seams and traps:

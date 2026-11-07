@@ -18,7 +18,10 @@ import type { Fact, Unblock } from "../attention/explanations.ts";
  * harness version; it resolves when that harness's installed version passes.
  * Under `[policy] mode = "relaxed"`, on a daemon that can run the check from
  * its own build, the P1 waits: the daemon runs the recording check itself
- * (src/contracts/auto.ts) and opens the P1 only if it cannot pass.
+ * (src/contracts/auto.ts) and opens the P1 only if it cannot pass; and work
+ * that meets the untested version is not refused but waits on the
+ * scheduler's grant, which gates it again before it launches
+ * (waitsOnAutoCheck; docs/notes/2026-11-06-a-claude-pi-y5.md).
  *
  * A pass counts only at the running daemon's contract revision
  * (src/contracts/revision.ts): one from another revision is stale, and the
@@ -92,7 +95,11 @@ export function harnessUnblock(gate: Exclude<HarnessCheck, { state: "verified" }
   ];
 }
 
-/** What a dispatch, a resume or a launch gets when the harness is not verified. With the database and config, the help names an automatic check that is queued or running. */
+/**
+ * What a dispatch, a resume or a launch gets when the harness is not verified.
+ * With the database and config, the help names an automatic check that is
+ * queued or running.
+ */
 export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" }>, db?: Db, config?: FlowrynConfig): FlowrynError {
   if (check.state === "missing") return new FlowrynError("tool_missing", check.detail, "flowryn init");
   const attempt = db && config ? activeAutoAttempt(db, config, check.harness) : null;
@@ -101,6 +108,26 @@ export function harnessRefusal(check: Exclude<HarnessCheck, { state: "verified" 
       ? `an automatic contract check is ${attempt.state === "running" ? "running" : `queued (${attempt.wait ?? "waiting"})`}; dispatch and resume work once it passes`
       : `run the contract suite: ${contractsCommand(check.harness)}`;
   return new FlowrynError("contract_unverified", unverifiedReason(check.harness, check.version, check.revision, check.stale), help);
+}
+
+/**
+ * Does work that meets this check wait for the automatic contract check
+ * instead of being refused? Only an untested version (never a missing
+ * harness), in relaxed mode on a daemon that can run the check
+ * (autoChecksOn). The work is created as usual and waits on the scheduler's
+ * grant, which re-runs the gate before it launches.
+ */
+export function waitsOnAutoCheck(db: Db, config: FlowrynConfig, check: HarnessCheck): check is Extract<HarnessCheck, { state: "unverified" }> {
+  return check.state === "unverified" && autoChecksOn(db, config);
+}
+
+/** What a reply says of work waiting on the contract check for this version: the automatic check, or (it failed) the pass it now needs. */
+export function autoWaitLine(db: Db, harness: HarnessId, version: string): string {
+  const attempt = autoAttempt(db, harness);
+  if (attempt?.version === version && attemptRevision(attempt) === contractRevision(harness) && attempt.state === "failed") {
+    return `waits for ${harness} ${version} to pass its contract suite: the automatic check failed (see the harness P1; ${contractsCommand(harness)}); starts by itself once it passes`;
+  }
+  return `waits on the automatic contract check for ${harness} ${version}; starts by itself once it passes`;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +145,8 @@ export interface AutoAttempt {
   revision?: number;
   /** `unrecorded`: it passed after a reload to strict, so nothing was recorded; a reload to relaxed runs it again. */
   state: "waiting" | "running" | "passed" | "failed" | "unrecorded";
+  /** Which try this is (src/contracts/auto.ts AUTO_TRIES); absent: the first. */
+  try?: number;
   /** While waiting: what it waits for. */
   wait?: string;
   started_at?: number;
@@ -279,7 +308,7 @@ export function unverifiedVersion(db: Db, harness: string): string | null {
   return hasPass(db, harness, flag.version, contractRevision(harness as HarnessId)) ? null : flag.version;
 }
 
-/** Check a harness and record the result in its own transaction; resolves the check. */
+/** Check a harness and record the result in its own transaction; resolves the check, with `flaggedNow` when this call flagged an untested version. */
 export async function gateHarness(
   db: Db,
   config: FlowrynConfig,
@@ -289,14 +318,21 @@ export async function gateHarness(
   where: string,
   now: () => number,
   revisions: RevisionMap = CONTRACT_REVISIONS,
-): Promise<HarnessCheck> {
+): Promise<GateCheck> {
   const check = await checkHarness(db, config, harness, versionOf, revisions);
-  tx(db, () => noteHarnessCheck(db, check, source, where, now(), autoChecksOn(db, config)));
-  return check;
+  const flaggedNow = tx(db, () => {
+    const before = readFlag(db, harness);
+    noteHarnessCheck(db, check, source, where, now(), autoChecksOn(db, config));
+    return check.state === "unverified" && !sameFlag(before, check.version, check.revision);
+  });
+  return flaggedNow ? { ...check, flaggedNow } : check;
 }
 
+/** The gate's check, and whether this call is the one that flagged the version. */
+export type GateCheck = HarnessCheck & { flaggedNow?: boolean };
+
 /** The harnesses in use: named by a project, an open run or a queued plan phase. */
-function harnessesInUse(db: Db): HarnessId[] {
+export function harnessesInUse(db: Db): HarnessId[] {
   const rows = db
     .query(
       `SELECT harness FROM projects

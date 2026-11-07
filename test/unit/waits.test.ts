@@ -12,6 +12,8 @@ import { appendEvent } from "../../src/db/events.ts";
 import type { BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import { checkWaits, collectWaits, deadlineLabel, RECOVERY_GRACE_MS, WAIT_DEADLINES_MS, waitDeadlines, type WaitPassDeps } from "../../src/reconcile/waits.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
+import { AUTO_BUILD_KEY, saveAutoAttempt } from "../../src/lifecycle/harness-gate.ts";
 import { hostRefusal } from "../../src/sched/wait-reasons.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { insertRequest, markStarted } from "../../src/verify/queue.ts";
@@ -188,6 +190,54 @@ describe("a host-held launch", () => {
     expect(openWaitItems(db).map((i) => i.run_id)).toEqual(["r1"]);
     expect(events(db, "wait.expired").map((e) => e.covered_by)).toEqual(["i99", null]);
     expect(pass(db, cfg, 1_000 + 14 * MIN).result.itemized).toEqual([]);
+  });
+});
+
+describe("a launch held on an untested harness version", () => {
+  /** A fresh dispatch the grant refuses on claude 2.1.319 (flagged, no pass), with the automatic check in `state` when given. */
+  function harnessHeld(db: Db, attempt: "waiting" | "running" | "failed" | null): void {
+    seedRun(db, { id: "r1", task: "t1", stageState: "idle", waitingSince: 1_000, pending: "fresh" });
+    tx(db, () => {
+      setMeta(db, AUTO_BUILD_KEY, "build-1");
+      setMeta(db, "harness_flagged:claude", JSON.stringify({ version: "2.1.319", revision: contractRevision("claude") }));
+      if (attempt) saveAutoAttempt(db, "claude", { version: "2.1.319", revision: contractRevision("claude"), state: attempt, try: 2 });
+      explain(db, { run: { id: "r1", task_id: "t1", stage: "build" }, kind: "capacity", rule: "capacity.harness_unverified", reason: "claude 2.1.319 has no passing contract", facts: [], unblock: [], source: "daemon", now: 1_000 });
+    });
+  }
+
+  for (const attempt of ["waiting", "running"] as const) {
+    test(`stays quiet past its deadline while the automatic check is ${attempt} (relaxed)`, () => {
+      const db = database();
+      const cfg = config('[policy]\nmode = "relaxed"\n');
+      harnessHeld(db, attempt);
+      expect(pass(db, cfg, 1_000 + 20 * MIN).kicks).toEqual(["scheduler"]);
+      expect(pass(db, cfg, 1_000 + 21 * MIN).result.itemized).toEqual(["run:r1"]);
+      expect(openWaitItems(db)).toEqual([]);
+      expect(events(db, "wait.expired")[0]).toMatchObject({ key: "run:r1", kind: "harness_check", covered_by: "auto_check:claude" });
+      expect(pass(db, cfg, 1_000 + 40 * MIN).result.itemized).toEqual([]);
+      expect(openWaitItems(db)).toEqual([]);
+    });
+  }
+
+  test("is itemized once the automatic check has failed for good and no harness_unverified item carries it", () => {
+    const db = database();
+    const cfg = config('[policy]\nmode = "relaxed"\n');
+    harnessHeld(db, "running");
+    pass(db, cfg, 1_000 + 20 * MIN);
+    pass(db, cfg, 1_000 + 21 * MIN);
+    tx(db, () => saveAutoAttempt(db, "claude", { version: "2.1.319", revision: contractRevision("claude"), state: "failed", try: 2 }));
+    expect(pass(db, cfg, 1_000 + 22 * MIN).result.itemized).toEqual(["run:r1"]);
+    expect(openWaitItems(db).map((i) => i.run_id)).toEqual(["r1"]);
+  });
+
+  test("strict mode keeps the 20-minute item even with an attempt on record", () => {
+    const db = database();
+    const cfg = config('[policy]\nmode = "strict"\n');
+    harnessHeld(db, "running");
+    pass(db, cfg, 1_000 + 20 * MIN);
+    expect(pass(db, cfg, 1_000 + 21 * MIN).result.itemized).toEqual(["run:r1"]);
+    expect(openWaitItems(db).map((i) => i.run_id)).toEqual(["r1"]);
+    expect(events(db, "wait.expired")[0]).toMatchObject({ covered_by: null });
   });
 });
 

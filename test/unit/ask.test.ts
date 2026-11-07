@@ -15,6 +15,8 @@ import { askContract, askEnv, capBytes, claudeAskArgs, firstSentence, NEEDS_SCOU
 import { abortAsk, drainAsks, recoverAsks, resetAskRunner, settledAsks, type AskDeps } from "../../src/ask/runner.ts";
 import { getAsk, insertAsk, markStarted, MAX_ASK_ATTEMPTS, recordAnswer, recordCancelled, recoverInterrupted, type AskRow } from "../../src/ask/store.ts";
 import { usd } from "../../src/ask/view.ts";
+import { recordPass } from "../../src/contracts/verbs.ts";
+import { contractRevision } from "../../src/contracts/revision.ts";
 import { composeReturnBrief } from "../../src/attention/briefing.ts";
 import { taskProject } from "../../src/leader/scope.ts";
 import type { StartDeps } from "../../src/lifecycle/dispatch.ts";
@@ -224,14 +226,14 @@ describe("the store", () => {
 });
 
 /** The runner's call seam: answers as the fake decides, records what it was given. */
-function deps(answer: (argv: string[], opts: BoundedOptions) => Promise<BoundedResult>): AskDeps & { kicks: number } {
+function deps(answer: (argv: string[], opts: BoundedOptions) => Promise<BoundedResult>, harnessVersion: StartDeps["harnessVersion"] = async () => null): AskDeps & { kicks: number } {
   const loaded = loadConfig(h.home).config;
   const out: AskDeps & { kicks: number } = {
     db,
     config: () => loaded,
     now: Date.now,
     log: () => {},
-    startDeps: { db, config: () => loaded, runtime: () => null, harnessVersion: async () => null, git: async () => null, now: Date.now } as StartDeps,
+    startDeps: { db, config: () => loaded, runtime: () => null, harnessVersion, git: async () => null, now: Date.now } as StartDeps,
     kick: () => {
       out.kicks++;
     },
@@ -255,12 +257,31 @@ describe("the runner", () => {
       return result(CLAUDE_SUCCESS);
     });
     const a = newAsk("Q?");
-    expect(drainAsks(d)).toBe(1);
+    expect(await drainAsks(d)).toBe(1);
     await settledAsks();
     expect(getAsk(db, a.id)).toMatchObject({ state: "answered", answer: "`TIMED_OUT` is `124`.", cost_usd: 0.00108937 });
     expect(seen[0]!.opts).toMatchObject({ cwd: h.home, stdin: "Q?", timeoutMs: DEFAULT_ASK.timeout_ms, label: "ask a1" });
     expect(readFileSync(join(h.stateDir, "asks", "a1", "contract.md"), "utf8")).toContain("You are a Flowryn ask");
     expect(d.kicks).toBe(1);
+  });
+
+  test("an ask on an untested harness version stays queued with no call, and starts once that version passes its contract suite", async () => {
+    const calls: string[][] = [];
+    const d = deps(async (argv) => {
+      calls.push(argv);
+      return result(CLAUDE_SUCCESS);
+    }, async () => "9.9.10");
+    const a = newAsk();
+    expect(await drainAsks(d)).toBe(0);
+    expect(getAsk(db, a.id)!.state).toBe("queued");
+    expect(calls).toEqual([]);
+    tx(db, () =>
+      recordPass(db, { harness: "claude", version: "9.9.10", revision: contractRevision("claude"), report: null, by: "human", build: null, session: null, source: "cli", platform: null, herdr_version: null, launch_profile: null }, Date.now()),
+    );
+    expect(await drainAsks(d)).toBe(1);
+    await settledAsks();
+    expect(getAsk(db, a.id)!.state).toBe("answered");
+    expect(calls).toHaveLength(1);
   });
 
   test("at most max_concurrent calls at once; the rest stay queued", async () => {
@@ -270,8 +291,8 @@ describe("the runner", () => {
       return result(CLAUDE_SUCCESS);
     });
     for (let i = 0; i < 3; i++) newAsk(`Q${i}?`);
-    expect(drainAsks(d)).toBe(DEFAULT_ASK.max_concurrent);
-    expect(drainAsks(d)).toBe(0);
+    expect(await drainAsks(d)).toBe(DEFAULT_ASK.max_concurrent);
+    expect(await drainAsks(d)).toBe(0);
     expect((db.query("SELECT state FROM asks ORDER BY id").all() as { state: string }[]).map((r) => r.state)).toEqual(["running", "running", "queued"]);
     gate.resolve();
     await settledAsks();
@@ -282,7 +303,7 @@ describe("the runner", () => {
     tx(db, () => noteUsageLimit(db, "claude", "a worker", "limit reached", Date.now(), { usage_backoff_ms: 3_600_000, usage_backoff_max_ms: 3_600_000 }));
     newAsk();
     db.query("INSERT INTO asks (id, project_id, title, question, harness, account, max_usd, created_by, created_at) VALUES ('a2', 'web', 't', 'q', 'pi', 'pi', 1, 'leader', 2000)").run();
-    expect(drainAsks(d)).toBe(1);
+    expect(await drainAsks(d)).toBe(1);
     await settledAsks();
     expect(getAsk(db, "a1")!.state).toBe("queued");
     expect(getAsk(db, "a2")!.state).not.toBe("queued");
@@ -296,7 +317,7 @@ describe("the runner", () => {
         }),
     );
     const a = newAsk();
-    drainAsks(d);
+    await drainAsks(d);
     tx(db, () => recordCancelled(db, a.id, { reason: "no", by: "leader" }, Date.now()));
     expect(abortAsk(a.id)).toBe(true);
     await settledAsks();
@@ -311,25 +332,25 @@ describe("the runner", () => {
       return result("", { code: 143, aborted: opts.signal!.aborted });
     });
     db.query("INSERT INTO asks (id, project_id, title, question, harness, account, max_usd, created_by, created_at) VALUES ('a1', 'web', 't', 'q', 'pi', 'pi', 1, 'leader', 1)").run();
-    drainAsks(d);
+    await drainAsks(d);
     await settledAsks();
     expect(getAsk(db, "a1")).toMatchObject({ state: "failed", reason: "it spent $1.20, over its $1.00 cap" });
   });
 
   test("a deadline or a failed start is the ask's failure, named", async () => {
     newAsk();
-    drainAsks(deps(async () => result("", { code: 124, timedOut: true })));
+    await drainAsks(deps(async () => result("", { code: 124, timedOut: true })));
     await settledAsks();
     expect(getAsk(db, "a1")!.reason).toBe("no answer within 10 min");
     newAsk();
-    drainAsks(deps(async () => result("", { code: 127, spawnError: "ENOENT" })));
+    await drainAsks(deps(async () => result("", { code: 127, spawnError: "ENOENT" })));
     await settledAsks();
     expect(getAsk(db, "a2")!.reason).toBe("claude did not start: ENOENT");
   });
 
   test("a scout request whose scout cannot start (no Herdr here) fails the ask with how to promote it later", async () => {
     newAsk();
-    drainAsks(deps(async () => result(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "NEEDS-SCOUT: it must run the tests", total_cost_usd: 0.01 }))));
+    await drainAsks(deps(async () => result(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "NEEDS-SCOUT: it must run the tests", total_cost_usd: 0.01 }))));
     await settledAsks();
     const a = getAsk(db, "a1")!;
     expect(a.state).toBe("failed");

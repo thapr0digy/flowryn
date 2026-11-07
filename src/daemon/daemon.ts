@@ -84,6 +84,7 @@ import { clearRestartFailure, failureLine, readRestartFailure } from "../service
 import { InFlight, settleWithin, type Draining } from "./inflight.ts";
 import { PENDING_POLL_MS, RestartController, buildIdOfBytes, commandOf, handoffPending, readPending, recordRestartFailure, recordRestarted, scriptSupervisor } from "./restart.ts";
 import { AutoContractChecker, autoPollMs } from "../contracts/auto.ts";
+import { HarnessVersionPoller } from "../contracts/version-poll.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
@@ -973,6 +974,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
 
     buildWatch.start();
     autoCheck.start();
+    // A self-updated harness is flagged (and, relaxed, checked) before anyone dispatches.
+    const versionPoll = new HarnessVersionPoller({ db: database, config: () => config, harnessVersion, now: Date.now, log, restartBusy, flagged: () => autoCheck?.kick() });
+    versionPoll.start();
     upkeep.start();
     policyFollow.start();
     const pendingRestart = setInterval(() => void inflight.track(restart.tryPending().catch((error: unknown) => log(`restart: pending check failed: ${(error as Error).message}`))), PENDING_POLL_MS);
@@ -1030,6 +1034,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     clearInterval(attentionTick);
     clearInterval(pendingRestart);
     draining.push({ name: "build watcher", done: buildWatch.stop() }, { name: "upkeep", done: upkeep.stop() }, { name: "policy follow-through", done: policyFollow.stop() });
+    await versionPoll.stop();
     await autoCheck.stop();
     draining.push({ name: "reconciler", done: reconciler.stop() });
     lavishPoller.stop();
