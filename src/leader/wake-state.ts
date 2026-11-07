@@ -2,7 +2,7 @@ import { getMeta, setMeta, type Db } from "../db/db.ts";
 import { clockLabel } from "../attention/away.ts";
 import { allLeases, getLease, getSession, UNCONFIRMED_SCOPE } from "../lease/lease.ts";
 
-/** The hourly budget a wake counts against: P0s and follow-ups, or worker question batches. */
+/** The kind of push a typed rewake was for: P0s and action items, or worker questions (recorded; the runaway guard counts them all). */
 export type WakeBudget = "p0" | "questions";
 
 /** One typed rewake: when, and the budget of the push that caused it. */
@@ -14,7 +14,7 @@ export interface TypedRewake {
 /**
  * What the leader rewake (src/leader/rewake.ts) last did, kept in the meta
  * table so `leader status` and the briefing read it without the daemon, and
- * so the hourly wake budget counts typed rewakes: the lease holder's session,
+ * so the runaway ceiling counts typed rewakes: the lease holder's session,
  * when the daemon typed into its pane in the last hour, and why it cannot
  * wake the leader now (null when nothing stops it).
  */
@@ -58,9 +58,9 @@ export function lastRewakeAt(state: RewakeState): number | null {
   return state.typed.at(-1)?.at ?? null;
 }
 
-/** Rewakes typed into `session`'s pane in the last hour for a push on `budget`: each counts against that hourly budget. */
-export function rewakesLastHour(db: Db, session: string, now: number, budget: WakeBudget): number {
-  return rewakeState(db, session).typed.filter((r) => r.budget === budget && r.at > now - HOUR_MS).length;
+/** Rewakes typed into `session`'s pane in the last hour: each counts against the runaway guard ([leader] wake_ceiling_per_hour). */
+export function rewakesLastHour(db: Db, session: string, now: number): number {
+  return rewakeState(db, session).typed.filter((r) => r.at > now - HOUR_MS).length;
 }
 
 /** The holders a wake line is about: the session's own scope's, or every scope's for your terminal. */

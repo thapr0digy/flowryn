@@ -197,7 +197,7 @@ describe("init", () => {
     const { io } = scriptedIo({ "Add a project": "" }, { Write: true, Install: false });
     expect(await runInit(initDeps(home, io))).toBe(0);
     const after = loadConfig(home).config;
-    expect(after.extra.notify).toEqual({ macos: true, herdr: true, min_interval_min: 45, p0_coalesce_s: 60, max_triggered_turns_per_hour: 3 });
+    expect(after.extra.notify).toEqual({ macos: true, herdr: true, min_interval_min: 45, p0_coalesce_s: 60 });
     expect(after.extra.capacity).toMatchObject({ worker: 7, validation: 5, host: { min_free_mem_gb: 8, max_load_per_core: 1.5 } });
     expect(notifyMacosCheck(after)).toBeNull();
   });
