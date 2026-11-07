@@ -210,7 +210,7 @@ describe("unattended mode", () => {
       const e = env;
       const leader: FakeClaudeLeader = await e.claude();
       await leader.start();
-      const refused = await e.fleet.json(["away", "--autonomous", "--projects", "web", "--until", "23:59"], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
+      const refused = await e.fleet.json(["away", "--autonomous", "--projects", "web", "--until", "+8h"], { env: { FLOWRYN_TOKEN: e.leaderToken() } });
       expect(refused.code).toBe(2);
       const help = String((refused.reply.error as { help: string }).help);
       const ref = /flowryn chat-question (autonomy:\S+)/.exec(help)?.[1];
