@@ -12,6 +12,9 @@ import { hashToken, mintToken } from "../../src/api/auth.ts";
 import { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { cliJson, daemonCall, realTasksAxi } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A leader per scope (docs/notes/2026-10-24-leader-scoping-and-vj.md), through

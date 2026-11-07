@@ -10,7 +10,8 @@
  *
  * FLOWRYN_TEST_JOBS sets the parallel workers (default: two thirds of the cores, 2 to 8).
  * Under --parallel each file runs several times slower than alone, so tests get a 30 s
- * default timeout instead of bun's 5 s; a test that sets its own keeps it.
+ * default timeout instead of bun's 5 s; a test that sets its own keeps it, and test/integration files
+ * set 60 s themselves (test/helpers/integration-timeout.ts), so they keep that here too.
  * test/timings.json (per-file durations) starts the slowest files first; refresh it with
  * `bun scripts/test.ts --update-timings` in a PR of its own. With two parts, it ends with one
  * summary in bun's own format, the parts added, so `flowryn verify` counts every test.

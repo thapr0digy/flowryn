@@ -6,6 +6,9 @@ import { createStandaloneDecision } from "../../src/lifecycle/decisions.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { cliJson, makeHome, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { makeShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {

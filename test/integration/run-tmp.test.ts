@@ -9,6 +9,9 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {

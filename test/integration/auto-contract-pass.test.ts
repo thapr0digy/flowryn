@@ -8,6 +8,9 @@ import { autoContractSuite, dispatchClaude, events, items, NEW_VERSION, query, v
 import { FAKE_VERSION, setHarnessVersion } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { contractRevision } from "../../src/contracts/revision.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const fleet = autoContractSuite();
 

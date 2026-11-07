@@ -6,6 +6,9 @@ import { tx } from "../../src/db/db.ts";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A restart past a validation that only waits on external CI (task

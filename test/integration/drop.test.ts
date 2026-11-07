@@ -6,6 +6,9 @@ import { getProject } from "../../src/lifecycle/projects.ts";
 import { queueTask } from "../../src/lifecycle/queued.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {

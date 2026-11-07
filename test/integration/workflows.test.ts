@@ -9,6 +9,9 @@ import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { M4_SHIP_WORKFLOW } from "../../src/db/schema.ts";
 import { lavishSessionKey } from "../../src/lavish/session-key.ts";
 import { readIdentity, type ProcIdentity, type PsRunner } from "../../src/runtime/proc.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Workflows, review gates, capacity grants and the usage-limit pause (design

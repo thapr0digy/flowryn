@@ -5,6 +5,9 @@ import { waitUntil } from "../helpers/harness.ts";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Review pages open in your browser (docs/notes/2026-10-10-review-pages-open-4b.md), end to

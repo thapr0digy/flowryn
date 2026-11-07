@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Wait explanations for questions and reviews, end to end through the real
