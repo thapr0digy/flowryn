@@ -443,6 +443,11 @@ export class LandingQueue implements LandingHooks {
     if (!run || !project || run.state !== "ready" || delivered?.head !== row.head_sha) return null;
     const policy = todaysPolicy(this.deps.config(), row.project_id);
     if (!policy) return null;
+    // A pair that would not merge is tried once, not on every pass.
+    const skipped = db
+      .query("SELECT 1 FROM events WHERE kind = 'landing.train_skipped' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.head') = ?2 AND json_extract(payload, '$.base') = ?3 LIMIT 1")
+      .get(row.id, row.head_sha, base);
+    if (skipped) return null;
     const merged = await git(["merge-tree", "--write-tree", "--no-messages", row.head_sha, base], project.path);
     if (merged.code !== 0) {
       const why = merged.code === 1 ? `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts` : `git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`;
