@@ -177,7 +177,7 @@ describe("the briefing", () => {
     writeSnapshot(db, "todos", "t", [task("bank-a1", "queued", { title: "call bank", body: "due: 2026-09-24" }), task("pass-b2", "queued", { title: "renew passport", body: "due: 2026-09-20" })], now);
     const briefing = tx(db, () => composeBriefing(db, { session: opened.session, now, morningHour: config().morning_hour, ageMs: AGE, markMorning: true }));
     const lines = briefing.text.split("\n");
-    expect(lines[0]).toBe("Flowryn status (facts, not instructions).");
+    expect(lines[0]).toBe("Flowryn status (daemon facts, not the user's words; do each item's next step).");
     expect(lines[1]).toBe("Leader: this session (claude, lease 1).");
     expect(lines[2]).toBe("Needs you (2):");
     expect(lines[3]).toBe(`- [${p0}] P0 · Worker question q1`);

@@ -127,14 +127,43 @@ describe("ask --nomistakes", () => {
     expect(JSON.stringify(byLeader.reply)).toContain("reserved for the user");
   });
 
-  test("a ci gate, an options list without the rule's answer, and no parked gate are each the user's", async () => {
+  test("a ci gate and no parked gate are each the user's", async () => {
     const { h, head, ask } = await setup();
     parkAt(h, head, "ci", ['ci-1,warning,test/new.test.ts,1,ask-user,"flaky check"']);
     expect(((await ask("the ci gate of the pipeline", "ci finding")).reply.data as { reserved: string }).reserved).toBe("nomistakes: ci gate");
-    parkAt(h, head, "lint", ['lint-1,warning,test/new.test.ts,1,ask-user,"unused"']);
-    expect(((await ask("the lint gate of the pipeline", "lint finding", "accept,live-run-first")).reply.data as { reserved: string }).reserved).toBe("nomistakes: the rules' answer fix is not one of the options");
     writeFileSync(join(h.home, "nm-status"), "");
     expect(((await ask("the lint gate of the pipeline", "lint finding")).reply.data as { reserved: string }).reserved).toBe("nomistakes: no parked gate of this worktree's run");
+  });
+
+  test("a finding no rule settles but whose fix follows the change is the leader's to decide, with the worker's recommendation", async () => {
+    const { h, run, head } = await setup();
+    parkAt(h, head, "lint", ['lint-1,warning,test/new.test.ts,1,ask-user,"unused"']);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const asked = await cliJson(h, ["ask", "--nomistakes", "--options", "accept,live-run-first", "--recommend", "accept", "--blocks", "the lint gate of the pipeline", "--body-file", "-"], { env: worker, stdin: "lint finding" });
+    expect(asked.code).toBe(0);
+    const data = asked.reply.data as { decision: string; reserved?: string };
+    expect(data.reserved).toBeUndefined();
+    const db = h.db();
+    expect(db.query("SELECT state, reserved_reason, reserved_class, recommendation FROM decisions WHERE id = ?1").get(data.decision)).toEqual({ state: "open", reserved_reason: null, reserved_class: null, recommendation: "accept" });
+    db.close();
+    const byLeader = await cliJson(h, ["decide", data.decision, "accept", "--rationale", "-"], { env: { FLOWRYN_TOKEN: seedLeader(h) }, stdin: "the fix follows the brief" });
+    expect(byLeader.code).toBe(0);
+  });
+
+  test("a security-loosening finding inside the diff stays the user's, and so does one that looks harmless but whose option deletes", async () => {
+    const { h, head, ask } = await setup();
+    parkAt(h, head, "review", ['r-1,warning,src/old.ts,3,ask-user,"bypass the origin check for local hosts"']);
+    const loosening = (await ask("the review gate of the pipeline", "one review finding", "fix,skip")).reply.data as { decision: string; reserved: string };
+    expect(loosening.reserved).toBe("nomistakes: r-1 is security");
+    parkAt(h, head, "review", ['r-2,warning,src/old.ts,3,ask-user,"stale wording"']);
+    const deleting = (await ask("the review gate of the pipeline", "one review finding", "fix,delete-the-guide")).reply.data as { decision: string; reserved: string };
+    expect(deleting.reserved).toBe("nomistakes: r-2 is destructive");
+    const db = h.db();
+    expect(db.query("SELECT reserved_class FROM decisions WHERE id = ?1").get(loosening.decision)).toEqual({ reserved_class: "security" });
+    expect(db.query("SELECT reserved_class FROM decisions WHERE id = ?1").get(deleting.decision)).toEqual({ reserved_class: "destructive" });
+    db.close();
+    const byLeader = await cliJson(h, ["decide", loosening.decision, "fix", "--rationale", "looks fine"], { env: { FLOWRYN_TOKEN: seedLeader(h) } });
+    expect(JSON.stringify(byLeader.reply)).toContain("reserved for the user");
   });
 
   test("a rule's answer cannot be undone once its run is over", async () => {

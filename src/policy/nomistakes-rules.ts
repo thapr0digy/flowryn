@@ -1,6 +1,7 @@
 import { isAbsolute, relative } from "node:path";
 import { irreversibleText, NM_FLOOR, type FileClass, type NmRule, type RuleAnswer } from "../attention/decisions-policy.ts";
 import type { GitRunner } from "./landed.ts";
+import { FINDING_CLASS_TABLE } from "./nomistakes-classes.ts";
 import { ownParkedRun, parseNmStatus, readNmStatus, type NmFinding } from "./nomistakes.ts";
 
 /**
@@ -103,6 +104,9 @@ export function matchRules(input: { step: string; findings: NmFinding[]; diff: B
     if ((NM_FLOOR.severities as readonly string[]).includes(f.severity)) return { settled: false, reason: `${f.severity} finding ${f.id}`, floored: true };
     if (NM_FLOOR.files.includes(cls)) return { settled: false, reason: cls === "none" ? `${f.id} names no file` : `${f.id} is outside the diff`, floored: true };
     if (irreversibleText(f.description)) return { settled: false, reason: `${f.id} names an irreversible step`, floored: true };
+    // The finding table's reserved classes (destructive, credential, security, scope, product) are never settled by rule either.
+    const reserved = FINDING_CLASS_TABLE.find((row) => row.test({ finding: f, file: cls, step: input.step, options: input.options }));
+    if (reserved) return { settled: false, reason: `${f.id} is ${reserved.klass}`, floored: true };
     const rule = rules.find((r) => r.step === input.step && r.severity === f.severity && r.file.includes(cls));
     if (!rule) return { settled: false, reason: `no rule for ${f.id} (${input.step} ${f.severity || "-"}, ${cls})` };
     classified.push({ id: f.id, severity: f.severity, file: path, cls });
