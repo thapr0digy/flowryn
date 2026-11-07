@@ -491,7 +491,7 @@ describe("autonomy and the usage limit", () => {
   );
 
   test(
-    "with no live Claude session left, the pause expires and lets one probe through: a rate_limit re-arms it with a longer backoff, a normal Stop lifts it",
+    "with no live Claude session left, the pause expires and lets one probe through: a rate_limit re-arms it with a longer backoff, the probe's first tool call lifts it",
     async () => {
       fleet = await makeFleetEnv({ extraConfig: "[sched]\npass_ms = 250\nusage_backoff_ms = 2000\nusage_backoff_max_ms = 60000" });
       const f = fleet;
@@ -512,18 +512,18 @@ describe("autonomy and the usage limit", () => {
       expect(items[0]!.line).toContain("flowryn capacity resume --account claude");
       expect(f.run(c.run).proc_pid).toBeNull();
       expect((await f.json(["cancel", b.task])).code).toBe(0);
-      // After the longer backoff exactly one more probe starts, the oldest waiting; the other keeps waiting.
-      await until(f, "the second probe", () => probes().length === 2, 20_000);
-      expect(probes()[1]).toBe(c.run);
-      await f.waitRun(c.run, (r) => r.proc_pid !== null, "the second probe's worker");
-      await Bun.sleep(1_000);
-      expect(f.run(d.run).proc_pid).toBeNull();
-      expect(one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'usage_limit'")!.state).not.toBe("resolved");
-      // The probe's turn ends normally: the pause lifts, and what waited starts.
-      writeFileSync(join(f.h.dataDir, c.task, "go"), "");
+      // After the longer backoff exactly one more probe starts, the oldest waiting; the other waits for the lift, never probing.
+      await until(f, "the second probe", () => probes().length >= 2, 20_000);
+      expect(probes()).toEqual([b.run, c.run]);
+      // The probe's first tool call means the model answered: the pause lifts, and what waited starts.
       await until(f, "the lift", () => one<{ state: string }>(f, "SELECT state FROM items WHERE kind = 'usage_limit'")!.state === "resolved", 20_000);
       await f.waitRun(d.run, (r) => r.proc_pid !== null, "the waiting Claude worker", 20_000);
-      expect(one<{ source: string }>(f, "SELECT source FROM events WHERE kind = 'sched.usage_resumed'")!.source).toBe("hook");
+      expect(probes()).toEqual([b.run, c.run]);
+      const resumed = one<{ source: string; seq: number; payload: string }>(f, "SELECT source, seq, payload FROM events WHERE kind = 'sched.usage_resumed'")!;
+      expect(resumed.source).toBe("hook");
+      expect(JSON.parse(resumed.payload).why).toBe(`the probe worker ${c.task} got a reply (a tool call)`);
+      const dStarted = one<{ seq: number }>(f, "SELECT MIN(seq) AS seq FROM events WHERE run_id = ?1 AND kind = 'stage.started'", d.run)!;
+      expect(dStarted.seq).toBeGreaterThan(resumed.seq);
     },
     { timeout: 120_000 },
   );
