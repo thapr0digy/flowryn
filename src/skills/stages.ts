@@ -25,9 +25,8 @@ export interface StageSkill {
   files?: Record<string, string>;
 }
 
-/** The build and QA stages' rule on long commands (no-idle-workers-23 phase 2): the idle nudge's other half. */
-export const LONG_COMMAND_RULE =
-  "- A command that may run over about 5 minutes (the full suite, a build, a container start): run it in the background (Claude: Bash run_in_background) and wait for its notice. Never end your turn with your own job running for no reason, or with commits unpushed or undelivered. The no-mistakes `axi run --wait` stays in the foreground (bounded at 8 minutes).";
+/** The build and QA stages' rule on ending a turn (no-idle-workers-23 phase 2): the idle nudge's other half. */
+export const LONG_COMMAND_RULE = "- Never end your turn with commits unpushed or undelivered.";
 
 const DESIGN_BODY = `# Flowryn design stage
 

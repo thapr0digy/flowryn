@@ -155,6 +155,29 @@ describe("outstanding work", () => {
     );
   });
 
+  test("a failed verification as the only work left survives its own nudges: three of them, then worker_stalled", () => {
+    tx(db, () => {
+      db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a1', 't1', 'pr', 'https://github.com/a/w/pull/1', 'hd', ?1)").run(clock);
+      db.query(
+        "INSERT INTO verifications (id, project_id, pr_url, task_id, head_sha, state, steps, dir, worktree_path, project_path, started_at, finished_at) VALUES ('v7', 'p', 'https://github.com/a/w/pull/1', 't1', 'hd', 'failed', '[]', '/d', '/d/wt', '/w', ?1, ?1)",
+      ).run(clock);
+    });
+    event("stage.done", { stage: "build" });
+    stopped();
+    const facts: GitFacts = { ...NO_GIT_FACTS, head: "hd", remote: "hd", unpushed: 0, undelivered: 0 };
+    const start = clock;
+    const at: number[] = [];
+    for (let minute = 1; minute <= 160; minute++) {
+      clock = start + minute * MIN;
+      const outcome = look(facts);
+      if (outcome.steer) at.push(minute);
+      if (minute > 10) expect(outcome.episodeActive).toBe(true);
+    }
+    expect(at).toEqual([10, 30, 70]);
+    expect(nudges().map((n) => n.outstanding)).toEqual([["verify:v7"], ["verify:v7"], ["verify:v7"]]);
+    expect(stalledItems()).toHaveLength(1);
+  });
+
   test("commits past the delivered head: deliver again", () => {
     expect(nudgeText([{ kind: "undelivered", commits: 1 }])).toBe("Flowryn: you are idle with work left: 1 commit past your delivered head (deliver again). Continue now; end with an outcome.");
   });
@@ -173,6 +196,21 @@ describe("outstanding work", () => {
 });
 
 describe("timing and the stall", () => {
+  test("a failed git read after a nudge neither resets the count nor is recorded again", () => {
+    stopped();
+    clock += 10 * MIN;
+    expect(look(UNPUSHED(1)).steer).not.toBeNull();
+    const unknown: GitFacts = { ...NO_GIT_FACTS, head: "h1", unknown: "git rev-parse refs/remotes/origin/b: exit 124" };
+    clock += MIN;
+    look(unknown);
+    clock += 19 * MIN;
+    expect(look(unknown).steer).not.toBeNull();
+    clock += 40 * MIN;
+    expect(look(unknown).steer).not.toBeNull();
+    expect(nudges().map((n) => n.n)).toEqual([1, 2, 3]);
+    expect(count(UNKNOWN_KIND)).toBe(1);
+  });
+
   test("three nudges at 10, 20 and 40 minutes with no progress, then one worker_stalled P1 a window later", () => {
     stopped();
     const at: number[] = [];
@@ -348,13 +386,13 @@ describe("[workers] idle_nudge_min and idle_nudge_max", () => {
   });
 });
 
-describe("the long-command wording", () => {
-  test("the build and visual QA skills carry it; the worker contract's outcome rule says never with work left", async () => {
-    const { LONG_COMMAND_RULE, STAGE_SKILLS } = await import("../../src/skills/stages.ts");
-    const { workerContract } = await import("../../src/harness/contract-text.ts");
-    for (const name of ["flowryn-build-test", "flowryn-visual-qa"]) expect(STAGE_SKILLS.find((s) => s.name === name)!.body).toContain(LONG_COMMAND_RULE);
-    expect(LONG_COMMAND_RULE).toContain("run_in_background");
-    expect(LONG_COMMAND_RULE).toContain("axi run --wait` stays in the foreground");
-    for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null, { defaultBranch: "main" })).toContain("or as a steer says; never with work left.");
+describe("the turn-end wording", () => {
+  test("the build and visual QA skills say never end a turn with commits unpushed or undelivered, and give no background-job advice", async () => {
+    const { STAGE_SKILLS } = await import("../../src/skills/stages.ts");
+    for (const name of ["flowryn-build-test", "flowryn-visual-qa"]) {
+      const body = STAGE_SKILLS.find((s) => s.name === name)!.body;
+      expect(body).toContain("- Never end your turn with commits unpushed or undelivered.");
+      expect(body).not.toContain("run_in_background");
+    }
   });
 });

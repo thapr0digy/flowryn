@@ -138,7 +138,7 @@ export function progressAt(db: Db, run: RunRow, nudgeIds: ReadonlySet<string>): 
 }
 
 function headMoved(last: NudgeEvent | undefined, facts: GitFacts): boolean {
-  if (!last || facts.head === null) return false;
+  if (!last || facts.head === null || facts.unknown !== null) return false;
   return last.head !== facts.head || last.remote !== facts.remote;
 }
 
@@ -162,7 +162,7 @@ export function outstandingWork(db: Db, run: RunRow, facts: GitFacts, nudgeIds: 
       finished_at: number | null;
     } | null;
     const after = v?.finished_at ?? 0;
-    const answered = db.query("SELECT 1 FROM messages WHERE run_id = ?1 AND created_at >= ?2").get(run.id, after) !== null;
+    const answered = (db.query("SELECT id FROM messages WHERE run_id = ?1 AND created_at >= ?2").all(run.id, after) as { id: string }[]).some((m) => !nudgeIds.has(m.id));
     if (v && v.state === "failed" && !answered) out.push({ kind: "verify", verification: v.id });
   }
   return out;
@@ -249,7 +249,7 @@ export function runIdleNudge(db: Db, run: RunRow, input: NudgeInput, now: number
   const last = nudges.at(-1);
   const sent = headMoved(last, input.facts) ? 0 : nudges.filter((n) => n.ts > progress).length;
   const outstanding = outstandingWork(db, run, input.facts, nudgeIds);
-  if (input.facts.unknown !== null && db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = ?2 AND ts > ?3").get(run.id, UNKNOWN_KIND, Math.max(progress, last?.ts ?? 0)) === null) {
+  if (input.facts.unknown !== null && db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = ?2 AND ts > ?3").get(run.id, UNKNOWN_KIND, progress) === null) {
     appendEvent(db, { source: "reconciler", kind: UNKNOWN_KIND, runId: run.id, taskId: run.task_id, payload: { detail: input.facts.unknown }, ts: now });
   }
   if (outstanding.length === 0) return none("no outstanding work");
