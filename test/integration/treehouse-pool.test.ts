@@ -146,6 +146,8 @@ describe("run worktrees from the treehouse pool", () => {
 
       // Its cleanup is today's: the guard, then git removes the worktree.
       expect((await env.json(["cancel", task])).code).toBe(0);
+      // A cancel is carried out after its reply: cleanup waits for the run to have ended.
+      await env.waitRun(run, (r) => r.state === "cancelled", "the cancel to finish");
       expect(git(env.repo, ["merge", "-q", "--ff-only", busy.branch]).code).toBe(0);
       const cleaned = await env.json(["cleanup", task]);
       expect(cleaned.code).toBe(0);
