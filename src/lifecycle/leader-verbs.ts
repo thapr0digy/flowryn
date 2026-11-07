@@ -32,6 +32,7 @@ import { dropRecord, isDropped } from "./drop.ts";
 import { watchById, watchLabel, watchOfTask, type WatchRow } from "./watches.ts";
 import { harnessWaitOf, planView, storedBase } from "./dispatch.ts";
 import { flowLine, gatesOf, runWorkflow, type GateRow } from "./stages.ts";
+import { choiceCell, stageChoiceLines } from "./stage-choices.ts";
 import { gateHarness, harnessRefusal, waitsOnAutoCheck } from "./harness-gate.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { divergenceView, getDivergence, resolveCommand } from "../reconcile/divergence.ts";
@@ -459,6 +460,7 @@ const fleet: VerbSpec = {
       project: r.project_id,
       state: r.state,
       stage: stageLabel(r),
+      model: choiceCell(r),
       live: r.liveness,
       age: age(ctx.now, r.started_at),
       steer: steerBrief(ctx.db, r.id, ctx.now),
@@ -919,6 +921,8 @@ const show: VerbSpec = {
         ...operationView(ctx, run.id),
         workflow: `${run.workflow}: ${flowLine(runWorkflow(ctx.db, run, policy.kind as "ship" | "scout"))}`,
         stage: stageLabel(run),
+        // Each stage's model and effort as a launch for it looks them up now (the current one: model and effort above).
+        stages: stageChoiceLines(ctx.db, ctx.config, { ...run, project_id: policy.project_id }, policy.kind as "ship" | "scout"),
         ...(requeued ? { queued: `${requeued.status} · ${requeued.next}` } : {}),
         ...(gatesView(ctx, run.id) ? { gates: gatesView(ctx, run.id) } : {}),
         ...grantsField(ctx, { task: run.task_id }),
