@@ -287,7 +287,7 @@ const inbox: VerbSpec = {
   roles: ["worker"],
   read(ctx) {
     const run = callerRun(ctx);
-    const steers = unackedSteers(ctx.db, run.id).map((m) => ({ id: m.id, steer: steerLine(m.id, m.body) }));
+    const steers = unackedSteers(ctx.db, run.id).map((m) => ({ id: m.id, steer: steerLine(m.id, m.body, m.end_turn === 1) }));
     return { data: { run: run.id, steers }, hints: steers.length > 0 ? ["act on each, then: $FLOWRYN_BIN ack <id>"] : [] };
   },
 };

@@ -33,13 +33,21 @@
  * fake-contract-shared.ts), acknowledge each steer (first when the steer says
  * so, otherwise once its work is done), write and deliver the report it is
  * told to, run the command the toolkit step names once and never retry a
- * toolkit denial, and otherwise end its turn. Anything else that continues a turn
+ * toolkit denial, and otherwise end its turn. Where it was told to end its turn
+ * and no steer of the turn said that turn end asks for no outcome
+ * (END_TURN_NOTE, on a steer sent with --end-turn), its worker contract's "End
+ * each turn with an outcome" and its scout task's "Finished: deliver --report"
+ * win and it delivers a report, as Claude 2.1.318 and 2.1.319 did live
+ * (docs/notes/2026-11-06-live-contract-check-bf.md);
+ * FAKE_CONTRACT_IGNORE_END_TURN_NOTE=1 makes it deliver past the note too, so a
+ * test can fail a step on purpose. Anything else that continues a turn
  * (a Stop continuation that is not a steer, such as the turn-end guard's
  * reminder) is outside the contract: it has no rule for it and keeps working,
  * as Claude 2.1.291 did in the #32 regression, so the run never goes idle.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { END_TURN_NOTE } from "../../src/harness/contract-text.ts";
 import { appendJson, logLine, ToolCall } from "./fake-contract-shared.ts";
 
 interface HookCommand {
@@ -118,18 +126,25 @@ function denyOf(outputs: string[]): string | null {
 // ---- the model: the contract's instructions, by rule ----
 
 const handled = new Set<string>();
-const STEER = /Flowryn steer \[(m\d+)\]: (.*?) \(when done: \$FLOWRYN_BIN ack m\d+\)/g;
+const NOTE_SOURCE = END_TURN_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const STEER = new RegExp(`Flowryn steer \\[(m\\d+)\\]: (.*?) \\(when done: \\$FLOWRYN_BIN ack m\\d+\\)( ${NOTE_SOURCE})?`, "g");
 const POINTER = /steer (m\d+) from your leader is waiting/;
+const IGNORE_NOTE = env.FAKE_CONTRACT_IGNORE_END_TURN_NOTE === "1";
+const END_TURN = /end your turn/i;
+const DELIVER = /\$FLOWRYN_BIN deliver --report/;
+
+/** What this turn's instructions said about its end: told to end it, told that asks for no outcome; and whether it delivered. */
+const turnEnd = { asked: false, noted: false, delivered: false };
 
 /** The steers a text carries: their lines, or a pointer's (read with inbox, as the pointer says). */
-async function steersIn(text: string): Promise<{ id: string; body: string }[]> {
+async function steersIn(text: string): Promise<{ id: string; body: string; noted: boolean }[]> {
   let source = text;
   if (POINTER.test(text)) {
     const proc = Bun.spawn([env.FLOWRYN_BIN ?? "flowryn", "inbox", "--json"], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const reply = JSON.parse((await new Response(proc.stdout).text()) || "{}") as { data?: { steers?: { steer: string }[] } };
     source += "\n" + (reply.data?.steers ?? []).map((s) => s.steer).join("\n");
   }
-  return [...source.matchAll(STEER)].map((m) => ({ id: m[1]!, body: m[2]! }));
+  return [...source.matchAll(STEER)].map((m) => ({ id: m[1]!, body: m[2]!, noted: m[3] !== undefined }));
 }
 
 /** The commands an instruction asks for, in order. */
@@ -148,10 +163,14 @@ function workOf(text: string): string[] {
 
 async function plan(text: string): Promise<string[]> {
   const task = /Your full task is in (\S+?);/.exec(text);
-  const commands = task && existsSync(task[1]!) ? workOf(readFileSync(task[1]!, "utf8")) : [];
+  const brief = task && existsSync(task[1]!) ? readFileSync(task[1]!, "utf8") : "";
+  const commands = workOf(brief);
+  if (END_TURN.test(brief)) turnEnd.asked = true;
   for (const steer of await steersIn(text)) {
     if (handled.has(steer.id)) continue;
     handled.add(steer.id);
+    if (END_TURN.test(steer.body)) turnEnd.asked = true;
+    if (steer.noted && !IGNORE_NOTE) turnEnd.noted = true;
     const ack = `$FLOWRYN_BIN ack ${steer.id}`;
     const steerWork = workOf(steer.body);
     commands.push(...(/acknowledge/i.test(steer.body) ? [ack, ...steerWork] : [...steerWork, ack]));
@@ -207,6 +226,7 @@ async function work(queue: string[]): Promise<boolean> {
       continue;
     }
     log(`bash ${command}`);
+    if (DELIVER.test(command)) turnEnd.delivered = true;
     current = new ToolCall();
     const code = await current.run(command, sandboxed(), cwd);
     current = null;
@@ -217,13 +237,25 @@ async function work(queue: string[]): Promise<boolean> {
   return !interrupted;
 }
 
+/** What finishes a scout: its report, then deliver. */
+const DELIVER_COMMANDS = [`mkdir -p "$FLOWRYN_REPORT_DIR" && echo 'contract ok' > "$FLOWRYN_REPORT_DIR/report.md"`, `$FLOWRYN_BIN deliver --report "$FLOWRYN_REPORT_DIR/report.md"`];
+
+/** Told to end the turn, with nothing saying that turn end asks for no outcome: the worker contract's outcome wins, so it delivers. */
+async function outcomeAtTurnEnd(): Promise<boolean> {
+  if (!turnEnd.asked || turnEnd.noted || turnEnd.delivered) return true;
+  log("told to end the turn, and nothing says it asks for no outcome: delivering, as the worker contract says");
+  return work([...DELIVER_COMMANDS]);
+}
+
 async function turn(prompt: string): Promise<void> {
   interrupted = false;
+  Object.assign(turnEnd, { asked: false, noted: false, delivered: false });
   log(`turn: ${prompt}`);
   await runHooks("UserPromptSubmit", { prompt });
   if (!(await work(await plan(prompt)))) return;
   let active = false;
   for (;;) {
+    if (!(await outcomeAtTurnEnd())) return;
     const context = contextOf(await runHooks("Stop", { stop_hook_active: active }));
     if (context === null) return;
     active = true;
