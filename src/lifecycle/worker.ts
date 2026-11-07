@@ -193,7 +193,7 @@ const ask: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  endsTurn: (args) => boolArg(args, "blocking") || boolArg(args, "nomistakes") || Boolean(stringArg(args, "reserved")?.trim()),
+  endsTurn: true,
   // A --nomistakes ask reads no-mistakes' status and git first; give it time before it spools.
   replyMs: 30_000,
   async prepare(ctx, args): Promise<RuleFacts | null> {
@@ -469,7 +469,7 @@ const deliver: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  endsTurn: () => true,
+  endsTurn: true,
   // The named-head gate asks GitHub and the remote; a slow answer must not turn a refusal into a spool.
   replyMs: 60_000,
   async prepare(ctx, args) {
@@ -609,7 +609,7 @@ const fail: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  endsTurn: () => true,
+  endsTurn: true,
   apply(ctx, args) {
     const run = activeRun(ctx);
     const reason = sanitizeBlock(stringArg(args, "body") ?? "").trim().slice(0, MAX_REPORT_CHARS);

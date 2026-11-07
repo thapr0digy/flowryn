@@ -804,7 +804,7 @@ const stageDone: VerbSpec = {
   kind: "mutation",
   roles: ["worker"],
   spool: true,
-  endsTurn: () => true,
+  endsTurn: true,
   // A review gate records the HEAD it opened at (a one-click pass is bound to it), and a draft
   // stage's page must be its file rendered as the worktree holds it now; both ask git.
   async prepare(ctx, args) {

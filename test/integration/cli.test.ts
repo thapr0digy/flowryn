@@ -232,13 +232,13 @@ describe("when the daemon is down", () => {
     expect(plain.reply.hints).toEqual(["go on with your recommendation now; the answer arrives as a steer (redo what it changes)"]);
   });
 
-  test("a spooled outcome or waiting question says end your turn; any other spooled call says go on", async () => {
+  test("a spooled outcome or question says end your turn (no reserved class can be read with the daemon down); any other spooled call says go on", async () => {
     const { h, d } = await setup();
     const run = seedRun(h);
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
     await d.stop();
-    const help = async (args: string[]) => {
-      const spooled = await cli(h, args, { env: worker, stdin: "x" });
+    const help = async (args: string[], stdin = "x") => {
+      const spooled = await cli(h, args, { env: worker, stdin });
       expect(spooled.code).toBe(75);
       return /help: (.*)/.exec(spooled.stdout)![1];
     };
@@ -246,7 +246,8 @@ describe("when the daemon is down", () => {
     const endTurn = "queued, delivered when the daemon is back; end your turn, never retry it";
     const ask = ["ask", "--options", "yes,no", "--blocks", "the next step of the task", "--body-file", "-"];
     expect(await help(["report", "finding", "--body-file", "-"])).toBe(goOn);
-    expect(await help(ask)).toBe(goOn);
+    expect(await help(ask)).toBe(endTurn);
+    expect(await help(["ask", "--options", "drop,keep", "--recommend", "drop", "--blocks", "the migration step", "--body-file", "-"], "Drop the legacy table?")).toBe(endTurn);
     expect(await help([...ask, "--blocking"])).toBe(endTurn);
     expect(await help([...ask, "--reserved", "the user owns it"])).toBe(endTurn);
     expect(await help(["fail", "--body-file", "-"])).toBe(endTurn);
