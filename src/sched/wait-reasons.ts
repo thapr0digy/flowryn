@@ -38,7 +38,7 @@ export function usageRefusal(db: Db, account: string, now: number, overflow: str
       ...(pause.probe ? [{ name: "probe", value: pause.probe.run, at: pause.probe.at }] : []),
     ],
     unblock: [
-      { by: "flowryn", action: probing ? "lifts the pause when the probe's turn ends normally" : `lets one run on ${account} probe it after ${clock(pause.until)}` },
+      { by: "flowryn", action: probing ? "lifts the pause when the probe makes a tool call or its turn ends normally" : `lets one run on ${account} probe it after ${clock(pause.until)}` },
       { by: "captain", action: resumeCommand(account) },
     ],
   };

@@ -20,7 +20,7 @@ import { dueSteers, dueUrgent, getMessage, loseUnseenUrgent, markLost, markRung,
 import { piPreempt } from "./urgent.ts";
 import { guardTurnEnd } from "./turn-end-guard.ts";
 import { backgroundStartOf, recordBackgroundStart } from "./background-jobs.ts";
-import { clearUsageLimit, noteUsageLimit } from "../sched/usage.ts";
+import { clearUsageLimit, noteProbeReply, noteUsageLimit } from "../sched/usage.ts";
 import { schedTiming } from "../config/workflows.ts";
 import { accountOfTranscript, defaultAccount } from "../config/accounts.ts";
 import type { ReportedLogin } from "../leader/login.ts";
@@ -479,20 +479,27 @@ const preTool = signalVerb(
   (ctx, run, args) => {
     claudeSaw(ctx, run, args, "pre-tool");
     markBusy(ctx, run, HOOK_SIGNALS["pre-tool"], "pre-tool");
-    const denied = toolkitArg(args);
-    if (denied) recordToolkitDenied(ctx.db, denied, { runId: run.id, taskId: run.task_id, harness: harnessOf(args), toolName: toolNameOf(args) }, ctx.now());
-    const tool = mainTool(args);
-    if (tool === null) return { data: { run: run.id } };
-    const urgent = dueUrgent(ctx.db, run.id, ctx.now(), ctx.fleet.timing());
-    if (urgent) {
-      markRung(ctx.db, urgent, run, "pre-tool", ctx.now(), false, ctx.fleet.timing());
-      return { data: { run: run.id, steer: urgent.id, permission: "deny", reason: urgentBlockLine(urgent.id, urgent.body, urgent.end_turn === 1) } };
-    }
-    if (!denied) ctx.fleet.urgent.tools.start(run.id, tool, ctx.now());
-    return { data: { run: run.id } };
+    // A usage probe's tool call means the model answered: the pause lifts (src/sched/usage.ts).
+    const usage = harnessOf(args) === "claude" && noteProbeReply(ctx.db, runAccountId(run), run.id, `worker ${run.task_id}`, ctx.now()) ? "resumed" : null;
+    return withUsage(preToolBody(ctx, run, args), usage);
   },
   (ctx, input, args) => leader.preToolUse(ctx, input, toolkitArg(args)),
 );
+
+/** The pre-tool hook past the usage probe: the toolkit record, an urgent steer that blocks the call, else the tool's clock. */
+function preToolBody(ctx: HandlerCtx, run: RunWithPolicy, args: Args): HandlerResult {
+  const denied = toolkitArg(args);
+  if (denied) recordToolkitDenied(ctx.db, denied, { runId: run.id, taskId: run.task_id, harness: harnessOf(args), toolName: toolNameOf(args) }, ctx.now());
+  const tool = mainTool(args);
+  if (tool === null) return { data: { run: run.id } };
+  const urgent = dueUrgent(ctx.db, run.id, ctx.now(), ctx.fleet.timing());
+  if (urgent) {
+    markRung(ctx.db, urgent, run, "pre-tool", ctx.now(), false, ctx.fleet.timing());
+    return { data: { run: run.id, steer: urgent.id, permission: "deny", reason: urgentBlockLine(urgent.id, urgent.body, urgent.end_turn === 1) } };
+  }
+  if (!denied) ctx.fleet.urgent.tools.start(run.id, tool, ctx.now());
+  return { data: { run: run.id } };
+}
 
 /** A Pi extension's tool call that `hook tool-check` denied by the toolkit rules: only the toolkit.denied event. */
 const toolDenied = signalVerb(
