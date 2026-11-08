@@ -309,7 +309,7 @@ describe("interventions", () => {
     ev("sched.usage_resumed", t + 14, null, {});
     ev("sched.usage_resumed", t + 15, null, {}, "daemon");
     ev("sched.quota_override", t + 16, null, {});
-    db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('a1', 't1', 'u', 'h', 'board', 'me', 'merge', ?1, ?1), ('a2', 't1', 'u', 'h', 'yolo', 'me', 'merge', ?1, ?1)").run(t);
+    db.query("INSERT INTO approvals (id, task_id, pr_url, head_sha, channel, actor, action, created_at, expires_at) VALUES ('a1', 't1', 'u', 'h', 'board', 'me', 'merge', ?1, ?1), ('a2', 't1', 'u', 'h', 'yolo', 'me', 'merge', ?1, ?1), ('a3', 't1', 'u', 'h', 'autonomous', 'me', 'merge', ?1, ?1), ('a4', 't1', 'u', 'h', 'validator', 'me', 'merge', ?1, ?1), ('a5', 't1', 'u', 'h', 'away-validator', 'validator j1', 'merge', ?1, ?1)").run(t);
     const rows = summarizeInterventions(interventions(db, scope(), []));
     expect(rows).toEqual(
       expect.arrayContaining([

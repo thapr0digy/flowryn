@@ -5,6 +5,7 @@ import { CONFIG_SECTIONS, table, type FlowrynConfig, type SectionName } from "./
 import { daemonConfig } from "./daemon.ts";
 import { cleanupConfig, githubConfig } from "./delivery.ts";
 import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
+import { mergeConfig } from "./merge.ts";
 import { policyMode } from "./policy.ts";
 import { askConfig } from "./ask.ts";
 import { contractsConfig } from "./contracts.ts";
@@ -84,6 +85,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   sched: schedTiming,
   style: styleView,
   decisions: decisionsConfig,
+  merge: mergeConfig,
   projects: projectsView,
   accounts: accountsView,
   // Its rules resolve with the accounts; both views come from one parse.

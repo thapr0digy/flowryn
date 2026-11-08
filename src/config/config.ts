@@ -114,6 +114,7 @@ export const CONFIG_SECTIONS = [
   "sched",
   "style",
   "decisions",
+  "merge",
   "projects",
   "accounts",
   "scopes",

@@ -1151,6 +1151,37 @@ ALTER TABLE approvals_v59 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 `;
 
+/**
+ * Migration 60 (docs/notes/2026-11-08-merge-sensitive-prs-rr.md): a validator round may judge a
+ * delivered PR before it merges (stage 'merge', no gate, the PR in `ref`), so `gate_id` is
+ * nullable; and `approvals` takes the channel `away-validator`, the record such a pass leaves.
+ */
+const AWAY_MERGES_SQL = /* sql */ `
+CREATE TABLE gate_validations_v60 (
+  id TEXT PRIMARY KEY, gate_id TEXT, run_id TEXT NOT NULL, task_id TEXT NOT NULL, stage TEXT NOT NULL,
+  away_since INTEGER NOT NULL, head TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running','passed','changes','held','failed','advised')),
+  verdict_json TEXT, reason TEXT, cost_usd REAL, waited_ms INTEGER NOT NULL, report_path TEXT,
+  started_at INTEGER NOT NULL, ended_at INTEGER, ref TEXT);
+INSERT INTO gate_validations_v60 (id, gate_id, run_id, task_id, stage, away_since, head, state, verdict_json, reason, cost_usd, waited_ms, report_path, started_at, ended_at)
+  SELECT id, gate_id, run_id, task_id, stage, away_since, head, state, verdict_json, reason, cost_usd, waited_ms, report_path, started_at, ended_at FROM gate_validations;
+DROP TABLE gate_validations;
+ALTER TABLE gate_validations_v60 RENAME TO gate_validations;
+CREATE INDEX gate_validations_gate ON gate_validations(gate_id);
+CREATE INDEX gate_validations_rounds ON gate_validations(task_id, stage, away_since);
+CREATE TABLE approvals_v60 (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','page','yolo','autonomous','validator','away-validator')),
+  actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
+  allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed_at INTEGER);
+INSERT INTO approvals_v60 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+  SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
+DROP TABLE approvals;
+ALTER TABLE approvals_v60 RENAME TO approvals;
+CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1211,6 +1242,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 57, name: "landing-train", sql: LANDING_TRAIN_SQL },
   { version: 58, name: "verify-wait", sql: VERIFY_WAIT_SQL },
   { version: 59, name: "gate-validations", sql: GATE_VALIDATIONS_SQL, rebuildsReferencedTable: true },
+  { version: 60, name: "away-merges", sql: AWAY_MERGES_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

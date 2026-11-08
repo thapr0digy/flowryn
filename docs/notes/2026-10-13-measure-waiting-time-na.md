@@ -49,7 +49,7 @@ An intervention is a verb a person or the leader ran that changed a run, read fr
 | `dismiss` | `item.dismissed` | payload `by`; a dismissed decision is counted here once, through its item |
 | `gate pass` | `gate.passed` of a review gate (payload has `channel`) | the approval channel (`claude-ask`, `claude-chat`, `cli-tty`, `board`, `pi-confirm`) |
 | `gate changes` | `gate.changes` with a `by` (a merge gate closed unpassed by a send-back records none: the decline or nudge is the action) | payload `by` |
-| `approve merge` | `approvals` rows with `action = 'merge'` created in the window, not `yolo` | the channel |
+| `approve merge` | `approvals` rows with `action = 'merge'` created in the window on a human channel (`HUMAN_CHANNELS`, src/policy/approvals.ts; never `yolo`, `autonomous`, `validator` or `away-validator`) | the channel |
 | `decline` | `run.declined` | payload `by` |
 | `steer` | `steer.created` with no decision, whose steer id no `stage.started` or `run.policy_steered` event in the window names (payload `steer`): those are Flowryn's own stage-start and policy-follow steers. Answer and dismissal steers carry their decision and are left out | `-` (not recorded) |
 | `cancel` | `operation.requested` with payload `kind = cancel` | payload `by` |

@@ -434,7 +434,7 @@ describe("gate reopen", () => {
     expect(pick(later)).toEqual([]);
     tx(db, () => endAway(db, "back", later));
     awayBy("human", later + 1000);
-    expect(pick(later + 2000).map((picked) => picked.gate.id)).toEqual(["g2"]);
+    expect(pick(later + 2000).map((picked) => picked.gate!.id)).toEqual(["g2"]);
   });
 });
 
