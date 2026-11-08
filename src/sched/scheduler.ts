@@ -435,7 +435,6 @@ export class Scheduler {
     const limit = projectLimit(config, c.run.project_id);
     let account = capacityAccount(config, c.run.account, c.run.harness);
     // An account config no longer has: the launch refuses it with why, so nothing is held here.
-    let usage: "open" | "probe" = "open";
     let moved: { from: string; why: string } | null = null;
     if (account) {
       if (c.run.pending_launch) {
@@ -449,7 +448,7 @@ export class Scheduler {
         if (!target) return this.refuse(c, hold.refusal(firstLaunch && account.overflow.length > 0 ? `no overflow account is free (${account.overflow.join(", ")})` : null));
         moved = { from: account.id, why: hold.refusal(null).rule };
         account = target;
-      } else usage = hold.usage;
+      }
     }
     // A grant that launches a worker checks the installed harness version first (design section 5).
     let verified: string | null = null;
@@ -476,6 +475,10 @@ export class Scheduler {
         if (open && (open.kind === "cancel" || open.phase !== "requested")) return null;
         if (heldByEscalation(db, fresh.id)) return null;
         if (open && fresh.pending_launch && open.mode !== fresh.pending_launch) return { refusal: operationModeRefusal(open, fresh.pending_launch) };
+        // Read again here: the gate read before the awaits above (sign-in, quota, harness and host checks) may be stale,
+        // and a stale "probe" would let a second run into a pause a hook re-armed meanwhile.
+        const usage = account ? usageGate(db, now(), account.id, fresh.id) : "open";
+        if (account && (usage === "paused" || (moved && usage !== "open"))) return { refusal: usageRefusal(db, account.id, now()) };
         if (moved && account) {
           // Re-read in the transaction: the run must still be on its first launch, on the account that was held.
           if (fresh.pending_launch !== "fresh" || (fresh.account ?? fresh.harness) !== moved.from) return null;
@@ -677,14 +680,13 @@ export class Scheduler {
       }
       // A phase's run is a fresh launch: a held account overflows if it can, else the phase waits unstarted.
       const hold = await this.accountHold(account, null, true);
-      let usage: "open" | "probe" = "open";
       let moved: { from: string; why: string } | null = null;
       if (hold.refusal) {
         const target = account.overflow.length > 0 ? await this.overflowTarget(account, config, pass, pins.model) : null;
         if (!target) continue;
         moved = { from: account.id, why: hold.refusal(null).rule };
         account = target;
-      } else usage = hold.usage;
+      }
       let made: string | null;
       try {
         const workflow = workflowFor(config, phase.workflow, "ship");
@@ -694,7 +696,7 @@ export class Scheduler {
           this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} waits: ${ready.stack.branch} moved past ${ready.stack.task}'s delivered head`);
           continue;
         }
-        made = this.startPhase(phase, project, account, { ...start, stackedOn: ready.stack?.task ?? null }, workflow, usage === "probe", moved, now());
+        made = this.startPhase(phase, project, account, { ...start, stackedOn: ready.stack?.task ?? null }, workflow, moved, now());
       } catch (error) {
         if (error instanceof FlowrynError) this.phaseBlocked(phase, error.message);
         else this.deps.log(`sched: phase ${phase.phase_no} of ${phase.plan_id} failed to start: ${(error as Error).stack ?? String(error)}`);
@@ -744,7 +746,6 @@ export class Scheduler {
     account: Account,
     start: { version: string; base: string; baseBranch: string | null; stackedOn: string | null },
     workflow: WorkflowDef,
-    probe: boolean,
     moved: { from: string; why: string } | null,
     t: number,
   ): string | null {
@@ -752,6 +753,10 @@ export class Scheduler {
     const config = this.deps.config();
     return tx(db, () => {
       if (db.query("SELECT 1 FROM runs WHERE task_id = ?1").get(phase.task_id)) return null;
+      // The usage gate read again in the transaction, as a grant does: what was read before the awaits may be stale.
+      const usage = usageGate(db, t, account.id, null);
+      if (usage === "paused" || (moved && usage !== "open")) return null;
+      const probe = usage === "probe";
       const runId = createRun(db, config, { taskId: phase.task_id, title: phase.title, body: phase.body, project, kind: "ship", account, pins: { model: phase.model, effort: phase.effort }, version: start.version, base: start.base, baseBranch: start.baseBranch, stackedOn: start.stackedOn, workflow, sensitive: false, existing: true, by: "scheduler", override: null, now: t });
       if (probe) claimProbe(db, account.id, runId, t);
       if (moved) appendEvent(db, { source: "daemon", kind: "sched.overflow", runId, taskId: phase.task_id, payload: { from: moved.from, to: account.id, why: moved.why, at: "phase start" }, ts: t });

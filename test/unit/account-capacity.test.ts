@@ -156,6 +156,48 @@ describe("one account held, the other carries on", () => {
   });
 });
 
+/**
+ * The pause lets at most one probe through (docs/notes/2026-11-08-fix-the-four-3w.md). A grant reads
+ * the gate, then awaits the quota, sign-in, harness and host checks before its transaction starts
+ * the run; a hook can re-arm the pause in that window. The stand-in quota read is the window here.
+ */
+describe("the usage pause's one probe, under a grant's awaits", () => {
+  const usageProbes = () => (db.query("SELECT run_id FROM events WHERE kind = 'sched.usage_probe' ORDER BY seq").all() as { run_id: string }[]).map((e) => e.run_id);
+
+  test("a pause re-armed while the grant awaits its checks starts nothing: the probe verdict read before is not used", async () => {
+    // Expired at 960_000, no probe out: the next grant may probe.
+    tx(db, () => noteUsageLimit(db, "work-a", "worker t0", "rate_limit", 900_000, BACKOFF));
+    expect(usageGate(db, 1_000_000, "work-a", "r1")).toBe("probe");
+    waiting("r1", "work-a");
+    const s = stand();
+    const sched = scheduler(s);
+    const rearm = (sched as unknown as { deps: { quota: (a: Account) => Promise<unknown> } }).deps;
+    const read = rearm.quota;
+    // Meanwhile another live session's turn hits the limit: the pause is re-armed with the next backoff.
+    rearm.quota = async (account) => {
+      tx(db, () => noteUsageLimit(db, "work-a", "worker t9", "rate_limit", 1_000_000, BACKOFF));
+      return read(account);
+    };
+    await sched.passNow();
+    sched.stop();
+    expect(s.launches).toEqual([]);
+    expect(usageProbes()).toEqual([]);
+    expect(usagePause(db, "work-a")).toMatchObject({ until: 1_120_000, probe: null });
+    expect(reasons("r1")).toEqual([["capacity.usage_limit", expect.stringMatching(/^the usage limit on account work-a pauses its starts until \d\d:\d\d$/)]]);
+  });
+
+  test("of three runs waiting at the expiry, exactly one starts, as the probe; the others wait on it", async () => {
+    tx(db, () => noteUsageLimit(db, "work-a", "worker t0", "rate_limit", 900_000, BACKOFF));
+    for (const [id, at] of [["r1", 1], ["r2", 2], ["r3", 3]] as const) waiting(id, "work-a", "fresh", at);
+    const s = stand();
+    await pass(s);
+    await pass(s);
+    expect(s.launches).toEqual(["r1:fresh"]);
+    expect(usageProbes()).toEqual(["r1"]);
+    for (const id of ["r2", "r3"]) expect(reasons(id)).toEqual([["capacity.usage_limit", "the usage limit on account work-a: run r1 probes it first"]]);
+  });
+});
+
 describe("a login quota-axi cannot read", () => {
   test("the implicit Pi account is never probed nor recorded: its run starts and no quota event is written", async () => {
     waiting("r1", "pi", "fresh", 1, "pi");
