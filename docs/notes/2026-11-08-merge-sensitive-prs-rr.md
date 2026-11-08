@@ -49,7 +49,7 @@ The pass runs on every attention tick, right after the review-gate validator.
    - the newest finished verify at exactly the delivered head, under today's policy, passed;
    - GitHub's last PR head and the worktree HEAD are both the delivered head;
    - nothing already approved this head;
-   - no round is running for the task, and none ended `held` under this away;
+   - no round is running for the task;
    - fewer than `validator_rounds` rounds that did not pass and fewer than `MAX_INTEGRATIONS + 1` (4) passes under this away.
 
    Only a run that passes all of that costs a `git rev-parse HEAD`. In one transaction the pass records a `gate_validations` row `j<N>` with stage `merge`, no gate, the PR `ref` and the head.
@@ -125,8 +125,8 @@ New events, each appended in its write's transaction: `away_merge.approved`, `aw
 - `test/unit/away-merge.test.ts`:
   - the key, with its refusals and startup problem;
   - every `awayMergeRefusal` check alone, and every `awayApprovalLive` case;
-  - the merge prompt and contract;
-  - against a real database: the trigger for each `by`; pass (record, live check, never a human record, the auto-merge started); a push after the pass; changes (sent back); no verdict (malformed, a listed question, timeout); head moved and user back as advice; the round limit;
+  - the merge prompt;
+  - against a real database: the trigger for each `by`; pass (record, live check, never a human record, the auto-merge started); a push after the pass; changes (sent back); no verdict (malformed, a listed question, timeout, cut off by a daemon stop, each with its item); head moved and user back as advice; the round limit;
   - `stopAwayMerges` voiding and keeping;
   - the brief's lines and the revert;
   - migration 60.
