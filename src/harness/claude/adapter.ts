@@ -58,6 +58,8 @@ export function workerSettings(
       PostToolUse: [{ matcher: "*", hooks: [command("post-tool")] }],
       // Claude fires PostToolUseFailure, not PostToolUse, for a tool that failed (a command exiting non-zero): it ends the tool's clock too.
       PostToolUseFailure: [{ matcher: "*", hooks: [command("tool-failed")] }],
+      // Claude denied a call without running it: a blocked prompt's follow-up steer (docs/notes/2026-11-08-keep-workers-off-pp.md).
+      PermissionDenied: [{ matcher: "*", hooks: [command("permission-denied")] }],
       Stop: [{ hooks: [command("stop"), waiter] }],
       StopFailure: [{ hooks: [command("stop-failure")] }],
       SessionEnd: [{ hooks: [command("session-end")] }],

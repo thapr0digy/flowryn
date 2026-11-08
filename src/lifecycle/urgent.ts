@@ -60,6 +60,13 @@ export class ToolTracker {
     return oldest;
   }
 
+  /** The running tool whose PreToolUse came last (the one a dialog that just opened holds), or null when none runs. */
+  latest(runId: string): string | null {
+    let latest: { id: string; at: number } | null = null;
+    for (const [id, at] of this.runs.get(runId) ?? []) if (latest === null || at >= latest.at) latest = { id, at };
+    return latest?.id ?? null;
+  }
+
   /** A dialog was just seen gone: the tools it held get their own full threshold from now. */
   restart(runId: string, at: number): void {
     const tools = this.runs.get(runId);

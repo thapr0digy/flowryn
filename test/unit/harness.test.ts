@@ -104,7 +104,9 @@ describe("claude adapter", () => {
 
   test("the worker settings wire every hook verb, and the Stop waiter is asyncRewake with an 8 h timeout", () => {
     const settings = workerSettings("/opt/flowryn bin/flowryn") as { hooks: Record<string, { hooks: { command: string; asyncRewake?: boolean; timeout?: number }[] }[]> };
-    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    expect(Object.keys(settings.hooks).toSorted()).toEqual(["Notification", "PermissionDenied", "PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
+    // Claude denied a call without running it: the blocked prompt's follow-up steer.
+    expect(settings.hooks.PermissionDenied![0]!.hooks[0]!.command).toBe("'/opt/flowryn bin/flowryn' hook permission-denied --harness claude");
     // A failed tool fires PostToolUseFailure instead of PostToolUse: it must end the tool's urgent-steer clock.
     expect(settings.hooks.PostToolUseFailure![0]!.hooks[0]!.command).toBe("'/opt/flowryn bin/flowryn' hook tool-failed --harness claude");
     // The usage-limit resume signals, and a permission dialog waiting mid-run (cutover C2): a worker's idle_prompt means nothing to Flowryn.
@@ -186,7 +188,8 @@ describe("worker contract text", () => {
   test("the worker contract forbids history rewrites, unguarded rm and approvals, and says what to do at a prompt", () => {
     const text = workerContract("claude", null, { defaultBranch: "main" });
     expect(text).toContain("- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take main by git merge origin/main, plain push.");
-    expect(text).toContain('- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.');
+    // Edits by the edit tool, not shell scripts, which trip false "dangerous rm" prompts (docs/notes/2026-11-08-keep-workers-off-pp.md).
+    expect(text).toContain('- Edit with your edit tool, not scripts; rm only "${VAR:?}"/mktemp -d; scratch goes in $TMPDIR.');
     expect(text).toContain("- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; never retry.");
     for (const harness of ["claude", "pi"] as const) expect(workerContract(harness, null, { defaultBranch: "main" })).toContain("scratch goes in $TMPDIR");
     expect(text).toContain("never end a turn to wait on a job: run it in foreground.");

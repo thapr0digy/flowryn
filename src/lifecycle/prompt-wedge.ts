@@ -1,10 +1,11 @@
-import { appendEvent } from "../db/events.ts";
+import { appendEvent, type EventSource } from "../db/events.ts";
 import type { Db } from "../db/db.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { redactSecrets } from "../util/redact.ts";
 import { findOpenRunItem, resolveRunItems } from "../attention/items.ts";
 import { explain, type Fact, type Unblock } from "../attention/explanations.ts";
 import { openRunItemOnce, setLiveness, taskTitle, type RunRow } from "./runs.ts";
+import { createSteer, type MessageRow } from "./steers.ts";
 
 /**
  * A worker stopped mid-run by a confirmation prompt (cutover C2): your own
@@ -68,7 +69,7 @@ export function clearPrompt(db: Db, run: RunRow, herdrStatus: string | null, sou
 export function openBlockedPrompt(
   db: Db,
   run: RunRow,
-  how: { suspected: boolean; screen: string | null; harness: "claude" | "pi"; lastHook: number; herdrStatus?: string | null },
+  how: { suspected: boolean; screen: string | null; harness: "claude" | "pi"; lastHook: number; herdrStatus?: string | null; heldTool?: string | null },
   now: number,
 ): string | null {
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return null;
@@ -85,7 +86,135 @@ export function openBlockedPrompt(
         : `${title} is waiting on a confirmation: ${prompt || "see pane " + run.pane_id}`;
   const item = openRunItemOnce(db, "blocked_prompt", run, event.seq, line, now);
   explainDialog(db, run, how, prompt, item, now);
+  if (how.harness === "claude") openEpisode(db, run, item, how.heldTool ?? null, prompt, how.suspected ? "reconciler" : "hook", now);
   return item;
+}
+
+// --- after the prompt: answered or blocked (docs/notes/2026-11-08-keep-workers-off-pp.md) ------------
+
+/** The third blocked prompt for one run inside the window goes to the leader instead of another steer. */
+export const PROMPT_REPEAT_LIMIT = 3;
+export const PROMPT_REPEAT_WINDOW_MS = 30 * 60_000;
+
+/** The text Claude hands the model for a refused or auto-blocked tool call (Claude Code 2.1.319). */
+const DENIAL_TEXT = /doesn't want to proceed with this tool use|tool use was rejected|permission for this tool use was denied|permission to use \S+ (?:with .{1,200} )?has been denied|awaiting approval did not run/i;
+
+export type EpisodeOutcome = "pending" | "answered" | "denied" | "void";
+
+export interface PromptEpisode {
+  id: number;
+  run_id: string;
+  item_id: string | null;
+  held_tool: string | null;
+  prompt: string;
+  opened_at: number;
+  outcome: EpisodeOutcome;
+  decided_at: number | null;
+  via: string | null;
+  steer_id: string | null;
+}
+
+/** A worker hook seen after a prompt opened, by what it tells about the held tool. */
+export type PromptSignal =
+  | { hook: "pre-tool" | "post-tool"; tool: string | null }
+  | { hook: "tool-failed"; tool: string | null; error: string | null }
+  | { hook: "permission-denied"; tool: string | null }
+  | { hook: "stop" | "prompt" };
+
+/** What the episode's next hook decides: answered (the command ran), denied (it did not), or nothing yet. */
+export function outcomeOf(heldTool: string | null, signal: PromptSignal): "answered" | "denied" | null {
+  switch (signal.hook) {
+    case "stop":
+    case "prompt":
+      // A turn cannot end, nor a new prompt arrive, while the held tool runs: it never ran.
+      return "denied";
+    case "permission-denied":
+      return heldTool === null || signal.tool === null || signal.tool === heldTool ? "denied" : null;
+    case "tool-failed":
+      if (heldTool !== null && signal.tool !== heldTool) return null;
+      return signal.error !== null && DENIAL_TEXT.test(signal.error) ? "denied" : "answered";
+    case "post-tool":
+      if (heldTool === null) return "answered";
+      return signal.tool === heldTool ? "answered" : null;
+    case "pre-tool":
+      // The worker went on to another tool while the held one never finished. Unknown held tool: no guess.
+      return heldTool !== null && signal.tool !== null && signal.tool !== heldTool ? "denied" : null;
+  }
+}
+
+/** The prompt line as quoted data: sanitized, quote marks neutralised, capped. */
+export function quotedPrompt(prompt: string): string {
+  const line = sanitizeLine(prompt.replace(/["`]/g, "'"), 160);
+  return line.length > 0 ? `"${line}"` : "(prompt text not captured)";
+}
+
+/** The fixed steer for a blocked command. Plain template, no model. */
+export function promptSteerBody(prompt: string, base: string): string {
+  return [
+    `Your last command was blocked by a permission prompt and did not run: ${quotedPrompt(prompt)}.`,
+    "Do not retry it. Do the same thing another way: edit files with your Edit/Write tool (no python/perl/sed -i scripts);",
+    `new commits only, git merge origin/${base}, plain push; rm only "\${VAR:?}" or mktemp -d paths. Then ack this steer.`,
+  ].join(" ");
+}
+
+function openEpisode(db: Db, run: RunRow, item: string | null, heldTool: string | null, prompt: string, source: EventSource, now: number): void {
+  // A second prompt opening while one is undecided: the older one is superseded (its tool never finished either).
+  voidPendingEpisodes(db, run, "superseded", source, now);
+  const row = db
+    .query("INSERT INTO prompt_episodes (run_id, item_id, held_tool, prompt, opened_at) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id")
+    .get(run.id, item, heldTool, sanitizeLine(prompt, 160), now) as { id: number };
+  appendEvent(db, { source, kind: "run.prompt_episode", runId: run.id, taskId: run.task_id, payload: { episode: row.id, item, held_tool: heldTool }, ts: now });
+}
+
+export function pendingEpisode(db: Db, runId: string): PromptEpisode | null {
+  return db.query("SELECT * FROM prompt_episodes WHERE run_id = ?1 AND outcome = 'pending' ORDER BY id DESC LIMIT 1").get(runId) as PromptEpisode | null;
+}
+
+/** A new session, a resume or a superseding prompt: an undecided episode can no longer be told. Call inside a transaction. */
+export function voidPendingEpisodes(db: Db, run: RunRow, via: string, source: EventSource, now: number): void {
+  const voided = db.query("UPDATE prompt_episodes SET outcome = 'void', decided_at = ?2, via = ?3 WHERE run_id = ?1 AND outcome = 'pending' RETURNING id").all(run.id, now, via) as { id: number }[];
+  for (const { id } of voided) appendEvent(db, { source, kind: "run.prompt_outcome", runId: run.id, taskId: run.task_id, payload: { episode: id, outcome: "void", via }, ts: now });
+}
+
+export type Settled = { outcome: "answered" | "denied"; episode: number; steer: MessageRow | null; item: string | null } | null;
+
+/**
+ * Decide the run's pending episode from a main-agent worker hook. Claude
+ * runs no main-agent hook while its dialog is up (spike c12), so the hook is
+ * itself proof the dialog is gone; every caller also releases the
+ * blocked_prompt item in the same transaction. Denied: the fixed steer, or
+ * past the repeat limit a P1 for the leader instead. Never touches the
+ * dialog or the pane. Call inside the hook's transaction; the hook's settle
+ * notifies the bus after commit, so the steer rings by the usual path.
+ */
+export function settlePromptEpisode(db: Db, run: RunRow, signal: PromptSignal, base: string, now: number): Settled {
+  const episode = pendingEpisode(db, run.id);
+  if (!episode) return null;
+  const outcome = outcomeOf(episode.held_tool, signal);
+  if (outcome === null) return null;
+  if (outcome === "answered") {
+    decide(db, run, episode, "answered", signal.hook, null, now);
+    return { outcome, episode: episode.id, steer: null, item: null };
+  }
+  const recent = db
+    .query("SELECT prompt FROM prompt_episodes WHERE run_id = ?1 AND opened_at > ?2 AND outcome != 'void' ORDER BY opened_at DESC")
+    .all(run.id, now - PROMPT_REPEAT_WINDOW_MS) as { prompt: string }[];
+  if (recent.length >= PROMPT_REPEAT_LIMIT) {
+    decide(db, run, episode, "denied", signal.hook, null, now);
+    const texts = recent.slice(0, PROMPT_REPEAT_LIMIT).map((r) => quotedPrompt(r.prompt));
+    const event = appendEvent(db, { source: "hook", kind: "run.prompt_repeat", runId: run.id, taskId: run.task_id, payload: { episodes: recent.length, prompts: texts }, ts: now });
+    const line = `${taskTitle(db, run.task_id)} was blocked by permission prompts ${recent.length} times in ${PROMPT_REPEAT_WINDOW_MS / 60_000} min; Flowryn stopped steering it on: ${texts.join("; ")}`;
+    const item = openRunItemOnce(db, "prompt_repeat", run, event.seq, line, now);
+    return { outcome, episode: episode.id, steer: null, item };
+  }
+  const steer = createSteer(db, run, promptSteerBody(episode.prompt, base), now);
+  decide(db, run, episode, "denied", signal.hook, steer.id, now);
+  return { outcome, episode: episode.id, steer, item: null };
+}
+
+function decide(db: Db, run: RunRow, episode: PromptEpisode, outcome: "answered" | "denied", via: string, steer: string | null, now: number): void {
+  db.query("UPDATE prompt_episodes SET outcome = ?2, decided_at = ?3, via = ?4, steer_id = ?5 WHERE id = ?1").run(episode.id, outcome, now, via, steer);
+  appendEvent(db, { source: "hook", kind: "run.prompt_outcome", runId: run.id, taskId: run.task_id, payload: { episode: episode.id, outcome, via, ...(steer ? { steer } : {}) }, ts: now });
 }
 
 /** Why the run is held: which rule saw the dialog, on what, and what ends it (docs/notes/2026-10-12-next-steps-md-wz.md). */

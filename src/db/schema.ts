@@ -1182,6 +1182,22 @@ ALTER TABLE approvals_v60 RENAME TO approvals;
 CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
 `;
 
+/** A permission prompt that held a worker, and what became of it (docs/notes/2026-11-08-keep-workers-off-pp.md). */
+const PROMPT_EPISODES_SQL = /* sql */ `
+CREATE TABLE prompt_episodes (
+  id INTEGER PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  item_id TEXT,
+  held_tool TEXT,
+  prompt TEXT NOT NULL,
+  opened_at INTEGER NOT NULL,
+  outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN ('pending','answered','denied','void')),
+  decided_at INTEGER,
+  via TEXT,
+  steer_id TEXT);
+CREATE INDEX prompt_episodes_run ON prompt_episodes(run_id, opened_at);
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1243,6 +1259,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 58, name: "verify-wait", sql: VERIFY_WAIT_SQL },
   { version: 59, name: "gate-validations", sql: GATE_VALIDATIONS_SQL, rebuildsReferencedTable: true },
   { version: 60, name: "away-merges", sql: AWAY_MERGES_SQL, rebuildsReferencedTable: true },
+  { version: 61, name: "prompt-episodes", sql: PROMPT_EPISODES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

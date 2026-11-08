@@ -110,7 +110,7 @@ export function workerContract(harness: HarnessId, style: string | null, deliver
     "- Decide what you can; record why. Stuck: $FLOWRYN_BIN ask --options a,b --blocks <what waits> [--blocking] --body-file -; not blocking or reserved: go on with your pick.",
     "- For your leader: $FLOWRYN_BIN report <finding|blocked|failed> --body-file -; a call refused twice: report blocked.",
     `- Never rewrite pushed history (amend, rebase, force push, reset --hard back); take ${base} by git merge origin/${base}, plain push.`,
-    '- Never rm a path from a maybe-empty variable ("${VAR:?}", mktemp -d); scratch goes in $TMPDIR.',
+    '- Edit with your edit tool, not scripts; rm only "${VAR:?}"/mktemp -d; scratch goes in $TMPDIR.',
     "- Never merge, clean up, approve or answer a confirmation prompt (ask --blocking naming it). Exit 75: queued; never retry.",
   ];
   return [...(style ? [style, ""] : []), TOOL_MAP, "", ...lines].join("\n") + "\n";
