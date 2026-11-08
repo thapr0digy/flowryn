@@ -1,10 +1,9 @@
 # No idle workers with work left: the leader wakes for every action item, and idle workers are nudged
 
-- Status: partial
-- Open: phase 3 (verify failures route themselves) is plan p23's last phase
+- Status: done
 - Config: `[leader] action_batch_ms`, `[leader] wake_ceiling_per_hour`, `[workers] idle_nudge_min`, `[workers] idle_nudge_max`
 
-Task no-idle-workers-23, phases 1 and 2 of 3 (phase 2 is task nudge-idle-workers-eg; see "Phase 2" below). The user (2026-11-06): workers sit stopped with work left, and the leader should hear of everything it must act on and tell the workers what next. Steer m569 made the leader wake the core of this phase: "I need the leader to wake when there is a new action item to complete".
+Task no-idle-workers-23, in three phases (phase 2 is task nudge-idle-workers-eg, phase 3 task route-verify-failures-vd; see "Phase 2" and "Phase 3" below). The user (2026-11-06): workers sit stopped with work left, and the leader should hear of everything it must act on and tell the workers what next. Steer m569 made the leader wake the core of this phase: "I need the leader to wake when there is a new action item to complete".
 
 ## What changed
 
@@ -69,3 +68,40 @@ The worker contract keeps main's outcome line (prompts-that-keep-47): work on un
 
 - `test/unit/idle-nudge.test.ts`: each condition, the template, the 10/30/70-minute schedule and the stall 80 minutes later, progress resetting the count (not a nudge's ack), a background job's end starting the window, no nudge on a review gate, a capacity wait, a pending launch, an open or reserved question, a blocked dialog, an end-turn steer, a restart handoff or a ring in flight, a failed verification as the only work left reaching the stall, a failed read that neither resets the count nor repeats its note, and the git reads against a real repository (unpushed, undelivered, never pushed, behind its remote, timed out).
 - `test/integration/idle-nudge.test.ts`: a fake worker that left a commit unpushed is nudged, pushes and delivers, and gets no second nudge; one that ignores its nudges gets three, then one `worker_stalled`.
+
+## Phase 3: verify failures route themselves
+
+Before, the auto-merge sent a verify's failing step back to its worker once per head and held everything else for the leader: a timeout, a second failure at the head. A leader's own `flowryn verify` that failed went nowhere: the leader read it and had to steer the worker by hand.
+
+Now one router judges every finished verify that did not pass (`src/verify/route.ts`, `routeVerifyOutcome`). It serves the auto-merge (`fromVerifying`), the landing queue (whose heads of line are auto-merge rows) and a leader's `flowryn verify` (`routeManualVerifies`, run in the auto-merger's pass, which a finished verify kicks):
+
+- **A timeout runs once more.** A step killed at a deadline (it hung at its own deadline on every attempt, or the run's ran out) gets one more verify at the same head: a new request copied from the one it ran from (PR, branch, worktree, PATH, source), or the queued one it joins, with event `verify.auto_rerun {of, step, ref, head, request}`. The auto-merge row goes back to `queued` on it. A second timeout at that head goes to the leader.
+- **A real failure goes back to the worker.** A step that exited non-zero is sent back with the step, its exit, its log path and its last 40 lines. The tail is read at most 16 KiB from the end, control characters stripped (`sanitizeBlock`), secrets redacted (`redactSecrets`: GitHub, GitLab, OpenAI-style, AWS and Slack tokens, `Bearer` values, labelled `password=`/`token=` values, URL userinfo, private key blocks), and then cut by the steer's own cap. Event `verify.sent_back {verification, step, exit, head, ref, log, path}` (path `auto_merge` or `manual`). A delivered ship is sent back as before (its last stage starts again with the text); a ship still working gets a plain steer (no decision, not urgent, not end-turn), carried at once.
+- **The leader gets** (event `verify.escalated {verification, code, step, head, detail, path}`):
+  - a second timeout at the same head (`verify_timeout`);
+  - a failure at a head that was already sent back (`verify_failed`);
+  - the same step failing after its send-back at an earlier head of the run;
+  - a fourth failure in one run (`MAX_VERIFY_SEND_BACKS`, 3 send-backs);
+  - an error, a review with no verdict, or a failure with no failing step;
+  - a failure whose run has ended;
+  - a re-run that could not be queued (the project has no verify steps now, or its config is invalid), with the reason.
+
+  On the auto-merge's path that is the row held with `auto_merge_held`, as before. On a leader's own verify it is a new P1 `verify_failed` item (route `act`, so it wakes the leader) naming `flowryn verify show v<N>`. It resolves when the run delivers again, is sent back or lands; otherwise the leader dismisses it once handled.
+- **A leader's own verify is judged once.** Only verifications started from a `cli` request (or a startup recovery's re-run of one) and not already judged elsewhere: an auto-merge row follows it, or either path recorded its `verify.auto_rerun` (`of`), `verify.sent_back`, `verify.escalated` or `verify.route_skipped` (`verification`), so a leader's verify an auto-merge row adopted and then re-ran after a timeout is not escalated a second time once the row moves to the re-run. Each one gets exactly one of the events above or `verify.route_skipped {verification, why}`: superseded by a later verify of the same PR, a delivery past its head, cut off by a daemon stop (recovery runs it again), or no task. The pass keeps its place in meta `verify_route_mark` (the last `finished_at` judged and the ids judged at that instant). With no mark (the first pass after an upgrade), failures from the last 15 minutes are judged and older ones are history. If routing one throws (a database error, a run in a state the send-back refuses), a fresh transaction escalates it instead: `verify.escalated` with the error in `route_error`, and a `verify_failed` item naming the error and `flowryn verify show v<N>`.
+- The idle nudge's `verify` condition (phase 2) still covers a failure nobody steered, such as one from before this change.
+
+### Phase 3 choices
+
+- **The same step after a send-back escalates, as the spec says**, even if a different test in that step failed: the worker already had one try at that step, and a loop of send-backs is what the leader should see.
+- **`redactSecrets` was already in `src/util/redact.ts`** (cutover C2, with its tests in `test/unit/redact.test.ts`), so the tail uses it rather than a new copy in `src/util/sanitize.ts`.
+- **The send-back event is `verify.sent_back` on both paths.** The auto-merge used to name it `auto_merge.verify_failed`; nothing read that kind. Rows sent back before this change still count at their head (an auto-merge row in state `sent_back`).
+- **A review step that timed out is re-run once like any step.** A review with no verdict that did not time out is still the leader's.
+- **The landing train's candidate verifies are not routed:** their failure only drops the candidate, as before.
+- **The send-back text says "your work", not "your delivery":** a leader's verify of a ship that has not delivered yet uses the same text. The log path is the verification's step log on this machine.
+- No migration, no `PROTO` change.
+
+### Phase 3 tests
+
+- `test/unit/verify-route.test.ts`: a timeout re-runs once and the second is held; a real failure sends back a cleaned tail and the same step failing at a new head is held; different steps are sent back up to three times, then escalate; a leader's verify sends a delivered ship back, steers a working one and carries it, and with no live run opens `verify_failed`; its timeout re-runs as the leader's own request, then opens `verify_failed`; the auto-merge's, a landing train candidate's and older verifies are not the manual router's; a leader's verify an auto-merge row adopted re-runs once on a timeout with no `verify_failed`; a routing error escalates with the error; a later verify supersedes an earlier failure; the tail drops control characters and tokens and keeps 40 lines.
+- `test/unit/auto-merge.test.ts`, `test/unit/verify-review.test.ts`: the verdict now re-runs a timeout.
+- `test/integration/auto-merge.test.ts`: the send-back and second-failure hold, through the real daemon.

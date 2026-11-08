@@ -37,7 +37,7 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
 
 ## Phase 2: yolo auto-merge (built)
 
-The user's answer in the design review (q78): a verify that fails because a step exited non-zero sends the ship back to its worker once per head, with the failing step and its tail. A timeout, an `error`, or a second failure at the same head opens `auto_merge_held` for the leader.
+The user's answer in the design review (q78): a verify that fails because a step exited non-zero sends the ship back to its worker once per head, with the failing step and its tail. A timeout, an `error`, or a second failure at the same head opens `auto_merge_held` for the leader. Since route-verify-failures-vd a timeout first runs once more, and more failures escalate: docs/notes/2026-11-06-no-idle-workers-23.md, "Phase 3", has the rules.
 
 - **Config.** `[projects.<id>] auto_merge = true` (unset, it now follows the project's yolo posture: docs/notes/2026-11-06-auto-verify-every-t8.md). It is refused (`config_invalid`) when it is not a boolean, or when the project has no `verify` steps, since without them the gate passes a PR that has no checks. `verifyConfig` checks it, so the daemon refuses such a config at start and on SIGHUP, and `flowryn config` shows `auto_merge: true` beside the steps. It is not part of the verify policy, so turning it on keeps earlier verifications valid.
   ```toml
@@ -61,8 +61,9 @@ The user's answer in the design review (q78): a verify that fails because a step
   | queued | its request was cancelled for good (PR closed or merged, no steps); any other lost request or verify is queued again, up to 3 times (docs/notes/2026-11-06-no-silent-waits-vj.md) | held (`verify_cancelled`) |
   | verifying | passed | waiting_checks |
   | verifying | `error`, and startup recovery requeued it | queued, following the rerun |
-  | verifying | a step exited non-zero, first time at this head | sent_back: the ship stage starts again with the step, its exit and its last 40 lines as the steer |
-  | verifying | a timeout (the run's deadline, or a step whose every attempt hung past `verify_step_timeout_min`: `endedAtDeadline`), an unrequeued `error`, a failure with no failing step, or a second failure at this head | held (`verify_timeout`, `verify_error`, `verify_failed`) |
+  | verifying | a step exited non-zero that the verify router sends back (src/verify/route.ts) | sent_back: the ship stage starts again with the step, its exit, its log path and its last 40 lines as the steer |
+  | verifying | a first timeout at this head (the run's deadline, or a step whose every attempt hung past `verify_step_timeout_min`: `endedAtDeadline`) | queued, following its one automatic re-run |
+  | verifying | a second timeout at this head, an unrequeued `error`, a failure with no failing step, or any other failure the router escalates (docs/notes/2026-11-06-no-idle-workers-23.md, "Phase 3") | held (`verify_timeout`, `verify_error`, `verify_failed`) |
   | waiting_checks | the watcher's PR evidence shows no pending check at the head | the merge, through the merge path |
   | waiting_checks | checks pending for over 6 h (1 h on a `no_ci` project), or the PR head moved over 30 min after it was first seen | held (`checks_timeout`, `head_moved`) |
   | merging | its merge is proven | merged |

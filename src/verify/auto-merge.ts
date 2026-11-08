@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerResult } from "../api/verbs.ts";
 import { findOpenRunItem, itemLines, openItem, resolveRunItems } from "../attention/items.ts";
@@ -11,13 +10,13 @@ import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../
 import { sendBack } from "../lifecycle/send-back.ts";
 import { DAEMON_CALLER, latestMerge, type MergeRow } from "../policy/merge.ts";
 import { applyMerge, prepareDaemonMerge, settleMerge, type MergeServices } from "../policy/merge-path.ts";
-import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { autoMergeEnabled, autoVerifyEnabled, REVIEW_STEP, verifyConfig } from "./config.ts";
+import { sanitizeLine } from "../util/sanitize.ts";
+import { autoMergeEnabled, autoVerifyEnabled, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, findQueued, getRequest, insertRequest, positionOf, requeuedFrom, type VerifyRequest } from "./queue.ts";
-import { endedAtDeadline, readTail, REVIEW_NO_VERDICT } from "./runner.ts";
+import { queueAutoRerun, recordEscalation, routeManualVerifies, routeVerifyOutcome, SENT_BACK_KIND, sendBackText, sentBackPayload } from "./route.ts";
 import { cancelIsFinal, headMovedTo, staleRead } from "./start.ts";
-import { finishedAtHead, getVerification, interruptedByStop, runningVerifications, type Verification, type VerifyStep } from "./store.ts";
+import { finishedAtHead, getVerification, interruptedByStop, runningVerifications, type Verification } from "./store.ts";
 
 /**
  * Yolo auto-merge (docs/notes/2026-10-22-daemon-run-verify-y3.md, phase 2):
@@ -28,9 +27,11 @@ import { finishedAtHead, getVerification, interruptedByStop, runningVerification
  *
  *   queued → verifying → waiting_checks → merging → merged
  *
- * A verify step that exits non-zero sends the ship back to its worker once
- * per head with the step and its tail (sent_back); a timeout, an error, a
- * second failure at the head, checks pending over 6 h (1 h under no_ci), a moved head
+ * A verify that did not pass is judged by src/verify/route.ts: a step that
+ * exits non-zero sends the ship back to its worker with the step and its tail
+ * (sent_back), a timeout runs the verify once more (back to queued); a second
+ * timeout, an error, a second failure at the head or of the same step, a
+ * fourth send-back, checks pending over 6 h (1 h under no_ci), a moved head
  * not redelivered 30 min after it was first seen, or a merge-gate refusal
  * holds it (auto_merge_held, a P1 that wakes the leader). A verify hold ends
  * when a later verify of the same head passes, whoever ran it (releaseHolds,
@@ -95,8 +96,6 @@ export function checksPending(pr: Pick<PrEvidence, "checks"> | null): boolean {
 
 /** The controller's fallback pass; a finished verify, a watcher pass and a delivery kick it sooner. */
 export const AUTO_MERGE_TICK_MS = 60_000;
-/** Lines of a failed step's output a send-back carries. */
-const SEND_BACK_TAIL_LINES = 40;
 /** How much of a hold's reason its item line keeps, so the next command after it stays on the line (the row keeps it whole). */
 const HELD_DETAIL_CHARS = 120;
 /** What joins the pr_ready line and the auto-merge's progress (an auto-verify's says so). */
@@ -418,7 +417,7 @@ export function releaseHolds(db: Db, config: FlowrynConfig, now: number): string
     });
     if (landing) move(db, row, "superseded", { reason: HOLD_RELEASED, detail: `verify ${passed.id} passed at ${row.head_sha.slice(0, 8)} after the hold; the landing queue takes it again` }, now);
     else move(db, row, to, { verification_id: passed.id, reason: null, detail: null }, now);
-    resolveRunItems(db, row.run_id, ["auto_merge_held"], "auto_merge.hold_released", now);
+    resolveRunItems(db, row.run_id, ["auto_merge_held", "verify_failed"], "auto_merge.hold_released", now);
     released.push(row.id);
   }
   return released;
@@ -431,41 +430,7 @@ function thenMerge(row: AutoMergeRow): string {
   return row.merge === 0 ? "" : `, then flowryn merge ${row.task_id}`;
 }
 
-/** How a finished verify that did not pass ends the auto-merge. */
-export type VerifyVerdict = { sendBack: VerifyStep } | { hold: "verify_failed" | "verify_timeout" | "verify_error"; detail: string };
-
-/**
- * A step that exited non-zero is the worker's to fix (sent back, once per
- * head); a timeout, an error, or a failure with no failing step is held for
- * the leader (the user's answer q78 in the design review).
- */
-export function verifyVerdict(v: Verification): VerifyVerdict {
-  if (v.state === "error") return { hold: "verify_error", detail: `verify ${v.id} ended in an error: ${v.detail ?? "no detail"}` };
-  const step = v.steps.find((s) => s.state === "failed");
-  // A review with no verdict (its call failed or went over its cap) is not the worker's to fix.
-  if (step && step.name === REVIEW_STEP && step.exit === REVIEW_NO_VERDICT && !endedAtDeadline(step)) return { hold: "verify_error", detail: `verify ${v.id}: ${step.detail ?? "the review gave no verdict"}` };
-  if (step && endedAtDeadline(step)) return { hold: "verify_timeout", detail: `verify ${v.id} timed out in \`${step.name}\`` };
-  if (!step || step.exit === null || step.exit === 0) return { hold: "verify_failed", detail: `verify ${v.id} failed: ${v.detail ?? step?.detail ?? "no failing step recorded"}` };
-  return { sendBack: step };
-}
-
-/** The steer a sent-back ship gets: the failing step, its exit and its last lines. */
-export function sendBackText(v: Verification, step: VerifyStep, label = "Auto-merge"): string {
-  if (step.name === REVIEW_STEP) {
-    const findings = sanitizeBlock(readTail(join(v.dir, step.log), 16 * 1024)).trimEnd();
-    return [
-      `${label}: the independent review in the daemon's flowryn verify ${v.id} of your delivery at ${v.head_sha.slice(0, 8)} failed it.`,
-      findings ? `Its findings:\n\n${findings}\n` : "It gave no findings.",
-      "Fix what holds up, commit, and deliver again; say in your handoff why a finding does not apply. A second failure at the same head goes to your leader instead.",
-    ].join("\n");
-  }
-  const tail = sanitizeBlock(readTail(join(v.dir, step.log), 16 * 1024)).split("\n").slice(-SEND_BACK_TAIL_LINES).join("\n").trimEnd();
-  return [
-    `${label}: the daemon's flowryn verify ${v.id} of your delivery at ${v.head_sha.slice(0, 8)} failed: step \`${step.name}\` exited ${step.exit}.`,
-    tail ? `Its last lines:\n\n${tail}\n` : "It printed nothing.",
-    "Fix it, commit, and deliver again. A second failure at the same head goes to your leader instead.",
-  ].join("\n");
-}
+export { sendBackText, verifyVerdict, type VerifyVerdict } from "./route.ts";
 
 /**
  * Codes the merge gate refuses with that only mean "not yet": the next pass
@@ -489,6 +454,8 @@ export interface AutoMergerDeps extends MergeServices {
   landing?: LandingHooks;
   /** Whether the project's default branch declares `no_ci: true` (.no-mistakes.yaml); absent or unreadable: no. */
   noCi?(projectId: string): Promise<boolean>;
+  /** A steer was made for this run (a leader's failed verify sent to a working ship): carry it now. */
+  notify?(runId: string): void;
   /** The fallback pass interval (AUTO_MERGE_TICK_MS). */
   tickMs?: number;
 }
@@ -559,6 +526,12 @@ export class AutoMerger {
       } catch (error) {
         this.deps.log(`auto-merge ${row.id}: ${(error as Error).stack ?? String(error)}`);
       }
+    }
+    // A leader's own `flowryn verify` that failed is routed the same way (src/verify/route.ts).
+    try {
+      routeManualVerifies({ db: this.deps.db, config: this.deps.config, now: this.deps.now, log: this.deps.log, kickScheduler: this.deps.kickScheduler, notify: this.deps.notify });
+    } catch (error) {
+      this.deps.log(`verify route: ${(error as Error).stack ?? String(error)}`);
     }
     await this.landingPass();
   }
@@ -743,24 +716,37 @@ export class AutoMerger {
     if (requeued) return move(db, row, "queued", { request_id: requeued.id, verification_id: null }, now).row;
     // Interrupted again (the rerun was itself stopped): the work was never judged, so it is queued once more.
     if (v.state === "error" && interruptedByStop(v)) return this.requeueLost(row, "verify_error", `its verification ${v.id} was cut off by a daemon stop (${v.detail ?? "no detail"})`, null, now);
-    const verdict = verifyVerdict(v);
-    const next = `flowryn verify show ${v.id}; once fixed: flowryn verify ${row.task_id}${thenMerge(row)}`;
-    if ("hold" in verdict) return this.hold(row, verdict.hold, verdict.detail, next, now);
-    const sentBefore = (db.query("SELECT COUNT(*) AS n FROM auto_merges WHERE run_id = ?1 AND head_sha = ?2 AND state = 'sent_back'").get(row.run_id, row.head_sha) as { n: number }).n;
-    if (sentBefore > 0) return this.hold(row, "verify_failed", `verify ${v.id} failed again at ${row.head_sha.slice(0, 8)} (\`${verdict.sendBack.name}\` exited ${verdict.sendBack.exit}) after a send-back`, next, now);
     const run = getRunWithPolicy(db, row.run_id)!;
+    const label = row.merge === 0 ? "auto-verify" : "auto-merge";
+    const next = `flowryn verify show ${v.id}; once fixed: flowryn verify ${row.task_id}${thenMerge(row)}`;
+    let route = routeVerifyOutcome(db, v, run);
+    if (route.route === "none") return row;
+    if (route.route === "rerun") {
+      try {
+        const request = queueAutoRerun(db, this.deps.config(), v, route.step, row.run_id, now);
+        this.deps.kickScheduler();
+        return move(db, row, "queued", { request_id: request.id, verification_id: null }, now).row;
+      } catch (error) {
+        route = { route: "escalate", code: "verify_timeout", detail: `verify ${v.id} timed out in \`${route.step.name}\`, and no re-run could be queued: ${(error as Error).message}`, step: route.step };
+      }
+    }
+    if (route.route === "escalate") {
+      recordEscalation(db, v, route, row.run_id, "auto_merge", now, { auto_merge: row.id });
+      return this.hold(row, route.code, route.detail, next, now);
+    }
+    const step = route.step;
     sendBack(
       db,
       run,
       {
-        text: sendBackText(v, verdict.sendBack, row.merge === 0 ? "Auto-verify" : "Auto-merge"),
-        feedback: `${row.merge === 0 ? "auto-verify" : "auto-merge"} verify ${v.id} failed`,
-        why: `the ${row.merge === 0 ? "auto-verify" : "auto-merge"}'s verify ${v.id} failed`,
-        event: { source: "daemon", kind: "auto_merge.verify_failed", payload: { auto_merge: row.id, verification: v.id, step: verdict.sendBack.name, exit: verdict.sendBack.exit } },
+        text: sendBackText(v, step, row.merge === 0 ? "Auto-verify" : "Auto-merge"),
+        feedback: `${label} verify ${v.id} failed`,
+        why: `the ${label}'s verify ${v.id} failed`,
+        event: { source: "daemon", kind: SENT_BACK_KIND, payload: sentBackPayload(v, step, "auto_merge", { auto_merge: row.id }) },
       },
       now,
     );
-    const sent = move(db, row, "sent_back", { reason: "verify_failed", detail: `verify ${v.id} failed: \`${verdict.sendBack.name}\` exited ${verdict.sendBack.exit}` }, now).row;
+    const sent = move(db, row, "sent_back", { reason: "verify_failed", detail: `verify ${v.id} failed: \`${step.name}\` exited ${step.exit}` }, now).row;
     this.deps.kickScheduler();
     return sent;
   }

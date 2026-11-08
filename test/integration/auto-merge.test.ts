@@ -179,7 +179,7 @@ describe("yolo auto-merge", () => {
       expect(first).toMatchObject({ reason: "verify_failed" });
       await e.fleet.waitRun(run, (r) => r.state === "running" && r.stage === "ship" && r.stage_state === "active", "the ship stage to start again");
       const steer = query<{ body: string }>(e, "SELECT body FROM messages WHERE run_id = ?1 ORDER BY created_at DESC LIMIT 1", run)[0]!.body;
-      expect(steer).toContain(`flowryn verify ${first!.verification_id} of your delivery at ${first!.head_sha.slice(0, 8)} failed`);
+      expect(steer).toContain(`flowryn verify ${first!.verification_id} of your work at ${first!.head_sha.slice(0, 8)} failed`);
       expect(steer).toContain("exited 3");
       expect(steer).toContain("boom: fixed.txt is missing");
 

@@ -636,7 +636,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       noCiRead.set(projectId, { at: Date.now(), value });
       return value;
     };
-    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick(), landing, noCi });
+    autoMerger = new AutoMerger({ db: database, config: () => config, delivery, now: Date.now, log, kickScheduler: () => scheduler?.kick(), landing, noCi, notify: (runId) => bus.notify(runId) });
     const sched: SchedServices = {
       kick: () => scheduler?.kick(),
       explainWaits: () => scheduler?.kickWaits(),
