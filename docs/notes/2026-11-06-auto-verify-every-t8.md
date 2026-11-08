@@ -54,7 +54,7 @@ What the step does (src/verify/review.ts): it diffs the head against its merge b
 | `VERDICT: PASS` | passed (exit 0) | the next step |
 | `VERDICT: FAIL` | failed (exit 1) | sent back to the worker with the findings in the steer, as a failing test is; a second fail at the head is held |
 | no verdict line, the call failed, or over its cap | failed (exit 3, "the review gave no verdict: ...") | held as `verify_error` for the leader, never sent back |
-| its deadline | failed, a step timeout | held as `verify_timeout` |
+| its deadline | failed, a step timeout | re-run once at the head; a second timeout is held as `verify_timeout` (docs/notes/2026-11-06-no-idle-workers-23.md, "Phase 3") |
 
 Why a model: whether a change does what its brief and spec ask is judgement no rule or test can make. Everything around the call is plain code: the diff, the fences, the caps, and reading the verdict.
 
