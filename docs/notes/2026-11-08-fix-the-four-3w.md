@@ -47,4 +47,33 @@ None of the four files was in `SERIAL_FILES` (`scripts/test.ts`), and these fixe
 
 ## Proof under load
 
-PROOF_RESULTS
+Method, on the shared 12-core Mac on 2026-11-08, outside the command sandbox. Each of the four files ran 20 times in its own loop, one `bun test --timeout=30000 test/integration/<file>.test.ts` after another, and the four loops ran side by side. Meanwhile `bun run test` (the full parallel suite) ran again and again as load until every loop had finished:
+
+```sh
+for f in promote turn-end-guard review-open workflows; do
+  ( for i in $(seq 20); do bun test --timeout=30000 test/integration/$f.test.ts; done ) &   # pass count kept per file
+done
+while loops-still-running; do bun run test; done
+```
+
+The 1-minute load average, sampled every 30 s (106 samples), ranged from 6 to 83, with a median of 40.
+
+| File | Runs | Pass | Fail |
+| --- | --- | --- | --- |
+| `promote.test.ts` | 20 | 20 | 0 |
+| `turn-end-guard.test.ts` | 20 | 20 | 0 |
+| `review-open.test.ts` | 20 | 20 | 0 |
+| `workflows.test.ts` | 20 | 20 | 0 |
+
+The load suites:
+
+- Suite 1 failed only `contract-ack-blocker` (the section above). It was fixed during the run.
+- Suites 2 to 4 each passed all 3601 tests:
+  - unit: 92–122 s
+  - integration parallel: 469–531 s
+  - serial files: 95–209 s
+
+Before the fixes, at a load of about 35, the same loops passed 10 of 10 for each file. Two harder probes reproduced failures:
+
+- **Stress.** Six copies of each test, filtered to the one in question, ran beside the suite, at a load past 60. They hit wait timeouts (a launch not granted in 20 s, a reminder not settled in 15 s). These failures came from the load, not from the races above. The `workflows` loop in the first baseline also failed twice, both times in "a stage with fresh = true…", with the same launch-grant timeout. That test passed 10 of 10 in a later loop under the proof's load.
+- **The old code.** The new unit test for the probe and the Pi assertion in `turn-end-guard` both fail on the old code. They do not depend on load.
