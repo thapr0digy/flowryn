@@ -93,6 +93,15 @@ describe("GitHub forge client", () => {
     expect(fake.requests.filter((r) => r.status === 304)).toHaveLength(1);
   });
 
+  test("a fresh read skips the ETag: a full answer, never a 304 (docs/notes/2026-11-07-fix-a-held-ss.md)", async () => {
+    const number = await openPr();
+    await forge.pull({ owner: "acme", repo: "web", number });
+    const pr = await forge.pull({ owner: "acme", repo: "web", number }, { fresh: true });
+    expect(pr.number).toBe(number);
+    expect(forge.stats.notModified).toBe(0);
+    expect(fake.requests.filter((r) => r.status === 304)).toHaveLength(0);
+  });
+
   test("checks: check runs and commit statuses in one summary", async () => {
     await openPr();
     const head = git(clone, ["rev-parse", "HEAD"]);
