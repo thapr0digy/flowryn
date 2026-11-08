@@ -12,6 +12,7 @@ import { AutoMerger, getAutoMerge, startAutoMerge, type AutoMergeRow } from "../
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { getRequest, insertRequest, markStarted } from "../../src/verify/queue.ts";
 import { cleanTail, MAX_VERIFY_SEND_BACKS, routeManualVerifies } from "../../src/verify/route.ts";
+import { TRAIN_RANK } from "../../src/verify/landing-queue.ts";
 import { initialSteps } from "../../src/verify/runner.ts";
 import { finishVerification, insertVerification, type Verification, type VerifyStep } from "../../src/verify/store.ts";
 
@@ -287,11 +288,57 @@ describe("a leader's own flowryn verify", () => {
     const judged = routeManualVerifies({ db: f.db, config: () => f.cfg, now: () => NOW + 500_000, log: () => {}, kickScheduler: () => {} });
     expect(judged).toEqual([]);
     expect(f.run().state).toBe("ready");
+    // A landing train's candidate verify: an auto request at TRAIN_RANK on a candidate sha no row follows.
+    const candidate = tx(f.db, () => {
+      const at = NOW + ++started;
+      const request = insertRequest(f.db, { project_id: "web", pr_url: PR_URL, task_id: "t1", head_sha: HEAD2, policy_id: POLICY, pr_number: null, head_ref: null, worktree: null, source: "auto", path: "/opt/bin", rank: TRAIN_RANK, now: at });
+      const v = insertVerification(f.db, { project_id: "web", pr_url: PR_URL, task_id: "t1", head_sha: HEAD2, steps: initialSteps(STEPS), policy_id: POLICY, dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: "/p", source: "daemon", now: at });
+      markStarted(f.db, request, v.id, at);
+      return v;
+    });
+    fail(f, candidate, 0, { exit: 1 });
+    expect(routeManualVerifies({ db: f.db, config: () => f.cfg, now: () => NOW + 500_000, log: () => {}, kickScheduler: () => {} })).toEqual([]);
+    expect(f.run().state).toBe("ready");
+    expect(events(f.db, "verify.sent_back")).toEqual([]);
+    expect(events(f.db, "verify.escalated")).toEqual([]);
     // A failure from before the first pass's lookback is history, not routed.
     const old = fixture(MANUAL);
     const v = verification(old, HEAD, "cli");
     fail(old, v, 0, { exit: 1 });
     expect(routeManualVerifies({ db: old.db, config: () => old.cfg, now: () => NOW + 60 * 60_000, log: () => {}, kickScheduler: () => {} })).toEqual([]);
+  });
+
+  test("a leader's verify an auto-merge row followed is judged by the row alone: its timeout re-runs once, no verify_failed", async () => {
+    const f = fixture(AUTO);
+    const v = verification(f, HEAD, "cli");
+    const row = verifying(f, HEAD, v);
+    fail(f, v, 0, TIMED_OUT);
+    const { auto } = merger(f);
+    await auto.pass();
+    expect(getAutoMerge(f.db, row.id)!.state).toBe("queued");
+    expect(events(f.db, "verify.auto_rerun")).toEqual([expect.objectContaining({ of: v.id })]);
+    expect(events(f.db, "verify.escalated")).toEqual([]);
+    expect(openKinds(f.db, "verify_failed")).toEqual([]);
+    await auto.pass();
+    expect(events(f.db, "verify.escalated")).toEqual([]);
+    expect(openKinds(f.db, "verify_failed")).toEqual([]);
+  });
+
+  test("when routing a leader's failure throws, the leader is told with the error instead of nobody", () => {
+    const f = fixture(MANUAL);
+    f.db.run("CREATE TRIGGER no_send_back BEFORE INSERT ON events WHEN NEW.kind = 'verify.sent_back' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END");
+    const v = verification(f, HEAD, "cli");
+    fail(f, v, 0, { exit: 1 });
+    const logged: string[] = [];
+    const judged = routeManualVerifies({ db: f.db, config: () => f.cfg, now: () => NOW + 500_000, log: (m) => logged.push(m), kickScheduler: () => {} });
+    expect(judged).toEqual([v.id]);
+    expect(logged.join("\n")).toContain("disk I/O error");
+    expect(events(f.db, "verify.escalated")).toEqual([expect.objectContaining({ verification: v.id, code: "verify_failed", path: "manual", route_error: "disk I/O error" })]);
+    const [line] = openKinds(f.db, "verify_failed");
+    expect(line).toContain("disk I/O error");
+    expect(line).toContain(`flowryn verify show ${v.id}`);
+    expect(routeManualVerifies({ db: f.db, config: () => f.cfg, now: () => NOW + 600_000, log: () => {}, kickScheduler: () => {} })).toEqual([]);
+    expect(events(f.db, "verify.escalated")).toHaveLength(1);
   });
 
   test("a later verify of the same PR supersedes an earlier failure: it is skipped, with its reason", () => {

@@ -298,11 +298,37 @@ function routeOne(deps: ManualRouteDeps, v: Verification, now: number): { notify
   }
   if (route.route === "none") return skip(route.why);
   if (route.route !== "escalate") return skip(`no live run for ${task}`);
-  const seq = recordEscalation(db, v, route, run?.id ?? null, "manual", now);
-  const line = `Verify failed: ${taskTitle(db, task)} (${task}): ${sanitizeLine(route.detail, ITEM_DETAIL_CHARS)}; flowryn verify show ${v.id}`;
+  return escalateManual(db, v, route, run, now);
+}
+
+/** A leader's failed verify sent to the leader: its verify.escalated event and a P1 verify_failed item. Call inside a transaction. */
+function escalateManual(db: Db, v: Verification, route: Extract<VerifyRoute, { route: "escalate" }>, run: RunRow | null, now: number, extra: Record<string, unknown> = {}): { notify: null; kick: false } {
+  const seq = recordEscalation(db, v, route, run?.id ?? null, "manual", now, extra);
+  const what = v.task_id ? `${taskTitle(db, v.task_id)} (${v.task_id})` : v.pr_url;
+  const line = `Verify failed: ${what}: ${sanitizeLine(route.detail, ITEM_DETAIL_CHARS)}; flowryn verify show ${v.id}`;
   if (run) openRunItemOnce(db, "verify_failed", run, seq, line, now);
-  else openItem(db, { kind: "verify_failed", eventSeq: seq, taskId: task, line, now });
+  else openItem(db, { kind: "verify_failed", eventSeq: seq, taskId: v.task_id, line, now });
   return { notify: null, kick: false };
+}
+
+/** Routing a leader's failed verify threw: the leader hears of it, with the error, rather than nobody. Call inside a transaction. */
+function escalateRouteError(db: Db, v: Verification, error: unknown, now: number): { notify: null; kick: false } {
+  const message = error instanceof Error ? error.message : String(error);
+  const code: EscalateCode = v.state === "error" ? "verify_error" : "verify_failed";
+  const run = v.task_id ? openRunForTask(db, v.task_id) : null;
+  return escalateManual(db, v, { route: "escalate", code, detail: `verify ${v.id} ${v.state} and routing it failed: ${message}`, step: null }, run, now, { route_error: message });
+}
+
+/** Whether a verification is already judged: an auto-merge row follows it, or either path recorded its routing event. */
+function judgedElsewhere(db: Db, id: string): boolean {
+  if (db.query("SELECT 1 FROM auto_merges WHERE verification_id = ?1").get(id)) return true;
+  return !!db
+    .query(
+      `SELECT 1 FROM events WHERE (kind = '${AUTO_RERUN_KIND}' AND json_extract(payload, '$.of') = ?1)
+          OR (kind IN ('${SENT_BACK_KIND}', '${ESCALATED_KIND}', '${ROUTE_SKIPPED_KIND}') AND json_extract(payload, '$.verification') = ?1)
+        LIMIT 1`,
+    )
+    .get(id);
 }
 
 /**
@@ -335,19 +361,25 @@ export function routeManualVerifies(deps: ManualRouteDeps): string[] {
       ids = new Set();
     }
     ids.add(v.id);
-    let outcome: { notify: string | null; kick: boolean } = { notify: null, kick: false };
-    try {
-      outcome = tx(db, () => {
+    const judge = (route: (fresh: Verification) => { notify: string | null; kick: boolean }) =>
+      tx(db, () => {
         const fresh = getVerification(db, v.id);
-        // Adopted by an auto-merge row since the read: that row judges it.
-        if (!fresh || db.query("SELECT 1 FROM auto_merges WHERE verification_id = ?1").get(v.id)) return { notify: null, kick: false };
-        if (!startedByHand(db, fresh)) return { notify: null, kick: false };
-        judged.push(v.id);
-        return routeOne(deps, fresh, now);
+        if (!fresh || judgedElsewhere(db, v.id) || !startedByHand(db, fresh)) return null;
+        return route(fresh);
       });
+    let outcome: { notify: string | null; kick: boolean } | null = null;
+    try {
+      outcome = judge((fresh) => routeOne(deps, fresh, now));
     } catch (error) {
       deps.log(`verify route ${v.id}: ${(error as Error).stack ?? String(error)}`);
+      try {
+        outcome = judge((fresh) => escalateRouteError(db, fresh, error, now));
+      } catch (again) {
+        deps.log(`verify route ${v.id}: escalating the routing error failed: ${(again as Error).stack ?? String(again)}`);
+      }
     }
+    if (!outcome) continue;
+    judged.push(v.id);
     if (outcome.notify) deps.notify?.(outcome.notify);
     if (outcome.kick) deps.kickScheduler();
   }
