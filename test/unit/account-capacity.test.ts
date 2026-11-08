@@ -161,9 +161,9 @@ describe("one account held, the other carries on", () => {
  * the gate, then awaits the quota, sign-in, harness and host checks before its transaction starts
  * the run; a hook can re-arm the pause in that window. The stand-in quota read is the window here.
  */
-describe("the usage pause's one probe, under a grant's awaits", () => {
-  const usageProbes = () => (db.query("SELECT run_id FROM events WHERE kind = 'sched.usage_probe' ORDER BY seq").all() as { run_id: string }[]).map((e) => e.run_id);
+const usageProbes = () => (db.query("SELECT run_id FROM events WHERE kind = 'sched.usage_probe' ORDER BY seq").all() as { run_id: string }[]).map((e) => e.run_id);
 
+describe("the usage pause's one probe, under a grant's awaits", () => {
   test("a pause re-armed while the grant awaits its checks starts nothing: the probe verdict read before is not used", async () => {
     // Expired at 960_000, no probe out: the next grant may probe.
     tx(db, () => noteUsageLimit(db, "work-a", "worker t0", "rate_limit", 900_000, BACKOFF));
