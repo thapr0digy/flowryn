@@ -7,6 +7,8 @@ import { latestVerification, verificationLine } from "../verify/store.ts";
 import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
 import { landingProgress, latestLanding } from "../verify/landing-queue.ts";
 import { awayLine, getAway } from "../attention/away.ts";
+import { waitedLabel } from "../attention/deadline-defaults.ts";
+import { getValidation, type ValidatorVerdict } from "../attention/validator-report.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { collectWaits, deadlineLabel, shortDuration, type Wait } from "../reconcile/waits.ts";
@@ -815,11 +817,47 @@ function autonomyView(ctx: ReadCtx, target: string): HandlerResult | null {
   };
 }
 
+/**
+ * `flowryn show j<N>`: one review-gate validator round (docs/notes/2026-11-08-unattended-loops-answer-4y.md):
+ * its gate, state, why, findings, the question answers it judged, its spend and the report it wrote
+ * (the first 60 lines; --full for all).
+ */
+function validationView(ctx: ReadCtx, id: string, full: boolean): HandlerResult | null {
+  const row = getValidation(ctx.db, id);
+  if (!row) return null;
+  const verdict = row.verdict_json ? (JSON.parse(row.verdict_json) as ValidatorVerdict) : null;
+  let report = "-";
+  if (row.report_path && existsSync(row.report_path)) {
+    const lines = readFileSync(row.report_path, "utf8").split("\n");
+    const shown = (full ? lines : lines.slice(0, 60)).map((l) => sanitizeLine(l, 400)).join("\n");
+    report = !full && lines.length > 60 ? `${shown}\n… (${lines.length - 60} more lines: flowryn show ${id} --full)` : shown;
+  }
+  return {
+    data: {
+      validation: row.id,
+      task: row.task_id,
+      title: taskTitle(ctx.db, row.task_id),
+      gate: row.gate_id,
+      stage: row.stage,
+      state: row.state,
+      reason: row.reason ?? "-",
+      waited: waitedLabel(row.waited_ms),
+      head: row.head.slice(0, 12),
+      spend: row.cost_usd === null ? "-" : `$${row.cost_usd.toFixed(2)}`,
+      verdict: verdict?.verdict ?? "-",
+      findings: verdict ? verdict.findings.map((f, i) => `${i + 1}. ${[f.requirement, f.file].filter((w): w is string => w !== null).map((w) => sanitizeLine(w, 120)).join(" / ")}: ${sanitizeLine(f.problem, 300)} Fix: ${sanitizeLine(f.fix, 300)}`) : [],
+      questions: verdict ? verdict.questions.map((q) => `${q.id} -> ${sanitizeLine(q.choice, 80)} (${q.consistent_with_spec ? "consistent with the spec" : "not consistent with the spec"}): ${sanitizeLine(q.why, 200)}`) : [],
+      report,
+    },
+    hints: [`flowryn show ${row.task_id}`, ...(row.state === "passed" ? [`flowryn gate reopen ${row.task_id} --gate ${row.stage} --body-file - (undo, while the run is live and undelivered)`] : [])],
+  };
+}
+
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
-  summary: "One task, run, item, decision, plan, divergence, review gate, chat-answer grant, leader session or unattended-mode grant (autonomy, u<N>) in detail; --full for untruncated text",
-  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), grant (c<N>), leader session (L<N>) id, or autonomy (the latest unattended-mode grant) / u<N>", complete: "task" }],
+  summary: "One task, run, item, decision, plan, divergence, review gate, validator round (j<N>), chat-answer grant, leader session or unattended-mode grant (autonomy, u<N>) in detail; --full for untruncated text",
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), validator round (j<N>), grant (c<N>), leader session (L<N>) id, or autonomy (the latest unattended-mode grant) / u<N>", complete: "task" }],
   flags: {
     full: { type: "boolean", help: "untruncated titles, lines and bodies" },
     why: { type: "boolean", help: "each recorded reason the run waits, whole: its rule, facts with their observation times, and who can end it" },
@@ -835,6 +873,10 @@ const show: VerbSpec = {
     if (boolArg(args, "timeline")) return timelineView(ctx, target, text.full);
     if (target === "autonomy" || /^u\d+$/.test(target)) {
       const view = autonomyView(ctx, target);
+      if (view) return view;
+    }
+    if (/^j\d+$/.test(target)) {
+      const view = validationView(ctx, target, text.full);
       if (view) return view;
     }
     if (/^[kq]\d+$/.test(target)) {

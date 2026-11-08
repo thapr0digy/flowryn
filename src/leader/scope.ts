@@ -188,6 +188,8 @@ export function refScope(db: Db, config: FlowrynConfig, ref: string): ThingScope
     if (l) return l.scope;
   }
   if (ref.startsWith("merge:")) return ofTask(ref.slice("merge:".length));
+  // A chat-confirmed away (away:<until>) is the user's posture, as `away` is: every scope's.
+  if (ref.startsWith("away:")) return GLOBAL;
   const run = db.query("SELECT task_id FROM runs WHERE id = ?1").get(ref) as { task_id: string } | null;
   if (run) return ofTask(run.task_id);
   if (taskKnown(db, ref)) return taskScope(db, config, ref);

@@ -59,6 +59,8 @@ export interface DecisionRow {
 
 /** answered_via of a deadline default (src/attention/deadline-defaults.ts): a policy answer the user may undo. */
 export const DEADLINE_VIA = "deadline";
+/** answered_via of a review-gate question the validator took as the worker recommended (src/attention/gate-validator.ts): a policy answer the user may undo. */
+export const VALIDATOR_VIA = "validator";
 
 /** A rule's answer the user may still undo (decide --by captain on an answered_by policy decision). */
 export function isRuleAnswer(d: Pick<DecisionRow, "state" | "answered_by">): boolean {

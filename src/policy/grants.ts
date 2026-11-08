@@ -120,7 +120,7 @@ export function preAsk(db: Db, a: { session: string; toolUseId: string; input: u
     seen.add(ref);
     let form: ChatForm;
     try {
-      form = chatForm(db, ref);
+      form = chatForm(db, ref, a.now);
     } catch (error) {
       if (error instanceof FlowrynError) return deny(`${ref} cannot be asked: ${error.message}`);
       throw error;
@@ -165,6 +165,8 @@ function grantLine(g: GrantRow): string {
           ? `${g.choice} for ${g.item}`
           : g.action === "autonomy"
             ? `start unattended mode (${g.item})`
+            : g.action === "away"
+              ? `start away as yours (${g.item}), so Flowryn decides for you meanwhile`
             : `merge ${g.task_id} at ${g.binds?.slice(0, 8) ?? "?"}`;
   return `Grant ${g.id}: ${what}. Run it now: flowryn grant use ${g.id}${g.action === "gate" && g.choice === "changes" && !g.words ? " --body-file - (the user's words: what to change)" : ""}. It ends with this turn.`;
 }
@@ -217,7 +219,7 @@ export function postAsk(db: Db, a: PostAsk): string[] {
     }
     let form: ChatForm;
     try {
-      form = chatForm(db, ref);
+      form = chatForm(db, ref, a.now);
     } catch (error) {
       if (!(error instanceof FlowrynError)) throw error;
       refuse(error.message);

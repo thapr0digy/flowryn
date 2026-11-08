@@ -87,6 +87,7 @@ import { AutoContractChecker, autoPollMs } from "../contracts/auto.ts";
 import { HarnessVersionPoller } from "../contracts/version-poll.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
+import { stopValidators, validatorPass } from "../attention/gate-validator.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
@@ -881,6 +882,38 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         deadlineFailing = true;
       }
     };
+    // The review-gate validator (docs/notes/2026-11-08-unattended-loops-answer-4y.md), on every attention tick
+    // after deadline defaults: under an away the user started, an opted-in review gate that has waited
+    // [decisions] default_after_h gets one fresh read-only capped model call; plain code acts on its verdict.
+    let validatorRunning = false;
+    let validatorFailing = false;
+    const validatorIfDue = async () => {
+      if (validatorRunning) return;
+      validatorRunning = true;
+      try {
+        await validatorPass({
+          db: database,
+          config: () => config,
+          decisions: () => decisionsConfig(config),
+          git: deliveryGit,
+          now: Date.now,
+          log,
+          changed: (run) => {
+            bus.notify(run);
+            journal.kick();
+            lavishPoller.kick();
+            scheduler?.kick();
+            attention.bus.notifyAll();
+          },
+        });
+        validatorFailing = false;
+      } catch (error) {
+        if (!validatorFailing) log(`validator: pass failed: ${(error as Error).message}`);
+        validatorFailing = true;
+      } finally {
+        validatorRunning = false;
+      }
+    };
     // Unattended mode (docs/notes/2026-11-05-unattended-mode-one-9e.md), on every attention tick: an
     // expired grant ends; a live one decides or parks worker questions, passes review gates and starts
     // merges for its projects. One pass at a time; a failing pass logs once until it recovers.
@@ -975,6 +1008,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       }
       autoAwayIfDue();
       deadlineDefaultsIfDue();
+      void inflight.track(validatorIfDue());
       void inflight.track(autonomyIfDue());
       guardScopes();
       void inflight.track(notifyPump.tick());
@@ -1038,6 +1072,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     const draining: Draining[] = [{ name: "scheduler", done: scheduler.stop() }, { name: "auto-merge", done: autoMerger.stop() }];
     stopVerifications();
     draining.push({ name: "asks", done: stopAsks() });
+    draining.push({ name: "validators", done: stopValidators() });
     clearInterval(pass);
     clearInterval(steady);
     clearInterval(attentionTick);

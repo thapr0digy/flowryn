@@ -65,7 +65,7 @@ describe("the leader route table", () => {
   });
 
   test("info kinds are nobody's move; questions are the question batch's; what unattended mode parked is the user's; every other actionable kind is the leader's", () => {
-    const userOnly: readonly ItemKind[] = ["autonomy_parked"];
+    const userOnly: readonly ItemKind[] = ["autonomy_parked", "validator_failed", "validator_held"];
     for (const kind of Object.keys(LANE_TABLE) as ItemKind[]) {
       const expected = LANE_TABLE[kind].class === "info" ? "info" : QUESTION_KINDS.includes(kind) ? "question" : userOnly.includes(kind) ? "user" : "act";
       expect(`${kind}:${LEADER_ROUTE[kind]}`).toBe(`${kind}:${expected}`);

@@ -13,7 +13,7 @@ import { findAttempt, matchAttempt } from "../policy/approvals.ts";
 import { prepareCaptainGrant, takeGrant, voidItemGrants } from "../policy/grants.ts";
 import { localDate } from "./dates.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { createStandaloneDecision, DEADLINE_VIA, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
+import { createStandaloneDecision, DEADLINE_VIA, VALIDATOR_VIA, DECISION_OPTION, getDecision, isRuleAnswer, type DecisionRow } from "./decisions.ts";
 import { CI_WAIT_ORIGIN, ciWaitSteer } from "./ci-wait.ts";
 import { blockersOf } from "./plans.ts";
 import { getProject } from "./projects.ts";
@@ -115,7 +115,12 @@ export function overrideRuleAnswer(ctx: { db: Db; now(): number }, d: DecisionRo
     const instruction = ciWaitSteer(d.id, a.choice, a.words, runBase(run, getProject(ctx.db, run.project_id)!)) ?? "Leave the pipeline as it now stands and keep driving it; the watchdog asks again if CI still has no checks.";
     return { steer: createSteer(ctx.db, run, `The user changed the answer to ${d.id} from ${before} to ${a.choice}. ${instruction}`, now, d.id).id, run: run.id, dependents: [], held: false };
   }
-  const committed = d.answered_via === DEADLINE_VIA ? "what you did on the deadline default's answer is" : d.answered_via === "autonomous" ? "what you did on your own recommendation is" : "the rule's fix is";
+  const committed =
+    d.answered_via === DEADLINE_VIA
+      ? "what you did on the deadline default's answer is"
+      : d.answered_via === "autonomous" || d.answered_via === VALIDATOR_VIA
+        ? "what you did on your own recommendation is"
+        : "the rule's fix is";
   const text = `The user changed the answer to your question ${d.id} ("${sanitizeLine(d.question, 100)}") from ${before} to ${a.choice}.${a.words ? ` ${a.words}` : ""} Act on ${a.choice} instead: if ${committed} already committed, undo it with git revert (new commits, never a rewrite), then respond to the gate or run the pipeline again.`;
   return { steer: createSteer(ctx.db, run, text, now, d.id).id, run: run.id, dependents: [], held: false };
 }

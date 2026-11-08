@@ -4,15 +4,16 @@ import { answerDecision } from "../lifecycle/decision-verbs.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { DEADLINE_VIA, type DecisionRow } from "../lifecycle/decisions.ts";
 import { getRunWithPolicy, isTerminal, type RunWithPolicy } from "../lifecycle/runs.ts";
-import { getAway, holderInactiveSince } from "./away.ts";
+import { userStartedAway } from "./away.ts";
 import { DEADLINE_CLASSES, DEADLINE_FLOOR, DEADLINE_REFUSED_ANSWERS, reservedReason, type DecisionsConfig } from "./decisions-policy.ts";
 
 /**
  * Deadline defaults (docs/notes/2026-10-30-deadline-defaults-for-gg.md): a
  * run-scoped question reserved for the user, of a kind `[decisions]
  * default_classes` opts in, carrying a recommendation, is answered as
- * recommended once it has waited `default_after_h` while the user is away or
- * inactive in every leader session. The answer is a policy answer (answered_by
+ * recommended once it has waited `default_after_h` while an away the user
+ * started themselves is on (userStartedAway: never automatic away, a leader's
+ * own away or inactivity; docs/notes/2026-11-08-unattended-loops-answer-4y.md). The answer is a policy answer (answered_by
  * policy, answered_via deadline), so `decide --by captain` undoes it while the
  * run is live, and the return brief lists it under "Decided for you". The
  * floor is in code: every keyword class, sensitive tasks, review-gate
@@ -42,9 +43,9 @@ export function deadlineRefusal(d: DecisionRow, run: Pick<RunWithPolicy, "state"
   return null;
 }
 
-/** The user is away, or inactive in every open leader session. */
+/** The user said they are away: an away they started themselves is on. Automatic away and inactivity never count. */
 export function userAbsent(db: Db, now: number): boolean {
-  return getAway(db, now) !== null || holderInactiveSince(db) !== null;
+  return userStartedAway(db, now) !== null;
 }
 
 /** "4h 12m" */

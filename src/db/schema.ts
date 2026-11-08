@@ -1123,6 +1123,34 @@ CREATE UNIQUE INDEX auto_merges_live ON auto_merges(run_id) WHERE state IN ('que
 CREATE INDEX auto_merges_merge ON auto_merges(merge_id);
 `;
 
+/**
+ * Migration 59 (docs/notes/2026-11-08-unattended-loops-answer-4y.md): the review-gate validator.
+ * One row per validator round (`j<N>`): the gate, the away it ran under (rounds count per away),
+ * the head it judged, its state, the parsed verdict, why it failed, held or only advised, its
+ * spend and the report on disk; and the approvals channel `validator` for the gates it passed.
+ */
+const GATE_VALIDATIONS_SQL = /* sql */ `
+CREATE TABLE gate_validations (
+  id TEXT PRIMARY KEY, gate_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL, stage TEXT NOT NULL,
+  away_since INTEGER NOT NULL, head TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('running','passed','changes','held','failed','advised')),
+  verdict_json TEXT, reason TEXT, cost_usd REAL, waited_ms INTEGER NOT NULL, report_path TEXT,
+  started_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE INDEX gate_validations_gate ON gate_validations(gate_id);
+CREATE INDEX gate_validations_rounds ON gate_validations(task_id, stage, away_since);
+CREATE TABLE approvals_v59 (
+  id TEXT PRIMARY KEY, task_id TEXT NOT NULL, pr_url TEXT NOT NULL, head_sha TEXT NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('claude-ask','claude-chat','pi-confirm','cli-tty','board','page','yolo','autonomous','validator')),
+  actor TEXT NOT NULL, action TEXT NOT NULL DEFAULT 'merge',
+  allow_red_check TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed_at INTEGER);
+INSERT INTO approvals_v59 (id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at)
+  SELECT id, task_id, pr_url, head_sha, channel, actor, action, allow_red_check, created_at, expires_at, consumed_at FROM approvals;
+DROP TABLE approvals;
+ALTER TABLE approvals_v59 RENAME TO approvals;
+CREATE INDEX approvals_open ON approvals(task_id) WHERE consumed_at IS NULL;
+`;
+
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "init", sql: INIT_SQL },
   { version: 2, name: "runtime", sql: RUNTIME_SQL },
@@ -1182,6 +1210,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 56, name: "waits", sql: WAITS_SQL },
   { version: 57, name: "landing-train", sql: LANDING_TRAIN_SQL },
   { version: 58, name: "verify-wait", sql: VERIFY_WAIT_SQL },
+  { version: 59, name: "gate-validations", sql: GATE_VALIDATIONS_SQL, rebuildsReferencedTable: true },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

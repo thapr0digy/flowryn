@@ -1,6 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { table } from "../config/config.ts";
+import { checkUsd } from "../config/ask.ts";
 
 /**
  * Which decisions only the user may answer (cutover C1). The leader decides
@@ -67,7 +68,15 @@ export const DEADLINE_FLOOR: readonly string[] = RESERVED_CLASSES;
 export const DEADLINE_REFUSED_ANSWERS: readonly string[] = ["accept-without-ci", "keep-waiting"];
 /** `[decisions] default_after_h` reaches at most a week. */
 export const DEADLINE_MAX_H = 168;
-const DECISIONS_KEYS = ["reserved_classes", "nomistakes_rules", "default_after_h", "default_classes"];
+/**
+ * The review gates `[decisions] default_gates` may opt in to the validator
+ * (docs/notes/2026-11-08-unattended-loops-answer-4y.md): a design review and a QA review, by stage.
+ */
+export const VALIDATOR_GATES = ["design", "qa"] as const;
+export type ValidatorGate = (typeof VALIDATOR_GATES)[number];
+/** `[decisions] validator_rounds` reaches at most this many per gate per away. */
+export const VALIDATOR_MAX_ROUNDS = 5;
+const DECISIONS_KEYS = ["reserved_classes", "nomistakes_rules", "default_after_h", "default_classes", "default_gates", "validator_max_usd", "validator_rounds"];
 
 export interface DecisionsConfig {
   reserved_classes: string[];
@@ -76,6 +85,12 @@ export interface DecisionsConfig {
   default_after_h: number;
   /** The opted-in kinds (empty: deadline defaults are off). */
   default_classes: DeadlineClass[];
+  /** The review gates the validator may judge, by stage (empty: the validator is off). */
+  default_gates: ValidatorGate[];
+  /** The spend cap of one validator call, in dollars. */
+  validator_max_usd: number;
+  /** Validator rounds (passes, changes and failures) per gate per away. */
+  validator_rounds: number;
 }
 
 export function decisionsConfig(config: FlowrynConfig): DecisionsConfig {
@@ -86,7 +101,30 @@ export function decisionsConfig(config: FlowrynConfig): DecisionsConfig {
   const unknown = (classes as string[]).filter((c) => !(RESERVED_CLASSES as readonly string[]).includes(c));
   if (unknown.length > 0) throw new FlowrynError("config_invalid", `[decisions] reserved_classes: ${unknown.join(", ")} is not one of ${RESERVED_CLASSES.join(", ")}`);
   const rules = raw.nomistakes_rules === undefined ? DEFAULT_NM_RULES.map((r) => ({ ...r, file: [...r.file] })) : nmRules(raw.nomistakes_rules);
-  return { reserved_classes: classes as string[], nomistakes_rules: rules, default_after_h: afterHours(raw.default_after_h), default_classes: deadlineClasses(raw.default_classes) };
+  return {
+    reserved_classes: classes as string[],
+    nomistakes_rules: rules,
+    default_after_h: afterHours(raw.default_after_h),
+    default_classes: deadlineClasses(raw.default_classes),
+    default_gates: validatorGates(raw.default_gates),
+    validator_max_usd: raw.validator_max_usd === undefined ? 1 : checkUsd(raw.validator_max_usd, "[decisions] validator_max_usd"),
+    validator_rounds: validatorRounds(raw.validator_rounds),
+  };
+}
+
+/** `[decisions] default_gates`: stages from VALIDATOR_GATES; anything else is refused. */
+function validatorGates(value: unknown): ValidatorGate[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((g) => typeof g !== "string")) throw new FlowrynError("config_invalid", "[decisions] default_gates must be a list of review stages");
+  const unknown = (value as string[]).filter((g) => !(VALIDATOR_GATES as readonly string[]).includes(g));
+  if (unknown.length > 0) throw new FlowrynError("config_invalid", `[decisions] default_gates: ${unknown.join(", ")} is not one of ${VALIDATOR_GATES.join(", ")}`);
+  return [...new Set(value as ValidatorGate[])];
+}
+
+function validatorRounds(value: unknown): number {
+  if (value === undefined) return 2;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > VALIDATOR_MAX_ROUNDS) throw new FlowrynError("config_invalid", `[decisions] validator_rounds must be a whole number from 1 to ${VALIDATOR_MAX_ROUNDS}`);
+  return value;
 }
 
 function afterHours(value: unknown): number {
@@ -153,7 +191,7 @@ export function keywordClass(reason: string | null): ReservedClass | null {
 }
 
 /** The reason only the user may answer, or null when the leader may. */
-export function reservedReason(input: ReservedInput, cfg: DecisionsConfig): string | null {
+export function reservedReason(input: ReservedInput, cfg: Pick<DecisionsConfig, "reserved_classes">): string | null {
   if (input.sourceReason && input.sourceReason.trim().length > 0) return input.sourceReason.trim().slice(0, 200);
   const enabled = new Set(cfg.reserved_classes);
   if (input.blocksYoloOff && enabled.has("merge")) return "merge";

@@ -3,9 +3,9 @@ import { boolArg, stringArg, type Args, type HandlerCtx, type VerbSpec } from ".
 import type { FlowrynConfig } from "../config/config.ts";
 import type { Db } from "../db/db.ts";
 import { listProjects } from "../lifecycle/projects.ts";
-import { AUTONOMY_MAX_MS, autonomyRef, canonicalTerms, checkTerms, endAutonomy, projectsOf, stampOf, startAutonomy, type AutonomyRow, type AutonomyTerms } from "../policy/autonomy.ts";
+import { AUTONOMY_MAX_MS, autonomyRef, awayRef, canonicalTerms, checkTerms, endAutonomy, projectsOf, stampOf, startAutonomy, type AutonomyRow, type AutonomyTerms } from "../policy/autonomy.ts";
 import { AUTONOMY_SUMMARY } from "../policy/chat-questions.ts";
-import { claudeLeaderSession, grantActor, prepareCaptainGrant, takeGrant } from "../policy/grants.ts";
+import { claudeLeaderSession, GRANT_ARG, grantActor, prepareCaptainGrant, takeGrant } from "../policy/grants.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { PARKING_CLASSES } from "./autonomy-pass.ts";
 import { awayConfig, leaderTiming } from "../config/leader.ts";
@@ -15,7 +15,7 @@ import { CI_WAIT_ORIGIN } from "../lifecycle/ci-wait.ts";
 import { getRun, isTerminal } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
 import { settleAutonomyParked } from "./items.ts";
-import { AWAY_MAX_MS, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief, type AwayPosture } from "./away.ts";
+import { AWAY_MAX_MS, CHAT_AWAY_BY, clockLabel, endAway, expireAway, getAway, lastAway, parseUntil, startAway, takePendingBrief, type AwayPosture } from "./away.ts";
 import { composeBriefing, composeReturnBrief, readOnlyBanner } from "./briefing.ts";
 import type { CommandMessage, CommandOutcome } from "./notify.ts";
 import { lensFor, projectRefScope, requireInScope } from "../leader/scope.ts";
@@ -150,7 +150,7 @@ const away: VerbSpec = {
   async prepare(ctx, args): Promise<AwayPrepared> {
     if (!boolArg(args, "autonomous")) {
       if (stringArg(args, "projects") !== undefined) throw new FlowrynError("bad_args", "--projects belongs to --autonomous");
-      return { autonomy: null };
+      return { autonomy: null, chat: chatAwayGrant(ctx, args) };
     }
     const now = ctx.now();
     const terms = autonomyTermsOf(ctx, args, now);
@@ -175,7 +175,8 @@ const away: VerbSpec = {
       if (used.item !== autonomyRef(terms) || used.action !== "autonomy") throw new FlowrynError("approval_required", `grant ${used.id} is for ${used.item}, not ${autonomyRef(terms)}`);
       const words = [used.words?.trim() ?? "", (stringArg(args, "body") ?? "").trim()].filter((w) => w.length > 0).join(" / ") || null;
       const row = startAutonomy(ctx.db, { terms, channel: "claude-chat", actor: grantActor(used), grantId: used.id, words, now });
-      const posture = awayAlongside(ctx.db, row.expires_at, words, ctx.caller.role, now);
+      // The grant is the user's own chat answer, so the away it rides along with is theirs too.
+      const posture = awayAlongside(ctx.db, row.expires_at, words, CHAT_AWAY_BY, now);
       return { data: autonomyStarted(row, posture, now), hints: ["flowryn back ends both and prints the return brief", "flowryn show autonomy"] };
     }
     const text = stringArg(args, "until");
@@ -183,11 +184,23 @@ const away: VerbSpec = {
     if (until === null) throw new FlowrynError("bad_args", `--until ${text} is not a time`, "HH:MM, +8h, +90m or YYYY-MM-DD HH:MM");
     if (until <= now) throw new FlowrynError("bad_args", `--until ${text} is in the past`);
     if (until - now > AWAY_MAX_MS) throw new FlowrynError("bad_args", `--until ${text} is more than 7 days away`);
-    const words = stringArg(args, "body") ?? null;
-    const { posture, extended } = startAway(ctx.db, { until, words, by: ctx.caller.role, now });
+    const chat = (prepared as AwayPrepared | undefined)?.chat ?? null;
+    let words = stringArg(args, "body") ?? null;
+    let by: string = ctx.caller.role;
+    if (chat) {
+      // The user's own chat answer for exactly this end time (docs/notes/2026-11-08-unattended-loops-answer-4y.md).
+      const used = takeGrant(ctx.db, chat.grant, `away ${chat.ref}`, now);
+      if (used.item !== awayRef(until) || used.action !== "away") throw new FlowrynError("approval_required", `grant ${used.id} is for ${used.item}, not ${awayRef(until)}`);
+      words = [used.words?.trim() ?? "", (words ?? "").trim()].filter((w) => w.length > 0).join(" / ") || null;
+      by = CHAT_AWAY_BY;
+    }
+    const { posture, extended } = startAway(ctx.db, { until, words, by, now });
+    const hints = ["flowryn back ends it and prints the return brief"];
+    // A leader's own away delivers items but decides nothing for the user; their chat answer makes it theirs.
+    if (by === "leader") hints.push(`nothing is decided for the user under a leader's away; to let Flowryn decide while they are away, ask: flowryn chat-question ${awayRef(posture.until)} (then flowryn grant use <grant>)`);
     return {
-      data: { away: extended ? "extended" : "started", since: clockLabel(posture.since, now), until: clockLabel(posture.until, now), words: posture.words ?? "-", wake_ceiling_per_hour: leaderTiming(ctx.config()).wake_ceiling_per_hour },
-      hints: ["flowryn back ends it and prints the return brief"],
+      data: { away: extended ? "extended" : "started", since: clockLabel(posture.since, now), until: clockLabel(posture.until, now), words: posture.words ?? "-", by: posture.by, wake_ceiling_per_hour: leaderTiming(ctx.config()).wake_ceiling_per_hour },
+      hints,
     };
   },
   async settle(ctx, result) {
@@ -199,6 +212,27 @@ const away: VerbSpec = {
 
 interface AwayPrepared {
   autonomy: { projects: string[]; until: number; grant: string } | null;
+  /** A plain away on the user's chat answer: the grant for `away:<until>`. */
+  chat?: { grant: string; ref: string } | null;
+}
+
+/**
+ * A plain away the Claude leader starts on the user's chat answer: the grant for exactly this end
+ * time (`away:<YYYY-MM-DDTHH:MM>`), checked against Claude's transcript, or null (another caller,
+ * an end time that does not parse, or no answer yet: the away is then the leader's own).
+ */
+function chatAwayGrant(ctx: HandlerCtx, args: Args): { grant: string; ref: string } | null {
+  if (!claudeLeaderSession(ctx)) {
+    if (stringArg(args, GRANT_ARG)) throw new FlowrynError("role_refused", "only the Claude leader session that asked uses a chat-answer grant");
+    return null;
+  }
+  const text = stringArg(args, "until");
+  if (text === undefined) return null;
+  const until = parseUntil(text, ctx.now());
+  if (until === null) return null;
+  const ref = awayRef(until);
+  const grant = prepareCaptainGrant(ctx, args, { item: ref, choice: "start" }, null);
+  return grant ? { grant, ref } : null;
 }
 
 /**

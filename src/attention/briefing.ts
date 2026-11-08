@@ -4,7 +4,8 @@ import { getMeta, setMeta } from "../db/db.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
-import { DEADLINE_VIA } from "../lifecycle/decisions.ts";
+import { DEADLINE_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
+import { validatorRoundLines } from "./validator-report.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { isTerminal, taskTitle, type RunState } from "../lifecycle/runs.ts";
@@ -132,14 +133,16 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
   const decided = (
     db
       .query(
-        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_at, d.created_at, r.state AS run_state
+        `SELECT d.id, d.task_id, d.question, d.answer, d.rationale, d.answered_by, d.answered_via, d.answered_at, d.created_at, r.state AS run_state
          FROM decisions d LEFT JOIN runs r ON r.id = d.run_id
-         WHERE (d.answered_by = 'leader' OR (d.answered_by = 'policy' AND d.answered_via = '${DEADLINE_VIA}')) AND d.answered_at > ?1 AND d.answered_at <= ?2 ORDER BY d.answered_at`,
+         WHERE (d.answered_by = 'leader' OR (d.answered_by = 'policy' AND d.answered_via IN ('${DEADLINE_VIA}', '${VALIDATOR_VIA}'))) AND d.answered_at > ?1 AND d.answered_at <= ?2 ORDER BY d.answered_at`,
       )
-      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_at: number; created_at: number | null; run_state: RunState | null }[]
+      .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_via: string | null; answered_at: number; created_at: number | null; run_state: RunState | null }[]
   ).filter((d) => lens.task(d.task_id));
-  if (decided.length === 0) return [];
-  const lines = [`${heading} (${decided.length}):`];
+  // The review-gate validator's rounds (src/attention/validator-report.ts) count as decided for you too.
+  const rounds = validatorRoundLines(db, since, until, lens);
+  if (decided.length + rounds.length === 0) return [];
+  const lines = [`${heading} (${decided.length + rounds.length}):`];
   for (const d of decided.slice(0, MAX_DECISION_LINES)) {
     if (d.answered_by === "leader") {
       lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer}: ${sanitizeLine(d.rationale ?? "", 80)}`);
@@ -148,9 +151,12 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
     // A deadline default (docs/notes/2026-10-30-deadline-defaults-for-gg.md): undone like a rule's answer, while the run is live.
     const waited = waitedLabel(d.answered_at - (d.created_at ?? d.answered_at));
     const undo = d.run_state !== null && !isTerminal(d.run_state) ? `undo: flowryn decide ${d.id} <choice> --by captain` : "run over, no undo";
-    lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (deadline after ${waited}; ${undo})`);
+    const how = d.answered_via === VALIDATOR_VIA ? "taken by the validator as recommended" : "deadline";
+    lines.push(`- [${d.id}] ${sanitizeLine(d.question, 80)} → ${d.answer} (${how} after ${waited}; ${undo})`);
   }
   if (decided.length > MAX_DECISION_LINES) lines.push(`+${decided.length - MAX_DECISION_LINES} more: flowryn decision list --all`);
+  lines.push(...rounds.slice(0, MAX_DECISION_LINES));
+  if (rounds.length > MAX_DECISION_LINES) lines.push(`+${rounds.length - MAX_DECISION_LINES} more validator rounds: flowryn show j<N>`);
   return lines;
 }
 
@@ -161,7 +167,7 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
 function ruleLines(db: Db, since: number, until: number, heading: string, lens: ScopeLens): string[] {
   const settled = (
     db
-      .query(`SELECT id, task_id, question, answer, answered_via FROM decisions WHERE answered_by = 'policy' AND answered_via IS NOT '${DEADLINE_VIA}' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at`)
+      .query(`SELECT id, task_id, question, answer, answered_via FROM decisions WHERE answered_by = 'policy' AND answered_via IS NOT '${DEADLINE_VIA}' AND answered_via IS NOT '${VALIDATOR_VIA}' AND answered_at > ?1 AND answered_at <= ?2 ORDER BY answered_at`)
       .all(since, until) as { id: string; task_id: string; question: string; answer: string; answered_via: string | null }[]
   ).filter((d) => lens.task(d.task_id));
   if (settled.length === 0) return [];
