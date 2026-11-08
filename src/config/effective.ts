@@ -7,6 +7,7 @@ import { cleanupConfig, githubConfig } from "./delivery.ts";
 import { awayConfig, grantsConfig, leaderTiming, learningsConfig, notifyConfig, reviewConfig } from "./leader.ts";
 import { policyMode } from "./policy.ts";
 import { askConfig } from "./ask.ts";
+import { contractsConfig } from "./contracts.ts";
 import { briefsConfig } from "./briefs.ts";
 import { waitDeadlines } from "../reconcile/wait-deadlines.ts";
 import { upkeepConfig } from "./upkeep.ts";
@@ -89,6 +90,7 @@ const RESOLVERS: Record<SnapshotKey, Resolver> = {
   scopes: (c) => accountsConfig(c).scopes,
   ask: askConfig,
   briefs: briefsConfig,
+  contracts: contractsConfig,
   waits: (c) => Object.fromEntries(Object.entries(waitDeadlines(c)).map(([kind, ms]) => [`${kind}_min`, ms / 60_000])),
 };
 
