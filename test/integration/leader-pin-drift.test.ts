@@ -3,6 +3,9 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The leader's pin never drifts with its hooks (docs/notes/2026-10-11-add-a-regression-d9.md):

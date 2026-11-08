@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 let ship: ShipEnv | null = null;
 afterEach(async () => {

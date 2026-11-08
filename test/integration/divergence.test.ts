@@ -10,6 +10,9 @@ import { existsSync } from "node:fs";
 import { listTasks, processRunner, type BacklogTask } from "../../src/journal/tasks-axi.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 async function fleet(options: Parameters<typeof makeFleetEnv>[0] = {}): Promise<FleetEnv> {

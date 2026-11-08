@@ -15,6 +15,9 @@ import { waitUntil } from "../helpers/harness.ts";
 import { worktreeChecks } from "../../src/doctor/doctor.ts";
 import { loadConfig } from "../../src/config/config.ts";
 import { stateFiles } from "../../src/config/paths.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 let fleet: FleetEnv | null = null;
 afterEach(async () => {

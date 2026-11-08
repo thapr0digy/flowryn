@@ -43,6 +43,25 @@ export interface VerifyRequest {
   detail: string | null;
   requested_at: number;
   ended_at: number | null;
+  /** Why the drain made it wait on its own PR (migration 58); null while it does not. */
+  wait_reason: OwnWaitReason | null;
+  /** The id that reason names: the short head GitHub shows (stale_read), the forge error kind and status. */
+  wait_ref: string | null;
+  /** When it began waiting on its own: the clock of its own deadline. */
+  wait_since: number | null;
+}
+
+/**
+ * Why the drain makes a queued request wait on its own PR and lets the ones
+ * behind it go first (src/verify/start.ts stillWanted). Fixed codes: the text
+ * shown is built from them, never stored.
+ */
+export const OWN_WAIT_REASONS = ["config_invalid", "forge_outage", "stale_read", "pr_unreadable"] as const;
+export type OwnWaitReason = (typeof OWN_WAIT_REASONS)[number];
+
+export interface OwnWait {
+  reason: OwnWaitReason;
+  ref: string | null;
 }
 
 export interface NewRequest {
@@ -129,11 +148,44 @@ export function markStarted(db: Db, request: VerifyRequest, verificationId: stri
   return true;
 }
 
+/** Move a queued request to another rank (a landing train's candidate that became the head of line). Call inside a transaction. */
+export function rerankRequest(db: Db, request: VerifyRequest, rank: number, now: number): boolean {
+  const changed = db.query("UPDATE verify_queue SET rank = ?2 WHERE id = ?1 AND state = 'queued' AND rank <> ?2").run(request.id, rank).changes;
+  if (changed === 0) return false;
+  appendEvent(db, { source: "daemon", kind: "verify.reranked", taskId: request.task_id, payload: { request: request.id, from: request.rank, to: rank }, ts: now });
+  return true;
+}
+
 /** Cancel a queued request, saying why. Call inside a transaction; false when it was no longer queued. */
 export function cancelRequest(db: Db, request: VerifyRequest, reason: string, now: number): boolean {
   const changed = db.query("UPDATE verify_queue SET state = 'cancelled', detail = ?2, ended_at = ?3 WHERE id = ?1 AND state = 'queued'").run(request.id, reason, now).changes;
   if (changed === 0) return false;
   appendEvent(db, { source: "daemon", kind: "verify.cancelled", taskId: request.task_id, payload: { request: request.id, pr: request.pr_url, head: request.head_sha, reason }, ts: now });
+  return true;
+}
+
+/**
+ * Record that a queued request waits on its own PR, with a `verify.waiting` event. Call inside a
+ * transaction. Its clock starts the first time; a new reason keeps it (the request is still
+ * waiting). The same reason again writes nothing and keeps its first ref, even when the reading
+ * differs (`refused 403`, then `refused 500`). False when it was no longer queued or unchanged.
+ */
+export function markWaiting(db: Db, request: VerifyRequest, wait: OwnWait, now: number): boolean {
+  const fresh = getRequest(db, request.id);
+  if (fresh?.state !== "queued") return false;
+  if (fresh.wait_reason === wait.reason) return false;
+  const since = fresh.wait_since ?? now;
+  db.query("UPDATE verify_queue SET wait_reason = ?2, wait_ref = ?3, wait_since = ?4 WHERE id = ?1").run(request.id, wait.reason, wait.ref, since);
+  appendEvent(db, { source: "daemon", kind: "verify.waiting", taskId: request.task_id, payload: { request: request.id, reason: wait.reason, ref: wait.ref, since, was: fresh.wait_reason }, ts: now });
+  return true;
+}
+
+/** The request no longer waits on its own PR (the drain may start it): clear its reason, with a `verify.wait_ended` event. Call inside a transaction; false when there was none. */
+export function clearWaiting(db: Db, request: VerifyRequest, now: number): boolean {
+  const fresh = getRequest(db, request.id);
+  if (!fresh?.wait_reason) return false;
+  db.query("UPDATE verify_queue SET wait_reason = NULL, wait_ref = NULL, wait_since = NULL WHERE id = ?1").run(request.id);
+  appendEvent(db, { source: "daemon", kind: "verify.wait_ended", taskId: request.task_id, payload: { request: request.id, reason: fresh.wait_reason, ref: fresh.wait_ref, waited_ms: now - (fresh.wait_since ?? now) }, ts: now });
   return true;
 }
 

@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cliJson, daemonCall, makeHome, seedLeader, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `ask --nomistakes` through the real daemon and CLI (docs/notes/2026-10-22-settle-routine-no-2r.md):

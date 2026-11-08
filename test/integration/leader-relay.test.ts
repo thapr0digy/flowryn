@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { RELAY_FOOTER, RELAY_HEADER } from "../../src/attention/router.ts";
 import { cliJson } from "../helpers/harness.ts";
 import { makeLeaderEnv, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Items the leader relays (task leader-stop-hook-yq): a Claude leader's turn

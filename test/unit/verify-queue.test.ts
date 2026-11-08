@@ -154,6 +154,17 @@ describe("migration 29", () => {
   });
 });
 
+describe("migration 58", () => {
+  test("applies forward on a database at 57: queued requests keep their place and wait on nothing of their own", () => {
+    const db = openDb(join(tempDir(), "flowryn.db"));
+    migrate(db, MIGRATIONS.slice(0, 57));
+    db.exec("INSERT INTO verify_queue (id, project_id, pr_url, head_sha, policy_id, source, state, requested_at) VALUES ('vq1', 'web', 'u', 'h', 'p', 'cli', 'queued', 1)");
+    expect(migrate(db, MIGRATIONS.slice(0, 58))).toEqual([58]);
+    expect(getRequest(db, "vq1")).toMatchObject({ state: "queued", wait_reason: null, wait_ref: null, wait_since: null });
+    db.close();
+  });
+});
+
 describe("the queue", () => {
   test("FIFO within rank; a recovered request goes first; position and what is ahead; one queued request per PR, head and policy", () => {
     const f = fixture();
@@ -300,6 +311,53 @@ describe("draining the queue", () => {
     await settled(f.db, [getRequest(f.db, behind.id)!.verification_id!]);
   });
 
+  test("the drain records each request's own wait, its reason and when it began, with an event; the same reason again writes nothing; a start clears it", async () => {
+    const f = fixture();
+    // Project app's config is invalid; web's PR 4 answers 403 (not an outage); PR 5 is fine.
+    f.config = parseConfig(`[projects.web]\nverify = ["true"]\n[projects.app]\nverify = "true"\n`, tempDir());
+    f.deps = { ...f.deps, projectPath: (id) => (id === "web" || id === "app" ? f.repo : null) };
+    const r1 = f.request(3, { project_id: "app", pr_url: "https://github.com/acme/app/pull/3", now: 1_000 });
+    const r2 = f.request(4, { now: 2_000 });
+    const r3 = f.request(5, { now: 3_000 });
+    f.prs.set(4, new ForgeError("refused", "Resource not accessible by integration: secret-ish text", 403));
+    let now = 10_000;
+    f.deps = { ...f.deps, now: () => now };
+    expect(await drainVerifyQueue(f.deps)).toBe(1);
+    expect(getRequest(f.db, r3.id)!.state).toBe("started");
+    expect(getRequest(f.db, r1.id)).toMatchObject({ state: "queued", wait_reason: "config_invalid", wait_ref: null, wait_since: 10_000 });
+    expect(getRequest(f.db, r2.id)).toMatchObject({ state: "queued", wait_reason: "pr_unreadable", wait_ref: "refused 403", wait_since: 10_000 });
+    expect(events(f.db, "verify.waiting")).toEqual([
+      { request: r1.id, reason: "config_invalid", ref: null, since: 10_000, was: null },
+      { request: r2.id, reason: "pr_unreadable", ref: "refused 403", since: 10_000, was: null },
+    ]);
+    // Only fixed codes and ids are stored, never the forge's message.
+    expect(JSON.stringify(f.db.query("SELECT * FROM verify_queue").all())).not.toContain("secret-ish");
+    expect(waitingOn(f.db, getRequest(f.db, r2.id)!, CAPS, now)).toBe(`waits on its own PR, the ones behind go first: cannot read ${PR(4)} (refused 403)`);
+    await settled(f.db, [getRequest(f.db, r3.id)!.verification_id!]);
+    now = 20_000;
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(events(f.db, "verify.waiting")).toHaveLength(2);
+    // The same reason with another reading writes nothing and keeps the first ref.
+    f.prs.set(4, new ForgeError("refused", "Server Error", 500));
+    now = 25_000;
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(events(f.db, "verify.waiting")).toHaveLength(2);
+    expect(getRequest(f.db, r2.id)).toMatchObject({ wait_reason: "pr_unreadable", wait_ref: "refused 403", wait_since: 10_000 });
+    // A new reason keeps the request's clock.
+    f.prs.set(4, new ForgeError("unreachable", "connect ECONNREFUSED"));
+    now = 30_000;
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(getRequest(f.db, r2.id)).toMatchObject({ wait_reason: "forge_outage", wait_ref: "unreachable", wait_since: 10_000 });
+    expect(events(f.db, "verify.waiting").at(-1)).toMatchObject({ request: r2.id, reason: "forge_outage", was: "pr_unreadable" });
+    // Its PR reads again: the wait ends and it starts.
+    f.prs.delete(4);
+    now = 40_000;
+    expect(await drainVerifyQueue(f.deps)).toBe(1);
+    expect(getRequest(f.db, r2.id)).toMatchObject({ state: "started", wait_reason: null, wait_since: null });
+    expect(events(f.db, "verify.wait_ended")).toEqual([{ request: r2.id, reason: "forge_outage", ref: "unreachable", waited_ms: 30_000 }]);
+    await settled(f.db, [getRequest(f.db, r2.id)!.verification_id!]);
+  });
+
   test("assumption: GitHub still showing the head a delivery was carried from waits (up to STALE_READ_WAIT_MS), not cancels", async () => {
     const f = fixture();
     const older = "e".repeat(40);
@@ -310,7 +368,7 @@ describe("draining the queue", () => {
     expect(staleRead(f.db, carried, older)).toBe(true);
     expect(staleRead(f.db, { ...carried, head_sha: older }, f.head)).toBe(false);
     expect(await drainVerifyQueue(f.deps)).toBe(0);
-    expect(getRequest(f.db, carried.id)!.state).toBe("queued");
+    expect(getRequest(f.db, carried.id)).toMatchObject({ state: "queued", wait_reason: "stale_read", wait_ref: older.slice(0, 8) });
     expect(f.logs.some((l) => l.includes(`verify ${carried.id}: waits: GitHub still shows ${older.slice(0, 8)}`))).toBe(true);
     // GitHub never catches up: past the bound the request is cancelled as a moved head (the auto-merge queues it again).
     f.deps = { ...f.deps, now: () => carried.requested_at + STALE_READ_WAIT_MS };
@@ -446,5 +504,33 @@ describe("a verification the daemon stopped runs again", () => {
     expect(await recoverVerifications(f.deps)).toBe(1);
     expect(getVerification(f.db, v.id)!.state).toBe("error");
     expect(queuedRequests(f.db)).toEqual([]);
+  });
+});
+
+describe("a landing train candidate's request (src/verify/landing-queue.ts)", () => {
+  test("starts while a live entry keeps the candidate, never asking GitHub (it is not pushed); is cancelled once dropped; waits behind every other request", async () => {
+    const f = fixture();
+    // GitHub shows another head: a PR request would be cancelled as moved, the candidate's must not be.
+    f.prs.set(1, { headSha: "f".repeat(40) });
+    f.db.exec(
+      `INSERT INTO landing_queue (id, project_id, run_id, task_id, ref, entered_head, head_sha, state, enqueued_at, state_since, updated_at, train_head, train_base)
+       VALUES ('lq1', 'web', 'r1', 't1', '${PR(1)}', 'aaa', 'aaa', 'waiting', 1, 1, 1, '${f.head}', 'bbb')`,
+    );
+    const ahead = f.request(2);
+    const train = f.request(1, { pr_number: null, head_ref: null, rank: 1, source: "auto" });
+    expect(queuedRequests(f.db).map((r) => r.id)).toEqual([ahead.id, train.id]);
+    expect(await drainVerifyQueue(f.deps)).toBe(2);
+    expect(getRequest(f.db, train.id)!.state).toBe("started");
+    await settled(f.db, [getRequest(f.db, train.id)!.verification_id!]);
+    expect(getVerification(f.db, getRequest(f.db, train.id)!.verification_id!)).toMatchObject({ state: "passed", pr_url: PR(1), head_sha: f.head });
+
+    f.db.exec("UPDATE landing_queue SET train_head = NULL");
+    const dropped = f.request(1, { pr_number: null, head_ref: null, rank: 1, source: "auto", policy_id: "vp1:other" });
+    expect(await drainVerifyQueue(f.deps)).toBe(0);
+    expect(getRequest(f.db, dropped.id)).toMatchObject({ state: "cancelled", detail: `the landing train no longer tests ${f.head.slice(0, 8)}` });
+  }, 30_000);
+
+  test("assumption: a restart holds queued verifies back for 10 minutes at most", () => {
+    expect(RESTART_HOLDS_VERIFIES_MS).toBe(10 * 60_000);
   });
 });

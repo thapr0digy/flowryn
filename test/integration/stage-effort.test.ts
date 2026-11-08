@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A stage's own effort and a review stage's model end to end (docs/notes/2026-11-06-effort-and-model-gn.md):

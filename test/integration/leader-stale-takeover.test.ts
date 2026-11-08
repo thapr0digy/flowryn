@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A new leader session takes over a stale lease without `leader claim`

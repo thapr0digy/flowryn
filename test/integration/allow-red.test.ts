@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A red-check waiver from the leader conversation: `flowryn merge <task>

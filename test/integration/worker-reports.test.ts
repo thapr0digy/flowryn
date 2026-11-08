@@ -18,6 +18,9 @@ import { tx } from "../../src/db/db.ts";
 import { appendEvent } from "../../src/db/events.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { cliJson, makeHome, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 async function fleet(): Promise<FleetEnv> {

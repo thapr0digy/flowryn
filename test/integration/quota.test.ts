@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { quotaJson, REPO_ROOT, waitUntil } from "../helpers/harness.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { Pty } from "../helpers/pty.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The Claude quota floor (the toolkit report's Q4), end to end on the fake

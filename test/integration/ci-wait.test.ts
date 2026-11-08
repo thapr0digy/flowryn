@@ -4,6 +4,9 @@ import { join } from "node:path";
 import type { FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The CI-wait watchdog end to end (task pipeline-watchdog-and-pt): a

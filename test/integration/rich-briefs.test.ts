@@ -5,6 +5,9 @@ import { DOC_TEMPLATES } from "../../src/lifecycle/brief-templates.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Rich briefs end to end on the fake fleet (docs/notes/2026-11-05-workers-get-rich-hx.md), with

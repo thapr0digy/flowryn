@@ -15,7 +15,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
 import { autoMergeProgress, CHECKS_WAIT_MS, checksPending, evidenceHead, HEAD_MOVED_WAIT_MS, headMovedSeenAt, liveAutoMerges, NO_CI_CHECKS_WAIT_MS, type AutoMergeRow } from "../verify/auto-merge.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { getRequest, queuedRequests, type VerifyRequest } from "../verify/queue.ts";
-import { waitingOn } from "../verify/start.ts";
+import { ownWaitCause, waitingOn } from "../verify/start.ts";
 import { getVerification, runningVerifications } from "../verify/store.ts";
 import { forgeDownSince } from "./forge-health.ts";
 import { waitDeadlines, type WaitKind } from "./wait-deadlines.ts";
@@ -109,10 +109,52 @@ function usualVerifyMs(db: Db, config: FlowrynConfig, projectId: string): number
   }
 }
 
-/** The first request in line: it should start once the queue ahead of it last moved, or the verifies running ahead of it are expected to end; requests that went past it never reset its clock. */
+/**
+ * The verify queue's waits: each request the drain recorded as waiting on its
+ * own PR (it steps aside for the ones behind) gets its own, from when it began
+ * waiting; and the first request in line that does not step aside should start
+ * once the queue ahead of it last moved, or the verifies running ahead of it
+ * are expected to end; requests that went past it never reset its clock.
+ */
 function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitKind, number>, now: number): Wait[] {
-  const first = queuedRequests(db)[0];
-  if (!first) return [];
+  const queued = queuedRequests(db);
+  const waits = queued.filter((r) => r.wait_reason !== null).map((r) => ownVerifyWait(config, r, deadlines));
+  const first = queued.find((r) => r.wait_reason === null);
+  return first ? [...waits, lineVerifyWait(db, config, deadlines, now, first, queued[0] !== first)] : waits;
+}
+
+/** What waits, for both kinds of verify wait. */
+function verifyWhat(r: VerifyRequest): string {
+  return `verify ${r.id}${r.task_id ? ` of ${r.task_id}` : ""} at ${r.head_sha.slice(0, 8)}`;
+}
+
+/** A request waiting on its own PR: its recorded cause, due a deadline after it began waiting. */
+function ownVerifyWait(config: FlowrynConfig, r: VerifyRequest, deadlines: Record<WaitKind, number>): Wait {
+  const since = r.wait_since ?? r.requested_at;
+  let detail: string | undefined;
+  if (r.wait_reason === "config_invalid") {
+    try {
+      verifyConfig(config, r.project_id);
+    } catch (error) {
+      detail = (error as Error).message;
+    }
+  }
+  const show = `flowryn verify show ${r.id}`;
+  return {
+    key: `verify:${r.id}`,
+    kind: "verify_queue",
+    task_id: r.task_id,
+    run_id: null,
+    since,
+    due: since + deadlines.verify_queue,
+    what: verifyWhat(r),
+    cause: `waits on its own PR, so the requests behind it go first: ${ownWaitCause(r, detail)}`,
+    fix: r.wait_reason === "config_invalid" ? `flowryn config; ${show}` : show,
+  };
+}
+
+/** The first request in line that does not step aside (`behindOwn`: requests waiting on their own PR are ahead of it). */
+function lineVerifyWait(db: Db, config: FlowrynConfig, deadlines: Record<WaitKind, number>, now: number, first: VerifyRequest, behindOwn: boolean): Wait {
   const ahead = (t: string) => `(${t}.rank, ${t}.requested_at, CAST(substr(${t}.id, 3) AS INTEGER)) < (?1, ?2, ?3)`;
   const place = [first.rank, first.requested_at, Number(first.id.slice(2))] as const;
   const moved = (db.query(`SELECT MAX(q.ended_at) AS t FROM verify_queue q WHERE q.ended_at IS NOT NULL AND ${ahead("q")}`).get(...place) as { t: number | null }).t ?? 0;
@@ -134,19 +176,17 @@ function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitK
     caps = {};
   }
   const { cause, fix } = verifyWaitCause(db, config, first, caps, now);
-  return [
-    {
-      key: `verify:${first.id}`,
-      kind: "verify_queue",
-      task_id: first.task_id,
-      run_id: null,
-      since: first.requested_at,
-      due: expected + deadlines.verify_queue,
-      what: `verify ${first.id}${first.task_id ? ` of ${first.task_id}` : ""} at ${first.head_sha.slice(0, 8)}`,
-      cause: `first in the verify queue and not started: ${cause}`,
-      fix,
-    },
-  ];
+  return {
+    key: `verify:${first.id}`,
+    kind: "verify_queue",
+    task_id: first.task_id,
+    run_id: null,
+    since: first.requested_at,
+    due: expected + deadlines.verify_queue,
+    what: verifyWhat(first),
+    cause: `${behindOwn ? "first in the verify queue behind requests waiting on their own PR" : "first in the verify queue"} and not started: ${cause}`,
+    fix,
+  };
 }
 
 /** Why the first request has not started: the drain's own checks that make it wait (its project's config, GitHub's outage), else what it waits on in the queue. */

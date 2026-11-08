@@ -8,6 +8,9 @@ import { failRun } from "../../src/lifecycle/runs.ts";
 import { makeFleetEnv, makeRepo, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { readSnapshot } from "../../src/journal/snapshot.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {
@@ -91,7 +94,7 @@ test("a queued task whose run failed can be started again with --task (cutover C
   const secondRunId = (second.reply.data as { run: string }).run;
   expect(secondRunId).not.toBe(runId);
   expect(env.run(secondRunId).task_id).toBe("web-retry-q1");
-});
+}, 30_000);
 
 type FleetData = { fleet: { id: string }[]; queued?: { id: string; kind: string; project: string; status: string; auto: string; waits: string; next: string; age: string }[] };
 

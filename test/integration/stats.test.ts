@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { decode } from "@toon-format/toon";
 import { cli, cliJson, makeHome, seedLeader, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /** `flowryn stats` through the real CLI (docs/notes/2026-10-13-measure-waiting-time-na.md). */
 

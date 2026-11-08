@@ -17,8 +17,12 @@ import { sanitizeLine } from "../util/sanitize.ts";
  * No hook input carries the reset time, so the pause expires after a backoff
  * (`[sched] usage_backoff_ms`, 15 min, doubling on each re-arm up to
  * `usage_backoff_max_ms`, 2 h). Once it expires, exactly one run on the
- * account is let through as a probe: its normal Stop lifts the pause, another
- * rate_limit re-arms it with the next backoff. `flowryn capacity resume
+ * account is let through as a probe: its first tool call (the model answered)
+ * or its normal Stop lifts the pause, another rate_limit re-arms it with the
+ * next backoff. The probe holds its slot until one of those or its run ends,
+ * however slowly it launches: no timer frees it, so a second probe never goes
+ * in while the first may still hit the limit
+ * (docs/notes/2026-11-07-fix-two-integration-iq.md). `flowryn capacity resume
  * --account <id>` lifts it at once.
  */
 
@@ -76,9 +80,9 @@ function pauseLine(account: string, pause: UsagePause): string {
   return `Account ${account}: usage limit reached (${pause.who}); launches and stage starts on ${account} pause until ${clock(pause.until)}, then one run probes it; ${resumeCommand(account)} lifts it now`;
 }
 
-/** A probe is out while its run is alive and younger than the backoff; a dead or finished probe frees the slot for another. */
-function probeOut(db: Db, pause: UsagePause, now: number): boolean {
-  if (!pause.probe || now - pause.probe.at >= pause.backoff_ms) return false;
+/** A probe is out while its run is alive, however long it takes to answer; a dead or finished probe frees the slot for another. */
+function probeOut(db: Db, pause: UsagePause): boolean {
+  if (!pause.probe) return false;
   const run = db.query("SELECT state, liveness FROM runs WHERE id = ?1").get(pause.probe.run) as { state: string; liveness: string } | null;
   return run !== null && !["cleaned", "failed", "cancelled"].includes(run.state) && run.liveness !== "dead";
 }
@@ -89,7 +93,7 @@ export function usageGate(db: Db, now: number, account: string, runId: string | 
   if (!pause) return "open";
   if (now < pause.until) return "paused";
   if (runId !== null && pause.probe?.run === runId) return "open";
-  return probeOut(db, pause, now) ? "paused" : "probe";
+  return probeOut(db, pause) ? "paused" : "probe";
 }
 
 /** The accounts whose usage pause holds starts now (not yet expired, or expired with its probe out). */
@@ -103,6 +107,18 @@ export function claimProbe(db: Db, account: string, runId: string, now: number):
   if (!pause) return;
   savePause(db, account, { ...pause, probe: { run: runId, at: now } });
   appendEvent(db, { source: "daemon", kind: "sched.usage_probe", runId, payload: { account, paused_ms: now - pause.since, backoff_ms: pause.backoff_ms }, ts: now });
+}
+
+/**
+ * The account's probe made a tool call: the model answered it, so usage is
+ * available again and the pause lifts. Only the probe's own call counts (a
+ * session already mid-turn when the limit hit proves nothing new). Call inside
+ * the hook's transaction; true when this lifted the pause.
+ */
+export function noteProbeReply(db: Db, account: string, runId: string, who: string, now: number): boolean {
+  const pause = usagePause(db, account);
+  if (pause?.probe?.run !== runId) return false;
+  return clearUsageLimit(db, account, `the probe ${who} got a reply (a tool call)`, now);
 }
 
 /**
