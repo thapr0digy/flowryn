@@ -8,6 +8,8 @@ import { resolveModelChoice } from "../config/model-choice.ts";
 import { workersConfig } from "../config/workers.ts";
 import { tx, type Db } from "../db/db.ts";
 import type { StartDeps } from "../lifecycle/dispatch.ts";
+import { gateHarness } from "../lifecycle/harness-gate.ts";
+import type { HarnessId } from "../harness/types.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { runBounded, type BoundedOptions, type BoundedResult } from "../runtime/bounded.ts";
 import { scrubbedEnv } from "../runtime/child-env.ts";
@@ -100,19 +102,44 @@ export function recoverAsks(db: Db, now: number): { requeued: string[]; failed: 
  * Start queued asks, oldest first, while fewer than [ask] max_concurrent run. An ask whose
  * account is paused for its usage limit waits, without holding up the others. Returns how many started.
  */
-export function drainAsks(deps: AskDeps, stopped: () => boolean = () => false): number {
+export async function drainAsks(deps: AskDeps, stopped: () => boolean = () => false): Promise<number> {
   const { db } = deps;
   const max = askConfig(deps.config()).max_concurrent;
+  const untested = new Map<HarnessId, boolean>();
   let started = 0;
   for (const ask of queuedAsks(db)) {
     if (stopped() || stopping) break;
     if (runningAsks(db).length >= max) break;
     if (usageGate(db, deps.now(), ask.account, null) !== "open") continue;
+    // The harness gate again at launch: an ask queued on an untested version (relaxed) waits for its contract pass.
+    if (await untestedNow(deps, ask.harness as HarnessId, untested)) continue;
+    if (stopped() || stopping) break;
     if (!tx(db, () => markStarted(db, ask.id, deps.now()))) continue;
     launchAsk(deps, getAsk(db, ask.id)!);
     started++;
   }
   return started;
+}
+
+/**
+ * Is the installed version of this harness untested, by the gate, now? Once
+ * per harness per drain. Only `unverified` holds an ask: a harness whose
+ * version cannot be read is the call's own failure, as before. A gate that
+ * throws holds it too, and says so.
+ */
+async function untestedNow(deps: AskDeps, harness: HarnessId, seen: Map<HarnessId, boolean>): Promise<boolean> {
+  const known = seen.get(harness);
+  if (known !== undefined) return known;
+  let untested: boolean;
+  try {
+    const check = await gateHarness(deps.db, deps.config(), harness, deps.startDeps.harnessVersion, "daemon", "ask-launch", deps.now);
+    untested = check.state === "unverified";
+  } catch (error) {
+    deps.log(`asks: checking ${harness} failed, so its asks wait: ${(error as Error).message}`);
+    untested = true;
+  }
+  seen.set(harness, untested);
+  return untested;
 }
 
 function launchAsk(deps: AskDeps, ask: AskRow): void {

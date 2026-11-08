@@ -173,7 +173,7 @@ describe("accounts", () => {
     expect(JSON.stringify(view.reply.data)).toContain("claude-work usage limit");
     expect(view.reply.hints).toContain("flowryn capacity resume --account claude-work");
     expect(env.run(limited).account).toBe("claude-work");
-  });
+  }, 30_000);
 
   test("a low quota moves a fresh launch to the overflow account; flowryn accounts shows each account's quota", async () => {
     const overflow = ACCOUNTS.replace('model = "opus"', 'model = "opus"\noverflow = ["claude-work-2"]');

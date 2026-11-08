@@ -22,7 +22,7 @@ import { sanitizeBlock } from "../util/sanitize.ts";
 import { ulid } from "../util/ulid.ts";
 import { reserveDecision } from "./decisions.ts";
 import { MAX_BACKLOG_BODY, mintTaskId } from "./ids.ts";
-import { gateHarness, harnessRefusal } from "./harness-gate.ts";
+import { autoChecksOn, autoWaitLine, gateHarness, harnessRefusal, unverifiedVersion, waitsOnAutoCheck } from "./harness-gate.ts";
 import { checkPhaseAccounts, getPlan, parsePlan, phaseOfTask, phasesOf, recordPlan, takenIds, waitingOn } from "./plans.ts";
 import { inStackedPlan, phaseReadiness, type StackBase } from "./stacks.ts";
 import { DELIVERY_MODES, getProject, type ProjectRow } from "./projects.ts";
@@ -154,9 +154,10 @@ export async function checkStart(deps: StartDeps, project: ProjectRow, account: 
     throw herdrRefusal(deps, `Herdr is not reachable (${(error as Error).message}), so no worker can start`, (error as Error).message);
   }
   tx(deps.db, () => noteHerdrUp(deps.db, "cli", deps.now()));
-  // The installed version, checked at every dispatch; an untested one refuses and opens its P1 (sections 5 and 16).
+  // The installed version, checked at every dispatch (sections 5 and 16). An untested one refuses and opens its P1, unless
+  // the daemon checks it itself (relaxed): then the run is created and waits on the scheduler's grant, which gates it again.
   const check = await gateHarness(deps.db, deps.config(), harness, deps.harnessVersion, "cli", "dispatch", deps.now);
-  if (check.state !== "verified") throw harnessRefusal(check, deps.db, deps.config());
+  if (check.state !== "verified" && !waitsOnAutoCheck(deps.db, deps.config(), check)) throw harnessRefusal(check, deps.db, deps.config());
   const version = check.version;
   const branch = await deps.git(project.path, ["branch", "--show-current"]);
   if (branch !== project.default_branch) {
@@ -655,13 +656,23 @@ function choiceOf(db: Db, runId: string): { model: string; effort: string } {
   return modelView(db, run);
 }
 
-/** After the scheduler looked: launching, or waiting for capacity (and why). */
+/** A waiting run's harness is the untested version flagged for the automatic check: what the reply says of it; null otherwise. */
+export function harnessWaitOf(db: Db, config: FlowrynConfig, runId: string): string | null {
+  if (!autoChecksOn(db, config)) return null;
+  const run = db.query("SELECT harness FROM runs WHERE id = ?1").get(runId) as { harness: HarnessId } | null;
+  const version = run ? unverifiedVersion(db, run.harness) : null;
+  return run && version ? autoWaitLine(db, run.harness, version) : null;
+}
+
+/** After the scheduler looked: launching, waiting on the contract check for an untested harness version, or waiting for capacity (and why). */
 function withStartState(ctx: HandlerCtx, result: HandlerResult): HandlerResult {
   const runId = typeof result.data.run === "string" ? result.data.run : null;
   if (!runId) return result;
   const row = ctx.db.query("SELECT stage_state, pending_launch FROM runs WHERE id = ?1").get(runId) as { stage_state: string; pending_launch: string | null } | null;
-  if (row && (row.stage_state === "waiting" || row.pending_launch === "fresh")) return { ...result, data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity", ...(result.hints ?? []).slice(0, 1)] };
-  return result;
+  if (!row || (row.stage_state !== "waiting" && row.pending_launch !== "fresh")) return result;
+  const untested = harnessWaitOf(ctx.db, ctx.config(), runId);
+  if (untested) return { ...result, data: { ...result.data, state: "waiting", waits: untested }, hints: (result.hints ?? []).slice(0, 1) };
+  return { ...result, data: { ...result.data, state: "waiting for capacity" }, hints: ["flowryn capacity", ...(result.hints ?? []).slice(0, 1)] };
 }
 
 // --- plan -----------------------------------------------------------------------------------

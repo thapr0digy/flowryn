@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { autoContractSuite, dispatchClaude, events, items, NEW_VERSION, versions } from "../helpers/auto-contract.ts";
+import { autoContractSuite, events, items, NEW_VERSION, versions } from "../helpers/auto-contract.ts";
 import { FAKE_VERSION, setHarnessVersion } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { readManifest, type OwnedResources } from "../../src/contracts/owned.ts";
@@ -25,11 +25,11 @@ describe("the automatic contract check", () => {
     test(
       `assumption: a check stopped mid-suite by ${signal} leaves nothing: the ${releasedBy} releases exactly what the manifest names; the failure and the cleanup are recorded apart`,
       async () => {
-        const env = await fleet("relaxed");
+        // The version poll trips the gate, so no dispatch's worker shares the fake Herdr with the check.
+        const env = await fleet("relaxed", undefined, { extraConfig: "[contracts]\nversion_poll_ms = 10000" });
         // A workspace that is not the contract run's: it must stay.
         const unrelated = env.herdr.addPaneWithStatus(env.repo, "working");
         setHarnessVersion(env.h, "claude", NEW_VERSION);
-        expect((await dispatchClaude(env)).error.code).toBe("contract_unverified");
 
         // The suite's worker is up in the fake Herdr, and the manifest names the scratch daemon.
         const contracts = join(env.h.dataDir, "contracts");
@@ -50,7 +50,8 @@ describe("the automatic contract check", () => {
         await waitUntil(() => events(env, "contract.auto_cleanup").length + events(env, "contract.auto_cleanup_failed").length > 0, 60_000, "the cleanup recorded");
         expect(events(env, "contract.auto_cleanup_failed")).toEqual([]);
         expect(events(env, "contract.auto_cleanup")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION, ok: true, by: releasedBy })]);
-        expect(events(env, "contract.auto_failed")).toEqual([expect.objectContaining({ harness: "claude", version: NEW_VERSION })]);
+        // The cut-off check is a first failure: not final (its retry runs on a later pass).
+        expect(events(env, "contract.auto_failed")[0]).toEqual(expect.objectContaining({ harness: "claude", version: NEW_VERSION, try: 1, final: false }));
         expect(versions(env)).toEqual([FAKE_VERSION]);
         expect(items(env, "contract_leftover")).toEqual([]);
         expect(env.herdr.livePanes()).toEqual([]);

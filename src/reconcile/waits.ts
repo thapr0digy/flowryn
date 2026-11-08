@@ -6,9 +6,11 @@ import { appendEvent } from "../db/events.ts";
 import { readSnapshot } from "../journal/snapshot.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
+import { activeAutoAttempt } from "../lifecycle/harness-gate.ts";
 import { taskTitle } from "../lifecycle/runs.ts";
 import { phaseReadiness } from "../lifecycle/stacks.ts";
 import { hostState } from "../sched/scheduler.ts";
+import type { HarnessId } from "../harness/types.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { autoMergeProgress, CHECKS_WAIT_MS, checksPending, evidenceHead, HEAD_MOVED_WAIT_MS, headMovedSeenAt, liveAutoMerges, NO_CI_CHECKS_WAIT_MS, type AutoMergeRow } from "../verify/auto-merge.ts";
 import { verifyConfig } from "../verify/config.ts";
@@ -548,11 +550,15 @@ function resolveItem(db: Db, itemId: string, by: string, now: number): void {
   db.query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1 AND state IN ('open','presented')").run(itemId, by, now);
 }
 
-/** An open item that already tells the leader about this wait, if any. */
-function coveringItem(db: Db, w: Wait): string | null {
+/** An open item that already tells the leader about this wait, if any; for a run held on an untested harness, also the automatic check still queued or running for it (its final failure opens the harness_unverified item). */
+function coveringItem(db: Db, config: FlowrynConfig, w: Wait): string | null {
   if (w.kind === "leader") return leaderCoveringItem(db, w);
   if (!w.run_id || (w.kind !== "capacity" && w.kind !== "harness_check")) return null;
   const rule = ruleOf(db, w.run_id);
+  if (rule === "capacity.harness_unverified") {
+    const harness = (db.query("SELECT harness FROM runs WHERE id = ?1").get(w.run_id) as { harness: HarnessId } | null)?.harness;
+    if (harness && activeAutoAttempt(db, config, harness)) return `auto_check:${harness}`;
+  }
   const kind = rule ? COVERING_ITEMS[rule] : undefined;
   if (!kind || !(kind in LANE_TABLE)) return null;
   return (db.query("SELECT id FROM items WHERE kind = ?1 AND state IN ('open','presented') ORDER BY opened_at LIMIT 1").get(kind) as { id: string } | null)?.id ?? null;
@@ -598,7 +604,7 @@ export function checkWaits(deps: WaitPassDeps): WaitPassResult {
         continue;
       }
       if ((row.item_id && !row.item_id.startsWith(COVERED)) || now - row.recovered_at < RECOVERY_GRACE_MS) continue;
-      const covering = coveringItem(db, w);
+      const covering = coveringItem(db, config, w);
       if (covering && row.item_id === `${COVERED}${covering}`) continue;
       const event = appendEvent(db, {
         source: "reconciler",
