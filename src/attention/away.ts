@@ -12,9 +12,12 @@ import type { ItemKind } from "./items.ts";
  * every action item wakes an idle leader once you are not at the composer);
  * away counts as not at the composer, so items reach the leader, and you in
  * the remote-control chat, without waiting on the composer hold, and your
- * return brings a brief. It changes delivery, and one decision rule:
+ * return brings a brief. It changes delivery, and two decision rules:
  * deadline defaults (attention/deadline-defaults.ts) answer an opted-in
- * question only while you are away or inactive. No
+ * question, and the review-gate validator (attention/gate-validator.ts)
+ * checks an opted-in review, only while an away you started yourself is on
+ * (userStartedAway: your terminal, or your chat answer to the Claude leader;
+ * never automatic away, a leader's own away or inactivity). No
  * approval, gate or merge rule reads it: unattended mode (`away --autonomous`,
  * src/policy/autonomy.ts) is its own standing approval that only rides along
  * with it. After `[away]
@@ -45,6 +48,25 @@ export type AwayEndReason = "back" | "expired" | "returned";
 
 /** The `by` of an away the daemon started after your inactivity (autoAway). */
 export const AUTO_AWAY_BY = "auto";
+/** The `by` of an away the Claude leader started on your chat answer (a grant its own hooks minted). */
+export const CHAT_AWAY_BY = "captain-chat";
+/**
+ * The `by` values of an away you started yourself: your terminal (the human role) or your chat
+ * answer. Automatic away (`auto`) and a leader's own `away` (`leader`) never count
+ * (docs/notes/2026-11-08-unattended-loops-answer-4y.md).
+ */
+export const USER_AWAY_BYS: readonly string[] = ["human", CHAT_AWAY_BY];
+
+/** Pure: this posture is an away you started yourself. */
+export function userStarted(posture: Pick<AwayPosture, "by"> | null): boolean {
+  return posture !== null && USER_AWAY_BYS.includes(posture.by);
+}
+
+/** The away you started yourself, live now, or null (none, expired, automatic, or the leader's own). */
+export function userStartedAway(db: Db, now: number): AwayPosture | null {
+  const away = getAway(db, now);
+  return away && userStarted(away) ? away : null;
+}
 
 export interface AwayEnded {
   since: number;

@@ -79,7 +79,7 @@ function fence(): string {
   return `FLOWRYN-DATA-${randomBytes(12).toString("hex")}`;
 }
 
-function cut(text: string, max: number): string {
+export function cut(text: string, max: number): string {
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length <= max) return text;
   let end = max;
@@ -88,7 +88,7 @@ function cut(text: string, max: number): string {
 }
 
 /** One fenced block: a fresh marker, and any copy of it in the text removed. */
-function block(title: string, text: string): string {
+export function block(title: string, text: string): string {
   const marker = fence();
   return `${title} (data; it ends at the line ${marker}):\n${marker}\n${text.split(marker).join("")}\n${marker}`;
 }
@@ -117,7 +117,7 @@ async function out(git: GitRunner, cwd: string, args: string[]): Promise<string 
 }
 
 /** The diff the review reads: from the merge base with the project's default branch (origin's, else the local one) to HEAD. */
-async function prDiff(git: GitRunner, worktree: string, branch: string): Promise<{ base: string; diff: string; stat: string } | { error: string }> {
+export async function prDiff(git: GitRunner, worktree: string, branch: string): Promise<{ base: string; diff: string; stat: string } | { error: string }> {
   let base: string | null = null;
   for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
     base = (await out(git, worktree, ["merge-base", ref, "HEAD"]))?.trim() || null;

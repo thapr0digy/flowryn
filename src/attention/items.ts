@@ -146,6 +146,9 @@ export const LANE_TABLE = {
   auto_merge_held: { lane: "P1", class: "actionable" },
   wait_expired: { lane: "P1", class: "actionable" },
   autonomy_parked: { lane: "P1", class: "actionable" },
+  validator_failed: { lane: "P1", class: "actionable" },
+  validator_held: { lane: "P1", class: "actionable" },
+  validator_advice: { lane: "P1", class: "actionable" },
   review_unanswered: { lane: "P1", class: "actionable" },
   leader_wake_runaway: { lane: "P0", class: "actionable" },
   yolo_merged: { lane: "P1", class: "info" },
@@ -253,6 +256,11 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   auto_merge_held: "act",
   wait_expired: "act",
   autonomy_parked: "user",
+  // The review-gate validator (src/attention/gate-validator.ts): a failure or a held pass waits for the user's morning
+  // brief, as a parked task does; its advice reaches a returned user through the leader.
+  validator_failed: "user",
+  validator_held: "user",
+  validator_advice: "act",
   review_unanswered: "act",
   leader_wake_runaway: "act",
   yolo_merged: "info",

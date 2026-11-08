@@ -12,9 +12,13 @@ import { requireGateAnswered } from "../lifecycle/gate-questions.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { goneForGood } from "../lifecycle/review-chat.ts";
 import { revivalTarget, reviveReview } from "../lifecycle/review-revival.ts";
-import { getRunWithPolicy, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { deliveredOf } from "../lifecycle/delivery.ts";
+import { appendEvent } from "../db/events.ts";
+import { resolveRunItems } from "../attention/items.ts";
+import { sanitizeBlock } from "../util/sanitize.ts";
 import { openUserActed } from "../attention/follow-up.ts";
-import { changesTarget, openGate, passReviewGate, positionOf, sendBack, type GateRow } from "../lifecycle/stages.ts";
+import { changesTarget, openGate, passReviewGate, positionOf, requestStage, sendBack, type GateRow } from "../lifecycle/stages.ts";
 import { consumeApproval, findAttempt, insertApproval, matchAttempt, type Channel } from "./approvals.ts";
 import { grantActor, prepareCaptainGrant, takeGrant, voidItemGrants } from "./grants.ts";
 import { runAndProject } from "./verbs.ts";
@@ -234,4 +238,61 @@ interface ChangesPrepared {
   revival: { gate: string; account: Account; start: { version: string; base: string } } | null;
 }
 
-export const GATE_VERBS: VerbSpec[] = [gatePass, gateChanges];
+/**
+ * The review gate of `stage` the validator passed (src/attention/gate-validator.ts), that the user
+ * may reopen now: the run is live, has not delivered, has no review gate open, and that pass is
+ * the stage's latest. Throws naming why not. Pure over the database.
+ */
+export function reopenableValidatorPass(db: Db, run: RunWithPolicy, stage: string): GateRow {
+  if (isTerminal(run.state)) throw new FlowrynError("run_not_active", `${run.task_id}'s run is over; nothing to reopen`);
+  if (deliveredOf(db, run.task_id)) throw new FlowrynError("not_ready", `${run.task_id} has delivered; send changes on its PR instead`, `flowryn decline ${run.task_id} --body-file -`);
+  if (openGate(db, run.id, "review")) throw new FlowrynError("not_ready", `a review gate is open for ${run.task_id}; answer it instead`, `flowryn gate changes ${run.task_id} --body-file -`);
+  const latest = db.query("SELECT * FROM gates WHERE run_id = ?1 AND kind = 'review' AND stage = ?2 ORDER BY opened_at DESC, rowid DESC LIMIT 1").get(run.id, stage) as GateRow | null;
+  if (!latest) throw new FlowrynError("not_found", `${run.task_id} has no ${stage} review`);
+  const channel = latest.approval_id ? (db.query("SELECT channel FROM approvals WHERE id = ?1").get(latest.approval_id) as { channel: string } | null)?.channel : null;
+  if (latest.state !== "passed" || channel !== "validator") throw new FlowrynError("not_ready", `the ${stage} review ${latest.id} of ${run.task_id} was not passed by the validator; only the validator's pass is reopened this way`);
+  return latest;
+}
+
+/**
+ * `flowryn gate reopen <task> --gate <stage> --body-file -`: the undo of a review the validator
+ * passed while the user was away (docs/notes/2026-11-08-unattended-loops-answer-4y.md). The run goes
+ * back to the gated stage, through the scheduler, with the user's words, and the next review there
+ * is the user's (the validator's rounds are used or the user is back). Not an approval: it only
+ * sends work back, as `gate changes` does.
+ */
+const gateReopen: VerbSpec = {
+  name: "gate reopen",
+  summary: "Undo a review the validator passed while you were away: send the run back to that stage with your words",
+  positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
+  flags: {
+    gate: { type: "string", help: "the stage of the review the validator passed (design, qa); required", placeholder: "stage", complete: "stage" },
+    "body-file": { type: "string", help: "what to change, from a file or - for stdin", fileFor: "body" },
+  },
+  kind: "mutation",
+  roles: ["leader", "human"],
+  scope: { kind: "ref", arg: "task" },
+  apply(ctx, args) {
+    const { run } = runAndProject(ctx.db, stringArg(args, "task")!);
+    const stage = stringArg(args, "gate");
+    if (!stage) throw new FlowrynError("bad_args", "name the review with --gate <stage> (design, qa)");
+    const words = sanitizeBlock(stringArg(args, "body") ?? "").trim();
+    if (words.length === 0) throw new FlowrynError("bad_args", "say what to change in --body-file -");
+    const gate = reopenableValidatorPass(ctx.db, run, stage);
+    const now = ctx.now();
+    const pos = positionOf(ctx.db, run, run.kind);
+    const index = pos.def.stages.findIndex((s) => s.id === stage);
+    if (index < 0) throw new FlowrynError("not_found", `${run.task_id}'s workflow has no stage ${stage}`);
+    appendEvent(ctx.db, { source: "cli", kind: "gate.reopened", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage, by: ctx.caller.role }, ts: now });
+    resolveRunItems(ctx.db, run.id, ["validator_failed", "validator_held", "validator_advice"], `gate.reopened ${gate.id}`, now);
+    requestStage(ctx.db, run, pos.def, index, `The user reopened the ${stage} review the validator passed (${gate.id}): ${words} Back to stage ${stage}; when it is ready, submit it for review again.`, now);
+    openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: run.id, line: `The user reopened the ${stage} review of ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) that the validator passed; the worker got their words`, now });
+    return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "reopened", to: stage }, hints: [`flowryn show ${run.task_id}`] };
+  },
+  async settle(ctx, result) {
+    ctx.journal.kick();
+    return stageStartedReply(ctx, result);
+  },
+};
+
+export const GATE_VERBS: VerbSpec[] = [gatePass, gateChanges, gateReopen];

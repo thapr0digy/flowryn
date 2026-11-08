@@ -4,7 +4,7 @@ import { captainAnswerable, getDecision } from "../lifecycle/decisions.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { getProject } from "../lifecycle/projects.ts";
-import { parseAutonomyRef, stampOf } from "./autonomy.ts";
+import { parseAutonomyRef, parseAwayRef, stampOf } from "./autonomy.ts";
 import { findRun, taskTitle } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
 import { getDivergence, isBacklogDivergence } from "../reconcile/divergence.ts";
@@ -21,7 +21,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
  */
 
 /** What an answer to a binding question can authorise. */
-export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "autonomy";
+export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "autonomy" | "away";
 
 export interface ChatOption {
   label: string;
@@ -37,7 +37,7 @@ export interface ChatQuestion {
 }
 
 export interface ChatForm {
-  /** The item: q42, k3, g81, d13, merge:<task> or autonomy:<projects>@<until>. */
+  /** The item: q42, k3, g81, d13, merge:<task>, autonomy:<projects>@<until> or away:<until>. */
   ref: string;
   action: GrantAction;
   task: string | null;
@@ -55,7 +55,7 @@ const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const SEPARATOR = " · ";
 const RECOMMENDED = " (Recommended)";
-const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|merge [A-Za-z0-9][\w.-]*|autonomy [a-z0-9,-]+@\S+) · /;
+const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|merge [A-Za-z0-9][\w.-]*|autonomy [a-z0-9,-]+@\S+|away \d{4}-\d{2}-\d{2}T\d{2}:\d{2}) · /;
 
 /** The item a question binds to, from its prefix (`q42 · `, `merge T17 · `), or null for an ordinary question. */
 export function bindingRef(question: string): string | null {
@@ -63,6 +63,7 @@ export function bindingRef(question: string): string | null {
   if (!match) return null;
   const head = match[1]!;
   if (head.startsWith("autonomy ")) return `autonomy:${head.slice("autonomy ".length)}`;
+  if (head.startsWith("away ")) return `away:${head.slice("away ".length)}`;
   return head.startsWith("merge ") ? `merge:${head.slice("merge ".length)}` : head;
 }
 
@@ -76,7 +77,11 @@ export function parseRef(typed: string): string {
     if (!parseAutonomyRef(trimmed)) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`, "flowryn away --autonomous --until <time> --projects <ids> prints the item to ask");
     return trimmed;
   }
-  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task> or autonomy:<projects>@<until>, not "${sanitizeLine(trimmed, 60)}"`);
+  if (trimmed.startsWith("away:")) {
+    if (parseAwayRef(trimmed) === null) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not away:<YYYY-MM-DDTHH:MM>`, "the end time, cut to the minute, as flowryn away --until takes it");
+    return trimmed;
+  }
+  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task>, autonomy:<projects>@<until> or away:<until>, not "${sanitizeLine(trimmed, 60)}"`);
 }
 
 function option(label: string, description: string): ChatOption {
@@ -219,9 +224,38 @@ function autonomyForm(db: Db, ref: string): ChatForm {
   };
 }
 
+/** What a chat-confirmed away does, as the chat question tells the user before they answer. */
+export const AWAY_SUMMARY =
+  "While it lasts, held questions of the kinds [decisions] default_classes opts in take the worker's recommendation after [decisions] default_after_h, and a review gate [decisions] default_gates opts in is checked by a fresh read-only validator that passes it or sends changes. It never merges, never answers a merge, destructive, irreversible, security, credential or outward question, and never touches a sensitive task; flowryn back ends it.";
+
+function awayForm(ref: string, now: number): ChatForm {
+  const until = parseAwayRef(ref);
+  if (until === null) throw new FlowrynError("bad_args", `${sanitizeLine(ref, 80)} is not away:<YYYY-MM-DDTHH:MM>`);
+  if (until <= now) throw new FlowrynError("bad_args", `${ref} ends in the past`);
+  const stamp = stampOf(until);
+  return {
+    ref,
+    action: "away",
+    task: null,
+    question: {
+      question: `away ${stamp}${SEPARATOR}You are away until ${stamp.replace("T", " ")}: may Flowryn decide for you meanwhile? ${AWAY_SUMMARY}`,
+      header: "away",
+      options: [option("Decide while I'm away", `Start away as yours until ${stamp.replace("T", " ")}`), option("No", "Away still wakes the leader; nothing is decided for you")],
+      multiSelect: false,
+    },
+    choices: [
+      { label: "Decide while I'm away", choice: "start" },
+      { label: "No", choice: null },
+    ],
+    binds: null,
+    freeText: null,
+  };
+}
+
 /** The binding form for an item, from what flowrynd knows now. Throws when the item cannot be asked. */
-export function chatForm(db: Db, ref: string): ChatForm {
+export function chatForm(db: Db, ref: string, now: number = Date.now()): ChatForm {
   if (ref.startsWith("autonomy:")) return autonomyForm(db, ref);
+  if (ref.startsWith("away:")) return awayForm(ref, now);
   if (ref.startsWith("merge:")) return mergeForm(db, ref.slice("merge:".length));
   if (/^[qk]\d+$/.test(ref)) return decisionForm(db, ref);
   if (/^g\d+$/.test(ref)) return gateForm(db, ref);

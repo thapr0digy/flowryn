@@ -72,6 +72,23 @@ function parseStamp(text: string): number | null {
   return at.getTime();
 }
 
+/**
+ * The chat item of a plain away the user confirms in chat (docs/notes/2026-11-08-unattended-loops-answer-4y.md):
+ * `away:<stamp>`, the end cut to its minute. Its grant starts away as the user's own (`captain-chat`),
+ * which turns on deadline defaults and the review-gate validator; it grants nothing else.
+ */
+export function awayRef(until: number): string {
+  return `away:${stampOf(until)}`;
+}
+
+/** The end time an away ref names, or null when it is not one. */
+export function parseAwayRef(ref: string): number | null {
+  const m = /^away:(\S+)$/.exec(ref.trim());
+  if (!m) return null;
+  const until = parseStamp(m[1]!);
+  return until !== null && awayRef(until) === ref.trim() ? until : null;
+}
+
 /** The terms as a grant binds them: projects sorted and unique, the end time cut to its minute. */
 export function canonicalTerms(projects: readonly string[], until: number): AutonomyTerms {
   const d = new Date(until);
