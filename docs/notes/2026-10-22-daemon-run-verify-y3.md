@@ -32,7 +32,7 @@ Everything here is plain code: a queue table, a per-delivery state machine, the 
 ### Restart
 
 - **Validations are carried across a restart, not waited on.** The `validation` guard leaves `restartGuards`, and the guard reply lists them as "carried: validation t1 (...)". This removes the only cause of every `restart_dropped` so far.
-- **Verifies are drained.** A parked restart (automatic or `--when-idle`) still waits on the `verifying` guard, and the scheduler starts no queued verify while it is parked, for at most 60 min (`RESTART_HOLDS_VERIFIES_MS`), so a restart stuck on another guard cannot hold verifies back forever.
+- **Verifies are drained.** A parked restart (automatic or `--when-idle`) still waits on the `verifying` guard, and the scheduler starts no queued verify while it is parked, for at most `RESTART_HOLDS_VERIFIES_MS` (10 min since docs/notes/2026-11-07-faster-landing-test-q7.md), so a restart stuck on another guard cannot hold verifies back forever.
 - **An interrupted verify is resumed.** Startup recovery still records the interrupted row as `error` (`the daemon stopped mid-run`), then queues the same PR, head and policy at the front (`source = recovered`), once per verification. A rerun interrupted again is not requeued: it records a `verify.not_requeued` event (no item in phase 1).
 
 ## Phase 2: yolo auto-merge (built)
@@ -114,7 +114,7 @@ The user's answer in the design review (q78): a verify that fails because a step
   - Before it starts, it is checked again: its PR is still open at the same head (or, for local-only work, the worktree HEAD has not moved), and the project still has verify steps. If not, it is cancelled, and the reason is recorded on the request.
   - A GitHub outage or an invalid config leaves it queued.
   - A start always runs today's steps, under today's policy.
-- The restart hold (`restartHoldingVerifies` in `src/daemon/restart.ts`): a parked restart request or a handoff under way holds queued verifies back for at most `RESTART_HOLDS_VERIFIES_MS` (60 min). The bound exists so a restart that waits on something else (a confirmation dialog) cannot stop every verify.
+- The restart hold (`restartHoldingVerifies` in `src/daemon/restart.ts`): a parked restart request or a handoff under way holds queued verifies back for at most `RESTART_HOLDS_VERIFIES_MS` (10 min; docs/notes/2026-11-07-faster-landing-test-q7.md). The bound exists so a restart that waits on something else (a confirmation dialog) cannot stop every verify.
 - `flowryn verify show vq<n>` gives the place in line, what it waits on, and the verification once started. The CLI follows a queued request (one line each time its place changes) and then its verification. A cancelled request ends the CLI with `verify_cancelled`. `--detach` returns the request.
 - `flowryn capacity` lists `verify_queue` (request, PR, task, waited, why) when anything is queued.
 - Restart:

@@ -6,6 +6,9 @@ import { buildIdOf } from "../../src/daemon/restart.ts";
 import { decode } from "@toon-format/toon";
 import { requireNotificationsOff } from "../../src/config/leader.ts";
 import { daemonCall, makeHome, pingSocket, REPO_ROOT, readText, seedLeader, waitUntil, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The shipped artifact: one compiled binary that is both flowryn and flowrynd,

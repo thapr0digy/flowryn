@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { sh } from "../helpers/scratch-git.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * The landing queue end to end (docs/notes/2026-10-30-landing-queue-the-65.md): a real daemon,
@@ -25,8 +28,8 @@ afterEach(async () => {
 
 const STEPS = ["printf ' 1 pass\\n 0 fail\\n 1 expect() calls\\nRan 1 tests across 1 file. [1.00ms]\\n'"];
 
-function queueConfig(steps: string[] = STEPS): string {
-  return `[projects.web]\nverify = ${JSON.stringify(steps)}\nlanding = "queue"\n`;
+function queueConfig(steps: string[] = STEPS, depth = 1): string {
+  return `[projects.web]\nverify = ${JSON.stringify(steps)}\nlanding = "queue"\nlanding_train_depth = ${depth}\n`;
 }
 
 function query<T>(e: ShipEnv, sql: string, ...params: string[]): T[] {
@@ -111,6 +114,34 @@ describe("the landing queue", () => {
       ]);
       expect(merges[1]!.head_sha).toBe(integrated.head_sha);
       expect(mainLog(e).split("\n").length).toBeGreaterThanOrEqual(3);
+    },
+    { timeout: 200_000 },
+  );
+
+  test(
+    "the train: the second PR verifies on its candidate while the first lands, then lands at that very candidate with no verify of its own",
+    async () => {
+      const gate = gated();
+      env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: queueConfig(gate.steps, 2) });
+      const e = env;
+      e.github.repo("acme/web").defaultChecks = [];
+      const first = await ship(e, "one.txt", "one");
+      const second = await ship(e, "two.txt", "two");
+      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND train_head IS NOT NULL", second.task).length > 0, 30_000, "the second PR's candidate");
+      const candidate = query<{ train_head: string; train_base: string }>(e, "SELECT train_head, train_base FROM landing_queue WHERE task_id = ?1", second.task)[0]!;
+      const head = query<{ head_sha: string }>(e, "SELECT head_sha FROM landing_queue WHERE task_id = ?1", first.task)[0]!.head_sha;
+      expect(candidate.train_base).toBe(head);
+
+      gate.open();
+      await waitUntil(() => query(e, "SELECT 1 FROM landing_queue WHERE task_id = ?1 AND state = 'landed'", second.task).length > 0, 120_000, "the second PR to land");
+      const landed = query<{ head_sha: string }>(e, "SELECT head_sha FROM landing_queue WHERE task_id = ?1", second.task)[0]!;
+      expect(landed.head_sha).toBe(candidate.train_head);
+      // One verify at the candidate, run while the first was landing, and the merge at exactly that head.
+      expect(query(e, "SELECT 1 FROM verifications WHERE head_sha = ?1 AND state = 'passed'", candidate.train_head)).toHaveLength(1);
+      const merges = query<{ task_id: string; head_sha: string }>(e, "SELECT task_id, head_sha FROM merges ORDER BY requested_at");
+      expect(merges.map((m) => m.task_id)).toEqual([first.task, second.task]);
+      expect(merges[1]!.head_sha).toBe(candidate.train_head);
+      expect(query(e, "SELECT 1 FROM events WHERE kind = 'landing.train_dropped'")).toHaveLength(0);
     },
     { timeout: 200_000 },
   );

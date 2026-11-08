@@ -3,7 +3,7 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import { findOpenRunItem } from "../attention/items.ts";
 import { REVIEW_TURN_END_REMINDER, TURN_END_REMINDER } from "../harness/contract-text.ts";
 import { runningBackgroundJobs } from "./background-jobs.ts";
-import { waitingOnOthers } from "./idle-alert.ts";
+import { noteIgnoredReminder, waitingOnOthers } from "./idle-alert.ts";
 import { unansweredPageSteer } from "./review-chat.ts";
 import type { RunRow } from "./runs.ts";
 
@@ -95,19 +95,22 @@ function remindedThisEpisode(db: Db, runId: string, episodeFrom: number): boolea
 
 /**
  * Settle the run's last reminder at the next turn end: obeyed when an outcome
- * or a wait followed it, ignored otherwise. Call inside the transaction.
+ * or a wait followed it, ignored otherwise; an ignored one rewords the
+ * worker_idle pointer already open for the run. Call inside the transaction.
  */
 function settleReminder(db: Db, run: RunRow, now: number): void {
   const last = latestReminderEvent(db, run.id);
   if (!last || last.kind !== REMINDER_KIND) return;
   const outcome = outcomeSince(db, run.id, { seq: last.seq });
   const wait = outcome ? null : pendingWait(db, run, now, "hook");
+  const obeyed = outcome !== null || wait !== null;
+  const idleItem = obeyed ? null : noteIgnoredReminder(db, run, now);
   appendEvent(db, {
     source: "hook",
     kind: RESULT_KIND,
     runId: run.id,
     taskId: run.task_id,
-    payload: { reminder_seq: last.seq, obeyed: outcome !== null || wait !== null, outcome: outcome ?? wait },
+    payload: { reminder_seq: last.seq, obeyed, outcome: outcome ?? wait, ...(idleItem ? { idle_item_refreshed: idleItem } : {}) },
     ts: now,
   });
 }

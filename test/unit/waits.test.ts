@@ -14,7 +14,7 @@ import { writeSnapshot } from "../../src/journal/snapshot.ts";
 import { checkWaits, collectWaits, deadlineLabel, RECOVERY_GRACE_MS, WAIT_DEADLINES_MS, waitDeadlines, type WaitPassDeps } from "../../src/reconcile/waits.ts";
 import { hostRefusal } from "../../src/sched/wait-reasons.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
-import { insertRequest, markStarted } from "../../src/verify/queue.ts";
+import { clearWaiting, getRequest, insertRequest, markStarted, markWaiting } from "../../src/verify/queue.ts";
 import { initialSteps } from "../../src/verify/runner.ts";
 import { finishVerification, insertVerification } from "../../src/verify/store.ts";
 
@@ -282,6 +282,43 @@ describe("the verify queue", () => {
     startBehind(25 * MIN, 9);
     expect(pass(db, cfg, 26 * MIN).result.cleared).toEqual([]);
     expect(openWaitItems(db)[0]!.line).toContain(`verify ${first} of t1`);
+  });
+
+  test("two requests waiting on their own PR for different causes get two waits and two deadlines, each clock from when that request began waiting", () => {
+    const db = database();
+    // Project app's config is invalid (its R1 waits from 2 min); web's R2 got a 403 on its PR read (it waits from 7 min); R3 is next in line.
+    const cfg = config(`[projects.web]\nverify = ["true"]\n[projects.app]\nverify = "true"\n`);
+    const r1 = tx(db, () => insertRequest(db, { project_id: "app", pr_url: "https://github.com/acme/app/pull/3", task_id: "t3", head_sha: "a".repeat(40), policy_id: POLICY, pr_number: 3, head_ref: "flowryn/t3", worktree: null, source: "auto", path: null, now: 0 }));
+    const r2 = tx(db, () => insertRequest(db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/4", task_id: "t4", head_sha: "b".repeat(40), policy_id: POLICY, pr_number: 4, head_ref: "flowryn/t4", worktree: null, source: "auto", path: null, now: MIN }));
+    const r3 = request(db, 2 * MIN);
+    tx(db, () => markWaiting(db, r1, { reason: "config_invalid", ref: null }, 2 * MIN));
+    tx(db, () => markWaiting(db, r2, { reason: "pr_unreadable", ref: "refused 403" }, 7 * MIN));
+    const waits = collectWaits(db, cfg, 8 * MIN);
+    expect(waits.map((w) => [w.key, w.since, w.due])).toEqual([
+      [`verify:${r1.id}`, 2 * MIN, 22 * MIN],
+      [`verify:${r3}`, 2 * MIN, 22 * MIN],
+      [`verify:${r2.id}`, 7 * MIN, 27 * MIN],
+    ]);
+    const [w1, w3, w2] = waits;
+    expect(w1!.cause).toStartWith("waits on its own PR, so the requests behind it go first: the [projects.app] config is invalid: ");
+    expect(w1!.fix).toBe(`flowryn config; flowryn verify show ${r1.id}`);
+    expect(w2!.cause).toBe("waits on its own PR, so the requests behind it go first: cannot read https://github.com/acme/web/pull/4 (refused 403)");
+    expect(w2!.fix).toBe(`flowryn verify show ${r2.id}`);
+    // The request next in line waits on the queue, not behind the requests that stepped aside.
+    expect(w3!.cause).toBe("first in the verify queue behind requests waiting on their own PR and not started: starting");
+    // Each is recovered and itemized on its own clock, naming its own cause.
+    expect(pass(db, cfg, 22 * MIN).result.recovered).toEqual([`verify:${r1.id}`, `verify:${r3}`]);
+    pass(db, cfg, 23 * MIN);
+    expect(pass(db, cfg, 27 * MIN).result.recovered).toEqual([`verify:${r2.id}`]);
+    pass(db, cfg, 28 * MIN);
+    const items = openWaitItems(db);
+    expect(items).toHaveLength(3);
+    expect(items.find((i) => i.task_id === "t4")!.line).toContain("cannot read https://github.com/acme/web/pull/4 (refused 403)");
+    expect(items.find((i) => i.task_id === "t3")!.line).toContain("the [projects.app] config is invalid");
+    // R2 reads again and may start: its own wait ends, and it is first in line behind R1 from its request time.
+    tx(db, () => clearWaiting(db, getRequest(db, r2.id)!, 29 * MIN));
+    expect(pass(db, cfg, 29 * MIN).result.cleared).toContain(`verify:${r2.id}`);
+    expect(collectWaits(db, cfg, 29 * MIN).find((w) => w.key === `verify:${r2.id}`)).toMatchObject({ since: MIN, cause: "first in the verify queue behind requests waiting on their own PR and not started: starting" });
   });
 
   test("a first request the drain holds names an invalid project config and its fix, or a GitHub outage", () => {

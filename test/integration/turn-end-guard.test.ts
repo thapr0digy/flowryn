@@ -11,6 +11,9 @@ import { join } from "node:path";
 import { TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 async function fleet(options: Parameters<typeof makeFleetEnv>[0] = {}): Promise<FleetEnv> {
@@ -60,7 +63,9 @@ for (const harness of ["claude", "pi"] as const) {
       expect(payloads(env, run, "run.turn_end_reminder_result")).toMatchObject([{ obeyed: false, outcome: null }]);
       await waitUntil(() => idleLines(env, run).length === 1, 10_000, "the worker_idle pointer");
       expect(idleLines(env, run)[0]).toMatch(/got the turn-end reminder, ended its turn again, and has been idle \d+m without an outcome$/);
-      expect(payloads(env, run, "run.idle_alert")).toMatchObject([{ ignored_reminder: true }]);
+      // The alert may fall due between the reminder and the worker's next turn end (under load), so its
+      // payload can predate the result; the pointer's line says it either way (test/unit/turn-end-guard.test.ts).
+      expect(payloads(env, run, "run.idle_alert")).toHaveLength(1);
     }, 30_000);
 
     test("a worker that obeys (report progress) settles it obeyed, gets no second one, and an ordinary idle pointer", async () => {
