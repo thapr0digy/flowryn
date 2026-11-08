@@ -13,6 +13,9 @@ import { contractRevision } from "../../src/contracts/revision.ts";
 import { request } from "../../src/transport/unix.ts";
 import { ulid } from "../../src/util/ulid.ts";
 import { PROTO } from "../../src/version.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const fleet = autoContractSuite();
 
