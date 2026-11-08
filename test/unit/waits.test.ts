@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { explain } from "../../src/attention/explanations.ts";
-import { LEADER_WAKE_SQL } from "../../src/attention/items.ts";
+import { LEADER_WAKE_SQL, openItem } from "../../src/attention/items.ts";
 import { parseConfig, type FlowrynConfig } from "../../src/config/config.ts";
 import { effectiveConfig } from "../../src/config/effective.ts";
 import { DEFAULT_HOST } from "../../src/config/workflows.ts";
@@ -394,6 +394,72 @@ describe("an auto-merge", () => {
     const req = tx(db, () => insertRequest(db, { project_id: "web", pr_url: "u", task_id: "t1", head_sha: "a".repeat(40), policy_id: POLICY, pr_number: 7, head_ref: "b", worktree: null, source: "auto", path: null, now: 0 }));
     tx(db, () => db.query("INSERT INTO auto_merges (id, run_id, task_id, project_id, ref, head_sha, state, request_id, created_at, state_since, updated_at) VALUES ('am1', 'r1', 't1', 'web', 'u', ?1, 'queued', ?2, 0, 0, 0)").run("a".repeat(40), req.id));
     expect(collectWaits(db, cfg, 60 * MIN).map((w) => w.key)).toEqual([`verify:${req.id}`]);
+  });
+});
+
+describe("a yolo run waiting for the leader (docs/notes/2026-11-07-fix-a-held-ss.md)", () => {
+  /** A delivered yolo run whose merge waits for the leader, as human-waits records it at `since`. */
+  function readyToMerge(db: Db, since: number, opts: { yolo?: number } = {}): void {
+    seedRun(db, { id: "r1", task: "t1", state: "ready", stageState: "done" });
+    tx(db, () => {
+      if (opts.yolo === 0) db.query("UPDATE task_policy SET yolo = 0 WHERE task_id = 't1'").run();
+      explain(db, {
+        run: { id: "r1", task_id: "t1", stage: "ship" },
+        kind: "merge",
+        subject: "merge",
+        rule: "merge.ready",
+        reason: "ready to merge; waiting for the leader",
+        facts: [{ name: "head", value: "05bf2c9e", at: since }],
+        unblock: [
+          { by: "leader", action: "flowryn merge t1" },
+          { by: "captain", action: "the same in your terminal: flowryn merge t1" },
+        ],
+        source: "daemon",
+        since,
+        now: since,
+      });
+    });
+  }
+
+  test("is due 15 min after it began: the auto-merger kicked, then one wait_expired item that wakes the leader with the merge to run", () => {
+    const db = database();
+    const cfg = config();
+    readyToMerge(db, 1_000);
+    expect(collectWaits(db, cfg, 2_000)).toMatchObject([{ key: "leader:r1:merge", kind: "leader", due: 1_000 + 15 * MIN, fix: "flowryn merge t1" }]);
+    expect(pass(db, cfg, 1_000 + 14 * MIN).kicks).toEqual([]);
+    expect(pass(db, cfg, 1_000 + 15 * MIN).kicks).toEqual(["auto_merger"]);
+    const later = pass(db, cfg, 1_000 + 15 * MIN + RECOVERY_GRACE_MS);
+    expect(later.result.itemized).toEqual(["leader:r1:merge"]);
+    const [item] = openWaitItems(db);
+    expect(item).toMatchObject({ task_id: "t1", run_id: "r1" });
+    expect(item!.line).toContain("the merge of t1");
+    expect(item!.line).toContain("flowryn merge t1; why: ready to merge; waiting for the leader");
+    const woken = db.query(`SELECT i.kind FROM items i WHERE ${LEADER_WAKE_SQL} AND i.state = 'open'`).all();
+    expect(woken).toEqual([{ kind: "wait_expired" }]);
+    expect(waitDeadlines(config("[waits]\nleader_min = 5\n")).leader).toBe(5 * MIN);
+  });
+
+  test("an open pr_ready of the run already wakes the leader: no second item until it closes while the wait stands", () => {
+    const db = database();
+    const cfg = config();
+    readyToMerge(db, 1_000);
+    tx(db, () => {
+      const event = appendEvent(db, { source: "cli", kind: "run.delivered", runId: "r1", taskId: "t1", payload: {}, ts: 1_000 });
+      openItem(db, { kind: "pr_ready", eventSeq: event.seq, taskId: "t1", runId: "r1", line: "PR ready: t1", now: 1_000 });
+    });
+    pass(db, cfg, 1_000 + 15 * MIN);
+    pass(db, cfg, 1_000 + 16 * MIN);
+    expect(openWaitItems(db)).toEqual([]);
+    // The leader dismissed the pr_ready and nothing merged: the wait is itemized now.
+    tx(db, () => db.query("UPDATE items SET state = 'resolved' WHERE kind = 'pr_ready'").run());
+    pass(db, cfg, 1_000 + 17 * MIN);
+    expect(openWaitItems(db)).toHaveLength(1);
+  });
+
+  test("a run that is not yolo waits on your approval, not the leader: no leader wait", () => {
+    const db = database();
+    readyToMerge(db, 1_000, { yolo: 0 });
+    expect(collectWaits(db, config(), 1_000 + 60 * MIN)).toEqual([]);
   });
 });
 

@@ -12,7 +12,7 @@ import { cleanMainMerge, type CleanMergeStep } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
-import { createAutoMerge, getAutoMerge, setReadyProgress, supersedeAutoMerge, type AutoMergeRow, type LandingHooks } from "./auto-merge.ts";
+import { createAutoMerge, getAutoMerge, HOLD_RELEASED, setReadyProgress, supersedeAutoMerge, type AutoMergeRow, type LandingHooks } from "./auto-merge.ts";
 import { landingQueued, landingTrainDepth, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
@@ -358,8 +358,15 @@ export class LandingQueue implements LandingHooks {
       if (!run || !landingQueued(this.deps.config(), run.project_id)) continue;
       const delivered = deliveredOf(db, run.task_id);
       if (!canQueue(db, run, delivered)) continue;
-      // Once per head: an entry that left at this head (held, conflicted) is not taken again until something changes.
-      if (db.query("SELECT 1 FROM landing_queue WHERE run_id = ?1 AND (head_sha = ?2 OR entered_head = ?2)").get(run.id, delivered.head)) continue;
+      // Once per head: an entry that left at this head (held, conflicted) is not taken again until something changes,
+      // such as a verify of the head passing after its hold (releaseHolds superseded its auto-merge as hold_released).
+      const taken = db
+        .query(
+          `SELECT 1 FROM landing_queue l WHERE l.run_id = ?1 AND (l.head_sha = ?2 OR l.entered_head = ?2)
+             AND NOT (l.state = 'left' AND EXISTS (SELECT 1 FROM auto_merges a WHERE a.id = l.auto_merge_id AND a.state = 'superseded' AND a.reason = ?3))`,
+        )
+        .get(run.id, delivered.head, HOLD_RELEASED);
+      if (taken) continue;
       // A merge already asked for, or a direct auto-merge from before the project queued: leave it be.
       // An auto-verify (merge = 0) is not one: the landing supersedes it and follows its verify.
       if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND merge = 1 AND state IN ('queued','verifying','waiting_checks','merging')").get(run.id)) continue;

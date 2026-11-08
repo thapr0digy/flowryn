@@ -15,7 +15,10 @@ import { gitRunner } from "../../src/policy/git.ts";
 import type { GitRunner } from "../../src/policy/landed.ts";
 import { chooseApproval, DAEMON_CALLER, standingApproval, type MergeFacts } from "../../src/policy/merge.ts";
 import { applyPrObservation } from "../../src/reconcile/delivery.ts";
-import { createAutoMerge, getAutoMerge, liveAutoMerge, startAutoMerge } from "../../src/verify/auto-merge.ts";
+import { createAutoMerge, getAutoMerge, liveAutoMerge, releaseHolds, startAutoMerge } from "../../src/verify/auto-merge.ts";
+import { verifyPolicyId } from "../../src/verify/policy.ts";
+import { initialSteps } from "../../src/verify/runner.ts";
+import { finishVerification, insertVerification } from "../../src/verify/store.ts";
 import { landingMode, landingQueued } from "../../src/verify/config.ts";
 import {
   BLOCKED_HOLD_MS,
@@ -210,6 +213,55 @@ describe("the head of line", () => {
     expect(entries()).toEqual([{ task_id: s.task, state: "landing", reason: null, integrations: 0 }]);
     expect(sh(s.wt, ["rev-parse", "HEAD"])).toBe(s.head);
     expect(liveAutoMerge(db, s.run)).toMatchObject({ head_sha: s.head });
+  });
+
+  test("an entry that left on a verify hold joins the line again once a verify of its head passes after the hold (docs/notes/2026-11-07-fix-a-held-ss.md)", async () => {
+    const s = ship(1, "one.txt", "one\n");
+    const cfg = config();
+    const { lq } = queue(cfg);
+    await lq.pass();
+    const first = liveAutoMerge(db, s.run)!;
+    // Its verify failed again after a send-back: held, as the auto-merger holds it, with its item.
+    tx(db, () => {
+      db.query("UPDATE auto_merges SET state = 'held', reason = 'verify_failed', detail = 'verify v1 failed again', state_since = ?2 WHERE id = ?1").run(first.id, now);
+      const event = appendEvent(db, { source: "daemon", kind: "auto_merge.held", runId: s.run, taskId: s.task, payload: {}, ts: now });
+      openItem(db, { kind: "auto_merge_held", eventSeq: event.seq, taskId: s.task, runId: s.run, line: "Auto-merge held", now });
+    });
+    await lq.pass();
+    expect(entries()).toEqual([{ task_id: s.task, state: "left", reason: "held:verify_failed", integrations: 0 }]);
+    // Once per head: nothing takes it again while the hold stands.
+    await lq.pass();
+    expect(entries()).toHaveLength(1);
+
+    // The leader's flowryn verify of the same head passes.
+    now += 60_000;
+    const v = tx(db, () =>
+      insertVerification(db, {
+        project_id: "web",
+        pr_url: s.url,
+        task_id: s.task,
+        head_sha: s.head,
+        steps: initialSteps(STEPS),
+        policy_id: verifyPolicyId({ steps: STEPS, binary: null }),
+        dir: (id) => join(dir, id),
+        worktree: (id) => join(dir, id, "wt"),
+        project_path: repos.primary,
+        source: "cli",
+        now,
+      }),
+    );
+    tx(db, () => finishVerification(db, v, { state: "passed", steps: v.steps, tests: null, detail: null, binary: null }, now));
+    expect(tx(db, () => releaseHolds(db, cfg, now))).toEqual([first.id]);
+    expect(getAutoMerge(db, first.id)).toMatchObject({ state: "superseded", reason: "hold_released" });
+    expect(openItems("auto_merge_held")).toEqual([]);
+
+    await lq.pass();
+    expect(entries()).toEqual([
+      { task_id: s.task, state: "left", reason: "held:verify_failed", integrations: 0 },
+      { task_id: s.task, state: "landing", reason: null, integrations: 0 },
+    ]);
+    // The new landing follows the passing verify: no verify again, straight to GitHub's checks.
+    expect(liveAutoMerge(db, s.run)).toMatchObject({ head_sha: s.head, state: "waiting_checks", verification_id: v.id });
   });
 
   test("a merge that conflicts is undone and the ship sent back with the conflicted files; the next PR goes", async () => {

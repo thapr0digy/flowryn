@@ -8,7 +8,7 @@ import { table, type FlowrynConfig } from "../config/config.ts";
 
 const MIN = 60_000;
 
-export const WAIT_KINDS = ["verify_queue", "capacity", "host", "harness_check", "phase_start", "auto_merge", "landing"] as const;
+export const WAIT_KINDS = ["verify_queue", "capacity", "host", "harness_check", "phase_start", "auto_merge", "landing", "leader"] as const;
 export type WaitKind = (typeof WAIT_KINDS)[number];
 
 /**
@@ -17,7 +17,8 @@ export type WaitKind = (typeof WAIT_KINDS)[number];
  * started from a request behind it);
  * phase_start from its last blocker's landing or cleanup (it is ready once cleaned); auto_merge from its last state
  * change, except a PR waiting on checks: pending checks are due at the auto-merger's checks limit, and a head
- * that moved 30 min after the auto-merger first saw it move; the others from when the wait began.
+ * that moved 30 min after the auto-merger first saw it move; leader (a yolo run whose merge or decision waits
+ * for the leader, docs/notes/2026-11-07-fix-a-held-ss.md) and the others from when the wait began.
  */
 export const WAIT_DEADLINES_MS: Readonly<Record<WaitKind, number>> = {
   verify_queue: 20 * MIN,
@@ -27,6 +28,7 @@ export const WAIT_DEADLINES_MS: Readonly<Record<WaitKind, number>> = {
   phase_start: 10 * MIN,
   auto_merge: 30 * MIN,
   landing: 30 * MIN,
+  leader: 15 * MIN,
 };
 
 /** `[waits] <kind>_min` overrides: whole minutes, at least this many, at most a day. */
