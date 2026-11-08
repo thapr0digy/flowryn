@@ -80,6 +80,9 @@ export type ItemClass = "actionable" | "info";
  * closed unmerged, so the run cannot land as stacked (src/lifecycle/stacks.ts).
  * worker_stalled: a stopped worker still idle with work left after its idle
  * nudges (src/lifecycle/idle-nudge.ts), so the leader steers it or says why.
+ * verify_failed: a leader's own `flowryn verify` failed in a way its worker
+ * is not sent back for (a second timeout, the same step failing again, a
+ * fourth send-back, an error, or no live run; src/verify/route.ts).
  * leader_wake_runaway: a leader session hit [leader] wake_ceiling_per_hour,
  * so no push starts a turn in it until the hour drains (src/leader/wake-ceiling.ts).
  * Asks (src/ask/): answer_ready, an ask's answer, read with `show a<N>`;
@@ -104,6 +107,7 @@ export const LANE_TABLE = {
   divergence: { lane: "P1", class: "actionable" },
   worker_idle: { lane: "P1", class: "actionable" },
   worker_stalled: { lane: "P1", class: "actionable" },
+  verify_failed: { lane: "P1", class: "actionable" },
   unproven_merge: { lane: "P1", class: "actionable" },
   backlog_out_of_sync: { lane: "P1", class: "actionable" },
   trust_dialog: { lane: "P1", class: "actionable" },
@@ -210,6 +214,7 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   divergence: "act",
   worker_idle: "act",
   worker_stalled: "act",
+  verify_failed: "act",
   unproven_merge: "act",
   backlog_out_of_sync: "act",
   trust_dialog: "act",

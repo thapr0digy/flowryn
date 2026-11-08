@@ -266,14 +266,14 @@ describe("the review step in a verification", () => {
     expect(text).toContain("a.ts:1: a is 2 but the brief says 3");
   });
 
-  test("no verdict is held for the leader, not sent back; the step deadline is a timeout", async () => {
+  test("no verdict is held for the leader, not sent back; the step deadline is a timeout, run once more", async () => {
     const r = repo();
     const broken = await verifyWithReview(r, async () => result("not json", { code: 1 }));
     expect(broken.steps[1]).toMatchObject({ state: "failed", exit: REVIEW_NO_VERDICT });
     expect(verifyVerdict(broken)).toMatchObject({ hold: "verify_error" });
 
     const late = await verifyWithReview(r, async () => result("", { timedOut: true, code: 124 }), { ...REVIEW, timeout_ms: 1_000 });
-    expect(verifyVerdict(late)).toMatchObject({ hold: "verify_timeout" });
+    expect(verifyVerdict(late)).toMatchObject({ rerun: { name: REVIEW_STEP } });
   });
 
   test("assumption: the review's deadline is the earlier of its own and what is left of the run", async () => {

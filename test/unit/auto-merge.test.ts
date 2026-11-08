@@ -245,12 +245,12 @@ describe("the verify verdict (the user's answer q78)", () => {
     expect(verifyVerdict(v("failed", [step({})]))).toEqual({ sendBack: step({}) });
   });
 
-  test("a timeout, an error, or a failure with no failing step is held", () => {
-    expect(verifyVerdict(v("failed", [step({ exit: null, detail: "timed out: the run's 30 min were up" })]))).toMatchObject({ hold: "verify_timeout" });
-    expect(verifyVerdict(v("failed", [step({ exit: 143, detail: "timed out: the run's 30 min were up" })]))).toMatchObject({ hold: "verify_timeout" });
-    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 2, hangs: 2, detail: "hung twice: killed at 5 min both times; process groups in a.log and b.log" })]))).toMatchObject({ hold: "verify_timeout" });
-    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 1, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; no time left in the run to retry it" })]))).toMatchObject({ hold: "verify_timeout" });
-    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 2, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; timed out: the run's 30 min were up" })]))).toMatchObject({ hold: "verify_timeout" });
+  test("a timeout runs once more; an error or a failure with no failing step is held", () => {
+    expect(verifyVerdict(v("failed", [step({ exit: null, detail: "timed out: the run's 30 min were up" })]))).toMatchObject({ rerun: { name: "bun test" } });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, detail: "timed out: the run's 30 min were up" })]))).toMatchObject({ rerun: { name: "bun test" } });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 2, hangs: 2, detail: "hung twice: killed at 5 min both times; process groups in a.log and b.log" })]))).toMatchObject({ rerun: { name: "bun test" } });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 1, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; no time left in the run to retry it" })]))).toMatchObject({ rerun: { name: "bun test" } });
+    expect(verifyVerdict(v("failed", [step({ exit: 143, attempts: 2, hangs: 1, detail: "hung once: killed at 5 min, process group in a.log; timed out: the run's 30 min were up" })]))).toMatchObject({ rerun: { name: "bun test" } });
     expect(verifyVerdict(v("error", [], "the daemon stopped mid-run"))).toMatchObject({ hold: "verify_error" });
     expect(verifyVerdict(v("failed", [step({ state: "passed", exit: 0 })], "dist/flowryn was not built"))).toMatchObject({ hold: "verify_failed", detail: "verify v9 failed: dist/flowryn was not built" });
   });
@@ -265,7 +265,7 @@ describe("the verify verdict (the user's answer q78)", () => {
     mkdirSync(join(dir, "v9"));
     writeFileSync(join(dir, "v9", "1-bun-test.log"), `${Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n")}\n(fail) the thing\n`);
     const text = sendBackText({ id: "v9", dir: join(dir, "v9"), head_sha: HEAD } as Verification, step({ exit: 1 }));
-    expect(text).toContain(`verify v9 of your delivery at ${HEAD.slice(0, 8)} failed: step \`bun test\` exited 1`);
+    expect(text).toContain(`verify v9 of your work at ${HEAD.slice(0, 8)} failed: step \`bun test\` exited 1. Its log: ${join(dir, "v9", "1-bun-test.log")}`);
     expect(text).toContain("(fail) the thing");
     expect(text).not.toContain("line 10\n");
     expect(text).toContain("deliver again");
