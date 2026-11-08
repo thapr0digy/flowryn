@@ -26,7 +26,7 @@ import { block, CLAUDE_REVIEW_TOOLS, cut, MAX_DIFF_BYTES, prDiff } from "../veri
 import { userStartedAway, type AwayPosture } from "./away.ts";
 import { waitedLabel } from "./deadline-defaults.ts";
 import { DEADLINE_FLOOR, reservedReason, type DecisionsConfig } from "./decisions-policy.ts";
-import { openItem, resolveRunItems } from "./items.ts";
+import { openItem } from "./items.ts";
 import { getValidation, type ValidationRow, type ValidationState, type ValidatorFinding, type ValidatorQuestion, type ValidatorVerdict } from "./validator-report.ts";
 
 /**
@@ -85,6 +85,10 @@ export interface GateFacts {
   pinned: boolean;
   /** Validator rounds of this task's stage under this away (failures included), not counting the one being checked. */
   roundsUsed: number;
+  /** A round of this task's stage under this away ended held: the gate waits for the user, never a re-ask. */
+  heldUnderAway: boolean;
+  /** The user reopened a validator pass of this task's stage under this away: its next review is theirs. */
+  reopenedUnderAway: boolean;
   /** Another validation of this gate is running. */
   running: boolean;
   /** The gate's open questions. */
@@ -105,6 +109,8 @@ export function validatorRefusal(f: GateFacts, cfg: Pick<DecisionsConfig, "defau
   if (!f.gate.page_path) return "no review page";
   if (!f.pinned) return "its page or spec changed since it was pinned";
   if (f.running) return "a validation is already running";
+  if (f.heldUnderAway) return "a round under this away held it for the user";
+  if (f.reopenedUnderAway) return "the user reopened a validator pass of this stage under this away";
   if (f.roundsUsed >= cfg.validator_rounds) return `${f.roundsUsed} validator rounds used under this away`;
   for (const q of f.questions) {
     if (q.reserved_class !== null && DEADLINE_FLOOR.includes(q.reserved_class)) return `a question of kind ${q.reserved_class} is the user's`;
@@ -222,6 +228,14 @@ function roundsUsed(db: Db, taskId: string, stage: string, awaySince: number, ex
   return (db.query("SELECT COUNT(*) AS n FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND id IS NOT ?4").get(taskId, stage, awaySince, except) as { n: number }).n;
 }
 
+function heldUnderAway(db: Db, taskId: string, stage: string, awaySince: number, except: string | null): boolean {
+  return db.query("SELECT 1 FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND state = 'held' AND id IS NOT ?4").get(taskId, stage, awaySince, except) !== null;
+}
+
+function reopenedUnderAway(db: Db, taskId: string, stage: string, awaySince: number): boolean {
+  return db.query("SELECT 1 FROM events WHERE kind = 'gate.reopened' AND task_id = ?1 AND json_extract(payload, '$.stage') = ?2 AND ts >= ?3").get(taskId, stage, awaySince) !== null;
+}
+
 function pinnedNow(run: RunWithPolicy, gate: GateRow): boolean {
   try {
     requireDesignPinned(run, gate);
@@ -244,6 +258,8 @@ export function gateFacts(db: Db, gate: GateRow, now: number, except: string | n
     pendingPlan: db.query("SELECT 1 FROM plans WHERE gate_id = ?1 AND state = 'pending'").get(gate.id) !== null,
     pinned: run !== null && pinnedNow(run, gate),
     roundsUsed: run && away ? roundsUsed(db, run.task_id, gate.stage, away.since, except) : 0,
+    heldUnderAway: run !== null && away !== null && heldUnderAway(db, run.task_id, gate.stage, away.since, except),
+    reopenedUnderAway: run !== null && away !== null && reopenedUnderAway(db, run.task_id, gate.stage, away.since),
     running: db.query("SELECT 1 FROM gate_validations WHERE gate_id = ?1 AND state = 'running' AND id IS NOT ?2").get(gate.id, except) !== null,
     questions: openGateQuestions(db, gate.id),
   };
@@ -521,7 +537,6 @@ export function applyValidation(db: Db, input: { id: string; result: CallResult;
     return { validation: row.id, run: row.run_id, state: "held" };
   }
   finish(db, row, { ...base, state: "passed", reason: null });
-  resolveRunItems(db, row.run_id, ["validator_failed", "validator_held", "validator_advice"], `validator.passed ${row.id}`, now);
   return { validation: row.id, run: row.run_id, state: "passed" };
 }
 

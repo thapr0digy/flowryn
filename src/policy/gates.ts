@@ -15,6 +15,8 @@ import { revivalTarget, reviveReview } from "../lifecycle/review-revival.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { deliveredOf } from "../lifecycle/delivery.ts";
 import { appendEvent } from "../db/events.ts";
+import { WORKER_POOL } from "../config/workflows.ts";
+import { holdsLease, releaseLeases } from "../sched/pools.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { sanitizeBlock } from "../util/sanitize.ts";
 import { openUserActed } from "../attention/follow-up.ts";
@@ -258,8 +260,9 @@ export function reopenableValidatorPass(db: Db, run: RunWithPolicy, stage: strin
  * `flowryn gate reopen <task> --gate <stage> --body-file -`: the undo of a review the validator
  * passed while the user was away (docs/notes/2026-11-08-unattended-loops-answer-4y.md). The run goes
  * back to the gated stage, through the scheduler, with the user's words, and the next review there
- * is the user's (the validator's rounds are used or the user is back). Not an approval: it only
- * sends work back, as `gate changes` does.
+ * is the user's: the validator judges that stage again only under a later away. The run's stage
+ * pools go, and a worker that is gone is resumed with the words. Not an approval: it only sends
+ * work back, as `gate changes` does.
  */
 const gateReopen: VerbSpec = {
   name: "gate reopen",
@@ -285,6 +288,8 @@ const gateReopen: VerbSpec = {
     if (index < 0) throw new FlowrynError("not_found", `${run.task_id}'s workflow has no stage ${stage}`);
     appendEvent(ctx.db, { source: "cli", kind: "gate.reopened", runId: run.id, taskId: run.task_id, payload: { gate: gate.id, stage, by: ctx.caller.role }, ts: now });
     resolveRunItems(ctx.db, run.id, ["validator_failed", "validator_held", "validator_advice"], `gate.reopened ${gate.id}`, now);
+    releaseLeases(ctx.db, run.id, run.task_id, { keepWorker: true }, `gate.reopened ${gate.id}`, now);
+    if (run.liveness === "dead" || !holdsLease(ctx.db, run.id, WORKER_POOL)) run.pending_launch = "resume";
     requestStage(ctx.db, run, pos.def, index, `The user reopened the ${stage} review the validator passed (${gate.id}): ${words} Back to stage ${stage}; when it is ready, submit it for review again.`, now);
     openUserActed(ctx.db, ctx.caller.role, { action: "gate_changes", taskId: run.task_id, runId: run.id, line: `The user reopened the ${stage} review of ${taskTitle(ctx.db, run.task_id)} (${run.task_id}) that the validator passed; the worker got their words`, now });
     return { data: { task: run.task_id, title: taskTitle(ctx.db, run.task_id), gate: gate.id, state: "reopened", to: stage }, hints: [`flowryn show ${run.task_id}`] };

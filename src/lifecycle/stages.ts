@@ -348,7 +348,7 @@ export function closeMergeGate(db: Db, run: RunRow, outcome: { passed: true; app
 }
 
 /** What a review gate's close resolves: its own items, and what its page raised. */
-export const REVIEW_ITEMS = ["gate_ready", "review_feedback", "review_summary", "review_worker_gone", "pass_requested", "review_channel"] as const;
+export const REVIEW_ITEMS = ["gate_ready", "review_feedback", "review_summary", "review_worker_gone", "pass_requested", "review_channel", "validator_failed", "validator_held", "validator_advice"] as const;
 
 /**
  * Pass an open review gate with the approval a human channel created (design

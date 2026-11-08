@@ -27,8 +27,9 @@ import { parseGateQuestions } from "../../src/lavish/questions.ts";
 import { getDecision, isRuleAnswer } from "../../src/lifecycle/decisions.ts";
 import { openGateQuestions } from "../../src/lifecycle/gate-questions.ts";
 import { getRun, getRunWithPolicy } from "../../src/lifecycle/runs.ts";
-import { type GateRow } from "../../src/lifecycle/stages.ts";
-import { reopenableValidatorPass } from "../../src/policy/gates.ts";
+import { sendBack, type GateRow } from "../../src/lifecycle/stages.ts";
+import { GATE_VERBS, reopenableValidatorPass } from "../../src/policy/gates.ts";
+import type { HandlerCtx } from "../../src/api/verbs.ts";
 import { makeHome, seedRun, type TestHome } from "../helpers/harness.ts";
 
 /**
@@ -94,6 +95,8 @@ function okFacts(over: Partial<GateFacts> = {}): GateFacts {
     pendingPlan: false,
     pinned: true,
     roundsUsed: 0,
+    heldUnderAway: false,
+    reopenedUnderAway: false,
     running: false,
     questions: [],
     ...over,
@@ -140,6 +143,8 @@ describe("validatorRefusal: each check alone", () => {
     ["the pins changed", { pinned: false }, /changed since it was pinned/],
     ["one running", { running: true }, /already running/],
     ["rounds used", { roundsUsed: 2 }, /2 validator rounds used/],
+    ["a round held it for the user", { heldUnderAway: true }, /held it for the user/],
+    ["the user reopened a pass of this stage", { reopenedUnderAway: true }, /reopened a validator pass/],
     ["a floor-kind question", { questions: [{ question: "Pick one", context: null, reserved_class: "security" }] }, /kind security/],
     ["a protected wording", { questions: [{ question: "Drop the users table?", context: null, reserved_class: null }] }, /wording names a protected kind/],
   ];
@@ -265,6 +270,37 @@ describe("picking and acting, against the database", () => {
     expect(db.query("SELECT 1 FROM items WHERE kind = 'validator_held' AND state = 'open'").get()).not.toBeNull();
   });
 
+  test("a held gate is not judged again under the same away, only under a new one", () => {
+    const [q] = withQuestions();
+    awayBy("human");
+    const [p] = pick();
+    expect(apply(p!.id, reply({ ...PASS, questions: [{ id: q, choice: "file", consistent_with_spec: true, why: "w" }] }))).toMatchObject({ state: "held" });
+    expect(pick(NOW + 2 * 60_000)).toEqual([]);
+    expect(validatorRefusal(gateFacts(db, gate(), NOW + 2 * 60_000), CFG, NOW + 2 * 60_000)).toMatch(/held it for the user/);
+    expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'validator_held'").get()).toEqual({ n: 1 });
+    tx(db, () => endAway(db, "back", NOW + 3 * 60_000));
+    awayBy("human", NOW + 4 * 60_000);
+    expect(pick(NOW + 5 * 60_000).length).toBe(1);
+  });
+
+  test("the user sending the gate back closes the validator's items", () => {
+    awayBy("human");
+    const [p] = pick();
+    apply(p!.id, { reply: "garbage", costUsd: null });
+    expect(db.query("SELECT state FROM items WHERE kind = 'validator_failed'").get()).toEqual({ state: "open" });
+    tx(db, () => sendBack(db, getRunWithPolicy(db, runId)!, gate(), "Rework the store.", 0, "cli", NOW + 2 * 60_000));
+    expect(db.query("SELECT state FROM items WHERE kind = 'validator_failed'").get()).not.toEqual({ state: "open" });
+  });
+
+  test("a validator changes round after a failed one closes the failed round's item", () => {
+    awayBy("human");
+    const [first] = pick();
+    apply(first!.id, { reply: "garbage", costUsd: null });
+    const [second] = pick(NOW + 2 * 60_000);
+    expect(apply(second!.id, reply(CHANGES), HEAD, NOW + 3 * 60_000)).toMatchObject({ state: "changes" });
+    expect(db.query("SELECT state FROM items WHERE kind = 'validator_failed'").get()).not.toEqual({ state: "open" });
+  });
+
   test("changes: the gate is sent back with the findings, attributed to the validator", () => {
     awayBy("human");
     const [p] = pick();
@@ -357,6 +393,48 @@ describe("the brief and the undo", () => {
     expect(() => reopenableValidatorPass(db, run(), "design")).toThrow(/not passed by the validator/);
     db.query("UPDATE runs SET state = 'failed' WHERE id = ?1").run(runId);
     expect(() => reopenableValidatorPass(db, run(), "design")).toThrow(/run is over/);
+  });
+});
+
+const reopenVerb = GATE_VERBS.find((verb) => verb.name === "gate reopen")!;
+const reopen = (now: number) => tx(db, () => reopenVerb.apply!({ db, now: () => now, caller: { role: "human" } } as unknown as HandlerCtx, { task: taskId, gate: "design", body: "Keep the old trigger." }, undefined));
+const passedThenInQa = () => {
+  awayBy("human");
+  const [p] = pick();
+  apply(p!.id, reply(PASS));
+  db.query("UPDATE runs SET stage = 'qa', stage_state = 'running' WHERE id = ?1").run(runId);
+  db.query("INSERT INTO pool_leases (pool, run_id, stage, granted_at) VALUES ('worker', ?1, 'design', ?2), ('docker_env', ?1, 'qa', ?2)").run(runId, NOW);
+};
+const liveLeases = () => (db.query("SELECT pool FROM pool_leases WHERE run_id = ?1 AND released_at IS NULL ORDER BY pool").all(runId) as { pool: string }[]).map((l) => l.pool);
+
+describe("gate reopen", () => {
+  test("releases the later stage's pools, keeps the worker's, and steers a live worker back", () => {
+    passedThenInQa();
+    db.query("UPDATE runs SET liveness = 'busy' WHERE id = ?1").run(runId);
+    reopen(NOW + 2 * 60_000);
+    expect(liveLeases()).toEqual(["worker"]);
+    expect(getRun(db, runId)).toMatchObject({ stage: "design", stage_state: "waiting" });
+    expect(getRun(db, runId)!.pending_launch).not.toBe("resume");
+  });
+
+  test("a worker that is gone is resumed with the words", () => {
+    passedThenInQa();
+    db.query("UPDATE runs SET liveness = 'dead' WHERE id = ?1").run(runId);
+    reopen(NOW + 2 * 60_000);
+    expect(getRun(db, runId)).toMatchObject({ stage: "design", pending_launch: "resume" });
+  });
+
+  test("the resubmitted review is the user's for the rest of this away; a later away may judge it", () => {
+    passedThenInQa();
+    reopen(NOW + 2 * 60_000);
+    db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, page_path, state, opened_at) VALUES ('g2', ?1, 'design', 'review', 'http://127.0.0.1:4387/session/y', ?2, 'open', ?3)").run(runId, page, NOW + 3 * 60_000);
+    const later = NOW + 3 * 60_000 + 3 * HOUR;
+    const g2 = db.query("SELECT * FROM gates WHERE id = 'g2'").get() as GateRow;
+    expect(validatorRefusal(gateFacts(db, g2, later), CFG, later)).toMatch(/reopened a validator pass/);
+    expect(pick(later)).toEqual([]);
+    tx(db, () => endAway(db, "back", later));
+    awayBy("human", later + 1000);
+    expect(pick(later + 2000).map((picked) => picked.gate.id)).toEqual(["g2"]);
   });
 });
 
