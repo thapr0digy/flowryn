@@ -32,9 +32,10 @@ The floor is in code (`DEADLINE_FLOOR`, src/attention/decisions-policy.ts). All 
      - `nomistakes-unread` when the facts did not read.
    - A worker's own `--reserved` reason writes none.
    - Standalone decisions (`decision add`) get none: they are never eligible.
-2. **The pass**: on every attention tick (1 s), after automatic away, `deadlineDefaults` (src/attention/deadline-defaults.ts) runs. It returns at once while `default_classes` is empty or the user is present. Absent means one of two things:
-   - `flowryn away` is on (set by the user, or automatic);
-   - every open leader session has `user_inactive_since` set.
+2. **The pass**: on every attention tick (1 s), after automatic away, `deadlineDefaults` (src/attention/deadline-defaults.ts) runs. It returns at once while `default_classes` is empty or no away the user started is on. Since 2026-11-08 (docs/notes/2026-11-08-unattended-loops-answer-4y.md) that means only:
+   - `flowryn away` from the user's terminal, or the Claude leader's `away` on the user's chat answer (`by` is `human` or `captain-chat`).
+
+   Automatic away, a leader's own `away` and inactivity in every leader session no longer count. They used to.
 3. **Eligibility**: `deadlineRefusal` is pure, and each check is tested alone. A question qualifies when it:
    - is open and reserved;
    - is run-scoped (a standalone decision's answer marks its task done, and the undo path cannot reverse that);

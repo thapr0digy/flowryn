@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { startAway } from "../../src/attention/away.ts";
+import { AUTO_AWAY_BY, CHAT_AWAY_BY, startAway, userStarted } from "../../src/attention/away.ts";
 import { composeBriefing, composeReturnBrief } from "../../src/attention/briefing.ts";
 import { deadlineDefaults, deadlineRefusal, userAbsent, waitedLabel } from "../../src/attention/deadline-defaults.ts";
 import { DEADLINE_FLOOR, decisionsConfig, RESERVED_CLASSES, type DecisionsConfig } from "../../src/attention/decisions-policy.ts";
@@ -175,20 +175,45 @@ describe("the pass", () => {
     expect(pass()).toEqual([]);
   });
 
-  test("inactive in every leader session counts as absent; one active session does not", () => {
-    question(5);
-    const session = (inactiveSince: number | null) =>
-      tx(db, () => {
-        const { session: id } = openSession(db, { harness: "claude", pane: `p${next++}`, cwd: "/x", now: NOW - 10 * HOUR });
-        db.query("UPDATE leader_sessions SET user_inactive_since = ?2 WHERE session_id = ?1").run(id, inactiveSince);
-        return id;
-      });
-    const first = session(NOW - 30 * 60_000);
-    tx(db, () => claim(db, first, "vacant", NOW - 10 * HOUR));
-    expect(userAbsent(db, NOW)).toBe(true);
-    db.query("UPDATE leader_sessions SET user_inactive_since = NULL WHERE session_id = ?1").run(first);
+  test("inactive in every leader session no longer counts as absent (2026-11-08: only an away the user started)", () => {
+    const d = question(5);
+    const { session: id } = tx(db, () => openSession(db, { harness: "claude", pane: `p${next++}`, cwd: "/x", now: NOW - 10 * HOUR }));
+    db.query("UPDATE leader_sessions SET user_inactive_since = ?2 WHERE session_id = ?1").run(id, NOW - 30 * 60_000);
+    tx(db, () => claim(db, id, "vacant", NOW - 10 * HOUR));
     expect(userAbsent(db, NOW)).toBe(false);
     expect(pass()).toEqual([]);
+    expect(getDecision(db, d.id)!.state).toBe("open");
+  });
+
+  test("an automatic away and a leader's own away answer nothing; the user's terminal and chat-confirmed aways do", () => {
+    const d = question(5);
+    const awayBy = (by: string) => tx(db, () => startAway(db, { until: NOW + 8 * HOUR, words: null, by, now: NOW - HOUR }));
+    for (const by of [AUTO_AWAY_BY, "leader"]) {
+      awayBy(by);
+      expect(userAbsent(db, NOW)).toBe(false);
+      expect(pass()).toEqual([]);
+      expect(getDecision(db, d.id)!.state).toBe("open");
+    }
+    awayBy(CHAT_AWAY_BY);
+    expect(userAbsent(db, NOW)).toBe(true);
+    expect(pass().map((a) => a.decision)).toEqual([d.id]);
+  });
+
+  test("an expired user away answers nothing", () => {
+    const d = question(5);
+    tx(db, () => startAway(db, { until: NOW - 1, words: null, by: "human", now: NOW - 2 * HOUR }));
+    expect(userAbsent(db, NOW)).toBe(false);
+    expect(pass()).toEqual([]);
+    expect(getDecision(db, d.id)!.state).toBe("open");
+  });
+});
+
+describe("userStarted (pure)", () => {
+  test("human and captain-chat count; auto, leader, other roles and none do not", () => {
+    expect(userStarted({ by: "human" })).toBe(true);
+    expect(userStarted({ by: CHAT_AWAY_BY })).toBe(true);
+    for (const by of [AUTO_AWAY_BY, "leader", "reader", "worker", "hook", ""]) expect(userStarted({ by })).toBe(false);
+    expect(userStarted(null)).toBe(false);
   });
 });
 
