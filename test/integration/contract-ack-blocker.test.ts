@@ -47,7 +47,10 @@ async function claudeWorker(env: FleetEnv) {
 describe("the contract's named ack causes, on the rows real hooks write", () => {
   test("assumption: a Claude Stop that carries a steer continues the turn, so it is not a turn end", async () => {
     // Contract runs turn the turn-end guard off (src/contracts/runner.ts), so a turn end is just that.
-    const env = await makeFleetEnv({ turnEndGuard: false });
+    // The test fleet re-rings an unacknowledged steer after 1 s; on a loaded host the hooks between the two Stops take
+    // longer, and the second Stop would carry the steer again (a continuation, not a turn end). Re-ringing is not what
+    // this asserts, so the interval is out of its reach (docs/notes/2026-11-08-fix-the-four-3w.md).
+    const env = await makeFleetEnv({ turnEndGuard: false, timing: { ring_interval_ms: 10 * 60_000 } });
     envs.push(env);
     const { run, hook, steer } = await claudeWorker(env);
     await hook("prompt");
