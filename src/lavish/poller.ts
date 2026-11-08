@@ -181,6 +181,8 @@ export class LavishPoller {
   private epoch = 0;
   /** Each gate's poll failures in a row that were server errors. */
   private readonly serverErrors = new Map<string, number>();
+  /** Gates whose failure the probe found the server healthy for: they ask no check again until they host or poll well. */
+  private readonly probedHealthy = new Set<string>();
 
   /** The sweep of an earlier daemon's polls: started by the first pass, and no poll starts until it is done. */
   private sweep: Promise<void> | null = null;
@@ -313,7 +315,7 @@ export class LavishPoller {
           if (this.closed || epoch !== this.epoch) return;
           this.pollFailed(gate, `cannot host the review page's copy: ${(error as Error).message}`);
           // A server error twice in a row (hostRetryingOnce tried it again at once): is the server broken?
-          if (isServerErrorFailure(error)) this.askRecovery(`hosting gate ${gate}'s page failed twice with a server error`);
+          if (isServerErrorFailure(error)) this.askRecovery(gate, `hosting gate ${gate}'s page failed twice with a server error`);
         },
       )
       .catch((error: unknown) => this.deps.log(`lavish: hosting gate ${gate}'s page could not be recorded: ${(error as Error).message}`))
@@ -492,15 +494,18 @@ export class LavishPoller {
       return;
     }
     this.serverErrors.delete(gate);
-    this.askRecovery(`the poll of gate ${gate} failed twice with a server error (${why})`);
+    this.askRecovery(gate, `the poll of gate ${gate} failed twice with a server error (${why})`);
   }
 
   /** Ask the recovery to check the server (one check at a time; it restarts the server only when its probe fails too). */
-  private askRecovery(reason: string): void {
+  private askRecovery(gate: string, reason: string): void {
     const recovery = this.deps.recovery?.();
-    if (!recovery || this.closed) return;
+    if (!recovery || this.closed || this.probedHealthy.has(gate)) return;
     recovery.check(reason, "daemon").then(
-      (outcome) => this.deps.log(`lavish: server check after "${reason}": ${outcome.state}${outcome.item ? ` (item ${outcome.item})` : ""}`),
+      (outcome) => {
+        if (outcome.state === "ok") this.probedHealthy.add(gate);
+        this.deps.log(`lavish: server check after "${reason}": ${outcome.state}${outcome.item ? ` (item ${outcome.item})` : ""}`);
+      },
       (error: unknown) => this.deps.log(`lavish: server check after "${reason}" failed: ${(error as Error).message}`),
     );
   }
@@ -508,6 +513,7 @@ export class LavishPoller {
   /** A host or poll worked: the gate's server-error streak ends, and an open lavish_broken item resolves. */
   private healthy(gate: string): void {
     this.serverErrors.delete(gate);
+    this.probedHealthy.delete(gate);
     try {
       this.deps.recovery?.()?.noteHealthy();
     } catch (error) {
@@ -559,6 +565,7 @@ export class LavishPoller {
       for (const id of hosted) {
         this.waitUntil.delete(id);
         this.serverErrors.delete(id);
+        this.probedHealthy.delete(id);
       }
       return { hosted, failed };
     } finally {

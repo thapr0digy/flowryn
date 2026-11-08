@@ -9,7 +9,7 @@ On 2026-11-08 the shared Lavish server (127.0.0.1:4387) answered every page with
 
 - `isServerError`: a non-zero lavish-axi exit that printed `code: SERVER_ERROR`. lavish-axi prints it for a 500 and for "server connection failed". `NOT_FOUND`, a timeout (124/125) and a spawn failure are never server errors.
 - A daemon host of a review page's copy that fails with one is run again at once; a gate's poll that fails with one is run again by its usual 2 s backoff. The second server error in a row asks the doctor (`LavishDoctor.check`).
-- The doctor (one check at a time, every asker shares it) hosts its own probe page, `<state_dir>/lavish-probe/probe.html` (fixed text, no task content, written by atomic rename so a planted symlink is replaced, never written through). Probe hosts: a blip, event `lavish.probe_ok`. Probe fails too: the server is broken, event `lavish.broken`.
+- The doctor (one check at a time, every asker shares it) hosts its own probe page, `<state_dir>/lavish-probe/probe.html` (fixed text, no task content, written by atomic rename so a planted symlink is replaced, never written through). Probe hosts: a blip, event `lavish.probe_ok`. The gate whose failure asked then asks no check again until it hosts or polls well, so one page the server keeps failing does not probe on every backoff. Probe fails too: the server is broken, event `lavish.broken`.
 
 ## Recovery
 
@@ -37,4 +37,4 @@ Each `lavish.restarted` and `lavish.gave_up` since the last briefing is one line
 
 ## Tests
 
-`test/unit/lavish-recovery.test.ts` (classification, probe, restart, rate limit across doctor instances, stop failing, still failing after the restart, a re-host failing, single flight, give-up resolving, briefing lines) and `test/integration/lavish-recovery.test.ts` (the fake lavish-axi broken until `stop`: a worker's verb recovers, the page is hosted and polled again and a message queued during the breakage is delivered; a second breakage within 10 minutes raises the P1; the daemon's own poll failing twice restarts it with no worker; a leader is refused). The test home's lavish-axi learns `$FLOWRYN_HOME/lavish-broken` and `lavish-stop-fail`.
+`test/unit/lavish-recovery.test.ts` (classification, probe, restart, rate limit across doctor instances, stop failing, still failing after the restart, a re-host failing, single flight, give-up resolving, briefing lines) and `test/integration/lavish-recovery.test.ts` (the fake lavish-axi broken until `stop`: a worker's verb recovers, the page is hosted and polled again and a message queued during the breakage is delivered; a second breakage within 10 minutes raises the P1; the daemon's own poll failing twice restarts it with no worker; one page failing while the probe hosts asks for one check, not one per backoff; a leader is refused). The test home's lavish-axi learns `$FLOWRYN_HOME/lavish-broken` and `lavish-stop-fail`.

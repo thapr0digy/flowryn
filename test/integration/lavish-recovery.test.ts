@@ -141,6 +141,19 @@ describe("a broken Lavish server recovers by itself", () => {
     expect(all(f, "SELECT 1 FROM items WHERE kind = 'lavish_broken'")).toHaveLength(0);
   });
 
+  test("one page the server keeps failing while the probe hosts asks for one check, not one per backoff", async () => {
+    ship = await makeShipEnv({ mode: "local-only" });
+    const e = ship;
+    const f = e.fleet;
+    const { gate } = await handIn(e);
+    writeFileSync(join(f.h.home, "lavish-page-broken"), "");
+    await waitUntil(() => one(f, "SELECT 1 FROM events WHERE kind = 'lavish.probe_ok'") !== null, 20_000, "the first check");
+    await waitUntil(() => failures(f, gate) >= 4, 30_000, "two more backoff cycles");
+    expect(all(f, "SELECT 1 FROM events WHERE kind = 'lavish.probe_ok'")).toHaveLength(1);
+    expect(calls(f).filter((c) => c.includes("lavish-probe"))).toHaveLength(1);
+    expect(calls(f).filter((c) => c === "stop")).toHaveLength(0);
+  });
+
   test("a leader cannot run lavish recover", async () => {
     ship = await makeShipEnv({ mode: "local-only" });
     const e = ship;
