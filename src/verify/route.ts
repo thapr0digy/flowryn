@@ -115,7 +115,7 @@ export function routeVerifyOutcome(db: Db, v: Verification, run: Pick<RunRow, "i
   const failed = `verify ${v.id} failed at ${v.head_sha.slice(0, 8)} (\`${step.name}\` exited ${step.exit})`;
   if (!run || isTerminal(run.state as RunRow["state"])) return { route: "escalate", code: "verify_failed", detail: `${failed}, and its run is ${run ? run.state : "gone"}`, step };
   const prior = verifySendBacks(db, run.id);
-  if (prior.some((p) => p.head === v.head_sha) || legacySentBackAt(db, run.id, v.head_sha)) return { route: "escalate", code: "verify_failed", detail: `${failed} again after a send-back`, step };
+  if (prior.some((p) => p.head === v.head_sha) || legacySentBackAt(db, run.id, v.head_sha)) return { route: "escalate", code: "verify_failed", detail: `verify ${v.id} failed again at ${v.head_sha.slice(0, 8)} (\`${step.name}\` exited ${step.exit}) after a send-back`, step };
   const same = prior.find((p) => p.step === step.name);
   if (same) return { route: "escalate", code: "verify_failed", detail: `${failed}: the same step failed after its send-back at ${same.head.slice(0, 8)}`, step };
   if (prior.length >= MAX_VERIFY_SEND_BACKS) return { route: "escalate", code: "verify_failed", detail: `${failed} after ${prior.length} verify send-backs in this run`, step };
