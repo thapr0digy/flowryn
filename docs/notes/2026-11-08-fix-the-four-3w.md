@@ -68,6 +68,9 @@ The 1-minute load average, sampled every 30 s (106 samples), ranged from 6 to 83
 The load suites:
 
 - Suite 1 failed only `contract-ack-blocker` (the section above). It was fixed during the run.
+- Suite 5 started while the last loop was finishing and failed two waits in other files, both left open here (other slow tests are out of scope):
+  - `workflows` "changes at the QA review…": the first QA review was not reached in 20 s.
+  - `contracts-offline` "pi: --model…": the Pi contract's "temp dir" step waited 15 s for a steer acknowledgement. The contract suite runs with `turn_end_guard = false`, so the Pi reminder change is not on that path.
 - Suites 2 to 4 each passed all 3601 tests:
   - unit: 92–122 s
   - integration parallel: 469–531 s
