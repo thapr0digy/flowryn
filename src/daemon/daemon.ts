@@ -88,6 +88,7 @@ import { HarnessVersionPoller } from "../contracts/version-poll.ts";
 import { launchdSupervisor, plistSpecFor, selfCommand } from "../service/launchd.ts";
 import { recoverVerifications, stopVerifications } from "../verify/runner.ts";
 import { stopValidators, validatorPass } from "../attention/gate-validator.ts";
+import { awayMergePass } from "../attention/away-merge.ts";
 import { askRoot, drainAsks, recoverAsks, resetAskRunner, stopAsks, type AskDeps } from "../ask/runner.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
@@ -891,21 +892,25 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       if (validatorRunning) return;
       validatorRunning = true;
       try {
-        await validatorPass({
+        const validatorDeps = {
           db: database,
           config: () => config,
           decisions: () => decisionsConfig(config),
           git: deliveryGit,
           now: Date.now,
           log,
-          changed: (run) => {
+          changed: (run: string) => {
             bus.notify(run);
             journal.kick();
             lavishPoller.kick();
             scheduler?.kick();
+            autoMerger?.kick();
             attention.bus.notifyAll();
           },
-        });
+        };
+        await validatorPass(validatorDeps);
+        // Sensitive merges during an away you started (docs/notes/2026-11-08-merge-sensitive-prs-rr.md): the same validator, one round per head.
+        await awayMergePass(validatorDeps);
         validatorFailing = false;
       } catch (error) {
         if (!validatorFailing) log(`validator: pass failed: ${(error as Error).message}`);

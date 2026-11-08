@@ -33,7 +33,7 @@ export const PAGE_CODE_TRIES = 3;
 /** Pass codes one gate may mint in the daemon's life; a pass asked for after that opens the leader's request only. */
 export const PAGE_CODE_MINTS = 5;
 
-export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "page" | "yolo" | "autonomous" | "validator";
+export type Channel = "claude-ask" | "claude-chat" | "pi-confirm" | "cli-tty" | "board" | "page" | "yolo" | "autonomous" | "validator" | "away-validator";
 export type ApprovalAction = "merge" | "discard" | "gate" | "decide";
 export const HUMAN_CHANNELS: readonly Channel[] = ["claude-ask", "claude-chat", "pi-confirm", "cli-tty", "board", "page"];
 
@@ -101,7 +101,7 @@ export function insertApproval(db: Db, a: NewApproval): ApprovalRow {
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
   ).run(id, a.task, a.ref, a.head, a.channel, a.actor, a.action, a.allowRed ?? null, a.now, a.now + APPROVAL_TTL_MS);
   appendEvent(db, {
-    source: a.channel === "cli-tty" || a.channel === "board" ? "cli" : a.channel === "yolo" || a.channel === "page" || a.channel === "autonomous" || a.channel === "validator" ? "daemon" : "hook",
+    source: a.channel === "cli-tty" || a.channel === "board" ? "cli" : a.channel === "yolo" || a.channel === "page" || a.channel === "autonomous" || a.channel === "validator" || a.channel === "away-validator" ? "daemon" : "hook",
     kind: "approval.recorded",
     taskId: a.task,
     payload: { approval: id, channel: a.channel, actor: a.actor, action: a.action, ref: a.ref, head: a.head, allow_red: a.allowRed ?? null },

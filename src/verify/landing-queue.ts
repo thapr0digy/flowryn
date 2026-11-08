@@ -8,6 +8,7 @@ import { getProject } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, runBase, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { findHumanApproval, insertApproval, isRoutineMerge, type ApprovalRow } from "../policy/approvals.ts";
 import { autonomyForRun, mintAutonomyApproval } from "../policy/autonomy.ts";
+import { findAwayApproval } from "../attention/away-merge.ts";
 import { cleanMainMerge, type CleanMergeStep } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
 import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
@@ -246,6 +247,24 @@ function leave(db: Db, row: LandingRow, reason: string, detail: string, now: num
 }
 
 /**
+ * A sensitive PR whose entry left at this head for want of an approval (the queue's merge of main
+ * moved its head, or you came back) is taken again once a newer away-validator approval binds the
+ * head: that approval is exactly what it lacked.
+ */
+function retakeForAwayApproval(db: Db, run: RunWithPolicy, delivered: Delivered, now: number): boolean {
+  if (!run.sensitive) return false;
+  const approval = findAwayApproval(db, { task: run.task_id, ref: delivered.ref, head: delivered.head, now });
+  if (!approval) return false;
+  const other = db
+    .query("SELECT 1 FROM landing_queue WHERE run_id = ?1 AND (head_sha = ?2 OR entered_head = ?2) AND NOT (state = 'left' AND reason IN ('approval_needed','user_back') AND state_since <= ?3)")
+    .get(run.id, delivered.head, approval.created_at);
+  return other === null;
+}
+
+/** An entry leaves the line (src/attention/away-merge.ts: the user came back, or the validator sent it back). Call inside a transaction. */
+export const leaveLanding = leave;
+
+/**
  * Whether a delivery of this run belongs to the landing queue rather than to
  * a direct auto-merge: its project queues, it is a PR on the project's
  * default branch, and it is not stacked. On a queue project a delivery never
@@ -366,12 +385,14 @@ export class LandingQueue implements LandingHooks {
              AND NOT (l.state = 'left' AND EXISTS (SELECT 1 FROM auto_merges a WHERE a.id = l.auto_merge_id AND a.state = 'superseded' AND a.reason = ?3))`,
         )
         .get(run.id, delivered.head, HOLD_RELEASED);
-      if (taken) continue;
+      if (taken && !retakeForAwayApproval(db, run, delivered, now)) continue;
       // A merge already asked for, or a direct auto-merge from before the project queued: leave it be.
       // An auto-verify (merge = 0) is not one: the landing supersedes it and follows its verify.
       if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND merge = 1 AND state IN ('queued','verifying','waiting_checks','merging')").get(run.id)) continue;
       const routine = isRoutineMerge(db, run.task_id);
       let approval = routine ? null : findHumanApproval(db, { task: run.task_id, action: "merge", ref: delivered.ref, head: delivered.head, now });
+      // Sensitive work during an away you started: the validator's pass at exactly this head (src/attention/away-merge.ts).
+      if (!routine && !approval && run.sensitive) approval = findAwayApproval(db, { task: run.task_id, ref: delivered.ref, head: delivered.head, now });
       // Unattended mode: your standing approval for the project stands in for your word at this head.
       const standing = routine || approval ? null : autonomyForRun(db, run, now);
       if (standing) approval = mintAutonomyApproval(db, standing, { task: run.task_id, ref: delivered.ref, head: delivered.head, action: "merge", runId: run.id }, now);

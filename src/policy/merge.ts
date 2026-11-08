@@ -32,6 +32,7 @@ import { isForgeOutage, noteForgeDown, noteForgeUp } from "../reconcile/forge-he
 import { shellWord } from "../util/shell-word.ts";
 import { grantActor, takeGrant, voidItemGrants } from "./grants.ts";
 import { autonomyForRun, mintAutonomyApproval, type AutonomyRow } from "./autonomy.ts";
+import { findAwayApproval } from "../attention/away-merge.ts";
 import { shortPolicy } from "../verify/policy.ts";
 import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification } from "../verify/store.ts";
 
@@ -251,7 +252,8 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
   if (row) return { choice: { kind: "row", row }, why: "" };
   // The landing queue merges an approved PR under the approval it was queued with.
   const queued = ask.caller.role === "daemon" && action === "merge" && allowRed === null ? findLandingApproval(db, { task, ref: facts.ref, head: facts.head, now }) : null;
-  if (queued) return { choice: { kind: "row", row: queued }, why: "" };
+  // An away-validator record counts only while it is live: the same away, the validator's pass at this head.
+  if (queued && (queued.channel !== "away-validator" || findAwayApproval(db, { task, ref: facts.ref, head: facts.head, now })?.id === queued.id)) return { choice: { kind: "row", row: queued }, why: "" };
   const reasons: string[] = [];
   // A head you confirmed is a precondition: another head is never merged in its place, not even under yolo.
   if (ask.head && ask.head !== facts.head) return { choice: null, why: `the head moved from ${ask.head.slice(0, 8)} since you confirmed; it is now ${facts.head.slice(0, 8)}` };
@@ -276,6 +278,11 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
   }
   if (allowRed !== null) reasons.push(`waiving ${JSON.stringify(allowRed)} needs your word; yolo never waives a check`);
   const policy = db.query("SELECT yolo FROM task_policy WHERE task_id = ?1").get(task) as { yolo: number } | null;
+  // Sensitive work during an away you started: the validator's pass at exactly this head (docs/notes/2026-11-08-merge-sensitive-prs-rr.md), checked live.
+  if (ask.caller.role === "daemon" && action === "merge" && allowRed === null && facts.run.sensitive) {
+    const away = findAwayApproval(db, { task, ref: facts.ref, head: facts.head, now });
+    if (away) return { choice: { kind: "row", row: away }, why: "" };
+  }
   // The daemon's merge of work yolo does not cover (not yolo, or sensitive) under your standing approval for this project.
   if (ask.caller.role === "daemon" && action === "merge" && allowRed === null && (policy?.yolo !== 1 || facts.run.sensitive)) {
     const standing = autonomyForRun(db, facts.run, now);

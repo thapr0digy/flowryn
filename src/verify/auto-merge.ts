@@ -6,6 +6,7 @@ import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { deliveredOf, prEvidence, type PrEvidence } from "../lifecycle/delivery.ts";
 import { autonomyForRun } from "../policy/autonomy.ts";
+import { findAwayApproval } from "../attention/away-merge.ts";
 import { getRunWithPolicy, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
 import { sendBack } from "../lifecycle/send-back.ts";
 import { DAEMON_CALLER, latestMerge, type MergeRow } from "../policy/merge.ts";
@@ -600,6 +601,8 @@ export class AutoMerger {
     if (db.query("SELECT 1 FROM landing_queue WHERE auto_merge_id = ?1 AND state = 'landing'").get(row.id)) return null;
     // Unattended mode started it (src/attention/autonomy-pass.ts): it lasts while the standing approval covers the project.
     if (autonomyForRun(db, run, this.deps.now())) return null;
+    // The away merge started it (src/attention/away-merge.ts): it lasts while the validator's approval of its head is live.
+    if (run.sensitive && findAwayApproval(db, { task: row.task_id, ref: row.ref, head: row.head_sha, now: this.deps.now() })) return null;
     let enabled: boolean;
     try {
       enabled = autoMergeOn(db, this.deps.config(), row.project_id);

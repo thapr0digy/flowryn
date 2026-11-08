@@ -837,8 +837,9 @@ function validationView(ctx: ReadCtx, id: string, full: boolean): HandlerResult 
       validation: row.id,
       task: row.task_id,
       title: taskTitle(ctx.db, row.task_id),
-      gate: row.gate_id,
+      gate: row.gate_id ?? "-",
       stage: row.stage,
+      ...(row.ref ? { pr: row.ref } : {}),
       state: row.state,
       reason: row.reason ?? "-",
       waited: waitedLabel(row.waited_ms),
@@ -849,7 +850,7 @@ function validationView(ctx: ReadCtx, id: string, full: boolean): HandlerResult 
       questions: verdict ? verdict.questions.map((q) => `${q.id} -> ${sanitizeLine(q.choice, 80)} (${q.consistent_with_spec ? "consistent with the spec" : "not consistent with the spec"}): ${sanitizeLine(q.why, 200)}`) : [],
       report,
     },
-    hints: [`flowryn show ${row.task_id}`, ...(row.state === "passed" ? [`flowryn gate reopen ${row.task_id} --gate ${row.stage} --body-file - (undo, while the run is live and undelivered)`] : [])],
+    hints: [`flowryn show ${row.task_id}`, ...(row.state === "passed" && row.stage !== "merge" ? [`flowryn gate reopen ${row.task_id} --gate ${row.stage} --body-file - (undo, while the run is live and undelivered)`] : [])],
   };
 }
 

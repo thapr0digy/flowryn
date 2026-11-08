@@ -5,7 +5,7 @@ import { readSnapshot } from "../journal/snapshot.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { openDecisions } from "../lifecycle/decision-verbs.ts";
 import { DEADLINE_VIA, VALIDATOR_VIA } from "../lifecycle/decisions.ts";
-import { validatorRoundLines } from "./validator-report.ts";
+import { awayMergeLines, validatorRoundLines } from "./validator-report.ts";
 import { todoViews } from "../lifecycle/todos.ts";
 import { queuedSummary, queuedWork } from "../lifecycle/queue-view.ts";
 import { isTerminal, taskTitle, type RunState } from "../lifecycle/runs.ts";
@@ -140,7 +140,8 @@ function decidedLines(db: Db, since: number, until: number, heading: string, len
       .all(since, until) as { id: string; task_id: string; question: string; answer: string; rationale: string | null; answered_by: string; answered_via: string | null; answered_at: number; created_at: number | null; run_state: RunState | null }[]
   ).filter((d) => lens.task(d.task_id));
   // The review-gate validator's rounds (src/attention/validator-report.ts) count as decided for you too.
-  const rounds = validatorRoundLines(db, since, until, lens);
+  // Sensitive merges during an away you started (docs/notes/2026-11-08-merge-sensitive-prs-rr.md), first: each with its undo.
+  const rounds = [...awayMergeLines(db, since, until, lens), ...validatorRoundLines(db, since, until, lens)];
   if (decided.length + rounds.length === 0) return [];
   const lines = [`${heading} (${decided.length + rounds.length}):`];
   for (const d of decided.slice(0, MAX_DECISION_LINES)) {
