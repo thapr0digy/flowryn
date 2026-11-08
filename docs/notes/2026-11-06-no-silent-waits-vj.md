@@ -2,7 +2,7 @@
 
 - Status: done
 - Open: not yet run against a live home
-- Config: `[waits] verify_queue_min`, `[waits] capacity_min`, `[waits] host_min`, `[waits] harness_check_min`, `[waits] phase_start_min`, `[waits] auto_merge_min`, `[waits] landing_min`
+- Config: `[waits] verify_queue_min`, `[waits] capacity_min`, `[waits] host_min`, `[waits] harness_check_min`, `[waits] phase_start_min`, `[waits] auto_merge_min`, `[waits] landing_min`, `[waits] leader_min`
 
 Two stalls on 2026-11-06 went unnoticed for hours. In the first, auto-merge am4 waited 2.5 h on verify request vq128. The verify queue had cancelled that request: GitHub still showed the head the delivery was carried from, so the drain read it as "the PR head moved". In the second, phase 2 of a plan waited about 2 h on the host check (7.8 GB free against an 8 GB floor), and the only signal was the 30-minute capacity P1. Both had the same cause. A wait ended only when some event arrived, and nothing timed it out when that event never came. This change fixes it with plain code (a table, timers and the reconciler) and no model.
 
@@ -48,6 +48,7 @@ The leader's audit (steer m576) added these:
 | `phase_start` | an approved plan's automatic phase, on a `plan`-autonomy project, whose blockers have landed and that has no run | its last blocker's `run.landed` or `run.cleaned`, else the plan's approval | 10 min |
 | `auto_merge` | a live auto-merge not following a queued request or a running verify (those are the queue's and the verify's own deadlines) | `state_since`; a PR head that moved, its `auto_merge.head_moved_seen` (before the auto-merger records one, `state_since`, so recovery kicks it) | 30 min; a PR's pending checks, the auto-merger's own checks limit (6 h, 1 h under no_ci, from the daemon's same no_ci reading) |
 | `landing` | each project's first waiting entry while none of its entries is landing | `state_since` | 30 min |
+| `leader` | a yolo run whose open explanation is `merge.ready`, `merge.held` or `decision.leader` ("waiting for the leader"), itemized only when no open pr_ready, auto_merge_held or decision item already wakes the leader (docs/notes/2026-11-07-fix-a-held-ss.md) | when that wait began | 15 min |
 
 `[waits] <kind>_min` overrides a deadline in whole minutes, from 1 to 1440. Any other key or value refuses the config at load: the effective config's `waits` section, which `flowryn config` shows.
 
@@ -57,7 +58,7 @@ The reconciler runs `checkWaits` on each full pass (the `checkWaits` dep wired i
 
 1. **Past its deadline: recovery first.**
    - A row in `waits` (migration 56) records it, with a `wait.recovered` event.
-   - The pass then kicks the scheduler (`verify_queue`, `capacity`, `host`, `harness_check`, `phase_start`) or the auto-merger (`auto_merge`, `landing`). A scheduler pass drains the verify queue, re-reads the host check, grants, and re-evaluates every phase's blockers (`autoDispatch`). An auto-merger pass re-queues a lost verify as above and moves the landing queue.
+   - The pass then kicks the scheduler (`verify_queue`, `capacity`, `host`, `harness_check`, `phase_start`) or the auto-merger (`auto_merge`, `landing`, `leader`). A scheduler pass drains the verify queue, re-reads the host check, grants, and re-evaluates every phase's blockers (`autoDispatch`). An auto-merger pass re-queues a lost verify as above and moves the landing queue.
    - Recovery never passes a gate, answers a decision or merges.
 2. **Still there on a later pass (at least `RECOVERY_GRACE_MS`, 30 s, after the recovery): one item.**
    - A `wait.expired` event, and one `wait_expired` item (P1, actionable, routed `act` in `LEADER_ROUTE`, so it wakes an idle leader once).

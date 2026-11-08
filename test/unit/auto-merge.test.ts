@@ -646,6 +646,83 @@ describe("the controller, without GitHub", () => {
   });
 });
 
+describe("a later passing verify releases a hold (docs/notes/2026-11-07-fix-a-held-ss.md)", () => {
+  /** An opted-in delivery whose verify failed with no failing step at 10 000: held verify_failed, with its auto_merge_held item. */
+  async function held(opts: { yolo?: number; cfg?: string } = {}): Promise<{ f: Fixture; cfg: FlowrynConfig; row: string }> {
+    const f = fixture({ yolo: opts.yolo });
+    const cfg = config(opts.cfg ?? OPTED_IN);
+    const row = tx(f.db, () => startAutoMerge(f.db, cfg, f.run(), f.delivery, 5_000))!;
+    const v = verification(f, f.root);
+    tx(f.db, () => f.db.query("UPDATE auto_merges SET state = 'verifying', verification_id = ?2 WHERE id = ?1").run(row.id, v.id));
+    finish(f, v, "failed", v.steps, "no step failed");
+    await merger(f, cfg).auto.pass();
+    expect(getAutoMerge(f.db, row.id)).toMatchObject({ state: "held", reason: "verify_failed" });
+    expect(f.db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'auto_merge_held' AND state IN ('open','presented')").get()).toEqual({ n: 1 });
+    // GitHub's checks still run, so a resumed row waits on them rather than reaching the (inert) forge.
+    tx(f.db, () =>
+      f.db
+        .query("INSERT OR REPLACE INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)")
+        .run(JSON.stringify({ url: PR_URL, number: 7, title: "t", state: "open", draft: false, head: HEAD, head_ref: "flowryn/t1", merge_sha: null, checks: { state: "pending", line: "x", red: [], pending: ["ci/test"], total: 1 }, observed_at: 1 })),
+    );
+    return { f, cfg, row: row.id };
+  }
+
+  function passedAt(f: Fixture, at: number, head = HEAD): Verification {
+    const v = verification(f, f.root, head);
+    tx(f.db, () => finishVerification(f.db, v, { state: "passed", steps: v.steps, tests: null, detail: null, binary: null }, at));
+    return v;
+  }
+
+  const releases = (db: Db) => (db.query("SELECT payload FROM events WHERE kind = 'auto_merge.hold_released'").all() as { payload: string }[]).map((r) => JSON.parse(r.payload));
+  const heldItems = (db: Db) => db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'auto_merge_held' AND state IN ('open','presented')").get();
+
+  test("the leader's verify passing at the held head resumes the auto-merge: waiting on checks, an event, and the held item resolved", async () => {
+    const { f, cfg, row } = await held();
+    const v = passedAt(f, 20_000);
+    await merger(f, cfg, 30_000).auto.pass();
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "waiting_checks", verification_id: v.id, reason: null });
+    expect(releases(f.db)).toEqual([{ auto_merge: row, head: HEAD, held: "verify_failed", verification: v.id, to: "waiting_checks", landing: null }]);
+    expect(heldItems(f.db)).toEqual({ n: 0 });
+    expect(readyLine(f.db)).toEndWith(`auto-merge: verify ${v.id} passed, waiting on checks`);
+    // Once: a second pass releases nothing more.
+    await merger(f, cfg, 40_000).auto.pass();
+    expect(releases(f.db)).toHaveLength(1);
+  });
+
+  test("an auto-verify held the same way ends verified", async () => {
+    const { f, cfg, row } = await held({ yolo: 0, cfg: `[projects.web]\nverify = ${JSON.stringify(STEPS)}\n` });
+    expect(getAutoMerge(f.db, row)!.merge).toBe(0);
+    const v = passedAt(f, 20_000);
+    await merger(f, cfg, 30_000).auto.pass();
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "verified", verification_id: v.id });
+    expect(releases(f.db)[0]).toMatchObject({ to: "verified" });
+  });
+
+  test("nothing releases it without a pass at exactly its head after the hold, or once the run moved on", async () => {
+    const { f, cfg, row } = await held();
+    passedAt(f, 20_000, "b".repeat(40));
+    passedAt(f, 9_000);
+    // The pass at 9 000 is older than the hold, and the later one is at another head: the newest at this head counts only if it came after.
+    await merger(f, cfg, 30_000).auto.pass();
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "held" });
+    expect(releases(f.db)).toEqual([]);
+    expect(heldItems(f.db)).toEqual({ n: 1 });
+
+    tx(f.db, () => f.db.query("UPDATE runs SET state = 'running' WHERE id = 'r1'").run());
+    passedAt(f, 31_000);
+    await merger(f, cfg, 40_000).auto.pass();
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "held" });
+  });
+
+  test("a hold that was not the verify's (red checks, a gate refusal) is not released by a pass", async () => {
+    const { f, cfg, row } = await held();
+    tx(f.db, () => f.db.query("UPDATE auto_merges SET reason = 'red_checks' WHERE id = ?1").run(row));
+    passedAt(f, 20_000);
+    await merger(f, cfg, 30_000).auto.pass();
+    expect(getAutoMerge(f.db, row)).toMatchObject({ state: "held", reason: "red_checks" });
+  });
+});
+
 describe("waking the leader", () => {
   const wakes = (db: Db) => (db.query(`SELECT i.kind FROM items i WHERE ${LEADER_WAKE_SQL} AND i.state IN ('open','presented') ORDER BY i.kind`).all() as { kind: string }[]).map((r) => r.kind);
 

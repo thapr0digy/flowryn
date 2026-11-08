@@ -141,8 +141,8 @@ export class GitHubForge implements Forge {
     return headers;
   }
 
-  private async request(method: string, path: string, body?: unknown, url = `${this.opts.apiUrl}${path}`): Promise<{ status: number; body: unknown; headers: Headers }> {
-    const cached = method === "GET" ? this.cache.get(url) : undefined;
+  private async request(method: string, path: string, body?: unknown, url = `${this.opts.apiUrl}${path}`, fresh = false): Promise<{ status: number; body: unknown; headers: Headers }> {
+    const cached = method === "GET" && !fresh ? this.cache.get(url) : undefined;
     const headers = await this.headers(cached ? { "If-None-Match": cached.etag } : body === undefined ? {} : { "Content-Type": "application/json" });
     this.stats.requests++;
     let response: Response;
@@ -238,8 +238,9 @@ export class GitHubForge implements Forge {
     };
   }
 
-  async pull(ref: PrRef): Promise<PullRequest> {
-    const { body } = await this.request("GET", `/repos/${enc(ref.owner)}/${enc(ref.repo)}/pulls/${ref.number}`);
+  async pull(ref: PrRef, opts: { fresh?: boolean } = {}): Promise<PullRequest> {
+    const path = `/repos/${enc(ref.owner)}/${enc(ref.repo)}/pulls/${ref.number}`;
+    const { body } = await this.request("GET", path, undefined, `${this.opts.apiUrl}${path}`, opts.fresh ?? false);
     return this.toPull(body);
   }
 

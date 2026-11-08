@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import type { HandlerResult } from "../api/verbs.ts";
-import { findOpenRunItem, itemLines, openItem } from "../attention/items.ts";
+import { findOpenRunItem, itemLines, openItem, resolveRunItems } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
@@ -32,7 +32,9 @@ import { finishedAtHead, getVerification, interruptedByStop, runningVerification
  * per head with the step and its tail (sent_back); a timeout, an error, a
  * second failure at the head, checks pending over 6 h (1 h under no_ci), a moved head
  * not redelivered 30 min after it was first seen, or a merge-gate refusal
- * holds it (auto_merge_held, a P1 that wakes the leader). A run that is sent
+ * holds it (auto_merge_held, a P1 that wakes the leader). A verify hold ends
+ * when a later verify of the same head passes, whoever ran it (releaseHolds,
+ * docs/notes/2026-11-07-fix-a-held-ss.md). A run that is sent
  * back, cancelled or redelivered, or a project that turns it off, supersedes
  * the row. The merge is the `merge` verb's own path (src/policy/merge-path.ts)
  * with the daemon as caller, so it takes the yolo channel and the gate is
@@ -352,6 +354,76 @@ function verifyOfHead(
   return { state: "queued", requestId: request.id, verificationId: null, made: true };
 }
 
+// --- releasing a hold -----------------------------------------------------------------------
+
+/** Holds a later passing verify at the row's head ends: the verify itself was what stopped it. */
+export const VERIFY_HOLDS: readonly string[] = ["verify_failed", "verify_timeout", "verify_error", "verify_cancelled"];
+
+/** The reason a released row that belonged to a landing-queue entry is superseded with: the queue takes the head again. */
+export const HOLD_RELEASED = "hold_released";
+
+/**
+ * The passing verify that releases a held row, or null: the row is its run's
+ * newest, held for its verify, the run is still ready with this head
+ * delivered, and a verify of exactly this head under the project's current
+ * policy passed (any source: the leader's `flowryn verify`, a recovery, the
+ * queue) after the hold. The merge gates are unchanged: the row goes back to
+ * waiting on checks and merges through the merge verb's path as before.
+ */
+export function releasingVerify(db: Db, config: FlowrynConfig, row: AutoMergeRow): Verification | null {
+  if (row.state !== "held" || !VERIFY_HOLDS.includes(row.reason ?? "")) return null;
+  if (latestAutoMerge(db, row.run_id)?.id !== row.id) return null;
+  const run = getRunWithPolicy(db, row.run_id);
+  if (!run || run.state !== "ready" || deliveredOf(db, row.task_id)?.head !== row.head_sha) return null;
+  let policy: string;
+  try {
+    const verify = verifyConfig(config, row.project_id);
+    if (!verify) return null;
+    policy = verifyPolicyId(verify);
+  } catch {
+    // An invalid [projects.<id>] table: nothing resumes on it.
+    return null;
+  }
+  const passed = finishedAtHead(db, row.ref, row.head_sha, policy);
+  if (passed?.state !== "passed" || (passed.finished_at ?? 0) < row.state_since) return null;
+  return passed;
+}
+
+function heldRows(db: Db): AutoMergeRow[] {
+  return db.query("SELECT * FROM auto_merges WHERE state = 'held' ORDER BY created_at, CAST(substr(id, 3) AS INTEGER)").all() as AutoMergeRow[];
+}
+
+/**
+ * Release every held row a later passing verify at its head ends, with one
+ * auto_merge.hold_released event each, and resolve its auto_merge_held item.
+ * A row that merges goes back to waiting_checks (one that only verifies ends
+ * verified), unless it was a landing-queue entry's: that entry left the line
+ * when it held, so the row is superseded and the queue takes the head again on
+ * its pass (enqueueReady). Call inside a transaction. Returns the rows released.
+ */
+export function releaseHolds(db: Db, config: FlowrynConfig, now: number): string[] {
+  const released: string[] = [];
+  for (const row of heldRows(db)) {
+    const passed = releasingVerify(db, config, row);
+    if (!passed) continue;
+    const landing = db.query("SELECT id FROM landing_queue WHERE auto_merge_id = ?1 ORDER BY enqueued_at DESC LIMIT 1").get(row.id) as { id: string } | null;
+    const to: AutoMergeState = landing ? "superseded" : row.merge === 0 ? "verified" : "waiting_checks";
+    appendEvent(db, {
+      source: "daemon",
+      kind: "auto_merge.hold_released",
+      runId: row.run_id,
+      taskId: row.task_id,
+      payload: { auto_merge: row.id, head: row.head_sha, held: row.reason, verification: passed.id, to, landing: landing?.id ?? null },
+      ts: now,
+    });
+    if (landing) move(db, row, "superseded", { reason: HOLD_RELEASED, detail: `verify ${passed.id} passed at ${row.head_sha.slice(0, 8)} after the hold; the landing queue takes it again` }, now);
+    else move(db, row, to, { verification_id: passed.id, reason: null, detail: null }, now);
+    resolveRunItems(db, row.run_id, ["auto_merge_held"], "auto_merge.hold_released", now);
+    released.push(row.id);
+  }
+  return released;
+}
+
 // --- the controller -------------------------------------------------------------------------
 
 /** What a held row's next command adds after the verify: the merge, for a row that merges. */
@@ -473,6 +545,12 @@ export class AutoMerger {
 
   /** One pass over the live rows. Exposed for tests. */
   async pass(): Promise<void> {
+    if (this.stopped) return;
+    try {
+      tx(this.deps.db, () => releaseHolds(this.deps.db, this.deps.config(), this.deps.now()));
+    } catch (error) {
+      this.deps.log(`auto-merge: releasing holds: ${(error as Error).stack ?? String(error)}`);
+    }
     await this.landingPass();
     for (const row of liveAutoMerges(this.deps.db)) {
       if (this.stopped) return;

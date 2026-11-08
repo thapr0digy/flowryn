@@ -19,7 +19,7 @@ A follow-up to the wait registry (docs/notes/2026-11-06-no-silent-waits-vj.md). 
 
 - The head-of-line wait moves past the requests that stepped aside. Before, the first request covered the whole line. With each of those requests now carrying its own wait, a line wait still pinned to them would leave the request the drain actually tries next (held by a full pool, say) with no wait. The deadline amounts and the drain order are unchanged.
 - A request's own clock is `wait_since`, not its request time. That is the requirement: R2's clock starts when R2 began waiting. Once its wait clears, it rejoins the line wait, which counts from its request time as before.
-- A recorded reason is the drain's last reading. While a full pool, a pending restart or a failing host check stops the drain before it reaches the request again, the reason stays as it was. Its deadline still runs: the recovery kicks the scheduler, which re-reads it, and the item that may follow names the last cause seen. A bounded, possibly stale cause beats no deadline.
+- A recorded reason is the drain's last reading. While a full pool, a pending restart or a failing host check stops the drain before it reaches the request again, the reason stays as it was (except a `stale_read` the watcher's head disproves, which every drain clears first: docs/notes/2026-11-07-fix-a-held-ss.md). Its deadline still runs: the recovery kicks the scheduler, which re-reads it, and the item that may follow names the last cause seen. A bounded, possibly stale cause beats no deadline.
 - The auto-merge skip (`autoMergeWaits` ignores a row whose request is queued) stays: that request is now always covered, by its own wait, by the line wait, or by being behind the line's head.
 
 ## Tests

@@ -156,3 +156,30 @@ test(
   },
   { timeout: 150_000 },
 );
+
+test(
+  "a yolo PR ready to merge with nothing waking the leader gets a wait_expired item past its deadline; fleet shows the wait (docs/notes/2026-11-07-fix-a-held-ss.md)",
+  async () => {
+    const passing = "printf ' 2 pass\\n 0 fail\\nRan 2 tests across 1 file. [1.00ms]\\n'";
+    env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: ["[projects.web]", `verify = ${JSON.stringify([passing])}`, "auto_merge = false"].join("\n") });
+    const e = env;
+    const { task, run } = await ship(e, "Ready, nobody told", "a.txt");
+    const ready = () => query<{ id: number }>(e, "SELECT id FROM explanations WHERE run_id = ?1 AND rule = 'merge.ready' AND closed_at IS NULL", run);
+    await waitUntil(() => ready().length === 1, 30_000, "the merge to wait for the leader");
+    // As on 2026-11-07: no item carries it (the pr_ready was dismissed), and it has waited past the 15 min deadline.
+    exec(e, "UPDATE items SET state = 'resolved', resolved_by = 'test' WHERE run_id = ?1 AND kind = 'pr_ready'", run);
+    exec(e, "UPDATE explanations SET opened_at = opened_at - ?2 WHERE id = ?1", String(ready()[0]!.id), String(20 * 60_000));
+    const key = `leader:${run}:merge`;
+    await waitUntil(() => query(e, "SELECT 1 FROM waits WHERE key = ?1", key).length === 1, 15_000, "the wait's recovery");
+    // Skip the recovery's grace rather than sleep through it.
+    exec(e, "UPDATE waits SET recovered_at = recovered_at - 60000 WHERE key = ?1", key);
+    await waitUntil(() => query(e, "SELECT 1 FROM items WHERE kind = 'wait_expired' AND run_id = ?1 AND state IN ('open','presented')", run).length === 1, 15_000, "the wait_expired item");
+    const [item] = query<{ line: string }>(e, "SELECT COALESCE(full_line, line) AS line FROM items WHERE kind = 'wait_expired' AND run_id = ?1", run);
+    expect(item!.line).toContain(`the merge of ${task}`);
+    expect(item!.line).toContain(`flowryn merge ${task}`);
+    const fleet = await e.fleet.json(["fleet"]);
+    const waiting = (fleet.reply.data as { waiting?: { task: string; wait: string; deadline: string }[] }).waiting ?? [];
+    expect(waiting.find((w) => w.wait === "leader"), JSON.stringify(fleet.reply.data)).toMatchObject({ task, deadline: expect.stringMatching(/^passed /) });
+  },
+  { timeout: 90_000 },
+);
