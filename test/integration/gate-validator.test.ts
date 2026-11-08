@@ -87,16 +87,16 @@ async function setup(reply: string | null, decisions = "") {
   db.query("INSERT INTO gates (id, run_id, stage, kind, review_url, page_path, state, opened_at) VALUES ('g1', ?1, 'design', 'review', 'http://127.0.0.1:4387/session/x', ?2, 'open', ?3)").run(run.runId, page, Date.now() - 3 * HOUR);
   db.close();
   daemons.push(await startDaemon(h));
-  const q = <T>(sql: string, ...params: string[]): T | null => {
+  const q = (sql: string, ...params: string[]): Record<string, unknown> | null => {
     const scratch = h.db();
     try {
-      return scratch.query(sql).get(...params) as T | null;
+      return scratch.query(sql).get(...params) as Record<string, unknown> | null;
     } finally {
       scratch.close();
     }
   };
-  const gateState = () => q<{ state: string }>("SELECT state FROM gates WHERE id = 'g1'")?.state;
-  const validation = (id = "j1") => q<{ state: string; reason: string | null }>("SELECT state, reason FROM gate_validations WHERE id = ?1", id);
+  const gateState = () => (q("SELECT state FROM gates WHERE id = 'g1'") as { state: string } | null)?.state;
+  const validation = (id = "j1") => (q("SELECT state, reason FROM gate_validations WHERE id = ?1", id) as { state: string; reason: string | null } | null);
   return { h, run, q, gateState, validation };
 }
 
@@ -140,9 +140,9 @@ describe("the review-gate validator", () => {
     expect((await daemonCall(h.home, "away", { until: "+8h" })).ok).toBe(true);
     expect(await until(() => gateState() === "changes")).toBe(true);
     expect(validation()).toMatchObject({ state: "changes" });
-    expect(q<{ feedback: string }>("SELECT feedback FROM gates WHERE id = 'g1'")!.feedback).toContain("Fix: Add gate reopen.");
+    expect((q("SELECT feedback FROM gates WHERE id = 'g1'") as { feedback: string } | null)!.feedback).toContain("Fix: Add gate reopen.");
     // Back to design through the scheduler: the stage start's steer carries the findings, attributed to the validator.
-    const back_to = q<{ stage: string; stage_note: string }>("SELECT stage, stage_note FROM runs WHERE id = ?1", run.runId)!;
+    const back_to = (q("SELECT stage, stage_note FROM runs WHERE id = ?1", run.runId) as { stage: string; stage_note: string } | null)!;
     expect(back_to.stage).toBe("design");
     expect(back_to.stage_note).toContain("The independent validator (j1)");
     expect(back_to.stage_note).toContain("1. (requirement: Requirement 3) Undo is missing. Fix: Add gate reopen.");
@@ -192,7 +192,7 @@ describe("deadline defaults under an automatic away", () => {
     await Bun.sleep(2_500);
     expect(q("SELECT state FROM decisions WHERE id = 'q900'")).toEqual({ state: "open" });
     expect((await daemonCall(h.home, "away", { until: "+8h" })).ok).toBe(true);
-    expect(await until(() => q<{ state: string }>("SELECT state FROM decisions WHERE id = 'q900'")?.state === "answered")).toBe(true);
+    expect(await until(() => (q("SELECT state FROM decisions WHERE id = 'q900'") as { state: string } | null)?.state === "answered")).toBe(true);
     expect(q("SELECT answered_by, answered_via FROM decisions WHERE id = 'q900'")).toEqual({ answered_by: "policy", answered_via: "deadline" });
   });
 });

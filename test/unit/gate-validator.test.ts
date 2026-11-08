@@ -188,9 +188,10 @@ describe("parseValidatorReply", () => {
   }
 });
 
+const v = (choice: string, consistent: boolean) => ({ id: "q1", choice, consistent_with_spec: consistent, why: "w" });
+
 describe("questionTake", () => {
   const d = { kind: "single", options: JSON.stringify(["db", "file"]), recommendation: "db" } as const;
-  const v = (choice: string, consistent: boolean) => ({ id: "q1", choice, consistent_with_spec: consistent, why: "w" });
   test("the recommendation, picked and consistent, is taken", () => expect(questionTake(d, v("db", true))).toBe("db"));
   test("picked but not consistent is left", () => expect(questionTake(d, v("db", false))).toBeNull());
   test("another choice is left, even consistent", () => expect(questionTake(d, v("file", true))).toBeNull());
