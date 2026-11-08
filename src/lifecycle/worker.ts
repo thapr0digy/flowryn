@@ -331,7 +331,7 @@ const ack: VerbSpec = {
     const message = getMessage(ctx.db, id);
     if (!message || message.run_id !== run.id) throw new FlowrynError("not_found", `no steer ${id} for this run`, "$FLOWRYN_BIN inbox");
     const result = ackSteer(ctx.db, run, message, ctx.now());
-    return { data: { steer: id, acked: true, already: result.already } };
+    return { data: { steer: id, acked: true, already: result.already, ...(result.superseded.length > 0 ? { superseded: result.superseded } : {}) } };
   },
   async settle(ctx, result) {
     if (ctx.caller.runId) ctx.fleet.bus.notify(ctx.caller.runId);

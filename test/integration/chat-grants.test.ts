@@ -5,6 +5,9 @@ import { openDivergence } from "../../src/reconcile/divergence.ts";
 import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { transcriptFixture } from "../helpers/transcript-fixtures.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Chat-answer grants (docs/notes/2026-10-10-chat-answers-authorise-5g.md), end to end through the

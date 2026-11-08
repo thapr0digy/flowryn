@@ -2,7 +2,7 @@
 
 - Status: done
 - Open: not yet run against a live home
-- Config: `[waits] verify_queue_min`, `[waits] capacity_min`, `[waits] host_min`, `[waits] harness_check_min`, `[waits] phase_start_min`, `[waits] auto_merge_min`, `[waits] landing_min`
+- Config: `[waits] verify_queue_min`, `[waits] capacity_min`, `[waits] host_min`, `[waits] harness_check_min`, `[waits] phase_start_min`, `[waits] auto_merge_min`, `[waits] landing_min`, `[waits] leader_min`
 
 Two stalls on 2026-11-06 went unnoticed for hours. In the first, auto-merge am4 waited 2.5 h on verify request vq128. The verify queue had cancelled that request: GitHub still showed the head the delivery was carried from, so the drain read it as "the PR head moved". In the second, phase 2 of a plan waited about 2 h on the host check (7.8 GB free against an 8 GB floor), and the only signal was the 30-minute capacity P1. Both had the same cause. A wait ended only when some event arrived, and nothing timed it out when that event never came. This change fixes it with plain code (a table, timers and the reconciler) and no model.
 
@@ -32,7 +32,7 @@ The leader's audit (steer m576) added these:
 
 - **A passed verify whose PR head moved** and was never redelivered now holds `HEAD_MOVED_WAIT_MS` (30 min) after the auto-merger first saw the move, not 6 h. The first sighting appends one `auto_merge.head_moved_seen` event for the row (its id and the moved head), and the clock counts from that event, not from when the row began waiting on checks, so a push after a long CI wait still gets its 30 min. Evidence that still shows an earlier delivered head of the task (GitHub catching up, `staleRead`) is not a move: the row waits, and no sighting is recorded. The merge gate's `head_moved` retry uses the same event and bound.
 - **GitHub's checks** may stay pending `CHECKS_WAIT_MS` (6 h). On a project whose default branch's `.no-mistakes.yaml` says `no_ci: true`, the limit is `NO_CI_CHECKS_WAIT_MS` (1 h). The daemon reads the file through bounded git and keeps the reading for a minute (the auto-merger's `noCi` dep).
-- **The verify drain** (`drainVerifyQueue`) still starts requests in order. A request that has to wait on its own PR now steps aside for that pass, so the requests behind it start. Such a wait is GitHub lagging, GitHub unreachable, or an invalid project config. A full validation pool, a pending restart or a failing host check still hold the whole queue. The registry tracks only the first request: a second request that also waits on its own PR behind a waiting first has no deadline of its own until the first starts or is cancelled. Recording the drain's per-request wait reason, so each gets its own, is a follow-up.
+- **The verify drain** (`drainVerifyQueue`) still starts requests in order. A request that has to wait on its own PR now steps aside for that pass, so the requests behind it start. Such a wait is GitHub lagging, GitHub unreachable, or an invalid project config. A full validation pool, a pending restart or a failing host check still hold the whole queue. The drain records each such request's reason and when it began, so each gets its own wait and deadline (docs/notes/2026-11-07-verify-queue-record-p9.md).
 - **The scheduler's `capacity_wait` P1**, opened by runs waiting over `[sched] wait_alert_ms`, also names the oldest queued verify in the queue's own order, with its id, task and age (`oldest queued verify vq1 (t1) 31m`). A queued verify alone never opens it: the registry's `verify_queue` wait covers that.
 
 ## The wait registry (`src/reconcile/waits.ts`, `src/reconcile/wait-deadlines.ts`)
@@ -41,13 +41,14 @@ The leader's audit (steer m576) added these:
 
 | kind | what waits | counted from | deadline |
 |---|---|---|---|
-| `verify_queue` | the first request in the verify queue | its expected start: the later of its request time, the last move of a request ahead of it, and the usual end of each running verify not started from a request behind it (its project's slowest of the last 5 passes, else its timeout) | 20 min |
+| `verify_queue` | the first request in the verify queue that does not wait on its own PR (one that does: from when it began waiting, docs/notes/2026-11-07-verify-queue-record-p9.md) | its expected start: the later of its request time, the last move of a request ahead of it, and the usual end of each running verify not started from a request behind it (its project's slowest of the last 5 passes, else its timeout) | 20 min |
 | `capacity` | a run waiting for a grant (pools, project limit, usage limit, quota, sign-in) | `runs.waiting_since` | 10 min |
 | `host` | a run whose latest refusal is `capacity.host_check` | `runs.waiting_since` | 10 min |
 | `harness_check` | a run whose latest refusal is `capacity.harness_unverified` (the automatic contract check) | `runs.waiting_since` | 20 min |
 | `phase_start` | an approved plan's automatic phase, on a `plan`-autonomy project, whose blockers have landed and that has no run | its last blocker's `run.landed` or `run.cleaned`, else the plan's approval | 10 min |
 | `auto_merge` | a live auto-merge not following a queued request or a running verify (those are the queue's and the verify's own deadlines) | `state_since`; a PR head that moved, its `auto_merge.head_moved_seen` (before the auto-merger records one, `state_since`, so recovery kicks it) | 30 min; a PR's pending checks, the auto-merger's own checks limit (6 h, 1 h under no_ci, from the daemon's same no_ci reading) |
 | `landing` | each project's first waiting entry while none of its entries is landing | `state_since` | 30 min |
+| `leader` | a yolo run whose open explanation is `merge.ready`, `merge.held` or `decision.leader` ("waiting for the leader"), itemized only when no open pr_ready, auto_merge_held or decision item already wakes the leader (docs/notes/2026-11-07-fix-a-held-ss.md) | when that wait began | 15 min |
 
 `[waits] <kind>_min` overrides a deadline in whole minutes, from 1 to 1440. Any other key or value refuses the config at load: the effective config's `waits` section, which `flowryn config` shows.
 
@@ -57,7 +58,7 @@ The reconciler runs `checkWaits` on each full pass (the `checkWaits` dep wired i
 
 1. **Past its deadline: recovery first.**
    - A row in `waits` (migration 56) records it, with a `wait.recovered` event.
-   - The pass then kicks the scheduler (`verify_queue`, `capacity`, `host`, `harness_check`, `phase_start`) or the auto-merger (`auto_merge`, `landing`). A scheduler pass drains the verify queue, re-reads the host check, grants, and re-evaluates every phase's blockers (`autoDispatch`). An auto-merger pass re-queues a lost verify as above and moves the landing queue.
+   - The pass then kicks the scheduler (`verify_queue`, `capacity`, `host`, `harness_check`, `phase_start`) or the auto-merger (`auto_merge`, `landing`, `leader`). A scheduler pass drains the verify queue, re-reads the host check, grants, and re-evaluates every phase's blockers (`autoDispatch`). An auto-merger pass re-queues a lost verify as above and moves the landing queue.
    - Recovery never passes a gate, answers a decision or merges.
 2. **Still there on a later pass (at least `RECOVERY_GRACE_MS`, 30 s, after the recovery): one item.**
    - A `wait.expired` event, and one `wait_expired` item (P1, actionable, routed `act` in `LEADER_ROUTE`, so it wakes an idle leader once).

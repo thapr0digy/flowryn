@@ -1,20 +1,21 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
 import { capacityConfig } from "../config/workflows.ts";
 import { restartHoldingVerifies } from "../daemon/restart.ts";
 import { tx, type Db } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
-import { deliveredOf } from "../lifecycle/delivery.ts";
+import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
-import { fullPools, grantJobLease, liveCounts, OverCapacity, poolHolders } from "../sched/pools.ts";
+import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, poolHolders } from "../sched/pools.ts";
 import { hostState } from "../sched/scheduler.ts";
 import { verifyConfig, type VerifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
-import { cancelRequest, getRequest, markStarted, positionOf, queuedRequests, type VerifyRequest } from "./queue.ts";
+import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
-import { insertVerification, runningVerifications, type Verification } from "./store.ts";
+import { insertVerification, interruptedByStop, parseVerification, runningVerifications, type Verification, type VerificationRow, type VerifyStep } from "./store.ts";
 
 /**
  * Starting verifications (docs/notes/2026-10-22-daemon-run-verify-y3.md): a
@@ -32,15 +33,50 @@ export function verifyRoot(config: Pick<FlowrynConfig, "state_dir">): string {
   return join(config.state_dir, "verify");
 }
 
+/**
+ * The interrupted verification a new one of this PR, head and policy resumes
+ * (docs/notes/2026-11-07-faster-landing-test-q7.md): the newest one a daemon
+ * stop cut off, whose worktree is still there and whose slot is free (nothing
+ * of it still runs), with exactly these steps.
+ */
+export function resumableFrom(db: Db, prUrl: string, head: string, policy: string, steps: readonly VerifyStep[]): Verification | null {
+  const rows = (
+    db
+      .query("SELECT * FROM verifications WHERE pr_url = ?1 AND head_sha = ?2 AND policy_id = ?3 AND state = 'error' ORDER BY started_at DESC, rowid DESC LIMIT 5")
+      .all(prUrl, head, policy) as VerificationRow[]
+  ).map(parseVerification);
+  const held = new Set(liveJobLeases(db, "verify").map((l) => l.job_id));
+  const source = rows.find((v) => interruptedByStop(v) && !held.has(v.id) && existsSync(v.worktree_path));
+  if (!source || source.steps.length !== steps.length || source.steps.some((s, i) => s.name !== steps[i]!.name)) return null;
+  return source;
+}
+
+/** The new steps with every step that passed or was skipped in `from` kept, its log named as there; null when none did. */
+export function resumeSteps(from: Verification, steps: readonly VerifyStep[]): VerifyStep[] | null {
+  let kept = 0;
+  const out = steps.map((step, i) => {
+    const old = from.steps[i]!;
+    if (old.state !== "passed" && old.state !== "skipped") return { ...step };
+    kept++;
+    return { ...old, resumed_from: from.id, detail: `kept from ${from.id}${old.detail ? `; ${old.detail}` : ""}` };
+  });
+  return kept > 0 ? out : null;
+}
+
 /** Take the request's slot and insert its running verification. Call inside a transaction; throws OverCapacity when the pool is full. */
 export function admitRequest(db: Db, request: VerifyRequest, config: VerifyConfig, caps: Record<string, number>, root: string, projectPath: string, now: number): Verification {
+  const policy = verifyPolicyId(config);
+  const fresh = initialSteps(config.steps, config.when_changed);
+  const source = resumableFrom(db, request.pr_url, request.head_sha, policy, fresh);
+  const resumed = source ? resumeSteps(source, fresh) : null;
   const v = insertVerification(db, {
     project_id: request.project_id,
     pr_url: request.pr_url,
     task_id: request.task_id,
     head_sha: request.head_sha,
-    steps: initialSteps(config.steps, config.when_changed),
-    policy_id: verifyPolicyId(config),
+    steps: resumed ?? fresh,
+    resumed_from: resumed ? source!.id : null,
+    policy_id: policy,
     dir: (id) => join(root, id),
     worktree: (id) => join(root, id, "wt"),
     project_path: projectPath,
@@ -65,11 +101,39 @@ export function queueHold(db: Db, caps: Record<string, number>, now: number): st
   return null;
 }
 
-/** What a queued request waits on, for `verify show` and the queued reply. */
+/** A forge error as a wait_ref: its kind and HTTP status ("refused 403"), never its message. */
+function forgeRef(error: unknown): string {
+  if (error instanceof ForgeError) return error.status === null ? error.kind : `${error.kind} ${error.status}`;
+  return "error";
+}
+
+/**
+ * The request's own wait in plain words, from its recorded code and id
+ * (`detail` adds what only the caller knows now, such as the config error).
+ */
+export function ownWaitCause(request: Pick<VerifyRequest, "project_id" | "pr_url" | "head_sha" | "wait_reason" | "wait_ref">, detail?: string): string {
+  switch (request.wait_reason) {
+    case "config_invalid":
+      return `the [projects.${request.project_id}] config is invalid${detail ? `: ${detail}` : ""}`;
+    case "forge_outage":
+      return `GitHub is unavailable (${request.wait_ref ?? "no answer"}), so its PR cannot be read`;
+    case "stale_read":
+      return `GitHub still shows ${request.wait_ref ?? "an older head"}, a head delivered before ${request.head_sha.slice(0, 8)}`;
+    case "pr_unreadable":
+      return `cannot read ${request.pr_url} (${request.wait_ref ?? "error"})`;
+    default:
+      return "-";
+  }
+}
+
+/** What a queued request waits on, for `verify show` and the queued reply: its own PR, else the requests ahead that do not step aside. */
 export function waitingOn(db: Db, request: VerifyRequest, caps: Record<string, number>, now: number): string {
   const place = positionOf(db, request.id);
   if (!place) return "-";
-  if (place.ahead.length > 0) return `behind ${place.ahead.join(", ")}`;
+  const fresh = getRequest(db, request.id) ?? request;
+  if (fresh.wait_reason) return `waits on its own PR, the ones behind go first: ${ownWaitCause(fresh)}`;
+  const ahead = place.ahead.filter((id) => !getRequest(db, id)?.wait_reason);
+  if (ahead.length > 0) return `behind ${ahead.join(", ")}`;
   const hold = queueHold(db, caps, now);
   if (hold) return hold;
   const host = hostState(db);
@@ -124,7 +188,35 @@ export function staleRead(db: Db, request: Pick<VerifyRequest, "task_id" | "head
   return db.query("SELECT 1 FROM artifacts WHERE task_id = ?1 AND substr(head_sha, 1, length(?2)) = ?2 AND kind IN ('pr','local') LIMIT 1").get(request.task_id, read) !== null;
 }
 
-type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string };
+/**
+ * The head the delivery watcher last observed for the request's PR (its task's
+ * newest run that is not ended), or null. The drain's own read can lag behind
+ * it: a conditional read GitHub answered from a stale cache, or a recorded wait
+ * the drain did not revisit while the queue was held.
+ */
+export function observedHead(db: Db, request: Pick<VerifyRequest, "task_id" | "pr_url">): string | null {
+  if (!request.task_id) return null;
+  const run = db.query("SELECT id FROM runs WHERE task_id = ?1 AND state NOT IN ('cleaned','failed','cancelled') ORDER BY started_at DESC, rowid DESC LIMIT 1").get(request.task_id) as { id: string } | null;
+  const pr = run ? prEvidence(db, run.id) : null;
+  return pr && pr.url === request.pr_url ? pr.head : null;
+}
+
+/**
+ * Clear each recorded stale_read wait the watcher's freshest reading already
+ * disproves (it shows the request's own head), so neither fleet nor the wait
+ * registry keeps saying GitHub lags while the request only waits its turn.
+ * Call inside a transaction. Returns the requests cleared.
+ */
+export function clearDisprovedStaleReads(db: Db, now: number): string[] {
+  const cleared: string[] = [];
+  for (const r of queuedRequests(db)) {
+    if (r.wait_reason !== "stale_read" || observedHead(db, r) !== r.head_sha) continue;
+    if (clearWaiting(db, r, now)) cleared.push(r.id);
+  }
+  return cleared;
+}
+
+type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string; own: OwnWait };
 
 /** Is the request still worth running: its project still has verify steps, its PR is open at the same head (local-only work: the worktree HEAD)? */
 async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wanted> {
@@ -134,9 +226,15 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
   try {
     config = verifyConfig(deps.config(), request.project_id);
   } catch (error) {
-    return { wait: `the [projects.${request.project_id}] config is invalid: ${(error as Error).message}` };
+    return { wait: `the [projects.${request.project_id}] config is invalid: ${(error as Error).message}`, own: { reason: "config_invalid", ref: null } };
   }
   if (!config) return { cancel: `project ${request.project_id} has no verify steps now` };
+  if (request.pr_number === null && request.worktree === null) {
+    // A landing train's candidate (src/verify/landing-queue.ts): in the object store, never pushed; wanted while its entry keeps it.
+    const kept = deps.db.query("SELECT 1 FROM landing_queue WHERE ref = ?1 AND train_head = ?2 AND state IN ('waiting','landing')").get(request.pr_url, request.head_sha);
+    if (!kept) return { cancel: `the landing train no longer tests ${request.head_sha.slice(0, 8)}` };
+    return { start: config, projectPath, base: null };
+  }
   if (request.pr_number === null) {
     const head = request.worktree ? await deps.git(["rev-parse", "HEAD"], request.worktree) : null;
     if (!head || head.code !== 0) return { cancel: `cannot read the head of ${request.pr_url}${request.worktree ? ` in ${request.worktree}` : ""}` };
@@ -148,18 +246,27 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
   if (!ref) return { cancel: `${request.pr_url} is not a pull request URL` };
   let base: string | null = null;
   try {
-    const pr = await deps.forge().pull(ref);
+    let pr = await deps.forge().pull(ref);
+    // An earlier delivered head may be a cached answer: read again without the ETag before deferring.
+    if (pr.headSha !== request.head_sha && staleRead(deps.db, request, pr.headSha)) pr = await deps.forge().pull(ref, { fresh: true });
     base = pr.baseRef || null;
     if (pr.state !== "open") return { cancel: `${request.pr_url} is ${pr.state}` };
     if (pr.headSha !== request.head_sha) {
-      // GitHub read a head this task delivered before (the one a carry started from): it has not caught up with the push yet.
-      if (staleRead(deps.db, request, pr.headSha) && deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}` };
+      // GitHub read a head this task delivered before (the one a carry started from): it has not caught up with the push yet,
+      // unless the watcher's freshest reading already shows the request's head: that one counts.
+      if (staleRead(deps.db, request, pr.headSha)) {
+        if (observedHead(deps.db, request) === request.head_sha) {
+          deps.log(`verify ${request.id}: GitHub's read shows ${pr.headSha.slice(0, 8)}, but the watcher last saw ${request.head_sha.slice(0, 8)}; starting on it`);
+          return { start: config, projectPath, base };
+        }
+        if (deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}`, own: { reason: "stale_read", ref: pr.headSha.slice(0, 8) } };
+      }
       return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
     }
   } catch (error) {
     if (error instanceof ForgeError && error.kind === "not_found") return { cancel: `GitHub has no ${request.pr_url}` };
-    if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})` };
-    return { wait: `cannot read ${request.pr_url} (${(error as Error).message})` };
+    if (isForgeOutage(error)) return { wait: `GitHub is unavailable (${(error as Error).message})`, own: { reason: "forge_outage", ref: forgeRef(error) } };
+    return { wait: `cannot read ${request.pr_url} (${(error as Error).message})`, own: { reason: "pr_unreadable", ref: forgeRef(error) } };
   }
   return { start: config, projectPath, base };
 }
@@ -194,13 +301,16 @@ function followRunning(db: Db, requestId: string, policy: string | null, now: nu
  * request in line either starts, is cancelled (its PR closed, its head moved),
  * follows a running verification of its PR and head under today's policy, or
  * waits on its own PR (GitHub lagging behind a push, a read that failed) and
- * steps aside for the ones behind it this pass. A full pool, a pending
+ * steps aside for the ones behind it this pass; that wait, its reason and when
+ * it began are recorded on the request (markWaiting), so the wait registry
+ * gives it its own deadline, and cleared once the request may start. A full pool, a pending
  * restart or the host check still hold the whole queue (FIFO). Returns how
  * many started.
  */
 export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
   const { db } = deps;
   let started = 0;
+  tx(db, () => clearDisprovedStaleReads(db, deps.now()));
   // Requests that must wait on their own PR (GitHub lagging, unreadable, a bad project config): the ones behind go first.
   const waiting = new Set<string>();
   for (;;) {
@@ -213,9 +323,11 @@ export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
     const wanted = await stillWanted(deps, first);
     if ("wait" in wanted) {
       deps.log(`verify ${first.id}: waits: ${wanted.wait}`);
+      tx(db, () => markWaiting(db, first, wanted.own, deps.now()));
       waiting.add(first.id);
       continue;
     }
+    if ("start" in wanted && first.wait_reason) tx(db, () => clearWaiting(db, first, deps.now()));
     if ("cancel" in wanted) {
       tx(db, () => cancelRequest(db, first, wanted.cancel, deps.now()));
       continue;

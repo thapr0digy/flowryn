@@ -8,7 +8,9 @@ import { appendEvent } from "../../src/db/events.ts";
 import { REVIEW_TURN_END_REMINDER, TURN_END_REMINDER } from "../../src/harness/contract-text.ts";
 import { addReviewMessage } from "../../src/lifecycle/review-chat.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
-import { getRun } from "../../src/lifecycle/runs.ts";
+import { openItem } from "../../src/attention/items.ts";
+import { idleAlertLine } from "../../src/lifecycle/idle-alert.ts";
+import { getRun, taskTitle } from "../../src/lifecycle/runs.ts";
 import { createSteer, markRung } from "../../src/lifecycle/steers.ts";
 import { BACKGROUND_ENDED, backgroundStartOf, recordBackgroundStart, runningBackgroundJobs, type ToolHookInput } from "../../src/lifecycle/background-jobs.ts";
 import { guardTurnEnd, instructionAt, OUTCOME_KINDS, reminderIgnored, REMINDER_KIND, RESULT_KIND, WAIT_BACKGROUND, WAIT_END_TURN, type TurnEnd } from "../../src/lifecycle/turn-end-guard.ts";
@@ -415,5 +417,64 @@ describe("a review gate and the page's messages", () => {
     tx(db, () => addReviewMessage(db, { id: "g1", run_id: "r1" }, "worker", "Because rows compare.", clock));
     expect(stop()).toBeNull();
     expect(results().at(-1)).toMatchObject({ obeyed: true });
+  });
+});
+
+/** What the reconciler does when the idle alert falls due: record it and open the pointer with its line. */
+function idleAlert(idleMs: number, jobs?: string): string {
+  clock += 10;
+  return tx(db, () => {
+    const ignored = reminderIgnored(db, run());
+    const payload = { idle_ms: idleMs, ignored_reminder: ignored, ...(jobs ? { background_jobs: [jobs] } : {}) };
+    const seq = appendEvent(db, { source: "reconciler", kind: "run.idle_alert", runId: "r1", taskId: "t1", payload, ts: clock }).seq;
+    const text = idleAlertLine(taskTitle(db, "t1"), idleMs, jobs ? { jobs } : { ignoredReminder: ignored });
+    return openItem(db, { kind: "worker_idle", eventSeq: seq, taskId: "t1", runId: "r1", line: text, now: clock });
+  });
+}
+
+function itemLine(id: string): string {
+  return (db.query("SELECT line FROM items WHERE id = ?1").get(id) as { line: string }).line;
+}
+
+describe("the worker_idle pointer and the reminder result, in either order", () => {
+  const IGNORED = /^Worker for t1 got the turn-end reminder, ended its turn again, and has been idle \d+m without an outcome$/;
+
+  test("result first: the pointer opens with the reminder clause", () => {
+    stop();
+    stop();
+    expect(itemLine(idleAlert(120_000))).toMatch(IGNORED);
+  });
+
+  test("pointer first (it opened between the reminder and the next turn end): the ignored result rewords it", () => {
+    stop();
+    const id = idleAlert(120_000);
+    expect(itemLine(id)).toBe("Worker for t1 has been idle 2m without an outcome");
+    stop();
+    expect(itemLine(id)).toMatch(IGNORED);
+    expect(results()).toMatchObject([{ obeyed: false, idle_item_refreshed: id }]);
+  });
+
+  test("an obeyed result leaves the pointer as it was", () => {
+    stop();
+    const id = idleAlert(60_000);
+    event("worker.report", { status: "progress" });
+    stop();
+    expect(itemLine(id)).toBe("Worker for t1 has been idle 1m without an outcome");
+    expect(results()[0]).not.toHaveProperty("idle_item_refreshed");
+  });
+
+  test("a pointer that waits on a background job, or one already resolved, is not touched", () => {
+    stop();
+    const jobs = idleAlert(60_000, "bjob1");
+    stop();
+    expect(itemLine(jobs)).toBe("Worker for t1 has been idle 1m waiting on bjob1");
+    update("UPDATE items SET state = 'resolved' WHERE id = ?1", jobs);
+    clock += 10;
+    update("UPDATE runs SET stage_started_at = ?2 WHERE id = ?1", "r1", clock);
+    stop();
+    const plain = idleAlert(60_000);
+    update("UPDATE items SET state = 'resolved' WHERE id = ?1", plain);
+    stop();
+    expect(itemLine(plain)).toBe("Worker for t1 has been idle 1m without an outcome");
   });
 });

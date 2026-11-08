@@ -8,6 +8,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { ackBlocker, IGNORED_GRACE_MS } from "../../src/contracts/suite.ts";
 import type { MessageRow } from "../../src/lifecycle/steers.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 const envs: FleetEnv[] = [];
 afterEach(async () => {

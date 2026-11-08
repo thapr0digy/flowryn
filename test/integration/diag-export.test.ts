@@ -5,6 +5,9 @@ import { tx } from "../../src/db/db.ts";
 import { openBlockedPrompt } from "../../src/lifecycle/prompt-wedge.ts";
 import { findRun } from "../../src/lifecycle/runs.ts";
 import { cli, cliJson, makeHome, seedLeader, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn diag export` through the real CLI (docs/notes/2026-10-13-next-steps-md-wq.md):

@@ -148,7 +148,8 @@ export class ForgeError extends Error {
 }
 
 export interface Forge {
-  pull(ref: PrRef): Promise<PullRequest>;
+  /** `fresh`: skip the conditional (ETag) read, for a caller that doubts a cached answer. */
+  pull(ref: PrRef, opts?: { fresh?: boolean }): Promise<PullRequest>;
   /** PRs whose head is `branch` in this repo, newest first, any state. */
   pullsForBranch(repo: RepoRef, branch: string): Promise<PullRequest[]>;
   checks(repo: RepoRef, sha: string): Promise<ChecksSummary>;

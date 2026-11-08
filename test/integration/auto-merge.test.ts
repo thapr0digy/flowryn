@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import type { FakeCheck } from "../helpers/fake-github.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Yolo auto-merge end to end (docs/notes/2026-10-22-daemon-run-verify-y3.md,
@@ -14,10 +18,12 @@ import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
  */
 
 let env: ShipEnv | null = null;
+const dirs: string[] = [];
 
 afterEach(async () => {
   await env?.cleanup();
   env = null;
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 }, 30_000);
 
 const PASSING = ["printf ' 2 pass\\n 0 fail\\nRan 2 tests across 1 file. [1.00ms]\\n'"];
@@ -187,6 +193,39 @@ describe("yolo auto-merge", () => {
       expect(e.github.pr("acme/web", 1).merged).toBe(false);
     },
     { timeout: 150_000 },
+  );
+
+  test(
+    "a hold after a second failure is released when the leader's flowryn verify passes at the same head, and the PR lands (docs/notes/2026-11-07-fix-a-held-ss.md)",
+    async () => {
+      // The step fails until a flag outside the worktree exists: the head stays the same, as in the 2026-11-07 stall.
+      const dir = mkdtempSync(join(tmpdir(), "fw-held-"));
+      dirs.push(dir);
+      const flag = join(dir, "go");
+      env = await makeShipEnv({ mode: "direct-PR", yolo: true, extraConfig: autoConfig([`test -f ${flag} || { echo 'boom: not yet'; exit 3; }`]) });
+      const e = env;
+      const { task, run } = await ship(e, "Held then verified", [...prSteps(e), "FAKE: wait-file again", "FAKE: deliver-pr"]);
+      await waitAuto(e, run, (rows) => rows[0]?.state === "sent_back", "the send-back", 60_000);
+      await e.fleet.waitRun(run, (r) => r.state === "running" && r.stage === "ship" && r.stage_state === "active", "the ship stage to start again");
+      writeFileSync(join(e.fleet.h.dataDir, task, "again"), "");
+      const held = await waitAuto(e, run, (r) => r[1]?.state === "held", "the second failure to hold it", 60_000);
+      expect(held[1]).toMatchObject({ reason: "verify_failed" });
+      expect(openItems(e, "auto_merge_held", run)).toHaveLength(1);
+
+      writeFileSync(flag, "go\n");
+      const verified = await e.fleet.cli(["verify", task]);
+      expect(verified.code).toBe(0);
+      await e.fleet.waitRun(run, (r) => r.state === "landed" || r.state === "cleaned", "the released auto-merge to land it", 60_000);
+      const rows = await waitAuto(e, run, (r) => r[1]?.state === "merged", "the held row merged");
+      expect(rows).toHaveLength(2);
+      expect(rows[1]!.head_sha).toBe(held[1]!.head_sha);
+      expect(e.github.pr("acme/web", 1).merged).toBe(true);
+      const released = query<{ payload: string }>(e, "SELECT payload FROM events WHERE kind = 'auto_merge.hold_released' AND run_id = ?1", run).map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+      expect(released).toHaveLength(1);
+      expect(released[0]).toMatchObject({ auto_merge: rows[1]!.id, held: "verify_failed", verification: rows[1]!.verification_id, to: "waiting_checks" });
+      expect(query(e, "SELECT id FROM items WHERE kind = 'auto_merge_held' AND run_id = ?1 AND state IN ('open','presented')", run)).toEqual([]);
+    },
+    { timeout: 180_000 },
   );
 
   test(

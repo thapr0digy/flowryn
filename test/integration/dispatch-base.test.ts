@@ -9,6 +9,9 @@ import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
 import { FakeGitHub } from "../helpers/fake-github.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `dispatch --base <branch>` (docs/notes/2026-10-27-stack-a-plan-4y.md): a

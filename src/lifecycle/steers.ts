@@ -280,7 +280,9 @@ export function formatMs(ms: number): string {
 
 /**
  * Steers that used every ring and were still not acknowledged a ring interval
- * after the last: open one P1 per run. Returns the runs that got one.
+ * after the last: open one P1 per run. A steer is flagged at most once: an
+ * item for it that was dismissed (or otherwise closed) is never reopened.
+ * Returns the runs that got one.
  */
 export function flagUnackedSteers(db: Db, now: number, timing: Timing): string[] {
   const rows = db
@@ -288,7 +290,10 @@ export function flagUnackedSteers(db: Db, now: number, timing: Timing): string[]
       `SELECT m.*, r.task_id FROM messages m JOIN runs r ON r.id = m.run_id
        WHERE m.acked_at IS NULL AND m.rings >= ?1 AND m.last_rung_at <= ?2
          AND r.state NOT IN ('cleaned','failed','cancelled')
-         AND NOT EXISTS (SELECT 1 FROM items i WHERE i.kind = 'steer_unacked' AND i.run_id = m.run_id AND i.state IN ('open','presented'))`,
+         AND NOT EXISTS (SELECT 1 FROM items i WHERE i.kind = 'steer_unacked' AND i.run_id = m.run_id AND i.state IN ('open','presented'))
+         AND NOT EXISTS (SELECT 1 FROM items i JOIN events e ON e.seq = i.event_seq
+                         WHERE i.kind = 'steer_unacked' AND i.run_id = m.run_id AND json_extract(e.payload, '$.steer') = m.id)
+       ORDER BY m.created_at, m.id`,
     )
     .all(timing.max_rings, now - timing.ring_interval_ms) as (MessageRow & { task_id: string })[];
   const flagged = new Set<string>();
@@ -308,14 +313,34 @@ export function flagUnackedSteers(db: Db, now: number, timing: Timing): string[]
   return [...flagged];
 }
 
-/** The worker acknowledged a steer. Call inside a transaction. */
-export function ackSteer(db: Db, run: RunRow, message: MessageRow, now: number): { already: boolean } {
-  if (message.acked_at !== null) return { already: true };
+/**
+ * Unacknowledged steers of the run created before `newer`: the worker acted on
+ * a later steer, so they stop ringing and are never flagged. Each is marked
+ * acked with a steer.superseded event naming the ack that settled it. Call
+ * inside a transaction; returns the ids settled.
+ */
+function supersedeOlderSteers(db: Db, run: RunRow, newer: MessageRow, now: number): string[] {
+  const older = unackedSteers(db, run.id).filter((m) => m.id !== newer.id && (m.created_at < newer.created_at || (m.created_at === newer.created_at && messageNo(m.id) < messageNo(newer.id))));
+  for (const m of older) {
+    db.query("UPDATE messages SET acked_at = ?2 WHERE id = ?1 AND acked_at IS NULL").run(m.id, now);
+    appendEvent(db, { source: "cli", kind: "steer.superseded", runId: run.id, taskId: run.task_id, payload: { steer: m.id, by: newer.id, rings: m.rings }, ts: now });
+  }
+  return older.map((m) => m.id);
+}
+
+function messageNo(id: string): number {
+  return Number(id.slice(1));
+}
+
+/** The worker acknowledged a steer, which also settles every older unacknowledged one on the run. Call inside a transaction. */
+export function ackSteer(db: Db, run: RunRow, message: MessageRow, now: number): { already: boolean; superseded: string[] } {
+  if (message.acked_at !== null) return { already: true, superseded: [] };
   // An ack proves the steer was read, even when no hook reported it seen first.
   db.query("UPDATE messages SET acked_at = ?2, seen_at = COALESCE(seen_at, ?2), ring_state = CASE WHEN ring_state = 'carried' THEN 'seen' ELSE ring_state END WHERE id = ?1").run(message.id, now);
   const event = appendEvent(db, { source: "cli", kind: "steer.acked", runId: run.id, taskId: run.task_id, payload: { steer: message.id, rings: message.rings }, ts: now });
+  const superseded = supersedeOlderSteers(db, run, message, now);
+  if (message.rings > 1 || superseded.length > 0) resolveRunItems(db, run.id, ["steer_unacked"], `steer.acked ${message.id}`, now);
   if (message.rings > 1) {
-    resolveRunItems(db, run.id, ["steer_unacked"], `steer.acked ${message.id}`, now);
     openItem(db, {
       kind: "steer_acked",
       eventSeq: event.seq,
@@ -325,7 +350,7 @@ export function ackSteer(db: Db, run: RunRow, message: MessageRow, now: number):
       now,
     });
   }
-  return { already: false };
+  return { already: false, superseded };
 }
 
 type WaitOutcome = "wake" | "timeout" | "superseded";

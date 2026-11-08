@@ -13,7 +13,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
 import { autoMergeProgress, CHECKS_WAIT_MS, checksPending, evidenceHead, HEAD_MOVED_WAIT_MS, headMovedSeenAt, liveAutoMerges, NO_CI_CHECKS_WAIT_MS, type AutoMergeRow } from "../verify/auto-merge.ts";
 import { verifyConfig } from "../verify/config.ts";
 import { getRequest, queuedRequests, type VerifyRequest } from "../verify/queue.ts";
-import { waitingOn } from "../verify/start.ts";
+import { ownWaitCause, waitingOn } from "../verify/start.ts";
 import { getVerification, runningVerifications } from "../verify/store.ts";
 import { forgeDownSince } from "./forge-health.ts";
 import { waitDeadlines, type WaitKind } from "./wait-deadlines.ts";
@@ -38,7 +38,7 @@ export const RECOVERY_GRACE_MS = 30_000;
 
 /** One waiting state as the registry sees it now. */
 export interface Wait {
-  /** Stable for the thing waiting: `verify:vq12`, `run:r3`, `phase:t5`, `auto_merge:am4`, `landing:lq5`. */
+  /** Stable for the thing waiting: `verify:vq12`, `run:r3`, `phase:t5`, `auto_merge:am4`, `landing:lq5`, `leader:r3:merge`. */
   key: string;
   kind: WaitKind;
   task_id: string | null;
@@ -64,6 +64,7 @@ const RECOVERY: Readonly<Record<WaitKind, "scheduler" | "auto_merger">> = {
   phase_start: "scheduler",
   auto_merge: "auto_merger",
   landing: "auto_merger",
+  leader: "auto_merger",
 };
 
 /** Items that already carry a wait of this rule to the leader: the wait is recovered, never itemized twice. */
@@ -87,7 +88,7 @@ export type NoCiReading = (projectId: string) => boolean;
 /** Every wait there is now, oldest first. */
 export function collectWaits(db: Db, config: FlowrynConfig, now: number, noCi: NoCiReading = () => false): Wait[] {
   const deadlines = waitDeadlines(config);
-  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, noCi), ...landingWaits(db, deadlines)].toSorted(
+  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, noCi), ...landingWaits(db, deadlines), ...leaderWaits(db, deadlines)].toSorted(
     (a, b) => a.since - b.since || a.key.localeCompare(b.key),
   );
 }
@@ -107,10 +108,52 @@ function usualVerifyMs(db: Db, config: FlowrynConfig, projectId: string): number
   }
 }
 
-/** The first request in line: it should start once the queue ahead of it last moved, or the verifies running ahead of it are expected to end; requests that went past it never reset its clock. */
+/**
+ * The verify queue's waits: each request the drain recorded as waiting on its
+ * own PR (it steps aside for the ones behind) gets its own, from when it began
+ * waiting; and the first request in line that does not step aside should start
+ * once the queue ahead of it last moved, or the verifies running ahead of it
+ * are expected to end; requests that went past it never reset its clock.
+ */
 function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitKind, number>, now: number): Wait[] {
-  const first = queuedRequests(db)[0];
-  if (!first) return [];
+  const queued = queuedRequests(db);
+  const waits = queued.filter((r) => r.wait_reason !== null).map((r) => ownVerifyWait(config, r, deadlines));
+  const first = queued.find((r) => r.wait_reason === null);
+  return first ? [...waits, lineVerifyWait(db, config, deadlines, now, first, queued[0] !== first)] : waits;
+}
+
+/** What waits, for both kinds of verify wait. */
+function verifyWhat(r: VerifyRequest): string {
+  return `verify ${r.id}${r.task_id ? ` of ${r.task_id}` : ""} at ${r.head_sha.slice(0, 8)}`;
+}
+
+/** A request waiting on its own PR: its recorded cause, due a deadline after it began waiting. */
+function ownVerifyWait(config: FlowrynConfig, r: VerifyRequest, deadlines: Record<WaitKind, number>): Wait {
+  const since = r.wait_since ?? r.requested_at;
+  let detail: string | undefined;
+  if (r.wait_reason === "config_invalid") {
+    try {
+      verifyConfig(config, r.project_id);
+    } catch (error) {
+      detail = (error as Error).message;
+    }
+  }
+  const show = `flowryn verify show ${r.id}`;
+  return {
+    key: `verify:${r.id}`,
+    kind: "verify_queue",
+    task_id: r.task_id,
+    run_id: null,
+    since,
+    due: since + deadlines.verify_queue,
+    what: verifyWhat(r),
+    cause: `waits on its own PR, so the requests behind it go first: ${ownWaitCause(r, detail)}`,
+    fix: r.wait_reason === "config_invalid" ? `flowryn config; ${show}` : show,
+  };
+}
+
+/** The first request in line that does not step aside (`behindOwn`: requests waiting on their own PR are ahead of it). */
+function lineVerifyWait(db: Db, config: FlowrynConfig, deadlines: Record<WaitKind, number>, now: number, first: VerifyRequest, behindOwn: boolean): Wait {
   const ahead = (t: string) => `(${t}.rank, ${t}.requested_at, CAST(substr(${t}.id, 3) AS INTEGER)) < (?1, ?2, ?3)`;
   const place = [first.rank, first.requested_at, Number(first.id.slice(2))] as const;
   const moved = (db.query(`SELECT MAX(q.ended_at) AS t FROM verify_queue q WHERE q.ended_at IS NOT NULL AND ${ahead("q")}`).get(...place) as { t: number | null }).t ?? 0;
@@ -132,19 +175,17 @@ function verifyQueueWaits(db: Db, config: FlowrynConfig, deadlines: Record<WaitK
     caps = {};
   }
   const { cause, fix } = verifyWaitCause(db, config, first, caps, now);
-  return [
-    {
-      key: `verify:${first.id}`,
-      kind: "verify_queue",
-      task_id: first.task_id,
-      run_id: null,
-      since: first.requested_at,
-      due: expected + deadlines.verify_queue,
-      what: `verify ${first.id}${first.task_id ? ` of ${first.task_id}` : ""} at ${first.head_sha.slice(0, 8)}`,
-      cause: `first in the verify queue and not started: ${cause}`,
-      fix,
-    },
-  ];
+  return {
+    key: `verify:${first.id}`,
+    kind: "verify_queue",
+    task_id: first.task_id,
+    run_id: null,
+    since: first.requested_at,
+    due: expected + deadlines.verify_queue,
+    what: verifyWhat(first),
+    cause: `${behindOwn ? "first in the verify queue behind requests waiting on their own PR" : "first in the verify queue"} and not started: ${cause}`,
+    fix,
+  };
 }
 
 /** Why the first request has not started: the drain's own checks that make it wait (its project's config, GitHub's outage), else what it waits on in the queue. */
@@ -390,6 +431,69 @@ function landingWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
   }));
 }
 
+// --- waits on the leader -----------------------------------------------------------------------
+
+/** The why-waiting rules (src/attention/human-waits.ts) that say a yolo run waits for the leader, and nothing else would act. */
+export const LEADER_WAIT_RULES: readonly string[] = ["merge.ready", "merge.held", "decision.leader"];
+
+interface LeaderExplanationRow {
+  run_id: string;
+  task_id: string;
+  kind: string;
+  rule: string;
+  reason: string;
+  unblock: string;
+  subject: string | null;
+  opened_at: number;
+}
+
+/**
+ * A yolo run whose fleet line says it waits for the leader (a ready PR, a
+ * held auto-merge, a decision only the leader answers): due a deadline after
+ * that wait began, so it is itemized unless an open item already wakes the
+ * leader for it (coveringItem). Read from the open explanations, as fleet does.
+ */
+function leaderWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
+  const rules = LEADER_WAIT_RULES.map((_, i) => `?${i + 1}`).join(", ");
+  const rows = db
+    .query(
+      `SELECT x.run_id, x.task_id, x.kind, x.rule, x.reason, x.unblock, x.subject, x.opened_at FROM explanations x
+         JOIN runs r ON r.id = x.run_id JOIN task_policy p ON p.task_id = x.task_id
+       WHERE x.closed_at IS NULL AND x.rule IN (${rules}) AND p.yolo = 1 AND r.state NOT IN ${ENDED}
+       ORDER BY x.opened_at, x.id`,
+    )
+    .all(...LEADER_WAIT_RULES) as LeaderExplanationRow[];
+  return rows.map((row) => {
+    let fix: string | null = null;
+    try {
+      fix = (JSON.parse(row.unblock) as { by: string; action: string }[]).find((u) => u.by === "leader")?.action ?? null;
+    } catch {
+      fix = null;
+    }
+    return {
+      key: `leader:${row.run_id}:${row.subject ?? row.kind}`,
+      kind: "leader",
+      task_id: row.task_id,
+      run_id: row.run_id,
+      since: row.opened_at,
+      due: row.opened_at + deadlines.leader,
+      what: row.kind === "merge" ? `the merge of ${row.task_id}` : `decision ${row.subject ?? "-"} of ${row.task_id}`,
+      cause: row.reason,
+      fix: fix ?? `flowryn show ${row.task_id}`,
+    };
+  });
+}
+
+/** Items that already wake the leader for a leader wait: the run's ready PR or held auto-merge, or the decision's own item. */
+function leaderCoveringItem(db: Db, w: Wait): string | null {
+  if (!w.run_id) return null;
+  const subject = w.key.slice(`leader:${w.run_id}:`.length);
+  if (subject === "merge") {
+    return (db.query("SELECT id FROM items WHERE run_id = ?1 AND kind IN ('pr_ready','auto_merge_held') AND state IN ('open','presented') ORDER BY opened_at LIMIT 1").get(w.run_id) as { id: string } | null)?.id ?? null;
+  }
+  return (db.query("SELECT id FROM items WHERE decision_id = ?1 AND state IN ('open','presented') ORDER BY opened_at LIMIT 1").get(subject) as { id: string } | null)?.id ?? null;
+}
+
 // --- the pass ----------------------------------------------------------------------------------
 
 interface WaitRow {
@@ -446,6 +550,7 @@ function resolveItem(db: Db, itemId: string, by: string, now: number): void {
 
 /** An open item that already tells the leader about this wait, if any. */
 function coveringItem(db: Db, w: Wait): string | null {
+  if (w.kind === "leader") return leaderCoveringItem(db, w);
   if (!w.run_id || (w.kind !== "capacity" && w.kind !== "harness_check")) return null;
   const rule = ruleOf(db, w.run_id);
   const kind = rule ? COVERING_ITEMS[rule] : undefined;

@@ -362,7 +362,7 @@ describe("a verification job", () => {
     expect(procs[0]!.proc_exe).not.toBe("(sh)");
   }, 20_000);
 
-  test("a verification a dead daemon left running is recorded as an error at startup, its worktree removed", async () => {
+  test("a verification a dead daemon left running is recorded as an error at startup, its worktree kept for a resume", async () => {
     const f = fixture();
     const v = tx(f.db, () =>
       insertVerification(f.db, { project_id: "web", pr_url: "https://github.com/acme/web/pull/1", task_id: null, head_sha: f.head, steps: initialSteps(["true"]), policy_id: verifyPolicyId({ steps: ["true"], binary: null }), dir: (id) => join(f.root, id), worktree: (id) => join(f.root, id, "wt"), project_path: f.repo, source: "cli", now: Date.now() }),
@@ -374,7 +374,7 @@ describe("a verification job", () => {
     const after = getVerification(f.db, v.id)!;
     expect(after.state).toBe("error");
     expect(after.detail).toContain("daemon stopped");
-    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(existsSync(v.worktree_path)).toBe(true); // kept for a resume (src/verify/start.ts resumableFrom)
     expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now())).toEqual([]);
   });
 
@@ -403,7 +403,7 @@ describe("a verification job", () => {
     expect(existsSync(marker)).toBe(false);
   }, 20_000);
 
-  test("startup recovery ends a step the last daemon left running (its whole group), records the row, removes the worktree, then frees the slot once", async () => {
+  test("startup recovery ends a step the last daemon left running (its whole group), records the row, keeps the worktree for a resume, then frees the slot once", async () => {
     const f = fixture();
     const marker = join(tempDir(), "grandchild-alive");
     const child = spawn("/bin/sh", ["-c", `(sleep 3; touch ${marker}) & sleep 30`], { detached: true, stdio: "ignore" });
@@ -420,7 +420,7 @@ describe("a verification job", () => {
     expect(order).toEqual(["terminate worktree=true live=1"]);
     expect(await isAlive(proc!)).toBe(false);
     expect(getVerification(f.db, v.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
-    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(existsSync(v.worktree_path)).toBe(true); // kept for a resume (src/verify/start.ts resumableFrom)
     expect(liveCounts(f.db)).toEqual({});
     expect(f.db.query("SELECT released_by FROM job_leases").all()).toEqual([{ released_by: "recovered at startup" }]);
     // A second startup finds nothing to do and records nothing.
@@ -444,7 +444,7 @@ describe("a verification job", () => {
     expect(await recoverVerifications(f.deps)).toBe(1);
     expect(await isAlive(proc!)).toBe(false);
     await waitFor(async () => !(await isAlive(member!)));
-    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(existsSync(v.worktree_path)).toBe(true); // kept for a resume (src/verify/start.ts resumableFrom)
     expect(liveCounts(f.db)).toEqual({});
   }, 20_000);
 
@@ -463,7 +463,7 @@ describe("a verification job", () => {
     expect(restartGuards(f.db, { mergesInFlight: [], cleanups: [], launching: [], challenges: [] }, Date.now())).toEqual([]);
     expect(existsSync(broken.worktree_path)).toBe(true);
     expect(getVerification(f.db, fine.id)).toMatchObject({ state: "error", detail: "the daemon stopped mid-run" });
-    expect(existsSync(fine.worktree_path)).toBe(false);
+    expect(existsSync(fine.worktree_path)).toBe(true); // kept for a resume (src/verify/start.ts resumableFrom)
     expect(liveJobLeases(f.db).map((l) => l.job_id)).toEqual([broken.id]);
     f.deps.terminate = async () => ({ ok: true, evidence: "absent", signal: "none" });
     expect(await recoverVerifications(f.deps)).toBe(0);

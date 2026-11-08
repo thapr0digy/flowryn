@@ -3,6 +3,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
 import { sh } from "../helpers/scratch-git.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * Notes projects (docs/notes/2026-10-30-notes-projects-non-8d.md), end to

@@ -10,6 +10,9 @@ import { projectScopeById, taskScope } from "../../src/leader/scope.ts";
 import { stateFiles } from "../../src/config/paths.ts";
 import { tryExclusiveLock } from "../../src/util/flock.ts";
 import { cliJson, daemonCall, makeHome, realTasksAxi, REPO_ROOT, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * `flowryn home adopt` (docs/notes/2026-10-24-leader-scoping-and-vj.md, phase 2)

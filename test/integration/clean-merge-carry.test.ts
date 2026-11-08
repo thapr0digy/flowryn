@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { waitUntil } from "../helpers/harness.ts";
 import { sh } from "../helpers/scratch-git.ts";
 import { makeShipEnv, type ShipEnv } from "../helpers/ship-env.ts";
+import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
+
+useIntegrationTimeout();
 
 /**
  * A routine PR's head moves on GitHub by a merge of main (docs/notes/2026-10-23-a-clean-merge-fm.md),
