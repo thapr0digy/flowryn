@@ -6,6 +6,7 @@ import { dispatchVerb, planVerb } from "../lifecycle/dispatch.ts";
 import { STAGE_VERBS } from "../lifecycle/stages.ts";
 import { DRAFT_VERBS } from "../lifecycle/draft.ts";
 import { REVIEW_VERBS } from "../lifecycle/review-verbs.ts";
+import { LAVISH_VERBS } from "../lavish/verbs.ts";
 import { BRIEF_VERBS } from "../lifecycle/brief-verbs.ts";
 import { GATE_VERBS } from "../policy/gates.ts";
 import { SCHED_VERBS } from "../sched/verbs.ts";
@@ -35,6 +36,7 @@ export const SERVER_VERBS: readonly VerbSpec[] = [
   ...STAGE_VERBS,
   ...DRAFT_VERBS,
   ...REVIEW_VERBS,
+  ...LAVISH_VERBS,
   ...BRIEF_VERBS,
   ...GATE_VERBS,
   ...SCHED_VERBS,

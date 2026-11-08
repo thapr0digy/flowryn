@@ -44,10 +44,21 @@ exit 0
  * own output format), claims it by renaming and prints it, or prints `status: waiting` once its
  * --timeout-ms runs out; a queued file named *.fail.out makes the poll
  * fail the way a missing session does; `<page> --no-open` (the daemon hosting its copy of a review page)
- * prints the page's session URL. Nothing reaches a real Lavish server or browser.
+ * prints the page's session URL. While $FLOWRYN_HOME/lavish-broken exists, every poll and host fails with
+ * lavish-axi's server error (HTTP 500, code: SERVER_ERROR) until `stop` removes it (a broken server that a
+ * restart cures); $FLOWRYN_HOME/lavish-stop-fail makes `stop` fail. Nothing reaches a real Lavish server or browser.
  */
 const FAKE_LAVISH = `#!/bin/sh
 echo "$*" >> "$FLOWRYN_HOME/lavish-calls.log"
+if [ "$1" = "stop" ]; then
+  [ -e "$FLOWRYN_HOME/lavish-stop-fail" ] && { echo "error: cannot stop" >&2; exit 1; }
+  rm -f "$FLOWRYN_HOME/lavish-broken"
+  exit 0
+fi
+if [ -e "$FLOWRYN_HOME/lavish-broken" ] && { [ "$1" = "poll" ] || [ "$2" = "--no-open" ]; }; then
+  printf 'error: "Lavish Editor request failed: 500"\ncode: SERVER_ERROR\n'
+  exit 1
+fi
 if [ "$1" = "reply" ]; then
   [ -e "$FLOWRYN_HOME/lavish-reply-fail" ] && exit 1
   { cat; echo; } >> "$FLOWRYN_HOME/lavish-replies.log"
@@ -72,6 +83,8 @@ while :; do
   # Unlike the real one, it ends with its daemon (or its home), so tests leave no process behind.
   kill -0 "$parent" 2>/dev/null || exit 0
   [ -d "$FLOWRYN_HOME" ] || exit 0
+  # A server that breaks while a poll waits fails the poll, and leaves what the user queued for a later one.
+  if [ -e "$FLOWRYN_HOME/lavish-broken" ]; then printf 'error: "Lavish Editor request failed: 500"\ncode: SERVER_ERROR\n'; exit 1; fi
   for f in "$q"/*.out; do
     [ -e "$f" ] || continue
     if mv "$f" "$f.taken" 2>/dev/null; then
