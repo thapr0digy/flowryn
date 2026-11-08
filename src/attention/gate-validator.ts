@@ -87,7 +87,7 @@ export interface GateFacts {
   roundsUsed: number;
   /** A round of this task's stage under this away ended held: the gate waits for the user, never a re-ask. */
   heldUnderAway: boolean;
-  /** The user reopened a validator pass of this task's stage under this away: its next review is theirs. */
+  /** The user reopened a validator pass of this run's stage under this away: its next review is theirs. */
   reopenedUnderAway: boolean;
   /** Another validation of this gate is running. */
   running: boolean;
@@ -232,8 +232,8 @@ function heldUnderAway(db: Db, taskId: string, stage: string, awaySince: number,
   return db.query("SELECT 1 FROM gate_validations WHERE task_id = ?1 AND stage = ?2 AND away_since = ?3 AND state = 'held' AND id IS NOT ?4").get(taskId, stage, awaySince, except) !== null;
 }
 
-function reopenedUnderAway(db: Db, taskId: string, stage: string, awaySince: number): boolean {
-  return db.query("SELECT 1 FROM events WHERE kind = 'gate.reopened' AND task_id = ?1 AND json_extract(payload, '$.stage') = ?2 AND ts >= ?3").get(taskId, stage, awaySince) !== null;
+function reopenedUnderAway(db: Db, runId: string, stage: string, awaySince: number): boolean {
+  return db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'gate.reopened' AND json_extract(payload, '$.stage') = ?2 AND ts >= ?3").get(runId, stage, awaySince) !== null;
 }
 
 function pinnedNow(run: RunWithPolicy, gate: GateRow): boolean {
@@ -259,7 +259,7 @@ export function gateFacts(db: Db, gate: GateRow, now: number, except: string | n
     pinned: run !== null && pinnedNow(run, gate),
     roundsUsed: run && away ? roundsUsed(db, run.task_id, gate.stage, away.since, except) : 0,
     heldUnderAway: run !== null && away !== null && heldUnderAway(db, run.task_id, gate.stage, away.since, except),
-    reopenedUnderAway: run !== null && away !== null && reopenedUnderAway(db, run.task_id, gate.stage, away.since),
+    reopenedUnderAway: run !== null && away !== null && reopenedUnderAway(db, run.id, gate.stage, away.since),
     running: db.query("SELECT 1 FROM gate_validations WHERE gate_id = ?1 AND state = 'running' AND id IS NOT ?2").get(gate.id, except) !== null,
     questions: openGateQuestions(db, gate.id),
   };

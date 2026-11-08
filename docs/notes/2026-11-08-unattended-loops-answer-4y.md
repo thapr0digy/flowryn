@@ -57,7 +57,7 @@ On every attention tick, after deadline defaults:
    - it carries no pending phase plan (passing it would approve the plan, which files backlog tasks an undo cannot remove);
    - it has a review page, and its pinned page and spec are unchanged;
    - no round is running for it;
-   - fewer than `validator_rounds` rounds of that task's stage ran under this away (failures count), none of them ended `held` (a held gate waits for you; the validator never re-asks it), and you have not reopened a validator pass of that stage under this away;
+   - fewer than `validator_rounds` rounds of that task's stage ran under this away (failures count), none of them ended `held` (a held gate waits for you; the validator never re-asks it), and you have not reopened a validator pass of that stage of the run under this away;
    - none of its open questions is of a floor kind, or worded like one (checked with every keyword class on).
 
    Only a gate that passes those checks costs a `git rev-parse HEAD`. In one transaction the pass records a `gate_validations` row `j<N>` (state `running`, event `validator.started`) with the head and how long the gate had waited. At most `[ask] max_concurrent` calls run at once.
