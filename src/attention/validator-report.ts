@@ -56,8 +56,15 @@ export interface ValidationRow {
   ref: string | null;
 }
 
-/** A merge round's stage (src/attention/away-merge.ts MERGE_STAGE, kept here so the report needs no import of it). */
-const MERGE_ROUND = "merge";
+/** The stage a merge round records in gate_validations (src/attention/away-merge.ts): no review gate is named so. */
+export const MERGE_STAGE = "merge";
+/** The approval channel a passed merge round mints. */
+export const AWAY_VALIDATOR_CHANNEL = "away-validator";
+
+/** The round an approval minted by the validator came from: its actor names it (`validator j<N> …`). */
+export function validationIdOfActor(actor: string): string | null {
+  return /^validator (j\d+)\b/.exec(actor)?.[1] ?? null;
+}
 
 export function getValidation(db: Db, id: string): ValidationRow | null {
   return db.query("SELECT * FROM gate_validations WHERE id = ?1").get(id) as ValidationRow | null;
@@ -114,13 +121,12 @@ function mergeOutcome(r: RoundRow): string {
   switch (r.state) {
     case "passed":
       return "passed by the validator";
-    case "changes":
-    case "held":
-      return outcome(r);
     case "failed":
       return `no verdict, the PR waits for your approval: ${sanitizeLine(r.reason ?? "", 80)}`;
     case "advised":
       return `advice only, the PR waits for your approval: ${sanitizeLine(r.reason ?? "", 80)}`;
+    default:
+      return outcome(r);
   }
 }
 
@@ -138,7 +144,7 @@ export function validatorRoundLines(db: Db, since: number, until: number, lens: 
   return rows.map((r) => {
     const title = taskTitle(db, r.task_id);
     const name = `${sanitizeLine(title, 60)}${title === r.task_id ? "" : ` (${r.task_id})`}`;
-    if (r.stage === MERGE_ROUND) return `- [${r.id}] pre-merge check of sensitive ${name} → ${mergeOutcome(r)} (report: flowryn show ${r.id}${r.state === "passed" ? mergeFate(db, r.id) : ""})`;
+    if (r.stage === MERGE_STAGE) return `- [${r.id}] pre-merge check of sensitive ${name} → ${mergeOutcome(r)} (report: flowryn show ${r.id}${r.state === "passed" ? mergeFate(db, r.id) : ""})`;
     return `- [${r.id}] ${r.stage} review of ${name} → ${outcome(r)} (after ${waitedLabel(r.waited_ms)}; report: flowryn show ${r.id}${undo(db, r)})`;
   });
 }
@@ -174,14 +180,14 @@ export function awayMergeLines(db: Db, since: number, until: number, lens: Scope
       .query(
         `SELECT m.id, m.task_id, m.pr_url, m.head_sha, m.state, m.merge_sha, m.method, m.detail, a.actor
          FROM merges m JOIN approvals a ON a.id = m.approval_id
-         WHERE a.channel = 'away-validator' AND m.requested_at > ?1 AND m.requested_at <= ?2 ORDER BY m.requested_at, m.id`,
+         WHERE a.channel = '${AWAY_VALIDATOR_CHANNEL}' AND m.requested_at > ?1 AND m.requested_at <= ?2 ORDER BY m.requested_at, m.id`,
       )
       .all(since, until) as AwayMergeRow[]
   ).filter((r) => lens.task(r.task_id));
   return rows.map((r) => {
     const title = taskTitle(db, r.task_id);
     const name = `${sanitizeLine(title, 60)}${title === r.task_id ? "" : ` (${r.task_id})`}`;
-    const validation = /^validator (j\d+)\b/.exec(r.actor)?.[1] ?? "-";
+    const validation = validationIdOfActor(r.actor) ?? "-";
     const report = `report: flowryn show ${validation}`;
     if (r.state === "merged") return `- [${r.id}] merged sensitive PR ${r.pr_url} of ${name} after the validator passed it (${report}; undo: ${revertCommand(r.method, r.merge_sha)} in a new fix ship)`;
     if (r.state === "requested") return `- [${r.id}] merge of sensitive PR ${r.pr_url} of ${name} asked of GitHub after the validator passed it, not yet proven (${report}; flowryn show ${r.task_id})`;

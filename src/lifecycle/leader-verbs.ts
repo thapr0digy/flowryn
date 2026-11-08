@@ -8,7 +8,7 @@ import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
 import { landingProgress, latestLanding } from "../verify/landing-queue.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { waitedLabel } from "../attention/deadline-defaults.ts";
-import { getValidation, type ValidatorVerdict } from "../attention/validator-report.ts";
+import { getValidation, MERGE_STAGE, type ValidatorVerdict } from "../attention/validator-report.ts";
 import { boolArg, stringArg, type HandlerResult, type ReadCtx, type VerbSpec } from "../api/verbs.ts";
 import { resolveRunItems } from "../attention/items.ts";
 import { collectWaits, deadlineLabel, shortDuration, type Wait } from "../reconcile/waits.ts";
@@ -850,7 +850,7 @@ function validationView(ctx: ReadCtx, id: string, full: boolean): HandlerResult 
       questions: verdict ? verdict.questions.map((q) => `${q.id} -> ${sanitizeLine(q.choice, 80)} (${q.consistent_with_spec ? "consistent with the spec" : "not consistent with the spec"}): ${sanitizeLine(q.why, 200)}`) : [],
       report,
     },
-    hints: [`flowryn show ${row.task_id}`, ...(row.state === "passed" && row.stage !== "merge" ? [`flowryn gate reopen ${row.task_id} --gate ${row.stage} --body-file - (undo, while the run is live and undelivered)`] : [])],
+    hints: [`flowryn show ${row.task_id}`, ...(row.state === "passed" && row.stage !== MERGE_STAGE ? [`flowryn gate reopen ${row.task_id} --gate ${row.stage} --body-file - (undo, while the run is live and undelivered)`] : [])],
   };
 }
 

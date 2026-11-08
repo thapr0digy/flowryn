@@ -20,6 +20,7 @@ import {
   finishValidation,
   launchValidation,
   nextValidationId,
+  openMergeFailedItem,
   parseValidatorReply,
   validationsInFlight,
   validatorAction,
@@ -29,7 +30,7 @@ import {
   type ValidatorDeps,
 } from "./gate-validator.ts";
 import { openItem, resolveRunItems } from "./items.ts";
-import { getValidation, type ValidationRow, type ValidatorFinding, type ValidatorVerdict } from "./validator-report.ts";
+import { AWAY_VALIDATOR_CHANNEL, getValidation, MERGE_STAGE, validationIdOfActor, type ValidationRow, type ValidatorFinding, type ValidatorVerdict } from "./validator-report.ts";
 
 /**
  * Sensitive merges while you are away (docs/notes/2026-11-08-merge-sensitive-prs-rr.md). With
@@ -48,9 +49,6 @@ import { getValidation, type ValidationRow, type ValidatorFinding, type Validato
  * (awayApprovalLive), the stop when the away ends (stopAwayMerges) and the merge are plain code.
  */
 
-export const AWAY_VALIDATOR_CHANNEL = "away-validator";
-/** The stage a merge round records in gate_validations: no review gate is named so. */
-export const MERGE_STAGE = "merge";
 /** Passes per task per away: the landing queue moves the head at most MAX_INTEGRATIONS times, and each new head is judged again. A function, so a module cycle never reads it early. */
 export function maxMergePasses(): number {
   return MAX_INTEGRATIONS + 1;
@@ -78,8 +76,6 @@ export interface AwayMergeFacts {
   verify: "passed" | "failed" | "none" | "no_steps";
   /** Another merge round of this task is running. */
   running: boolean;
-  /** A merge round of this task under this away ended held. */
-  held: boolean;
   /** Merge rounds of this task under this away that did not pass (changes, no verdict, advice). */
   stopped: number;
   /** Merge rounds of this task under this away that passed. */
@@ -106,7 +102,6 @@ export function awayMergeRefusal(f: AwayMergeFacts, cfg: Pick<DecisionsConfig, "
   if (f.worktreeHead !== undefined && f.worktreeHead !== f.delivered.head) return "the worktree head is not the delivered head";
   if (f.approvedAtHead) return "already approved at this head";
   if (f.running) return "a merge round is already running";
-  if (f.held) return "a merge round under this away held it for you";
   if (f.stopped >= cfg.validator_rounds) return `${f.stopped} merge rounds did not pass under this away`;
   if (f.passed >= maxMergePasses()) return `${f.passed} merge rounds passed under this away without a merge`;
   return null;
@@ -159,7 +154,7 @@ export function awayApprovals(db: Db, taskId: string | null = null): ApprovalRow
 
 /** The merge round an away-validator approval came from: its actor names it (`validator j<N> …`). */
 export function validationOfApproval(db: Db, row: Pick<ApprovalRow, "actor">): ValidationRow | null {
-  const id = /^validator (j\d+)\b/.exec(row.actor)?.[1];
+  const id = validationIdOfActor(row.actor);
   return id ? getValidation(db, id) : null;
 }
 
@@ -196,7 +191,6 @@ export function awayMergeFacts(db: Db, input: { config: FlowrynConfig; merge: Me
     ...(input.worktreeHead === undefined ? {} : { worktreeHead: input.worktreeHead }),
     verify: run && delivered && ref ? verifyAt(db, config, run, ref, delivered.head) : "none",
     running: run !== null && db.query(`SELECT 1 FROM gate_validations WHERE task_id = ?1 AND stage = '${MERGE_STAGE}' AND state = 'running' AND id IS NOT ?2`).get(run.task_id, except) !== null,
-    held: run !== null && away !== null && count(db, run.task_id, away.since, ["held"], except) > 0,
     stopped: run && away ? count(db, run.task_id, away.since, ["changes", "failed", "advised"], except) : 0,
     passed: run && away ? count(db, run.task_id, away.since, ["passed"], except) : 0,
     approvedAtHead: run !== null && delivered !== null && ref !== null && awayApprovals(db, run.task_id).some((a) => a.pr_url === ref && a.head_sha === delivered.head),
@@ -270,7 +264,7 @@ export function mergeChangesWords(id: string, verdict: ValidatorVerdict): string
   );
 }
 
-function item(db: Db, row: ValidationRow, kind: "validator_failed" | "validator_advice", line: string, now: number): void {
+function item(db: Db, row: ValidationRow, kind: "validator_advice", line: string, now: number): void {
   const { seq } = appendEvent(db, { source: "daemon", kind: "validator.item", runId: row.run_id, taskId: row.task_id, payload: { validation: row.id }, ts: now });
   openItem(db, { kind, eventSeq: seq, taskId: row.task_id, runId: row.run_id, line, now });
 }
@@ -299,7 +293,7 @@ export function applyMergeValidation(db: Db, input: { id: string; result: Parame
   const showLine = `flowryn show ${row.id}`;
   if (action.action === "fail") {
     finishValidation(db, row, { ...base, state: "failed", reason: action.why });
-    item(db, row, "validator_failed", `The validator (${row.id}) gave no verdict on merging ${title} (${row.task_id}): ${sanitizeLine(action.why, 160)}; the PR waits for your approval (${showLine})`, now);
+    openMergeFailedItem(db, row, action.why, now);
     return { validation: row.id, run: row.run_id, state: "failed" };
   }
   if (action.action === "advise") {

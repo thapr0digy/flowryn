@@ -27,7 +27,7 @@ import { userStartedAway, type AwayPosture } from "./away.ts";
 import { waitedLabel } from "./deadline-defaults.ts";
 import { DEADLINE_FLOOR, reservedReason, type DecisionsConfig } from "./decisions-policy.ts";
 import { openItem } from "./items.ts";
-import { getValidation, type ValidationRow, type ValidationState, type ValidatorFinding, type ValidatorQuestion, type ValidatorVerdict } from "./validator-report.ts";
+import { getValidation, MERGE_STAGE, type ValidationRow, type ValidationState, type ValidatorFinding, type ValidatorQuestion, type ValidatorVerdict } from "./validator-report.ts";
 
 /**
  * The review-gate validator (docs/notes/2026-11-08-unattended-loops-answer-4y.md). While an away
@@ -299,7 +299,9 @@ export interface PickedValidation {
 export function pickValidations(db: Db, input: { cfg: DecisionsConfig; now: number; heads: ReadonlyMap<string, string>; inFlight: ReadonlySet<string>; limit: number }): PickedValidation[] {
   const { cfg, now } = input;
   for (const row of db.query("SELECT * FROM gate_validations WHERE state = 'running'").all() as ValidationRow[]) {
-    if (!input.inFlight.has(row.id)) finishValidation(db, row, { state: "failed", reason: "the daemon stopped while it ran", verdict: null, costUsd: row.cost_usd, now });
+    if (input.inFlight.has(row.id)) continue;
+    finishValidation(db, row, { state: "failed", reason: "the daemon stopped while it ran", verdict: null, costUsd: row.cost_usd, now });
+    if (row.stage === MERGE_STAGE) openMergeFailedItem(db, row, "the daemon stopped while it ran", now);
   }
   if (cfg.default_gates.length === 0) return [];
   const away = userStartedAway(db, now);
@@ -330,6 +332,13 @@ export function candidateGates(db: Db, cfg: Pick<DecisionsConfig, "default_gates
   return db
     .query(`SELECT * FROM gates WHERE kind = 'review' AND state = 'open' AND opened_at <= ?1 AND stage IN (${cfg.default_gates.map((_, i) => `?${i + 2}`).join(",")}) ORDER BY opened_at`)
     .all(now - cfg.default_after_h * 3_600_000, ...cfg.default_gates) as GateRow[];
+}
+
+/** The item a merge round that gave no verdict opens: no merge, and the PR waits for the user's approval. Call inside a transaction. */
+export function openMergeFailedItem(db: Db, row: ValidationRow, why: string, now: number): void {
+  const title = sanitizeLine(taskTitle(db, row.task_id), 60);
+  const { seq } = appendEvent(db, { source: "daemon", kind: "validator.item", runId: row.run_id, taskId: row.task_id, payload: { validation: row.id }, ts: now });
+  openItem(db, { kind: "validator_failed", eventSeq: seq, taskId: row.task_id, runId: row.run_id, line: `The validator (${row.id}) gave no verdict on merging ${title} (${row.task_id}): ${sanitizeLine(why, 160)}; the PR waits for your approval (flowryn show ${row.id})`, now });
 }
 
 /** End a round with its `validator.<state>` event. Call inside a transaction. */
@@ -676,7 +685,10 @@ async function runOne(deps: ValidatorDeps, picked: PickedValidation, cfg: Decisi
     deps.log(`validator: recording ${picked.id} failed: ${(error as Error).message}`);
     tx(deps.db, () => {
       const row = getValidation(deps.db, picked.id);
-      if (row?.state === "running") finishValidation(deps.db, row, { state: "failed", reason: `recording failed: ${sanitizeLine((error as Error).message, 160)}`, verdict: null, costUsd: result.costUsd, now: deps.now(), reportPath });
+      if (row?.state !== "running") return;
+      const reason = `recording failed: ${sanitizeLine((error as Error).message, 160)}`;
+      finishValidation(deps.db, row, { state: "failed", reason, verdict: null, costUsd: result.costUsd, now: deps.now(), reportPath });
+      if (row.stage === MERGE_STAGE) openMergeFailedItem(deps.db, row, reason, deps.now());
     });
     deps.changed(picked.run.id);
   }

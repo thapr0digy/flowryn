@@ -6,6 +6,7 @@ import { isValidIsoDate, localDate } from "../lifecycle/dates.ts";
 import { getProject, listProjects } from "../lifecycle/projects.ts";
 import { isTerminal, TERMINAL_STATES, type RunState } from "../lifecycle/runs.ts";
 import { POLICY_EVENT } from "../upkeep/policy-follow.ts";
+import { HUMAN_CHANNELS } from "../policy/approvals.ts";
 import { storeStats, type StoreSection } from "./store-stats.ts";
 import { lensFor } from "../leader/scope.ts";
 
@@ -430,7 +431,7 @@ export function interventions(db: Db, scope: Scope, gaps: string[]): Interventio
   const approvals = db
     .query(
       `SELECT id, task_id, channel, created_at FROM approvals
-       WHERE action = 'merge' AND channel != 'yolo' AND created_at >= $since AND ${inProject("task_id")}
+       WHERE action = 'merge' AND channel IN (${HUMAN_CHANNELS.map((c) => `'${c}'`).join(", ")}) AND created_at >= $since AND ${inProject("task_id")}
        ORDER BY created_at LIMIT $limit`,
     )
     .all({ since: scope.since, project: scope.project, limit: MAX_WAIT_ROWS }) as { id: string; task_id: string; channel: string; created_at: number }[];
