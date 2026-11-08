@@ -239,8 +239,8 @@ describe("the trigger: only an away the user started", () => {
     test(`an away by ${by} picks the verified sensitive PR`, () => {
       const f = fixture();
       awayBy(f, by);
-      const picked = pick(f);
-      expect(picked.map((p) => [p.id, p.gate, p.head, p.ref])).toEqual([["j1", null, HEAD, PR_URL]]);
+      const rounds = pick(f);
+      expect(rounds.map((p) => [p.id, p.gate, p.head, p.ref])).toEqual([["j1", null, HEAD, PR_URL]]);
       expect(getValidation(f.db, "j1")).toMatchObject({ stage: "merge", gate_id: null, ref: PR_URL, state: "running", head: HEAD });
       // One round at a time.
       expect(pick(f)).toEqual([]);

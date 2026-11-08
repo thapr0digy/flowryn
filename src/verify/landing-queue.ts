@@ -717,6 +717,11 @@ export class LandingQueue implements LandingHooks {
         } else if (before && before.consumed_at === null && before.expires_at > now) {
           // Your answer in the design review (q130): an approval carries across the queue's clean merge of the base, unless the work is sensitive.
           if (current.sensitive) {
+            // The validator's pass while you are away binds its head too; it judges the new head by itself, so nothing is held for you.
+            if (before.channel === "away-validator") {
+              leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of origin/${integrated.base} moved the head to ${head.slice(0, 8)}; the validator judges the new head before it merges`, now);
+              return "left";
+            }
             leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of origin/${integrated.base} moved the head to ${head.slice(0, 8)}, so your approval of ${fresh.head_sha.slice(0, 8)} does not carry`, now, {
               next: `flowryn merge ${current.task_id}`,
             });
