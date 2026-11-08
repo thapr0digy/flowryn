@@ -5,7 +5,7 @@ import { capacityConfig } from "../config/workflows.ts";
 import { restartHoldingVerifies } from "../daemon/restart.ts";
 import { tx, type Db } from "../db/db.ts";
 import { parsePrUrl } from "../forge/github.ts";
-import { deliveredOf } from "../lifecycle/delivery.ts";
+import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { ForgeError, type Forge } from "../forge/types.ts";
 import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
@@ -188,6 +188,34 @@ export function staleRead(db: Db, request: Pick<VerifyRequest, "task_id" | "head
   return db.query("SELECT 1 FROM artifacts WHERE task_id = ?1 AND substr(head_sha, 1, length(?2)) = ?2 AND kind IN ('pr','local') LIMIT 1").get(request.task_id, read) !== null;
 }
 
+/**
+ * The head the delivery watcher last observed for the request's PR (its task's
+ * newest run that is not ended), or null. The drain's own read can lag behind
+ * it: a conditional read GitHub answered from a stale cache, or a recorded wait
+ * the drain did not revisit while the queue was held.
+ */
+export function observedHead(db: Db, request: Pick<VerifyRequest, "task_id" | "pr_url">): string | null {
+  if (!request.task_id) return null;
+  const run = db.query("SELECT id FROM runs WHERE task_id = ?1 AND state NOT IN ('cleaned','failed','cancelled') ORDER BY started_at DESC, rowid DESC LIMIT 1").get(request.task_id) as { id: string } | null;
+  const pr = run ? prEvidence(db, run.id) : null;
+  return pr && pr.url === request.pr_url ? pr.head : null;
+}
+
+/**
+ * Clear each recorded stale_read wait the watcher's freshest reading already
+ * disproves (it shows the request's own head), so neither fleet nor the wait
+ * registry keeps saying GitHub lags while the request only waits its turn.
+ * Call inside a transaction. Returns the requests cleared.
+ */
+export function clearDisprovedStaleReads(db: Db, now: number): string[] {
+  const cleared: string[] = [];
+  for (const r of queuedRequests(db)) {
+    if (r.wait_reason !== "stale_read" || observedHead(db, r) !== r.head_sha) continue;
+    if (clearWaiting(db, r, now)) cleared.push(r.id);
+  }
+  return cleared;
+}
+
 type Wanted = { start: VerifyConfig; projectPath: string; base: string | null } | { cancel: string } | { wait: string; own: OwnWait };
 
 /** Is the request still worth running: its project still has verify steps, its PR is open at the same head (local-only work: the worktree HEAD)? */
@@ -218,12 +246,21 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
   if (!ref) return { cancel: `${request.pr_url} is not a pull request URL` };
   let base: string | null = null;
   try {
-    const pr = await deps.forge().pull(ref);
+    let pr = await deps.forge().pull(ref);
+    // An earlier delivered head may be a cached answer: read again without the ETag before deferring.
+    if (pr.headSha !== request.head_sha && staleRead(deps.db, request, pr.headSha)) pr = await deps.forge().pull(ref, { fresh: true });
     base = pr.baseRef || null;
     if (pr.state !== "open") return { cancel: `${request.pr_url} is ${pr.state}` };
     if (pr.headSha !== request.head_sha) {
-      // GitHub read a head this task delivered before (the one a carry started from): it has not caught up with the push yet.
-      if (staleRead(deps.db, request, pr.headSha) && deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}`, own: { reason: "stale_read", ref: pr.headSha.slice(0, 8) } };
+      // GitHub read a head this task delivered before (the one a carry started from): it has not caught up with the push yet,
+      // unless the watcher's freshest reading already shows the request's head: that one counts.
+      if (staleRead(deps.db, request, pr.headSha)) {
+        if (observedHead(deps.db, request) === request.head_sha) {
+          deps.log(`verify ${request.id}: GitHub's read shows ${pr.headSha.slice(0, 8)}, but the watcher last saw ${request.head_sha.slice(0, 8)}; starting on it`);
+          return { start: config, projectPath, base };
+        }
+        if (deps.now() - request.requested_at < STALE_READ_WAIT_MS) return { wait: `GitHub still shows ${pr.headSha.slice(0, 8)}, a head delivered before ${request.head_sha.slice(0, 8)}`, own: { reason: "stale_read", ref: pr.headSha.slice(0, 8) } };
+      }
       return { cancel: headMovedCancel("PR head", request.head_sha, pr.headSha) };
     }
   } catch (error) {
@@ -273,6 +310,7 @@ function followRunning(db: Db, requestId: string, policy: string | null, now: nu
 export async function drainVerifyQueue(deps: QueueDeps): Promise<number> {
   const { db } = deps;
   let started = 0;
+  tx(db, () => clearDisprovedStaleReads(db, deps.now()));
   // Requests that must wait on their own PR (GitHub lagging, unreadable, a bad project config): the ones behind go first.
   const waiting = new Set<string>();
   for (;;) {

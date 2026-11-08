@@ -376,6 +376,60 @@ describe("draining the queue", () => {
     expect(getRequest(f.db, carried.id)).toMatchObject({ state: "cancelled", detail: `the PR head moved from ${f.head.slice(0, 8)} to ${older.slice(0, 8)}; verify the new head` });
   });
 
+  describe("a stale head read (docs/notes/2026-11-07-fix-a-held-ss.md)", () => {
+    /** t1's PR 5 carried from `older` to the fixture's head, a live run of t1, and request 5 at the new head. */
+    function carried(f: Fixture, older: string, observed: string | null): ReturnType<Fixture["request"]> {
+      f.db.exec(`INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at) VALUES ('a0', 't1', 'pr', '${PR(5)}', '${older}', 1)`);
+      f.db.exec(`INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES ('a1', 't1', 'pr', '${PR(5)}', '${f.head}', 2, '${older}')`);
+      f.db.exec("INSERT INTO task_policy (task_id, project_id, kind, delivery_mode, yolo, sensitive, workflow, created_at) VALUES ('t1', 'web', 'ship', 'direct-PR', 1, 0, 'fix', 0)");
+      f.db.exec(
+        `INSERT INTO runs (id, task_id, harness, harness_version, state, liveness, workflow, stage, stage_state, worktree_path, branch, base_sha, token_hash, started_at, updated_at)
+         VALUES ('r1', 't1', 'claude', '2.1.281', 'ready', 'idle', 'fix', 'ship', 'done', '/tmp/wt', 'b5', 'abc', 'x', 0, 0)`,
+      );
+      if (observed) f.db.query("INSERT INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR(5), number: 5, state: "open", head: observed, checks: null, observed_at: 1 }));
+      return f.request(5, { task_id: "t1" });
+    }
+
+    test("a cached read showing the earlier head is read again without the ETag before it defers; the fresh answer starts it", async () => {
+      const f = fixture();
+      const older = "e".repeat(40);
+      const request = carried(f, older, null);
+      const reads: boolean[] = [];
+      const base = f.deps.forge();
+      f.deps = { ...f.deps, forge: () => ({ ...base, pull: async (ref, opts) => (reads.push(opts?.fresh ?? false), { ...(await base.pull(ref)), headSha: opts?.fresh ? f.head : older }) }) };
+      expect(await drainVerifyQueue(f.deps)).toBe(1);
+      expect(reads).toEqual([false, true]);
+      expect(getRequest(f.db, request.id)).toMatchObject({ state: "started", wait_reason: null });
+      await settled(f.db, [getRequest(f.db, request.id)!.verification_id!]);
+    });
+
+    test("GitHub still showing the earlier head while the watcher last saw the request's head: the freshest observed head counts, and it starts", async () => {
+      const f = fixture();
+      const older = "e".repeat(40);
+      const request = carried(f, older, f.head);
+      f.prs.set(5, { headSha: older });
+      expect(await drainVerifyQueue(f.deps)).toBe(1);
+      expect(getRequest(f.db, request.id)).toMatchObject({ state: "started", wait_reason: null });
+      expect(f.logs.some((l) => l.includes(`but the watcher last saw ${f.head.slice(0, 8)}`))).toBe(true);
+      await settled(f.db, [getRequest(f.db, request.id)!.verification_id!]);
+    });
+
+    test("a recorded stale_read wait the watcher's reading disproves is cleared even while the queue is held, so it waits only its turn", async () => {
+      const f = fixture();
+      const older = "e".repeat(40);
+      const request = carried(f, older, null);
+      f.prs.set(5, { headSha: older });
+      expect(await drainVerifyQueue(f.deps)).toBe(0);
+      expect(getRequest(f.db, request.id)).toMatchObject({ wait_reason: "stale_read" });
+      // The watcher then reads the new head, while the host check holds the whole queue: the drain never reaches the request.
+      f.db.query("INSERT INTO run_evidence (run_id, source, rank, value, observed_at) VALUES ('r1', 'github', 1, ?1, 1)").run(JSON.stringify({ url: PR(5), number: 5, state: "open", head: f.head, checks: null, observed_at: 1 }));
+      f.host = { ok: false, sample: null, reason: "load" };
+      expect(await drainVerifyQueue(f.deps)).toBe(0);
+      expect(getRequest(f.db, request.id)).toMatchObject({ state: "queued", wait_reason: null, wait_ref: null });
+      expect(events(f.db, "verify.wait_ended")).toMatchObject([{ request: request.id, reason: "stale_read" }]);
+    });
+  });
+
   test("once the daemon is stopping, nothing starts; the queue is left as it was", async () => {
     const f = fixture();
     const a = f.request(1);

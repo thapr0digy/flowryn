@@ -40,7 +40,7 @@ export const RECOVERY_GRACE_MS = 30_000;
 
 /** One waiting state as the registry sees it now. */
 export interface Wait {
-  /** Stable for the thing waiting: `verify:vq12`, `run:r3`, `phase:t5`, `auto_merge:am4`, `landing:lq5`. */
+  /** Stable for the thing waiting: `verify:vq12`, `run:r3`, `phase:t5`, `auto_merge:am4`, `landing:lq5`, `leader:r3:merge`. */
   key: string;
   kind: WaitKind;
   task_id: string | null;
@@ -66,6 +66,7 @@ const RECOVERY: Readonly<Record<WaitKind, "scheduler" | "auto_merger">> = {
   phase_start: "scheduler",
   auto_merge: "auto_merger",
   landing: "auto_merger",
+  leader: "auto_merger",
 };
 
 /** Items that already carry a wait of this rule to the leader: the wait is recovered, never itemized twice. */
@@ -89,7 +90,7 @@ export type NoCiReading = (projectId: string) => boolean;
 /** Every wait there is now, oldest first. */
 export function collectWaits(db: Db, config: FlowrynConfig, now: number, noCi: NoCiReading = () => false): Wait[] {
   const deadlines = waitDeadlines(config);
-  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, noCi), ...landingWaits(db, deadlines)].toSorted(
+  return [...verifyQueueWaits(db, config, deadlines, now), ...runWaits(db, config, deadlines), ...phaseWaits(db, deadlines), ...autoMergeWaits(db, deadlines, noCi), ...landingWaits(db, deadlines), ...leaderWaits(db, deadlines)].toSorted(
     (a, b) => a.since - b.since || a.key.localeCompare(b.key),
   );
 }
@@ -432,6 +433,69 @@ function landingWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
   }));
 }
 
+// --- waits on the leader -----------------------------------------------------------------------
+
+/** The why-waiting rules (src/attention/human-waits.ts) that say a yolo run waits for the leader, and nothing else would act. */
+export const LEADER_WAIT_RULES: readonly string[] = ["merge.ready", "merge.held", "decision.leader"];
+
+interface LeaderExplanationRow {
+  run_id: string;
+  task_id: string;
+  kind: string;
+  rule: string;
+  reason: string;
+  unblock: string;
+  subject: string | null;
+  opened_at: number;
+}
+
+/**
+ * A yolo run whose fleet line says it waits for the leader (a ready PR, a
+ * held auto-merge, a decision only the leader answers): due a deadline after
+ * that wait began, so it is itemized unless an open item already wakes the
+ * leader for it (coveringItem). Read from the open explanations, as fleet does.
+ */
+function leaderWaits(db: Db, deadlines: Record<WaitKind, number>): Wait[] {
+  const rules = LEADER_WAIT_RULES.map((_, i) => `?${i + 1}`).join(", ");
+  const rows = db
+    .query(
+      `SELECT x.run_id, x.task_id, x.kind, x.rule, x.reason, x.unblock, x.subject, x.opened_at FROM explanations x
+         JOIN runs r ON r.id = x.run_id JOIN task_policy p ON p.task_id = x.task_id
+       WHERE x.closed_at IS NULL AND x.rule IN (${rules}) AND p.yolo = 1 AND r.state NOT IN ${ENDED}
+       ORDER BY x.opened_at, x.id`,
+    )
+    .all(...LEADER_WAIT_RULES) as LeaderExplanationRow[];
+  return rows.map((row) => {
+    let fix: string | null = null;
+    try {
+      fix = (JSON.parse(row.unblock) as { by: string; action: string }[]).find((u) => u.by === "leader")?.action ?? null;
+    } catch {
+      fix = null;
+    }
+    return {
+      key: `leader:${row.run_id}:${row.subject ?? row.kind}`,
+      kind: "leader",
+      task_id: row.task_id,
+      run_id: row.run_id,
+      since: row.opened_at,
+      due: row.opened_at + deadlines.leader,
+      what: row.kind === "merge" ? `the merge of ${row.task_id}` : `decision ${row.subject ?? "-"} of ${row.task_id}`,
+      cause: row.reason,
+      fix: fix ?? `flowryn show ${row.task_id}`,
+    };
+  });
+}
+
+/** Items that already wake the leader for a leader wait: the run's ready PR or held auto-merge, or the decision's own item. */
+function leaderCoveringItem(db: Db, w: Wait): string | null {
+  if (!w.run_id) return null;
+  const subject = w.key.slice(`leader:${w.run_id}:`.length);
+  if (subject === "merge") {
+    return (db.query("SELECT id FROM items WHERE run_id = ?1 AND kind IN ('pr_ready','auto_merge_held') AND state IN ('open','presented') ORDER BY opened_at LIMIT 1").get(w.run_id) as { id: string } | null)?.id ?? null;
+  }
+  return (db.query("SELECT id FROM items WHERE decision_id = ?1 AND state IN ('open','presented') ORDER BY opened_at LIMIT 1").get(subject) as { id: string } | null)?.id ?? null;
+}
+
 // --- the pass ----------------------------------------------------------------------------------
 
 interface WaitRow {
@@ -488,6 +552,7 @@ function resolveItem(db: Db, itemId: string, by: string, now: number): void {
 
 /** An open item that already tells the leader about this wait, if any; for a run held on an untested harness, also the automatic check still queued or running for it (its final failure opens the harness_unverified item). */
 function coveringItem(db: Db, config: FlowrynConfig, w: Wait): string | null {
+  if (w.kind === "leader") return leaderCoveringItem(db, w);
   if (!w.run_id || (w.kind !== "capacity" && w.kind !== "harness_check")) return null;
   const rule = ruleOf(db, w.run_id);
   if (rule === "capacity.harness_unverified") {
