@@ -76,6 +76,8 @@ The load suites:
   - integration parallel: 469–531 s
   - serial files: 95–209 s
 
+After the proof run, the serial suite (`bun test`) passed: 3601 pass, 0 fail, in 2290 s.
+
 Before the fixes, at a load of about 35, the same loops passed 10 of 10 for each file. Two harder probes reproduced failures:
 
 - **Stress.** Six copies of each test, filtered to the one in question, ran beside the suite, at a load past 60. They hit wait timeouts (a launch not granted in 20 s, a reminder not settled in 15 s). These failures came from the load, not from the races above. The `workflows` loop in the first baseline also failed twice, both times in "a stage with fresh = true…", with the same launch-grant timeout. That test passed 10 of 10 in a later loop under the proof's load.
