@@ -289,8 +289,30 @@ function filesUnder(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
     const path = join(dir, name);
     if (name === ".git" || name === "objects") return [];
-    const st = statSync(path);
-    return st.isDirectory() ? filesUnder(path) : st.isFile() ? [path] : [];
+    const st = statIfPresent(path);
+    return st?.isDirectory() ? filesUnder(path) : st?.isFile() ? [path] : [];
+  });
+}
+
+/** The daemon still runs while the test lists its files: one it removes meanwhile (a finished command's state/owned/<pid>.json) is gone, not an error. */
+function statIfPresent(path: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** The listed files that hold the secret; one removed since the listing holds nothing any more. */
+function holding(paths: string[], secret: string): string[] {
+  return paths.filter((path) => {
+    try {
+      return readFileSync(path).includes(secret);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
   });
 }
 
@@ -345,7 +367,7 @@ describe("passing a review from its page with a pass code (docs/notes/2026-10-30
       // Nowhere a worker reads holds the code: the database, the logs, the report directory, Lavish's replies.
       const readable = [...filesUnder(f.h.stateDir), ...filesUnder(f.h.dataDir), ...readdirSync(f.h.home).filter((n) => n.endsWith(".log")).map((n) => join(f.h.home, n))];
       expect(readable.length).toBeGreaterThan(0);
-      expect(readable.filter((path) => readFileSync(path).includes(code))).toEqual([]);
+      expect(holding(readable, code)).toEqual([]);
     },
     { timeout: 120_000 },
   );
@@ -415,7 +437,7 @@ describe("one-click approve (docs/notes/2026-11-05-one-click-approve-3y.md)", ()
       // Nowhere a worker reads holds the key (the open recorder stands in for your browser).
       const readable = [...filesUnder(f.h.stateDir), ...filesUnder(f.h.dataDir), ...readdirSync(f.h.home).filter((n) => n.endsWith(".log") && n !== "browser-opens.log").map((n) => join(f.h.home, n))];
       expect(readable.length).toBeGreaterThan(0);
-      expect(readable.filter((path) => readFileSync(path).includes(key))).toEqual([]);
+      expect(holding(readable, key)).toEqual([]);
     },
     { timeout: 120_000 },
   );

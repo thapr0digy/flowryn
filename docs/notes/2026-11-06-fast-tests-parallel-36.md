@@ -11,9 +11,9 @@ Leader audit of 2026-11-06: `bun test` took 25–27 min, one file at a time, and
 `scripts/test.ts` (`bun run test`, `bun run test:unit`, `bun run test:integration`):
 
 1. `bun test --parallel=N --timeout=30000 --path-ignore-patterns=<serial files> test/unit`
-2. `bun test --timeout=30000 <unit serial files>`, one at a time
+2. `bun test --timeout=30000 <unit serial files>` (one file, so no `--parallel`)
 3. `bun test --parallel=N --timeout=30000 --path-ignore-patterns=<serial files> test/integration`
-4. `bun test --timeout=30000 <integration serial files>`, one at a time
+4. `bun test --parallel=<the fewer of N and the files> --timeout=30000 <integration serial files>`, side by side among themselves (docs/notes/2026-11-08-adopt-the-parallel-vi.md)
 
 It stops at the first failing part, so a unit failure shows in a minute or two. With more than one part it ends with one summary in bun's format, the parts added, so `flowryn verify` records every test's count.
 
