@@ -23,14 +23,16 @@ function filesUnder(dir: string): string[] {
 
 /** The repository files reachable by relative imports from the entry points: what the built binary, and so a worker and the contract check, run. */
 function importClosure(entries: string[]): string[] {
+  const transpiler = new Bun.Transpiler({ loader: "ts" });
   const seen = new Set<string>();
   const queue = entries.map((e) => resolve(ROOT, e));
   while (queue.length > 0) {
     const file = queue.pop()!;
     if (seen.has(file)) continue;
     seen.add(file);
-    for (const match of readFileSync(file, "utf8").matchAll(/(?:from|import)\s*\(?\s*["'](\.{1,2}\/[^"']+)["']/g)) {
-      const target = resolve(dirname(file), match[1]!);
+    const specifiers = transpiler.scanImports(readFileSync(file, "utf8").replace(/^#!.*/, "")).map((entry) => entry.path);
+    for (const specifier of specifiers.filter((s) => s.startsWith("./") || s.startsWith("../"))) {
+      const target = resolve(dirname(file), specifier);
       const found = [target, `${target}.ts`, join(target, "index.ts")].find((c) => existsSync(c) && statSync(c).isFile());
       if (found) queue.push(found);
     }
