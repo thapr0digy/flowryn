@@ -382,12 +382,13 @@ describe("the leader told the worker to end its turn (steer --end-turn)", () => 
   });
 });
 
-describe("the daemon interrupted the worker (flowryn interrupt)", () => {
-  const interrupt = () => {
-    clock += 10;
-    tx(db, () => appendEvent(db, { source: "daemon", kind: INTERRUPT_SENT_KIND, runId: "r1", taskId: "t1", payload: { via: "bus" }, ts: clock }));
-  };
+/** The daemon sends the worker an interrupt. */
+function interrupt(): void {
+  clock += 10;
+  tx(db, () => appendEvent(db, { source: "daemon", kind: INTERRUPT_SENT_KIND, runId: "r1", taskId: "t1", payload: { via: "bus" }, ts: clock }));
+}
 
+describe("the daemon interrupted the worker (flowryn interrupt)", () => {
   test("the interrupted turn's end gets no reminder; a later steer starts an episode that is guarded again", () => {
     interrupt();
     expect(stop()).toBeNull();
