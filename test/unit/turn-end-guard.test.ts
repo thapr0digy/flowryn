@@ -14,7 +14,7 @@ import { getRun, taskTitle } from "../../src/lifecycle/runs.ts";
 import { createSteer, markRung } from "../../src/lifecycle/steers.ts";
 import { INTERRUPT_SENT_KIND } from "../../src/lifecycle/control.ts";
 import { BACKGROUND_ENDED, backgroundStartOf, recordBackgroundStart, runningBackgroundJobs, type ToolHookInput } from "../../src/lifecycle/background-jobs.ts";
-import { guardTurnEnd, instructionAt, OUTCOME_KINDS, reminderIgnored, REMINDER_KIND, RESULT_KIND, WAIT_BACKGROUND, WAIT_END_TURN, WAIT_INTERRUPTED, type TurnEnd } from "../../src/lifecycle/turn-end-guard.ts";
+import { guardTurnEnd, instructionAt, OUTCOME_KINDS, reminderIgnored, REMINDER_KIND, RESULT_KIND, WAIT_BACKGROUND, WAIT_END_TURN, pendingWait, type TurnEnd } from "../../src/lifecycle/turn-end-guard.ts";
 
 /**
  * The turn-end guard's rules (autonomy spec 2, ship A): one reminder per
@@ -403,11 +403,21 @@ describe("the daemon interrupted the worker (flowryn interrupt)", () => {
     expect(stop()).toBe(TURN_END_REMINDER);
   });
 
-  test("an interrupt after a reminder settles it obeyed", () => {
-    expect(stop()).toBe(TURN_END_REMINDER);
+  test("an interrupt that reported a timeout earns no pass: the turn end is reminded", () => {
     interrupt();
+    event("run.interrupted", { ok: false, evidence: "timeout" });
+    expect(stop()).toBe(TURN_END_REMINDER);
+  });
+
+  test("a verified interrupt still earns its pass", () => {
+    interrupt();
+    event("run.interrupted", { ok: true, evidence: "hook" });
     expect(stop()).toBeNull();
-    expect(results()).toMatchObject([{ obeyed: true, outcome: WAIT_INTERRUPTED }]);
+  });
+
+  test("an interrupt is not a rightful wait: the idle nudge and the stale-hook pointer still see the worker as unheld", () => {
+    interrupt();
+    expect(tx(db, () => pendingWait(db, run(), clock, "reconciler"))).toBeNull();
   });
 });
 

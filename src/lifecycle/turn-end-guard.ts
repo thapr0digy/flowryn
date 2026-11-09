@@ -25,7 +25,6 @@ export const OUTCOME_KINDS = ["stage.done", "stage.requested", "stage.delivered"
 
 export const WAIT_BACKGROUND = "its own background job";
 export const WAIT_END_TURN = "the leader said end the turn";
-export const WAIT_INTERRUPTED = "the daemon interrupted the turn";
 
 export const REMINDER_KIND = "run.turn_end_reminder";
 export const RESULT_KIND = "run.turn_end_reminder_result";
@@ -57,17 +56,11 @@ function toldToEndTurn(db: Db, run: RunRow): boolean {
   return latest !== null && latest.end_turn === 1 && latest.carried_at >= instructionAt(db, run);
 }
 
-/** The daemon interrupted the worker and no instruction has come since: the episode has not moved past the interrupt. */
-function interruptedThisEpisode(db: Db, run: RunRow): boolean {
-  const latest = db.query("SELECT MAX(ts) AS at FROM events WHERE run_id = ?1 AND kind = ?2").get(run.id, INTERRUPT_SENT_KIND) as { at: number | null };
-  return latest.at !== null && latest.at >= instructionAt(db, run);
-}
-
 /**
  * Why the worker may rightly sit idle: the run is past running (validating,
  * ready, merging), or it waits on a grant, a gate, a question, a launch, a
  * permission dialog or its own background job, or the leader told it to end
- * its turn, or the daemon interrupted it. Null when nothing holds it. Call inside the transaction: it
+ * its turn. Null when nothing holds it. Call inside the transaction: it
  * records background jobs the transcript shows ended, as `source` (the
  * turn-end guard's hook, or the reconciler's stale-hook pointer).
  */
@@ -80,7 +73,6 @@ export function pendingWait(db: Db, run: RunRow, now: number, source: EventSourc
   if (waitingOnOthers(db, run)) return "an open question";
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog";
   if (toldToEndTurn(db, run)) return WAIT_END_TURN;
-  if (interruptedThisEpisode(db, run)) return WAIT_INTERRUPTED;
   if (runningBackgroundJobs(db, run, now, source).length > 0) return WAIT_BACKGROUND;
   return null;
 }
@@ -124,6 +116,21 @@ function settleReminder(db: Db, run: RunRow, now: number): void {
   });
 }
 
+/**
+ * The daemon sent an interrupt in this episode that has not reported a
+ * timeout: the turn ending now is the daemon's doing, not the worker's.
+ */
+function interruptedThisEpisode(db: Db, run: RunRow, episodeFrom: number): boolean {
+  const sent = db
+    .query("SELECT seq FROM events WHERE run_id = ?1 AND kind = ?2 AND ts >= ?3 ORDER BY seq DESC LIMIT 1")
+    .get(run.id, INTERRUPT_SENT_KIND, episodeFrom) as { seq: number } | null;
+  if (!sent) return false;
+  const timedOut = db
+    .query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'run.interrupted' AND seq > ?2 AND json_extract(payload, '$.ok') = 0")
+    .get(run.id, sent.seq);
+  return timedOut === null;
+}
+
 export interface TurnEnd {
   harness: "claude" | "pi";
   /**
@@ -151,6 +158,7 @@ export function guardTurnEnd(db: Db, run: RunRow, turn: TurnEnd, now: number): s
   if (pendingWait(db, run, now, "hook") !== null) return null;
   const episodeFrom = instructionAt(db, run);
   if (outcomeSince(db, run.id, { ts: episodeFrom }) !== null) return null;
+  if (interruptedThisEpisode(db, run, episodeFrom)) return null;
   if (remindedThisEpisode(db, run.id, episodeFrom)) return null;
   appendEvent(db, {
     source: "hook",
