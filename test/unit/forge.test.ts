@@ -77,7 +77,7 @@ describe("GitHub forge client", () => {
     const many = Array.from({ length: 250 }, (_, i) => ({ sha: i.toString(16).padStart(40, "0"), message: `c${i}` }));
     const big = fake.addPr("acme/big", { headRef: "b", headSha: "f".repeat(40), body: "Generated with Claude Code", commits: many });
     expect((await forge.pull({ owner: "acme", repo: "big", number: big.number })).body).toBe("Generated with Claude Code");
-    await expect(forge.pullCommits({ owner: "acme", repo: "big", number: big.number })).rejects.toMatchObject({ kind: "protocol" });
+    await expect(forge.pullCommits({ owner: "acme", repo: "big", number: big.number })).rejects.toMatchObject({ kind: "refused" });
     big.commits = many.slice(0, 249);
     expect(await forge.pullCommits({ owner: "acme", repo: "big", number: big.number })).toHaveLength(249);
   });

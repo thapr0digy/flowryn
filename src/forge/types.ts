@@ -172,7 +172,7 @@ export interface Forge {
   merge(ref: PrRef, sha: string, method: string, title: string): Promise<MergeResult>;
   /**
    * A PR's commits, oldest first (what a squash merge reads its co-authors from).
-   * GitHub lists at most MAX_PR_COMMITS; a PR with more throws a `protocol` error, never a partial list.
+   * GitHub lists at most MAX_PR_COMMITS; a PR with more throws a `refused` error, never a partial list.
    */
   pullCommits(ref: PrRef): Promise<CommitInfo[]>;
   /** Point an open PR at another base branch (a stacked PR whose base landed); the PR as GitHub has it after. */

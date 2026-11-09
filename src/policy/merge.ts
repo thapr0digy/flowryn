@@ -167,7 +167,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
         commits = await mc.forge.pullCommits(ref);
       } catch (error) {
         noteMergeBlocked(mc, error);
-        throw new FlowrynError("forge_unavailable", `cannot read the commits of ${delivered.ref} (${(error as Error).message}); a merge whose commits cannot be checked for AI co-author lines is not attempted`, error instanceof ForgeError && error.kind === "protocol" ? `GitHub lists at most ${MAX_PR_COMMITS} commits of a PR: split the work, or deliver it on a fresh branch with fewer commits` : "try again later");
+        throw new FlowrynError("forge_unavailable", `cannot read the commits of ${delivered.ref} (${(error as Error).message}); a merge whose commits cannot be checked for AI co-author lines is not attempted`, error instanceof ForgeError && error.kind === "refused" ? `GitHub lists at most ${MAX_PR_COMMITS} commits of a PR: split the work, or deliver it on a fresh branch with fewer commits` : "try again later");
       }
     }
     let notStarted: number[] = [];

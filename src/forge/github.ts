@@ -244,7 +244,7 @@ export class GitHubForge implements Forge {
   async pullCommits(ref: PrRef): Promise<CommitInfo[]> {
     const items = await this.list(`/repos/${enc(ref.owner)}/${enc(ref.repo)}/pulls/${ref.number}/commits`, "a pull request's commit list");
     // GitHub lists at most MAX_PR_COMMITS; a full last page cannot prove there are no more.
-    if (items.length >= MAX_PR_COMMITS) throw new ForgeError("protocol", `${ref.owner}/${ref.repo}#${ref.number} has ${MAX_PR_COMMITS} or more commits, more than GitHub lists`);
+    if (items.length >= MAX_PR_COMMITS) throw new ForgeError("refused", `${ref.owner}/${ref.repo}#${ref.number} has ${MAX_PR_COMMITS} or more commits, more than GitHub lists`);
     return items.map((item) => {
       if (typeof item.sha !== "string" || typeof item.commit?.message !== "string") throw new ForgeError("protocol", "a pull request commit is missing sha or commit.message");
       return { sha: item.sha, message: item.commit.message, authorEmail: str(item.commit.author?.email), committerEmail: str(item.commit.committer?.email) };
