@@ -52,11 +52,23 @@ export interface FakePr {
   mergeable?: boolean | null;
   /** The login that opened it (user.login); the repo owner by default. */
   author?: string;
+  /** The PR's description (body); null by default, as GitHub reads an empty one. */
+  body?: string | null;
+  /** The PR's commits for static data; with a bare origin they are read from base..head there. */
+  commits?: FakeCommit[];
   reviews: FakeReview[];
   reviewComments: FakeComment[];
   issueComments: FakeComment[];
   /** Root comment ids of the resolved review threads. */
   resolvedThreads: Set<number>;
+}
+
+/** A commit as pulls/{n}/commits lists it. */
+export interface FakeCommit {
+  sha: string;
+  message: string;
+  authorEmail?: string;
+  committerEmail?: string;
 }
 
 /** Who wrote a review or comment: a login, its author_association, and whether it is a bot. */
@@ -200,6 +212,8 @@ export class FakeGitHub {
       pendingMerge: null,
       ...(pr.mergeable !== undefined ? { mergeable: pr.mergeable } : {}),
       ...(pr.author ? { author: pr.author } : {}),
+      ...(pr.body !== undefined ? { body: pr.body } : {}),
+      ...(pr.commits ? { commits: pr.commits } : {}),
       reviews: [],
       reviewComments: [],
       issueComments: [],
@@ -306,6 +320,30 @@ export class FakeGitHub {
       base: { ref: pr.baseRef, repo: { full_name: full } },
       mergeable: this.mergeableOf(repo, pr, head),
       user: { login: pr.author ?? repo.owner, type: "User" },
+      body: pr.body ?? null,
+    };
+  }
+
+  /** pulls/{n}/commits, oldest first: base..head on the bare origin when there is one, else the PR's static list. */
+  private commitsOf(repo: FakeRepo, pr: FakePr): FakeCommit[] {
+    if (!repo.bare) return pr.commits ?? [];
+    const head = this.headOf(repo, pr);
+    const log = gitSync(repo.bare, ["log", "--reverse", "--format=%H%x00%ae%x00%ce%x00%B%x1e", `refs/heads/${pr.baseRef}..${head}`]);
+    if (log.code !== 0) return pr.commits ?? [];
+    return log.out
+      .split("\x1e")
+      .map((entry) => entry.replace(/^\n/, ""))
+      .filter((entry) => entry.length > 0)
+      .map((entry) => {
+        const [sha, authorEmail, committerEmail, ...message] = entry.split("\x00");
+        return { sha: sha!, authorEmail: authorEmail!, committerEmail: committerEmail!, message: message.join("\x00") };
+      });
+  }
+
+  private commitJson(commit: FakeCommit): Record<string, unknown> {
+    return {
+      sha: commit.sha,
+      commit: { message: commit.message, author: { email: commit.authorEmail ?? "dev@example.invalid" }, committer: { email: commit.committerEmail ?? "dev@example.invalid" } },
     };
   }
 
@@ -443,6 +481,12 @@ export class FakeGitHub {
         return this.json(req, path, 200, this.prJson(repo, pr));
       }
       if (req.method === "PUT" && pull[2]) return this.merge(req, path, repo, pr, body);
+    }
+    const commits = /^pulls\/(\d+)\/commits$/.exec(rest);
+    if (req.method === "GET" && commits) {
+      const pr = repo.prs.find((p) => p.number === Number(commits[1]));
+      if (!pr) return this.json(req, path, 404, { message: "Not Found" });
+      return this.json(req, path, 200, this.page(url, this.commitsOf(repo, pr).map((c) => this.commitJson(c))));
     }
     const feedback = /^(pulls|issues)\/(\d+)\/(reviews|comments)$/.exec(rest);
     if (req.method === "GET" && feedback && !(feedback[1] === "issues" && feedback[3] === "reviews")) {

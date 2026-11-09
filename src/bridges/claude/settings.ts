@@ -1,4 +1,4 @@
-import { USAGE_NOTIFICATIONS } from "../../harness/claude/adapter.ts";
+import { NO_ATTRIBUTION, USAGE_NOTIFICATIONS } from "../../harness/claude/adapter.ts";
 import type { StaticLayers } from "../../policy/static.ts";
 
 /**
@@ -50,6 +50,8 @@ export function leaderSettings(input: LeaderSettingsInput): Record<string, unkno
   const command = (hook: string) => ({ type: "command", command: `${shellQuote(input.bin)} hook ${hook} --harness claude` });
   const waiter = { ...command("wait-p0"), asyncRewake: true, timeout: LEADER_WAITER_TIMEOUT_S };
   return {
+    // The leader never commits as Claude's co-author, whatever your own settings say.
+    attribution: { ...NO_ATTRIBUTION },
     permissions: {
       allow: [...LEADER_PERMISSIONS.allow],
       ask: [...LEADER_PERMISSIONS.ask],

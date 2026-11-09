@@ -16,6 +16,15 @@ export const PROMPT_NOTIFICATIONS = "permission_prompt";
 /** The asyncRewake waiter's timeout: 8 h, re-armed by every turn start and Stop (design section 5, M0 c01). */
 export const WAITER_TIMEOUT_S = 28_800;
 
+/**
+ * Claude's commit and PR attribution, switched off in every settings file
+ * Flowryn writes (docs/notes/2026-11-08-never-commit-claude-ks.md): an empty
+ * string hides it (Claude Code 2.1.319's schema; `includeCoAuthoredBy` is
+ * deprecated), and a --settings file outranks the user's own settings.
+ * `sessionUrl` is left alone: the Claude-Session line is a link, not a co-author.
+ */
+export const NO_ATTRIBUTION = { commit: "", pr: "" } as const;
+
 function shellQuote(text: string): string {
   return `'${text.replace(/'/g, `'\\''`)}'`;
 }
@@ -46,6 +55,7 @@ export function workerSettings(
   const command = (hook: string) => ({ type: "command", command: hookCommand(bin, hook) });
   const waiter = { ...command("wait-steer"), asyncRewake: true, timeout: WAITER_TIMEOUT_S };
   return {
+    attribution: { ...NO_ATTRIBUTION },
     ...(access.deny && access.deny.length > 0 ? { permissions: { deny: access.deny } } : {}),
     hooks: {
       SessionStart: [{ hooks: [command("worker-start")] }],

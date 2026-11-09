@@ -106,6 +106,7 @@ function fixture(steps: string[] = ["true"], caps = "validation = 5"): Fixture {
     },
     feedback: async () => ({ reviews: [], reviewComments: [], issueComments: [] }),
     reviewThreads: async () => [],
+    pullCommits: async () => [],
     setBase: async () => {
       throw new Error("no base changes here");
     },
