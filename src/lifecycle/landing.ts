@@ -33,7 +33,7 @@ import { dismissRunQuestions } from "./gate-questions.ts";
 export const LANDED_BEFORE_CANCEL = "the run landed before the cancel took effect; the merge stands";
 
 /** The items a landing settles. */
-const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered", "auto_merge_held", "verify_failed", "stack_base_lost"] as const;
+const SETTLED_BY_LANDING = ["user_acted", "pr_ready", "sensitive_action_waiting", "checks_red", "pr_closed", "unproven_merge", "worker_idle", "steer_unacked", "prompt_repeat", "worker_report", "pr_conflict", "conflict_nudged", "policy_sent_back", "policy_behind", "review_steered", "review_unanswered", "auto_merge_held", "verify_failed", "stack_base_lost"] as const;
 
 /**
  * Who proved a landing: the leader's own merge call (its reply says it
@@ -148,7 +148,7 @@ export function doneFlags(db: Db, run: Pick<RunWithPolicy, "task_id" | "kind">, 
 export function landScout(db: Db, run: RunWithPolicy, report: string, now: number): void {
   if (run.state === "landed" || isTerminal(run.state)) return;
   db.query("UPDATE runs SET state = 'landed', updated_at = ?2 WHERE id = ?1").run(run.id, now);
-  resolveRunItems(db, run.id, ["worker_idle", "steer_unacked", "worker_report"], "run.landed report", now);
+  resolveRunItems(db, run.id, ["worker_idle", "steer_unacked", "prompt_repeat", "worker_report"], "run.landed report", now);
   releaseLeases(db, run.id, run.task_id, { keepWorker: true }, "run.landed", now);
   appendEvent(db, { source: "daemon", kind: "run.landed", runId: run.id, taskId: run.task_id, payload: { how: "report", report }, ts: now });
   run.state = "landed";

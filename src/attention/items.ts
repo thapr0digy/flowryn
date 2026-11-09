@@ -20,6 +20,8 @@ export type ItemClass = "actionable" | "info";
  * passing contract, Herdr unreachable, GitHub unavailable while a merge waits).
  * steer_unacked is the section 6 "re-ring up to 3 times, then a P1".
  * The cutover adds blocked_prompt: a worker stopped by a confirmation prompt mid-run.
+ * prompt_repeat: a run blocked by permission prompts 3 times in 30 minutes, so
+ * Flowryn stops steering it on by itself (src/lifecycle/prompt-wedge.ts).
  * restart_dropped: a `flowryn daemon restart` that will not happen (its binary
  * failed the check, its supervisor refused, or `--when-idle` expired).
  * restart_failed: a launchd restart that left flowrynd down until something
@@ -115,6 +117,7 @@ export const LANE_TABLE = {
   backlog_out_of_sync: { lane: "P1", class: "actionable" },
   trust_dialog: { lane: "P1", class: "actionable" },
   blocked_prompt: { lane: "P1", class: "actionable" },
+  prompt_repeat: { lane: "P1", class: "actionable" },
   overdue_todo: { lane: "P1", class: "actionable" },
   steer_unacked: { lane: "P1", class: "actionable" },
   checkout_tangle: { lane: "P1", class: "actionable" },
@@ -226,6 +229,7 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   backlog_out_of_sync: "act",
   trust_dialog: "act",
   blocked_prompt: "act",
+  prompt_repeat: "act",
   overdue_todo: "act",
   steer_unacked: "act",
   checkout_tangle: "act",

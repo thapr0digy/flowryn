@@ -11,8 +11,8 @@ import { HOOK_SIGNALS, type HookName } from "../harness/types.ts";
 import { getProject } from "./projects.ts";
 import { gatherFacts } from "../policy/merge.ts";
 import { mergeContext, mergeSummary, runAndProject } from "../policy/verbs.ts";
-import { failRun, getRunWithPolicy, isTerminal, recordEvidence, setLiveness, taskTitle, type RunWithPolicy } from "./runs.ts";
-import { openBlockedPrompt, SCREEN_LINES } from "./prompt-wedge.ts";
+import { failRun, getRunWithPolicy, isTerminal, recordEvidence, runBase, setLiveness, taskTitle, type RunWithPolicy } from "./runs.ts";
+import { openBlockedPrompt, SCREEN_LINES, settlePromptEpisode, voidPendingEpisodes, type PromptSignal } from "./prompt-wedge.ts";
 import { openReviewGate } from "../policy/gates.ts";
 import { pendingPlanLine } from "./plans.ts";
 import { gateQuestionsLine } from "./gate-questions.ts";
@@ -292,6 +292,8 @@ const workerStart: VerbSpec = {
       ts: now,
     });
     resolveRunItems(ctx.db, run.id, ["trust_dialog"], "run.worker_started", now);
+    // A new or resumed session: a prompt from the last one can no longer be told answered or blocked.
+    voidPendingEpisodes(ctx.db, run, "run.worker_started", "hook", now);
     if (run.liveness === "starting" || run.liveness === "blocked_dialog" || run.liveness === "unknown") setLiveness(ctx.db, run, "idle", "hook", { signal: "started" }, now);
     return { data: { run: run.id, isolation: "ok" } };
   },
@@ -446,6 +448,7 @@ const prompt = signalVerb(
     // A new turn: no tool of the last one is still running (an interrupt fires no hook to end them).
     ctx.fleet.urgent.tools.clear(run.id);
     markBusy(ctx, run, HOOK_SIGNALS.prompt);
+    afterPrompt(ctx, run, { hook: "prompt" });
     return { data: { run: run.id } };
   },
   (ctx, input, _args, prepared) => {
@@ -479,6 +482,7 @@ const preTool = signalVerb(
   (ctx, run, args) => {
     claudeSaw(ctx, run, args, "pre-tool");
     markBusy(ctx, run, HOOK_SIGNALS["pre-tool"], "pre-tool");
+    afterPrompt(ctx, run, { hook: "pre-tool", tool: mainTool(args) });
     // A usage probe's tool call means the model answered: the pause lifts (src/sched/usage.ts).
     const usage = harnessOf(args) === "claude" && noteProbeReply(ctx.db, runAccountId(run), run.id, `worker ${run.task_id}`, ctx.now()) ? "resumed" : null;
     return withUsage(preToolBody(ctx, run, args), usage);
@@ -526,6 +530,7 @@ const postTool = signalVerb(
     claudeSaw(ctx, run, args, "post-tool");
     markBusy(ctx, run, HOOK_SIGNALS["post-tool"], "post-tool");
     const tool = mainTool(args);
+    afterPrompt(ctx, run, { hook: "post-tool", tool });
     if (tool !== null) ctx.fleet.urgent.tools.end(run.id, tool);
     if (harnessOf(args) !== "claude") return { data: { run: run.id } };
     const input = parseInput(args);
@@ -548,11 +553,39 @@ const toolFailed = signalVerb(
   (ctx, run, args) => {
     markBusy(ctx, run, HOOK_SIGNALS["tool-failed"], "tool-failed");
     const tool = mainTool(args);
+    const error = parseInput(args).error;
+    afterPrompt(ctx, run, { hook: "tool-failed", tool, error: typeof error === "string" ? error : null });
     if (tool !== null) ctx.fleet.urgent.tools.end(run.id, tool);
     return { data: { run: run.id } };
   },
   (ctx) => leader.toolActivity(ctx),
 );
+
+/**
+ * PermissionDenied: Claude refused a tool call without running it (its auto
+ * mode; docs/notes/2026-11-08-keep-workers-off-pp.md). The run's pending
+ * prompt episode is denied. It never answers `retry`: the steer says what to
+ * do instead.
+ */
+const permissionDenied = signalVerb(
+  "permission-denied",
+  "Hook: Claude denied a tool call without running it; a blocked prompt gets its follow-up steer",
+  (ctx, run, args) => {
+    markBusy(ctx, run, HOOK_SIGNALS["permission-denied"], "permission-denied");
+    const tool = mainTool(args);
+    afterPrompt(ctx, run, { hook: "permission-denied", tool });
+    if (tool !== null) ctx.fleet.urgent.tools.end(run.id, tool);
+    return { data: { run: run.id } };
+  },
+  (ctx) => leader.toolActivity(ctx),
+);
+
+/** A worker hook after a permission prompt: decide whether its command ran, and steer the worker on if not (src/lifecycle/prompt-wedge.ts). */
+function afterPrompt(ctx: HandlerCtx, run: RunWithPolicy, signal: PromptSignal): void {
+  if (run.harness !== "claude") return;
+  const project = getProject(ctx.db, run.project_id);
+  settlePromptEpisode(ctx.db, run, signal, runBase(run, { default_branch: project?.default_branch ?? "main" }), ctx.now());
+}
 
 /**
  * Stop: a turn ended, unless a pending steer continues it (M0 c06), at most
@@ -564,6 +597,8 @@ const toolFailed = signalVerb(
 const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer or a turn-end reminder (worker) or a P0 (leader)", (ctx, run, args) => {
   const harness = harnessOf(args);
   claudeSaw(ctx, run, args, "stop");
+  // First, so a follow-up steer for a blocked command can continue this very turn.
+  afterPrompt(ctx, run, { hook: "stop" });
   ctx.fleet.urgent.tools.clear(run.id);
   // Pi settled: an urgent steer it queued into the turn and never showed the model (its abort dropped it) goes again, idle.
   if (harness === "pi") loseUnseenUrgent(ctx.db, run, ctx.now());
@@ -664,7 +699,8 @@ const notify = signalVerb(
       // actually up is never idle by design, review gate or blocking question notwithstanding.
       if (busy) {
         const lastHook = run.last_hook_at ?? run.launched_at ?? run.started_at;
-        openBlockedPrompt(ctx.db, run, { suspected: false, screen: (prepared as { screen?: string | null } | undefined)?.screen ?? null, harness: "claude", lastHook }, ctx.now());
+        const heldTool = ctx.fleet.urgent.tools.latest(run.id);
+        openBlockedPrompt(ctx.db, run, { suspected: false, screen: (prepared as { screen?: string | null } | undefined)?.screen ?? null, harness: "claude", lastHook, heldTool }, ctx.now());
       }
       return { data: { run: run.id } };
     }
@@ -881,4 +917,4 @@ const preempt = piWorkerVerb("preempt", "Worker hook (Pi): may the extension cut
   return { data: { run: run.id, steer: id, ...piPreempt(ctx.db, run, id, toolMs, ctx.fleet.timing(), ctx.fleet.urgent.deferrals, ctx.now()) } };
 });
 
-export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, toolDenied, postTool, toolFailed, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];
+export const HOOK_VERBS: VerbSpec[] = [workerStart, prompt, preTool, toolDenied, postTool, toolFailed, permissionDenied, stop, stopFailure, sessionEnd, waitSteer, steerCarried, steerSeen, preempt, sessionStart, notify, waitP0, delivered, mergeSummaryHook, gateSummaryHook, approvalKeyHook];

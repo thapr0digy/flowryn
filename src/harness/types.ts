@@ -75,6 +75,7 @@ export const HOOK_SIGNALS = {
   "pre-tool": "tool",
   "post-tool": "tool",
   "tool-failed": "tool",
+  "permission-denied": "tool",
   stop: "turn_ended",
   "stop-failure": "failed",
   "session-end": "ended",
