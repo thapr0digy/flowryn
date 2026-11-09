@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { MERGE_DEFAULTS } from "../../src/config/merge.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
@@ -142,7 +143,7 @@ describe("the chat question binds exactly the terms", () => {
     const ref = autonomyRef(canonicalTerms(["web"], NOW + 8 * HOUR));
     expect(parseRef(ref)).toBe(ref);
     expect(refusal(() => parseRef("autonomy:web"))).toBe("bad_args");
-    const form = chatForm(db, ref);
+    const form = chatForm(db, ref, MERGE_DEFAULTS);
     expect(form.action).toBe("autonomy");
     expect(bindingRef(form.question.question)).toBe(ref);
     expect(form.question.question).toContain("parks only its task");

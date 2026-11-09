@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { MERGE_DEFAULTS } from "../../src/config/merge.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
@@ -62,10 +63,10 @@ function writeTranscript(w: World, toolUseId: string, questions: unknown[], answ
 
 /** Ask and answer one binding question through both hooks; returns the context lines. */
 function askAndAnswer(w: World, toolUseId: string, answer: string, now: number, transcript = true): string[] {
-  const q = chatForm(w.db, w.decision).question;
-  expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId, input: { questions: [q] }, now }))).toBeNull();
+  const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
+  expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId, input: { questions: [q] }, merge: MERGE_DEFAULTS, now }))).toBeNull();
   const result = { questions: [q], answers: { [q.question]: answer }, annotations: {} };
-  const lines = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId, input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, now }));
+  const lines = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId, input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now }));
   if (transcript) writeTranscript(w, toolUseId, [q], { [q.question]: answer }, new Date(now));
   return lines;
 }
@@ -89,16 +90,16 @@ describe("binding questions", () => {
 
   test("a decision's form: its options as labels, the recommendation marked; text or too many options cannot be asked", () => {
     const w = world();
-    const form = chatForm(w.db, w.decision);
+    const form = chatForm(w.db, w.decision, MERGE_DEFAULTS);
     expect(form.question).toMatchObject({ question: `${w.decision} · Rotate the key?`, header: w.decision, multiSelect: false });
     expect(form.choices).toEqual([
       { label: "yes (Recommended)", choice: "yes" },
       { label: "no", choice: "no" },
     ]);
     const five = world(["a", "b", "c", "d", "e"]);
-    expect(() => chatForm(five.db, five.decision)).toThrow("a chat question takes 2 to 4");
+    expect(() => chatForm(five.db, five.decision, MERGE_DEFAULTS)).toThrow("a chat question takes 2 to 4");
     tx(w.db, () => w.db.query("UPDATE decisions SET state = 'answered' WHERE id = ?1").run(w.decision));
-    expect(() => chatForm(w.db, w.decision)).toThrow("already answered");
+    expect(() => chatForm(w.db, w.decision, MERGE_DEFAULTS)).toThrow("already answered");
   });
 
   test("the comparison and hash see only what the user sees, in order; key order and extra fields do not matter", () => {
@@ -112,12 +113,12 @@ describe("binding questions", () => {
 
   test("an answer maps to a choice by its label; multi-select joins labels; free text grants only a gate's changes", () => {
     const w = world(["red", "green", "blue"]);
-    const form = chatForm(w.db, w.decision);
+    const form = chatForm(w.db, w.decision, MERGE_DEFAULTS);
     expect(mapAnswer(form, "red (Recommended)", null)).toEqual({ kind: "grant", choice: "red", words: null });
     expect(mapAnswer(form, "red", null)).toMatchObject({ kind: "none" });
     expect(mapAnswer(form, "maybe green?", "note")).toMatchObject({ kind: "none" });
     tx(w.db, () => w.db.query("UPDATE decisions SET kind = 'multi' WHERE id = ?1").run(w.decision));
-    const multi = chatForm(w.db, w.decision);
+    const multi = chatForm(w.db, w.decision, MERGE_DEFAULTS);
     expect(multi.question.multiSelect).toBe(true);
     expect(mapAnswer(multi, "red (Recommended), blue", null)).toEqual({ kind: "grant", choice: "red, blue", words: null });
     expect(mapAnswer(multi, "red (Recommended), purple", null)).toMatchObject({ kind: "none" });
@@ -138,8 +139,8 @@ describe("assumptions the design rests on (c15, run live by spikes/claude/c15-as
 
   test("A2: an AskUserQuestion that brings its own answers is denied, before any dialog", () => {
     const w = world();
-    const q = chatForm(w.db, w.decision).question;
-    const deny = tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_a2", input: { questions: [q], answers: { [q.question]: "yes (Recommended)" } }, now: 2_000 }));
+    const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
+    const deny = tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_a2", input: { questions: [q], answers: { [q.question]: "yes (Recommended)" } }, merge: MERGE_DEFAULTS, now: 2_000 }));
     expect(deny).toContain("may not carry its own answers");
     expect(w.db.query("SELECT 1 FROM chat_questions").all()).toEqual([]);
   });
@@ -149,7 +150,7 @@ describe("assumptions the design rests on (c15, run live by spikes/claude/c15-as
     const grant = grantIn(askAndAnswer(w, "toolu_a4", "yes (Recommended)", Date.now(), false));
     const ask = { session: w.session, item: w.decision, choice: "yes", grantId: grant };
     expect(() => prepareGrant({ db: w.db, now: () => Date.now() }, ask, w.projects)).toThrow("Claude's transcript has no such question");
-    const q = chatForm(w.db, w.decision).question;
+    const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
     writeTranscript(w, "toolu_a4", [q], { [q.question]: "yes (Recommended)" });
     expect(prepareGrant({ db: w.db, now: () => Date.now() }, ask, w.projects)).toBe(grant);
     expect(getGrant(w.db, grant)!.verified_at).not.toBeNull();
@@ -191,12 +192,12 @@ describe("grant lifecycle", () => {
     const w = world();
     const now = Date.now();
     askAndAnswer(w, "toolu_l3", "no", now);
-    const q = chatForm(w.db, w.decision).question;
+    const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
     const result = { questions: [q], answers: { [q.question]: "yes (Recommended)" }, annotations: {} };
-    const again = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId: "toolu_l3", input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, now }));
+    const again = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId: "toolu_l3", input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now }));
     expect(again.join("\n")).toContain("already answered");
-    expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_l3", input: { questions: [q] }, now }))).toContain("already asked");
-    const unseen = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId: "toolu_never", input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, now }));
+    expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_l3", input: { questions: [q] }, merge: MERGE_DEFAULTS, now }))).toContain("already asked");
+    const unseen = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId: "toolu_never", input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now }));
     expect(unseen.join("\n")).toContain("did not see this question asked");
     expect(w.db.query("SELECT COUNT(*) AS n FROM captain_grants").get()).toEqual({ n: 1 });
   });
@@ -205,7 +206,7 @@ describe("grant lifecycle", () => {
     const w = world();
     const now = Date.now();
     const grant = grantIn(askAndAnswer(w, "toolu_l4", "no", now, false));
-    const q = chatForm(w.db, w.decision).question;
+    const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
     // An answer from before the question was recorded (a replay of an older line) does not count.
     writeTranscript(w, "toolu_l4", [q], { [q.question]: "no" }, new Date(now - 5 * 60_000));
     const ask = { session: w.session, item: w.decision, choice: "no", grantId: grant };
@@ -225,7 +226,7 @@ describe("grant lifecycle", () => {
     const w = world();
     const now = Date.now();
     const grant = grantIn(askAndAnswer(w, "toolu_pf", "yes (Recommended)", now, false));
-    const q = chatForm(w.db, w.decision).question;
+    const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
     const answers = { [q.question]: "yes (Recommended)" };
     appendFileSync(w.transcript, JSON.stringify({ type: "assistant", sessionId: w.claudeSession, timestamp: new Date(now).toISOString(), message: { content: [{ type: "tool_use", id: "toolu_pf", name: "AskUserQuestion", input: { questions: [q], answers } }] } }) + "\n");
     appendFileSync(w.transcript, JSON.stringify({ type: "user", sessionId: w.claudeSession, timestamp: new Date(now).toISOString(), toolUseResult: { questions: [q], answers, annotations: {} }, message: { content: [{ type: "tool_result", tool_use_id: "toolu_pf", content: "answered" }] } }) + "\n");

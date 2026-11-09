@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { MERGE_DEFAULTS } from "../../src/config/merge.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
@@ -82,10 +83,10 @@ function repin(w: World, now: number): { voided: number } {
 
 /** Ask and answer the decision's binding question through both hooks; Claude's transcript lines at `answeredAt`. */
 function ask(w: World, toolUseId: string, now: number, answeredAt = now): string[] {
-  const q = chatForm(w.db, w.decision).question;
-  expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId, input: { questions: [q] }, now }))).toBeNull();
+  const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
+  expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId, input: { questions: [q] }, merge: MERGE_DEFAULTS, now }))).toBeNull();
   const result = { questions: [q], answers: { [q.question]: "yes (Recommended)" }, annotations: {} };
-  const lines = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId, input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, now }));
+  const lines = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId, input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now }));
   const at = new Date(answeredAt).toISOString();
   appendFileSync(w.transcript, `${JSON.stringify({ type: "assistant", sessionId: w.claudeSession, cwd: w.real, timestamp: at, message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions: [q] } }] } })}\n`);
   appendFileSync(w.transcript, `${JSON.stringify({ type: "user", sessionId: w.claudeSession, cwd: w.real, timestamp: at, toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: toolUseId, content: "answered" }] } })}\n`);
@@ -236,11 +237,11 @@ describe("grants around a repin", () => {
 
   test("a question asked before the repin and answered after it grants nothing", () => {
     const w = world();
-    const q = chatForm(w.db, w.decision).question;
-    expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_span", input: { questions: [q] }, now: 2_000 }))).toBeNull();
+    const q = chatForm(w.db, w.decision, MERGE_DEFAULTS).question;
+    expect(tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_span", input: { questions: [q] }, merge: MERGE_DEFAULTS, now: 2_000 }))).toBeNull();
     repin(w, 3_000);
     const result = { questions: [q], answers: { [q.question]: "yes (Recommended)" }, annotations: {} };
-    const lines = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId: "toolu_span", input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, now: 4_000 }));
+    const lines = tx(w.db, () => postAsk(w.db, { session: w.session, toolUseId: "toolu_span", input: result, response: result, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now: 4_000 }));
     expect(lines).toEqual(["Flowryn: this answer grants nothing (it was asked before the leader was repinned; ask again)."]);
   });
 

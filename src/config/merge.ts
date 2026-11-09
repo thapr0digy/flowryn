@@ -11,6 +11,9 @@ export interface MergeConfig {
   sensitive_when_away: boolean;
 }
 
+/** `[merge]` with no table: what an absent or unreadable table means. */
+export const MERGE_DEFAULTS: Readonly<MergeConfig> = { sensitive_when_away: false };
+
 const MERGE_KEYS = ["sensitive_when_away"];
 
 export function mergeConfig(config: FlowrynConfig): MergeConfig {

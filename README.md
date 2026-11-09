@@ -107,7 +107,7 @@ fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"  #
 - Requires `jq` for the fixtures.
 - Run the tests outside any command sandbox: it starts daemons on Unix sockets, uses FSEvents, runs the real tasks-axi and drives a pty. It never reaches GitHub, Herdr or a real harness.
 - A rebuild from `origin/<default branch>` is applied by the daemon by itself (`[daemon] auto_restart`); `flowryn daemon restart` applies any build now.
-- CI runs on `ubuntu-latest`; macOS-only tests are skipped there, so run `bun run test` on the Mac before a PR. **CI is off until about 2026-11-07** ([how to re-enable](docs/v1-status.md#ci-is-off-2026-10-07)).
+- CI runs on `ubuntu-latest`; macOS-only tests are skipped there, so run `bun run test` on the Mac before a PR. **CI is permanently off** ([why and what gates instead](docs/v1-status.md#ci-is-off-2026-10-07)).
 - Source layout follows section 4 of the design (`src/<component>`).
 
 ## Running the live runs
