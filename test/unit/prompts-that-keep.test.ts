@@ -107,7 +107,8 @@ describe("worker turn rules say what to do next on every path", () => {
   test("the failure fallbacks live where each failure happens", () => {
     expect(deliveryLines(nm).join("\n")).toContain("A pipeline that fails (an error, not a gate): fix, commit, run it again; failed twice at the same head: report failed.");
     expect(deliveryLines(nm).join("\n")).toContain("--recommend <your pick>");
-    expect(REVIEW_GATE_TEXT).toContain("lavish-axi failing: run it once more, then report blocked with its output.");
+    expect(REVIEW_GATE_TEXT).toContain("lavish-axi failing: run it once more; still code: SERVER_ERROR: run $FLOWRYN_BIN lavish recover");
+    expect(REVIEW_GATE_TEXT).toContain("any other error, or recover giving up: report blocked with its output. Never run lavish-axi stop yourself.");
     expect(skill("flowryn-build-test")).toContain("A test that fails the same way on the base branch (outside your change)");
     expect(skill("flowryn-visual-qa")).toContain("Docker failing to start or build");
   });

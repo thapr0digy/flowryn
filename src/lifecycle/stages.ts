@@ -104,7 +104,7 @@ export const REVIEW_GATE_TEXT = [
   "When it is ready for review: $FLOWRYN_BIN stage done --review <lavish url> --page <its .html file>, then end your turn; a steer brings the verdict.",
   "Keep the page's Flowryn widget mount (it shows the user's Approve button; stage done refuses a page without it).",
   "Flowryn listens on the page itself and opens it in the user's browser: do not hold a lavish-axi poll open; lavish-axi's status: opened is its session, not a browser tab, so never say the page is open in their browser.",
-  "lavish-axi failing: run it once more, then report blocked with its output.",
+  "lavish-axi failing: run it once more; still code: SERVER_ERROR: run $FLOWRYN_BIN lavish recover (it restarts a broken Lavish), then your lavish-axi command again; any other error, or recover giving up: report blocked with its output. Never run lavish-axi stop yourself.",
   "While it waits, a steer may bring the user's words from the page: answer with $FLOWRYN_BIN review reply --body-file - (never lavish-axi poll or reply yourself), revise the page if asked, then end your turn.",
   "Only a question you cannot proceed without goes to the user: add --questions-file <json> (the flowryn-design skill has the shape); decide the rest yourself and record it.",
 ].join(" ");

@@ -260,7 +260,7 @@ export interface ShownItem {
  * failed build) may name another scope's tasks, so a scoped leader gets a fixed
  * line instead (redact); your own terminal shows it whole.
  */
-export const PLAIN_GLOBAL_KINDS: ReadonlySet<string> = new Set(["contract_recorded", "nomistakes_down", "herdr_unreachable"]);
+export const PLAIN_GLOBAL_KINDS: ReadonlySet<string> = new Set(["contract_recorded", "nomistakes_down", "herdr_unreachable", "lavish_broken"]);
 
 /** The fixed line a scoped leader sees for a task-less item that may name other scopes' tasks. */
 export function neutralLine(item: Pick<ShownItem, "id" | "kind">): string {

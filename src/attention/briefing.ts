@@ -244,6 +244,24 @@ function restartLines(db: Db): string[] {
 }
 
 /**
+ * Lavish restarts and give-ups since the last briefing, each shown once (src/lavish/recovery.ts).
+ * Why it restarted names a gate or a run, so a scoped leader sees only that it did.
+ */
+export function lavishLines(db: Db, lens: ScopeLens): string[] {
+  const since = Number(getMeta(db, "last_briefing_at") ?? "0");
+  const rows = db.query("SELECT ts, kind, payload FROM events WHERE kind IN ('lavish.restarted', 'lavish.gave_up') AND ts > ?1 ORDER BY seq").all(since) as { ts: number; kind: string; payload: string }[];
+  return rows.map((r) => {
+    const p = JSON.parse(r.payload) as { reason?: string; by?: string; pages?: number; failed?: string[]; ok?: boolean; detail?: string };
+    const why = lens.restricted ? "" : ` (${p.reason ?? "a server error"})`;
+    if (r.kind === "lavish.gave_up") return `Lavish recovery gave up ${hhmm(r.ts)}: ${p.detail ?? "it keeps failing"}; see the lavish_broken item.`;
+    const who = p.by?.startsWith("worker:") ? "for a worker" : "automatically";
+    const failed = p.failed && p.failed.length > 0 ? `, ${p.failed.length} failed to host` : "";
+    const still = p.ok === false ? " It still failed afterwards." : "";
+    return `Lavish restarted ${hhmm(r.ts)} ${who}${why}: ${plural(p.pages ?? 0, "review page")} hosted again${failed}.${still}`;
+  });
+}
+
+/**
  * Contract passes the leader or the daemon's automatic check recorded since
  * the last briefing, each shown once (src/contracts/verbs.ts, auto.ts).
  */
@@ -298,6 +316,7 @@ export function composeBriefing(db: Db, input: BriefingInput): Briefing {
   lines.push(...waitingLines(db, lens));
   // Before decisionLines, which moves last_briefing_at on.
   lines.push(...restartLines(db));
+  lines.push(...lavishLines(db, lens));
   lines.push(...recordLines(db));
   lines.push(...autoCheckLines(db, input.config));
   lines.push(...decisionLines(db, input.now, input.markMorning, lens));
