@@ -8,7 +8,7 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { canonicalPrUrl, parsePrUrl } from "../forge/github.ts";
-import { checksLine, ForgeError, type ChecksSummary, type CommitInfo, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
+import { checksLine, ForgeError, MAX_PR_COMMITS, type ChecksSummary, type CommitInfo, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
 import { findAiAttribution } from "./ai-attribution.ts";
 import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { approvalRef, deliveredOf, prEvidenceFrom, recordPrEvidence, remoteHead, type Delivered } from "../lifecycle/delivery.ts";
@@ -167,7 +167,7 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
         commits = await mc.forge.pullCommits(ref);
       } catch (error) {
         noteMergeBlocked(mc, error);
-        throw new FlowrynError("forge_unavailable", `cannot read the commits of ${delivered.ref} (${(error as Error).message}); a merge whose commits cannot be checked for AI co-author lines is not attempted`, "try again later");
+        throw new FlowrynError("forge_unavailable", `cannot read the commits of ${delivered.ref} (${(error as Error).message}); a merge whose commits cannot be checked for AI co-author lines is not attempted`, error instanceof ForgeError && error.kind === "protocol" ? `GitHub lists at most ${MAX_PR_COMMITS} commits of a PR: split the work, or deliver it on a fresh branch with fewer commits` : "try again later");
       }
     }
     let notStarted: number[] = [];

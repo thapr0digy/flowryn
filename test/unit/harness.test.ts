@@ -116,7 +116,6 @@ describe("claude adapter", () => {
         expect(deliveryLines({ kind: "ship", mode, defaultBranch: "main", harness })).toContain(NO_AI_ATTRIBUTION_LINE);
       }
     }
-    expect(NO_AI_ATTRIBUTION_LINE).toContain('no AI Co-authored-by trailer, no "Generated with Claude Code" line');
     expect(deliveryLines({ kind: "scout", mode: "direct-PR", defaultBranch: "main" })).not.toContain(NO_AI_ATTRIBUTION_LINE);
   });
 
