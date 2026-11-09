@@ -1,4 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
+import type { MergeConfig } from "../config/merge.ts";
 import type { Db } from "../db/db.ts";
 import { captainAnswerable, getDecision } from "../lifecycle/decisions.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
@@ -224,11 +225,20 @@ function autonomyForm(db: Db, ref: string): ChatForm {
   };
 }
 
-/** What a chat-confirmed away does, as the chat question tells the user before they answer. */
-export const AWAY_SUMMARY =
-  "While it lasts, held questions of the kinds [decisions] default_classes opts in take the worker's recommendation after [decisions] default_after_h, and a review gate [decisions] default_gates opts in is checked by a fresh read-only validator that passes it or sends changes. It never merges, never answers a merge, destructive, irreversible, security, credential or outward question, and never touches a sensitive task; flowryn back ends it.";
+/**
+ * What a chat-confirmed away does, as the chat question tells the user before they answer. Built
+ * from `[merge] sensitive_when_away` (docs/notes/2026-11-08-merge-sensitive-prs-rr.md), so the
+ * text never understates what an away merges. Fixed templates; no model.
+ */
+export function awaySummary(merge: MergeConfig): string {
+  const loops =
+    "While it lasts, held questions of the kinds [decisions] default_classes opts in take the worker's recommendation after [decisions] default_after_h, and a review gate [decisions] default_gates opts in is checked by a fresh read-only validator that passes it or sends changes.";
+  const never = "never answers a merge, destructive, irreversible, security, credential or outward question";
+  if (!merge.sensitive_when_away) return `${loops} It never merges, ${never}, and never touches a sensitive task; flowryn back ends it.`;
+  return `${loops} Pull requests of yolo projects merge by themselves once their gates pass, sensitive ones included: a sensitive one only after its local verify and a fresh-context validator have both passed at its exact head ([merge] sensitive_when_away), the validator's changes going back to its worker. A project that is not yolo never merges by policy. It ${never}, and touches a sensitive task only for that merge; flowryn back ends it.`;
+}
 
-function awayForm(ref: string, now: number): ChatForm {
+function awayForm(ref: string, now: number, merge: MergeConfig): ChatForm {
   const until = parseAwayRef(ref);
   if (until === null) throw new FlowrynError("bad_args", `${sanitizeLine(ref, 80)} is not away:<YYYY-MM-DDTHH:MM>`);
   if (until <= now) throw new FlowrynError("bad_args", `${ref} ends in the past`);
@@ -238,7 +248,7 @@ function awayForm(ref: string, now: number): ChatForm {
     action: "away",
     task: null,
     question: {
-      question: `away ${stamp}${SEPARATOR}You are away until ${stamp.replace("T", " ")}: may Flowryn decide for you meanwhile? ${AWAY_SUMMARY}`,
+      question: `away ${stamp}${SEPARATOR}You are away until ${stamp.replace("T", " ")}: may Flowryn decide for you meanwhile? ${awaySummary(merge)}`,
       header: "away",
       options: [option("Decide while I'm away", `Start away as yours until ${stamp.replace("T", " ")}`), option("No", "Away still wakes the leader; nothing is decided for you")],
       multiSelect: false,
@@ -252,10 +262,10 @@ function awayForm(ref: string, now: number): ChatForm {
   };
 }
 
-/** The binding form for an item, from what flowrynd knows now. Throws when the item cannot be asked. */
-export function chatForm(db: Db, ref: string, now: number = Date.now()): ChatForm {
+/** The binding form for an item, from what flowrynd knows now and the `[merge]` config. Throws when the item cannot be asked. */
+export function chatForm(db: Db, ref: string, merge: MergeConfig, now: number = Date.now()): ChatForm {
   if (ref.startsWith("autonomy:")) return autonomyForm(db, ref);
-  if (ref.startsWith("away:")) return awayForm(ref, now);
+  if (ref.startsWith("away:")) return awayForm(ref, now, merge);
   if (ref.startsWith("merge:")) return mergeForm(db, ref.slice("merge:".length));
   if (/^[qk]\d+$/.test(ref)) return decisionForm(db, ref);
   if (/^g\d+$/.test(ref)) return gateForm(db, ref);

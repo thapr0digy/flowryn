@@ -1,5 +1,6 @@
 import { accountById } from "../../src/config/accounts.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { MERGE_DEFAULTS } from "../../src/config/merge.ts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openItem } from "../../src/attention/items.ts";
@@ -803,7 +804,7 @@ describe("a gate's questions as decisions", () => {
   test("a pass request from the page never passes the gate: once every question is answered it opens one P1 for the leader", () => {
     open();
     expect(tx(db, () => requestGatePass(db, "g1", NOW))).toEqual({ outcome: "questions_open", open: ["q1", "q2", "q3"] });
-    expect(() => chatForm(db, "g1")).toThrow(expect.objectContaining({ code: "questions_open", help: "ask those first: flowryn chat-question q1" }));
+    expect(() => chatForm(db, "g1", MERGE_DEFAULTS)).toThrow(expect.objectContaining({ code: "questions_open", help: "ask those first: flowryn chat-question q1" }));
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE kind = 'pass_requested'").get()).toEqual({ n: 0 });
     tx(db, () => {
       lavishAnswer(ctx(), { gate: "g1", decision: "q1", choice: ["db"], note: null });

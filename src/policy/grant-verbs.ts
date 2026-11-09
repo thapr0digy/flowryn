@@ -1,6 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type HandlerCtx, type HandlerResult, type VerbSpec } from "../api/verbs.ts";
 import { ATTENTION_VERBS } from "../attention/verbs.ts";
+import { mergeConfig } from "../config/merge.ts";
 import { DECISION_VERBS } from "../lifecycle/decision-verbs.ts";
 import { DIVERGENCE_VERBS } from "../lifecycle/divergences.ts";
 import { parseAutonomyRef, parseAwayRef, stampOf } from "./autonomy.ts";
@@ -29,7 +30,7 @@ const chatQuestion: VerbSpec = {
     const ref = parseRef(stringArg(args, "item")!);
     // An autonomy item names projects, not a task: each must be in the caller's scope.
     for (const project of parseAutonomyRef(ref)?.projects ?? []) requireInScope(ctx.config, ctx.caller, projectRefScope(ctx.db, ctx.config, project), `project ${project}`);
-    const form = chatForm(ctx.db, ref, ctx.now);
+    const form = chatForm(ctx.db, ref, mergeConfig(ctx.config), ctx.now);
     return {
       data: { item: form.ref, action: form.action, question: JSON.stringify(form.question) },
       hints: ["pass question unchanged as the one element of AskUserQuestion's questions (up to 4 such questions per call); then flowryn grant use <grant>"],

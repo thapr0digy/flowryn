@@ -3,6 +3,7 @@ import { basename, dirname, join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { stringArg, type Args, type HandlerCtx } from "../api/verbs.ts";
 import { grantsConfig } from "../config/leader.ts";
+import type { MergeConfig } from "../config/merge.ts";
 import { sessionProjectsDir } from "../leader/login.ts";
 import { getSession } from "../lease/lease.ts";
 import { findAttempt, type ApprovalAction } from "./approvals.ts";
@@ -100,7 +101,7 @@ function nonEmpty(value: unknown): boolean {
  * each item at most once. Returns the reason to deny it, or null. A call with no binding question
  * is not recorded and grants nothing. Call inside a transaction.
  */
-export function preAsk(db: Db, a: { session: string; toolUseId: string; input: unknown; now: number }): string | null {
+export function preAsk(db: Db, a: { session: string; toolUseId: string; input: unknown; merge: MergeConfig; now: number }): string | null {
   const input = (a.input && typeof a.input === "object" ? a.input : {}) as Record<string, unknown>;
   const questions = questionsOf(input);
   if (!questions) return null;
@@ -120,7 +121,7 @@ export function preAsk(db: Db, a: { session: string; toolUseId: string; input: u
     seen.add(ref);
     let form: ChatForm;
     try {
-      form = chatForm(db, ref, a.now);
+      form = chatForm(db, ref, a.merge, a.now);
     } catch (error) {
       if (error instanceof FlowrynError) return deny(`${ref} cannot be asked: ${error.message}`);
       throw error;
@@ -151,6 +152,8 @@ export interface PostAsk {
   /** The harness's own session id and transcript, from the hook payload. */
   claudeSession: string;
   transcriptPath: string;
+  /** `[merge]`: the away form's text depends on it. */
+  merge: MergeConfig;
   now: number;
 }
 
@@ -219,7 +222,7 @@ export function postAsk(db: Db, a: PostAsk): string[] {
     }
     let form: ChatForm;
     try {
-      form = chatForm(db, ref, a.now);
+      form = chatForm(db, ref, a.merge, a.now);
     } catch (error) {
       if (!(error instanceof FlowrynError)) throw error;
       refuse(error.message);
