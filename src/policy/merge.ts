@@ -8,7 +8,8 @@ import type { Db } from "../db/db.ts";
 import { getMeta, setMeta, tx } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
 import { canonicalPrUrl, parsePrUrl } from "../forge/github.ts";
-import { checksLine, ForgeError, type ChecksSummary, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
+import { checksLine, ForgeError, type ChecksSummary, type CommitInfo, type Forge, type PrRef, type PullRequest } from "../forge/types.ts";
+import { findAiAttribution } from "./ai-attribution.ts";
 import { getSession, leaseOfSession } from "../lease/lease.ts";
 import { approvalRef, deliveredOf, prEvidenceFrom, recordPrEvidence, remoteHead, type Delivered } from "../lifecycle/delivery.ts";
 import { landRun, type LandedBy } from "../lifecycle/landing.ts";
@@ -82,6 +83,12 @@ export interface MergeFacts {
   primaryBranch: string | null;
   primaryDirty: boolean;
   fastForward: boolean;
+  /**
+   * The commits the merge would land (the open PR's, or the local branch's past
+   * the default branch), for the AI attribution check; null when they could
+   * not be read (the gate refuses), absent for a PR already merged.
+   */
+  commits?: CommitInfo[] | null;
   /** Read when the project has verify steps, or when every red check may be one GitHub never started; absent: no verify is required. */
   local?: LocalEvidence;
 }
@@ -154,6 +161,15 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
         throw new FlowrynError("forge_unavailable", `cannot read the checks of ${delivered.ref} (${(error as Error).message})`, "try again later");
       }
     }
+    let commits: CommitInfo[] | undefined;
+    if (pr.state === "open") {
+      try {
+        commits = await mc.forge.pullCommits(ref);
+      } catch (error) {
+        noteMergeBlocked(mc, error);
+        throw new FlowrynError("forge_unavailable", `cannot read the commits of ${delivered.ref} (${(error as Error).message}); a merge whose commits cannot be checked for AI co-author lines is not attempted`, "try again later");
+      }
+    }
     let notStarted: number[] = [];
     let annotationsUnread = false;
     if (checks && checks.state === "red") {
@@ -167,14 +183,33 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
     if (!annotationsUnread) tx(mc.db, () => noteForgeUp(mc.db, "github", mc.now()));
     const local = localEvidence(mc, project.id, canonicalPrUrl(ref, mc.github.web_url), pr.headSha, notStarted);
     const remote = pr.state === "open" ? await remoteHead(mc.git, run.worktree_path, pr.headRef) : null;
-    return { ...base, head: pr.headSha, pr, checks, remote, ...(local ? { local } : {}) };
+    return { ...base, head: pr.headSha, pr, checks, remote, ...(commits ? { commits } : {}), ...(local ? { local } : {}) };
   }
   const head = (await out(mc.git, run.worktree_path, ["rev-parse", "HEAD"])) ?? "";
   const primaryBranch = await out(mc.git, project.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const status = await out(mc.git, project.path, ["status", "--porcelain", "--untracked-files=no"]);
   const fastForward = head !== "" && (await mc.git(["merge-base", "--is-ancestor", `refs/heads/${project.default_branch}`, head], project.path)).code === 0;
   const local = localEvidence(mc, project.id, base.ref, head, []);
-  return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, ...(local ? { local } : {}) };
+  const commits = head === "" ? null : await branchCommits(mc.git, project.path, project.default_branch, head);
+  return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, commits, ...(local ? { local } : {}) };
+}
+
+const COMMIT_FIELD = "\x00";
+const COMMIT_END = "\x1e";
+
+/** The commits on `head` past the default branch, oldest first; null when git cannot list them. */
+export async function branchCommits(git: GitRunner, cwd: string, defaultBranch: string, head: string): Promise<CommitInfo[] | null> {
+  const listed = await git(["log", "--reverse", "--format=%H%x00%ae%x00%ce%x00%B%x1e", `refs/heads/${defaultBranch}..${head}`, "--"], cwd);
+  if (listed.code !== 0) return null;
+  const commits: CommitInfo[] = [];
+  for (const entry of listed.stdout.split(COMMIT_END)) {
+    const record = entry.replace(/^\n/, "");
+    if (record.trim() === "") continue;
+    const [sha, authorEmail, committerEmail, ...message] = record.split(COMMIT_FIELD);
+    if (!sha || authorEmail === undefined || committerEmail === undefined) return null;
+    commits.push({ sha, authorEmail, committerEmail, message: message.join(COMMIT_FIELD) });
+  }
+  return commits;
 }
 
 /**
@@ -366,6 +401,33 @@ function ciNote(facts: MergeFacts, notStarted: string[]): string {
   return `${required} (${!checks || checks.state === "none" ? "the PR has no checks" : `checks: ${checksLine(checks)}`} at ${head})`;
 }
 
+const SHOWN_HITS = 3;
+
+/**
+ * Refuse a merge whose commits or PR body carry an AI co-author line, or
+ * whose commits cannot be read. A trailer lives in a pushed commit, which a
+ * new commit cannot change and Flowryn never force-pushes, so the fix is a
+ * fresh branch with the work re-committed without it.
+ */
+export function checkAiAttribution(facts: MergeFacts): void {
+  const task = facts.run.task_id;
+  if (facts.commits === null) throw new FlowrynError("ai_attribution", `merge refused: cannot list the commits of ${facts.ref} to check them for AI co-author lines`, `flowryn show ${task}`);
+  const hits = findAiAttribution(facts.commits ?? [], facts.pr?.body ?? null);
+  if (hits.length === 0) return;
+  const inCommits = hits.filter((h) => h.sha !== null);
+  const shas = [...new Set(inCommits.map((h) => h.sha!.slice(0, 8)))];
+  const shown = hits.slice(0, SHOWN_HITS).map((h) => `${h.sha ? h.sha.slice(0, 8) : "PR body"}: ${JSON.stringify(h.line)}`);
+  const more = hits.length > SHOWN_HITS ? ` (+${hits.length - SHOWN_HITS} more)` : "";
+  const what = inCommits.length > 0 ? `${shas.length} commit${shas.length === 1 ? "" : "s"} (${shas.join(", ")})${inCommits.length < hits.length ? " and the PR body" : ""}` : "the PR body";
+  const base = facts.pr ? `origin/${facts.pr.baseRef}` : facts.project.default_branch;
+  const redeliver = facts.pr ? "deliver it as a new PR, and decline this one" : "and deliver that branch instead";
+  const help =
+    inCommits.length > 0
+      ? `a new commit cannot remove a trailer, and history is never force-pushed: steer the worker to branch afresh from ${base}, re-create the work as new commits without the line (git cherry-pick --no-commit, then a clean message), ${redeliver}: flowryn steer ${task} --body-file -`
+      : `edit the PR description to drop the line, then merge again`;
+  throw new FlowrynError("ai_attribution", `merge refused: an AI co-author line in ${what}: ${shown.join("; ")}${more}`, help);
+}
+
 /** The gate, in the design's order; throws the first refusal. */
 export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
   const { run, delivered, pr, project } = facts;
@@ -404,6 +466,8 @@ export function checkGate(facts: MergeFacts, chosen: ChoiceResult): GateResult {
       throw new FlowrynError("not_fast_forward", `${run.branch} is not a fast-forward of ${project.default_branch} (it has diverged)`, `steer the worker to rebase onto ${project.default_branch} and deliver again`);
     }
   }
+  // 2b · no AI co-author line in a commit or the PR body (docs/notes/2026-11-08-never-commit-claude-ks.md).
+  checkAiAttribution(facts);
   // 3 · every check green or exactly one red check waived by a human; local green when the project has verify steps (it also covers checks GitHub never started).
   let waived: string | null = null;
   let localGreen: string | null = null;

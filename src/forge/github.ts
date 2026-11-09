@@ -5,7 +5,9 @@ import {
   type Annotation,
   type Check,
   type ChecksSummary,
+  type CommitInfo,
   type FeedbackAuthor,
+  MAX_PR_COMMITS,
   type Forge,
   type IssueComment,
   type MergeResult,
@@ -235,7 +237,18 @@ export class GitHubForge implements Forge {
       // Only a single-PR answer carries it; a list answer and a closed PR read null.
       mergeable: !merged && pr.state === "open" && typeof pr.mergeable === "boolean" ? pr.mergeable : null,
       ...(typeof pr.user?.login === "string" ? { author: pr.user.login } : {}),
+      ...("body" in pr ? { body: typeof pr.body === "string" ? pr.body : null } : {}),
     };
+  }
+
+  async pullCommits(ref: PrRef): Promise<CommitInfo[]> {
+    const items = await this.list(`/repos/${enc(ref.owner)}/${enc(ref.repo)}/pulls/${ref.number}/commits`, "a pull request's commit list");
+    // GitHub lists at most MAX_PR_COMMITS; a full last page cannot prove there are no more.
+    if (items.length >= MAX_PR_COMMITS) throw new ForgeError("protocol", `${ref.owner}/${ref.repo}#${ref.number} has ${MAX_PR_COMMITS} or more commits, more than GitHub lists`);
+    return items.map((item) => {
+      if (typeof item.sha !== "string" || typeof item.commit?.message !== "string") throw new ForgeError("protocol", "a pull request commit is missing sha or commit.message");
+      return { sha: item.sha, message: item.commit.message, authorEmail: str(item.commit.author?.email), committerEmail: str(item.commit.committer?.email) };
+    });
   }
 
   async pull(ref: PrRef, opts: { fresh?: boolean } = {}): Promise<PullRequest> {

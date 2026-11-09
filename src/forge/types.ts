@@ -39,6 +39,8 @@ export interface PullRequest {
   mergeable: boolean | null;
   /** The login that opened the PR; absent when the forge did not say. */
   author?: string;
+  /** The PR's description; absent when the forge did not say, null when it is empty. */
+  body?: string | null;
 }
 
 export type CheckState = "green" | "red" | "pending";
@@ -147,6 +149,17 @@ export class ForgeError extends Error {
   }
 }
 
+/** A commit as the merge gate reads it: from the forge for a PR, from git for a local delivery. */
+export interface CommitInfo {
+  sha: string;
+  message: string;
+  authorEmail: string;
+  committerEmail: string;
+}
+
+/** GitHub's cap on a PR's commit list (REST: pulls/{n}/commits). */
+export const MAX_PR_COMMITS = 250;
+
 export interface Forge {
   /** `fresh`: skip the conditional (ETag) read, for a caller that doubts a cached answer. */
   pull(ref: PrRef, opts?: { fresh?: boolean }): Promise<PullRequest>;
@@ -157,6 +170,11 @@ export interface Forge {
   annotations(repo: RepoRef, checkRunId: number): Promise<Annotation[]>;
   /** Merge at exactly `sha`: the forge refuses when the head moved (design section 7: bound to the head). */
   merge(ref: PrRef, sha: string, method: string, title: string): Promise<MergeResult>;
+  /**
+   * A PR's commits, oldest first (what a squash merge reads its co-authors from).
+   * GitHub lists at most MAX_PR_COMMITS; a PR with more throws a `protocol` error, never a partial list.
+   */
+  pullCommits(ref: PrRef): Promise<CommitInfo[]>;
   /** Point an open PR at another base branch (a stacked PR whose base landed); the PR as GitHub has it after. */
   setBase(ref: PrRef, base: string): Promise<PullRequest>;
   /** A PR's reviews, inline review comments and conversation comments (src/forge/feedback.ts reads them). */

@@ -29,6 +29,8 @@ export const ERROR_CODES = {
   account_signed_out: EXIT.unavailable,
   // flowryn home adopt: the old home is live, or its work clashes with this home's or its scope rules
   adopt_refused: EXIT.policy,
+  // a merge whose commits or PR body carry an AI co-author line (docs/notes/2026-11-08-never-commit-claude-ks.md)
+  ai_attribution: EXIT.policy,
   already_exists: EXIT.validation,
   already_running: EXIT.failure,
   approval_required: EXIT.policy,

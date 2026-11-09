@@ -140,6 +140,7 @@ function forge(prs: PullRequest[], fail = false): Forge & { patched: { number: n
     merge: async () => ({ merged: false, sha: null, message: "" }),
     feedback: async () => ({ reviews: [], reviewComments: [], issueComments: [] }),
     reviewThreads: async () => [],
+    pullCommits: async () => [],
     setBase: async (ref, base) => {
       if (fail) throw new ForgeError("unreachable", "GitHub is down (test)");
       patched.push({ number: ref.number, base });
