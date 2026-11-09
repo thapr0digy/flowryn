@@ -197,7 +197,7 @@ export function settlePromptEpisode(db: Db, run: RunRow, signal: PromptSignal, b
     return { outcome, episode: episode.id, steer: null, item: null };
   }
   const recent = db
-    .query("SELECT prompt FROM prompt_episodes WHERE run_id = ?1 AND opened_at > ?2 AND outcome != 'void' ORDER BY opened_at DESC")
+    .query("SELECT prompt FROM prompt_episodes WHERE run_id = ?1 AND opened_at > ?2 AND outcome IN ('pending', 'denied') ORDER BY opened_at DESC")
     .all(run.id, now - PROMPT_REPEAT_WINDOW_MS) as { prompt: string }[];
   if (recent.length >= PROMPT_REPEAT_LIMIT) {
     decide(db, run, episode, "denied", signal.hook, null, now);

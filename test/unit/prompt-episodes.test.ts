@@ -15,7 +15,7 @@ import {
   voidPendingEpisodes,
   type PromptSignal,
 } from "../../src/lifecycle/prompt-wedge.ts";
-import { getRun } from "../../src/lifecycle/runs.ts";
+import { failRun, getRun } from "../../src/lifecycle/runs.ts";
 
 /**
  * After a permission prompt (docs/notes/2026-11-08-keep-workers-off-pp.md):
@@ -206,6 +206,27 @@ describe("the repeat limit", () => {
     clock += PROMPT_REPEAT_WINDOW_MS - 15 * MIN + 1;
     blockedOnce();
     expect(steers()).toHaveLength(3);
+    expect(items("prompt_repeat")).toHaveLength(0);
+  });
+
+  test("the run failing resolves its open repeat P1", () => {
+    blockedOnce();
+    blockedOnce();
+    blockedOnce();
+    expect(items("prompt_repeat")).toEqual([expect.objectContaining({ state: "open" })]);
+    tx(db, () => failRun(db, run(), "worker died", "daemon", clock));
+    expect(items("prompt_repeat").map((i) => i.state)).not.toContain("open");
+  });
+
+  test("prompts the captain answered do not count toward the limit", () => {
+    prompted("t1");
+    hook({ hook: "post-tool", tool: "t1" });
+    clock += 5 * MIN;
+    prompted("t1");
+    hook({ hook: "post-tool", tool: "t1" });
+    clock += 5 * MIN;
+    blockedOnce();
+    expect(steers()).toHaveLength(1);
     expect(items("prompt_repeat")).toHaveLength(0);
   });
 });
