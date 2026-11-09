@@ -25,18 +25,18 @@ Claude only. A Pi worker's prompt item is a stall guess with no outcome signal, 
   - **denied**: Claude's PermissionDenied hook for it; PostToolUseFailure whose error is Claude's rejection text ("The user doesn't want to proceed…", "Permission … has been denied", "…awaiting approval did not run"; a plain `Permission denied` from a command does not count); PreToolUse of another main-agent tool; Stop; UserPromptSubmit.
   - Held tool unknown: only Stop, UserPromptSubmit or PermissionDenied decide denied, and any PostToolUse decides answered, so a missing fact never sends a false steer.
   - **void**: a new or resumed session (`hook worker-start`), or a second prompt opening while one is undecided.
-- **Denied**, fewer than 3 episodes for the run in the last 30 minutes: one ordinary steer through `createSteer`, which rings by the usual paths (a Stop continues the turn with it at once):
+- **Denied**, fewer than 3 blocked episodes for the run in the last 30 minutes (this one included; answered ones do not count): one ordinary steer through `createSteer`, which rings by the usual paths (a Stop continues the turn with it at once):
 
       Your last command was blocked by a permission prompt and did not run: "<prompt line>". Do not retry it. Do the same thing another way: edit files with your Edit/Write tool (no python/perl/sed -i scripts); new commits only, git merge origin/<base>, plain push; rm only "${VAR:?}" or mktemp -d paths. Then ack this steer.
 
   The prompt line has its double quotes and backticks replaced and is capped again, so it is only ever quoted data. Not urgent: an urgent steer would cancel the very tool call that does it another way.
-- **Denied**, the 3rd or later within 30 minutes: no steer; one P1 item `prompt_repeat` for the run (once while open) with up to the last three prompt texts. Fixed limits (`PROMPT_REPEAT_LIMIT`, `PROMPT_REPEAT_WINDOW_MS`), no config keys.
+- **Denied**, the 3rd or later within 30 minutes: no steer; one P1 item `prompt_repeat` for the run (once while open) with up to the last three blocked prompt texts, resolved when the run fails, lands or is cleaned. Fixed limits (`PROMPT_REPEAT_LIMIT`, `PROMPT_REPEAT_WINDOW_MS`), no config keys.
 - Events: `run.prompt_episode`, `run.prompt_outcome` (`{episode, outcome, via, steer?}`), `run.prompt_repeat`, beside `steer.created`.
 - Flowryn still never answers or dismisses a dialog: all of this runs from hooks, which Claude fires only once the dialog is gone. The new worker hook `PermissionDenied` → `flowryn hook permission-denied` prints nothing, so it never asks Claude to retry.
 
 ## Tests
 
-- test/unit/prompt-episodes.test.ts: the outcome rules table, the steer text, hostile prompt text arriving inert (no newline, escape or quote breakout, capped), episodes (blocked, answered, Pi, voided by a new session, superseded), and the repeat limit inside and outside the window.
+- test/unit/prompt-episodes.test.ts: the outcome rules table, the steer text, hostile prompt text arriving inert (no newline, escape or quote breakout, capped), episodes (blocked, answered, Pi, voided by a new session, superseded), and the repeat limit inside and outside the window, with answered episodes not counted.
 - test/integration/prompt-episodes.test.ts, through the real daemon, CLI and hook verbs against the fake Herdr: a blocked prompt cleared by the dialog-gone check gets the steer, carried at the next tool result; an answered one gets none; PermissionDenied decides it; three in 30 minutes raise the P1 with all three texts; and while the dialog is up no key or text is sent and no steer is made.
 
 ## Assumptions not yet run live
