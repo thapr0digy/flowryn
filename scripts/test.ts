@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
  * The test suite, fast (docs/notes/2026-11-06-fast-tests-parallel-36.md): every file but the
- * timing-sensitive ones in parallel (`bun test --parallel`), then those one at a time, stopping
- * at the first failing part.
+ * timing-sensitive ones in parallel (`bun test --parallel`), then those side by side among
+ * themselves once the busy part has ended, stopping at the first failing part.
  *
  *   bun scripts/test.ts               # unit, then integration (stops at the first failing part)
  *   bun scripts/test.ts unit          # test/unit only
@@ -28,7 +28,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 /**
  * Files whose tests assert on wall-clock windows (a fixed sleep before "nothing happened yet",
  * a race between two deliveries): they pass alone but miss their windows when a dozen daemons
- * share the CPU, so they run one at a time after the parallel part.
+ * share the CPU, so they run after the parallel part, side by side only among themselves.
  */
 export const SERIAL_FILES = [
   "test/unit/gate-questions.test.ts",
