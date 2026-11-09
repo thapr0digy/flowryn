@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { parseConfig } from "../../src/config/config.ts";
+import { capacityConfig } from "../../src/config/workflows.ts";
 import { anyMatches } from "../../src/verify/changed.ts";
 import { verifyConfig } from "../../src/verify/config.ts";
-import { recommendedVerifyToml, VERIFY_TEST_JOBS, VERIFY_TIMEOUT_MIN, WORKER_PATH_GLOBS } from "../../src/verify/recommended.ts";
+import { recommendedVerifyToml, VERIFY_TEST_JOBS, VERIFY_TIMEOUT_MIN, VERIFY_VALIDATION_CAP, WORKER_PATH_GLOBS } from "../../src/verify/recommended.ts";
 
 /** The recommended verify block (docs/notes/2026-11-08-adopt-the-parallel-vi.md) and the globs that gate its contract checks. */
 
@@ -77,7 +78,10 @@ describe("the recommended verify block", () => {
     expect(verify.timeout_ms).toBe(VERIFY_TIMEOUT_MIN * 60_000);
   });
 
-  test("the note prints the block exactly as the code builds it", () => {
-    expect(readFileSync(NOTE, "utf8")).toContain(`\`\`\`toml\n${recommendedVerifyToml()}\n`);
+  test("the note prints the block exactly as the code builds it, and the cap it was measured for", () => {
+    const note = readFileSync(NOTE, "utf8");
+    expect(note).toContain(`\`\`\`toml\n${recommendedVerifyToml()}\n`);
+    expect(note).toContain(`\`\`\`toml\n[capacity]\nvalidation = ${VERIFY_VALIDATION_CAP}\n`);
+    expect(capacityConfig(parseConfig(`[capacity]\nvalidation = ${VERIFY_VALIDATION_CAP}\n`, "/h")).pools.validation).toBe(VERIFY_VALIDATION_CAP);
   });
 });

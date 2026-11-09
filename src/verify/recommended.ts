@@ -17,8 +17,14 @@
  */
 export const WORKER_PATH_GLOBS = ["src/**", "spikes/pi/lib/**", "scripts/build.sh", "package.json", "bun.lock", "bunfig.toml", "tsconfig.json"] as const;
 
-/** Parallel test workers per verify: two verifies at once (`[capacity] validation = 2`) use at most 12 on the 12-core Mac. */
-export const VERIFY_TEST_JOBS = 6;
+/**
+ * Parallel test workers per verify, with one verify at a time (`[capacity] validation = 1`): the suite
+ * is CPU-bound on the 12-core Mac, so two at once took about twice as long each and flaked (the note's "Two at once").
+ */
+export const VERIFY_TEST_JOBS = 8;
+
+/** The `[capacity] validation` this block is measured for. */
+export const VERIFY_VALIDATION_CAP = 1;
 
 /** Twice the 15 minute target: a hung step is caught sooner than at 75, a loaded run is not cut. */
 export const VERIFY_TIMEOUT_MIN = 30;
