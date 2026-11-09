@@ -59,8 +59,17 @@ export function plan(scope: Scope, jobs: number, opts: { timings: boolean; updat
   const serial = SERIAL_FILES.filter((file) => file.startsWith(`${dir}/`));
   const timings = opts.timings ? [`--timings=${TIMINGS}`, ...(opts.updateTimings ? ["--update-timings"] : [])] : [];
   const runs = [["bun", "test", `--parallel=${jobs}`, `--timeout=${DEFAULT_TIMEOUT_MS}`, ...timings, ...serial.map((file) => `--path-ignore-patterns=${file}`), dir]];
-  if (serial.length > 0) runs.push(["bun", "test", `--timeout=${DEFAULT_TIMEOUT_MS}`, ...serial]);
+  if (serial.length > 0) runs.push(["bun", "test", ...serialParallelism(jobs, serial.length), `--timeout=${DEFAULT_TIMEOUT_MS}`, ...serial]);
   return runs;
+}
+
+/**
+ * The serial files run side by side among themselves, once the busy part has ended: their windows
+ * hold beside each other, not beside a dozen daemons (docs/notes/2026-11-08-adopt-the-parallel-vi.md).
+ */
+function serialParallelism(jobs: number, files: number): string[] {
+  const workers = Math.min(jobs, files);
+  return workers > 1 ? [`--parallel=${workers}`] : [];
 }
 
 function parseArgs(argv: string[]): { scope: Scope; updateTimings: boolean } {
