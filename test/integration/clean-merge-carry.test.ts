@@ -141,9 +141,15 @@ describe("a clean merge of main into a delivered routine PR", () => {
       await waitUntil(() => query(e, "SELECT 1 FROM divergences WHERE summary LIKE 'the PR head moved%'").length > 0, 30_000, "the head-moved divergence");
       const [summary] = query<{ summary: string }>(e, "SELECT summary FROM divergences WHERE summary LIKE 'the PR head moved%'").map((d) => d.summary);
       expect(summary).toContain(`not carried: not only a clean merge of main (${head.slice(0, 8)} holds changes beyond the clean merge of main)`);
+      // The delivered head's auto-verify settles first: a request the head move cancelled is queued again by
+      // AutoMerger.requeueLost, which verifies the moved head ahead of its redelivery and supersedes the row
+      // (src/verify/auto-merge.ts). Reading before that settled raced it (docs/notes/2026-11-08-fix-the-four-3w.md).
+      await waitUntil(() => query(e, "SELECT 1 FROM auto_merges WHERE head_sha = ?1 AND state IN ('queued','verifying','waiting_checks','merging')", approved).length === 0, 30_000, "the delivered head's auto-verify to settle");
       expect(query(e, "SELECT 1 FROM events WHERE kind = 'run.head_carried'")).toHaveLength(0);
-      // The delivered head's own auto-verify aside, nothing verifies the head that was not carried.
-      expect(query(e, "SELECT 1 FROM verify_queue WHERE head_sha = ?1", head)).toHaveLength(0);
+      // Nothing carries the head that was not carried: any verify of it is that pre-verify, never a carried head's.
+      const preVerified = new Set(query<{ request: string | null }>(e, "SELECT json_extract(payload, '$.request') AS request FROM events WHERE kind = 'auto_merge.verify_requeued'").map((r) => r.request));
+      const ofHead = query<{ id: string }>(e, "SELECT id FROM verify_queue WHERE head_sha = ?1", head).map((r) => r.id);
+      expect(ofHead.filter((id) => !preVerified.has(id))).toEqual([]);
       const merge = await e.call("merge", { task });
       expect(merge.ok).toBe(false);
       expect(merge.error).toMatchObject({ code: "head_moved" });

@@ -591,8 +591,9 @@ function afterPrompt(ctx: HandlerCtx, run: RunWithPolicy, signal: PromptSignal):
  * Stop: a turn ended, unless a pending steer continues it (M0 c06), at most
  * twice in a row. With no steer taken, the turn-end guard may answer a turn
  * that ended without an outcome with its one reminder per episode: a Claude
- * continuation, or for Pi a follow-up the extension sends (the Pi worker goes
- * idle meanwhile; its follow-up turn reports busy itself).
+ * continuation, or for Pi a follow-up the extension sends. Either way the run
+ * stays busy until that turn ends; a Pi follow-up that never starts lets the
+ * busy lease lapse, and the reconciler's Pi stall backstop flags it.
  */
 const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pending steer or a turn-end reminder (worker) or a P0 (leader)", (ctx, run, args) => {
   const harness = harnessOf(args);
@@ -631,7 +632,10 @@ const stop = signalVerb("stop", "Hook: a turn ended; may continue it with a pend
     return { data: { run: run.id, reminder: true, context: reminder } };
   }
   ctx.fleet.continuations.delete(run.id);
-  markIdle(ctx, run, HOOK_SIGNALS.stop);
+  // A Pi reminder is a follow-up turn the extension starts now: busy, as a Claude continuation is, so no worker_idle
+  // pointer falls due between the reminder and that turn's own end (docs/notes/2026-11-08-fix-the-four-3w.md).
+  if (reminder !== null) markBusy(ctx, run, "reminded");
+  else markIdle(ctx, run, HOOK_SIGNALS.stop);
   const data = reminder !== null ? { run: run.id, reminder: true, context: reminder } : { run: run.id };
   return withUsage({ data }, usageSignal(ctx, harness, runAccountId(run), `worker ${run.task_id}`, { stop: true }));
 }, (ctx, input, args) => withUsage(leader.stop(ctx), usageSignal(ctx, harnessOf(args), leaderAccount(ctx, input), "the leader", { stop: true })));
