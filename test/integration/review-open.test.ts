@@ -39,6 +39,12 @@ function one<T>(e: FleetEnv, sql: string, ...params: string[]): T | null {
   }
 }
 
+/** Every lavish-axi call the daemon made, one line each (the test home's stand-in logs its arguments). */
+function lavishCalls(f: FleetEnv): string[] {
+  const log = join(f.h.home, "lavish-calls.log");
+  return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
+}
+
 async function handIn(e: ShipEnv, review?: string): Promise<{ task: string; run: string; gate: { id: string; review_url: string } }> {
   const f = e.fleet;
   expect((await f.json(["project", "set", "web", "--workflow", "feature"])).code).toBe(0);
@@ -158,10 +164,11 @@ describe("review pages open in your browser", () => {
     const e = ship;
     const f = e.fleet;
     const { task, gate } = await handIn(e);
-    // The poll starts with stage done's own kick (about 150 ms idle); 30 s leaves room for a loaded host
-    // (docs/notes/2026-11-07-fix-two-integration-iq.md).
-    await waitUntil(() => existsSync(join(f.h.home, "lavish-calls.log")), 30_000, "the lavish-axi poll");
-    await Bun.sleep(300);
+    // The daemon's poll of the page: the opener is offered the gate in the same synchronous step that starts it
+    // (src/lavish/poller.ts followGates), so once the poll has run nothing can be waiting to open. The first
+    // lavish-axi call is the hosting of the page's copy, which comes before the poll, so the wait reads the poll's
+    // own line (docs/notes/2026-11-08-fix-the-four-3w.md).
+    await waitUntil(() => lavishCalls(f).some((line) => line.startsWith("poll ")), 30_000, "the lavish-axi poll");
     expect(one<{ open_state: string; open_detail: string }>(f, "SELECT open_state, open_detail FROM gates WHERE id = ?1", gate.id)).toEqual({ open_state: "off", open_detail: "[review] open_browser = false" });
     expect(existsSync(join(f.h.home, "browser-opens.log"))).toBe(false);
     expect(await gateLine(e, task, gate.id)).toContain(`; browser: off ([review] open_browser = false); open by hand: ${gate.review_url}`);

@@ -43,6 +43,24 @@ function idleLines(env: FleetEnv, runId: string): string[] {
   }
 }
 
+/** The run.liveness events that set the run idle after its first reminder and before that reminder's result. */
+function idleBetweenReminderAndResult(env: FleetEnv, runId: string): number[] {
+  const db = env.h.db();
+  try {
+    return (
+      db
+        .query(
+          `SELECT e.seq FROM events e WHERE e.run_id = ?1 AND e.kind = 'run.liveness' AND json_extract(e.payload, '$.to') = 'idle'
+             AND e.seq > (SELECT MIN(seq) FROM events WHERE run_id = ?1 AND kind = 'run.turn_end_reminder')
+             AND e.seq < (SELECT MIN(seq) FROM events WHERE run_id = ?1 AND kind = 'run.turn_end_reminder_result')`,
+        )
+        .all(runId) as { seq: number }[]
+    ).map((e) => e.seq);
+  } finally {
+    db.close();
+  }
+}
+
 /** The reminders the fake worker received ($FLOWRYN_REPORT_DIR/fake-reminders.txt). */
 function received(env: FleetEnv, task: string): string[] {
   const file = join(env.h.dataDir, task, "fake-reminders.txt");
@@ -62,10 +80,11 @@ for (const harness of ["claude", "pi"] as const) {
       expect(payloads(env, run, "run.turn_end_reminder")).toMatchObject([{ harness }]);
       expect(payloads(env, run, "run.turn_end_reminder_result")).toMatchObject([{ obeyed: false, outcome: null }]);
       await waitUntil(() => idleLines(env, run).length === 1, 10_000, "the worker_idle pointer");
-      expect(idleLines(env, run)[0]).toMatch(/got the turn-end reminder, ended its turn again, and has been idle \d+m without an outcome$/);
-      // The alert may fall due between the reminder and the worker's next turn end (under load), so its
-      // payload can predate the result; the pointer's line says it either way (test/unit/turn-end-guard.test.ts).
-      expect(payloads(env, run, "run.idle_alert")).toHaveLength(1);
+      expect(idleLines(env, run)).toEqual([expect.stringMatching(/got the turn-end reminder, ended its turn again, and has been idle \d+m without an outcome$/)]);
+      // The reminder keeps the run busy until the turn it started ends (a Claude continuation, a Pi follow-up), so the
+      // run never goes idle in between and the alert can only fall due after the result: its payload says ignored.
+      expect(idleBetweenReminderAndResult(env, run)).toEqual([]);
+      expect(payloads(env, run, "run.idle_alert")).toMatchObject([{ ignored_reminder: true }]);
     }, 30_000);
 
     test("a worker that obeys (report progress) settles it obeyed, gets no second one, and an ordinary idle pointer", async () => {
@@ -156,5 +175,19 @@ describe("steer --end-turn", () => {
     await Bun.sleep(500);
     expect(received(env, task)).toHaveLength(1);
     expect(payloads(env, run, "run.turn_end_reminder")).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("the turn-end guard and an interrupt (Pi)", () => {
+  test("a worker interrupted mid-episode with no outcome is not reminded, so the interrupt verifies by its stop hook", async () => {
+    const env = await fleet();
+    const { task, run } = await env.dispatch("Build\nFAKE: sleep 30000", { harness: "pi" });
+    await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+    const result = await env.json(["interrupt", task]);
+    expect(result.code).toBe(0);
+    expect(result.reply.data).toMatchObject({ interrupted: true, evidence: "hook" });
+    expect(payloads(env, run, "run.interrupt_sent")).toMatchObject([{ via: "bus" }]);
+    expect(payloads(env, run, "run.turn_end_reminder")).toEqual([]);
+    expect(received(env, task)).toEqual([]);
   }, 30_000);
 });

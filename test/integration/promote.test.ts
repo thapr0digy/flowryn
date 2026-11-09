@@ -6,11 +6,9 @@
  * that names its report. The worker is the fake harness.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { listTasks, processRunner, type BacklogTask } from "../../src/journal/tasks-axi.ts";
-import { tx } from "../../src/db/db.ts";
-import { addReviewMessage } from "../../src/lifecycle/review-chat.ts";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { realTasksAxi, waitUntil } from "../helpers/harness.ts";
 import { filledDesignPage } from "../helpers/design-page.ts";
@@ -37,6 +35,23 @@ function policy(env: FleetEnv, taskId: string): { kind: string; delivery_mode: s
   const db = env.h.db();
   try {
     return db.query("SELECT kind, delivery_mode, workflow FROM task_policy WHERE task_id = ?1").get(taskId) as { kind: string; delivery_mode: string; workflow: string };
+  } finally {
+    db.close();
+  }
+}
+
+/** A chat message the user sent from the review page, as the next lavish-axi poll prints it (lavish-axi 0.1.65's TOON layout). */
+function sendFromPage(env: FleetEnv, said: string): void {
+  const queue = join(env.h.home, "lavish-queue");
+  mkdirSync(queue, { recursive: true });
+  const prompt = `  - uid: ""\n    prompt: ${JSON.stringify(said)}\n    selector: ""\n    tag: message\n    text: Freeform message`;
+  writeFileSync(join(queue, "001.out"), `session:\n  file: /x/design.html\n  status: feedback\nprompts[1]:\n${prompt}\nnext_step: "Apply the requested changes."\ndom_snapshot: ""\n`);
+}
+
+function messageCount(env: FleetEnv, gateId: string): number {
+  const db = env.h.db();
+  try {
+    return (db.query("SELECT COUNT(*) AS n FROM review_messages WHERE gate_id = ?1 AND author = 'user'").get(gateId) as { n: number }).n;
   } finally {
     db.close();
   }
@@ -241,13 +256,10 @@ describe("a scout in a review with questions", () => {
       };
       const gate = (decisions()[0] as { gate_id: string }).gate_id;
       expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "open", answered_via: null, items: 1, resolved_by: null }]);
-      const seeded = env.h.db();
-      try {
-        // BEGIN IMMEDIATE, like the daemon: a deferred transaction's read-to-write upgrade gets SQLITE_BUSY at once while the daemon writes, without waiting out the busy timeout.
-        tx(seeded, () => addReviewMessage(seeded, { id: gate, run_id: run }, "user", "Use the db", Date.now()));
-      } finally {
-        seeded.close();
-      }
+      // The user writes on the page: the daemon's own poll of it delivers the message (the test home's lavish-axi
+      // prints the queued file), so the test never writes the database while the daemon does.
+      sendFromPage(env, "Use the db");
+      await waitUntil(() => messageCount(env, gate) === 1, 15_000, "the page message kept");
       expect((await env.json(["promote", task])).code).toBe(0);
       expect(decisions()).toEqual([{ id: "q1", gate_id: gate, state: "dismissed", answered_via: "promoted", items: 0, resolved_by: `run.promoted ${gate}` }]);
       // The page's conversation reaches the leader as the review's one summary.

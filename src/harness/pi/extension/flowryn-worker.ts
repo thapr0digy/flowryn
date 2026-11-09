@@ -241,7 +241,7 @@ export default function flowrynWorker(pi: any): void {
     try {
       pi.sendMessage({ customType: REMINDER_CUSTOM_TYPE, content: data.context, display: true }, { deliverAs: "followUp", triggerTurn: true });
     } catch {
-      // Not delivered; the worker_idle pointer covers a worker left idle.
+      // Not delivered; the run's busy lease lapses and the reconciler's Pi stall backstop flags a worker left idle.
     }
   }
 

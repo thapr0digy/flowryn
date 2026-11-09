@@ -3,6 +3,7 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import { findOpenRunItem } from "../attention/items.ts";
 import { REVIEW_TURN_END_REMINDER, TURN_END_REMINDER } from "../harness/contract-text.ts";
 import { runningBackgroundJobs } from "./background-jobs.ts";
+import { INTERRUPT_SENT_KIND } from "./control.ts";
 import { noteIgnoredReminder, waitingOnOthers } from "./idle-alert.ts";
 import { unansweredPageSteer } from "./review-chat.ts";
 import type { RunRow } from "./runs.ts";
@@ -115,6 +116,21 @@ function settleReminder(db: Db, run: RunRow, now: number): void {
   });
 }
 
+/**
+ * The daemon sent an interrupt in this episode that has not reported a
+ * timeout: the turn ending now is the daemon's doing, not the worker's.
+ */
+function interruptedThisEpisode(db: Db, run: RunRow, episodeFrom: number): boolean {
+  const sent = db
+    .query("SELECT seq FROM events WHERE run_id = ?1 AND kind = ?2 AND ts >= ?3 ORDER BY seq DESC LIMIT 1")
+    .get(run.id, INTERRUPT_SENT_KIND, episodeFrom) as { seq: number } | null;
+  if (!sent) return false;
+  const timedOut = db
+    .query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'run.interrupted' AND seq > ?2 AND json_extract(payload, '$.ok') = 0")
+    .get(run.id, sent.seq);
+  return timedOut === null;
+}
+
 export interface TurnEnd {
   harness: "claude" | "pi";
   /**
@@ -142,6 +158,7 @@ export function guardTurnEnd(db: Db, run: RunRow, turn: TurnEnd, now: number): s
   if (pendingWait(db, run, now, "hook") !== null) return null;
   const episodeFrom = instructionAt(db, run);
   if (outcomeSince(db, run.id, { ts: episodeFrom }) !== null) return null;
+  if (interruptedThisEpisode(db, run, episodeFrom)) return null;
   if (remindedThisEpisode(db, run.id, episodeFrom)) return null;
   appendEvent(db, {
     source: "hook",
