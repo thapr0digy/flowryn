@@ -103,6 +103,7 @@ const forge = {
     github.checksGate = null;
     return gate ? gate.hold(() => said) : said;
   },
+  pullCommits: async () => [],
   merge: async (): Promise<{ merged: boolean; message: string }> => {
     const merged = () => {
       github.pr = { ...github.pr, state: "merged", mergeSha: MERGED, mergeable: null };

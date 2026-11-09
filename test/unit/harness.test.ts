@@ -7,7 +7,7 @@ import { defaultConfig } from "../../src/config/config.ts";
 import { DEFAULT_TIMING, timingConfig, workersConfig } from "../../src/config/workers.ts";
 import { claudeAdapter, workerSettings } from "../../src/harness/claude/adapter.ts";
 import { canonicalProject, checkOrRegisterTrust } from "../../src/harness/claude/trust.ts";
-import { type ContractDelivery, deliveryLines, promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
+import { type ContractDelivery, deliveryLines, NO_AI_ATTRIBUTION_LINE, promptLine, steerLine, steerPointer, STYLE_BLOCK, workerContract } from "../../src/harness/contract-text.ts";
 import { TOOL_MAP } from "../../src/policy/toolkit.ts";
 import { shipGitAccess } from "../../src/harness/git-access.ts";
 import { loadExtensionSource, piAdapter } from "../../src/harness/pi/adapter.ts";
@@ -100,6 +100,23 @@ describe("claude adapter", () => {
     const plan = claudeAdapter.resume(context(), workers);
     expect(plan.args.slice(0, 2)).toEqual(["--resume", context().sessionId]);
     expect(plan.args.at(-1)).toContain("Continue your task");
+  });
+
+  test("the written worker settings file turns Claude's commit and PR attribution off, at launch and at resume", () => {
+    for (const plan of [claudeAdapter.launch(context(), workers), claudeAdapter.resume(context(), workers)]) {
+      const file = plan.files!.find((f) => f.path.endsWith("claude-settings.json"))!;
+      // Empty strings hide Claude's Co-authored-by trailer and its "Generated with Claude Code" PR line; sessionUrl is left alone.
+      expect(JSON.parse(file.content).attribution).toEqual({ commit: "", pr: "" });
+    }
+  });
+
+  test("every ship's delivery steps forbid AI co-author and \"Generated with Claude Code\" lines; a scout's do not need it", () => {
+    for (const mode of ["no-mistakes", "direct-PR", "local-only"] as const) {
+      for (const harness of ["claude", "pi"] as const) {
+        expect(deliveryLines({ kind: "ship", mode, defaultBranch: "main", harness })).toContain(NO_AI_ATTRIBUTION_LINE);
+      }
+    }
+    expect(deliveryLines({ kind: "scout", mode: "direct-PR", defaultBranch: "main" })).not.toContain(NO_AI_ATTRIBUTION_LINE);
   });
 
   test("the worker settings wire every hook verb, and the Stop waiter is asyncRewake with an 8 h timeout", () => {

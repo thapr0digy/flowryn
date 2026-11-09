@@ -168,6 +168,48 @@ describe("the named-head gate at deliver", () => {
 
 describe("the merge gate", () => {
   test(
+    "a PR whose commit carries a Claude co-author trailer is refused, naming the commit and the fresh-branch fix; one without merges",
+    async () => {
+      env = await makeShipEnv({ mode: "direct-PR" });
+      const e = env;
+      e.github.repo("acme/web").defaultChecks = [{ name: "ci/test", state: "green" }];
+      const tainted = await e.fleet.dispatch(
+        `Trailer\nFAKE: commit fix.txt fixed\nFAKE: wait-file go\nFAKE: push\nFAKE: pr ${e.github.apiUrl} acme/web\nFAKE: deliver-pr\nFAKE: sleep 120000`,
+        { kind: "ship" },
+      );
+      await waitUntil(() => {
+        const path = e.fleet.run(tainted.run).worktree_path;
+        return Boolean(path) && existsSync(join(path, "fix.txt")) && git(path, ["log", "-1", "--format=%s"]) !== "" && git(path, ["status", "--porcelain"]) === "";
+      }, 20_000, "the worker's first commit");
+      const wt = e.fleet.run(tainted.run).worktree_path;
+      writeFileSync(join(wt, "more.txt"), "more\n");
+      git(wt, ["add", "more.txt"]);
+      git(wt, ["commit", "-q", "-m", "more\n\nCo-Authored-By:  Claude Opus 5.5 <NoReply@Anthropic.com>"]);
+      const sha = git(wt, ["rev-parse", "HEAD"]);
+      writeFileSync(join(e.fleet.h.dataDir, tainted.task, "go"), "");
+      await delivered(e, tainted.run);
+      expect((await e.approve(tainted.task)).ok).toBe(true);
+      const refused = await e.fleet.json(["merge", tainted.task]);
+      expect(refused.code).toBe(2);
+      expect(errorCode(refused.reply)).toBe("ai_attribution");
+      const error = refused.reply.error as { message: string; help: string };
+      expect(error.message).toContain(sha.slice(0, 8));
+      expect(error.help).toContain("never force-pushed");
+      expect(error.help).toContain("new PR");
+      expect(e.github.repo("acme/web").prs.find((p) => p.headRef === e.fleet.run(tainted.run).branch)?.merged).toBe(false);
+
+      const clean = await shipPr(e);
+      await delivered(e, clean.run);
+      expect((await e.approve(clean.task)).ok).toBe(true);
+      const merged = await e.fleet.json(["merge", clean.task]);
+      expect(merged.code).toBe(0);
+      expect(merged.reply.data).toMatchObject({ state: "merged" });
+      await waitCleaned(e, clean.run, clean.task);
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
     "red: refused; one failing check waived in your shell merges; two cannot be waived",
     async () => {
       env = await makeShipEnv({ mode: "direct-PR" });

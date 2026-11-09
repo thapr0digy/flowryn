@@ -67,15 +67,23 @@ function baseLines(d: ContractDelivery): string[] {
   return d.base ? [`  This task's base is ${d.base}, not ${d.defaultBranch}: pass --base-branch ${d.base} on every no-mistakes axi run that starts a run.`] : [];
 }
 
+/** Every ship's commits and PR body: the merge gate refuses either line (docs/notes/2026-11-08-never-commit-claude-ks.md). */
+export const NO_AI_ATTRIBUTION_LINE = '  Commits and PR body: no AI Co-authored-by trailer, no "Generated with Claude Code" line (merge refuses them).';
+
 /** The "finished" lines: how this worker delivers, and that it is verified. */
 export function deliveryLines(d: ContractDelivery): string[] {
   if (d.kind === "scout") return ["- Finished: $FLOWRYN_BIN deliver --report <path>. It is verified.", "  Write reports under $FLOWRYN_REPORT_DIR."];
-  if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", `  Finished: $FLOWRYN_BIN deliver --local${handoffFlag(d)}. It is verified.`];
+  if (d.mode === "local-only") return ["- Ship locally: commit on your branch and never push.", NO_AI_ATTRIBUTION_LINE, `  Finished: $FLOWRYN_BIN deliver --local${handoffFlag(d)}. It is verified.`];
   if (d.mode === "direct-PR") {
-    return [`- Ship: commit, git push origin HEAD, open a PR into ${targetOf(d)} (gh-axi pr create).`, `  Finished: $FLOWRYN_BIN deliver --pr <url>${handoffFlag(d)}. Verified: your HEAD must be the PR head.`];
+    return [
+      `- Ship: commit, git push origin HEAD, open a PR into ${targetOf(d)} (gh-axi pr create).`,
+      NO_AI_ATTRIBUTION_LINE,
+      `  Finished: $FLOWRYN_BIN deliver --pr <url>${handoffFlag(d)}. Verified: your HEAD must be the PR head.`,
+    ];
   }
   return [
     "- Ship with no-mistakes: commit, then run its pipeline; it pushes and opens the PR.",
+    NO_AI_ATTRIBUTION_LINE,
     ...baseLines(d),
     ...beginLines(d),
     ...waitLines(d),

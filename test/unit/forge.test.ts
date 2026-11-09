@@ -66,6 +66,22 @@ describe("GitHub forge client", () => {
     expect((await forge.pull({ owner: "acme", repo: "web", number })).headSha).toBe(git(clone, ["rev-parse", "HEAD"]));
   });
 
+  test("a PR's commits read back oldest first with message and emails, and its body; 250 or more commits refuse", async () => {
+    const number = await openPr();
+    const commits = await forge.pullCommits({ owner: "acme", repo: "web", number });
+    expect(commits.map((c) => [c.sha, c.message.trim()])).toEqual([[git(clone, ["rev-parse", "HEAD"]), "work"]]);
+    expect(commits[0]!.authorEmail).toContain("@");
+    expect((await forge.pull({ owner: "acme", repo: "web", number })).body).toBeNull();
+
+    fake.addRepo("acme", "big", { bare: null });
+    const many = Array.from({ length: 250 }, (_, i) => ({ sha: i.toString(16).padStart(40, "0"), message: `c${i}` }));
+    const big = fake.addPr("acme/big", { headRef: "b", headSha: "f".repeat(40), body: "Generated with Claude Code", commits: many });
+    expect((await forge.pull({ owner: "acme", repo: "big", number: big.number })).body).toBe("Generated with Claude Code");
+    await expect(forge.pullCommits({ owner: "acme", repo: "big", number: big.number })).rejects.toMatchObject({ kind: "refused" });
+    big.commits = many.slice(0, 249);
+    expect(await forge.pullCommits({ owner: "acme", repo: "big", number: big.number })).toHaveLength(249);
+  });
+
   test("a check run carries its id, app and annotation count, and its annotations read back", async () => {
     await openPr();
     const head = git(clone, ["rev-parse", "HEAD"]);
