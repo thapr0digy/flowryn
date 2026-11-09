@@ -72,6 +72,9 @@ export type ItemClass = "actionable" | "info";
  * already told to merge (informational).
  * review_channel: a review page's Lavish poll has failed for a while, so answers
  * sent on the page are not reaching Flowryn (src/lavish/channel.ts).
+ * lavish_broken: the shared Lavish server broke again within ten minutes of
+ * Flowryn's automatic restart (or the restart failed), so Flowryn stopped
+ * restarting it (src/lavish/recovery.ts).
  * The leader follow-ups (src/attention/follow-up.ts): user_acted, something you
  * did outside the leader session (an approval, a decline, a gate pass) that the
  * leader follows up; landed, a merge proven outside the leader's own merge call.
@@ -137,6 +140,7 @@ export const LANE_TABLE = {
   operation_escalated: { lane: "P1", class: "actionable" },
   harness_unverified: { lane: "P1", class: "actionable" },
   herdr_unreachable: { lane: "P1", class: "actionable" },
+  lavish_broken: { lane: "P1", class: "actionable" },
   forge_unavailable: { lane: "P1", class: "actionable" },
   restart_dropped: { lane: "P1", class: "actionable" },
   restart_failed: { lane: "P1", class: "actionable" },
@@ -248,6 +252,7 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   operation_escalated: "act",
   harness_unverified: "act",
   herdr_unreachable: "act",
+  lavish_broken: "act",
   forge_unavailable: "act",
   restart_dropped: "act",
   restart_failed: "act",
