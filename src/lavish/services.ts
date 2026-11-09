@@ -1,3 +1,5 @@
+import type { CheckOutcome } from "./recovery.ts";
+
 /**
  * What the verbs need from the daemon's Lavish poller: a nudge after a change
  * to a review gate or its questions, so the widget beside the page is
@@ -10,8 +12,10 @@ export interface LavishServices {
   kick(): void;
   /** Show a worker's reply in a gate's page: shown, queued for the next poll, or off (no lavish-axi). */
   reply(gate: string, page: string, text: string): Promise<"shown" | "queued" | "off">;
+  /** Check the shared Lavish server for a worker that hit a server error, restarting it when broken (src/lavish/recovery.ts). */
+  recover(by: string): Promise<CheckOutcome>;
 }
 
 export function inertLavish(overrides: Partial<LavishServices> = {}): LavishServices {
-  return { kick: () => {}, reply: async () => "off", ...overrides };
+  return { kick: () => {}, reply: async () => "off", recover: async () => ({ state: "off" }), ...overrides };
 }

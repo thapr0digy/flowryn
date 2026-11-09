@@ -394,10 +394,21 @@ export function snapshotUrl(workerUrl: string, page: string): string {
   return workerUrl.replace(/\/session\/[0-9a-f]{16}$/, `/session/${lavishSessionKey(page)}`);
 }
 
+/** A lavish-axi call that exited non-zero, with what it printed, so a caller can tell a server error (src/lavish/recovery.ts). */
+export class LavishCallError extends Error {
+  constructor(
+    readonly code: number,
+    readonly stdout: string,
+    readonly stderr: string,
+  ) {
+    super(`lavish-axi exited ${code}: ${(stderr || stdout).trim().slice(0, 200)}`);
+  }
+}
+
 /** Host the copy with lavish-axi (the session must exist before a poll), and check the URL it prints names the copy. */
 export async function hostSnapshot(lavish: string, page: string): Promise<string> {
   const result = await runBounded([lavish, page, "--no-open"], { label: "lavish-axi host", timeoutMs: HOST_TIMEOUT_MS, env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" } });
-  if (result.code !== 0) throw new Error(`lavish-axi exited ${result.code}: ${(result.stderr || result.stdout).trim().slice(0, 200)}`);
+  if (result.code !== 0) throw new LavishCallError(result.code, result.stdout, result.stderr);
   const url = /https?:\/\/[^\s"'/?#]{1,253}\/session\/[0-9a-f]{16}/.exec(result.stdout)?.[0] ?? null;
   const expected = lavishSessionKey(page);
   if (!url || lavishUrlKey(url) !== expected) throw new Error(`lavish-axi did not print the copy's session ${expected}`);

@@ -42,6 +42,7 @@ import { harnessVersion, workerBinary, type FleetServices } from "../lifecycle/f
 import { Launcher } from "../lifecycle/launcher.ts";
 import { ReviewOpener } from "../lavish/opener.ts";
 import { LavishPoller } from "../lavish/poller.ts";
+import { LavishDoctor } from "../lavish/recovery.ts";
 import { SteerBus } from "../lifecycle/steers.ts";
 import { Reconciler } from "../reconcile/reconciler.ts";
 import { checkWaits } from "../reconcile/waits.ts";
@@ -769,6 +770,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       pidDir: join(config.state_dir, "lavish-polls"),
       opener: reviewOpener,
       channelAlertMs: () => reviewConfig(config).channel_alert_ms,
+      recovery: () => lavishDoctor,
       // A review page's words went to its worker: deliver the steer now, and grant a resume or start a new run it asked for.
       routed: (runId, resumed) => {
         bus.notify(runId);
@@ -792,6 +794,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       },
     });
 
+    // A broken Lavish server is restarted by itself, at most once per ten minutes (src/lavish/recovery.ts).
+    const lavishDoctor: LavishDoctor = new LavishDoctor({ db: database, lavish: lavishTool, stateDir: config.state_dir, poller: lavishPoller, log, now: Date.now });
+
     const services: DaemonServices = {
       db: database,
       config: () => config,
@@ -808,7 +813,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       delivery,
       sched,
       restart,
-      lavish: { kick: () => lavishPoller.kick(), reply: (gate, page, text) => lavishPoller.reply(gate, page, text) },
+      lavish: { kick: () => lavishPoller.kick(), reply: (gate, page, text) => lavishPoller.reply(gate, page, text), recover: (by) => lavishDoctor.check(`a worker hit a server error (${by})`, by) },
     };
     const gateway = new Gateway({ services, lookup: serverVerb, ready });
 
@@ -1086,6 +1091,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     await versionPoll.stop();
     await autoCheck.stop();
     draining.push({ name: "reconciler", done: reconciler.stop() });
+    lavishDoctor.stop();
     lavishPoller.stop();
     reviewOpener.stop();
     draining.push({ name: "delivery watcher", done: deliveryWatcher.stop() });

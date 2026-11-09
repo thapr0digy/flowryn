@@ -15,6 +15,7 @@ import { passFromPage, type PagePass } from "../policy/page-pass.ts";
 import { channelFailures, clearUnpolledChannels, pollFailureReason, recordChannelFailure, recordChannelOk } from "./channel.ts";
 import { parsePollOutput, withoutAnswerTokens, type PollOutput } from "./poll-output.ts";
 import { requirePageDir, writeWidget } from "./widget.ts";
+import { isServerError, isServerErrorFailure, type LavishRecovery } from "./recovery.ts";
 import { hostSnapshot, recordHostedUrl, REFUSAL_HINT, refreshSnapshot, refusalText, snapshotGates, sourceFingerprint } from "./snapshot.ts";
 import { getRun } from "../lifecycle/runs.ts";
 import { createSteer } from "../lifecycle/steers.ts";
@@ -86,6 +87,11 @@ export interface PollerDeps {
     sendCode(gate: string, title: string, text: string): Promise<string[]>;
     passed(runId: string): void;
   };
+  /**
+   * The server's recovery (src/lavish/recovery.ts): asked when a gate's poll failed with a server
+   * error twice in a row, or its hosting did after a retry; told when a host or poll worked.
+   */
+  recovery?(): LavishRecovery | null;
 }
 
 /** What one Send's pass came to. */
@@ -113,6 +119,8 @@ interface Running {
   final: boolean;
   /** Marks the channel listening once the poll has kept running STEADY_MS. */
   steady: ReturnType<typeof setTimeout> | null;
+  /** The --agent-reply it carries, queued again when a restart stops it. */
+  reply?: string;
 }
 
 /** How long the last poll that carries a reply waits for anything else the user sends. */
@@ -167,6 +175,14 @@ export class LavishPoller {
   private readonly prints = new Map<string, string>();
   private retry: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  /** While the server restarts (src/lavish/recovery.ts): no poll or host starts. */
+  private paused = false;
+  /** Bumped by each restart, so a host that began before it is not recorded after it. */
+  private epoch = 0;
+  /** Each gate's poll failures in a row that were server errors. */
+  private readonly serverErrors = new Map<string, number>();
+  /** Gates whose failure the probe found the server healthy for: they ask no check again until they host or poll well. */
+  private readonly probedHealthy = new Set<string>();
 
   /** The sweep of an earlier daemon's polls: started by the first pass, and no poll starts until it is done. */
   private sweep: Promise<void> | null = null;
@@ -286,14 +302,20 @@ export class LavishPoller {
   /** Host a gate's copy with lavish-axi; a failure backs off as a failed poll does. */
   private host(lavish: string, gate: string, page: string): void {
     this.hosting.add(gate);
-    void hostSnapshot(lavish, page)
+    const epoch = this.epoch;
+    void hostRetryingOnce(lavish, page)
       .then(
         (url) => {
+          if (epoch !== this.epoch) return;
           tx(this.deps.db, () => recordHostedUrl(this.deps.db, gate, url, this.deps.now()));
           this.hosted.add(gate);
+          this.healthy(gate);
         },
         (error: unknown) => {
-          if (!this.closed) this.pollFailed(gate, `cannot host the review page's copy: ${(error as Error).message}`);
+          if (this.closed || epoch !== this.epoch) return;
+          this.pollFailed(gate, `cannot host the review page's copy: ${(error as Error).message}`);
+          // A server error twice in a row (hostRetryingOnce tried it again at once): is the server broken?
+          if (isServerErrorFailure(error)) this.askRecovery(gate, `hosting gate ${gate}'s page failed twice with a server error`);
         },
       )
       .catch((error: unknown) => this.deps.log(`lavish: hosting gate ${gate}'s page could not be recorded: ${(error as Error).message}`))
@@ -322,6 +344,7 @@ export class LavishPoller {
   }
 
   private followGates(): void {
+    if (this.paused) return;
     const lavish = this.deps.lavish();
     const polled = gatesToPoll(this.deps.db);
     const wanted = new Map(polled.map((g) => [g.id, g.page_path]));
@@ -395,7 +418,7 @@ export class LavishPoller {
       this.finished(gate, page, -1, "", `cannot run ${lavish}: ${(error as Error).message}`, final).catch((e) => this.deps.log(`lavish: the failed poll of gate ${gate} could not be recorded: ${(e as Error).stack ?? String(e)}`));
       return;
     }
-    const entry: Running = { page, proc, stopped: false, final, steady: null };
+    const entry: Running = { page, proc, stopped: false, final, steady: null, ...(reply ? { reply } : {}) };
     this.running.set(gate, entry);
     this.keepPid(gate, proc.pid, page);
     if (!final) entry.steady = setTimeout(() => this.listening(gate, entry), this.deps.steadyMs ?? STEADY_MS);
@@ -427,6 +450,7 @@ export class LavishPoller {
     if (entry.stopped || this.closed || this.running.get(gate) !== entry) return;
     try {
       if (recordChannelOk(this.deps.db, gate, "listening", this.deps.now())) this.deps.log(`lavish: gate ${gate}'s poll is listening`);
+      this.healthy(gate);
     } catch (error) {
       this.deps.log(`lavish: cannot record gate ${gate}'s channel listening: ${(error as Error).message}`);
     }
@@ -451,12 +475,103 @@ export class LavishPoller {
         return;
       }
       this.pollFailed(gate, why);
+      if (isServerError(code, stdout, stderr)) this.serverErrorOn(gate, why);
+      else this.serverErrors.delete(gate);
       return;
     }
     this.waitUntil.delete(gate);
+    if (!final) this.healthy(gate);
     if (!final && recordChannelOk(this.deps.db, gate, "delivered", now)) this.deps.log(`lavish: gate ${gate}'s poll delivered`);
     const out = parsePollOutput(stdout);
     await this.record(gate, page, out, stdout);
+  }
+
+  /** A gate's poll failed with a server error: the first is retried by the backoff, the second asks whether the server is broken. */
+  private serverErrorOn(gate: string, why: string): void {
+    const count = (this.serverErrors.get(gate) ?? 0) + 1;
+    if (count < 2) {
+      this.serverErrors.set(gate, count);
+      return;
+    }
+    this.serverErrors.delete(gate);
+    this.askRecovery(gate, `the poll of gate ${gate} failed twice with a server error (${why})`);
+  }
+
+  /** Ask the recovery to check the server (one check at a time; it restarts the server only when its probe fails too). */
+  private askRecovery(gate: string, reason: string): void {
+    const recovery = this.deps.recovery?.();
+    if (!recovery || this.closed || this.probedHealthy.has(gate)) return;
+    recovery.check(reason, "daemon").then(
+      (outcome) => {
+        if (outcome.state === "ok") this.probedHealthy.add(gate);
+        this.deps.log(`lavish: server check after "${reason}": ${outcome.state}${outcome.item ? ` (item ${outcome.item})` : ""}`);
+      },
+      (error: unknown) => this.deps.log(`lavish: server check after "${reason}" failed: ${(error as Error).message}`),
+    );
+  }
+
+  /** A host or poll worked: the gate's server-error streak ends, and an open lavish_broken item resolves. */
+  private healthy(gate: string): void {
+    this.serverErrors.delete(gate);
+    this.probedHealthy.delete(gate);
+    try {
+      this.deps.recovery?.()?.noteHealthy();
+    } catch (error) {
+      this.deps.log(`lavish: cannot record the server healthy: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Before `lavish-axi stop`: every poll stops as a deliberate stop (no failure recorded, no
+   * backoff; Lavish keeps the user's queued feedback until a poll delivers it), a reply a poll
+   * carried is queued again, and no poll or host starts until resumeAfterRestart.
+   */
+  pauseForRestart(): void {
+    this.paused = true;
+    this.epoch += 1;
+    for (const [gate, entry] of this.running) {
+      if (entry.reply && !this.replies.has(gate)) this.replies.set(gate, { page: entry.page, text: entry.reply });
+      this.halt(gate);
+    }
+    this.hosted.clear();
+  }
+
+  /**
+   * After the restart: host every open review page again (the server self-starts on the first),
+   * then let the polls start at once. A page that fails to host backs off as a failed poll does.
+   */
+  async resumeAfterRestart(): Promise<{ hosted: string[]; failed: string[] }> {
+    const hosted: string[] = [];
+    const failed: string[] = [];
+    try {
+      const lavish = this.deps.lavish();
+      if (!lavish || this.closed) return { hosted, failed };
+      const epoch = this.epoch;
+      const gates = gatesToPoll(this.deps.db).filter((g) => existsSync(g.page_path));
+      await Promise.all(
+        gates.map(async (g) => {
+          try {
+            const url = await hostSnapshot(lavish, g.page_path);
+            if (epoch !== this.epoch || this.closed) return;
+            tx(this.deps.db, () => recordHostedUrl(this.deps.db, g.id, url, this.deps.now()));
+            this.hosted.add(g.id);
+            hosted.push(g.id);
+          } catch (error) {
+            failed.push(g.id);
+            if (!this.closed) this.pollFailed(g.id, `cannot host the review page after the Lavish restart: ${(error as Error).message}`);
+          }
+        }),
+      );
+      for (const id of hosted) {
+        this.waitUntil.delete(id);
+        this.serverErrors.delete(id);
+        this.probedHealthy.delete(id);
+      }
+      return { hosted, failed };
+    } finally {
+      this.paused = false;
+      this.kick();
+    }
   }
 
   /** A poll (or the hosting before it) failed: back off, keep the failure on the gate, and host the copy again before the next poll. */
@@ -786,5 +901,15 @@ function pageRefusal(page: PagePass): string | null {
       return `Not passed: the design page or its build spec changed since the worker last answered here. Ask the worker to reply on the page (that pins what you see now), or send it back: flowryn gate changes ${page.task} --body-file -`;
     default:
       return null;
+  }
+}
+
+/** Host a page, and once more at once when the first try failed with a server error. */
+async function hostRetryingOnce(lavish: string, page: string): Promise<string> {
+  try {
+    return await hostSnapshot(lavish, page);
+  } catch (error) {
+    if (!isServerErrorFailure(error)) throw error;
+    return hostSnapshot(lavish, page);
   }
 }
