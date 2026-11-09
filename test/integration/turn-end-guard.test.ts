@@ -177,3 +177,17 @@ describe("steer --end-turn", () => {
     expect(payloads(env, run, "run.turn_end_reminder")).toHaveLength(1);
   }, 30_000);
 });
+
+describe("the turn-end guard and an interrupt (Pi)", () => {
+  test("a worker interrupted mid-episode with no outcome is not reminded, so the interrupt verifies by its stop hook", async () => {
+    const env = await fleet();
+    const { task, run } = await env.dispatch("Build\nFAKE: sleep 30000", { harness: "pi" });
+    await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+    const result = await env.json(["interrupt", task]);
+    expect(result.code).toBe(0);
+    expect(result.reply.data).toMatchObject({ interrupted: true, evidence: "hook" });
+    expect(payloads(env, run, "run.interrupt_sent")).toMatchObject([{ via: "bus" }]);
+    expect(payloads(env, run, "run.turn_end_reminder")).toEqual([]);
+    expect(received(env, task)).toEqual([]);
+  }, 30_000);
+});

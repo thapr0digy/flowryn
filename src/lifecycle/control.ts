@@ -28,6 +28,13 @@ export const SECOND_READ_MS = 500;
 /** Screen lines the gate reads for a dialog's question. */
 const GATE_SCREEN_LINES = 20;
 
+/** Recorded before an interrupt goes to the worker: the turn it ends is the daemon's doing, so the turn-end guard gives it no reminder. */
+export const INTERRUPT_SENT_KIND = "run.interrupt_sent";
+
+function recordInterruptSent(deps: ControlDeps, run: RunRow, via: "keys" | "bus"): void {
+  tx(deps.db, () => appendEvent(deps.db, { source: "daemon", kind: INTERRUPT_SENT_KIND, runId: run.id, taskId: run.task_id, payload: { via }, ts: deps.now() }));
+}
+
 export function identityOf(run: RunRow): ProcIdentity | null {
   if (run.proc_pid === null || run.proc_start === null || run.proc_exe === null) return null;
   return { pid: run.proc_pid, start: run.proc_start, exe: run.proc_exe };
@@ -165,6 +172,7 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
       return { ok: false, evidence: "refused", detail: refusal };
     }
     const before = transcriptSize(run.transcript_path);
+    recordInterruptSent(deps, run, "keys");
     await runtime.sendInterrupt(run.pane_id);
     // Without a transcript (no worker-start yet) there is nothing to verify against; do not wait long.
     const until = run.transcript_path ? deadline : Math.min(deadline, started + 1_000);
@@ -176,6 +184,7 @@ export async function interruptRun(deps: ControlDeps, runId: string, waitMs = 10
       }
     }
   } else {
+    recordInterruptSent(deps, run, "bus");
     deps.bus.command(runId, "interrupt");
     while (deps.now() < deadline) {
       await Bun.sleep(100);

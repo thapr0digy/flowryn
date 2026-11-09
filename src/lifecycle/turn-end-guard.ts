@@ -3,6 +3,7 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import { findOpenRunItem } from "../attention/items.ts";
 import { REVIEW_TURN_END_REMINDER, TURN_END_REMINDER } from "../harness/contract-text.ts";
 import { runningBackgroundJobs } from "./background-jobs.ts";
+import { INTERRUPT_SENT_KIND } from "./control.ts";
 import { noteIgnoredReminder, waitingOnOthers } from "./idle-alert.ts";
 import { unansweredPageSteer } from "./review-chat.ts";
 import type { RunRow } from "./runs.ts";
@@ -24,6 +25,7 @@ export const OUTCOME_KINDS = ["stage.done", "stage.requested", "stage.delivered"
 
 export const WAIT_BACKGROUND = "its own background job";
 export const WAIT_END_TURN = "the leader said end the turn";
+export const WAIT_INTERRUPTED = "the daemon interrupted the turn";
 
 export const REMINDER_KIND = "run.turn_end_reminder";
 export const RESULT_KIND = "run.turn_end_reminder_result";
@@ -55,11 +57,17 @@ function toldToEndTurn(db: Db, run: RunRow): boolean {
   return latest !== null && latest.end_turn === 1 && latest.carried_at >= instructionAt(db, run);
 }
 
+/** The daemon interrupted the worker and no instruction has come since: the episode has not moved past the interrupt. */
+function interruptedThisEpisode(db: Db, run: RunRow): boolean {
+  const latest = db.query("SELECT MAX(ts) AS at FROM events WHERE run_id = ?1 AND kind = ?2").get(run.id, INTERRUPT_SENT_KIND) as { at: number | null };
+  return latest.at !== null && latest.at >= instructionAt(db, run);
+}
+
 /**
  * Why the worker may rightly sit idle: the run is past running (validating,
  * ready, merging), or it waits on a grant, a gate, a question, a launch, a
  * permission dialog or its own background job, or the leader told it to end
- * its turn. Null when nothing holds it. Call inside the transaction: it
+ * its turn, or the daemon interrupted it. Null when nothing holds it. Call inside the transaction: it
  * records background jobs the transcript shows ended, as `source` (the
  * turn-end guard's hook, or the reconciler's stale-hook pointer).
  */
@@ -72,6 +80,7 @@ export function pendingWait(db: Db, run: RunRow, now: number, source: EventSourc
   if (waitingOnOthers(db, run)) return "an open question";
   if (findOpenRunItem(db, "blocked_prompt", run.id)) return "a permission dialog";
   if (toldToEndTurn(db, run)) return WAIT_END_TURN;
+  if (interruptedThisEpisode(db, run)) return WAIT_INTERRUPTED;
   if (runningBackgroundJobs(db, run, now, source).length > 0) return WAIT_BACKGROUND;
   return null;
 }
