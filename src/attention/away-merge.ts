@@ -1,5 +1,5 @@
 import type { FlowrynConfig } from "../config/config.ts";
-import { mergeConfig, type MergeConfig } from "../config/merge.ts";
+import { MERGE_DEFAULTS, mergeConfig, type MergeConfig } from "../config/merge.ts";
 import { askConfig } from "../config/ask.ts";
 import { tx, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
@@ -202,7 +202,7 @@ function safeMergeConfig(config: FlowrynConfig): MergeConfig {
     return mergeConfig(config);
   } catch {
     // The daemon refuses an invalid config at start and on SIGHUP; a table it cannot read merges nothing.
-    return { sensitive_when_away: false };
+    return { ...MERGE_DEFAULTS };
   }
 }
 

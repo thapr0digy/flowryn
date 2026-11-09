@@ -78,6 +78,15 @@ The away must be one you started: `by` is `human` (`flowryn away` in your termin
 
 Your return is `flowryn back`, the away's expiry, or a new away or extension that is not yours (a leader extending your away rewrites `by`). Any of these stops what has not merged yet, within a tick. The gate's live check covers the race.
 
+## What the away confirmation says
+
+The Claude leader's binding away question (`flowryn chat-question away:<until>`, `awaySummary` in src/policy/chat-questions.ts) is built from this key, so what you accept never understates what an away does. Fixed templates; no model.
+
+- **Off:** "It never merges, never answers a merge, destructive, irreversible, security, credential or outward question, and never touches a sensitive task".
+- **On:** "Pull requests of yolo projects merge by themselves once their gates pass, sensitive ones included: a sensitive one only after its local verify and a fresh-context validator have both passed at its exact head ([merge] sensitive_when_away), the validator's changes going back to its worker. A project that is not yolo never merges by policy. It never answers a merge, destructive, irreversible, security, credential or outward question, and touches a sensitive task only for that merge".
+
+Both hooks and `chat-question` read the key from the daemon's config, so the form the leader prints is the one the hooks check. A question asked before a SIGHUP that flips the key grants nothing after it (its text no longer matches); ask again. The overnight-answer and review-validator lines are unchanged: both already refuse sensitive tasks and every reserved kind (`deadlineRefusal`, `validatorRefusal`). Tests: `test/unit/chat-away.test.ts`.
+
 ## The return brief
 
 "Decided for you" (and "since the last briefing") lists sensitive merges first, then rounds:

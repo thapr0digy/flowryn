@@ -24,6 +24,7 @@ import {
 } from "../attention/router.ts";
 import { tx, type Db } from "../db/db.ts";
 import { awayConfig } from "../config/leader.ts";
+import { mergeConfig } from "../config/merge.ts";
 import { acceptedWithoutCi } from "../lifecycle/ci-wait.ts";
 import { localDate } from "../lifecycle/dates.ts";
 import { appendEvent } from "../db/events.ts";
@@ -569,6 +570,7 @@ export function postToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerRes
     response: input.tool_response,
     claudeSession: String(input.session_id ?? ""),
     transcriptPath: String(input.transcript_path ?? ""),
+    merge: mergeConfig(ctx.config()),
     now: ctx.now(),
   });
   return lines.length > 0 ? { data: { context: lines.join("\n") } } : result;
@@ -789,7 +791,7 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: Tool
   }
   // A binding chat question must be exactly Flowryn's form and bring no answers of its own.
   if (input.tool_name === "AskUserQuestion") {
-    const deny = preAsk(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), input: input.tool_input, now });
+    const deny = preAsk(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), input: input.tool_input, merge: mergeConfig(ctx.config()), now });
     return deny ? { data: { permission: "deny", reason: deny } } : result;
   }
   if (input.tool_name !== "Bash") return result;
