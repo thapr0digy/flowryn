@@ -35,7 +35,7 @@ The attention tick (1 s) runs one pass at a time, and only for the grant's proje
 1. **Questions** (`autonomyVerdict`, pure). The pass looks at each open run-scoped question of a covered run started after migration 54, oldest first.
    - It **parks** the question when:
      - its recorded class is protected: `destructive`, `irreversible`, `security`, `credential` or `outward` (`PARKING_CLASSES`: every keyword class but `merge`);
-     - its wording names one of those classes, checked with all of them on, whatever `[decisions] reserved_classes` narrows;
+     - its wording names one of those classes, checked with all of them on, whatever `[decisions] reserved_classes` narrows (either of these two may instead be decided by the finding rule behind `[decisions] unattended_findings`, docs/notes/2026-11-10-unattended-mode-decide-8k.md);
      - the worker reserved it itself (`ask --reserved <reason>`);
      - the task is sensitive;
      - its recommendation would skip CI (a CI wait's `accept-without-ci`, or a no-mistakes `approve`/`skip` on a CI finding) and the default branch's `.no-mistakes.yaml` does not say `no_ci: true`.

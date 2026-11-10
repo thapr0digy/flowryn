@@ -969,6 +969,11 @@ CREATE INDEX landing_queue_project ON landing_queue(project_id, state, enqueued_
 `;
 
 /** The kind of a reserved question, recorded when it opens: what `[decisions] default_classes` matches (deadline defaults). */
+/** The daemon's no-mistakes read for an ask --nomistakes (docs/notes/2026-11-10-unattended-mode-decide-8k.md). */
+const NM_RECORD_SQL = /* sql */ `
+ALTER TABLE decisions ADD COLUMN nm_record TEXT;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1260,6 +1265,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 59, name: "gate-validations", sql: GATE_VALIDATIONS_SQL, rebuildsReferencedTable: true },
   { version: 60, name: "away-merges", sql: AWAY_MERGES_SQL, rebuildsReferencedTable: true },
   { version: 61, name: "prompt-episodes", sql: PROMPT_EPISODES_SQL },
+  { version: 62, name: "decisions-nm-record", sql: NM_RECORD_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

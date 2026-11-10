@@ -24,7 +24,8 @@ import { verifyPolicyId } from "../verify/policy.ts";
 import { finishedAtHead } from "../verify/store.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { openItem, findOpenRunItem } from "./items.ts";
-import { RESERVED_CLASSES, reservedReason, type DecisionsConfig } from "./decisions-policy.ts";
+import { keywordClasses, RESERVED_CLASSES, type DecisionsConfig } from "./decisions-policy.ts";
+import { exemptFinding } from "./real-actions.ts";
 
 /**
  * Unattended mode's pass (docs/notes/2026-11-05-unattended-mode-one-9e.md), on the attention
@@ -55,7 +56,8 @@ const NOMISTAKES_KINDS = ["nomistakes", "nomistakes-floor", "nomistakes-unread"]
 const SKIPS_CI = ["accept-without-ci"];
 const CI_TEXT = /\b(ci|checks?)\b|never started/i;
 
-export type QuestionVerdict = { action: "decide"; choice: string } | { action: "park"; why: string; klass: string | null } | { action: "skip"; why: string };
+/** A decide through the finding rule names its rule and the classes it set aside. */
+export type QuestionVerdict = { action: "decide"; choice: string; rule?: string; classes?: string[] } | { action: "park"; why: string; klass: string | null } | { action: "skip"; why: string };
 
 export interface QuestionFacts {
   /** The default branch's .no-mistakes.yaml declares no_ci: true (null: not read). */
@@ -82,24 +84,41 @@ function workerReserved(d: DecisionRow): boolean {
   return reason !== GATE_QUESTION_RESERVED && reason !== "merge" && !reason.startsWith("nomistakes:");
 }
 
-/** What autonomy does with an open question. Pure: the run and the facts are read before. */
+/** The protected classes a question has: its recorded class, then every class its wording names. */
+function protectedClasses(d: DecisionRow): string[] {
+  const recorded = d.reserved_class !== null && (PARKING_CLASSES as readonly string[]).includes(d.reserved_class) ? [d.reserved_class] : [];
+  return [...new Set([...recorded, ...keywordClasses(`${d.question}\n${d.context ?? ""}`)])];
+}
+
+/**
+ * What autonomy does with an open question. Pure: the run and the facts are read before.
+ * The wording is checked with every protected class on, whatever [decisions] reserved_classes
+ * narrows; `[decisions] unattended_findings` may decide a protected one through the finding rule
+ * (src/attention/real-actions.ts), never a worker-reserved or sensitive task's question.
+ */
 export function autonomyVerdict(d: DecisionRow, run: Pick<RunWithPolicy, "state" | "sensitive"> | null, cfg: DecisionsConfig, facts: QuestionFacts): QuestionVerdict {
   if (d.state !== "open") return { action: "skip", why: "not open" };
   if (d.run_id === null) return { action: "skip", why: "standalone decision" };
   if (d.autonomy_state != null) return { action: "skip", why: `already ${d.autonomy_state}` };
   if (!run || isTerminal(run.state)) return { action: "skip", why: "its run is over" };
   if (workerReserved(d)) return { action: "park", why: `the worker marked it for the user: ${sanitizeLine(d.reserved_reason!, 120)}`, klass: null };
-  if (d.reserved_class !== null && (PARKING_CLASSES as readonly string[]).includes(d.reserved_class)) return { action: "park", why: `a ${d.reserved_class} question`, klass: d.reserved_class };
-  // The wording is checked with every protected class on, whatever [decisions] reserved_classes narrows.
-  const all = { ...cfg, reserved_classes: [...PARKING_CLASSES] };
-  const klass = reservedReason({ question: d.question, context: d.context, sourceReason: null, blocksYoloOff: false }, all);
-  if (klass !== null) return { action: "park", why: `its wording names a ${klass} step`, klass };
   if (run.sensitive === 1) return { action: "park", why: "a sensitive task's question", klass: null };
   const choice = recommendedChoice(d);
+  const classes = protectedClasses(d);
+  let exemption: { rule: string; classes: string[] } | null = null;
+  if (classes.length > 0) {
+    const klass = classes[0]!;
+    const base = klass === d.reserved_class ? `a ${klass} question` : `its wording names a ${klass} step`;
+    if (cfg.unattended_findings === "off") return { action: "park", why: base, klass };
+    if (choice === null) return { action: "park", why: `${base}: no recommendation among its options`, klass };
+    const ex = exemptFinding({ mode: cfg.unattended_findings, classes, record: d.nm_record, choice, texts: [d.question, d.context, d.note] });
+    if (!ex.exempt) return { action: "park", why: `${base}: ${ex.why}`, klass };
+    exemption = { rule: ex.rule, classes: ex.classes };
+  }
   if (choice === null) return { action: "skip", why: "no recommendation among its options: the leader decides" };
   const ciRelated = d.origin === CI_WAIT_ORIGIN ? SKIPS_CI.includes(choice) : NOMISTAKES_KINDS.includes(d.reserved_class ?? "") && ["approve", "skip"].includes(choice) && CI_TEXT.test(d.question);
   if (ciRelated && facts.noCi !== true) return { action: "park", why: `${choice} skips CI, and the default branch's .no-mistakes.yaml does not say no_ci`, klass: null };
-  return { action: "decide", choice };
+  return exemption ? { action: "decide", choice, ...exemption } : { action: "decide", choice };
 }
 
 export interface GateFacts {
@@ -189,7 +208,7 @@ function passQuestions(db: Db, row: AutonomyRow, cfg: DecisionsConfig, noCi: Map
     const why = d.note?.trim() ? sanitizeLine(d.note, 300) : "no reason given";
     const done = answerDecision({ db, now: () => now }, d, { choice: verdict.choice, words: `Decided under unattended mode (${row.id}) as the worker recommended: ${why}`, by: "worker", via: AUTONOMOUS_CHANNEL });
     db.query("UPDATE decisions SET autonomy_state = 'decided', autonomy_id = ?2 WHERE id = ?1").run(d.id, row.id);
-    appendEvent(db, { source: "daemon", kind: "autonomy.decided", runId: run.id, taskId: run.task_id, payload: { autonomy: row.id, decision: d.id, choice: verdict.choice, class: d.reserved_class, ...(d.gate_id ? { gate: d.gate_id } : {}) }, ts: now });
+    appendEvent(db, { source: "daemon", kind: "autonomy.decided", runId: run.id, taskId: run.task_id, payload: { autonomy: row.id, decision: d.id, choice: verdict.choice, class: d.reserved_class, ...(d.gate_id ? { gate: d.gate_id } : {}), ...(verdict.rule ? { rule: verdict.rule, classes: verdict.classes } : {}) }, ts: now });
     if (done.steer) out.steered.push(run.id);
   }
 }

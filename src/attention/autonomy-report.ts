@@ -71,7 +71,8 @@ export function autonomyLines(db: Db, input: { since: number; until: number; now
       if (!d) return `- [${sanitizeLine(String(p.decision ?? "?"), 12)}] ${named(db, e.task_id)} → ${sanitizeLine(String(p.choice ?? "?"), 60)}`;
       const changed = d.answered_by === "captain" ? `; the user changed it to ${sanitizeLine(d.answer ?? "?", 60)}` : `; undo: flowryn decide ${d.id} <choice> --by captain`;
       const why = d.note?.trim() || "no reason given";
-      return `- [${d.id}] ${named(db, e.task_id)}: "${sanitizeLine(d.question, 100)}" → ${sanitizeLine(String(p.choice ?? "?"), 60)}; why: ${sanitizeLine(why, 120)}${changed}`;
+      const rule = typeof p.rule === "string" ? `; was ${Array.isArray(p.classes) ? sanitizeLine(p.classes.map(String).join(", "), 60) : "protected"}, decided by the ${sanitizeLine(p.rule, 30)} rule` : "";
+      return `- [${d.id}] ${named(db, e.task_id)}: "${sanitizeLine(d.question, 100)}" → ${sanitizeLine(String(p.choice ?? "?"), 60)}; why: ${sanitizeLine(why, 120)}${rule}${changed}`;
     });
   const merges = (
     db
