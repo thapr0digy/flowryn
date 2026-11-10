@@ -137,7 +137,8 @@ describe("the discard question", () => {
     const w = world();
     const error = thrown(() => chatForm(w.db, "discard:T1", MERGE_DEFAULTS));
     expect(error.code).toBe("not_ready");
-    expect(error.help).toContain("flowryn cleanup T1 --discard");
+    expect(error.help).toContain("flowryn cleanup T1 first");
+    expect(error.help).not.toContain("--discard");
   });
 
   test("an already-removed worktree cannot be asked", () => {

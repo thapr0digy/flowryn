@@ -226,7 +226,12 @@ const cleanup: VerbSpec = {
       }
     }
     const report = await ctx.delivery.cleanup(run.id, { discardApproval, discardAttempt, discardGrant, auto: false });
-    if (report.outcome === "refused") throw new FlowrynError("cleanup_refused", `cleanup refused (${report.reason}): ${report.detail}`, report.reason === "dirty" || report.reason === "unlanded" || report.reason === "unpushed" ? `discard only with your approval: flowryn cleanup ${run.task_id} --discard, then ${discardRoutes(run.task_id)}` : `flowryn show ${run.task_id}`);
+    if (report.outcome === "refused") {
+      const unlanded = report.reason === "dirty" || report.reason === "unlanded" || report.reason === "unpushed";
+      // What a discard would remove, recorded so the chat question can show it.
+      if (unlanded && !boolArg(args, "discard")) noteDiscardFacts(ctx.db, run, await readDiscardFacts(ctx.delivery.git, run, project), "cli", ctx.now());
+      throw new FlowrynError("cleanup_refused", `cleanup refused (${report.reason}): ${report.detail}`, unlanded ? `discard only with the user's word: ${discardRoutes(run.task_id)}` : `flowryn show ${run.task_id}`);
+    }
     return report;
   },
   apply(_ctx, _args, prepared) {

@@ -9,7 +9,7 @@ import type { GitRunner } from "./landed.ts";
 /**
  * What a discard would remove, as a chat question shows it and a chat grant binds to
  * (docs/notes/2026-11-09-chat-answer-approvals-wa.md): the worktree's HEAD and its uncommitted
- * files. `flowryn cleanup --discard` records it when it refuses for want of your word, so the
+ * files. `flowryn cleanup` records it when it refuses unlanded work (and `--discard` when it lacks your word), so the
  * pure-read `chat-question discard:<task>` can print it; the leader's hooks and the cleanup
  * itself read it again live and refuse when it moved. Plain code: git and a hash.
  */
@@ -92,6 +92,6 @@ export function discardBindsProblem(grantId: string, binds: string | null, live:
 
 export function requireDiscardFacts(db: Db, run: Pick<RunRow, "id" | "task_id">): RecordedDiscardFacts {
   const facts = discardFacts(db, run.id);
-  if (!facts) throw new FlowrynError("not_ready", `nothing records what discarding ${run.task_id} would remove`, `run flowryn cleanup ${run.task_id} --discard first; its refusal records it`);
+  if (!facts) throw new FlowrynError("not_ready", `nothing records what discarding ${run.task_id} would remove`, `run flowryn cleanup ${run.task_id} first; its refusal records it`);
   return facts;
 }

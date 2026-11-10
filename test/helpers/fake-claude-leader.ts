@@ -324,18 +324,20 @@ export class FakeClaudeLeader implements BridgeDriver {
    * The model calls AskUserQuestion and you answer. `prefill` makes the model pass its own answers
    * in the tool input. A deny stops it before any dialog. Otherwise your `answers` (question text to
    * the label or text you chose) and `notes` come back through PostToolUse, whose context lines
-   * (the grants) are returned, and the transcript records the call and its result.
+   * (the grants) are returned, and the transcript records the call and its result. `whileOpen`
+   * runs while the dialog is up, after PreToolUse and before you answer.
    */
   async ask(
     questions: unknown[],
     answer: { answers: Record<string, string>; notes?: Record<string, string> },
-    opts: { prefill?: Record<string, string>; toolUseId?: string } = {},
+    opts: { prefill?: Record<string, string>; toolUseId?: string; whileOpen?: () => void | Promise<void> } = {},
   ): Promise<{ denied: boolean; reason: string; contexts: string[]; toolUseId: string }> {
     const toolUseId = opts.toolUseId ?? `toolu_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`;
     const preInput = opts.prefill ? { questions, answers: opts.prefill } : { questions };
     const pre = await this.preDecision("AskUserQuestion", preInput, toolUseId);
     if (pre.decision === "deny") return { denied: true, reason: pre.reason, contexts: [], toolUseId };
     appendFileSync(this.transcript, JSON.stringify({ type: "assistant", sessionId: this.sessionId, cwd: this.cwd, timestamp: isoNow(), message: { content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions } }] } }) + "\n");
+    await opts.whileOpen?.();
     const annotations = Object.fromEntries(Object.entries(answer.notes ?? {}).map(([q, notes]) => [q, { notes }]));
     const result = { questions, answers: answer.answers, annotations };
     const contexts = await this.fire("PostToolUse", { tool_name: "AskUserQuestion", tool_input: result, tool_response: result, tool_use_id: toolUseId }, "AskUserQuestion");

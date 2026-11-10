@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FakeClaudeLeader } from "../helpers/fake-claude-leader.ts";
 import { waitUntil } from "../helpers/harness.ts";
@@ -68,18 +68,27 @@ async function claudeLeader(e: ShipEnv): Promise<FakeClaudeLeader> {
   return leader;
 }
 
-/** A cancelled ship with an unlanded commit, and the refusal that records what a discard would remove. */
-async function abandoned(e: ShipEnv): Promise<{ task: string; run: string; worktree: string }> {
+/** A plain cleanup the Claude leader runs through its Bash hook: never prompted, it refuses and records what a discard would remove. */
+async function refusedCleanup(leader: FakeClaudeLeader, task: string): Promise<void> {
+  const refused = await leader.runBash(`flowryn cleanup ${task} --json`, { approve: false });
+  expect(refused).toMatchObject({ prompted: false, ran: true });
+  expect(refused.code).not.toBe(0);
+  const error = errorOf(refused.stdout);
+  expect(error.code).toBe("cleanup_refused");
+  expect(error.help).toContain(`flowryn chat-question discard:${task}`);
+  expect(error.help).toContain(`flowryn approve ${task} --discard`);
+}
+
+/** A cancelled ship with an unlanded commit, the Claude leader, and the plain cleanup refusal that records what a discard would remove. */
+async function abandoned(e: ShipEnv): Promise<{ task: string; run: string; worktree: string; leader: FakeClaudeLeader }> {
   const { task, run } = await e.fleet.dispatch("Abandon\nFAKE: commit wip.txt work in progress\nFAKE: sleep 120000", { kind: "ship" });
   await e.fleet.waitRun(run, (r) => r.worker_started_at !== null, "worker started");
   const worktree = e.fleet.run(run).worktree_path;
   await waitUntil(() => git(worktree, ["log", "--oneline", "-1"]).includes("wip.txt"), 10_000, "the commit");
   expect((await e.fleet.json(["cancel", task])).code).toBe(0);
-  const refused = await e.fleet.json(["cleanup", task, "--discard"], token(e));
-  expect((refused.reply.error as { code: string; help: string }).code).toBe("approval_required");
-  expect((refused.reply.error as { help: string }).help).toContain(`flowryn chat-question discard:${task}`);
-  expect((refused.reply.error as { help: string }).help).toContain(`flowryn approve ${task} --discard`);
-  return { task, run, worktree };
+  const leader = await claudeLeader(e);
+  await refusedCleanup(leader, task);
+  return { task, run, worktree, leader };
 }
 
 function discardApprovals(e: ShipEnv, task: string): { channel: string; actor: string; consumed: boolean }[] {
@@ -96,8 +105,7 @@ describe("discard by chat answer", () => {
     async () => {
       ship = await makeShipEnv({ mode: "direct-PR" });
       const e = ship;
-      const { task, worktree } = await abandoned(e);
-      const leader = await claudeLeader(e);
+      const { task, worktree, leader } = await abandoned(e);
       const q = await chatQuestion(e, `discard:${task}`);
       expect(q.question).toContain(`discard ${task} · `);
       expect(q.question).toContain(git(worktree, ["rev-parse", "HEAD"]).slice(0, 8));
@@ -125,8 +133,7 @@ describe("discard by chat answer", () => {
     async () => {
       ship = await makeShipEnv({ mode: "direct-PR" });
       const e = ship;
-      const { task, worktree } = await abandoned(e);
-      const leader = await claudeLeader(e);
+      const { task, worktree, leader } = await abandoned(e);
 
       const q = await chatQuestion(e, `discard:${task}`);
       const first = grantOf((await leader.ask([q], { answers: { [q.question]: "Discard" } })).contexts);
@@ -155,12 +162,39 @@ describe("discard by chat answer", () => {
   );
 
   test(
+    "the uncommitted files changing while the user answers, at the same head and count, grant nothing",
+    async () => {
+      ship = await makeShipEnv({ mode: "direct-PR" });
+      const e = ship;
+      const { task, worktree, leader } = await abandoned(e);
+      writeFileSync(join(worktree, "a.txt"), "first");
+      await refusedCleanup(leader, task);
+      const q = await chatQuestion(e, `discard:${task}`);
+      expect(q.question).toContain("1 uncommitted change(s)");
+      const moved = await leader.ask(
+        [q],
+        { answers: { [q.question]: "Discard" } },
+        {
+          whileOpen: () => {
+            rmSync(join(worktree, "a.txt"));
+            writeFileSync(join(worktree, "b.txt"), "second");
+          },
+        },
+      );
+      expect(moved.denied).toBe(false);
+      expect(moved.contexts.join("\n")).toContain(`no grant for discard:${task} (its facts changed while the user answered; ask again)`);
+      expect(rows(e, "SELECT id FROM captain_grants")).toEqual([]);
+      expect(existsSync(worktree)).toBe(true);
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
     "a question that brings its own answer is denied and grants nothing",
     async () => {
       ship = await makeShipEnv({ mode: "direct-PR" });
       const e = ship;
-      const { task, worktree } = await abandoned(e);
-      const leader = await claudeLeader(e);
+      const { task, worktree, leader } = await abandoned(e);
       const q = await chatQuestion(e, `discard:${task}`);
       const forged = await leader.ask([q], { answers: { [q.question]: "Discard" } }, { prefill: { [q.question]: "Discard" } });
       expect(forged.denied).toBe(true);

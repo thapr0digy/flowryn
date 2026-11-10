@@ -155,6 +155,8 @@ export interface PostAsk {
   transcriptPath: string;
   /** `[merge]`: the away form's text depends on it. */
   merge: MergeConfig;
+  /** Items whose live facts no longer match what the user was shown, with why: they grant nothing. */
+  stale?: ReadonlyMap<string, string>;
   now: number;
 }
 
@@ -223,6 +225,11 @@ export function postAsk(db: Db, a: PostAsk): string[] {
     };
     if (answer === null) {
       refuse("no answer");
+      continue;
+    }
+    const stale = a.stale?.get(ref);
+    if (stale) {
+      refuse(stale);
       continue;
     }
     let form: ChatForm;

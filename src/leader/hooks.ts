@@ -595,16 +595,29 @@ export async function prepareAskFacts(ctx: HandlerCtx, input: LeaderHookInput): 
   return out;
 }
 
-/** In the hook's transaction: record each discard item's live facts where they moved. Returns why one cannot be asked, or null. */
-function refreshDiscardFacts(ctx: HandlerCtx, facts: AskFacts | null, now: number): string | null {
+/** A discard item whose worktree could not be read, or whose facts moved since they were last recorded. */
+interface DiscardDrift {
+  ref: string;
+  unreadable: boolean;
+  why: string;
+}
+
+/** In the hook's transaction: record each discard item's live facts where they moved, and return each item that drifted. */
+function refreshDiscardFacts(ctx: HandlerCtx, facts: AskFacts | null, now: number): DiscardDrift[] {
+  const drift: DiscardDrift[] = [];
   for (const d of facts?.discard ?? []) {
-    if (!d.facts) return `discard:${d.task} cannot be asked: its worktree cannot be read (${sanitizeLine(d.error ?? "?", 200)})`;
+    const ref = `discard:${d.task}`;
+    if (!d.facts) {
+      drift.push({ ref, unreadable: true, why: `its worktree cannot be read (${sanitizeLine(d.error ?? "?", 200)})` });
+      continue;
+    }
     const recorded = discardFacts(ctx.db, d.runId);
     if (recorded && sameDiscardFacts(recorded, d.facts)) continue;
     const run = findRun(ctx.db, d.runId);
     if (run) recordDiscardFacts(ctx.db, run, d.facts, "hook", now);
+    if (recorded) drift.push({ ref, unreadable: false, why: "its facts changed while the user answered; ask again" });
   }
-  return null;
+  return drift;
 }
 
 /**
@@ -616,8 +629,7 @@ export function postToolUse(ctx: HandlerCtx, input: LeaderHookInput, facts: AskF
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
   if (s.harness !== "claude" || input.tool_name !== "AskUserQuestion") return result;
-  // A discard item's worktree that moved while the user answered: the form changes, so the answer grants nothing.
-  refreshDiscardFacts(ctx, facts, ctx.now());
+  const drift = refreshDiscardFacts(ctx, facts, ctx.now());
   const lines = postAsk(ctx.db, {
     session: s.session_id,
     toolUseId: String(input.tool_use_id ?? ""),
@@ -626,6 +638,7 @@ export function postToolUse(ctx: HandlerCtx, input: LeaderHookInput, facts: AskF
     claudeSession: String(input.session_id ?? ""),
     transcriptPath: String(input.transcript_path ?? ""),
     merge: mergeConfig(ctx.config()),
+    stale: new Map(drift.map((d) => [d.ref, d.why])),
     now: ctx.now(),
   });
   return lines.length > 0 ? { data: { context: lines.join("\n") } } : result;
@@ -846,8 +859,8 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: Tool
   }
   // A binding chat question must be exactly Flowryn's form and bring no answers of its own.
   if (input.tool_name === "AskUserQuestion") {
-    const unreadable = refreshDiscardFacts(ctx, askFacts, now);
-    if (unreadable) return { data: { permission: "deny", reason: `Flowryn: ${unreadable}` } };
+    const unreadable = refreshDiscardFacts(ctx, askFacts, now).find((d) => d.unreadable);
+    if (unreadable) return { data: { permission: "deny", reason: `Flowryn: ${unreadable.ref} cannot be asked: ${unreadable.why}` } };
     const deny = preAsk(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), input: input.tool_input, merge: mergeConfig(ctx.config()), now });
     return deny ? { data: { permission: "deny", reason: deny } } : result;
   }
