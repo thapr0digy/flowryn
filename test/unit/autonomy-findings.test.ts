@@ -249,6 +249,27 @@ describe("off, the setting and the record", () => {
     expect(["skip", "skip-it", "ignore", "waive_it", "defer"].map(answerKind)).toEqual(["skip", "skip", "skip", "skip", "skip"]);
     expect(["approve", "keep-cap", "accept-false-p1", "approve-as-is", "tolerate"].map(answerKind)).toEqual(["approve", "approve", "approve", "approve", "approve"]);
     expect(["fix", "serial", "remove-it", "record-on-plain-cleanup"].map(answerKind)).toEqual(["fix", "fix", "fix", "fix"]);
+    expect(["proceed", "continue", "yes", "ok", "merge", "ship"].map(answerKind)).toEqual(["approve", "approve", "approve", "approve", "approve", "approve"]);
+  });
+
+  test("a q91-shaped question recommended as proceed parks like an approve", () => {
+    const d = decision({ question: "no-mistakes review finding workers-config-dir-now-unsets-credentials (warning, src/config/workers.ts): the diff changes behaviour.", options: JSON.stringify(["proceed", "fix"]), recommendation: "proceed", reserved_class: "credential", reserved_reason: "credential", nm_record: review("Intent conformance: the diff unsets credentials for a home that has no [accounts].") });
+    const v = autonomyVerdict(d, live, CRED, facts);
+    expect(v.action === "park" && v.why).toContain("touches credentials");
+  });
+
+  test("a finding that is also security counts as security, whatever the question names", () => {
+    const d = decision({ question: "no-mistakes review finding cors-1 (warning, src/server.ts): the session token is reachable.", reserved_class: "credential", reserved_reason: "credential", nm_record: review("A wildcard CORS policy lets any origin access the session token.", { category: "cors", file: "src/server.ts" }) });
+    const cred = autonomyVerdict(d, live, CRED, facts);
+    expect(cred.action === "park" && cred.why).toContain("does not cover security");
+    const wide = autonomyVerdict(d, live, WIDE, facts);
+    expect(wide.action === "park" && wide.why).toContain("security finding");
+    const loosening = autonomyVerdict(decision({ ...d, nm_record: review("A wildcard CORS policy lets any origin reach the session token.", { file: "src/server.ts" }) }), live, WIDE, facts);
+    expect(loosening.action === "park" && loosening.why).toContain("security finding");
+  });
+
+  test("a judged step is read in any case", () => {
+    expect(autonomyVerdict(q196({ nm_record: record(" Test ", [finding({ description: "Live evidence is missing for the main runtime change." })]) }), live, CRED, facts)).toMatchObject({ action: "decide", choice: "approve" });
   });
 
   test("the stored record is sanitized and capped; an oversized one exempts nothing", () => {

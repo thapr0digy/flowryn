@@ -1,6 +1,6 @@
 import type { FileClass, ReservedClass, UnattendedFindingsMode } from "./decisions-policy.ts";
-import { RESERVED_PATTERNS } from "./decisions-policy.ts";
-import { CREDENTIAL_CATEGORY, INSIDE, LEADER_STEPS, SECURITY_CATEGORY } from "../policy/nomistakes-classes.ts";
+import { keywordClasses, RESERVED_PATTERNS } from "./decisions-policy.ts";
+import { CREDENTIAL_CATEGORY, FINDING_CLASS_TABLE, INSIDE, LEADER_STEPS, SECURITY_CATEGORY, SECURITY_LOOSENING } from "../policy/nomistakes-classes.ts";
 import type { NmFinding } from "../policy/nomistakes.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
@@ -53,12 +53,13 @@ const SECRET_FILE = /(?:^|\/)\.env(?:\.|$)|\.(?:pem|key|p12|pfx)$|secret|credent
 
 export type AnswerKind = "fix" | "approve" | "skip";
 
-/** What the recommended option does, by its label (worker-written, so it only ever narrows). */
+/** What the recommended option does, by its label (worker-written, so it only ever narrows): a label that names no fix counts as an approve. */
 export function answerKind(label: string): AnswerKind {
   const words = label.replace(/[-_]+/g, " ");
   if (/\b(skip|ignore|waive|defer|bypass|suppress)\b/i.test(words)) return "skip";
   if (/\b(approve|accept|keep|as is|tolerate|leave)\b/i.test(words)) return "approve";
-  return "fix";
+  if (/\b(fix\w*|chang\w*|updat\w*|address\w*|serial\w*|remov\w*|drop\w*|delet\w*|record\w*|clean\w*|correct\w*|repair\w*|patch\w*|renam\w*|refactor\w*|rewrit\w*|rotat\w*|revert\w*|tighten\w*|retry|re ?run)\b/i.test(words)) return "fix";
+  return "approve";
 }
 
 export interface NmRecordFinding {
@@ -123,18 +124,35 @@ export interface ExemptInput {
   texts: readonly (string | null)[];
 }
 
-export type Exemption = { exempt: true; rule: string } | { exempt: false; why: string };
+export type Exemption = { exempt: true; rule: string; classes: ParkingClass[] } | { exempt: false; why: string };
+
+const PARKING: readonly string[] = MODE_CLASSES["by-answer"];
+
+/** Every protected class the recorded findings name, by every table row (not only the first) and their wording. */
+function recordClasses(record: NmRecord): ParkingClass[] {
+  return record.findings.flatMap((f) => [
+    ...FINDING_CLASS_TABLE.filter((r) => PARKING.includes(r.klass) && r.test({ finding: f, file: f.cls, step: record.step, options: [] })).map((r) => r.klass as ParkingClass),
+    ...keywordClasses(`${f.category}\n${f.description}`),
+  ]);
+}
 
 /** Whether the finding rule lets a protected question be decided. Pure. */
 export function exemptFinding(input: ExemptInput): Exemption {
   if (input.mode === "off") return { exempt: false, why: "the finding rule is off" };
-  const covered = MODE_CLASSES[input.mode];
-  const uncovered = input.classes.filter((c) => !(covered as readonly string[]).includes(c));
-  if (uncovered.length > 0) return { exempt: false, why: `the finding rule (${input.mode}) does not cover ${uncovered.join(", ")}` };
+  const covered = MODE_CLASSES[input.mode] as readonly string[];
+  const uncoveredBy = (classes: readonly string[]): Exemption | null => {
+    const uncovered = classes.filter((c) => !covered.includes(c));
+    return uncovered.length > 0 ? { exempt: false, why: `the finding rule (${input.mode}) does not cover ${uncovered.join(", ")}` } : null;
+  };
+  const questionUncovered = uncoveredBy(input.classes);
+  if (questionUncovered) return questionUncovered;
   if (input.record === null || input.record === undefined || input.record === "") return { exempt: false, why: "no no-mistakes record" };
   const record = parseNmRecord(input.record);
   if (record === null || record.truncated) return { exempt: false, why: "its no-mistakes record could not be read" };
-  if (!LEADER_STEPS.includes(record.step)) return { exempt: false, why: `a ${record.step || "unknown"} gate` };
+  const classes = [...new Set([...(input.classes as readonly ParkingClass[]), ...recordClasses(record)])];
+  const findingsUncovered = uncoveredBy(classes);
+  if (findingsUncovered) return findingsUncovered;
+  if (!LEADER_STEPS.includes(record.step.trim().toLowerCase())) return { exempt: false, why: `a ${record.step || "unknown"} gate` };
   const asks = record.findings.filter((f) => f.action === "ask-user");
   if (asks.length === 0) return { exempt: false, why: "no ask-user finding in its no-mistakes record" };
   for (const f of asks) {
@@ -156,13 +174,13 @@ export function exemptFinding(input: ExemptInput): Exemption {
       if (hit) return { exempt: false, why: `its wording names a real ${klass} action (${sanitizeLine(hit[0], 60)})` };
     }
   }
-  if (kind === "approve") for (const klass of input.classes) {
+  if (kind === "approve") for (const klass of classes) {
     if (klass === "credential") {
       if (record.findings.some((f) => CREDENTIAL_CATEGORY.test(f.category))) return { exempt: false, why: "an approve on a secrets finding" };
       const waive = CREDENTIAL_WAIVE.exec(all);
       if (waive) return { exempt: false, why: `an approve on a finding that touches credentials (${sanitizeLine(waive[0], 60)})` };
     }
-    if (klass === "security" && record.findings.some((f) => SECURITY_CATEGORY.test(f.category))) return { exempt: false, why: "an approve on a security finding" };
+    if (klass === "security" && record.findings.some((f) => SECURITY_CATEGORY.test(f.category) || SECURITY_LOOSENING.test(f.description))) return { exempt: false, why: "an approve on a security finding" };
   }
-  return { exempt: true, rule: MODE_RULE[input.mode] };
+  return { exempt: true, rule: MODE_RULE[input.mode], classes };
 }

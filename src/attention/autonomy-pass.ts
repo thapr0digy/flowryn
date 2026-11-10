@@ -113,7 +113,7 @@ export function autonomyVerdict(d: DecisionRow, run: Pick<RunWithPolicy, "state"
     if (choice === null) return { action: "park", why: `${base}: no recommendation among its options`, klass };
     const ex = exemptFinding({ mode: cfg.unattended_findings, classes, record: d.nm_record, choice, texts: [d.question, d.context, d.note] });
     if (!ex.exempt) return { action: "park", why: `${base}: ${ex.why}`, klass };
-    exemption = { rule: ex.rule, classes };
+    exemption = { rule: ex.rule, classes: ex.classes };
   }
   if (choice === null) return { action: "skip", why: "no recommendation among its options: the leader decides" };
   const ciRelated = d.origin === CI_WAIT_ORIGIN ? SKIPS_CI.includes(choice) : NOMISTAKES_KINDS.includes(d.reserved_class ?? "") && ["approve", "skip"].includes(choice) && CI_TEXT.test(d.question);
