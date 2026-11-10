@@ -58,7 +58,8 @@ export function answerKind(label: string): AnswerKind {
   const words = label.replace(/[-_]+/g, " ");
   if (/\b(skip|ignore|waive|defer|bypass|suppress)\b/i.test(words)) return "skip";
   if (/\b(approve|accept|keep|as is|tolerate|leave)\b/i.test(words)) return "approve";
-  if (/\b(fix\w*|chang\w*|updat\w*|address\w*|serial\w*|remov\w*|drop\w*|delet\w*|record\w*|clean\w*|correct\w*|repair\w*|patch\w*|renam\w*|refactor\w*|rewrit\w*|rotat\w*|revert\w*|tighten\w*|retry|re ?run)\b/i.test(words)) return "fix";
+  if (/\b(no|not|never|without|later|don'?t|won'?t|can'?t|cannot)\b/i.test(words)) return "approve";
+  if (/\b(fix\w*|chang\w*|updat\w*|address\w*|serial\w*|remov\w*|delet\w*|clean\w*|correct\w*|repair\w*|patch\w*|renam\w*|refactor\w*|rewrit\w*|rotat\w*|revert\w*|tighten\w*|retry|re ?run)\b/i.test(words)) return "fix";
   return "approve";
 }
 

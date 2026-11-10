@@ -250,10 +250,18 @@ describe("off, the setting and the record", () => {
     expect(["approve", "keep-cap", "accept-false-p1", "approve-as-is", "tolerate"].map(answerKind)).toEqual(["approve", "approve", "approve", "approve", "approve"]);
     expect(["fix", "serial", "remove-it", "record-on-plain-cleanup"].map(answerKind)).toEqual(["fix", "fix", "fix", "fix"]);
     expect(["proceed", "continue", "yes", "ok", "merge", "ship"].map(answerKind)).toEqual(["approve", "approve", "approve", "approve", "approve", "approve"]);
+    const dismissals = ["no-fix", "wont-fix", "won't-fix", "dont-fix", "fix-later", "not-fixing", "drop-it", "record-as-known", "record-and-proceed"];
+    expect(dismissals.map(answerKind)).toEqual(dismissals.map(() => "approve"));
   });
 
   test("a q91-shaped question recommended as proceed parks like an approve", () => {
     const d = decision({ question: "no-mistakes review finding workers-config-dir-now-unsets-credentials (warning, src/config/workers.ts): the diff changes behaviour.", options: JSON.stringify(["proceed", "fix"]), recommendation: "proceed", reserved_class: "credential", reserved_reason: "credential", nm_record: review("Intent conformance: the diff unsets credentials for a home that has no [accounts].") });
+    const v = autonomyVerdict(d, live, CRED, facts);
+    expect(v.action === "park" && v.why).toContain("touches credentials");
+  });
+
+  test("a q91-shaped question recommended as no-fix parks like an approve", () => {
+    const d = decision({ question: "no-mistakes review finding workers-config-dir-now-unsets-credentials (warning, src/config/workers.ts): the diff changes behaviour.", options: JSON.stringify(["no-fix", "fix"]), recommendation: "no-fix", reserved_class: "credential", reserved_reason: "credential", nm_record: review("Intent conformance: the diff unsets credentials for a home that has no [accounts].") });
     const v = autonomyVerdict(d, live, CRED, facts);
     expect(v.action === "park" && v.why).toContain("touches credentials");
   });
