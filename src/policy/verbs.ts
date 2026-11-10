@@ -5,7 +5,8 @@ import { deliveredOf } from "../lifecycle/delivery.ts";
 import { deliveryBasis } from "../lifecycle/observed.ts";
 import type { ProjectRow } from "../lifecycle/projects.ts";
 import { findRun, isTerminal, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
-import type { DiscardAttempt } from "../lifecycle/landing.ts";
+import type { DiscardAttempt, DiscardGrant } from "../lifecycle/landing.ts";
+import { noteDiscardFacts, readDiscardFacts, worktreeHead as gitWorktreeHead } from "./discard-facts.ts";
 import { discardRef, findAttempt, findHumanApproval, insertApproval } from "./approvals.ts";
 import { prepareCaptainGrant } from "./grants.ts";
 import { checkStage, gateRef, openReviewGate, recordGatePass, reviewedHead, stageStartedReply } from "./gates.ts";
@@ -81,8 +82,11 @@ const merge: VerbSpec = {
     const { run, project } = mergeable(ctx.db, ctx.delivery, task);
     const seen = deliveryBasis(ctx.db, run.id);
     const facts = await gatherFacts(mergeContext(ctx), run, project);
-    // A chat answer never waives a red check: with --allow-red only the prompt, Pi's confirm or your shell count.
-    const grant = allowRed === undefined ? prepareCaptainGrant(ctx, args, { item: `merge:${run.task_id}`, choice: "merge", head: facts.head }, { action: "merge", task }) : null;
+    // A plain merge answer never waives a red check; a waiver needs the allow-red question, whose answer names that one check.
+    const grant =
+      allowRed === undefined
+        ? prepareCaptainGrant(ctx, args, { item: `merge:${run.task_id}`, choice: "merge", head: facts.head }, { action: "merge", task })
+        : prepareCaptainGrant(ctx, args, { item: `allow-red:${run.task_id}`, choice: allowRed, head: facts.head }, { action: "merge", task, allowRed });
     const chosen = chooseApproval(ctx.db, facts, { caller: ctx.caller, approvalKey: stringArg(args, "approval_key")?.trim(), head: stringArg(args, "head"), allowRed, grant }, "merge", ctx.now());
     // The attempt the Claude hook recorded is matched by the task as you typed it.
     if (!chosen.choice && ctx.caller.role === "leader" && ctx.caller.session && task !== run.task_id) {
@@ -171,18 +175,20 @@ const decline: VerbSpec = {
 // --- cleanup --------------------------------------------------------------------------------------
 
 /** The worktree's HEAD; once the worktree is gone, the tip of its branch in the primary checkout. */
-async function worktreeHead(ctx: HandlerCtx, run: RunWithPolicy, project: ProjectRow): Promise<string> {
-  const head = await ctx.delivery.git(["rev-parse", "HEAD"], run.worktree_path);
-  if (head.code === 0) return head.stdout.trim();
-  const branch = await ctx.delivery.git(["rev-parse", "--verify", "--quiet", `refs/heads/${run.branch}`], project.path);
-  return branch.code === 0 ? branch.stdout.trim() : "none";
+function worktreeHead(ctx: HandlerCtx, run: RunWithPolicy, project: ProjectRow): Promise<string> {
+  return gitWorktreeHead(ctx.delivery.git, run, project);
+}
+
+/** Where your word for a discard can come from, as a refusal names it. */
+function discardRoutes(task: string): string {
+  return `ask the user in chat: flowryn chat-question discard:${task}, or in their own shell: flowryn approve ${task} --discard`;
 }
 
 const cleanup: VerbSpec = {
   name: "cleanup",
   summary: "Remove a landed, cancelled or failed task's worktree, through the cleanup guard (--discard needs your approval)",
   positionals: [{ name: "task", required: true, help: "task or run id", complete: "task" }],
-  flags: { discard: { type: "boolean", help: "discard unlanded work (needs a human discard approval: flowryn approve <task> --discard)" } },
+  flags: { discard: { type: "boolean", help: "discard unlanded work (needs the user's word: flowryn chat-question discard:<task>, or flowryn approve <task> --discard)" } },
   kind: "mutation",
   roles: ["leader", "human"],
   scope: { kind: "ref", arg: "task" },
@@ -197,8 +203,10 @@ const cleanup: VerbSpec = {
     // The approval is only found here; the cleanup uses it up when it removes the worktree, so a refusal leaves it for a retry.
     let discardApproval: string | null = null;
     let discardAttempt: DiscardAttempt | null = null;
+    let discardGrant: DiscardGrant | null = null;
     if (boolArg(args, "discard")) {
-      const head = await worktreeHead(ctx, run, project);
+      const facts = await readDiscardFacts(ctx.delivery.git, run, project);
+      const head = facts.head;
       const now = ctx.now();
       discardApproval = findHumanApproval(ctx.db, { task: run.task_id, action: "discard", ref: discardRef(run), head, now })?.id ?? null;
       const session = ctx.caller.role === "leader" ? ctx.caller.session : null;
@@ -206,10 +214,24 @@ const cleanup: VerbSpec = {
         const attempt = findAttempt(ctx.db, { session, action: "discard", task, now });
         if (attempt) discardAttempt = { attempt: attempt.id, session, head };
       }
-      if (!discardApproval && !discardAttempt) throw new FlowrynError("approval_required", `discarding ${run.task_id}'s work needs your approval for head ${head.slice(0, 8)}`, `in your shell: flowryn approve ${run.task_id} --discard`);
+      // Your chat answer to discard:<task>, bound to this head and these uncommitted files (docs/notes/2026-11-09-chat-answer-approvals-wa.md).
+      if (!discardApproval && !discardAttempt) {
+        const grant = prepareCaptainGrant(ctx, args, { item: `discard:${run.task_id}`, choice: "discard", discard: facts }, { action: "discard", task });
+        if (grant) discardGrant = { grant, head };
+      }
+      if (!discardApproval && !discardAttempt && !discardGrant) {
+        // What a discard would remove, recorded so the chat question can show it.
+        noteDiscardFacts(ctx.db, run, facts, "cli", now);
+        throw new FlowrynError("approval_required", `discarding ${run.task_id}'s work needs your approval for head ${head.slice(0, 8)}`, discardRoutes(run.task_id));
+      }
     }
-    const report = await ctx.delivery.cleanup(run.id, { discardApproval, discardAttempt, auto: false });
-    if (report.outcome === "refused") throw new FlowrynError("cleanup_refused", `cleanup refused (${report.reason}): ${report.detail}`, report.reason === "dirty" || report.reason === "unlanded" || report.reason === "unpushed" ? `discard only with your approval: flowryn approve ${run.task_id} --discard` : `flowryn show ${run.task_id}`);
+    const report = await ctx.delivery.cleanup(run.id, { discardApproval, discardAttempt, discardGrant, auto: false });
+    if (report.outcome === "refused") {
+      const unlanded = report.reason === "dirty" || report.reason === "unlanded" || report.reason === "unpushed";
+      // What a discard would remove, recorded so the chat question can show it.
+      if (unlanded && !boolArg(args, "discard")) noteDiscardFacts(ctx.db, run, await readDiscardFacts(ctx.delivery.git, run, project), "cli", ctx.now());
+      throw new FlowrynError("cleanup_refused", `cleanup refused (${report.reason}): ${report.detail}`, unlanded ? `discard only with the user's word: ${discardRoutes(run.task_id)}` : `flowryn show ${run.task_id}`);
+    }
     return report;
   },
   apply(_ctx, _args, prepared) {

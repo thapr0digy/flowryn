@@ -228,8 +228,12 @@ export type ApprovalChoice =
   | { kind: "row"; row: ApprovalRow }
   | { kind: "attempt"; attempt: AttemptRow; session: string }
   | { kind: "key"; session: string; allowRed: string | null }
-  /** Your chat answer (docs/notes/2026-10-10-chat-answers-authorise-5g.md), already checked against Claude's transcript; never a waiver. */
-  | { kind: "grant"; grant: string; session: string }
+  /**
+   * Your chat answer (docs/notes/2026-10-10-chat-answers-authorise-5g.md), already checked against
+   * Claude's transcript. A waiver only from the explicit allow-red question, whose answer named
+   * that one check (docs/notes/2026-11-09-chat-answer-approvals-wa.md); a plain merge answer never waives.
+   */
+  | { kind: "grant"; grant: string; session: string; allowRed: string | null }
   /** Unattended mode's standing approval (src/policy/autonomy.ts): for the daemon's own merge only, never a waiver. */
   | { kind: "autonomy"; autonomy: string }
   | { kind: "yolo" };
@@ -298,7 +302,7 @@ function chooseFor(db: Db, facts: MergeFacts, ask: MergeAsk, action: "merge" | "
     const attempt = findAttempt(db, { session: leader.session_id, action, task, now, allowRed });
     if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) return { choice: { kind: "attempt", attempt, session: leader.session_id }, why: "" };
     if (attempt) return { choice: null, why: `the head moved from ${attempt.head_sha?.slice(0, 8)} since your prompt; it is now ${facts.head.slice(0, 8)}` };
-    if (ask.grant && allowRed === null) return { choice: { kind: "grant", grant: ask.grant, session: leader.session_id }, why: "" };
+    if (ask.grant) return { choice: { kind: "grant", grant: ask.grant, session: leader.session_id, allowRed }, why: "" };
     reasons.push(
       allowRed === null
         ? "no confirmed Claude prompt for this command (under bypassPermissions there is none to trust)"
@@ -338,12 +342,12 @@ export interface GateResult {
   localGreen: string | null;
 }
 
-/** The red check an approval waives: a human record's, a Claude prompt's or a Pi confirm's; yolo never waives. */
+/** The red check an approval waives: a human record's, a Claude prompt's, a Pi confirm's or an allow-red chat answer's; yolo never waives. */
 export function waiverOf(choice: ApprovalChoice | null): string | null {
   if (!choice) return null;
   if (choice.kind === "row") return choice.row.allow_red_check;
   if (choice.kind === "attempt") return choice.attempt.allow_red_check;
-  if (choice.kind === "key") return choice.allowRed;
+  if (choice.kind === "key" || choice.kind === "grant") return choice.allowRed;
   return null;
 }
 
@@ -532,6 +536,12 @@ function user(): string {
   return process.env.USER || process.env.LOGNAME || "you";
 }
 
+/** Another approval merged it: the user's chat answers to merge it, waiver or not, end. */
+function voidMergeGrants(db: Db, task: string, reason: string, now: number): void {
+  voidItemGrants(db, `merge:${task}`, reason, now);
+  voidItemGrants(db, `allow-red:${task}`, reason, now);
+}
+
 /** Use up the approval that allowed the merge, and return its id. Call inside a transaction. */
 export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, action: "merge" | "discard", now: number): string {
   const task = facts.run.task_id;
@@ -544,14 +554,14 @@ export function takeApproval(db: Db, facts: MergeFacts, choice: ApprovalChoice, 
     const fresh = db.query("SELECT consumed_at FROM approvals WHERE id = ?1").get(choice.row.id) as { consumed_at: number | null } | null;
     if (!fresh || fresh.consumed_at !== null) throw new FlowrynError("approval_required", `approval ${choice.row.id} was just used by another merge`);
     consumeApproval(db, choice.row.id, now, `${action} ${task}`);
-    if (action === "merge") voidItemGrants(db, `merge:${task}`, "a standing approval approved it", now);
+    if (action === "merge") voidMergeGrants(db, task, "a standing approval approved it", now);
     return choice.row.id;
   }
   if (choice.kind === "attempt") {
     const fresh = db.query("SELECT matched_at FROM approval_attempts WHERE id = ?1").get(choice.attempt.id) as { matched_at: number | null } | null;
     if (!fresh || fresh.matched_at !== null) throw new FlowrynError("approval_required", "that Claude prompt was already used");
     matchAttempt(db, choice.attempt.id, now);
-    if (action === "merge") voidItemGrants(db, `merge:${task}`, "a confirmed prompt approved it", now);
+    if (action === "merge") voidMergeGrants(db, task, "a confirmed prompt approved it", now);
   }
   const used = choice.kind === "grant" ? takeGrant(db, choice.grant, `${action} ${task}`, now) : null;
   const actor = used ? grantActor(used) : choice.kind === "attempt" ? `${user()} (Claude prompt, leader ${choice.session})` : choice.kind === "key" ? `${user()} (Pi confirm, leader ${choice.session})` : "yolo posture";
@@ -582,7 +592,7 @@ export function standingApproval(db: Db, facts: MergeFacts, choice: ApprovalChoi
     matchAttempt(db, choice.attempt.id, now);
   }
   const used = choice.kind === "grant" ? takeGrant(db, choice.grant, `merge ${task} (landing queue)`, now) : null;
-  voidItemGrants(db, `merge:${task}`, "the merge was queued for landing", now);
+  voidMergeGrants(db, task, "the merge was queued for landing", now);
   const actor = used ? grantActor(used) : choice.kind === "attempt" ? `${user()} (Claude prompt, leader ${choice.session})` : `${user()} (Pi confirm, leader ${choice.session})`;
   return insertApproval(db, { task, ref: facts.ref, head: facts.head, channel: channelOf(choice), actor, action: "merge", allowRed: waiverOf(choice), now }).id;
 }

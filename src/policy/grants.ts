@@ -11,6 +11,8 @@ import { tx, getMeta, setMeta, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { countSenders } from "./notifications.ts";
+import { discardBindsProblem, discardFacts, type DiscardFacts } from "./discard-facts.ts";
+import { findRun } from "../lifecycle/runs.ts";
 import { bindingRef, chatForm, mapAnswer, normalizeQuestion, questionsHash, sameQuestion, type ChatForm, type ChatQuestion, type GrantAction } from "./chat-questions.ts";
 
 /**
@@ -154,6 +156,8 @@ export interface PostAsk {
   transcriptPath: string;
   /** `[merge]`: the away form's text depends on it. */
   merge: MergeConfig;
+  /** Items whose live facts no longer match what the user was shown, with why: they grant nothing. */
+  stale?: ReadonlyMap<string, string>;
   now: number;
 }
 
@@ -170,6 +174,10 @@ function grantLine(g: GrantRow): string {
             ? `start unattended mode (${g.item})`
             : g.action === "away"
               ? `start away as yours (${g.item}), so Flowryn decides for you meanwhile`
+            : g.action === "allow-red"
+              ? `merge ${g.task_id} at ${g.binds?.slice(0, 8) ?? "?"}, waiving only "${sanitizeLine(g.choice, 120)}"`
+            : g.action === "discard"
+              ? `discard the unlanded work of ${g.task_id} at ${g.binds?.slice(0, 8) ?? "?"}; it cannot be undone`
             : `merge ${g.task_id} at ${g.binds?.slice(0, 8) ?? "?"}`;
   return `Grant ${g.id}: ${what}. Run it now: flowryn grant use ${g.id}${g.action === "gate" && g.choice === "changes" && !g.words ? " --body-file - (the user's words: what to change)" : ""}. It ends with this turn.`;
 }
@@ -179,6 +187,14 @@ function grantLine(g: GrantRow): string {
  * choice and mint a grant. Returns the lines the leader sees beside the tool result. Call inside
  * a transaction.
  */
+/** A discard item whose snapshot was recorded again after the question was asked: the user saw an older one. */
+function discardRecordedSince(db: Db, form: ChatForm, askedAt: number): boolean {
+  if (form.action !== "discard" || !form.task) return false;
+  const run = findRun(db, form.task);
+  const recorded = run ? discardFacts(db, run.id) : null;
+  return recorded !== null && recorded.observed_at > askedAt;
+}
+
 export function postAsk(db: Db, a: PostAsk): string[] {
   const questions = questionsOf(a.input);
   if (!questions) return [];
@@ -220,6 +236,11 @@ export function postAsk(db: Db, a: PostAsk): string[] {
       refuse("no answer");
       continue;
     }
+    const stale = a.stale?.get(ref);
+    if (stale) {
+      refuse(stale);
+      continue;
+    }
     let form: ChatForm;
     try {
       form = chatForm(db, ref, a.merge, a.now);
@@ -228,7 +249,7 @@ export function postAsk(db: Db, a: PostAsk): string[] {
       refuse(error.message);
       continue;
     }
-    if (!sameQuestion(q, form.question)) {
+    if (!sameQuestion(q, form.question) || discardRecordedSince(db, form, asked.created_at)) {
       refuse("its facts changed while the user answered; ask again");
       continue;
     }
@@ -311,8 +332,12 @@ export interface GrantAsk {
   choice: string;
   /** `flowryn grant use <id>`: that grant only. */
   grantId: string | null;
-  /** A merge: the head it would merge. */
+  /**
+   * What the command would act on now, compared with what the answer bound: a merge's or
+   * allow-red's head, a discard's live worktree facts. Undefined: nothing to compare.
+   */
   head?: string | null;
+  discard?: DiscardFacts;
 }
 
 function normalChoice(choice: string): string {
@@ -501,8 +526,12 @@ export function prepareGrant(ctx: { db: Db; now(): number }, ask: GrantAsk, proj
     throw error;
   }
   if (!g) return null;
-  if (g.action === "merge" && ask.head !== undefined && ask.head !== g.binds) {
-    return refuse(new FlowrynError("approval_required", `grant ${g.id} was for head ${g.binds?.slice(0, 8) ?? "?"}; the head is now ${ask.head?.slice(0, 8) ?? "?"}`, `ask the user again: flowryn chat-question merge:${g.task_id}`), g.id);
+  if ((g.action === "merge" || g.action === "allow-red") && ask.head !== undefined && ask.head !== g.binds) {
+    return refuse(new FlowrynError("approval_required", `grant ${g.id} was for head ${g.binds?.slice(0, 8) ?? "?"}; the head is now ${ask.head?.slice(0, 8) ?? "?"}`, `ask the user again: flowryn chat-question ${g.item}`), g.id);
+  }
+  if (g.action === "discard") {
+    const moved = ask.discard ? discardBindsProblem(g.id, g.binds, ask.discard) : `grant ${g.id} cannot be checked against the worktree`;
+    if (moved) return refuse(new FlowrynError("approval_required", moved, `ask the user again: flowryn chat-question ${g.item}`), g.id);
   }
   if (g.verified_at === null) {
     const session = ctx.db.query("SELECT transcript_path, cwd, pinned_at FROM leader_sessions WHERE session_id = ?1").get(g.session_id) as { transcript_path: string | null; cwd: string | null; pinned_at: number | null } | null;
@@ -595,17 +624,17 @@ export function claudeLeaderSession(ctx: Pick<HandlerCtx, "db" | "caller">): str
  * transcript, or null (another caller, no grant, or a confirmed prompt for the same command,
  * which wins). A grant for another choice of the same item refuses the command.
  */
-export function prepareCaptainGrant(ctx: HandlerCtx, args: Args, ask: { item: string; choice: string; head?: string | null }, attempt: { action: ApprovalAction; task: string } | null): string | null {
+export function prepareCaptainGrant(ctx: HandlerCtx, args: Args, ask: { item: string; choice: string; head?: string | null; discard?: DiscardFacts }, attempt: { action: ApprovalAction; task: string; allowRed?: string | null } | null): string | null {
   const named = stringArg(args, GRANT_ARG) ?? null;
   const session = claudeLeaderSession(ctx);
   if (!session) {
     if (named) throw new FlowrynError("role_refused", "only the Claude leader session that asked uses a chat-answer grant");
     return null;
   }
-  if (!named && attempt && findAttempt(ctx.db, { session, action: attempt.action, task: attempt.task, now: ctx.now() })) return null;
+  if (!named && attempt && findAttempt(ctx.db, { session, action: attempt.action, task: attempt.task, now: ctx.now(), ...(attempt.allowRed !== undefined ? { allowRed: attempt.allowRed } : {}) })) return null;
   // The leader's own login's projects folder (docs/notes/2026-10-24-leader-scoping-and-vj.md); the implicit account keeps [grants].
   const projectsDir = sessionProjectsDir(ctx.config(), getSession(ctx.db, session)?.account ?? null, grantsConfig(ctx.config()).claude_projects_dir);
-  return prepareGrant(ctx, { session, item: ask.item, choice: ask.choice, grantId: named, ...(ask.head !== undefined ? { head: ask.head } : {}) }, projectsDir);
+  return prepareGrant(ctx, { session, item: ask.item, choice: ask.choice, grantId: named, ...(ask.head !== undefined ? { head: ask.head } : {}), ...(ask.discard ? { discard: ask.discard } : {}) }, projectsDir);
 }
 
 /** Who answered, for an approval row or an event: you, through a chat answer the leader asked. */
