@@ -263,11 +263,12 @@ describe("grants bind to what was shown", () => {
 
   test("another snapshot recorded while the dialog was open grants nothing, even when the question reads the same", () => {
     const w = world();
-    seedDiscard(w);
+    const now = Math.floor(Date.now() / 60_000) * 60_000;
+    seedDiscard(w, facts(), now);
     const q = chatForm(w.db, "discard:T1", MERGE_DEFAULTS).question;
-    const now = Date.now();
     tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_r", input: { questions: [q] }, merge: MERGE_DEFAULTS, now }));
     seedDiscard(w, facts({ digest: "d9".repeat(32) }), now + 1);
+    expect(chatForm(w.db, "discard:T1", MERGE_DEFAULTS).question).toEqual(q);
     const lines = tx(w.db, () =>
       postAsk(w.db, { session: w.session, toolUseId: "toolu_r", input: { questions: [q] }, response: { answers: { [q.question]: "Discard" } }, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now: now + 2 }),
     );
