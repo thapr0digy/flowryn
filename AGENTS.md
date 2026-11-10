@@ -1,35 +1,88 @@
-# Project agent memory
+# Flowryn agent guide
 
-This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
+Flowryn runs a fleet of coding agents: a leader (Claude Code or Pi) dispatches workers into git worktrees in Herdr panes, and one daemon, `flowrynd`, keeps state in SQLite. TypeScript on Bun. Claude reads this file through `CLAUDE.md`; Pi reads it directly.
 
-- The design spec is `docs/design-v3.html`. Its M0 badges (Pi included) were resolved by the spikes; `docs/m0-verdicts.md` is the record of what each platform behavior actually does and which design text changed. Read it before building on any harness, Pi, Herdr or tasks-axi behavior.
-- Deterministic first; AI only when necessary: build features from plain code (rules, state machines, parsers, schemas, fixed templates, timers) wherever it can do the job. Use a model only where judgement or natural language is truly needed, and say why in the design and PR.
-- Anything that drives Herdr (spikes, contract tests) must go through the vendored lab helper `spikes/lib/herdr-lab.sh` (via `spikes/lib/lab.sh`, `fl-lab-*` sessions), never the default session. Scrub inherited `CLAUDECODE`/`CLAUDE_CODE_*` env before provisioning (`lab_scrub_env`), or launched harnesses run as child sessions of yours.
-- Run the spikes with `spikes/run-all.sh [group]` (README "Running the M0 spikes"). Herdr needs socket access, so run them outside a command sandbox.
-- Pi contract tests use the offline scripted model in `spikes/pi/lib/scripted-provider.ts` and a scratch `PI_CODING_AGENT_DIR`, never a paid model or `~/.pi`; `spikes/pi/NOTES.md` has the script syntax and the opt-in real-model pass.
-- The cleanup guard must pass both fixture sets before any change to it lands: `fixtures/cleanup-guard/run.sh --impl "bun $PWD/scripts/guard/landed-impl.ts"` (landed-work verdicts) and `fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"` (locks, parked runs, reaping, order). CI runs both.
-- Product code is TypeScript on Bun; dev commands are in README "Development". `bun test` starts real daemons on Unix sockets, relies on FSEvents and runs the real tasks-axi 0.2.5, so run it outside a command sandbox. Inside one, `bun install` also needs `BUN_TMPDIR` and `BUN_INSTALL_CACHE_DIR` pointed at a writable temp directory.
-- `docs/m1-notes.md` to `docs/m5-notes.md` record the choices each milestone made where the design leaves room, and the live results (Herdr's typed-command limits, Claude trust and sandbox, the steer channels, the reconciler's rules, leader sessions and the lease, presentations and offers, the named-head and merge gates, the approval channels, cleanup, stages and gates, capacity and the scheduler, plans); the M5 notes end with the v1 completion pass (the harness gate, divergences and the invariant pass, scout landing, promote, the Herdr and GitHub outage P1s). Read them rather than rediscovering them. `docs/v1-status.md` lists every v1 item as done (with its PR) or not built (with why). These files, and `docs/cutover-notes.md`, are frozen since 2026-10-09: fix them in place, never add a section or row (`test/unit/docs-notes.test.ts` fails on a new heading).
-- Docs for new work go in one new file per feature, `docs/notes/<yyyy-mm-dd>-<task id>.md`, opening with its title and a `- Status: done|partial|not built` line (`docs/notes/README.md` has the format), so two PRs never touch the same docs file. Later phases and fixes of the same feature edit its file. Put a feature's configuration keys, verbs and behaviour there (its `- Config:` line lists the keys), not in README.md, which changes only for the setup and usage a new user follows. Ship briefs point at this rule, not at a shared file. `bun run notes` prints the index; nothing commits one.
-- `bun test` never reaches a real Herdr, harness or Docker, nor reads this machine's memory: test homes point `[herdr] socket` at a missing path (with `unreachable_alert_ms` of a day, so no Herdr P1), get stand-in `claude` and `pi` that answer no version (the daemon's startup harness check would otherwise run the real ones from PATH), a `herdr` binary that only answers `--version` (a contract pass records it), a fake `docker`, a `lavish-axi` whose `poll` prints what a test queues in `$FLOWRYN_HOME/lavish-queue/` (a review URL is lavish's for its page, so the fake worker's `lavish:<file>` argument builds it), a `quota-axi` that prints `$FLOWRYN_HOME/quota.json` (`quotaJson`, else 80%), a host check that passes, `FLOWRYN_OPENER=record:` (review pages are recorded to `browser-opens.log`, never opened; the preload refuses `/usr/bin/open` like osascript) and `FLOWRYN_NOTIFY=off` (macOS notifications are on by default in a real setup, so a preload sets the override and refuses osascript in-process, and anything that launches a daemon for testing must call `requireNotificationsOff` from `src/config/leader.ts` first, which refuses to start one without it), and runtime tests use `test/helpers/fake-herdr.ts` with a fake worker that goes through the real CLI (its `FAKE:` steps, including `stage-done`, are listed at the top of `test/helpers/fake-harness.ts`). Leader tests use fakes that run the real bridge artifacts (the leader settings file's hooks, the Pi leader extension). `test/integration/contracts-offline.test.ts` runs the real contract suite through `flowryn doctor --contracts` against instruction-following fakes (`test/helpers/fake-contract-claude.ts`, `fake-contract-pi.ts`; docs/m5-notes.md "Offline contract test"), so a worker-path change that breaks a step fails there. A change to behaviour the suite proves also bumps that harness's `CONTRACT_REVISIONS` (`src/contracts/revision.ts`), which makes older passes stale; a docs or unrelated change never does. Live Herdr, Claude and Pi runs are `flowryn doctor --contracts` and `scripts/lab/m2-live.sh` to `m5-live.sh` and `v1-live.sh`, all in a lab session; they own a `flowryn/contract-<runid>-` branch prefix and clean up by exact name in code.
-- Leader and worker hooks share the `flowryn hook` verbs; the caller's token decides (a run token is a worker, a leader session's token a leader or read-only reader, by the lease). Leader bridges decide nothing: put any rule in `src/leader/` or `src/attention/`, never in `src/bridges/`.
-- A worker's `$FLOWRYN_BIN` calls run inside the user's Claude Bash sandbox (hooks do not). The per-run settings allow the daemon socket, the run's spool, report and temp directories (its `TMPDIR`, src/lifecycle/run-tmp.ts) and, for a ship, only what a commit in its linked worktree writes of the git common dir (`objects`, `refs`, `logs`, `packed-refs` and its lock, its `worktrees/<name>`), with `hooks` and `config` denied, so a worker never writes git config (no `push -u`). A new path a worker must write needs adding there (`src/harness/git-access.ts`, `src/harness/claude/adapter.ts`, `src/lifecycle/launcher.ts`).
-- Nothing in tests, fixtures or the lab reaches GitHub or the shared no-mistakes daemon: GitHub goes through `src/forge` at `[github] api_url`, served by the fake forge (`test/helpers/fake-github.ts`), and test homes get a stand-in `no-mistakes`. A GitHub token is only ever sent to GitHub's own API host. A real-GitHub run is not planned: the user declined a sandbox repo (docs/v1-status.md).
-- `flowryn approve` and the live board need a real terminal; tests drive them through `test/helpers/pty.ts`: `script(1)` on macOS, which refuses a socket on its stdin (Bun's pipe, and a macOS FIFO, are sockets), so keys go through a FIFO that `cat` copies onto a real pipe; Python's `pty.spawn` on Linux, where util-linux `script` waits for stdin EOF.
-- CI runs on `ubuntu-latest`; the full suite runs on the Mac before every PR. A test that needs macOS (launchd, plutil, codesign, Seatbelt, FSEvents) is `test.skipIf(process.platform !== "darwin")` with the reason in a comment beside it, never an early `return` inside the body.
-- Every tasks-axi mutation goes through `recordIntent` in the same transaction as its runtime change, and every mutation of `flowryn.db` appends an event in its transaction (`src/db/events.ts`). Never call tasks-axi or write the database from anywhere else. The reconciler's invariant pass raises a divergence for any live run whose task is not In flight in the backlog (and the reverse), so a test that seeds a run straight into the database must add its task too (`seedRun` does).
-- A run starts, and each stage starts, only through the scheduler's grant (`src/sched/scheduler.ts`): code that makes a run or a stage wait sets `runs.stage_state`/`pending_launch` and kicks it, never launches or steers directly. A capacity slot is a `pool_leases` row, released at stage or run end.
-- Decisions: content in `decisions` (q<N> run-scoped, k<N> standalone); the standalone decision's task, hold and blocked-by edges in the backlog through `recordIntent`. Only `captainChannel`, a chat-answer grant taken in `decide` (`takeGrant`, src/policy/grants.ts: minted only by the Claude leader's own AskUserQuestion hooks and checked against Claude's transcript) and, for a review gate's own questions, `lavishAnswer` (src/lifecycle/decision-verbs.ts) may record `answered_by = captain`; known limits parked outside the confused-agent threat model are listed in one place in docs/cutover-notes.md's "C1 · Decisions" section (an approval attempt bound to (action, task) rather than the exact command, a leader shell faking the human channel, the Pi shell gate's mid-word-quoting dodge, a local process posting a review-page answer, and a leader repointing its transcript to replay a chat answer).
-- A permission prompt on a busy run holds liveness at `blocked_dialog` while its `blocked_prompt` item is open; it is released by hook activity on the run, or for a Claude run by the reconciler's dialog-gone check on Herdr's agent status (holds on `null`/`"unknown"`, releases at once on `"working"`, releases on `"idle"`/`"done"` only after two consecutive passes read a settled status), and resolved on the run's death or a deferred resume (src/lifecycle/prompt-wedge.ts, src/reconcile/reconciler.ts). The Pi backstop (no confirmed dialog, just a suspected stall) also excludes `"unknown"` alongside `"working"`.
-- An external command the daemon runs goes through `runBounded` (`src/runtime/bounded.ts`) or a helper built on it (`runCommand`, `gitRunner`): in the daemon it gets its own process group, a deadline with SIGTERM, grace and group SIGKILL, a bounded pipe drain, and an entry in `<state_dir>/owned/` that the next start uses to end a group a force-kill left. A cut-off or incomplete read is a non-zero code (124/125), never empty output. Never hand-roll `Bun.spawn` plus a pid-only timer (docs/notes/2026-10-13-next-steps-md-xm.md lists the ones left).
-- A leader sees one scope (docs/notes/2026-10-24-leader-scoping-and-vj.md): every verb a leader, reader or leader hook can call declares `scope` on its spec (`src/leader/scope.ts`; a unit test fails without one), a list verb filters with `lensFor`, and anything that hands a leader items goes through its session's lens. Your terminal (no scope) and a one-scope home are unrestricted.
-- Toolkit rules (which tool does each job: gh-axi, sqlite-axi, treehouse, jira-axi, chrome-devtools-axi, tasks-axi) live in `src/policy/toolkit.ts` with the shell normalizer in `src/policy/shell.ts`; the hook process evaluates them (`hook pre-tool`, `hook tool-check`), never the daemon, so a denial holds with the daemon down. A new rule gets a unit case and one integration deny through the real hook (`test/integration/toolkit.test.ts`). Their static layer for Claude (bare-name MCP denies, Bash backstops, `Edit(//…)` and sandbox `denyWrite` on Flowryn's task files) is `src/policy/static.ts`, written into both the worker and leader settings; keep it in step with a rule change. A user PreToolUse hook that rewrites commands (RTK's `git` → `rtk git`) runs before Claude's permission match, so a static Bash deny is only a backstop.
-- Shared lines that parallel PRs touch (docs/notes/2026-10-22-remove-conflict-hotspots-24.md): a feature PR never changes `VERSION` or package.json's version, whatever a global SemVer habit says; a release is its own PR from main (`bun run release <major|minor|patch>`), and `bun test` fails a commit that mixes a version change with other files. `PROTO` is still bumped in the PR that changes the wire format. A new migration takes the next number in `MIGRATIONS` (renumber yours when another lands first: the numbers must run 1..N, and the daemon refuses a database whose recorded name for a number differs). `ERROR_CODES` stays in alphabetical order (a test checks).
-- `import_source` (projects, task_policy, decisions) holds `legacy:<id>` for work the retired cutover import created; nothing writes it any more, and the briefing still counts open imported decisions by it.
+## Commands
+
+```bash
+bun install
+bun run typecheck                 # tsc --noEmit
+npx oxlint                        # lint (not `npm run lint`: a user hook misparses it)
+bun run test                      # unit, then integration, in parallel
+bun run test:unit                 # or test:integration
+bun test test/unit/foo.test.ts    # one file
+bun test --changed=origin/main    # only tests your change affects
+bun run build                     # dist/flowryn and the dist/flowrynd link
+bun run notes                     # index of docs/notes/
+fixtures/cleanup-guard/run.sh --impl "bun $PWD/scripts/guard/landed-impl.ts"
+fixtures/cleanup-order/run.sh --impl "bun $PWD/scripts/guard/cleanup-impl.ts"
+```
+
+- Run tests, spikes and anything that touches Herdr or the daemon socket outside a command sandbox: the suite starts daemons on Unix sockets, uses FSEvents, drives a pty and runs the real tasks-axi 0.2.5. Inside a sandbox, `bun install` needs `BUN_TMPDIR` and `BUN_INSTALL_CACHE_DIR` set to a writable temp directory.
+- CI is off for good (docs/v1-status.md "CI is off"). The merge gate is local `flowryn verify`: install, typecheck + oxlint + build, contract checks (`doctor --contracts --verify-only`) when a worker path changed, then unit and integration tests. Its steps are in `src/verify/recommended.ts`.
+- Worker paths are `src/**`, `spikes/pi/lib/**`, `scripts/build.sh`, `package.json`, `bun.lock`, `bunfig.toml` and `tsconfig.json`. A change there runs the contract checks; docs, tests and scripts alone do not.
+- A cleanup-guard change must pass both fixture sets above before it lands.
+- Known load flakes are listed by `flowryn learnings`. If a lone test fails under the full suite, rerun it alone before you debug it.
+
+## Before you change things, read
+
+- `docs/design-v3.html`: the design spec. `src/<component>` follows its section 4.
+- `docs/m0-verdicts.md`: what each harness, Pi, Herdr and tasks-axi behaviour really does. Read it before you build on any of them.
+- `docs/m1-notes.md` to `docs/m5-notes.md`: choices and live results for each milestone. `docs/v1-status.md`: every v1 item with its PR, or why it was not built. `docs/cutover-notes.md`: security limits and follow-ups.
+- `docs/notes/`: one file per feature since v1. Search here first for a feature's config keys, verbs and behaviour.
+
+## Design rule
+
+- Deterministic first: build from plain code (rules, state machines, parsers, schemas, templates, timers). Use a model only where judgement or natural language is truly needed, and say why in the design and the PR.
+
+## State and data
+
+- Write `flowryn.db` and call tasks-axi only through the existing paths. Every tasks-axi mutation goes through `recordIntent` in the same transaction as its runtime change. Every database mutation appends an event in its transaction (`src/db/events.ts`).
+- The reconciler raises a divergence for any live run whose task is not In flight in the backlog, and the reverse. A test that seeds a run must also seed its task (`seedRun` does both).
+- Runs and stages start only through the scheduler's grant (`src/sched/scheduler.ts`). To make one wait, set `runs.stage_state`/`pending_launch` and kick it. Never launch or steer directly. A capacity slot is a `pool_leases` row, released at stage or run end.
+- Decisions live in `decisions` (q<N> run-scoped, k<N> standalone). Only `captainChannel`, a chat-answer grant (`takeGrant`, `src/policy/grants.ts`) and, for a review gate's own questions, `lavishAnswer` (`src/lifecycle/decision-verbs.ts`) may record `answered_by = captain`. Known limits are in docs/cutover-notes.md "C1 · Decisions".
+- `import_source = legacy:<id>` marks work from the retired cutover import. Nothing writes it any more; the briefing still counts by it.
+
+## Processes and the daemon
+
+- Every external command the daemon runs goes through `runBounded` (`src/runtime/bounded.ts`) or a helper built on it (`runCommand`, `gitRunner`). It provides a process group, a deadline, a bounded drain and an `owned/` record. A cut-off read returns code 124/125, never empty output. Never hand-roll `Bun.spawn` with a pid timer.
+- A permission prompt on a busy run holds liveness at `blocked_dialog`. The rules for when it is released are in `src/lifecycle/prompt-wedge.ts` and `src/reconcile/reconciler.ts`. Herdr status `null`/`"unknown"` holds; `"idle"`/`"done"` needs two settled passes.
+
+## Leader, hooks and policy
+
+- Leader and worker hooks share the `flowryn hook` verbs. The caller's token decides the role (a run token means a worker; a leader session token means a leader or a reader, by the lease).
+- Bridges decide nothing. Rules go in `src/leader/` or `src/attention/`, never in `src/bridges/`.
+- Every verb a leader, reader or leader hook can call declares `scope` on its spec (`src/leader/scope.ts`; a unit test fails without one). List verbs filter with `lensFor`. See docs/notes/2026-10-24-leader-scoping-and-vj.md.
+- Toolkit rules (gh-axi, sqlite-axi, treehouse, jira-axi, chrome-devtools-axi, tasks-axi) live in `src/policy/toolkit.ts`, and the shell normalizer in `src/policy/shell.ts`. They are evaluated in the hook process, not the daemon, so a denial holds with the daemon down. A new rule gets a unit case and one deny through the real hook (`test/integration/toolkit.test.ts`), and `src/policy/static.ts` (the static Claude layer) stays in step with it.
+- A worker's `$FLOWRYN_BIN` calls run inside the user's Claude Bash sandbox (hooks do not). Per-run settings allow only the daemon socket, the run's spool, report and temp directories, and the git-common-dir paths a commit writes. `hooks` and `config` are denied, so a worker never writes git config (no `push -u`). A new path a worker must write gets added in `src/harness/git-access.ts`, `src/harness/claude/adapter.ts` and `src/lifecycle/launcher.ts`.
+
+## Tests
+
+- Tests never reach a real Herdr, harness, Docker, GitHub, no-mistakes daemon or this machine's memory. Test homes get stand-ins: a missing Herdr socket, `claude`/`pi`/`herdr`/`docker`/`no-mistakes`/`lavish-axi`/`quota-axi` fakes, `FLOWRYN_OPENER=record:` and `FLOWRYN_NOTIFY=off`. Reuse the helpers in `test/helpers/` (`fleet-env.ts`, `fake-herdr.ts`, `fake-harness.ts` whose `FAKE:` steps are listed at its top, `fake-github.ts`). Don't build new fakes.
+- Anything that launches a daemon in a test calls `requireNotificationsOff` (`src/config/leader.ts`) first.
+- `test/integration/contracts-offline.test.ts` runs the real contract suite against fake harnesses. A change to behaviour that suite proves bumps that harness's `CONTRACT_REVISIONS` (`src/contracts/revision.ts`). Docs and unrelated changes never bump it.
+- A macOS-only test (launchd, plutil, codesign, Seatbelt, FSEvents) uses `test.skipIf(process.platform !== "darwin")` with the reason in a comment. Never use an early `return`.
+- `flowryn approve` and the live board need a real terminal. Drive them through `test/helpers/pty.ts`.
+- A GitHub token is only ever sent to GitHub's own API host. All forge calls go through `src/forge` at `[github] api_url`.
+
+## Live runs (Herdr, Claude, Pi)
+
+- Drive Herdr only through `spikes/lib/lab.sh` (`fl-lab-*` sessions), never the default session. Scrub `CLAUDECODE`/`CLAUDE_CODE_*` first (`lab_scrub_env`), or launched harnesses become child sessions of yours.
+- Live checks are `flowryn doctor --contracts`, `spikes/run-all.sh [group]`, and `scripts/lab/m2-live.sh` to `v1-live.sh`. They own a `flowryn/contract-<runid>-` branch prefix and clean up by exact name.
+- Pi contract tests use the offline scripted model (`spikes/pi/lib/scripted-provider.ts`) and a scratch `PI_CODING_AGENT_DIR`, never a paid model or `~/.pi`. See `spikes/pi/NOTES.md`.
+
+## Docs, versions and merge hotspots
+
+- Docs for new work go in a new `docs/notes/<yyyy-mm-dd>-<task id>.md` (format in `docs/notes/README.md`). A feature's config keys and verbs go there, not in README.md, which changes only for setup and usage a new user follows. Later fixes to the same feature edit that feature's file.
+- `docs/m*-notes.md`, `docs/v1-status.md` and `docs/cutover-notes.md` are frozen. Fix them in place, but never add a heading (`test/unit/docs-notes.test.ts` fails).
+- Feature PRs never change `VERSION` or the package.json version. A release is its own PR from main (`bun run release <major|minor|patch>`), and a commit that mixes a version change with other files fails `bun test`.
+- Bump `PROTO` in the PR that changes the wire format.
+- A new migration takes the next number in `MIGRATIONS`. The numbers must run 1..N; renumber yours if another lands first.
+- Keep `ERROR_CODES` in alphabetical order (a test checks).
+- Workers never rewrite history. Make new commits and `git merge origin/main`; never amend, rebase or force-push.
 
 ## Maintaining this file
 
-Keep this file for knowledge useful to almost every future agent session in this project.
-Do not repeat what the codebase already shows; point to the authoritative file or command instead.
-Prefer rewriting or pruning existing entries over appending new ones.
-When updating this file, preserve this bar for all agents and keep entries concise.
+- Keep only what almost every session needs and cannot learn from the code. Point to the authoritative file instead of restating it.
+- Keep each bullet to one or two lines. Edit or prune an existing bullet instead of adding a near-duplicate. Stay well under 200 lines.
+- A rule that must never be broken belongs in a test or hook, with a one-line pointer here.
