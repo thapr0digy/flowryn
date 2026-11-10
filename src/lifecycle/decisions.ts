@@ -55,6 +55,8 @@ export interface DecisionRow {
   /** Unattended mode (src/attention/autonomy-pass.ts): the grant that decided or parked it, and which. */
   autonomy_id?: string | null;
   autonomy_state?: "decided" | "parked" | null;
+  /** The daemon's own no-mistakes read for an `ask --nomistakes` (src/attention/real-actions.ts NmRecord); never from the question. */
+  nm_record?: string | null;
 }
 
 /** answered_via of a deadline default (src/attention/deadline-defaults.ts): a policy answer the user may undo. */

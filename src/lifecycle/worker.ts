@@ -14,6 +14,7 @@ import { resolveTool } from "../config/config.ts";
 import { cleanupConfig } from "../config/delivery.ts";
 import { fileClass, findingPath, matchRules, readRuleFacts, type RuleFacts, type RuleVerdict } from "../policy/nomistakes-rules.ts";
 import { classifyAsk, type AskVerdict } from "../policy/nomistakes-classes.ts";
+import { nmRecordJson } from "../attention/real-actions.ts";
 import { parseOpenDecisions } from "./report-decisions.ts";
 import { reportDirFor, reportLink } from "./launcher.ts";
 import { getProject } from "./projects.ts";
@@ -242,10 +243,13 @@ const ask: VerbSpec = {
     const sourceReason = stringArg(args, "reserved") ?? null;
     // A gate no rule settles goes through the finding table (src/policy/nomistakes-classes.ts): the
     // leader's when every finding plainly follows the change, else the user's with the class why.
-    const owner = facts?.ok && verdict && !verdict.settled ? classifyAsk({ step: facts.step, findings: facts.findings.map((f) => ({ ...f, cls: fileClass(findingPath(f.file, run.worktree_path), f.line, facts.diff) })), options, sensitive: run.sensitive === 1 }) : null;
+    const classified = facts?.ok ? facts.findings.map((f) => ({ ...f, cls: fileClass(findingPath(f.file, run.worktree_path), f.line, facts.diff) })) : [];
+    const owner = facts?.ok && verdict && !verdict.settled ? classifyAsk({ step: facts.step, findings: classified, options, sensitive: run.sensitive === 1 }) : null;
     // A gate a rule settles is judged on no-mistakes' and git's facts, not on the question's wording
     // (the user's ruling, 2026-10-22); only the worker's own --reserved still keeps it for the user.
     const ownReason = sourceReason?.trim() ? sourceReason : null;
+    // The daemon's own read, kept for unattended mode's finding rule; a worker-reserved ask keeps none, so it never qualifies.
+    const nmRecord = facts?.ok && !ownReason ? nmRecordJson(facts.step, classified) : null;
     const keyword = () => reservedReason({ question, context: null, sourceReason, blocksYoloOff: false }, cfg);
     let reserved: string | null;
     if (verdict?.settled && !ownReason) reserved = null;
@@ -254,9 +258,9 @@ const ask: VerbSpec = {
     // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask the table kept for the user.
     const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : !facts?.ok ? "nomistakes-unread" : nmClass(verdict, owner)));
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks, why);
-    const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via, ...(verdict ? { nomistakes: true } : {}) } });
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks, note, nm_record) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks, why, nmRecord);
+    const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via, ...(verdict ? { nomistakes: true } : {}), ...(nmRecord ? { nm_record: true } : {}) } });
     if (verdict?.settled && reserved === null) {
       appendEvent(ctx.db, { source: "daemon", kind: "decision.settled_by_rule", runId: run.id, taskId: run.task_id, payload: { decision: id, step: facts!.ok ? facts!.step : "", rules: verdict.rules, answer: verdict.answer, findings: verdict.findings } });
       // Never held, so nothing to unhold: answer it as a non-blocking question.

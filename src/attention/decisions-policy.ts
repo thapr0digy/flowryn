@@ -76,7 +76,13 @@ export const VALIDATOR_GATES = ["design", "qa"] as const;
 export type ValidatorGate = (typeof VALIDATOR_GATES)[number];
 /** `[decisions] validator_rounds` reaches at most this many per gate per away. */
 export const VALIDATOR_MAX_ROUNDS = 5;
-const DECISIONS_KEYS = ["reserved_classes", "nomistakes_rules", "default_after_h", "default_classes", "default_gates", "validator_max_usd", "validator_rounds"];
+/**
+ * `[decisions] unattended_findings` (docs/notes/2026-11-10-unattended-mode-decide-8k.md): which protected
+ * classes unattended mode may decide when the daemon's own no-mistakes record shows a keyword misfire.
+ */
+export const UNATTENDED_FINDINGS_MODES = ["off", "credential", "by-answer"] as const;
+export type UnattendedFindingsMode = (typeof UNATTENDED_FINDINGS_MODES)[number];
+const DECISIONS_KEYS = ["reserved_classes", "nomistakes_rules", "default_after_h", "default_classes", "default_gates", "validator_max_usd", "validator_rounds", "unattended_findings"];
 
 export interface DecisionsConfig {
   reserved_classes: string[];
@@ -91,6 +97,8 @@ export interface DecisionsConfig {
   validator_max_usd: number;
   /** Validator rounds (passes, changes and failures) per gate per away. */
   validator_rounds: number;
+  /** Off by default: the finding rule of unattended mode (src/attention/real-actions.ts). */
+  unattended_findings: UnattendedFindingsMode;
 }
 
 export function decisionsConfig(config: FlowrynConfig): DecisionsConfig {
@@ -109,6 +117,7 @@ export function decisionsConfig(config: FlowrynConfig): DecisionsConfig {
     default_gates: validatorGates(raw.default_gates),
     validator_max_usd: raw.validator_max_usd === undefined ? 1 : checkUsd(raw.validator_max_usd, "[decisions] validator_max_usd"),
     validator_rounds: validatorRounds(raw.validator_rounds),
+    unattended_findings: unattendedFindings(raw.unattended_findings),
   };
 }
 
@@ -119,6 +128,12 @@ function validatorGates(value: unknown): ValidatorGate[] {
   const unknown = (value as string[]).filter((g) => !(VALIDATOR_GATES as readonly string[]).includes(g));
   if (unknown.length > 0) throw new FlowrynError("config_invalid", `[decisions] default_gates: ${unknown.join(", ")} is not one of ${VALIDATOR_GATES.join(", ")}`);
   return [...new Set(value as ValidatorGate[])];
+}
+
+function unattendedFindings(value: unknown): UnattendedFindingsMode {
+  if (value === undefined) return "off";
+  if (typeof value !== "string" || !(UNATTENDED_FINDINGS_MODES as readonly string[]).includes(value)) throw new FlowrynError("config_invalid", `[decisions] unattended_findings must be one of ${UNATTENDED_FINDINGS_MODES.join(", ")}`);
+  return value as UnattendedFindingsMode;
 }
 
 function validatorRounds(value: unknown): number {
@@ -188,6 +203,11 @@ export interface ReservedInput {
 /** The keyword class a reserved reason names, or null for a source's own words. */
 export function keywordClass(reason: string | null): ReservedClass | null {
   return reason !== null && (RESERVED_CLASSES as readonly string[]).includes(reason) ? (reason as ReservedClass) : null;
+}
+
+/** Every keyword class the text names, in the order reservedReason checks them. */
+export function keywordClasses(text: string): Exclude<ReservedClass, "merge">[] {
+  return (["irreversible", "destructive", "credential", "security", "outward"] as const).filter((klass) => RESERVED_PATTERNS[klass].test(text));
 }
 
 /** The reason only the user may answer, or null when the leader may. */

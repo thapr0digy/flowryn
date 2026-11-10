@@ -33,9 +33,9 @@ export interface FindingClassRule {
   test(facts: FindingFacts): boolean;
 }
 
-const SECURITY_CATEGORY = /\b(security|auth\w*|permission\w*|access|sandbox|crypto\w*|injection|xss|csrf|ssrf|cors|tls|ssl)\b/i;
+export const SECURITY_CATEGORY = /\b(security|auth\w*|permission\w*|access|sandbox|crypto\w*|injection|xss|csrf|ssrf|cors|tls|ssl)\b/i;
 const SECURITY_LOOSENING = /\b(bypass\w*|disabl\w+|turn(s|ing)? off|relax\w*|allow[- ]all|wildcard|world[- ]writable|chmod (7|6)77|--no-verify|unsafe|insecure|no[- ]?auth|sandbox)\b/i;
-const CREDENTIAL_CATEGORY = /\b(secrets?|credentials?|tokens?|keys?|passwords?)\b/i;
+export const CREDENTIAL_CATEGORY = /\b(secrets?|credentials?|tokens?|keys?|passwords?)\b/i;
 const DESTRUCTIVE_CATEGORY = /\b(destructive|data[- ]?loss|irreversible)\b/i;
 const SCOPE_TEXT = /\b(out of scope|scope (creep|growth)|new feature|feature request|also (add|support|handle)|follow[- ]?up|separate (task|pr|change)|redesign|re-?architect\w*|rewrite (the|this|all)|refactor (the|all|every)|new (api|endpoint|dependency|module|service|table|verb|flag)|add (a |another )?(dependency|package|library))\b/i;
 const SCOPE_CATEGORY = /\b(scope|architecture|design)\b/i;
@@ -96,7 +96,7 @@ export const LEADER_KINDS: readonly string[] = [
 export const LEADER_STEPS: readonly string[] = ["review", "lint", "test", "document", "docs", "format"];
 
 /** The file classes inside the branch's own change: a finding there is about this change. */
-const INSIDE: readonly FileClass[] = ["added", "diff-line", "touched"];
+export const INSIDE: readonly FileClass[] = ["added", "diff-line", "touched"];
 
 export type FindingVerdict = { owner: "user"; klass: ReservedFindingClass | "unknown"; reason: string } | { owner: "leader" };
 
