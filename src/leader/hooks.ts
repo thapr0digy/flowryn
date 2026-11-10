@@ -42,6 +42,9 @@ import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { gateQuestionsLine } from "../lifecycle/gate-questions.ts";
 import { isRoutineMerge, recordAttempt, voidPendingAttempts, type ApprovalAction } from "../policy/approvals.ts";
 import { holdSessionGrants, NEW_MESSAGE, postAsk, preAsk, voidSessionGrants } from "../policy/grants.ts";
+import { bindingRef } from "../policy/chat-questions.ts";
+import { discardFacts, readDiscardFacts, recordDiscardFacts, sameDiscardFacts, type DiscardFacts } from "../policy/discard-facts.ts";
+import { runAndProject } from "../policy/merge-path.ts";
 import { isNotificationPrompt } from "../policy/notifications.ts";
 import { recordToolkitDenied, type ToolkitDenial } from "../policy/toolkit-event.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
@@ -554,15 +557,67 @@ function awayLines(ctx: HandlerCtx, s: LeaderSessionRow, now: number): string[] 
   return suggestion ? [suggestion] : [];
 }
 
+/** What a leader AskUserQuestion's discard items look like now, read before the hook's transaction. */
+export interface AskFacts {
+  discard: { task: string; runId: string; facts: DiscardFacts | null; error: string | null }[];
+}
+
+/**
+ * Pre/PostToolUse prepare (docs/notes/2026-11-09-chat-answer-approvals-wa.md): for an
+ * AskUserQuestion naming a `discard <task>` item only, read that worktree live, so the question
+ * is checked against the work as it is rather than as last recorded. Every other call reads nothing.
+ */
+export async function prepareAskFacts(ctx: HandlerCtx, input: LeaderHookInput): Promise<AskFacts | null> {
+  if (input.tool_name !== "AskUserQuestion") return null;
+  const raw = (input.tool_input as { questions?: unknown } | undefined)?.questions;
+  if (!Array.isArray(raw)) return null;
+  const tasks = new Set<string>();
+  for (const q of raw) {
+    const text = q && typeof q === "object" ? (q as { question?: unknown }).question : undefined;
+    const ref = typeof text === "string" ? bindingRef(text.trim()) : null;
+    if (ref?.startsWith("discard:")) tasks.add(ref.slice("discard:".length));
+  }
+  if (tasks.size === 0) return null;
+  const out: AskFacts = { discard: [] };
+  for (const task of tasks) {
+    let found: ReturnType<typeof runAndProject>;
+    try {
+      found = runAndProject(ctx.db, task);
+    } catch {
+      continue; // preAsk refuses an unknown task by itself.
+    }
+    try {
+      out.discard.push({ task, runId: found.run.id, facts: await readDiscardFacts(ctx.delivery.git, found.run, found.project), error: null });
+    } catch (error) {
+      out.discard.push({ task, runId: found.run.id, facts: null, error: (error as Error).message });
+    }
+  }
+  return out;
+}
+
+/** In the hook's transaction: record each discard item's live facts where they moved. Returns why one cannot be asked, or null. */
+function refreshDiscardFacts(ctx: HandlerCtx, facts: AskFacts | null, now: number): string | null {
+  for (const d of facts?.discard ?? []) {
+    if (!d.facts) return `discard:${d.task} cannot be asked: its worktree cannot be read (${sanitizeLine(d.error ?? "?", 200)})`;
+    const recorded = discardFacts(ctx.db, d.runId);
+    if (recorded && sameDiscardFacts(recorded, d.facts)) continue;
+    const run = findRun(ctx.db, d.runId);
+    if (run) recordDiscardFacts(ctx.db, run, d.facts, "hook", now);
+  }
+  return null;
+}
+
 /**
  * Claude PostToolUse: busy and heartbeat as for any tool; after an AskUserQuestion, your answers
  * to its binding questions become chat-answer grants, and the leader is told each one beside the
  * tool result (docs/notes/2026-10-10-chat-answers-authorise-5g.md).
  */
-export function postToolUse(ctx: HandlerCtx, input: LeaderHookInput): HandlerResult {
+export function postToolUse(ctx: HandlerCtx, input: LeaderHookInput, facts: AskFacts | null = null): HandlerResult {
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
   if (s.harness !== "claude" || input.tool_name !== "AskUserQuestion") return result;
+  // A discard item's worktree that moved while the user answered: the form changes, so the answer grants nothing.
+  refreshDiscardFacts(ctx, facts, ctx.now());
   const lines = postAsk(ctx.db, {
     session: s.session_id,
     toolUseId: String(input.tool_use_id ?? ""),
@@ -778,7 +833,7 @@ function routineMerge(ctx: HandlerCtx, ref: string): boolean {
  * same way, so a decline that ends the turn or your next message also
  * kills it.
  */
-export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: ToolkitDenial | null = null): HandlerResult {
+export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: ToolkitDenial | null = null, askFacts: AskFacts | null = null): HandlerResult {
   const result = toolActivity(ctx);
   const s = leaderSession(ctx);
   if (s.harness !== "claude") return result;
@@ -791,6 +846,8 @@ export function preToolUse(ctx: HandlerCtx, input: LeaderHookInput, denied: Tool
   }
   // A binding chat question must be exactly Flowryn's form and bring no answers of its own.
   if (input.tool_name === "AskUserQuestion") {
+    const unreadable = refreshDiscardFacts(ctx, askFacts, now);
+    if (unreadable) return { data: { permission: "deny", reason: `Flowryn: ${unreadable}` } };
     const deny = preAsk(ctx.db, { session: s.session_id, toolUseId: String(input.tool_use_id ?? ""), input: input.tool_input, merge: mergeConfig(ctx.config()), now });
     return deny ? { data: { permission: "deny", reason: deny } } : result;
   }

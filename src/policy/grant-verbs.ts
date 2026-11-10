@@ -20,8 +20,8 @@ import { projectRefScope, requireInScope } from "../leader/scope.ts";
 
 const chatQuestion: VerbSpec = {
   name: "chat-question",
-  summary: "The AskUserQuestion question that lets the user's chat answer authorise an item (q<N>, k<N>, g<N>, d<N>, merge:<task>, autonomy:<projects>@<until>)",
-  positionals: [{ name: "item", required: true, help: "a decision, review gate, divergence, merge:<task>, or autonomy:<projects>@<until> (flowryn away --autonomous names it)" }],
+  summary: "The AskUserQuestion question that lets the user's chat answer authorise an item (q<N>, k<N>, g<N>, d<N>, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until>)",
+  positionals: [{ name: "item", required: true, help: "a decision, review gate, divergence, merge:<task>, allow-red:<task>, discard:<task>, or autonomy:<projects>@<until> (flowryn away --autonomous names it)" }],
   flags: {},
   kind: "read",
   roles: ["leader", "reader", "human"],
@@ -61,6 +61,10 @@ function targetOf(g: GrantRow, body: string | undefined): { spec: VerbSpec; args
       return { spec: verb(DIVERGENCE_VERBS, "divergence resolve"), args: { id: g.item, resolution: g.choice, [GRANT_ARG]: g.id } };
     case "merge":
       return { spec: verb(POLICY_VERBS, "merge"), args: { task: g.task_id!, [GRANT_ARG]: g.id } };
+    case "allow-red":
+      return { spec: verb(POLICY_VERBS, "merge"), args: { task: g.task_id!, "allow-red": g.choice, [GRANT_ARG]: g.id } };
+    case "discard":
+      return { spec: verb(POLICY_VERBS, "cleanup"), args: { task: g.task_id!, discard: true, [GRANT_ARG]: g.id } };
     case "autonomy": {
       const terms = parseAutonomyRef(g.item);
       if (!terms) throw new FlowrynError("bad_args", `grant ${g.id} names no autonomy terms`);
@@ -92,7 +96,7 @@ function targetFor(ctx: HandlerCtx, args: Args): { g: GrantRow; spec: VerbSpec; 
 
 const grantUse: VerbSpec = {
   name: "grant use",
-  summary: "Run the one action the user's chat answer granted (decide, gate pass or changes, divergence resolve, merge, start unattended mode, start away as the user's)",
+  summary: "Run the one action the user's chat answer granted (decide, gate pass or changes, divergence resolve, merge, merge waiving one check, discard, start unattended mode, start away as the user's)",
   positionals: [{ name: "grant", required: true, help: "the grant id, such as c7" }],
   flags: { "body-file": { type: "string", help: "your relay of the user's words (gate changes needs some)", fileFor: "body" } },
   kind: "mutation",

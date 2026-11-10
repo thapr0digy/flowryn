@@ -487,7 +487,8 @@ const preTool = signalVerb(
     const usage = harnessOf(args) === "claude" && noteProbeReply(ctx.db, runAccountId(run), run.id, `worker ${run.task_id}`, ctx.now()) ? "resumed" : null;
     return withUsage(preToolBody(ctx, run, args), usage);
   },
-  (ctx, input, args) => leader.preToolUse(ctx, input, toolkitArg(args)),
+  (ctx, input, args, prepared) => leader.preToolUse(ctx, input, toolkitArg(args), prepared as leader.AskFacts | null),
+  (ctx, args) => leader.prepareAskFacts(ctx, parseInput(args) as leader.LeaderHookInput),
 );
 
 /** The pre-tool hook past the usage probe: the toolkit record, an urgent steer that blocks the call, else the tool's clock. */
@@ -539,7 +540,8 @@ const postTool = signalVerb(
     const steer = takeSteer(ctx, run, "post-tool");
     return { data: steer ? { run: run.id, steer: steer.id, context: steerLine(steer.id, steer.body, steer.end_turn === 1) } : { run: run.id } };
   },
-  (ctx, input) => leader.postToolUse(ctx, input),
+  (ctx, input, _args, prepared) => leader.postToolUse(ctx, input, prepared as leader.AskFacts | null),
+  (ctx, args) => leader.prepareAskFacts(ctx, parseInput(args) as leader.LeaderHookInput),
 );
 
 /**

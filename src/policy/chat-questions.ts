@@ -6,9 +6,10 @@ import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { getProject } from "../lifecycle/projects.ts";
 import { parseAutonomyRef, parseAwayRef, stampOf } from "./autonomy.ts";
-import { findRun, taskTitle } from "../lifecycle/runs.ts";
+import { findRun, getRunWithPolicy, taskTitle } from "../lifecycle/runs.ts";
 import type { GateRow } from "../lifecycle/stages.ts";
 import { getDivergence, isBacklogDivergence } from "../reconcile/divergence.ts";
+import { discardBinds, requireDiscardFacts } from "./discard-facts.ts";
 import { sha256Hex } from "../util/hash.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 
@@ -22,7 +23,7 @@ import { sanitizeLine } from "../util/sanitize.ts";
  */
 
 /** What an answer to a binding question can authorise. */
-export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "autonomy" | "away";
+export type GrantAction = "decide" | "gate" | "divergence" | "merge" | "allow-red" | "discard" | "autonomy" | "away";
 
 export interface ChatOption {
   label: string;
@@ -38,14 +39,14 @@ export interface ChatQuestion {
 }
 
 export interface ChatForm {
-  /** The item: q42, k3, g81, d13, merge:<task>, autonomy:<projects>@<until> or away:<until>. */
+  /** The item: q42, k3, g81, d13, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until> or away:<until>. */
   ref: string;
   action: GrantAction;
   task: string | null;
   question: ChatQuestion;
   /** Each label's choice; null grants nothing (Don't merge). */
   choices: { label: string; choice: string | null }[];
-  /** Besides the item: the PR head a merge answer binds to. */
+  /** Besides the item: the PR head a merge or allow-red answer binds to; a discard's head and status digest. */
   binds: string | null;
   /** The choice an "Other" answer becomes, with the answer as its words (a gate's changes), or null: free text grants nothing. */
   freeText: string | null;
@@ -56,7 +57,7 @@ const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const SEPARATOR = " · ";
 const RECOMMENDED = " (Recommended)";
-const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|merge [A-Za-z0-9][\w.-]*|autonomy [a-z0-9,-]+@\S+|away \d{4}-\d{2}-\d{2}T\d{2}:\d{2}) · /;
+const BINDING_PREFIX = /^(q\d+|k\d+|g\d+|d\d+|(?:merge|allow-red|discard) [A-Za-z0-9][\w.-]*|autonomy [a-z0-9,-]+@\S+|away \d{4}-\d{2}-\d{2}T\d{2}:\d{2}) · /;
 
 /** The item a question binds to, from its prefix (`q42 · `, `merge T17 · `), or null for an ordinary question. */
 export function bindingRef(question: string): string | null {
@@ -65,14 +66,15 @@ export function bindingRef(question: string): string | null {
   const head = match[1]!;
   if (head.startsWith("autonomy ")) return `autonomy:${head.slice("autonomy ".length)}`;
   if (head.startsWith("away ")) return `away:${head.slice("away ".length)}`;
-  return head.startsWith("merge ") ? `merge:${head.slice("merge ".length)}` : head;
+  const task = /^(merge|allow-red|discard) (.+)$/.exec(head);
+  return task ? `${task[1]}:${task[2]}` : head;
 }
 
-/** The item as typed on the command line: q42, g81, d13, or merge:<task> (also `merge <task>`). */
+/** The item as typed on the command line: q42, g81, d13, or merge:<task>, allow-red:<task>, discard:<task> (also `merge <task>`). */
 export function parseRef(typed: string): string {
   const trimmed = typed.trim();
-  const merge = /^merge[: ]\s*([A-Za-z0-9][\w.-]*)$/.exec(trimmed);
-  if (merge) return `merge:${merge[1]}`;
+  const task = /^(merge|allow-red|discard)[: ]\s*([A-Za-z0-9][\w.-]*)$/.exec(trimmed);
+  if (task) return `${task[1]}:${task[2]}`;
   if (/^[qkgd]\d+$/.test(trimmed)) return trimmed;
   if (trimmed.startsWith("autonomy:")) {
     if (!parseAutonomyRef(trimmed)) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not autonomy:<projects>@<YYYY-MM-DDTHH:MM>`, "flowryn away --autonomous --until <time> --projects <ids> prints the item to ask");
@@ -82,7 +84,7 @@ export function parseRef(typed: string): string {
     if (parseAwayRef(trimmed) === null) throw new FlowrynError("bad_args", `${sanitizeLine(trimmed, 80)} is not away:<YYYY-MM-DDTHH:MM>`, "the end time, cut to the minute, as flowryn away --until takes it");
     return trimmed;
   }
-  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task>, autonomy:<projects>@<until> or away:<until>, not "${sanitizeLine(trimmed, 60)}"`);
+  throw new FlowrynError("bad_args", `a chat question names q<N>, k<N>, g<N>, d<N>, merge:<task>, allow-red:<task>, discard:<task>, autonomy:<projects>@<until> or away:<until>, not "${sanitizeLine(trimmed, 60)}"`);
 }
 
 function option(label: string, description: string): ChatOption {
@@ -196,6 +198,80 @@ function mergeForm(db: Db, task: string): ChatForm {
   };
 }
 
+/**
+ * A merge waiving the one failing check (docs/notes/2026-11-09-chat-answer-approvals-wa.md). The
+ * item names no check: a waiver covers exactly one, so the form names the one red check the PR
+ * evidence shows, and the answer's choice is that check's name. The plain merge question never waives.
+ */
+function allowRedForm(db: Db, task: string): ChatForm {
+  const run = findRun(db, task);
+  if (!run) throw new FlowrynError("not_found", `no task ${task}`, "flowryn fleet");
+  if (getRunWithPolicy(db, run.id)?.kind !== "ship") throw new FlowrynError("not_ready", `${run.task_id} is a scout; there is nothing to merge`);
+  const shipped = deliveredOf(db, run.task_id);
+  if (!shipped) throw new FlowrynError("not_ready", `${run.task_id} has delivered nothing to merge`, `flowryn show ${run.task_id}`);
+  if (shipped.kind !== "pr") throw new FlowrynError("not_ready", `${run.task_id} is a local-only delivery; it has no checks to waive`);
+  const evidence = prEvidence(db, run.id);
+  if (!evidence?.checks) throw new FlowrynError("not_ready", `${run.task_id}'s checks are unknown so far; wait for the PR watcher to read them`, `flowryn show ${run.task_id}`);
+  const red = evidence.checks.red;
+  if (red.length !== 1) throw new FlowrynError("not_ready", red.length === 0 ? `no check of ${run.task_id} is failing; there is nothing to waive` : `${red.length} checks of ${run.task_id} are failing (${red.map((c) => sanitizeLine(c, 80)).join(", ")}); only one can be waived`);
+  const check = red[0]!;
+  const shown = sanitizeLine(check, 120);
+  const head = evidence.head;
+  return {
+    ref: `allow-red:${run.task_id}`,
+    action: "allow-red",
+    task: run.task_id,
+    question: {
+      question: `allow-red ${run.task_id}${SEPARATOR}${sanitizeLine(taskTitle(db, run.task_id), 120)}: PR ${shipped.ref} at ${head.slice(0, 8)}, checks ${evidence.checks.line}. Merge it waiving the one failing check "${shown}"? Every other check must be green.`,
+      header: "allow-red",
+      options: [option("Waive and merge", `Merge ${run.task_id} at ${head.slice(0, 8)}, waiving only "${shown}"`), option("Don't merge", "Leave it unmerged")],
+      multiSelect: false,
+    },
+    choices: [
+      { label: "Waive and merge", choice: check },
+      { label: "Don't merge", choice: null },
+    ],
+    binds: head,
+    freeText: null,
+  };
+}
+
+/** The local time of day a discard's facts were read, for the question. */
+function clockOf(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * Discarding a task's unlanded work (docs/notes/2026-11-09-chat-answer-approvals-wa.md), from the
+ * facts `flowryn cleanup --discard` recorded when it refused (src/policy/discard-facts.ts); the
+ * answer binds to that head and those uncommitted files.
+ */
+function discardForm(db: Db, task: string): ChatForm {
+  const run = findRun(db, task);
+  if (!run) throw new FlowrynError("not_found", `no task ${task}`, "flowryn fleet");
+  if (run.cleanup === "done") throw new FlowrynError("not_ready", `${run.task_id}'s worktree was already removed`);
+  const facts = requireDiscardFacts(db, run);
+  const changes = facts.uncommitted < 0 ? "an unreadable number of uncommitted changes" : `${facts.uncommitted} uncommitted change(s)`;
+  return {
+    ref: `discard:${run.task_id}`,
+    action: "discard",
+    task: run.task_id,
+    question: {
+      question: `discard ${run.task_id}${SEPARATOR}${sanitizeLine(taskTitle(db, run.task_id), 120)}: worktree ${sanitizeLine(facts.worktree, 200)}, branch ${sanitizeLine(facts.branch, 120)} at ${facts.head.slice(0, 8)}, ${changes} (seen ${clockOf(facts.observed_at)}). Discard this unlanded work? It cannot be undone once the worktree is removed.`,
+      header: "discard",
+      options: [option("Discard", `Remove the worktree and branch of ${run.task_id} at ${facts.head.slice(0, 8)}; cannot be undone`), option("Keep it", "Leave the work where it is")],
+      multiSelect: false,
+    },
+    choices: [
+      { label: "Discard", choice: "discard" },
+      { label: "Keep it", choice: null },
+    ],
+    binds: discardBinds(facts),
+    freeText: null,
+  };
+}
+
 /** What unattended mode does, as the chat question tells the user before they answer. */
 export const AUTONOMY_SUMMARY =
   "While it lasts the daemon passes review gates of tasks dispatched with a full brief whose pinned page and spec are unchanged, merges verified pull requests (sensitive ones included) and takes the worker's recommendation on ordinary questions. A question about a destructive, irreversible, security, credential or outward step parks only its task for you. It never waives a red check or force-pushes; flowryn back ends it.";
@@ -267,6 +343,8 @@ export function chatForm(db: Db, ref: string, merge: MergeConfig, now: number = 
   if (ref.startsWith("autonomy:")) return autonomyForm(db, ref);
   if (ref.startsWith("away:")) return awayForm(ref, now, merge);
   if (ref.startsWith("merge:")) return mergeForm(db, ref.slice("merge:".length));
+  if (ref.startsWith("allow-red:")) return allowRedForm(db, ref.slice("allow-red:".length));
+  if (ref.startsWith("discard:")) return discardForm(db, ref.slice("discard:".length));
   if (/^[qk]\d+$/.test(ref)) return decisionForm(db, ref);
   if (/^g\d+$/.test(ref)) return gateForm(db, ref);
   if (/^d\d+$/.test(ref)) return divergenceForm(db, ref);

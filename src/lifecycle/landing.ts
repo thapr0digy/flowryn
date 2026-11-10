@@ -7,6 +7,7 @@ import { appendEvent } from "../db/events.ts";
 import type { Forge } from "../forge/types.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { consumeApproval, discardRef, insertApproval, matchAttempt } from "../policy/approvals.ts";
+import { grantActor, takeGrant } from "../policy/grants.ts";
 import { runCleanup, type CleanupOutcome } from "../policy/cleanup.ts";
 import { poolRoot, returnSlot } from "../runtime/treehouse.ts";
 import type { GitRunner } from "../policy/landed.ts";
@@ -107,11 +108,19 @@ export interface DiscardAttempt {
   head: string;
 }
 
+/** Your chat answer to discard:<task> (docs/notes/2026-11-09-chat-answer-approvals-wa.md): a grant prepareCaptainGrant checked. */
+export interface DiscardGrant {
+  grant: string;
+  head: string;
+}
+
 export interface CleanupRequestOptions {
   /** The discard approval allowing unlanded work to go (human channel, action discard); used up only by a removal. */
   discardApproval: string | null;
   /** Or a matched Claude prompt, recorded as a claude-ask approval only by a removal, so a refusal leaves it usable. */
   discardAttempt?: DiscardAttempt | null;
+  /** Or a chat-answer grant: used up just before the guard runs (so an ended grant removes nothing), recorded as a claude-chat approval by a removal. */
+  discardGrant?: DiscardGrant | null;
   /** The daemon's own cleanup after a proven merge: a refusal is a P1 rather than an error. */
   auto: boolean;
   /** The upkeep sweep of an ended run's worktree (src/upkeep/sweep.ts): recorded as such; a refusal opens no item. */
@@ -195,6 +204,8 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
   const github = deps.github();
   const delivered = deliveredOf(db, run.task_id);
   const returnWorktree = poolReturn(deps, run, project.id);
+  // Your chat answer is used up before anything is removed, so a grant that ended meanwhile removes nothing; a guard refusal after it spends it.
+  const usedGrant = opts.discardGrant ? tx(db, () => takeGrant(db, opts.discardGrant!.grant, `discard ${run.task_id}`, deps.now())) : null;
   const outcome = await runCleanup(
     {
       guard: {
@@ -205,7 +216,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
         defaultBranch: runBase(run, project),
         repo: projectRepo(project, github.web_url),
         recordedPrUrl: delivered?.kind === "pr" ? delivered.ref : null,
-        discardApproved: opts.discardApproval !== null || Boolean(opts.discardAttempt),
+        discardApproved: opts.discardApproval !== null || Boolean(opts.discardAttempt) || Boolean(opts.discardGrant),
       },
       primary: project.path,
     },
@@ -239,6 +250,10 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
       const { attempt, session, head } = opts.discardAttempt;
       matchAttempt(db, attempt, now);
       const made = insertApproval(db, { task: run.task_id, ref: discardRef(run), head, channel: "claude-ask", actor: `${process.env.USER ?? "you"} (Claude prompt, leader ${session})`, action: "discard", now });
+      consumeApproval(db, made.id, now, `discard ${run.task_id}`);
+    }
+    if (opts.discardGrant && usedGrant) {
+      const made = insertApproval(db, { task: run.task_id, ref: discardRef(run), head: opts.discardGrant.head, channel: "claude-chat", actor: grantActor(usedGrant), action: "discard", now });
       consumeApproval(db, made.id, now, `discard ${run.task_id}`);
     }
     // The slot is back in the pool (or gone): the run no longer holds it, so nothing judges by its path again.
