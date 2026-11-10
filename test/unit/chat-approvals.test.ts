@@ -261,6 +261,20 @@ describe("grants bind to what was shown", () => {
     expect(lines.join("\n")).toContain("its facts changed while the user answered");
   });
 
+  test("another snapshot recorded while the dialog was open grants nothing, even when the question reads the same", () => {
+    const w = world();
+    seedDiscard(w);
+    const q = chatForm(w.db, "discard:T1", MERGE_DEFAULTS).question;
+    const now = Date.now();
+    tx(w.db, () => preAsk(w.db, { session: w.session, toolUseId: "toolu_r", input: { questions: [q] }, merge: MERGE_DEFAULTS, now }));
+    seedDiscard(w, facts({ digest: "d9".repeat(32) }), now + 1);
+    const lines = tx(w.db, () =>
+      postAsk(w.db, { session: w.session, toolUseId: "toolu_r", input: { questions: [q] }, response: { answers: { [q.question]: "Discard" } }, claudeSession: w.claudeSession, transcriptPath: w.transcript, merge: MERGE_DEFAULTS, now: now + 2 }),
+    );
+    expect(lines.join("\n")).toContain("no grant for discard:T1 (its facts changed while the user answered; ask again)");
+    expect(w.db.query("SELECT id FROM captain_grants").all()).toEqual([]);
+  });
+
   test("an allow-red tap is for its check only, and its head only", () => {
     const w = world();
     setChecks(w, ["lint"]);

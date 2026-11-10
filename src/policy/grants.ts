@@ -11,7 +11,8 @@ import { tx, getMeta, setMeta, type Db } from "../db/db.ts";
 import { appendEvent } from "../db/events.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { countSenders } from "./notifications.ts";
-import { discardBindsProblem, type DiscardFacts } from "./discard-facts.ts";
+import { discardBindsProblem, discardFacts, type DiscardFacts } from "./discard-facts.ts";
+import { findRun } from "../lifecycle/runs.ts";
 import { bindingRef, chatForm, mapAnswer, normalizeQuestion, questionsHash, sameQuestion, type ChatForm, type ChatQuestion, type GrantAction } from "./chat-questions.ts";
 
 /**
@@ -186,6 +187,14 @@ function grantLine(g: GrantRow): string {
  * choice and mint a grant. Returns the lines the leader sees beside the tool result. Call inside
  * a transaction.
  */
+/** A discard item whose snapshot was recorded again after the question was asked: the user saw an older one. */
+function discardRecordedSince(db: Db, form: ChatForm, askedAt: number): boolean {
+  if (form.action !== "discard" || !form.task) return false;
+  const run = findRun(db, form.task);
+  const recorded = run ? discardFacts(db, run.id) : null;
+  return recorded !== null && recorded.observed_at > askedAt;
+}
+
 export function postAsk(db: Db, a: PostAsk): string[] {
   const questions = questionsOf(a.input);
   if (!questions) return [];
@@ -240,7 +249,7 @@ export function postAsk(db: Db, a: PostAsk): string[] {
       refuse(error.message);
       continue;
     }
-    if (!sameQuestion(q, form.question)) {
+    if (!sameQuestion(q, form.question) || discardRecordedSince(db, form, asked.created_at)) {
       refuse("its facts changed while the user answered; ask again");
       continue;
     }
