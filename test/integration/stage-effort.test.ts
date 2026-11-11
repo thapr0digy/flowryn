@@ -27,6 +27,12 @@ stages = [
 
 [workflows.firstreview]
 stages = [{ id = "check", review = true, effort = "high" }]
+
+[workflows.split]
+stages = [
+  { id = "design", effort = "high", model = "claude-opus-5-5" },
+  { id = "build", effort = "medium", model = "claude-sonnet-5-5" },
+]
 `;
 
 async function fleet(): Promise<FleetEnv> {
@@ -97,5 +103,49 @@ describe("per-stage effort and the review model", () => {
     const launch = starts(env).at(-1)!;
     expect(flag(launch, "--thinking")).toBe("high");
     expect(launch).not.toContain("--model");
+  }, 30_000);
+
+  test("a stage's model: design launches on its model, build relaunches the same session on its own, show and fleet print them", async () => {
+    const env = await fleet();
+    const sent = await env.json(["dispatch", "web", "--kind", "scout", "--harness", "claude", "--workflow", "split", "--body-file", "-"], {
+      stdin: "design it\nFAKE: sleep 300\nFAKE: stage-done\nFAKE: sleep 60000",
+    });
+    expect(sent.code).toBe(0);
+    const { run: runId, task } = sent.reply.data as { run: string; task: string };
+    expect(sent.reply.data).toMatchObject({ model: "claude-opus-5-5 (stage design)", effort: "high (stage design)" });
+    const first = await env.waitRun(runId, (r) => r.proc_pid !== null, "the worker launched");
+    const launch = starts(env)[0]!;
+    expect(flag(launch, "--model")).toBe("claude-opus-5-5");
+    expect(flag(launch, "--effort")).toBe("high");
+
+    const relaunched = await env.waitRun(runId, (r) => r.stage === "build" && r.proc_pid !== null && r.proc_pid !== first.proc_pid && r.pending_launch === null, "the relaunched worker", 30_000);
+    const again = starts(env).at(-1)!;
+    expect(flag(again, "--resume")).toBe(first.agent_session);
+    expect(flag(again, "--model")).toBe("claude-sonnet-5-5");
+    expect(flag(again, "--effort")).toBe("medium");
+    expect(relaunched).toMatchObject({ model: "claude-sonnet-5-5", effort: "medium", agent_session: first.agent_session });
+    expect(eventPayloads(env, runId, "stage.requested").at(-1)).toMatchObject({ stage: "build", from: "design", relaunch: true });
+    expect(eventPayloads(env, runId, "run.launched").at(-1)).toMatchObject({ model_source: "stage build", effort_source: "stage build" });
+
+    const shown = await env.json(["show", task]);
+    expect(shown.reply.data).toMatchObject({
+      model: "claude-sonnet-5-5 (stage build)",
+      stages: ["design: claude-opus-5-5 (stage design) · high (stage design)", "build: claude-sonnet-5-5 (stage build) · medium (stage build)"],
+    });
+    const listed = await env.json(["fleet"]);
+    expect((listed.reply.data as { fleet: { id: string; model: string }[] }).fleet.find((r) => r.id === task)).toMatchObject({ model: "claude-sonnet-5-5 · medium" });
+  }, 60_000);
+
+  test("a Pi run ignores a stage's model: no --model at launch, and show says so", async () => {
+    const env = await fleet();
+    const sent = await env.json(["dispatch", "web", "--kind", "scout", "--harness", "pi", "--workflow", "split", "--body-file", "-"], { stdin: "look\nFAKE: sleep 60000" });
+    expect(sent.code).toBe(0);
+    const { run: runId, task } = sent.reply.data as { run: string; task: string };
+    await env.waitRun(runId, (r) => r.proc_pid !== null, "the Pi worker launched");
+    const launch = starts(env).at(-1)!;
+    expect(flag(launch, "--thinking")).toBe("high");
+    expect(launch).not.toContain("--model");
+    const shown = await env.json(["show", task]);
+    expect((shown.reply.data as { stages: string[] }).stages.at(-1)).toBe("note: a stage's model applies to Claude only; this Pi run ignores it");
   }, 30_000);
 });

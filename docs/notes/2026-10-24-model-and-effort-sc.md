@@ -50,7 +50,7 @@ At every launch: a run's first launch, a resume, a fresh stage worker and a rela
 
 - One pure module, `src/config/model-choice.ts`, owns the lookup and the checks; the launcher (`src/lifecycle/launcher.ts`), dispatch, plans, promote and the scheduler's overflow call it. `workersFor` takes the resolved values, so the adapters are unchanged: same `--model`/`--effort`/`--thinking` flags, so no `CONTRACT_REVISIONS` bump.
 - The source of a value is not stored on the run; `flowryn show` reads it from the newest `run.dispatched`, `run.launched` or `sched.overflow` event, which is where each lookup is recorded.
-- No per-stage defaults here; docs/notes/2026-11-06-effort-and-model-gn.md added a stage's own `effort` and a review stage's model later.
+- No per-stage defaults here; docs/notes/2026-11-06-effort-and-model-gn.md added a stage's own `effort` and `model` and a review stage's model later.
 
 ## Tests
 

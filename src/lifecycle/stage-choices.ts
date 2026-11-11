@@ -21,10 +21,14 @@ export function stageChoiceLines(db: Db, config: FlowrynConfig, run: RunRow & { 
     const account = runAccount(config, project, run.account, run.harness);
     const workflow = currentWorkflow(config, run.workflow);
     const pins = { model: run.model_pin, effort: run.effort_pin };
-    return runWorkflow(db, run, kind).stages.map((stage) => {
+    const { stages } = runWorkflow(db, run, kind);
+    const lines = stages.map((stage) => {
       const choice = resolveModelChoice(config, { pins, workflow, account, stage });
       return `${stage.id}: ${choiceLine(choice.model, choice.model_source)} · ${choiceLine(choice.effort, choice.effort_source)}`;
     });
+    // A stage's model is Claude's only: say so where a Pi run's workflow sets one, so the lines above are not misread.
+    if (account.harness === "pi" && stages.some((s) => s.model)) lines.push("note: a stage's model applies to Claude only; this Pi run ignores it");
+    return lines;
   } catch (error) {
     return [`unknown: ${(error as Error).message}`];
   }
