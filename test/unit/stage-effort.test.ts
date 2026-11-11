@@ -155,3 +155,98 @@ describe("a stage start relaunches the live worker only when its model or effort
     expect(stageChoiceChanges(run(), old[0]!, old[1]!)).toBe(false);
   });
 });
+
+/**
+ * A stage's own Claude model (the user's 2026-11-10 ask: Opus on the design stage, Sonnet on the build stage):
+ * under the task's own and a review stage's review_model, over the workflow's; frozen with the run; Pi ignores it.
+ */
+const SPLIT = `
+[projects.web]
+review_model = "claude-haiku-5-5"
+
+[workflows.tiered]
+stages = [
+  { id = "design", gate = "review", effort = "high", model = "claude-opus-5-5" },
+  { id = "build", effort = "medium", model = "claude-sonnet-5-5" },
+  { id = "review", review = true, model = "claude-opus-5-5" },
+  { id = "ship", gate = "merge" },
+]
+
+[workflows.tiered.claude]
+model = "opus"
+`;
+
+describe("config: a stage's model", () => {
+  test("a stage takes a model name; a stage without one has no model key", () => {
+    expect(stageOf(SPLIT, "design")).toMatchObject({ id: "design", effort: "high", model: "claude-opus-5-5" });
+    expect(stageOf(SPLIT, "build")).toMatchObject({ model: "claude-sonnet-5-5" });
+    expect("model" in stageOf(SPLIT, "ship")).toBe(false);
+  });
+
+  test("an empty, non-string or malformed stage model refuses with config_invalid", () => {
+    for (const bad of ['model = ""', "model = 5", 'model = "sonnet; rm -rf ~"', 'model = "two words"', 'model = "-sonnet"']) {
+      let code: string | undefined;
+      try {
+        workflowsConfig(config(stages(`{ id = "build", ${bad} }`)));
+      } catch (error) {
+        code = (error as { code?: string }).code;
+      }
+      expect(code).toBe("config_invalid");
+    }
+    expect(() => workflowsConfig(config(stages('{ id = "build", model = "a b" }')))).toThrow(/is not a model name/);
+    expect(() => workflowsConfig(config(stages('{ id = "build", model = "" }')))).toThrow(/model must be a model name/);
+  });
+
+  test("freezing keeps each stage's model with the run's workflow, through its JSON form", () => {
+    const frozen = freezeWorkflow(workflowsConfig(config(SPLIT)).tiered!, "claude-haiku-5-5");
+    const stored = JSON.parse(JSON.stringify(frozen)) as typeof frozen;
+    expect(stored.stages.map((s) => s.model ?? null)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-5-5", null]);
+  });
+});
+
+describe("lookup: the stage's model", () => {
+  test("the stage's model beats the workflow's; a stage without one takes the workflow's", () => {
+    expect(choose(SPLIT, "design")).toEqual({ model: "claude-opus-5-5", effort: "high", model_source: "stage design", effort_source: "stage design" });
+    expect(choose(SPLIT, "build")).toMatchObject({ model: "claude-sonnet-5-5", model_source: "stage build", effort: "medium" });
+    expect(choose(SPLIT, "ship")).toMatchObject({ model: "opus", model_source: "workflow tiered" });
+  });
+
+  test("the task's own model beats the stage's", () => {
+    expect(choose(SPLIT, "build", { pins: { model: "fable", effort: null } })).toMatchObject({ model: "fable", model_source: "dispatch" });
+  });
+
+  test("a review stage's review_model beats the stage's own model and the task's", () => {
+    expect(choose(SPLIT, "review")).toMatchObject({ model: "claude-haiku-5-5", model_source: "review_model (stage review)" });
+    expect(choose(SPLIT, "review", { pins: { model: "fable", effort: null } })).toMatchObject({ model: "claude-haiku-5-5" });
+    // Without a review_model the review stage's own model applies.
+    expect(choose(SPLIT.replace('review_model = "claude-haiku-5-5"', "max_workers = 3"), "review")).toMatchObject({ model: "claude-opus-5-5", model_source: "stage review" });
+  });
+
+  test("a Pi worker ignores a stage's model", () => {
+    const pi = choose(SPLIT, "build", { account: "pi" });
+    expect(pi.model).toBeNull();
+    expect(pi.model_source).toBe("harness default");
+  });
+});
+
+describe("a stage start relaunches the live worker when the stage's model changes", () => {
+  const frozen = freezeWorkflow(workflowsConfig(config(SPLIT)).tiered!, null);
+  const at = (id: string) => frozen.stages.find((s) => s.id === id)!;
+
+  test("design (opus) to build (sonnet) relaunches; a worker already on the build model does not", () => {
+    expect(stageChoiceChanges(run({ model: "claude-opus-5-5", effort: "medium" }), at("design"), at("build"))).toBe(true);
+    expect(stageChoiceChanges(run({ model: "claude-sonnet-5-5", effort: "medium" }), at("design"), at("build"))).toBe(false);
+  });
+
+  test("a stage that sets no model after one that did counts as a change", () => {
+    expect(stageChoiceChanges(run({ model: "claude-sonnet-5-5", effort: "medium" }), at("build"), { ...at("ship"), effort: "medium" })).toBe(true);
+  });
+
+  test("the task's own model is never relaunched for a stage's model", () => {
+    expect(stageChoiceChanges(run({ model: "fable", model_pin: "fable", effort: "medium" }), at("design"), at("build"))).toBe(false);
+  });
+
+  test("a Pi worker is never relaunched for a stage's model", () => {
+    expect(stageChoiceChanges(run({ harness: "pi", model: null, effort: "medium" }), at("design"), at("build"))).toBe(false);
+  });
+});

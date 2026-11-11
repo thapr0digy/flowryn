@@ -31,6 +31,11 @@ export interface StageDef {
    * account's and the harness's, under the task's own. Absent in a workflow frozen before it existed.
    */
   effort?: string | null;
+  /**
+   * The stage's own Claude model (docs/notes/2026-11-06-effort-and-model-gn.md): over the workflow's, the
+   * account's and the harness's, under the task's own and a review stage's `review_model`. Pi ignores it.
+   */
+  model?: string | null;
   /** A review stage: its worker runs on the project's `review_model` (Claude only), when one is set. */
   review?: boolean;
   /** The project's `review_model`, frozen onto a review stage when the run is dispatched (never a config key). */
@@ -249,7 +254,7 @@ export function projectWorkerLimits(config: FlowrynConfig): { project: string; m
 
 function parseStage(raw: unknown, where: string, pools: Record<string, number>): StageDef {
   const t = table(raw, where);
-  unknownKeys(t, ["id", "skill", "gate", "pools", "fresh", "effort", "review"], where);
+  unknownKeys(t, ["id", "skill", "gate", "pools", "fresh", "effort", "model", "review"], where);
   if (typeof t.id !== "string" || !STAGE_ID.test(t.id)) throw new FlowrynError("config_invalid", `${where} id must be a stage id such as build`);
   const skill = t.skill === undefined ? null : t.skill;
   if (skill !== null && (typeof skill !== "string" || !SKILL_NAME.test(skill))) throw new FlowrynError("config_invalid", `${where} skill must be a skill name such as flowryn-design`);
@@ -266,10 +271,18 @@ function parseStage(raw: unknown, where: string, pools: Record<string, number>):
   return { id: t.id, skill: skill as string | null, gate: gate as GateKind, pools: [...new Set(stagePools as string[])], fresh: t.fresh === true, ...optionalStageKeys(t, where) };
 }
 
-/** `effort` and `review`, present only when set, so a stage without them reads as it always did. */
-function optionalStageKeys(t: Record<string, unknown>, where: string): Pick<StageDef, "effort" | "review"> {
+/** `effort`, `model` and `review`, present only when set, so a stage without them reads as it always did. */
+function optionalStageKeys(t: Record<string, unknown>, where: string): Pick<StageDef, "effort" | "model" | "review"> {
   const effort = stageEffortOf(t.effort, where);
-  return { ...(effort !== null ? { effort } : {}), ...(t.review === true ? { review: true } : {}) };
+  const model = stageModelOf(t.model, where);
+  return { ...(effort !== null ? { effort } : {}), ...(model !== null ? { model } : {}), ...(t.review === true ? { review: true } : {}) };
+}
+
+/** A stage's `model`: a Claude model name, checked as `review_model` is. */
+function stageModelOf(value: unknown, where: string): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length === 0) throw new FlowrynError("config_invalid", `${where} model must be a model name such as claude-sonnet-5-5`);
+  return checkModelName(value, `${where} model`, "config_invalid");
 }
 
 /** A stage's `effort`: one both harnesses take, and never max. */

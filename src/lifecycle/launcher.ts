@@ -270,8 +270,8 @@ export class Launcher {
     const config = this.deps.config();
     // The account recorded at dispatch, checked against its project's scope again at every launch.
     const account = runAccount(config, project, run.account, run.harness);
-    // Looked up at every launch: a review stage's model and the stage's own effort (frozen with the run's
-    // workflow), the task's own choice, then the workflow's default, the account's, the harness's.
+    // Looked up at every launch: a review stage's model, the task's own choice, the stage's own model and
+    // effort (frozen with the run's workflow), then the workflow's default, the account's, the harness's.
     const pins = { model: run.model_pin, effort: run.effort_pin };
     checkPinsAtLaunch(pins, account);
     const stage = positionOf(this.deps.db, run, run.kind).stage;

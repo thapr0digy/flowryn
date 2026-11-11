@@ -8,7 +8,7 @@ import type { StageDef, WorkflowDef } from "./workflows.ts";
  * A worker's model and effort (docs/notes/2026-10-24-model-and-effort-sc.md).
  * Each is looked up on its own, first set wins: for the model, a review stage's
  * `review_model` on Claude (docs/notes/2026-11-06-effort-and-model-gn.md); the task's own choice
- * (`dispatch --model/--effort`, a plan phase's lines); for the effort, the stage's own; the workflow's default
+ * (`dispatch --model/--effort`, a plan phase's lines); the stage's own (its model on Claude only); the workflow's default
  * for the harness (`[workflows.<id>.<harness>]`), the account's
  * (`[accounts.<id>]`), the harness's (`[workers.<harness>]`). Plain lookups:
  * the launcher resolves at every launch, so a resume keeps the task's choice
@@ -102,15 +102,25 @@ function accountSets(config: FlowrynConfig, account: Account, key: "model" | "ef
   return raw[key] !== undefined;
 }
 
-/** The part of a stage the lookup reads: its own effort, and the review model frozen onto a review stage at dispatch. */
-export type StageChoice = Pick<StageDef, "id"> & Partial<Pick<StageDef, "effort" | "review_model">>;
+/** The part of a stage the lookup reads: its own effort and model, and the review model frozen onto a review stage at dispatch. */
+export type StageChoice = Pick<StageDef, "id"> & Partial<Pick<StageDef, "effort" | "model" | "review_model">>;
 
 /**
  * A review stage's model: the project's `review_model`, frozen onto the stage at dispatch. Claude only: a
  * Pi worker stays on its own model (the user's rule: Pi keeps the free model), so it is never set there.
  */
-export function stageModel(stage: StageChoice | null | undefined, harness: HarnessId): string | null {
+export function reviewModel(stage: StageChoice | null | undefined, harness: HarnessId): string | null {
   return harness === "claude" ? (stage?.review_model ?? null) : null;
+}
+
+/** A stage's own model on Claude, unless the task chose one itself (dispatch --model wins over every stage but a review). */
+export function stageOwnModel(stage: StageChoice | null | undefined, harness: HarnessId, pins: ModelPins): string | null {
+  return harness === "claude" && pins.model === null ? (stage?.model ?? null) : null;
+}
+
+/** The model a stage itself puts a worker on, if any: a review stage's `review_model`, else the stage's own. */
+export function stageModel(stage: StageChoice | null | undefined, harness: HarnessId, pins: ModelPins): string | null {
+  return reviewModel(stage, harness) ?? stageOwnModel(stage, harness, pins);
 }
 
 /** A stage's own effort, unless the task chose one itself (dispatch --effort wins over every default). */
@@ -128,10 +138,12 @@ export function resolveModelChoice(config: FlowrynConfig, input: { pins: ModelPi
 
   let model: string | null;
   let modelSource: string;
-  const reviewModel = stageModel(stage, account.harness);
+  const review = reviewModel(stage, account.harness);
+  const ownModel = stageOwnModel(stage, account.harness, pins);
   // A review stage runs on the project's review model, whoever built: the point is a second model's read.
-  if (reviewModel !== null) [model, modelSource] = [reviewModel, `review_model (stage ${stage!.id})`];
+  if (review !== null) [model, modelSource] = [review, `review_model (stage ${stage!.id})`];
   else if (pins.model !== null) [model, modelSource] = [pins.model, "dispatch"];
+  else if (ownModel !== null) [model, modelSource] = [ownModel, `stage ${stage!.id}`];
   else if (defaults.model !== null && modelFits(defaults.model, account)) [model, modelSource] = [defaults.model, `workflow ${workflow!.id}`];
   else {
     [model, modelSource] = [account.model, below("model")];
