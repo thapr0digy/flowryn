@@ -377,3 +377,91 @@ describe("review-page rule: the daemon is a review page's one listener", () => {
     expect(ruleOf("lavish-axi poll /x/page.html", { role: "leader" })).toBeNull();
   });
 });
+
+describe("rule: process-kill (workers stop only what they started, by pid)", () => {
+  test.each([
+    "pkill -f signal-dev-instance",
+    "pkill -f 'port 9105'",
+    "pkill -u jgalindo",
+    "killall -9 node",
+    "killall5 -15",
+    "command pkill -f x",
+    "/usr/bin/pkill -f x",
+    "env pkill -f x",
+    "sudo pkill -f x",
+    "p''kill -f x",
+    "\\pkill -f x",
+    "'pkill' -f x",
+    "sh -c \"pkill -f 'bun ui/build.ts --watch'\"",
+    "bash -lc 'cd x && killall bun'",
+    "echo `pkill -f x`",
+    "echo $(pkill -f x)",
+    "make stop || pkill -f dev-instance.sh",
+    "kill -- -1",
+    "kill -9 -1",
+    "kill -1",
+    "kill -TERM -4321",
+    "kill -- -4321",
+    "kill -s KILL -- -4321",
+    "kill 0",
+    "kill -9 -$(cat pgid)",
+    "kill $(pgrep -f x)",
+    "kill -9 `pgrep -f signal`",
+    "kill $(lsof -ti tcp:8081)",
+    "kill -9 $(lsof -t -i :8081)",
+    "kill $(pidof signal)",
+    "pgrep -f signal | xargs kill",
+    "pgrep -f signal | xargs -r kill -9",
+    "lsof -ti :8081 | xargs kill",
+    "lsof -i :8081 | awk 'NR>1 {print $2}' | xargs kill",
+    "ps aux | grep signal | awk '{print $2}' | xargs kill",
+    "kill $(ps aux | grep '[s]ignal' | awk '{print $2}')",
+    "for p in $(pgrep -f x); do kill $p; done",
+    "fuser -k 8081/tcp",
+    "/bin/kill -9 $(pgrep x)",
+  ])("denies %s", (cmd) => {
+    const v = bash(cmd);
+    expect(v?.rule).toBe("process-kill");
+    expect(v?.tool).toBe("kill <pid>");
+    expect(v?.reason).toContain("Stop only what you started, by its pid");
+  });
+
+  test.each([
+    "kill 1234",
+    "kill -TERM 1234",
+    "kill -9 1234 5678",
+    "kill -s TERM 1234",
+    "kill -0 1234",
+    "kill %1",
+    "kill -9 %1",
+    "kill $!",
+    "kill \"$PID\"",
+    "kill $(cat \"$TMPDIR/signal.pid\")",
+    "cat \"$TMPDIR/pids\" | xargs kill",
+    "wait",
+    "wait $!",
+    "pgrep -f signal",
+    "lsof -ti :8081",
+    "ps aux | grep signal",
+    "ps -p 1234 >/dev/null && kill 1234",
+    "kill -l",
+    "echo pkill",
+  ])("allows %s", (cmd) => {
+    expect(ruleOf(cmd)).toBeNull();
+  });
+
+  test("a leader keeps every kill", () => {
+    for (const cmd of ["pkill -f x", "kill -- -1", "kill $(pgrep -f x)"]) expect(ruleOf(cmd, { role: "leader" })).toBeNull();
+  });
+
+  test("the reason names the command, the hazard and what to do instead", () => {
+    expect(bash("pkill -f signal-dev-instance")!.reason).toBe(
+      "Blocked by Flowryn's toolkit rule (process-kill): `pkill -f signal-dev-instance` is not allowed; a kill by name, pattern, port or process group also hits other workers' processes and the user's own apps. Stop only what you started, by its pid: use the project's own stop command if it has one; otherwise record the pid when you start the process (`cmd & echo $! > \"$TMPDIR/<name>.pid\"`) and run `kill <pid>` or `kill -TERM $(cat \"$TMPDIR/<name>.pid\")`.",
+    );
+    expect(bash("lsof -ti :8081 | xargs kill -9")!.reason).toContain("`kill -9` fed by `lsof -ti :8081`");
+  });
+
+  test("a Pi worker is held to it too", () => {
+    expect(ruleOf("pkill -f x", { harness: "pi", toolName: "bash" })).toBe("process-kill");
+  });
+});

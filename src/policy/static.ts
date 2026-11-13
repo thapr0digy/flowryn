@@ -1,6 +1,7 @@
 import { basename, join } from "node:path";
 import type { FlowrynConfig } from "../config/config.ts";
 import { stateFiles } from "../config/paths.ts";
+import { KILL_BY_NAME } from "./toolkit.ts";
 
 /**
  * The toolkit's static layers (toolkit-enforcement scout, section 2 L3 and L4;
@@ -42,6 +43,14 @@ export const DENIED_BASH_PREFIXES = [
   "git worktree move",
   "git worktree prune",
 ] as const;
+
+/**
+ * Workers only: the process-kill rule's backstop, for the commands that kill by name. The hook's
+ * normalizer catches the rest (`kill $(pgrep …)`, negative pids, wrappers); a leader and the user keep them.
+ */
+export function workerBashDenies(): string[] {
+  return [...KILL_BY_NAME].map((prefix) => `Bash(${prefix} *)`);
+}
 
 /** A backstop for the jira rule's Skill check; Claude accepts it without voiding the file (verified live). */
 export const DENIED_SKILLS = ["Skill(atlassian:*)"] as const;

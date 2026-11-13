@@ -13,7 +13,7 @@ import { basename, shellCommands, type Command } from "./shell.ts";
  * a URL host or a file path; no model is involved.
  */
 
-export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths", "review-page"] as const;
+export const TOOLKIT_RULES = ["github", "sqlite", "worktree", "jira", "browser", "tasks", "flowryn-tasks", "leader-shell", "pipeline", "scope-paths", "review-page", "process-kill"] as const;
 export type ToolkitRule = (typeof TOOLKIT_RULES)[number];
 
 export interface ToolkitVerdict {
@@ -92,6 +92,7 @@ const TOOL_FOR: Record<Exclude<ToolkitRule, "leader-shell">, string> = {
   pipeline: "no-mistakes axi run --wait",
   "scope-paths": "flowryn",
   "review-page": "$FLOWRYN_BIN review reply",
+  "process-kill": "kill <pid>",
 };
 
 /** The verdict for one tool call: the first rule it breaks, or null. Never throws. */
@@ -119,7 +120,7 @@ function evaluate(call: ToolCall, paths: ToolkitPaths): ToolkitVerdict | null {
       const hit = commandVerdict(c, call, paths);
       if (hit) return hit;
     }
-    return scopeShellVerdict(shellCommands(command), call, paths);
+    return processKillVerdict(commands, call) ?? scopeShellVerdict(commands, call, paths);
   }
   if (FILE_TOOLS.has(tool) || READ_TOOLS.has(tool)) {
     const named = [call.toolInput.file_path, call.toolInput.path, call.toolInput.notebook_path].find((p): p is string => typeof p === "string" && p.length > 0);
@@ -173,7 +174,64 @@ function guidance(rule: Exclude<ToolkitRule, "leader-shell">, call: ToolCall): s
       return "it holds another scope's work, or every scope's tasks; this leader sees its own scope through the flowryn verbs (fleet, show, brief).";
     case "review-page":
       return "Flowryn listens on your review page and hands you the user's words as a steer; answer them with $FLOWRYN_BIN review reply --body-file -.";
+    case "process-kill":
+      return PROCESS_KILL_GUIDANCE;
   }
+}
+
+// --- a worker's kills (docs/notes/2026-11-13-workers-must-not-um.md) ------------------------------
+
+const PROCESS_KILL_GUIDANCE =
+  "a kill by name, pattern, port or process group also hits other workers' processes and the user's own apps. Stop only what you started, by its pid: use the project's own stop command if it has one; otherwise record the pid when you start the process (`cmd & echo $! > \"$TMPDIR/<name>.pid\"`) and run `kill <pid>` or `kill -TERM $(cat \"$TMPDIR/<name>.pid\")`.";
+
+/** Commands that kill by name or pattern (also the static layer's worker backstop, src/policy/static.ts). */
+export const KILL_BY_NAME: ReadonlySet<string> = new Set(["pkill", "killall", "killall5", "skill"]);
+/** Commands whose only output is the pids matching a name, pattern or port. */
+const PID_SEARCHES = new Set(["pgrep", "pidof", "fuser"]);
+/** Commands that list processes or open files: a pid search when their output is piped on, or (lsof) with -t. */
+const PROCESS_LISTERS = new Set(["ps", "lsof"]);
+
+/**
+ * process-kill, workers only: pkill/killall and their kin; `fuser -k`; a `kill` of a negative pid,
+ * pid 0 or `-1` (a process group or every process); and a `kill` on a line that also searches for
+ * pids (pgrep, pidof, fuser, `lsof -t`, or ps/lsof piped on), so `kill $(pgrep -f x)`,
+ * `lsof -ti :8081 | xargs kill` and `ps aux | grep x | awk … | xargs kill`. A kill of literal pids,
+ * job specs or a variable or substitution that searches nothing (`kill $(cat x.pid)`) passes.
+ */
+function processKillVerdict(commands: Command[], call: ToolCall): ToolkitVerdict | null {
+  if (call.role !== "worker") return null;
+  const search = commands.find(isPidSearch);
+  for (const c of commands) {
+    const shown = `\`${c.argv.slice(0, 3).join(" ")}\``;
+    if (KILL_BY_NAME.has(c.name)) return deny("process-kill", call, shown);
+    if (c.name === "fuser" && c.argv.slice(1).some((a) => /^-[a-zA-Z]*k/.test(a))) return deny("process-kill", call, shown);
+    if (c.name !== "kill") continue;
+    if (killsGroup(c.argv.slice(1))) return deny("process-kill", call, shown);
+    if (search) return deny("process-kill", call, `${shown} fed by \`${search.argv.slice(0, 3).join(" ")}\``);
+  }
+  return null;
+}
+
+/** A pid search: pgrep and kin, `lsof -t`, or a ps or lsof whose output the line pipes on. */
+function isPidSearch(c: Command, _i: number, commands: Command[]): boolean {
+  if (PID_SEARCHES.has(c.name)) return true;
+  if (!PROCESS_LISTERS.has(c.name)) return false;
+  if (c.name === "lsof" && c.argv.slice(1).some((a) => /^-[a-zA-Z]*t/.test(a))) return true;
+  return commands.some((o) => o.pipedOpaque && o.stdin.split("\n").some((line) => shellCommands(line)[0]?.name === c.name));
+}
+
+/**
+ * `kill`'s operands after its one signal option (`-9`, `-TERM`, `-s TERM`, `-n 9`) and `--`: any that
+ * is negative or 0 names a process group, `-1` every process. A `-1` anywhere counts, since it reads
+ * both as SIGHUP and as every process; `kill -HUP <pid>` says the first plainly.
+ */
+function killsGroup(args: string[]): boolean {
+  if (args.includes("-1")) return true;
+  let i = 0;
+  if (args[0] === "-s" || args[0] === "-n") i = 2;
+  else if (args[0] !== undefined && args[0] !== "--" && args[0].startsWith("-")) i = 1;
+  if (args[i] === "--") i++;
+  return args.slice(i).some((a) => a.startsWith("-") || /^0+$/.test(a));
 }
 
 // --- a leader's scope (docs/notes/2026-10-24-leader-scoping-and-vj.md) ----------------------------
