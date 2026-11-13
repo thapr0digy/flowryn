@@ -71,6 +71,7 @@ describe("a Claude worker: one raw call per rule is denied through the real pre-
       { rule: "flowryn-tasks", tool: "flowryn", name: "Bash", input: { command: `echo '- [ ] x' >> ${env.h.backlog}` } },
       { rule: "pipeline", tool: "no-mistakes axi run --wait", name: "Bash", input: { command: "no-mistakes axi run --intent 'ship it'", run_in_background: true } },
       { rule: "review-page", tool: "review reply", name: "Bash", input: { command: "lavish-axi poll design/design.html" } },
+      { rule: "process-kill", tool: "kill <pid>", name: "Bash", input: { command: "pkill -f signal-dev-instance" } },
     ];
     for (const c of cases) {
       const decision = await preTool(env, token, c.name, c.input);
@@ -88,6 +89,11 @@ describe("a Claude worker: one raw call per rule is denied through the real pre-
     // acli jira is the fallback for an option jira-axi lacks; a raw jira CLI is still denied.
     expect(await preTool(env, token, "Bash", { command: "acli jira workitem view X-1" })).toBeNull();
     expect(await preTool(env, token, "Bash", { command: "jira issue list" })).toMatchObject({ permissionDecision: "deny" });
+    // A worker stops what it started by its pid; a kill fed by a pid search is denied with the way to do it.
+    expect(await preTool(env, token, "Bash", { command: "kill -TERM 1234" })).toBeNull();
+    const byPort = await preTool(env, token, "Bash", { command: "kill $(lsof -ti tcp:8081)" });
+    expect(byPort).toMatchObject({ permissionDecision: "deny" });
+    expect(byPort!.permissionDecisionReason).toContain("record the pid when you start the process");
   }, 60_000);
 
   test("the daemon down: the hook process still denies (no daemon call needed)", async () => {

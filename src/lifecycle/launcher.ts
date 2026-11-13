@@ -24,7 +24,7 @@ import { withRepoLock } from "../runtime/repo-lock.ts";
 import { acquireSlot, adoptSlot, leaseHolder, poolRoot, returnSlot } from "../runtime/treehouse.ts";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { spoolDir } from "../config/paths.ts";
-import { browserProfileReads, configStaticLayers } from "../policy/static.ts";
+import { browserProfileReads, configStaticLayers, workerBashDenies } from "../policy/static.ts";
 import { SNAPSHOT_ROOT } from "../lavish/snapshot.ts";
 import { PROTO } from "../version.ts";
 import { writeStageSkills } from "../skills/stages.ts";
@@ -331,7 +331,7 @@ export class Launcher {
       readOnly: [...gitAccess.readOnly, ...toolkit.denyWrite, ...reviewCopies],
       // A review tab's address carries its pass key, and browsers keep addresses in their history.
       // The page the tab shows is the daemon's checked copy (src/lavish/snapshot.ts): file tools never write it.
-      permissionsDeny: [...toolkit.permissionsDeny, ...browserProfileReads(homedir()), ...reviewCopies.map((dir) => `Edit(/${dir}/**)`)],
+      permissionsDeny: [...toolkit.permissionsDeny, ...workerBashDenies(), ...browserProfileReads(homedir()),...reviewCopies.map((dir) => `Edit(/${dir}/**)`)],
       stagePlugin: skills.claudePlugin,
       ...(mode === "relaunch" ? { resumePrompt: relaunchPrompt(instructionsFile) } : {}),
     };

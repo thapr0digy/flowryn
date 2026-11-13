@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { defaultConfig, TOOL_BINARIES, TOOL_NAMES, type FlowrynConfig, type ToolName } from "../../src/config/config.ts";
 import { leaderSettings, LEADER_PERMISSIONS } from "../../src/bridges/claude/settings.ts";
 import { workerSettings } from "../../src/harness/claude/adapter.ts";
-import { configStaticLayers, DENIED_MCP_SERVERS, staticLayers } from "../../src/policy/static.ts";
+import { configStaticLayers, DENIED_MCP_SERVERS, staticLayers, workerBashDenies } from "../../src/policy/static.ts";
 import { chromeEnabled, contractSteps, hiddenToolsVerdict, offeredTools } from "../../src/contracts/suite.ts";
 import { chromeMcpCheck, toolChecks } from "../../src/doctor/doctor.ts";
 import { INSTALL_HINTS, INSTALLERS } from "../../src/init/install.ts";
@@ -44,6 +44,13 @@ describe("the toolkit's static layers", () => {
     const denied = (command: string) => bash.some((rule) => bashRuleMatches(rule, command));
     for (const command of ["gh", "gh pr list", "hub pr", "git worktree add ../x", "git worktree prune", "jira issue list", "jira-cli issue list"]) expect(denied(command)).toBe(true);
     for (const command of ["gh-axi pr list", "git worktree list", "treehouse get --lease --json", "jira-axi issue view X-1", "acli --help", "acli jira workitem view X-1"]) expect(denied(command)).toBe(false);
+  });
+
+  test("a worker's settings alone back up the process-kill rule for kills by name; the shared layers never do", () => {
+    const rules = workerBashDenies();
+    for (const command of ["pkill -f signal-dev-instance", "pkill", "killall -9 node", "killall5 -15", "skill bun"]) expect(rules.some((rule) => bashRuleMatches(rule, command))).toBe(true);
+    for (const command of ["kill 1234", "kill -TERM 1234", "pgrep -f x", "pkillx", "killallx"]) expect(rules.some((rule) => bashRuleMatches(rule, command))).toBe(false);
+    expect(layers.permissionsDeny.some((rule) => /^Bash\((pkill|killall)/.test(rule))).toBe(false);
   });
 
   test("q31: no blanket sqlite3 deny, only Flowryn's own database", () => {
