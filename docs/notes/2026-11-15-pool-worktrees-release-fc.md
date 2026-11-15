@@ -39,7 +39,7 @@ A failure never refuses a cleanup or keeps a worktree: one broken command would 
 
 ## Tests
 
-- `test/unit/release.test.ts`: the key (argv split, refusals, the known-key check), the runner (order, cwd, a failure or a deadline never stopping the next, a command that cannot start, the output tail).
+- `test/unit/project-release.test.ts`: the key (argv split, refusals, the known-key check), the runner (order, cwd, a failure or a deadline never stopping the next, a command that cannot start, the output tail).
 - `test/unit/treehouse.test.ts`: the release runs once after the worker stops and before the reap and the return, with the branch still checked out; a failed one still returns the slot; none on a refused verdict or a gone worktree.
 - `test/unit/verify.test.ts`: release before removal, pass and fail; a failure recorded and the worktree still removed; a worktree kept for a resume not released.
 - `test/integration/treehouse-pool.test.ts`: a cancelled pool run's cleanup runs the release in the slot, records a failing one, and still returns the slot.
