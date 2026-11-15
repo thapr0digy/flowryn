@@ -197,7 +197,7 @@ describe("two local branches ready together", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM messages").get()).toEqual({ n: 0 });
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE kind IN ('verify.sent_back','run.conflict_nudged')").get()).toEqual({ n: 0 });
     // assumption: the branch only gained the merge commit (the delivered head is its first parent), and was never reset.
-    expect(sh(s2.wt, ["rev-list", "--first-parent", "HEAD"]).split("\n").slice(0, 2)).toEqual([r2.train_head, s2.head]);
+    expect(sh(s2.wt, ["rev-list", "--first-parent", "HEAD"]).split("\n").slice(0, 2)).toEqual([r2.train_head!, s2.head]);
     expect(sh(s2.wt, ["reflog", "--format=%gs", s2.branch])).not.toContain("reset");
   });
 

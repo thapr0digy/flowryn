@@ -549,7 +549,7 @@ export class LandingQueue implements LandingHooks {
    * main's tip (`main`, its verify at rank 0) and whose entry that already
    * holds its base is its own candidate.
    */
-  private async buildCandidate(row: LandingRow, base: string, position: number, local: { main: string; branch: string } | null = null): Promise<Built> {
+  private async buildCandidate(row: LandingRow, base: string, position: number, local: { main: string } | null = null): Promise<Built> {
     const { db, git } = this.deps;
     const run = getRunWithPolicy(db, row.run_id);
     const project = run ? getProject(db, run.project_id) : null;
@@ -777,7 +777,7 @@ export class LandingQueue implements LandingHooks {
         continue;
       }
       if (row.train_head) drop(row, `its base moved from ${row.train_base?.slice(0, 8) ?? "-"} to ${on!.slice(0, 8)}`);
-      const candidate = await this.buildCandidate(row, on!, i + (head ? 2 : 1), { main, branch: project.default_branch });
+      const candidate = await this.buildCandidate(row, on!, i + (head ? 2 : 1), { main });
       if (candidate && "conflict" in candidate && on === main) {
         left = (await this.localConflict(row, project, candidate.conflict)) || left;
       }
