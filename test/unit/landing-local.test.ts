@@ -330,13 +330,15 @@ describe("a worker that is not ready on its turn", () => {
     expect(landingCell(db, row(s1))).toContain("worker not ready");
 
     for (const [turn, s] of behind.entries()) {
-      // Within the wait nothing goes past it; after it, the next one does.
-      now += 60_000;
-      await lq.pass();
-      expect(row(s).state).toBe("waiting");
-      // Within the wait it stays in the train: the one behind is built on its candidate, not rebuilt on main.
-      expect(row(s).train_base).toBe(row(s1).train_head);
-      now += 5 * 60_000;
+      // Within the 5 min nothing goes past it, and it stays in the train: the one behind is built on its candidate, not rebuilt on main.
+      for (const step of [60_000, 4 * 60_000 - 1]) {
+        now += step;
+        await lq.pass();
+        expect(row(s).state).toBe("waiting");
+        expect(row(s).train_base).toBe(row(s1).train_head);
+      }
+      // At 5 min the next one goes.
+      now += 1;
       await lq.pass();
       expect(row(s).state).toBe("landing");
       expect(events("landing.turn_skipped").length).toBe(turn + 1);
