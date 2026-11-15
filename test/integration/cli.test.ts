@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { decode } from "@toon-format/toon";
-import { cli, cliJson, makeHome, readText, REPO_ROOT, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { askCosts, cli, cliJson, makeHome, readText, REPO_ROOT, seedLeader, seedRun, startDaemon, waitUntil, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
 
 useIntegrationTimeout();
@@ -223,7 +223,7 @@ describe("when the daemon is down", () => {
     const { h } = await setup();
     const run = seedRun(h);
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
-    const ask = (question: string, ...extra: string[]) => cliJson(h, ["ask", "--options", "drop,keep", "--recommend", "drop", "--blocks", "the migration step", ...extra, "--body-file", "-"], { env: worker, stdin: question });
+    const ask = (question: string, ...extra: string[]) => cliJson(h, ["ask", "--options", "drop,keep", ...askCosts("drop,keep", "drop"), "--recommend", "drop", "--blocks", "the migration step", ...extra, "--body-file", "-"], { env: worker, stdin: question });
     const destructive = await ask("Drop the legacy table?");
     expect(destructive.code).toBe(0);
     expect((destructive.reply.data as { reserved?: string }).reserved).toBeString();
@@ -247,10 +247,10 @@ describe("when the daemon is down", () => {
     };
     const goOn = "queued, delivered when the daemon is back; go on with your work, never retry it";
     const endTurn = "queued, delivered when the daemon is back; end your turn, never retry it";
-    const ask = ["ask", "--options", "yes,no", "--blocks", "the next step of the task", "--body-file", "-"];
+    const ask = ["ask", "--options", "yes,no", ...askCosts("yes,no"), "--blocks", "the next step of the task", "--body-file", "-"];
     expect(await help(["report", "finding", "--body-file", "-"])).toBe(goOn);
     expect(await help(ask)).toBe(endTurn);
-    expect(await help(["ask", "--options", "drop,keep", "--recommend", "drop", "--blocks", "the migration step", "--body-file", "-"], "Drop the legacy table?")).toBe(endTurn);
+    expect(await help(["ask", "--options", "drop,keep", ...askCosts("drop,keep", "drop"), "--recommend", "drop", "--blocks", "the migration step", "--body-file", "-"], "Drop the legacy table?")).toBe(endTurn);
     expect(await help([...ask, "--blocking"])).toBe(endTurn);
     expect(await help([...ask, "--reserved", "the user owns it"])).toBe(endTurn);
     expect(await help(["fail", "--body-file", "-"])).toBe(endTurn);

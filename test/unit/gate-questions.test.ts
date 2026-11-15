@@ -34,10 +34,15 @@ import { makeHome, seedRun, waitUntil, type TestHome } from "../helpers/harness.
  * to its API, then `lavish-axi poll --timeout-ms`), kept verbatim.
  */
 
+/** Options as the questions file takes them: each with its consequence. */
+function costed(...labels: string[]): { label: string; consequence: string }[] {
+  return labels.map((label) => ({ label, consequence: `picking ${label} changes what the build writes` }));
+}
+
 const QUESTIONS = {
   questions: [
-    { key: "token-store", kind: "single", question: "Where do cached tokens live?", options: ["db", "file"], recommend: "db", blocks: "which store TokenCache writes to", why: "db is transactional" },
-    { key: "harnesses", kind: "multi", question: "Which harnesses first?", options: ["claude", "pi"], recommend: ["claude"], blocks: "which adapters the build touches" },
+    { key: "token-store", kind: "single", question: "Where do cached tokens live?", options: costed("db", "file"), recommend: "db", recommended_downside: "a migration first", blocks: "which store TokenCache writes to", why: "db is transactional" },
+    { key: "harnesses", kind: "multi", question: "Which harnesses first?", options: costed("claude", "pi"), recommend: ["claude"], recommended_downside: "Pi waits a release", blocks: "which adapters the build touches" },
     { key: "verb-name", kind: "text", question: "What is the verb called?", recommend: "flowryn tokens", blocks: "the CLI name in code and docs" },
   ],
   decided: [{ choice: "poller home", picked: "src/lavish/poller.ts", why: "one child per gate" }],
@@ -72,12 +77,26 @@ describe("the questions file and the ask rule, checked in code", () => {
   });
 
   test("a choice needs 2 to 8 distinct options and a recommendation among them", () => {
-    expect(() => parseGateQuestions(withQuestion({ options: ["db"] }))).toThrow(/decision you make yourself/);
-    expect(() => parseGateQuestions(withQuestion({ options: ["db", "db"] }))).toThrow(/twice/);
+    expect(() => parseGateQuestions(withQuestion({ options: costed("db") }))).toThrow(/decision you make yourself/);
+    expect(() => parseGateQuestions(withQuestion({ options: costed("db", "db") }))).toThrow(/twice/);
     expect(() => parseGateQuestions(withQuestion({ recommend: "redis" }))).toThrow(/one of its options/);
     expect(() => parseGateQuestions(withQuestion({ recommend: undefined }))).toThrow(/one of its options/);
     expect(() => parseGateQuestions(withQuestion({ recommend: [] }, 1))).toThrow(/non-empty list/);
-    expect(() => parseGateQuestions(withQuestion({ options: ["a,b", "c"] }))).toThrow(/short/);
+    expect(() => parseGateQuestions(withQuestion({ options: costed("a,b", "c") }))).toThrow(/short/);
+  });
+
+  test("every option carries its consequence and the recommendation its downside, or the file is refused with an example", () => {
+    const parsed = parseGateQuestions(JSON.stringify(QUESTIONS)).questions[0]!;
+    expect(parsed.consequences).toEqual({ db: "picking db changes what the build writes", file: "picking file changes what the build writes" });
+    expect(parsed.downside).toBe("a migration first");
+    expect(() => parseGateQuestions(withQuestion({ options: ["db", "file"] }))).toThrow(/must be an option with its consequence, such as \{"label": "keychain", "consequence"/);
+    expect(() => parseGateQuestions(withQuestion({ options: [{ label: "db", consequence: "tokens survive restarts" }, { label: "file" }] }))).toThrow(/option "file" has no consequence: say what happens if it is picked, what waits or is blocked, and what breaks if it is wrong/);
+    expect(() => parseGateQuestions(withQuestion({ options: [{ label: "db", consequence: "  " }, { label: "file", consequence: "x" }] }))).toThrow(/consequence of "db" is empty/);
+    expect(() => parseGateQuestions(withQuestion({ options: [{ label: "db", consequence: "x".repeat(201) }, { label: "file", consequence: "x" }] }))).toThrow(/longer than 200/);
+    expect(() => parseGateQuestions(withQuestion({ recommended_downside: undefined }))).toThrow(/recommendation \(db\) has no downside.*"recommended_downside"/);
+    expect(() => parseGateQuestions(withQuestion({ recommended_downside: "y".repeat(201) }))).toThrow(/downside is longer than 200/);
+    // A text question has no options to cost; its downside is optional.
+    expect(parseGateQuestions(JSON.stringify(QUESTIONS)).questions[2]!.downside).toBeNull();
   });
 
   test("a text question carries the worker's default answer and no options", () => {
@@ -112,7 +131,7 @@ describe("the questions file and the ask rule, checked in code", () => {
     expect(normalizeAnswer("multi", ["claude", "pi"], ["other", "pi"], true)).toBe("pi, other");
     expect(() => normalizeAnswer("multi", ["claude", "pi"], ["pi", "other"])).toThrow(/needs your words/);
     expect(normalizeAnswer("text", [], ["other"])).toBe("other");
-    expect(() => parseGateQuestions(withQuestion({ options: ["db", "Other"] }))).toThrow(/"other" is reserved/);
+    expect(() => parseGateQuestions(withQuestion({ options: costed("db", "Other") }))).toThrow(/"other" is reserved/);
   });
 });
 
@@ -327,10 +346,11 @@ const STATE: WidgetState = {
   oneClick: false,
   decided: [{ choice: "poller home", picked: "src/lavish/poller.ts", why: "one child per gate" }],
   questions: [
-    { id: "q1", key: "token-store", kind: "single", question: "Where?", options: ["db", "file"], recommend: ["db"], blocks: "which store TokenCache writes to", why: "why", state: "open", answer: null, via: null },
-    { id: "q2", key: "harnesses", kind: "multi", question: "Which?", options: ["claude", "pi"], recommend: ["claude"], blocks: "which adapters", why: null, state: "open", answer: null, via: null },
-    { id: "q3", key: "verb-name", kind: "text", question: "Name?", options: [], recommend: ["flowryn tokens"], blocks: "the CLI name", why: null, state: "open", answer: null, via: null },
-    { id: "q4", key: "alias", kind: "single", question: "Alias?", options: ["yes", "no"], recommend: ["yes"], blocks: "the old flag", why: null, state: "answered", answer: "no", via: "your leader" },
+    { id: "q1", key: "token-store", kind: "single", question: "Where?", options: ["db", "file"], recommend: ["db"], consequences: { db: "tokens survive restarts", file: "<b>no migration</b>; two daemons race" }, downside: "a migration first", blocks: "which store TokenCache writes to", why: "why", state: "open", answer: null, via: null },
+    // Asked before costs were required: no consequence lines, nothing breaks.
+    { id: "q2", key: "harnesses", kind: "multi", question: "Which?", options: ["claude", "pi"], recommend: ["claude"], consequences: {}, downside: null, blocks: "which adapters", why: null, state: "open", answer: null, via: null },
+    { id: "q3", key: "verb-name", kind: "text", question: "Name?", options: [], recommend: ["flowryn tokens"], consequences: {}, downside: null, blocks: "the CLI name", why: null, state: "open", answer: null, via: null },
+    { id: "q4", key: "alias", kind: "single", question: "Alias?", options: ["yes", "no"], recommend: ["yes"], consequences: {}, downside: null, blocks: "the old flag", why: null, state: "answered", answer: "no", via: "your leader" },
   ],
 };
 
@@ -359,6 +379,17 @@ describe("the question widget", () => {
     expect(mount.text()).toContain("Answered via your leader: no");
     expect(mount.text()).toContain("poller home: src/lavish/poller.ts");
     expect(mount.all().filter((e) => e.tag === "button").map((b) => b.textContent)).toEqual(["Send answers", "Send answers and approve"]);
+  });
+
+  test("each option shows its consequence and the recommended one its downside, as text; an older question shows none", () => {
+    const { mount } = runWidget(STATE);
+    const costs = mount.all().filter((e) => (e.attrs.class ?? "").includes("fq-cost"));
+    expect(costs.map((e) => [e.attrs["data-option"], e.textContent])).toEqual([
+      ["db", "tokens survive restarts · Downside: a migration first"],
+      ["file", "<b>no migration</b>; two daemons race"],
+    ]);
+    // Worker text goes in as textContent: the markup stays text, never an element.
+    expect(mount.all().some((e) => e.tag === "b")).toBe(false);
   });
 
   test("assumption: one Send queues one prompt whose token decodes to every answer and the comment, then sends", () => {

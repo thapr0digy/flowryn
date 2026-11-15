@@ -57,6 +57,76 @@ export interface DecisionRow {
   autonomy_state?: "decided" | "parked" | null;
   /** The daemon's own no-mistakes read for an `ask --nomistakes` (src/attention/real-actions.ts NmRecord); never from the question. */
   nm_record?: string | null;
+  /** A worker question's option costs: each option's consequence, as JSON keyed by option; null on older rows. */
+  consequences?: string | null;
+  /** The recommended choice's main downside, as the worker wrote it. */
+  downside?: string | null;
+}
+
+/**
+ * Option costs (docs/notes/2026-11-15-worker-questions-carry-gn.md): a worker question names, for
+ * each option, what happens if it is picked, what waits or is blocked, what breaks if it is wrong;
+ * and for its recommendation the main downside. The user weighs the options on those lines.
+ */
+export const MAX_COST_CHARS = 200;
+
+export interface OptionCosts {
+  consequences: Record<string, string>;
+  downside: string | null;
+}
+
+/** One cost as stored: one clean line, or why it cannot be. */
+function costLine(raw: string): string | { problem: string } {
+  const line = sanitizeLine(raw, Number.MAX_SAFE_INTEGER);
+  if (line.length === 0) return { problem: "is empty" };
+  if (line.length > MAX_COST_CHARS) return { problem: `is longer than ${MAX_COST_CHARS} characters` };
+  return line;
+}
+
+/**
+ * Check a worker question's costs against its options: every option has a consequence, none names
+ * an unknown option, and a recommendation brings its downside. Returns the costs as stored, or the
+ * first problem in words the caller frames with its own example.
+ */
+export function checkOptionCosts(options: string[], given: Map<string, string>, recommended: string[], downside: string | null): OptionCosts | { problem: string } {
+  const stray = [...given.keys()].find((o) => !options.includes(o));
+  if (stray !== undefined) return { problem: `a consequence names "${sanitizeLine(stray, 40)}", which is not one of the options (${options.join(", ")})` };
+  const consequences: Record<string, string> = {};
+  for (const option of options) {
+    const raw = given.get(option);
+    if (raw === undefined) return { problem: `option "${option}" has no consequence: say what happens if it is picked, what waits or is blocked, and what breaks if it is wrong` };
+    const line = costLine(raw);
+    if (typeof line !== "string") return { problem: `the consequence of "${option}" ${line.problem}` };
+    consequences[option] = line;
+  }
+  if (downside === null) {
+    if (recommended.length === 0) return { consequences, downside: null };
+    return { problem: `the recommendation (${recommended.join(", ")}) has no downside: name its main cost, so the user sees what they accept` };
+  }
+  const line = costLine(downside);
+  if (typeof line !== "string") return { problem: `the recommendation's downside ${line.problem}` };
+  return { consequences, downside: line };
+}
+
+/** The choices a decision recommends: a multi choice's list, else the one recommendation. */
+export function recommendedChoices(d: Pick<DecisionRow, "kind" | "recommendation">): string[] {
+  if (!d.recommendation) return [];
+  return d.kind === "multi" ? d.recommendation.split(", ").filter((r) => r.length > 0) : [d.recommendation];
+}
+
+/** A decision's option costs as stored, each a clean capped line; empty for older rows and standalone decisions. */
+export function optionCostsOf(d: Pick<DecisionRow, "consequences" | "downside">): OptionCosts {
+  const consequences: Record<string, string> = {};
+  try {
+    const parsed: unknown = d.consequences ? JSON.parse(d.consequences) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [option, text] of Object.entries(parsed)) if (typeof text === "string" && text.trim()) consequences[option] = sanitizeLine(text, MAX_COST_CHARS);
+    }
+  } catch {
+    // A row the daemon wrote is JSON; an unreadable one shows the fallback text, never an error.
+  }
+  const downside = d.downside ? sanitizeLine(d.downside, MAX_COST_CHARS) : "";
+  return { consequences, downside: downside || null };
 }
 
 /** answered_via of a deadline default (src/attention/deadline-defaults.ts): a policy answer the user may undo. */

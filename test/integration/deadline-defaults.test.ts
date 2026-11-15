@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cliJson, daemonCall, makeHome, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { askCosts, cliJson, daemonCall, makeHome, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
 
 useIntegrationTimeout();
@@ -64,7 +64,7 @@ async function setup() {
   db.close();
   const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
   const ask = async (question: string, extra: string[] = []) => {
-    const asked = await cliJson(h, ["ask", "--nomistakes", "--options", "fix,approve,skip", "--recommend", "fix", "--blocks", "the gate of the pipeline", ...extra, "--body-file", "-"], { env: worker, stdin: question });
+    const asked = await cliJson(h, ["ask", "--nomistakes", "--options", "fix,approve,skip", ...askCosts("fix,approve,skip", "fix"), "--recommend", "fix", "--blocks", "the gate of the pipeline", ...extra, "--body-file", "-"], { env: worker, stdin: question });
     expect(asked.code).toBe(0);
     return (asked.reply.data as { decision: string }).decision;
   };

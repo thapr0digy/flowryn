@@ -52,7 +52,7 @@ const CFG: DecisionsConfig = config('[decisions]\ndefault_gates = ["design", "qa
 
 const QUESTIONS = {
   questions: [
-    { key: "store", kind: "single", question: "Where do cached tokens live?", options: ["db", "file"], recommend: "db", blocks: "which store TokenCache writes to", why: "db is transactional" },
+    { key: "store", kind: "single", question: "Where do cached tokens live?", options: [{ label: "db", consequence: "tokens survive restarts" }, { label: "file", consequence: "no migration; two daemons race" }], recommend: "db", recommended_downside: "a migration first", blocks: "which store TokenCache writes to", why: "db is transactional" },
   ],
   decided: [],
 };

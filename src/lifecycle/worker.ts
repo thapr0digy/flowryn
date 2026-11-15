@@ -3,12 +3,12 @@ import { join, sep } from "node:path";
 import { FlowrynError } from "../api/errors.ts";
 import { appendEvent } from "../db/events.ts";
 import { openItem, resolveRunItems } from "../attention/items.ts";
-import { boolArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
+import { boolArg, listArg, stringArg, type HandlerCtx, type VerbSpec } from "../api/verbs.ts";
 import { decisionsConfig, keywordClass, reservedReason } from "../attention/decisions-policy.ts";
 import { recordIntent } from "../journal/journal.ts";
 import { capStoredText, MAX_LINE_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 import { steerLine } from "../harness/contract-text.ts";
-import { createStandaloneDecision, DECISION_KEY, DECISION_OPTION, getDecision, nextRunDecisionId } from "./decisions.ts";
+import { checkOptionCosts, createStandaloneDecision, DECISION_KEY, DECISION_OPTION, getDecision, nextRunDecisionId, type OptionCosts } from "./decisions.ts";
 import { answerDecision } from "./decision-verbs.ts";
 import { resolveTool } from "../config/config.ts";
 import { cleanupConfig } from "../config/delivery.ts";
@@ -164,8 +164,10 @@ const report: VerbSpec = {
 };
 
 /**
- * `flowryn ask --options a,b --blocks <what waits> [--blocking] --body-file -`:
- * a question for you, only when the worker cannot proceed without it.
+ * `flowryn ask --options a,b --consequence "a: <effect>" --consequence "b: <effect>" [--recommend a --downside <cost>] --blocks <what waits> [--blocking] --body-file -`:
+ * a question for you, only when the worker cannot proceed without it. Each option carries its
+ * consequence and a recommendation its downside, or the ask is refused with an example
+ * (docs/notes/2026-11-15-worker-questions-carry-gn.md).
  * It never holds the call open (design section 12): it returns a decision id
  * and the answer arrives as a steer; a blocking one ends the worker's turn,
  * any other goes on with its recommendation. A blocking question is a P0 and
@@ -184,7 +186,9 @@ const ask: VerbSpec = {
     options: { type: "string", help: "comma-separated choices", placeholder: "a,b" },
     blocking: { type: "boolean", help: "you cannot continue without the answer" },
     key: { type: "string", help: "a short slug for this question, for show", placeholder: "key" },
+    consequence: { type: "list", help: "required, one per option: \"<option>: what happens if picked, what waits, what breaks if wrong\" (at most 200 chars; repeatable)", placeholder: "option: text" },
     recommend: { type: "string", help: "the recommended choice", placeholder: "option" },
+    downside: { type: "string", help: "required with --recommend: its main downside, in a line (at most 200 chars)", placeholder: "text" },
     why: { type: "string", help: "why you recommend it, in a line (unattended mode keeps it with the answer)", placeholder: "text" },
     reserved: { type: "string", help: "only the user may answer, and why", placeholder: "reason" },
     blocks: { type: "string", help: "required: the choice in your work that waits on the answer", placeholder: "text" },
@@ -220,6 +224,9 @@ const ask: VerbSpec = {
     if (blocks.length < MIN_BLOCKS_CHARS) throw new FlowrynError("bad_args", "--blocks <what waits on the answer> is required: ask only when you cannot proceed; decide the rest yourself and record it");
     const bad = options.find((o) => !OPTION.test(o));
     if (bad) throw new FlowrynError("bad_args", `option "${bad}" must be short: letters, digits, spaces, _ . -`);
+    const recommend = stringArg(args, "recommend")?.trim() || null;
+    if (recommend !== null && !options.includes(recommend)) throw new FlowrynError("bad_args", `--recommend ${sanitizeLine(recommend, 40)} is not one of the options (${options.join(", ")})`);
+    const costs = askCosts(options, listArg(args, "consequence"), recommend, stringArg(args, "downside") ?? null);
     const blocking = boolArg(args, "blocking");
     const why = sanitizeLine(stringArg(args, "why") ?? "", MAX_WHY_CHARS) || null;
     const now = ctx.now();
@@ -258,8 +265,8 @@ const ask: VerbSpec = {
     // The question's kind, for deadline defaults: a keyword class, or a no-mistakes ask the table kept for the user.
     const reservedClass = reserved === null ? null : (keywordClass(reserved) ?? (sourceReason?.trim() || !verdict || verdict.settled ? null : !facts?.ok ? "nomistakes-unread" : nmClass(verdict, owner)));
     ctx.db
-      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks, note, nm_record) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)")
-      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, stringArg(args, "recommend") ?? null, reserved, reservedClass, now, blocks, why, nmRecord);
+      .query("INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, reserved_class, created_at, blocks, note, nm_record, consequences, downside) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)")
+      .run(id, run.task_id, run.id, question, JSON.stringify(options), blocking ? 1 : 0, key ? run.task_id : null, key, recommend, reserved, reservedClass, now, blocks, why, nmRecord, JSON.stringify(costs.consequences), costs.downside);
     const event = appendEvent(ctx.db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, blocking, options, blocks, via: ctx.via, ...(verdict ? { nomistakes: true } : {}), ...(nmRecord ? { nm_record: true } : {}) } });
     if (verdict?.settled && reserved === null) {
       appendEvent(ctx.db, { source: "daemon", kind: "decision.settled_by_rule", runId: run.id, taskId: run.task_id, payload: { decision: id, step: facts!.ok ? facts!.step : "", rules: verdict.rules, answer: verdict.answer, findings: verdict.findings } });
@@ -286,6 +293,25 @@ const ask: VerbSpec = {
     return result;
   },
 };
+
+/** The ask that shows what a refused one is missing. */
+const ASK_COSTS_EXAMPLE =
+  '--options wait-5m,land-now --consequence "wait-5m: the branch waits up to 5 min for the queue head, then is skipped" --consequence "land-now: lands at once; a red main shows only after the merge" --recommend wait-5m --downside "a busy branch lands up to 5 min later"';
+
+/** An ask's option costs from its `--consequence "<option>: <text>"` flags and `--downside`; refused with an example when any is missing. */
+function askCosts(options: string[], given: string[], recommend: string | null, downside: string | null): OptionCosts {
+  const byOption = new Map<string, string>();
+  for (const entry of given) {
+    const colon = entry.indexOf(":");
+    const option = colon < 0 ? "" : entry.slice(0, colon).trim();
+    if (!option) throw new FlowrynError("bad_args", `--consequence "${sanitizeLine(entry, 60)}" must be "<option>: <what happens>"`, `e.g. ${ASK_COSTS_EXAMPLE}`);
+    if (byOption.has(option)) throw new FlowrynError("bad_args", `option "${sanitizeLine(option, 40)}" has two --consequence flags; give it one`);
+    byOption.set(option, entry.slice(colon + 1));
+  }
+  const costs = checkOptionCosts(options, byOption, recommend === null ? [] : [recommend], downside);
+  if ("problem" in costs) throw new FlowrynError("bad_args", `${costs.problem}. Give each option --consequence "<option>: <what happens, what waits, what breaks if wrong>" and the recommendation --downside`, `e.g. ${ASK_COSTS_EXAMPLE}`);
+  return costs;
+}
 
 /** What a worker does after an ask: a blocking or reserved one (or a parked pipeline) ends the turn; any other goes on with its recommendation. */
 function askHint(waits: boolean): string {

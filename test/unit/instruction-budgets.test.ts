@@ -31,9 +31,10 @@ describe("instruction budgets", () => {
     expect(SKILL_DESCRIPTION.length).toBeLessThanOrEqual(240);
   });
 
-  test("assumption: the worker contract stays under 425 tokens whole (its own lines: test/unit/harness.test.ts)", () => {
+  // 425 -> 435 tokens (docs/notes/2026-11-15-worker-questions-carry-gn.md): the ask line names each option's consequence.
+  test("assumption: the worker contract stays under 435 tokens whole (its own lines: test/unit/harness.test.ts)", () => {
     const text = workerContract("claude", STYLE_BLOCK, { base: "release/2", defaultBranch: "main" });
-    expect(text.length).toBeLessThanOrEqual(1_700);
+    expect(text.length).toBeLessThanOrEqual(1_740);
   });
 });
 

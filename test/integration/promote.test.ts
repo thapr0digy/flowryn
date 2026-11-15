@@ -232,7 +232,7 @@ describe("a scout in a review with questions", () => {
     "is promoted: its open review questions close unanswered, its page is no longer polled and its conversation is summarized for the leader",
     async () => {
       const page = filledDesignPage({ widget: true });
-      const questions = JSON.stringify({ questions: [{ key: "store", kind: "single", question: "Where?", options: ["db", "file"], recommend: "db", blocks: "which store the cache writes to" }] });
+      const questions = JSON.stringify({ questions: [{ key: "store", kind: "single", question: "Where?", options: [{ label: "db", consequence: "tokens survive restarts" }, { label: "file", consequence: "no migration; two daemons race" }], recommend: "db", recommended_downside: "a migration first", blocks: "which store the cache writes to" }] });
       const env = await fleet({ extraConfig: ["[workflows.scout-review]", 'stages = [ { id = "design", gate = "review" }, { id = "investigate" } ]'].join("\n") });
       const dispatched = await env.json(["dispatch", "web", "--kind", "scout", "--workflow", "scout-review", "--body-file", "-"], {
         stdin: [

@@ -974,6 +974,16 @@ const NM_RECORD_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN nm_record TEXT;
 `;
 
+/**
+ * A worker question's option costs (docs/notes/2026-11-15-worker-questions-carry-gn.md): each
+ * option's one-line consequence as a JSON object keyed by option, and the recommended choice's
+ * main downside. Null on older rows and on the leader's standalone decisions.
+ */
+const OPTION_COSTS_SQL = /* sql */ `
+ALTER TABLE decisions ADD COLUMN consequences TEXT;
+ALTER TABLE decisions ADD COLUMN downside TEXT;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1266,6 +1276,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 60, name: "away-merges", sql: AWAY_MERGES_SQL, rebuildsReferencedTable: true },
   { version: 61, name: "prompt-episodes", sql: PROMPT_EPISODES_SQL },
   { version: 62, name: "decisions-nm-record", sql: NM_RECORD_SQL },
+  { version: 63, name: "decisions-option-costs", sql: OPTION_COSTS_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

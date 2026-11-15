@@ -102,6 +102,27 @@ describe("binding questions", () => {
     expect(() => chatForm(w.db, w.decision, MERGE_DEFAULTS)).toThrow("already answered");
   });
 
+  test("each option's description is the worker's consequence, the recommended one ending with its downside; an older decision keeps the generic text", () => {
+    const w = world();
+    expect(chatForm(w.db, w.decision, MERGE_DEFAULTS).question.options).toEqual([
+      { label: "yes (Recommended)", description: `Record "yes" as your answer to ${w.decision}` },
+      { label: "no", description: `Record "no" as your answer to ${w.decision}` },
+    ]);
+    const consequences = JSON.stringify({ yes: "old tokens stop working at once; clients re-auth.", no: "the leaked key stays valid until it expires" });
+    tx(w.db, () => w.db.query("UPDATE decisions SET consequences = ?2, downside = ?3 WHERE id = ?1").run(w.decision, consequences, "every client signs in again today"));
+    const form = chatForm(w.db, w.decision, MERGE_DEFAULTS);
+    expect(form.question.options).toEqual([
+      { label: "yes (Recommended)", description: "old tokens stop working at once; clients re-auth. Downside: every client signs in again today" },
+      { label: "no", description: "the leaked key stays valid until it expires" },
+    ]);
+    expect(form.choices.map((c) => c.label)).toEqual(["yes (Recommended)", "no"]);
+    // A multi choice marks and costs each recommended option.
+    tx(w.db, () => w.db.query("UPDATE decisions SET kind = 'multi', recommendation = 'yes, no' WHERE id = ?1").run(w.decision));
+    const multi = chatForm(w.db, w.decision, MERGE_DEFAULTS).question.options;
+    expect(multi.map((o) => o.label)).toEqual(["yes (Recommended)", "no (Recommended)"]);
+    expect(multi.every((o) => o.description.endsWith("Downside: every client signs in again today"))).toBe(true);
+  });
+
   test("the comparison and hash see only what the user sees, in order; key order and extra fields do not matter", () => {
     const a = { question: "q1 · x", header: "q1", options: [{ label: "A", description: "a" }, { label: "B", description: "b" }], multiSelect: false };
     const reordered = { multiSelect: false, options: [{ description: "a", label: "A" }, { description: "b", label: "B" }], header: "q1", question: "q1 · x", extra: 1 };
