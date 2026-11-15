@@ -747,8 +747,10 @@ export class LandingQueue implements LandingHooks {
    * A local-only line's candidates. The chain starts at the landing entry's
    * head, or at main's tip when none lands; each waiting entry within the
    * depth gets a candidate on the head ahead of it, as speculate() does. An
-   * entry waiting on its worker stays out of the chain, so the ones behind it
-   * build on what is ahead of it, and keeps a candidate on main for its turn.
+   * entry whose worker has kept it waiting LOCAL_TURN_WAIT_MS stays out of the
+   * chain, so the ones behind it build on what is ahead of it, and keeps a
+   * candidate on main for its turn. Within the wait it stays in the chain, so
+   * a worker that turns ready in time costs the ones behind no rebuild.
    * A head of line whose merge onto main conflicts goes back to its worker.
    * Returns whether an entry left the line.
    */
@@ -763,7 +765,7 @@ export class LandingQueue implements LandingHooks {
     let built = 0;
     let left = false;
     for (const [i, row] of line.filter((r) => r.state === "waiting").entries()) {
-      const waitingOnWorker = !head && row.blocked_since !== null;
+      const waitingOnWorker = !head && this.passedOver(row);
       const on = waitingOnWorker ? main : base;
       if (!waitingOnWorker) {
         if (base === null || room <= 0) {
@@ -841,8 +843,13 @@ export class LandingQueue implements LandingHooks {
   private turnBlocked(row: LandingRow, why: string): TurnOutcome {
     const outcome = this.blocked(row, why);
     if (outcome !== "blocked") return outcome;
-    const since = getLanding(this.deps.db, row.id)?.blocked_since ?? null;
-    return since !== null && this.deps.now() - since >= LOCAL_TURN_WAIT_MS ? "passed" : "blocked";
+    const fresh = getLanding(this.deps.db, row.id);
+    return fresh && this.passedOver(fresh) ? "passed" : "blocked";
+  }
+
+  /** Whether the entry's worker has kept its turn waiting LOCAL_TURN_WAIT_MS. */
+  private passedOver(row: LandingRow): boolean {
+    return row.blocked_since !== null && this.deps.now() - row.blocked_since >= LOCAL_TURN_WAIT_MS;
   }
 
   /**

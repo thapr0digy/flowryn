@@ -10,7 +10,7 @@ import { deliveredOf } from "../../src/lifecycle/delivery.ts";
 import { getRunWithPolicy, type RunWithPolicy } from "../../src/lifecycle/runs.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { liveAutoMerge } from "../../src/verify/auto-merge.ts";
-import { LOCAL_TURN_WAIT_MS, MAX_SKIPPED_TURNS, verifyConfig } from "../../src/verify/config.ts";
+import { MAX_SKIPPED_TURNS, verifyConfig } from "../../src/verify/config.ts";
 import { landingCell, landingProgress, LandingQueue, liveLanding, TRAIN_RANK, type LandingRow } from "../../src/verify/landing-queue.ts";
 import { verifyPolicyId } from "../../src/verify/policy.ts";
 import { getRequest, markStarted } from "../../src/verify/queue.ts";
@@ -317,7 +317,7 @@ describe("a failed car", () => {
 });
 
 describe("a worker that is not ready on its turn", () => {
-  test(`waits ${LOCAL_TURN_WAIT_MS / 60_000} min, then the ones behind go ahead; it keeps its place, and is held at its ${MAX_SKIPPED_TURNS}rd skipped turn`, async () => {
+  test(`waits 5 min, then the ones behind go ahead; it keeps its place, and is held at its ${MAX_SKIPPED_TURNS}rd skipped turn`, async () => {
     const s1 = ship(1, "one.txt", "one\n");
     const behind = [ship(2, "two.txt", "two\n"), ship(3, "three.txt", "three\n"), ship(4, "four.txt", "four\n")];
     // Main moved since s1 branched: its candidate is a merge, so its turn needs its checkout.
@@ -334,7 +334,9 @@ describe("a worker that is not ready on its turn", () => {
       now += 60_000;
       await lq.pass();
       expect(row(s).state).toBe("waiting");
-      now += LOCAL_TURN_WAIT_MS;
+      // Within the wait it stays in the train: the one behind is built on its candidate, not rebuilt on main.
+      expect(row(s).train_base).toBe(row(s1).train_head);
+      now += 5 * 60_000;
       await lq.pass();
       expect(row(s).state).toBe("landing");
       expect(events("landing.turn_skipped").length).toBe(turn + 1);
