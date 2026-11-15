@@ -93,8 +93,9 @@ const merge: VerbSpec = {
       const attempt = findAttempt(ctx.db, { session: ctx.caller.session, action: "merge", task, now: ctx.now(), allowRed: allowRed ?? null });
       if (attempt && (!attempt.head_sha || attempt.head_sha === facts.head)) chosen.choice = { kind: "attempt", attempt, session: ctx.caller.session };
     }
-    // A landing-queue project (src/verify/landing-queue.ts): your word puts the open PR in line; the queue brings it up to date, verifies and merges it.
-    if (facts.pr?.state === "open" && landingQueued(ctx.config(), run.project_id) && queueable(ctx.db, run)) {
+    // A landing-queue project (src/verify/landing-queue.ts): your word puts the open PR (or local branch) in line; the queue brings it up to date, verifies and merges it.
+    const open = facts.pr ? facts.pr.state === "open" : facts.delivered.kind === "local";
+    if (open && landingQueued(ctx.config(), run.project_id, run.delivery_mode) && queueable(ctx.db, run)) {
       if (!chosen.choice) throw new FlowrynError("approval_required", `no approval to queue ${run.task_id} for landing: ${chosen.why}`, `the leader runs flowryn merge ${run.task_id} and asks you, or in your shell: flowryn approve ${run.task_id}`);
       if (run.sensitive && chosen.choice.kind === "yolo") throw new FlowrynError("approval_required", `no approval to queue ${run.task_id} for landing: sensitive work needs a human approval even under yolo`, `approve in your shell: flowryn approve ${run.task_id}`);
       return { facts, gate: { waived: null, alreadyMerged: false, localGreen: null }, chosen, seen, queue: true } satisfies QueuedMerge;

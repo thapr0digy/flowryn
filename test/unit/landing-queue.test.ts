@@ -135,12 +135,20 @@ function openItems(kind: string): string[] {
 
 describe("[projects.<id>] landing", () => {
   test("manual by default; queue needs verify steps; anything else is refused; flowryn config shows it", () => {
-    expect(landingMode(config(`[projects.web]\nverify = ["bun test"]\n`), "web")).toBe("manual");
-    expect(landingMode(config(QUEUE), "web")).toBe("queue");
-    expect(() => landingMode(config(`[projects.web]\nlanding = "queue"\n`), "web")).toThrow(/landing = "queue" needs verify steps/);
-    expect(() => landingMode(config(`[projects.web]\nverify = ["x"]\nlanding = "fifo"\n`), "web")).toThrow(/landing must be "queue" or "manual"/);
-    expect(landingQueued(config(`[projects.web]\nlanding = "fifo"\n`), "web")).toBe(false);
+    expect(landingMode(config(`[projects.web]\nverify = ["bun test"]\n`), "web", "direct-PR")).toBe("manual");
+    expect(landingMode(config(QUEUE), "web", "direct-PR")).toBe("queue");
+    expect(() => landingMode(config(`[projects.web]\nlanding = "queue"\n`), "web", "direct-PR")).toThrow(/landing = "queue" needs verify steps/);
+    expect(() => landingMode(config(`[projects.web]\nverify = ["x"]\nlanding = "fifo"\n`), "web", "direct-PR")).toThrow(/landing must be "queue" or "manual"/);
+    expect(landingQueued(config(`[projects.web]\nlanding = "fifo"\n`), "web", "direct-PR")).toBe(false);
     expect(JSON.stringify(effectiveConfig(config(QUEUE)))).toContain('"landing":"queue"');
+  });
+
+  test("unset, a local-only project with verify steps queues; manual opts it out; without verify steps it is manual", () => {
+    const steps = `[projects.web]\nverify = ["bun test"]\n`;
+    expect(landingMode(config(steps), "web", "local-only")).toBe("queue");
+    expect(landingMode(config(`${steps}landing = "manual"\n`), "web", "local-only")).toBe("manual");
+    expect(landingMode(config(`[projects.web]\nmax_workers = 2\n`), "web", "local-only")).toBe("manual");
+    for (const mode of ["direct-PR", "no-mistakes", null]) expect(landingMode(config(steps), "web", mode)).toBe("manual");
   });
 });
 

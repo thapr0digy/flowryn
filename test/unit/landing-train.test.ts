@@ -127,10 +127,12 @@ const policy = () => verifyPolicyId(verifyConfig(config(), "web")!);
 
 describe("[projects.<id>] landing_train_depth", () => {
   test("2 by default on a queue project, 1 (no train) off one; outside 1..5 is refused", () => {
-    expect(landingTrainDepth(config(null), "web")).toBe(DEFAULT_TRAIN_DEPTH);
+    expect(landingTrainDepth(config(null), "web", "direct-PR")).toBe(DEFAULT_TRAIN_DEPTH);
     expect(DEFAULT_TRAIN_DEPTH).toBe(2);
-    expect(landingTrainDepth(config(4), "web")).toBe(4);
-    expect(landingTrainDepth(parseConfig(`[projects.web]\nverify = ["x"]\nlanding_train_depth = 3\n`, dir), "web")).toBe(1);
+    expect(landingTrainDepth(config(4), "web", "direct-PR")).toBe(4);
+    expect(landingTrainDepth(parseConfig(`[projects.web]\nverify = ["x"]\nlanding_train_depth = 3\n`, dir), "web", "direct-PR")).toBe(1);
+    // A local-only project queues by default, so its depth applies unset.
+    expect(landingTrainDepth(parseConfig(`[projects.web]\nverify = ["x"]\nlanding_train_depth = 3\n`, dir), "web", "local-only")).toBe(3);
     for (const bad of ["0", "6", "1.5", '"2"']) expect(() => verifyConfig(parseConfig(`${QUEUE}landing_train_depth = ${bad}\n`, dir), "web")).toThrow(/landing_train_depth must be an integer from 1/);
   });
 
@@ -303,7 +305,7 @@ describe("a car that leaves", () => {
     await queue().pass();
     expect([row(s2).train_head, row(s3).train_head]).toEqual([null, null]);
     // Tried once, not on every pass.
-    expect(trainEvents("landing.train_skipped")).toEqual([{ landing: row(s2).id, head: s2.head, base: expect.any(String), why: expect.stringContaining("conflicts") }]);
+    expect(trainEvents("landing.train_skipped")).toEqual([{ landing: row(s2).id, head: s2.head, base: expect.any(String), why: expect.stringContaining("conflicts in same.txt"), files: ["same.txt"] }]);
   });
 });
 

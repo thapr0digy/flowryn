@@ -337,7 +337,7 @@ export function applyMergeValidation(db: Db, input: { id: string; result: Parame
   appendEvent(db, { source: "daemon", kind: "away_merge.approved", runId: run!.id, taskId: run!.task_id, payload: { validation: row.id, approval: approval.id, ref, head: row.head, away_since: away!.since, by: away!.by }, ts: now });
   // A landing that left for want of an approval waits no longer.
   resolveRunItems(db, run!.id, ["auto_merge_held"], "away_merge.approved", now);
-  if (!landingQueued(config, run!.project_id)) {
+  if (!landingQueued(config, run!.project_id, run!.delivery_mode)) {
     // The delivery's auto-verify gives way to the merge, which follows its passed verify.
     if (liveAutoMerge(db, run!.id)?.merge !== 1) {
       supersedeAutoMerge(db, run!.id, "away_merge", `the validator ${row.id} passed it while you are away`, now);

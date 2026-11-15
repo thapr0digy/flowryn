@@ -142,16 +142,23 @@ export function sendConflictBack(db: Db, run: RunWithPolicy, delivered: Delivere
     }
     return false;
   }
-  const seen = conflict.source === "github" ? `GitHub reads it as not mergeable at ${conflict.head.slice(0, 8)}` : `the landing queue's merge of origin/${base} into ${conflict.head.slice(0, 8)} conflicted`;
+  const local = delivered.kind === "local";
+  const seen =
+    conflict.source === "github"
+      ? `GitHub reads it as not mergeable at ${conflict.head.slice(0, 8)}`
+      : `the landing queue's merge of ${local ? "" : "origin/"}${base} into ${conflict.head.slice(0, 8)} conflicted`;
   const files = conflict.files && conflict.files.length > 0 ? ` Conflicted: ${conflict.files.slice(0, 20).join(", ")}${conflict.files.length > 20 ? ` and ${conflict.files.length - 20} more` : ""}.` : "";
-  const text = `Your PR ${conflict.url} conflicts with ${base}: ${seen}.${files} Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}), resolve the conflicts, run the tests, then ship it again and deliver. Never rebase or force-push.`;
-  const { seq } = sendBack(db, run, { text, feedback: `conflicts with ${base}`, why: "the PR conflicts with its base", event: { source: conflict.source, kind: "run.conflict_nudged", payload: { pr: conflict.url, base, nudge: nudges.length + 1, ...(conflict.files ? { files: conflict.files.slice(0, 20) } : {}) } } }, now);
+  const text = local
+    ? `Your branch ${run.branch} conflicts with ${base}: ${seen}.${files} Merge ${base} into your branch with a new commit (git merge ${base}), resolve the conflicts, run the tests, commit, then deliver --local again. Never rebase.`
+    : `Your PR ${conflict.url} conflicts with ${base}: ${seen}.${files} Merge origin/${base} into your branch with a new commit (git fetch origin, then git merge origin/${base}), resolve the conflicts, run the tests, then ship it again and deliver. Never rebase or force-push.`;
+  const what = local ? "branch" : "PR";
+  const { seq } = sendBack(db, run, { text, feedback: `conflicts with ${base}`, why: `the ${what} conflicts with its base`, event: { source: conflict.source, kind: "run.conflict_nudged", payload: { pr: conflict.url, base, nudge: nudges.length + 1, ...(conflict.files ? { files: conflict.files.slice(0, 20) } : {}) } } }, now);
   openItem(db, {
     kind: "conflict_nudged",
     eventSeq: seq,
     taskId: run.task_id,
     runId: run.id,
-    line: `PR conflicts with ${base}: ${title} (${run.project_id}); sent back to merge origin/${base} and deliver again (nudge ${nudges.length + 1} of ${MAX_CONFLICT_NUDGES})`,
+    line: `${local ? "Branch" : "PR"} conflicts with ${base}: ${title} (${run.project_id}); sent back to merge ${local ? "" : "origin/"}${base} and deliver again (nudge ${nudges.length + 1} of ${MAX_CONFLICT_NUDGES})`,
     now,
   });
   return true;

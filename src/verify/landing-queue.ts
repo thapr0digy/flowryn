@@ -3,9 +3,10 @@ import { findOpenRunItem, openItem } from "../attention/items.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { getMeta, setMeta, tx, type Db } from "../db/db.ts";
 import { appendEvent, type EventSource } from "../db/events.ts";
-import { carryLanding, deliveredOf, prEvidence, type Delivered } from "../lifecycle/delivery.ts";
-import { getProject } from "../lifecycle/projects.ts";
+import { approvalRef, carryLanding, deliveredOf, prEvidence, type Delivered } from "../lifecycle/delivery.ts";
+import { getProject, type ProjectRow } from "../lifecycle/projects.ts";
 import { getRunWithPolicy, isTerminal, runBase, taskTitle, type RunWithPolicy } from "../lifecycle/runs.ts";
+import { sendBack } from "../lifecycle/send-back.ts";
 import { findHumanApproval, insertApproval, isRoutineMerge, type ApprovalRow } from "../policy/approvals.ts";
 import { autonomyForRun, mintAutonomyApproval } from "../policy/autonomy.ts";
 import { findAwayApproval } from "../attention/away-merge.ts";
@@ -14,10 +15,11 @@ import type { GitRunner } from "../policy/landed.ts";
 import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { createAutoMerge, getAutoMerge, HOLD_RELEASED, setReadyProgress, supersedeAutoMerge, type AutoMergeRow, type LandingHooks } from "./auto-merge.ts";
-import { landingQueued, landingTrainDepth, verifyConfig } from "./config.ts";
+import { landingQueued, landingTrainDepth, LOCAL_TURN_WAIT_MS, MAX_SKIPPED_TURNS, verifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
-import { finishedAtHead, interruptedByStop } from "./store.ts";
+import { routeVerifyOutcome, SENT_BACK_KIND, sendBackText, sentBackPayload } from "./route.ts";
+import { finishedAtHead, getVerification, interruptedByStop, type Verification } from "./store.ts";
 
 /**
  * The landing queue (docs/notes/2026-10-30-landing-queue-the-65.md): on a
@@ -51,6 +53,21 @@ import { finishedAtHead, interruptedByStop } from "./store.ts";
  * into main writes exactly the tree that was verified (trainBaseHolds). A base
  * that changed (the entry ahead left, was sent back, merged again) drops the
  * candidate; the entry is built again on its new base, or integrated as before.
+ *
+ * A local-only project (docs/notes/2026-11-15-local-only-auto-x9.md) queues by
+ * default when it has verify steps, and every entry lands at a candidate: the
+ * head of line's is built on local main's tip, each car's on the candidate
+ * ahead, all in the object store and verified in the verify runner's own
+ * worktree (no fetch, no push). A candidate that already holds its base is the
+ * delivered head itself. The entry whose candidate is on main's tip starts
+ * landing: its worktree is fast-forwarded to the candidate (only when the
+ * worker is idle and the checkout clean and at the delivered head) and the
+ * delivery carried; its auto-merge follows the candidate's verify and fast-
+ * forwards main to it. A conflict with main goes back to the worker naming the
+ * paths; a car whose candidate failed goes back with that log once main is its
+ * base. An entry whose worker is not ready is waited on LOCAL_TURN_WAIT_MS,
+ * then the entries behind it go ahead (it keeps its place); at its
+ * MAX_SKIPPED_TURNS-th skipped turn it is held.
  */
 
 export const LANDING_STATES = ["waiting", "landing", "landed", "left"] as const;
@@ -71,8 +88,14 @@ export function landingMergeMessage(base: string, branch: string): string {
 export function trainMergeMessage(base: string, branch: string): string {
   return `Merge ${base.slice(0, 8)}, the PR ahead in the landing train, into ${branch}`;
 }
+/** A local-only candidate's message: the commit of the base it merges in, and whether that is main's tip or the entry ahead's candidate. */
+export function localMergeMessage(base: string, branch: string, onto: { main: string } | null): string {
+  return onto ? `Merge ${onto.main} at ${base.slice(0, 8)} into ${branch} (Flowryn merge queue)` : `Merge ${base.slice(0, 8)}, the branch ahead in the merge queue, into ${branch}`;
+}
 /** A candidate's verify waits behind every other request (rank 0, recovered -1): it runs only on a free slot. */
 export const TRAIN_RANK = 1;
+/** Rounds of one local-only line per pass: an entry that leaves (a conflict, a send-back) lets the next go at once. */
+const MAX_LOCAL_ROUNDS = 4;
 
 export interface LandingRow {
   id: string;
@@ -133,15 +156,59 @@ export function placeOf(db: Db, row: LandingRow): { position: number; of: number
   return { position: index + 1, of: line.length, ahead: index > 0 ? line[index - 1]!.task_id : null };
 }
 
-/** What `show` and the pr_ready line say of an entry. */
+function isLocal(row: Pick<LandingRow, "ref">): boolean {
+  return row.ref.startsWith("local:");
+}
+
+/** Where a candidate's verify stands: "verifying v41", "verify v41 passed", "verify queued (vr12)", or null without one. */
+function candidateVerify(db: Db, row: LandingRow): string | null {
+  const request = row.train_request ? getRequest(db, row.train_request) : null;
+  if (!request) return null;
+  const v = request.verification_id ? getVerification(db, request.verification_id) : null;
+  if (v) return v.state === "running" ? `verifying ${v.id}` : `verify ${v.id} ${v.state}`;
+  return request.state === "queued" ? `verify queued (${request.id})` : null;
+}
+
+/** Turns a local-only entry was passed over while its worker was not ready. */
+function skippedTurns(db: Db, row: LandingRow): number {
+  return (db.query("SELECT COUNT(*) AS n FROM events WHERE run_id = ?2 AND kind = 'landing.turn_skipped' AND json_extract(payload, '$.landing') = ?1").get(row.id, row.run_id) as { n: number }).n;
+}
+
+/**
+ * A local-only entry that waited on its worker loses its turn to `by`, which
+ * starts landing ahead of it, with one landing.turn_skipped event; at its
+ * MAX_SKIPPED_TURNS-th it leaves the line, held for the leader. Call inside a transaction.
+ */
+function skipTurn(db: Db, row: LandingRow, by: LandingRow, now: number): void {
+  const skipped = skippedTurns(db, row) + 1;
+  const why = row.detail ?? "its worker was not ready";
+  appendEvent(db, { source: "daemon", kind: "landing.turn_skipped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, by: by.id, by_task: by.task_id, skipped, of: MAX_SKIPPED_TURNS, why }, ts: now });
+  if (skipped >= MAX_SKIPPED_TURNS) leave(db, row, "turns_skipped", `passed over ${skipped} times while its worker was not ready (${why})`, now, { next: `flowryn show ${row.task_id}` });
+}
+
+/** What `show`, `fleet` and the pr_ready line say of an entry. */
 export function landingProgress(db: Db, row: LandingRow): string {
-  if (row.state === "landing") return `landing queue: first in line (${row.id})`;
+  const verify = isLocal(row) ? candidateVerify(db, row) : null;
+  if (row.state === "landing") return `landing queue: first in line${isLocal(row) && row.detail ? `, ${row.detail}` : ""}${verify ? `, ${verify}` : ""} (${row.id})`;
   if (row.state === "waiting") {
     const place = placeOf(db, row);
-    const train = row.train_head ? `, verifying ahead at ${row.train_head.slice(0, 8)}` : "";
-    return `landing queue: ${place ? `${place.position} of ${place.of}${place.ahead ? `, behind ${place.ahead}` : ""}` : "waiting"}${train} (${row.id})`;
+    const where = place ? `${place.position} of ${place.of}${place.ahead ? `, behind ${place.ahead}` : ""}` : "waiting";
+    if (!isLocal(row)) return `landing queue: ${where}${row.train_head ? `, verifying ahead at ${row.train_head.slice(0, 8)}` : ""} (${row.id})`;
+    const candidate = row.train_head && row.train_base ? `, candidate ${row.train_head.slice(0, 8)} on ${row.train_base.slice(0, 8)}${verify ? `, ${verify}` : ""}` : "";
+    const skipped = skippedTurns(db, row);
+    const blocked = row.blocked_since !== null ? `, waiting on its worker (${row.detail ?? "not ready"})` : "";
+    return `landing queue: ${where}${candidate}${blocked}${skipped > 0 ? `, passed over ${skipped} of ${MAX_SKIPPED_TURNS}` : ""} (${row.id})`;
   }
   return `landing queue ${row.state}${row.reason ? ` (${row.reason})` : ""}${row.detail ? `: ${row.detail}` : ""}`;
+}
+
+/** The fleet's needs cell for a run in a line: its place, and for a local-only entry its candidate's verify. */
+export function landingCell(db: Db, row: LandingRow): string {
+  if (row.state === "landing") return `landing${isLocal(row) ? ` ${candidateVerify(db, row) ?? ""}`.trimEnd() : ""}`;
+  const place = placeOf(db, row);
+  const verify = isLocal(row) && row.train_base ? candidateVerify(db, row) : null;
+  const on = verify && row.train_base ? ` ${verify} on ${row.train_base.slice(0, 8)}` : "";
+  return `queue ${place ? `${place.position}/${place.of}` : "-"}${on}${row.blocked_since !== null ? " worker not ready" : ""}`;
 }
 
 interface MoveFields {
@@ -220,13 +287,15 @@ export function enqueueLanding(db: Db, run: RunWithPolicy, delivered: Delivered,
   const next = Number(getMeta(db, "next_landing_no") ?? "1");
   setMeta(db, "next_landing_no", String(next + 1));
   const id = `lq${next}`;
+  // What verifications and approvals bind to: the PR URL, or local:<branch>.
+  const ref = approvalRef(delivered);
   db.query(
     `INSERT INTO landing_queue (id, project_id, run_id, task_id, ref, entered_head, head_sha, approval_id, state, enqueued_at, state_since, updated_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, 'waiting', ?8, ?8, ?8)`,
-  ).run(id, run.project_id, run.id, run.task_id, delivered.ref, delivered.head, approvalId, now);
+  ).run(id, run.project_id, run.id, run.task_id, ref, delivered.head, approvalId, now);
   const row = getLanding(db, id)!;
   const place = placeOf(db, row);
-  appendEvent(db, { source, kind: "landing.queued", runId: run.id, taskId: run.task_id, payload: { landing: id, ref: delivered.ref, head: delivered.head, approval: approvalId, position: place?.position ?? null, of: place?.of ?? null }, ts: now });
+  appendEvent(db, { source, kind: "landing.queued", runId: run.id, taskId: run.task_id, payload: { landing: id, ref, head: delivered.head, approval: approvalId, position: place?.position ?? null, of: place?.of ?? null }, ts: now });
   refreshLine(db, run.project_id);
   return row;
 }
@@ -253,7 +322,7 @@ function leave(db: Db, row: LandingRow, reason: string, detail: string, now: num
  */
 function retakeForAwayApproval(db: Db, run: RunWithPolicy, delivered: Delivered, now: number): boolean {
   if (!run.sensitive) return false;
-  const approval = findAwayApproval(db, { task: run.task_id, ref: delivered.ref, head: delivered.head, now });
+  const approval = findAwayApproval(db, { task: run.task_id, ref: approvalRef(delivered), head: delivered.head, now });
   if (!approval) return false;
   const other = db
     .query("SELECT 1 FROM landing_queue WHERE run_id = ?1 AND (head_sha = ?2 OR entered_head = ?2) AND NOT (state = 'left' AND reason IN ('approval_needed','user_back') AND state_since <= ?3)")
@@ -273,7 +342,7 @@ export const leaveLanding = leave;
  * does a live row. Call inside the delivery's transaction.
  */
 export function deliveredToQueue(db: Db, config: FlowrynConfig, run: RunWithPolicy, head: string, now: number): boolean {
-  if (!landingQueued(config, run.project_id)) return false;
+  if (!landingQueued(config, run.project_id, run.delivery_mode)) return false;
   supersedeAutoMerge(db, run.id, "redelivered", `delivered again at ${head.slice(0, 8)}`, now, "cli");
   const live = liveLanding(db, run.id);
   // The watcher carried the delivery across the queue's own push, between it and the queue's carry: the entry is landing it.
@@ -282,11 +351,12 @@ export function deliveredToQueue(db: Db, config: FlowrynConfig, run: RunWithPoli
   return true;
 }
 
-/** Whether the run can join a line: a ready ship's PR on its project's default branch, not stacked. */
+/** Whether the run can join a line: a ready ship's PR (local-only: its branch) on its project's default branch, not stacked. */
 function canQueue(db: Db, run: RunWithPolicy, delivered: Delivered | null): delivered is Delivered {
-  if (run.kind !== "ship" || run.state !== "ready" || run.stacked_on || !delivered || delivered.kind !== "pr") return false;
+  if (run.kind !== "ship" || run.state !== "ready" || run.stacked_on || !delivered) return false;
   const project = getProject(db, run.project_id);
-  return project !== null && runBase(run, project) === project.default_branch;
+  if (!project || runBase(run, project) !== project.default_branch) return false;
+  return delivered.kind === (project.delivery_mode === "local-only" ? "local" : "pr");
 }
 
 /** Whether the queue may take the run's delivered PR at all (for the merge verb's refusal). */
@@ -307,6 +377,10 @@ export interface LandingQueueDeps {
 }
 
 type HeadOutcome = "started" | "blocked" | "left";
+/** A local-only entry's turn: as HeadOutcome, or `passed` when its worker kept it waiting LOCAL_TURN_WAIT_MS and the ones behind may go. */
+type TurnOutcome = HeadOutcome | "passed";
+/** A candidate built (its head), a merge that conflicts (the paths git named), or nothing (git failed, or the entry moved on). */
+type Built = { head: string } | { conflict: string[] } | null;
 
 /**
  * The queue's controller: the AutoMerger calls pass() around its own pass and
@@ -347,7 +421,7 @@ export class LandingQueue implements LandingHooks {
       return refreshLine(db, row.project_id);
     }
     if (isTerminal(run.state)) return void leave(db, row, run.state, `the run is ${run.state}`, now);
-    if (!landingQueued(this.deps.config(), row.project_id)) return void leave(db, row, "landing_off", `project ${row.project_id} no longer queues its landings`, now);
+    if (!landingQueued(this.deps.config(), row.project_id, run.delivery_mode)) return void leave(db, row, "landing_off", `project ${row.project_id} no longer queues its landings`, now);
     // A merge asked for by hand, or the queue's own merge in flight: wait for its proof.
     if (run.state === "merging") return;
     if (run.state !== "ready") return void leave(db, row, "sent_back", `the run is ${run.state}`, now);
@@ -374,9 +448,10 @@ export class LandingQueue implements LandingHooks {
     const ready = db.query("SELECT r.id FROM runs r WHERE r.state = 'ready' AND NOT EXISTS (SELECT 1 FROM landing_queue l WHERE l.run_id = r.id AND l.state IN ('waiting','landing'))").all() as { id: string }[];
     for (const { id } of ready) {
       const run = getRunWithPolicy(db, id);
-      if (!run || !landingQueued(this.deps.config(), run.project_id)) continue;
+      if (!run || !landingQueued(this.deps.config(), run.project_id, run.delivery_mode)) continue;
       const delivered = deliveredOf(db, run.task_id);
       if (!canQueue(db, run, delivered)) continue;
+      const ref = approvalRef(delivered);
       // Once per head: an entry that left at this head (held, conflicted) is not taken again until something changes,
       // such as a verify of the head passing after its hold (releaseHolds superseded its auto-merge as hold_released).
       const taken = db
@@ -390,12 +465,12 @@ export class LandingQueue implements LandingHooks {
       // An auto-verify (merge = 0) is not one: the landing supersedes it and follows its verify.
       if (db.query("SELECT 1 FROM auto_merges WHERE run_id = ?1 AND merge = 1 AND state IN ('queued','verifying','waiting_checks','merging')").get(run.id)) continue;
       const routine = isRoutineMerge(db, run.task_id);
-      let approval = routine ? null : findHumanApproval(db, { task: run.task_id, action: "merge", ref: delivered.ref, head: delivered.head, now });
+      let approval = routine ? null : findHumanApproval(db, { task: run.task_id, action: "merge", ref, head: delivered.head, now });
       // Sensitive work during an away you started: the validator's pass at exactly this head (src/attention/away-merge.ts).
-      if (!routine && !approval && run.sensitive) approval = findAwayApproval(db, { task: run.task_id, ref: delivered.ref, head: delivered.head, now });
+      if (!routine && !approval && run.sensitive) approval = findAwayApproval(db, { task: run.task_id, ref, head: delivered.head, now });
       // Unattended mode: your standing approval for the project stands in for your word at this head.
       const standing = routine || approval ? null : autonomyForRun(db, run, now);
-      if (standing) approval = mintAutonomyApproval(db, standing, { task: run.task_id, ref: delivered.ref, head: delivered.head, action: "merge", runId: run.id }, now);
+      if (standing) approval = mintAutonomyApproval(db, standing, { task: run.task_id, ref, head: delivered.head, action: "merge", runId: run.id }, now);
       if (!routine && !approval) continue;
       enqueueLanding(db, run, delivered, approval?.id ?? null, now);
     }
@@ -403,6 +478,8 @@ export class LandingQueue implements LandingHooks {
 
   /** Bring the first entry that can go up to date and start its landing; the rest wait their turn. */
   private async advanceProject(projectId: string): Promise<void> {
+    const project = getProject(this.deps.db, projectId);
+    if (project?.delivery_mode === "local-only") return this.advanceLocal(project);
     const line = projectLine(this.deps.db, projectId);
     if (!line.some((r) => r.state === "landing")) {
       for (const row of line) {
@@ -423,7 +500,7 @@ export class LandingQueue implements LandingHooks {
    */
   private async speculate(projectId: string): Promise<void> {
     const { db } = this.deps;
-    const depth = landingTrainDepth(this.deps.config(), projectId);
+    const depth = landingTrainDepth(this.deps.config(), projectId, getProject(db, projectId)?.delivery_mode ?? null);
     const line = projectLine(db, projectId);
     const head = line.find((r) => r.state === "landing");
     if (!head) return;
@@ -441,30 +518,38 @@ export class LandingQueue implements LandingHooks {
       }
       if (row.train_head) tx(db, () => dropCandidate(db, getLanding(db, row.id) ?? row, `its base moved from ${row.train_base?.slice(0, 8) ?? "-"} to ${base!.slice(0, 8)}`, this.deps.now()));
       const candidate = await this.buildCandidate(row, base, i + 2);
-      base = candidate;
-      if (candidate) built++;
+      base = candidate && "head" in candidate ? candidate.head : null;
+      if (base) built++;
     }
     if (built > 0) this.deps.kickScheduler();
   }
 
   /** Whether the candidate's newest finished verify failed: the train goes no further behind it. */
   private candidateFailed(row: LandingRow): boolean {
-    const { db } = this.deps;
+    if (!todaysPolicy(this.deps.config(), row.project_id) || !row.train_head) return true;
+    return this.failedCandidate(row) !== null;
+  }
+
+  /** The candidate's newest finished verify when it did not pass (a cut-off one aside), else null. */
+  private failedCandidate(row: LandingRow): Verification | null {
     const policy = todaysPolicy(this.deps.config(), row.project_id);
-    if (!policy || !row.train_head) return true;
-    const finished = finishedAtHead(db, row.ref, row.train_head, policy);
-    return finished !== null && finished.state !== "passed" && !interruptedByStop(finished);
+    if (!policy || !row.train_head) return null;
+    const finished = finishedAtHead(this.deps.db, row.ref, row.train_head, policy);
+    return finished !== null && finished.state !== "passed" && !interruptedByStop(finished) ? finished : null;
   }
 
   /**
    * One candidate: git's own merge of the entry's delivered head and `base`
    * (merge-tree, then commit-tree with the delivered head as first parent),
    * in the project's object store, so its verify finds it; recorded on the
-   * entry with its request and a landing.train_built event. Null when the
-   * merge conflicts (recorded once per pair) or git fails (logged, tried
-   * again on a later pass); the entry waits its turn as before.
+   * entry with its request and a landing.train_built event. A conflict
+   * (recorded once per pair, with the paths git names) or a git failure
+   * (logged, tried again on a later pass) builds none; the entry waits its
+   * turn as before. `local`: a local-only line, whose head of line builds on
+   * main's tip (`main`, its verify at rank 0) and whose entry that already
+   * holds its base is its own candidate.
    */
-  private async buildCandidate(row: LandingRow, base: string, position: number): Promise<string | null> {
+  private async buildCandidate(row: LandingRow, base: string, position: number, local: { main: string; branch: string } | null = null): Promise<Built> {
     const { db, git } = this.deps;
     const run = getRunWithPolicy(db, row.run_id);
     const project = run ? getProject(db, run.project_id) : null;
@@ -472,39 +557,55 @@ export class LandingQueue implements LandingHooks {
     if (!run || !project || run.state !== "ready" || delivered?.head !== row.head_sha) return null;
     const policy = todaysPolicy(this.deps.config(), row.project_id);
     if (!policy) return null;
-    // A pair that would not merge is tried once, not on every pass.
-    const skipped = db
-      .query("SELECT 1 FROM events WHERE run_id = ?4 AND kind = 'landing.train_skipped' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.head') = ?2 AND json_extract(payload, '$.base') = ?3 LIMIT 1")
-      .get(row.id, row.head_sha, base, row.run_id);
+    const onMain = local !== null && base === local.main;
+    // A pair that would not merge is tried once, not on every pass; on main (a car's base that landed), a conflict sends the work back, so it is tried again.
+    const skipped =
+      !onMain &&
+      db
+        .query("SELECT 1 FROM events WHERE run_id = ?4 AND kind = 'landing.train_skipped' AND json_extract(payload, '$.landing') = ?1 AND json_extract(payload, '$.head') = ?2 AND json_extract(payload, '$.base') = ?3 LIMIT 1")
+        .get(row.id, row.head_sha, base, row.run_id);
     if (skipped) return null;
-    const merged = await git(["merge-tree", "--write-tree", "--no-messages", row.head_sha, base], project.path);
-    if (merged.code === 1) {
-      const why = `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts`;
-      tx(db, () => appendEvent(db, { source: "daemon", kind: "landing.train_skipped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, head: row.head_sha, base, why }, ts: this.deps.now() }));
+    let sha: string;
+    const holds = local ? await git(["merge-base", "--is-ancestor", base, row.head_sha], project.path) : null;
+    if (holds && holds.code !== 0 && holds.code !== 1) {
+      this.deps.log(`landing queue ${row.id}: git merge-base exited ${holds.code}: ${holds.stderr.trim()}`);
       return null;
     }
-    if (merged.code !== 0) {
-      this.deps.log(`landing queue ${row.id}: git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`);
-      return null;
+    if (holds?.code === 0) {
+      sha = row.head_sha;
+    } else {
+      const merged = await git(["merge-tree", "--write-tree", "--no-messages", "--name-only", row.head_sha, base], project.path);
+      if (merged.code === 1) {
+        const files = [...new Set(merged.stdout.split("\n").slice(1).map((f) => f.trim()).filter((f) => f.length > 0))];
+        const why = `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts${files.length > 0 ? ` in ${files.slice(0, 5).join(", ")}` : ""}`;
+        tx(db, () => appendEvent(db, { source: "daemon", kind: "landing.train_skipped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, head: row.head_sha, base, why, files: files.slice(0, 20) }, ts: this.deps.now() }));
+        return { conflict: files };
+      }
+      if (merged.code !== 0) {
+        this.deps.log(`landing queue ${row.id}: git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`);
+        return null;
+      }
+      const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
+      const message = local ? localMergeMessage(base, run.branch, onMain ? { main: project.default_branch } : null) : trainMergeMessage(base, run.branch);
+      const commit = await git(["commit-tree", tree, "-p", row.head_sha, "-p", base, "-m", message], project.path);
+      sha = commit.stdout.trim();
+      if (commit.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
+        this.deps.log(`landing queue ${row.id}: git commit-tree failed: ${commit.stderr.trim()}`);
+        return null;
+      }
     }
-    const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
-    const commit = await git(["commit-tree", tree, "-p", row.head_sha, "-p", base, "-m", trainMergeMessage(base, run.branch)], project.path);
-    const sha = commit.stdout.trim();
-    if (commit.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
-      this.deps.log(`landing queue ${row.id}: git commit-tree failed: ${commit.stderr.trim()}`);
-      return null;
-    }
+    const rank = onMain ? 0 : TRAIN_RANK;
     return tx(db, () => {
       const fresh = getLanding(db, row.id);
       if (!fresh || fresh.state !== "waiting" || fresh.head_sha !== row.head_sha || fresh.train_head) return null;
       const now = this.deps.now();
       const request =
         findQueued(db, fresh.ref, sha, policy) ??
-        insertRequest(db, { project_id: fresh.project_id, pr_url: fresh.ref, task_id: fresh.task_id, head_sha: sha, policy_id: policy, pr_number: null, head_ref: null, worktree: null, source: "auto", path: autoVerifyPath(db, fresh.project_id), rank: TRAIN_RANK, now });
+        insertRequest(db, { project_id: fresh.project_id, pr_url: fresh.ref, task_id: fresh.task_id, head_sha: sha, policy_id: policy, pr_number: null, head_ref: null, worktree: null, source: "auto", path: autoVerifyPath(db, fresh.project_id), rank, now });
       db.query("UPDATE landing_queue SET train_head = ?2, train_base = ?3, train_request = ?4, updated_at = ?5 WHERE id = ?1").run(fresh.id, sha, base, request.id, now);
-      appendEvent(db, { source: "daemon", kind: "landing.train_built", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: sha, from: fresh.head_sha, base, request: request.id, position }, ts: now });
+      appendEvent(db, { source: "daemon", kind: "landing.train_built", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: sha, from: fresh.head_sha, base, request: request.id, position, rank, ...(local ? { main: onMain } : {}) }, ts: now });
       refreshLine(db, fresh.project_id);
-      return sha;
+      return { head: sha };
     });
   }
 
@@ -594,12 +695,194 @@ export class LandingQueue implements LandingHooks {
   private async workable(row: LandingRow, run: RunWithPolicy): Promise<HeadOutcome | null> {
     const wt = run.worktree_path;
     if (!existsSync(wt)) return this.held(row, "no_worktree", `the run's worktree ${wt} is gone`, `flowryn merge ${run.task_id}`);
-    if (run.liveness === "busy" || run.liveness === "blocked_dialog") return this.blocked(row, `the worker is ${run.liveness === "busy" ? "busy" : "showing a dialog"}`);
-    const status = await this.deps.git(["status", "--porcelain"], wt);
-    if (status.code !== 0) return this.blocked(row, `git status failed: ${status.stderr.trim()}`);
+    const why = await this.notReady(run);
+    return why === null ? null : this.blocked(row, why);
+  }
+
+  /** Why the worker's checkout may not be moved now (busy, a dialog, uncommitted changes), or null. */
+  private async notReady(run: RunWithPolicy): Promise<string | null> {
+    if (run.liveness === "busy" || run.liveness === "blocked_dialog") return `the worker is ${run.liveness === "busy" ? "busy" : "showing a dialog"}`;
+    const status = await this.deps.git(["status", "--porcelain"], run.worktree_path);
+    if (status.code !== 0) return `git status failed: ${status.stderr.trim()}`;
     const dirty = status.stdout.split("\n").filter((l) => l.length > 0 && !l.startsWith("?? .claude/"));
-    if (dirty.length > 0) return this.blocked(row, `the worktree has ${dirty.length} uncommitted change(s)`);
+    return dirty.length > 0 ? `the worktree has ${dirty.length} uncommitted change(s)` : null;
+  }
+
+  /**
+   * A local-only line (docs/notes/2026-11-15-local-only-auto-x9.md): build the
+   * candidates, then start the first entry whose candidate is on main's tip.
+   * An entry that leaves on its turn (a conflict, a send-back) lets the next
+   * go in the same pass; one whose worker kept it waiting LOCAL_TURN_WAIT_MS
+   * lets the ones behind it go (it keeps its place).
+   */
+  private async advanceLocal(project: ProjectRow): Promise<void> {
+    for (let round = 0; round < MAX_LOCAL_ROUNDS; round++) {
+      const main = await this.mainTip(project);
+      if (!main) return;
+      const changed = await this.speculateLocal(project, main);
+      const line = projectLine(this.deps.db, project.id);
+      if (line.some((r) => r.state === "landing")) return;
+      let left = changed;
+      for (const row of line) {
+        // A candidate not built yet (git failed, or the merge onto the entry ahead conflicted): it is tried on main next pass.
+        if (!row.train_head || row.train_base !== main) break;
+        const outcome = await this.startLocal(row, project, main);
+        if (outcome === "left") left = true;
+        if (outcome !== "passed") break;
+      }
+      if (!left) return;
+    }
+  }
+
+  /** Local main's tip, or null (logged) when git cannot read it. */
+  private async mainTip(project: ProjectRow): Promise<string | null> {
+    const read = await this.deps.git(["rev-parse", "--verify", "--quiet", `refs/heads/${project.default_branch}^{commit}`], project.path);
+    const sha = read.stdout.trim();
+    if (read.code === 0 && /^[0-9a-f]{40,64}$/.test(sha)) return sha;
+    this.deps.log(`landing queue ${project.id}: cannot read local ${project.default_branch}: ${read.stderr.trim() || `git exited ${read.code}`}`);
     return null;
+  }
+
+  /**
+   * A local-only line's candidates. The chain starts at the landing entry's
+   * head, or at main's tip when none lands; each waiting entry within the
+   * depth gets a candidate on the head ahead of it, as speculate() does. An
+   * entry waiting on its worker stays out of the chain, so the ones behind it
+   * build on what is ahead of it, and keeps a candidate on main for its turn.
+   * A head of line whose merge onto main conflicts goes back to its worker.
+   * Returns whether an entry left the line.
+   */
+  private async speculateLocal(project: ProjectRow, main: string): Promise<boolean> {
+    const { db } = this.deps;
+    const depth = landingTrainDepth(this.deps.config(), project.id, project.delivery_mode);
+    const line = projectLine(db, project.id);
+    const head = line.find((r) => r.state === "landing");
+    const drop = (row: LandingRow, why: string) => tx(db, () => dropCandidate(db, getLanding(db, row.id) ?? row, why, this.deps.now()));
+    let base: string | null = head ? head.head_sha : main;
+    let room = head ? depth - 1 : depth;
+    let built = 0;
+    let left = false;
+    for (const [i, row] of line.filter((r) => r.state === "waiting").entries()) {
+      const waitingOnWorker = !head && row.blocked_since !== null;
+      const on = waitingOnWorker ? main : base;
+      if (!waitingOnWorker) {
+        if (base === null || room <= 0) {
+          if (row.train_head) drop(row, base === null ? "the train ends ahead of it" : `it is beyond the train's depth of ${depth}`);
+          continue;
+        }
+        room--;
+      }
+      if (row.train_head && row.train_base === on) {
+        if (!waitingOnWorker) base = this.candidateFailed(row) ? null : row.train_head;
+        continue;
+      }
+      if (row.train_head) drop(row, `its base moved from ${row.train_base?.slice(0, 8) ?? "-"} to ${on!.slice(0, 8)}`);
+      const candidate = await this.buildCandidate(row, on!, i + (head ? 2 : 1), { main, branch: project.default_branch });
+      if (candidate && "conflict" in candidate && on === main) {
+        left = (await this.localConflict(row, project, candidate.conflict)) || left;
+      }
+      if (candidate && "head" in candidate) built++;
+      if (!waitingOnWorker) base = candidate && "head" in candidate ? candidate.head : null;
+    }
+    if (built > 0) this.deps.kickScheduler();
+    return left;
+  }
+
+  /** The head of line's merge onto main conflicts: it leaves, and its worker is sent back naming the paths. */
+  private async localConflict(row: LandingRow, project: ProjectRow, files: string[]): Promise<boolean> {
+    const { db } = this.deps;
+    const run = getRunWithPolicy(db, row.run_id);
+    const delivered = run ? deliveredOf(db, run.task_id) : null;
+    if (!run || !delivered) return false;
+    if (files.length === 0) return this.held(row, "merge_failed", `git could not merge ${project.default_branch} into ${row.head_sha.slice(0, 8)} and named no conflicted path`, `flowryn show ${run.task_id}`) === "left";
+    return this.sendConflict(row, run, delivered, project.default_branch, files);
+  }
+
+  /**
+   * The entry whose candidate is on main's tip takes its turn. A candidate
+   * whose verify failed sends the work back with that log (it is exactly main
+   * plus the work). A merge candidate needs the worker idle and its checkout
+   * clean at the delivered head, which then fast-forwards to it; a candidate
+   * that is the delivered head itself needs nothing of the checkout.
+   */
+  private async startLocal(row: LandingRow, project: ProjectRow, main: string): Promise<TurnOutcome> {
+    const { db, git } = this.deps;
+    const run = getRunWithPolicy(db, row.run_id);
+    const delivered = run ? deliveredOf(db, run.task_id) : null;
+    if (!run || !delivered || run.state !== "ready" || delivered.head !== row.head_sha || !row.train_head) return "left";
+    const failed = this.failedCandidate(row);
+    if (failed && this.sendCarBack(row, run, failed, project, main)) return "left";
+    const merge = row.train_head !== row.head_sha;
+    const steps: CleanMergeStep[] = [];
+    if (merge) {
+      const wt = run.worktree_path;
+      if (!existsSync(wt)) return this.held(row, "no_worktree", `the run's worktree ${wt} is gone`, `flowryn merge ${run.task_id}`);
+      const head = await git(["rev-parse", "HEAD"], wt);
+      const why = head.code !== 0 ? `git cannot read the worktree's HEAD: ${head.stderr.trim()}` : head.stdout.trim() !== row.head_sha ? `the worktree is at ${head.stdout.trim().slice(0, 8)}, not the delivered ${row.head_sha.slice(0, 8)}` : await this.notReady(run);
+      if (why !== null) return this.turnBlocked(row, why);
+      const parents = (await git(["rev-list", "--parents", "-n", "1", row.train_head], project.path)).stdout.trim().split(/\s+/).slice(1);
+      const proof = parents.length === 2 && parents[0] === row.head_sha && parents[1] === main ? await trainBaseHolds(git, project.path, { head: row.train_head, base: main, main: `refs/heads/${project.default_branch}` }) : null;
+      if (!proof?.ok) {
+        if (proof?.unknown) {
+          this.deps.log(`landing queue ${row.id}: ${proof.why}`);
+          return "blocked";
+        }
+        tx(db, () => dropCandidate(db, getLanding(db, row.id) ?? row, proof?.why ?? `the candidate ${row.train_head!.slice(0, 8)} is not the delivered head merged with ${project.default_branch}`, this.deps.now()));
+        return "blocked";
+      }
+      const forwarded = await git(["merge", "--ff-only", "--quiet", row.train_head], wt);
+      if (forwarded.code !== 0) return this.turnBlocked(row, `git could not fast-forward the worktree to ${row.train_head.slice(0, 8)}: ${forwarded.stderr.trim()}`);
+      steps.push({ commit: row.train_head, main, tree: proof.tree });
+    }
+    return this.startLanding(row, run, { head: row.train_head, steps, base: project.default_branch, train: main });
+  }
+
+  /** blocked(), and `passed` once the entry has kept its turn waiting LOCAL_TURN_WAIT_MS: the ones behind it may go. */
+  private turnBlocked(row: LandingRow, why: string): TurnOutcome {
+    const outcome = this.blocked(row, why);
+    if (outcome !== "blocked") return outcome;
+    const since = getLanding(this.deps.db, row.id)?.blocked_since ?? null;
+    return since !== null && this.deps.now() - since >= LOCAL_TURN_WAIT_MS ? "passed" : "blocked";
+  }
+
+  /**
+   * A car whose candidate on main failed its verify: that is a failure of
+   * exactly main plus the work, so it goes back with that verify's log, with
+   * no verify again. Only a step that failed is sent back this way; anything
+   * else (a timeout, an error) starts the landing, whose auto-merge verifies
+   * again under its own rules. Returns whether it was sent back.
+   */
+  private sendCarBack(row: LandingRow, run: RunWithPolicy, v: Verification, project: ProjectRow, main: string): boolean {
+    const { db } = this.deps;
+    const sent = tx(db, () => {
+      const fresh = getLanding(db, row.id);
+      const current = getRunWithPolicy(db, run.id);
+      if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready") return false;
+      const route = routeVerifyOutcome(db, v, current);
+      if (route.route !== "send_back") return false;
+      const now = this.deps.now();
+      const step = route.step;
+      const merged = fresh.train_head !== fresh.head_sha;
+      const where = merged
+        ? `It ran on your branch merged with ${project.default_branch} at ${main.slice(0, 8)} (the merge queue's commit, not in your branch): merge ${project.default_branch} into your branch to reproduce it.`
+        : `It ran on your branch as delivered, on ${project.default_branch} at ${main.slice(0, 8)}.`;
+      appendEvent(db, { source: "daemon", kind: "landing.car_failed", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: fresh.train_head, base: fresh.train_base, verification: v.id, step: step.name }, ts: now });
+      leave(db, fresh, "verify_failed", `verify ${v.id} of its merge onto ${project.default_branch} at ${main.slice(0, 8)} failed: \`${step.name}\` exited ${step.exit}`, now);
+      sendBack(
+        db,
+        current,
+        {
+          text: `${sendBackText(v, step, "Merge queue")}\n${where}`,
+          feedback: `merge queue verify ${v.id} failed`,
+          why: `the merge queue's verify ${v.id} failed`,
+          event: { source: "daemon", kind: SENT_BACK_KIND, payload: sentBackPayload(v, step, "auto_merge", { landing: fresh.id }) },
+        },
+        now,
+      );
+      return true;
+    });
+    if (sent) this.deps.kickScheduler();
+    return sent;
   }
 
   /**
@@ -662,23 +945,31 @@ export class LandingQueue implements LandingHooks {
 
   /** The merge stopped on conflicts: undo it, then send the ship back as the conflict nudge does. */
   private async conflicted(row: LandingRow, run: RunWithPolicy, delivered: Delivered, base: string, output: string): Promise<HeadOutcome> {
-    const { db, git } = this.deps;
+    const { git } = this.deps;
     const wt = run.worktree_path;
     const unmerged = await git(["diff", "--name-only", "--diff-filter=U"], wt);
     const files = unmerged.stdout.split("\n").map((f) => f.trim()).filter((f) => f.length > 0);
     const aborted = await git(["merge", "--abort"], wt);
     if (aborted.code !== 0) this.deps.log(`landing queue ${row.id}: merge --abort in ${wt} failed: ${aborted.stderr.trim()}`);
     if (files.length === 0) return this.held(row, "merge_failed", `git merge origin/${base} failed: ${output.trim().split("\n").at(-1) ?? ""}`, `flowryn show ${run.task_id}`);
-    const sent = tx(db, () => {
+    this.sendConflict(row, run, delivered, base, files);
+    return "left";
+  }
+
+  /** The entry leaves the line for a conflict with `base`, and its ship is sent back as the conflict nudge sends it. Returns whether it left. */
+  private sendConflict(row: LandingRow, run: RunWithPolicy, delivered: Delivered, base: string, files: string[]): boolean {
+    const { db } = this.deps;
+    const where = delivered.kind === "pr" ? `origin/${base}` : base;
+    const outcome = tx(db, () => {
       const fresh = getLanding(db, row.id);
       const current = getRunWithPolicy(db, run.id);
-      if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready") return false;
+      if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready") return null;
       const now = this.deps.now();
-      leave(db, fresh, "conflict", `merging origin/${base} conflicts in ${files.length} file(s): ${files.slice(0, 5).join(", ")}`, now);
-      return sendConflictBack(db, current, delivered, { url: delivered.ref, base, head: delivered.head, files, source: "daemon" }, taskTitle(db, current.task_id), now);
+      leave(db, fresh, "conflict", `merging ${where} conflicts in ${files.length} file(s): ${files.slice(0, 5).join(", ")}`, now);
+      return sendConflictBack(db, current, delivered, { url: delivered.kind === "pr" ? delivered.ref : approvalRef(delivered), base, head: delivered.head, files, source: "daemon" }, taskTitle(db, current.task_id), now);
     });
-    if (sent) this.deps.kickScheduler();
-    return "left";
+    if (outcome) this.deps.kickScheduler();
+    return outcome !== null;
   }
 
   /**
@@ -699,30 +990,38 @@ export class LandingQueue implements LandingHooks {
       const carriedByWatcher = integrated !== null && delivered.head === integrated.head && delivered.carriedFrom === fresh.head_sha;
       if (delivered.head !== fresh.head_sha && !carriedByWatcher) return "left";
       const steps = verifyConfig(config, current.project_id);
+      const local = delivered.kind === "local";
+      const ref = approvalRef(delivered);
       let head = delivered.head;
       let approval = fresh.approval_id;
-      if (integrated) {
+      // A local-only candidate that is the delivered head itself moves nothing.
+      const moved = integrated !== null && integrated.head !== fresh.head_sha;
+      if (integrated && moved) {
         const evidence = prEvidence(db, current.id);
         const before = approval ? (db.query("SELECT * FROM approvals WHERE id = ?1").get(approval) as ApprovalRow | null) : null;
+        const merged = local ? integrated.base : `origin/${integrated.base}`;
         if (!carriedByWatcher) {
-          carryLanding(db, current, delivered, { headSha: integrated.head, number: evidence?.number ?? 0, headRef: evidence?.head_ref ?? current.branch }, { from: delivered.head, steps: integrated.steps, verifyPolicy: steps ? verifyPolicyId(steps) : null }, now);
+          // A local candidate's verify was queued when it was built: the carry queues none.
+          const verifyPolicy = steps && !local ? verifyPolicyId(steps) : null;
+          carryLanding(db, current, delivered, { headSha: integrated.head, number: evidence?.number ?? 0, headRef: evidence?.head_ref ?? current.branch }, { from: delivered.head, steps: integrated.steps, verifyPolicy }, now);
           settleHeadMove(db, current, delivered.head, integrated.head, now);
+          if (local) appendEvent(db, { source: "daemon", kind: "landing.caught_up", runId: current.id, taskId: current.task_id, payload: { landing: fresh.id, from: delivered.head, to: integrated.head, main: integrated.train ?? null, request: fresh.train_request }, ts: now });
         }
         head = integrated.head;
         approval = null;
         // Unattended mode: the standing approval covers the new head as it covered the old one, sensitive work included.
         const standing = isRoutineMerge(db, current.task_id) ? null : autonomyForRun(db, current, now);
         if (standing) {
-          approval = mintAutonomyApproval(db, standing, { task: current.task_id, ref: before?.pr_url ?? delivered.ref, head, action: "merge", runId: current.id }, now).id;
+          approval = mintAutonomyApproval(db, standing, { task: current.task_id, ref: before?.pr_url ?? ref, head, action: "merge", runId: current.id }, now).id;
         } else if (before && before.consumed_at === null && before.expires_at > now) {
           // Your answer in the design review (q130): an approval carries across the queue's clean merge of the base, unless the work is sensitive.
           if (current.sensitive) {
             // The validator's pass while you are away binds its head too; it judges the new head by itself, so nothing is held for you.
             if (before.channel === "away-validator") {
-              leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of origin/${integrated.base} moved the head to ${head.slice(0, 8)}; the validator judges the new head before it merges`, now);
+              leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of ${merged} moved the head to ${head.slice(0, 8)}; the validator judges the new head before it merges`, now);
               return "left";
             }
-            leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of origin/${integrated.base} moved the head to ${head.slice(0, 8)}, so your approval of ${fresh.head_sha.slice(0, 8)} does not carry`, now, {
+            leave(db, { ...fresh, head_sha: head }, "approval_needed", `sensitive work: the merge of ${merged} moved the head to ${head.slice(0, 8)}, so your approval of ${fresh.head_sha.slice(0, 8)} does not carry`, now, {
               next: `flowryn merge ${current.task_id}`,
             });
             return "left";
@@ -742,9 +1041,18 @@ export class LandingQueue implements LandingHooks {
       if (trainRequest?.state === "queued") rerankRequest(db, trainRequest, 0, now);
       const kept = integrated?.train ? fresh : dropCandidate(db, fresh, "it lands at its own merge of the base", now);
       supersedeAutoMerge(db, current.id, "landing", `the landing queue lands it at ${head.slice(0, 8)}`, now);
-      const auto = createAutoMerge(db, config, current, { ref: delivered.ref, head, prNumber: evidence?.number ?? null, headRef: evidence?.head_ref ?? current.branch, worktree: null, source: "daemon" }, now);
-      const detail = !integrated ? null : integrated.train ? `the landing train's candidate on ${integrated.train.slice(0, 8)}, at ${head.slice(0, 8)}` : `merged origin/${integrated.base} at ${head.slice(0, 8)}`;
-      move(db, kept, "landing", { head_sha: head, approval_id: approval, auto_merge_id: auto.id, integrations: fresh.integrations + (integrated ? 1 : 0), blocked_since: null, detail }, now);
+      const auto = createAutoMerge(db, config, current, { ref, head, prNumber: evidence?.number ?? null, headRef: local ? null : (evidence?.head_ref ?? current.branch), worktree: null, source: "daemon" }, now);
+      const detail = !integrated
+        ? null
+        : local
+          ? `${moved ? "caught up with" : "on"} ${integrated.base} at ${(integrated.train ?? head).slice(0, 8)}`
+          : integrated.train
+            ? `the landing train's candidate on ${integrated.train.slice(0, 8)}, at ${head.slice(0, 8)}`
+            : `merged origin/${integrated.base} at ${head.slice(0, 8)}`;
+      const line = projectLine(db, current.project_id);
+      // A local-only line: every entry ahead of this one that waited on its worker loses this turn.
+      if (local) for (const other of line.slice(0, line.findIndex((r) => r.id === fresh.id))) if (other.state === "waiting" && other.blocked_since !== null) skipTurn(db, other, fresh, now);
+      move(db, kept, "landing", { head_sha: head, approval_id: approval, auto_merge_id: auto.id, integrations: fresh.integrations + (moved ? 1 : 0), blocked_since: null, detail }, now);
       // Time blocked counts only while an entry is tried: the others wait out this landing.
       for (const other of projectLine(db, current.project_id)) if (other.state === "waiting" && other.blocked_since !== null) move(db, other, "waiting", { blocked_since: null }, now);
       refreshLine(db, current.project_id);
@@ -766,6 +1074,15 @@ export class LandingQueue implements LandingHooks {
     const project = run ? getProject(db, run.project_id) : null;
     if (!run || !project) return true;
     const base = runBase(run, project);
+    const local = project.delivery_mode === "local-only";
+    const where = local ? base : `origin/${base}`;
+    if (local) {
+      // Local-only: the merge fast-forwards main to the head, which holds exactly what was verified while main is in it.
+      const has = await git(["merge-base", "--is-ancestor", `refs/heads/${base}`, auto.head_sha], project.path);
+      if (has.code === 0) return true;
+      if (has.code !== 1) return false;
+      return this.baseMoved(row, auto, base, where);
+    }
     const cwd = existsSync(run.worktree_path) ? run.worktree_path : project.path;
     const fetched = await netGit(["fetch", "--quiet", "--no-tags", "origin", base], cwd);
     if (fetched.code !== 0) {
@@ -782,17 +1099,23 @@ export class LandingQueue implements LandingHooks {
       if (has.code === 0) return true;
       if (has.code !== 1) return false;
     }
+    return this.baseMoved(row, auto, base, where);
+  }
+
+  /** The head of line's base moved before its merge: back to waiting, to integrate again (MAX_INTEGRATIONS times, then held). Returns false: no merge now. */
+  private baseMoved(row: LandingRow, auto: AutoMergeRow, branch: string, base: string): false {
+    const { db } = this.deps;
     tx(db, () => {
       const fresh = getLanding(db, row.id);
       if (!fresh || fresh.state !== "landing") return;
       const now = this.deps.now();
       if (fresh.integrations >= MAX_INTEGRATIONS) {
-        leave(db, fresh, "base_moving", `origin/${base} moved under it ${fresh.integrations} times before it could merge`, now, { next: `flowryn merge ${fresh.task_id}` });
+        leave(db, fresh, "base_moving", `${base} moved under it ${fresh.integrations} times before it could merge`, now, { next: `flowryn merge ${fresh.task_id}` });
         return;
       }
-      supersedeAutoMerge(db, fresh.run_id, "base_moved", `origin/${base} moved past ${auto.head_sha.slice(0, 8)} before the merge`, now);
-      move(db, fresh, "waiting", { auto_merge_id: null, detail: `origin/${base} moved; merging it in again`, train_head: null, train_base: null, train_request: null }, now);
-      appendEvent(db, { source: "daemon", kind: "landing.base_moved", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: auto.head_sha, base }, ts: now });
+      supersedeAutoMerge(db, fresh.run_id, "base_moved", `${base} moved past ${auto.head_sha.slice(0, 8)} before the merge`, now);
+      move(db, fresh, "waiting", { auto_merge_id: null, detail: `${base} moved; merging it in again`, train_head: null, train_base: null, train_request: null }, now);
+      appendEvent(db, { source: "daemon", kind: "landing.base_moved", runId: fresh.run_id, taskId: fresh.task_id, payload: { landing: fresh.id, head: auto.head_sha, base: branch }, ts: now });
     });
     return false;
   }

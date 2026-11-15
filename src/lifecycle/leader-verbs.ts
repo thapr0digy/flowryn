@@ -5,7 +5,7 @@ import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
 import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
-import { landingProgress, latestLanding } from "../verify/landing-queue.ts";
+import { landingCell, landingProgress, latestLanding, liveLanding } from "../verify/landing-queue.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { waitedLabel } from "../attention/deadline-defaults.ts";
 import { getValidation, MERGE_STAGE, type ValidatorVerdict } from "../attention/validator-report.ts";
@@ -337,7 +337,12 @@ function needs(ctx: ReadCtx, run: FleetRow): string {
   if (run.stage_state === "review") return "review";
   // A scout's report stays to be read after its run landed and was cleaned.
   if (run.kind === "scout" && ctx.db.query("SELECT 1 FROM items WHERE run_id = ?1 AND kind = 'report_ready' AND state IN ('open','presented')").get(run.id)) return "read";
-  if (run.state === "ready") return run.kind === "scout" ? "read" : "merge";
+  if (run.state === "ready" && run.kind !== "scout") {
+    // A ship in its project's landing queue: its place, and a local-only entry's candidate verify.
+    const landing = liveLanding(ctx.db, run.id);
+    return landing ? landingCell(ctx.db, landing) : "merge";
+  }
+  if (run.state === "ready") return "read";
   if (run.state === "merging") return "proof";
   if (run.state === "landed") return run.cleanup === "refused" ? "cleanup" : "-";
   return "-";
