@@ -498,6 +498,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
         return bin ? { bin, worktreeRoot: workersConfig(config).worktree_root } : null;
       },
       removeRunTmp: (runId) => removeRunTmp({ root: workersConfig(config).tmp_root, runId, stateDir: config.state_dir }),
+      config: () => config,
       kickJournal: () => journal.kick(),
       log,
       now: Date.now,
@@ -954,7 +955,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
     };
     // A verification the last daemon was running when it stopped: recorded as an error and requeued once, its worktree removed.
     try {
-      const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify") });
+      const recovered = await recoverVerifications({ db: database, git: deliveryGit, now: Date.now, log, root: join(config.state_dir, "verify"), config: () => config });
       if (recovered > 0) log(`verify: ${recovered} left running by the last daemon, recorded as errors and requeued`);
     } catch (error) {
       log(`verify: startup recovery failed: ${(error as Error).message}`);

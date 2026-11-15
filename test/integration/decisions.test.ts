@@ -10,6 +10,9 @@ import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
 
 useIntegrationTimeout();
 
+/** Each option's consequence, as an ask must give them. */
+const DB_COSTS = ["--consequence", "sqlite: one file, no server", "--consequence", "postgres: a server to run; scales"];
+
 const envs: FleetEnv[] = [];
 afterEach(async () => {
   for (const env of envs.splice(0)) await env.cleanup();
@@ -365,10 +368,10 @@ describe("ask --key", () => {
     daemons.push(d);
     const run = seedRun(h);
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
-    const first = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const first = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", ...DB_COSTS, "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(first.code).toBe(0);
     const decisionId = (first.reply.data as { decision: string }).decision;
-    const again = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const again = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", ...DB_COSTS, "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(again.code).toBe(0);
     expect(again.reply.data).toMatchObject({ decision: decisionId, already: true });
     const db = h.db();
@@ -380,7 +383,7 @@ describe("ask --key", () => {
     const answered = await cliJson(h, ["decide", decisionId, "sqlite", "--rationale", "fine"], { env: { FLOWRYN_TOKEN: leader } });
     expect(answered.code).toBe(0);
 
-    const refused = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const refused = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", ...DB_COSTS, "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(refused.code).toBe(3);
     expect(JSON.stringify(refused.reply)).toContain(`key db already used by ${decisionId}`);
   });
@@ -392,17 +395,57 @@ describe("ask --key", () => {
     daemons.push(d);
     const run = seedRun(h);
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
-    const missing = await cliJson(h, ["ask", "--options", "sqlite,postgres", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const missing = await cliJson(h, ["ask", "--options", "sqlite,postgres", ...DB_COSTS, "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(missing.code).toBe(3);
     expect(JSON.stringify(missing.reply)).toContain("bad_args");
     expect(JSON.stringify(missing.reply)).toContain("--blocks <what waits on the answer> is required");
-    const vague = await cliJson(h, ["ask", "--options", "sqlite,postgres", "--blocks", "stuff", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const vague = await cliJson(h, ["ask", "--options", "sqlite,postgres", ...DB_COSTS, "--blocks", "stuff", "--body-file", "-"], { env: worker, stdin: "Which database?" });
     expect(vague.code).toBe(3);
     expect(JSON.stringify(vague.reply)).toContain("--blocks <what waits on the answer> is required");
     const db = h.db();
     const count = db.query("SELECT COUNT(*) AS n FROM decisions").get() as { n: number };
     db.close();
     expect(count.n).toBe(0);
+  });
+
+  test("ask refuses a question whose options lack their costs, with an example, and opens no decision; a costed one stores them", async () => {
+    const h = makeHome();
+    homes.push(h);
+    const d = await startDaemon(h);
+    daemons.push(d);
+    const run = seedRun(h);
+    const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
+    const ask = (...flags: string[]) => cliJson(h, ["ask", "--options", "sqlite,postgres", ...flags, "--blocks", "the storage layer schema", "--body-file", "-"], { env: worker, stdin: "Which database?" });
+    const refusals: [string[], string][] = [
+      [[], 'option \\"sqlite\\" has no consequence'],
+      [["--consequence", "sqlite: one file"], 'option \\"postgres\\" has no consequence'],
+      [["--consequence", "sqlite one file", "--consequence", "postgres: a server"], 'must be \\"<option>: <what happens>\\"'],
+      [["--consequence", "redis: fast", ...DB_COSTS], 'names \\"redis\\", which is not one of the options'],
+      [[...DB_COSTS, "--consequence", "sqlite: again"], "has two --consequence flags"],
+      [["--consequence", `sqlite: ${"x".repeat(201)}`, "--consequence", "postgres: a server"], "longer than 200 characters"],
+      [[...DB_COSTS, "--recommend", "sqlite"], "the recommendation (sqlite) has no downside"],
+      [[...DB_COSTS, "--recommend", "mysql", "--downside", "x"], "--recommend mysql is not one of the options"],
+    ];
+    for (const [flags, message] of refusals) {
+      const refused = await ask(...flags);
+      expect(refused.code).toBe(3);
+      expect(JSON.stringify(refused.reply)).toContain(message);
+    }
+    const missing = JSON.stringify((await ask()).reply);
+    expect(missing).toContain("Give each option --consequence");
+    expect(missing).toContain("e.g. --options wait-5m,land-now --consequence");
+    const db = h.db();
+    expect((db.query("SELECT COUNT(*) AS n FROM decisions").get() as { n: number }).n).toBe(0);
+    db.close();
+
+    const asked = await ask(...DB_COSTS, "--recommend", "sqlite", "--downside", "one writer at a time");
+    expect(asked.code).toBe(0);
+    const id = (asked.reply.data as { decision: string }).decision;
+    const after = h.db();
+    const row = after.query("SELECT consequences, downside, recommendation FROM decisions WHERE id = ?1").get(id) as { consequences: string; downside: string; recommendation: string };
+    after.close();
+    expect(JSON.parse(row.consequences)).toEqual({ sqlite: "one file, no server", postgres: "a server to run; scales" });
+    expect(row).toMatchObject({ downside: "one writer at a time", recommendation: "sqlite" });
   });
 
   test("ask --key refuses a key a standalone decision from its task already holds", async () => {
@@ -415,7 +458,7 @@ describe("ask --key", () => {
     const taskId = (db.query("SELECT task_id FROM runs WHERE id = ?1").get(run.runId) as { task_id: string }).task_id;
     const standalone = tx(db, () => createStandaloneDecision(db, { key: "db", question: "Which database?", options: [], origin: taskId, now: 1 }));
     db.close();
-    const asked = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", "--blocks", "the storage layer schema", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "Which database?" });
+    const asked = await cliJson(h, ["ask", "--key", "db", "--options", "sqlite,postgres", ...DB_COSTS, "--blocks", "the storage layer schema", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "Which database?" });
     expect(asked.code).toBe(3);
     expect(JSON.stringify(asked.reply)).toContain(standalone.id);
   });
@@ -429,7 +472,7 @@ describe("ask --key", () => {
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
     const question = `Which permissions should the per-run settings allow?\n${Array.from({ length: 120 }, (_, i) => `- Bash(tool${i}:*), so step ${i} runs`).join("\n")}\nThe last item is the one that matters.`;
     expect(question.length).toBeGreaterThan(2_000);
-    const asked = await cliJson(h, ["ask", "--options", "allow,deny", "--blocks", "the per-run settings allow list", "--body-file", "-"], { env: worker, stdin: question });
+    const asked = await cliJson(h, ["ask", "--options", "allow,deny", "--consequence", "allow: every listed tool runs unprompted", "--consequence", "deny: each listed tool prompts the user", "--blocks", "the per-run settings allow list", "--body-file", "-"], { env: worker, stdin: question });
     expect(asked.code).toBe(0);
     const id = (asked.reply.data as { decision: string }).decision;
     const db = h.db();

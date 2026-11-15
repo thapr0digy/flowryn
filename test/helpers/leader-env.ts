@@ -161,7 +161,7 @@ export async function makeLeaderEnv(options: LeaderEnvOptions = {}): Promise<Lea
       return String(data.item);
     },
     async openP1(text) {
-      await workerCall(["ask", "--options", "yes,no", "--blocks", "the next step of the task", "--body-file", "-"], text);
+      await workerCall(["ask", "--options", "yes,no", "--consequence", "yes: the task goes on", "--consequence", "no: the task stops", "--blocks", "the next step of the task", "--body-file", "-"], text);
       return withDb((db) => (db.query("SELECT id FROM items WHERE kind = 'worker_question' ORDER BY rowid DESC LIMIT 1").get() as { id: string }).id);
     },
     openPlainP1(text) {

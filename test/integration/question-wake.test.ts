@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cliJson } from "../helpers/harness.ts";
+import { askCosts, cliJson } from "../helpers/harness.ts";
 import { makeLeaderEnv, waitFor, type LeaderEnv } from "../helpers/leader-env.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
 
@@ -45,7 +45,7 @@ function questionPushes(e: LeaderEnv): { items: string[]; path: string }[] {
 }
 
 async function ask(e: LeaderEnv, text: string, blocking = false): Promise<string> {
-  const args = ["ask", "--options", "yes,no", "--blocks", "the next step of the task", ...(blocking ? ["--blocking"] : []), "--body-file", "-"];
+  const args = ["ask", "--options", "yes,no", ...askCosts("yes,no"), "--blocks", "the next step of the task", ...(blocking ? ["--blocking"] : []), "--body-file", "-"];
   const result = await cliJson(e.h, args, { env: { FLOWRYN_TOKEN: e.worker.token, FLOWRYN_RUN: e.worker.runId }, stdin: text });
   if (result.code !== 0) throw new Error(`ask failed: ${JSON.stringify(result.reply)}`);
   const decision = String((result.reply.data as { decision: string }).decision);

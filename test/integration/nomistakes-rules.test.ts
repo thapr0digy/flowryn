@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cliJson, daemonCall, makeHome, seedLeader, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { askCosts, cliJson, daemonCall, makeHome, seedLeader, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
 
 useIntegrationTimeout();
@@ -60,7 +60,7 @@ async function setup() {
   db.query("UPDATE runs SET worktree_path = ?2 WHERE id = ?1").run(run.runId, wt);
   db.close();
   const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
-  const ask = (blocks: string, question: string, options = "approve,fix,skip") => cliJson(h, ["ask", "--nomistakes", "--options", options, "--blocks", blocks, "--body-file", "-"], { env: worker, stdin: question });
+  const ask = (blocks: string, question: string, options = "approve,fix,skip") => cliJson(h, ["ask", "--nomistakes", "--options", options, ...askCosts(options), "--blocks", blocks, "--body-file", "-"], { env: worker, stdin: question });
   return { h, run, head, ask };
 }
 
@@ -142,7 +142,7 @@ describe("ask --nomistakes", () => {
     const { h, run, head } = await setup();
     parkAt(h, head, "lint", ['lint-1,warning,test/new.test.ts,1,ask-user,"unused"']);
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
-    const asked = await cliJson(h, ["ask", "--nomistakes", "--options", "accept,live-run-first", "--recommend", "accept", "--blocks", "the lint gate of the pipeline", "--body-file", "-"], { env: worker, stdin: "lint finding" });
+    const asked = await cliJson(h, ["ask", "--nomistakes", "--options", "accept,live-run-first", ...askCosts("accept,live-run-first", "accept"), "--recommend", "accept", "--blocks", "the lint gate of the pipeline", "--body-file", "-"], { env: worker, stdin: "lint finding" });
     expect(asked.code).toBe(0);
     const data = asked.reply.data as { decision: string; reserved?: string };
     expect(data.reserved).toBeUndefined();
@@ -184,7 +184,7 @@ describe("ask --nomistakes", () => {
   test("an ask without --nomistakes is unchanged: never settled, never reserved by the rules", async () => {
     const { h, run, head } = await setup();
     parkAt(h, head, "lint", ['lint-1,warning,test/new.test.ts,1,ask-user,"unused"']);
-    const asked = await cliJson(h, ["ask", "--options", "approve,fix,skip", "--blocks", "the lint gate of the pipeline", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "lint finding" });
+    const asked = await cliJson(h, ["ask", "--options", "approve,fix,skip", ...askCosts("approve,fix,skip"), "--blocks", "the lint gate of the pipeline", "--body-file", "-"], { env: { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId }, stdin: "lint finding" });
     expect(asked.code).toBe(0);
     const db = h.db();
     expect(db.query("SELECT state, answered_by, reserved_reason FROM decisions WHERE id = ?1").get((asked.reply.data as { decision: string }).decision)).toEqual({ state: "open", answered_by: null, reserved_reason: null });

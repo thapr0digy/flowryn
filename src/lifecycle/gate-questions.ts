@@ -7,7 +7,7 @@ import { appendEvent, type EventSource } from "../db/events.ts";
 import { OTHER_ANSWER, type GateQuestions } from "../lavish/questions.ts";
 import { MOUNT_SNIPPET, pageMountsWidget, type WidgetState } from "../lavish/widget.ts";
 import { sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
-import { nextRunDecisionId, type DecisionRow } from "./decisions.ts";
+import { nextRunDecisionId, optionCostsOf, type DecisionRow } from "./decisions.ts";
 import { conversationPath } from "./review-chat.ts";
 import { taskTitle, type RunRow } from "./runs.ts";
 
@@ -74,9 +74,9 @@ export function openGateQuestions(db: Db, run: RunRow, gate: GateRef, page: stri
   for (const q of parsed.questions) {
     const id = nextRunDecisionId(db);
     db.query(
-      `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at, kind, gate_id, note, blocks)
-       VALUES (?1, ?2, ?3, ?4, ?5, 0, 'open', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
-    ).run(id, run.task_id, run.id, q.question, JSON.stringify(q.options), `gate:${gate.id}`, q.key, q.recommend.join(", "), GATE_QUESTION_RESERVED, now, q.kind, gate.id, q.why, q.blocks);
+      `INSERT INTO decisions (id, task_id, run_id, question, options, blocking, state, origin, key, recommendation, reserved_reason, created_at, kind, gate_id, note, blocks, consequences, downside)
+       VALUES (?1, ?2, ?3, ?4, ?5, 0, 'open', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+    ).run(id, run.task_id, run.id, q.question, JSON.stringify(q.options), `gate:${gate.id}`, q.key, q.recommend.join(", "), GATE_QUESTION_RESERVED, now, q.kind, gate.id, q.why, q.blocks, JSON.stringify(q.consequences), q.downside);
     const event = appendEvent(db, { source: "cli", kind: "decision.opened", runId: run.id, taskId: run.task_id, payload: { decision: id, gate: gate.id, key: q.key, kind: q.kind, options: q.options, blocks: q.blocks }, ts: now });
     const choices = q.kind === "text" ? "free answer" : q.options.join(" | ");
     const item = openItem(db, {
@@ -294,6 +294,7 @@ export function widgetState(db: Db, gateId: string): { page: string; state: Widg
     question: d.question,
     options: JSON.parse(d.options) as string[],
     recommend: d.kind === "text" ? [d.recommendation ?? ""] : (d.recommendation ?? "").split(", ").filter((r) => r.length > 0),
+    ...optionCostsOf(d),
     blocks: d.blocks ?? "-",
     why: d.note,
     state: d.state,

@@ -11,12 +11,13 @@ import { readIdentity, terminate, type ProcIdentity, type PsRunner, type Termina
 import { withRepoLock } from "../runtime/repo-lock.ts";
 import { leaseProcesses, liveJobLeases, recordJobProcess, releaseJobLeases, type JobRef } from "../sched/pools.ts";
 import { appendEvent } from "../db/events.ts";
+import { failedReleases, projectRelease, runRelease } from "../lifecycle/release.ts";
 import type { FlowrynConfig } from "../config/config.ts";
 import { anyMatches, changedSinceBase, type ChangedFiles } from "./changed.ts";
 import { REVIEW_STEP, type ReviewConfig, type VerifyItem } from "./config.ts";
 import { deadlineLine, duration, stepDeadlines, type StepDeadline } from "./deadline.ts";
 import { reviewLog, runReview, type ReviewInput } from "./review.ts";
-import { insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
+import { autoVerifyPath, insertRequest, RECOVERED_RANK, requestOf, requeuedFrom } from "./queue.ts";
 import { finishVerification, getVerification, recordSteps, runningVerifications, STOPPED_MID_RUN, type Verification, type VerificationOutcome, type VerifyStep } from "./store.ts";
 import { parseBunSummary, type TestCounts } from "./summary.ts";
 
@@ -118,6 +119,11 @@ export function stepEnv(base: NodeJS.ProcessEnv, path: string | null = null): Re
   env.NO_COLOR = "1";
   env.GIT_TERMINAL_PROMPT = "0";
   return env;
+}
+
+/** The environment a release command runs with (src/lifecycle/release.ts): a daemon-made verify's, so it finds the tools `make test` does. */
+export function releaseEnv(db: Db, projectId: string): Record<string, string> {
+  return stepEnv(process.env, autoVerifyPath(db, projectId));
 }
 
 /** "bun install --frozen-lockfile" -> "1-bun-install-frozen-lockfile.log". */
@@ -378,12 +384,33 @@ function ownPath(root: string, path: string, leaf: "dir" | "wt"): boolean {
   return path.startsWith(root + sep) && pattern.test(path.slice(root.length + 1));
 }
 
-/** Under the repository's worktree lock (src/runtime/repo-lock.ts), like the add. */
-export async function removeWorktree(deps: Pick<VerifyDeps, "git" | "root" | "log">, v: Pick<Verification, "id" | "worktree_path" | "project_path">): Promise<void> {
+type RemoveDeps = Pick<VerifyDeps, "db" | "git" | "root" | "log" | "now" | "config">;
+type Removed = Pick<Verification, "id" | "worktree_path" | "project_path" | "project_id" | "task_id">;
+
+/**
+ * Under the repository's worktree lock (src/runtime/repo-lock.ts), like the add. The project's release
+ * commands run first, outside the lock (they may take a minute each), so the steps' services go with it.
+ */
+export async function removeWorktree(deps: RemoveDeps, v: Removed): Promise<void> {
+  if (existsSync(v.worktree_path) && ownPath(deps.root, v.worktree_path, "wt")) await release(deps, v);
   await withRepoLock(v.project_path, () => removeWorktreeLocked(deps, v));
 }
 
-async function removeWorktreeLocked(deps: Pick<VerifyDeps, "git" | "root" | "log">, v: Pick<Verification, "id" | "worktree_path" | "project_path">): Promise<void> {
+/** Free the worktree's own services; a failure appends verify.release_failed and the removal goes on. */
+async function release(deps: RemoveDeps, v: Removed): Promise<void> {
+  const label = `verify ${v.id}`;
+  const commands = projectRelease(deps.config?.() ?? null, v.project_id, (line) => deps.log(`${label}: ${line}`));
+  if (commands.length === 0) return;
+  const failed = failedReleases(await runRelease(commands, { cwd: v.worktree_path, env: releaseEnv(deps.db, v.project_id), label, log: deps.log }));
+  if (failed.length === 0) return;
+  try {
+    tx(deps.db, () => appendEvent(deps.db, { source: "daemon", kind: "verify.release_failed", taskId: v.task_id, payload: { verification: v.id, worktree: v.worktree_path, failed }, ts: deps.now() }));
+  } catch (error) {
+    deps.log(`${label}: could not record the failed release: ${(error as Error).message}`);
+  }
+}
+
+async function removeWorktreeLocked(deps: RemoveDeps, v: Removed): Promise<void> {
   if (!existsSync(v.worktree_path)) {
     await deps.git(["worktree", "prune"], v.project_path);
     return;

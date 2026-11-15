@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FlowrynError } from "../../src/api/errors.ts";
@@ -568,6 +568,54 @@ function refusal(fn: () => unknown): { code: string; message: string; help?: str
   }
   throw new Error("expected a refusal");
 }
+
+function releasing(f: Fixture, commands: string[]): void {
+  f.deps.config = () => parseConfig(`data_dir = "/tmp/d"\nstate_dir = "/tmp/s"\n[projects.web]\nrelease = ${JSON.stringify(commands)}\n`, "/h");
+}
+
+function script(path: string, body: string): string {
+  writeFileSync(path, `#!/bin/sh\n${body}\n`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+describe("a verification worktree's release (docs/notes/2026-11-15-pool-worktrees-release-fc.md)", () => {
+  test("assumption: the project's release commands run in the worktree before it is removed, pass or fail", async () => {
+    const f = fixture();
+    const out = tempDir();
+    const seen = join(out, "seen.log");
+    // What the release saw: its directory, and that the worktree is still at the head.
+    releasing(f, [script(join(out, "release"), `echo "$(pwd) $(git rev-parse HEAD)" >> ${seen}`)]);
+    for (const tail of ["true", "exit 4"]) await f.start([tail]);
+    const lines = readFileSync(seen, "utf8").trim().split("\n");
+    expect(lines).toEqual([`${realpathSync(f.root)}/v1/wt ${f.head}`, `${realpathSync(f.root)}/v2/wt ${f.head}`]);
+    for (const id of ["v1", "v2"]) expect(existsSync(join(f.root, id, "wt"))).toBe(false);
+    expect(events(f.db, "verify.release_failed")).toEqual([]);
+  });
+
+  test("assumption: a failed release is recorded and the worktree is still removed", async () => {
+    const f = fixture();
+    const out = tempDir();
+    releasing(f, [script(join(out, "release"), 'echo "no such container" >&2; exit 2')]);
+    const v = await f.start(["true"]);
+    expect(v.state).toBe("passed");
+    expect(existsSync(v.worktree_path)).toBe(false);
+    expect(events(f.db, "verify.release_failed")).toEqual([
+      { verification: v.id, worktree: v.worktree_path, failed: [expect.objectContaining({ code: 2, ok: false, tail: "no such container" })] },
+    ]);
+  });
+
+  test("a worktree the last daemon left mid-run is kept for its resume and not released", async () => {
+    const f = fixture();
+    const out = tempDir();
+    const marker = join(out, "released");
+    releasing(f, [script(join(out, "release"), `touch ${marker}`)]);
+    const v = leftRunning(f, null);
+    expect(await recoverVerifications(f.deps)).toBe(1);
+    expect(existsSync(v.worktree_path)).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+  });
+});
 
 describe("verify show", () => {
   test("a kept binary that pruning removed reads as removed", () => {

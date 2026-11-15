@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cliJson, daemonCall, makeHome, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
+import { askCosts, cliJson, daemonCall, makeHome, seedRun, startDaemon, type DaemonProc, type TestHome } from "../helpers/harness.ts";
 import { useIntegrationTimeout } from "../helpers/integration-timeout.ts";
 
 useIntegrationTimeout();
@@ -75,7 +75,7 @@ describe("unattended mode's finding rule", () => {
     db.close();
     const worker = { FLOWRYN_TOKEN: run.token, FLOWRYN_RUN: run.runId };
     const ask = async (extra: string[]) => {
-      const asked = await cliJson(h, ["ask", ...extra, "--options", "fix,approve,skip", "--recommend", "approve", "--why", "the evidence gap is the test runner's, not this change's", "--blocks", "the test gate of the pipeline", "--body-file", "-"], { env: worker, stdin: QUESTION });
+      const asked = await cliJson(h, ["ask", ...extra, "--options", "fix,approve,skip", ...askCosts("fix,approve,skip", "approve"), "--recommend", "approve", "--why", "the evidence gap is the test runner's, not this change's", "--blocks", "the test gate of the pipeline", "--body-file", "-"], { env: worker, stdin: QUESTION });
       expect(asked.code).toBe(0);
       return (asked.reply.data as { decision: string }).decision;
     };

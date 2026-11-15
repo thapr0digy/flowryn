@@ -27,7 +27,8 @@ const count = (haystack: string, needle: string) => haystack.split(needle).lengt
 
 describe("rendered sizes stay under fixed limits", () => {
   const limits: [string, number][] = [
-    ["flowryn-design", 3_600],
+    // 3,600 -> 3,900: the questions.json example gives each option its consequence (docs/notes/2026-11-15-worker-questions-carry-gn.md).
+    ["flowryn-design", 3_900],
     ["flowryn-build-test", 3_200],
     ["flowryn-visual-qa", 4_800],
     ["flowryn-draft", 2_400],

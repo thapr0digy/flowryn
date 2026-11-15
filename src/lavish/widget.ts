@@ -37,6 +37,10 @@ export interface WidgetQuestion {
   question: string;
   options: string[];
   recommend: string[];
+  /** Each option's consequence, by option; missing on questions asked before they were required. */
+  consequences: Record<string, string>;
+  /** The recommendation's main downside. */
+  downside: string | null;
   blocks: string;
   why: string | null;
   state: "open" | "answered" | "dismissed";
@@ -80,7 +84,7 @@ const RENDERER = String.raw`
     ".fq input[type=text],.fq textarea{font:inherit;color:inherit;background:transparent;border:1px solid color-mix(in oklab,currentColor 35%,transparent);border-radius:.4rem;padding:.35rem .5rem;width:100%;max-width:36rem}" +
     ".fq .fq-actions{display:flex;flex-wrap:wrap;gap:.6rem}" +
     ".fq button{font:inherit;padding:.4rem 1rem;border-radius:.5rem;border:1px solid currentColor;background:transparent;color:inherit;cursor:pointer}" +
-    ".fq .fq-status{font-size:.85em;opacity:.85}.fq ul{margin:.2rem 0 0 1.1rem;padding:0}.fq code{font-size:.9em}";
+    ".fq .fq-cost{margin:-.2rem 0 .1rem 1.6rem}.fq .fq-status{font-size:.85em;opacity:.85}.fq ul{margin:.2rem 0 0 1.1rem;padding:0}.fq code{font-size:.9em}";
   var style = document.createElement("style");
   style.textContent = css;
   document.head.appendChild(style);
@@ -135,9 +139,10 @@ const RENDERER = String.raw`
     }
     if (q.kind === "text") {
       box.appendChild(el("input", { type: "text", name: q.id, placeholder: q.recommend[0] || "", "aria-label": q.question }));
-      box.appendChild(el("div", { "class": "fq-meta", text: "Leave it empty to keep it open; the worker's default: " + (q.recommend[0] || "-") }));
+      box.appendChild(el("div", { "class": "fq-meta", text: "Leave it empty to keep it open; the worker's default: " + (q.recommend[0] || "-") + (q.downside ? " · Downside: " + q.downside : "") }));
     } else {
       var type = q.kind === "multi" ? "checkbox" : "radio";
+      var costs = q.consequences || {};
       q.options.forEach(function (o) {
         var rec = q.recommend.indexOf(o) >= 0;
         box.appendChild(el("label", {}, [
@@ -145,6 +150,9 @@ const RENDERER = String.raw`
           el("span", { text: o }),
           rec ? el("span", { "class": "fq-rec", text: "recommended" }) : null,
         ]));
+        var cost = Object.prototype.hasOwnProperty.call(costs, o) ? costs[o] : "";
+        if (rec && q.downside) cost = (cost ? cost + " · " : "") + "Downside: " + q.downside;
+        if (cost) box.appendChild(el("div", { "class": "fq-meta fq-cost", "data-option": o, text: cost }));
       });
       box.appendChild(el("label", {}, [el("input", { type: type, name: q.id, value: OTHER }), el("span", { text: "Other: say what in the note below" })]));
     }

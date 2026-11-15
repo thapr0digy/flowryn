@@ -194,10 +194,11 @@ describe("worker contract text", () => {
         const text = workerContract(harness, STYLE_BLOCK, { base, defaultBranch: "main" });
         const own = ownLines(text);
         expect(own.length).toBeLessThanOrEqual(10);
-        // About 4 characters a token: Flowryn's own lines under 275 tokens, the whole contract (shared blocks included) under 425
-        // (raised from 250 and 400 for the turn rules that say what to do next on every path: docs/notes/2026-11-06-prompts-that-keep-47.md).
-        expect(own.join("\n").length).toBeLessThanOrEqual(1_100);
-        expect(text.length).toBeLessThanOrEqual(1_700);
+        // About 4 characters a token: Flowryn's own lines under 285 tokens, the whole contract (shared blocks included) under 435
+        // (raised from 250 and 400 for the turn rules that say what to do next on every path: docs/notes/2026-11-06-prompts-that-keep-47.md;
+        // then from 275 and 425 for each ask option's consequence: docs/notes/2026-11-15-worker-questions-carry-gn.md).
+        expect(own.join("\n").length).toBeLessThanOrEqual(1_140);
+        expect(text.length).toBeLessThanOrEqual(1_740);
       }
     }
   });
