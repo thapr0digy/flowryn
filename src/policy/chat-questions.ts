@@ -104,7 +104,7 @@ function decisionForm(db: Db, id: string): ChatForm {
   const costs = optionCostsOf(d);
   // The worker's own line of what each option costs (docs/notes/2026-11-15-worker-questions-carry-gn.md); a question asked before they were required says only what the answer records.
   const describe = (o: string) => {
-    const consequence = costs.consequences[o] ?? `Record "${o}" as your answer to ${d.id}`;
+    const consequence = Object.hasOwn(costs.consequences, o) ? costs.consequences[o]! : `Record "${o}" as your answer to ${d.id}`;
     return recommended.has(o) && costs.downside ? `${consequence.replace(/[.;\s]+$/, "")}. Downside: ${costs.downside}` : consequence;
   };
   return {

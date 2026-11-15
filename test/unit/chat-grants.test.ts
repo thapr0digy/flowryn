@@ -123,6 +123,19 @@ describe("binding questions", () => {
     expect(multi.every((o) => o.description.endsWith("Downside: every client signs in again today"))).toBe(true);
   });
 
+  test("an option named like an object member still gets its own consequence or the generic text", () => {
+    const w = world(["constructor", "__proto__"]);
+    expect(chatForm(w.db, w.decision, MERGE_DEFAULTS).question.options.map((o) => o.description)).toEqual([
+      `Record "constructor" as your answer to ${w.decision}`,
+      `Record "__proto__" as your answer to ${w.decision}`,
+    ]);
+    tx(w.db, () => w.db.query("UPDATE decisions SET consequences = ?2, recommendation = NULL WHERE id = ?1").run(w.decision, '{"__proto__":"the prototype key is kept"}'));
+    expect(chatForm(w.db, w.decision, MERGE_DEFAULTS).question.options.map((o) => o.description)).toEqual([
+      `Record "constructor" as your answer to ${w.decision}`,
+      "the prototype key is kept",
+    ]);
+  });
+
   test("the comparison and hash see only what the user sees, in order; key order and extra fields do not matter", () => {
     const a = { question: "q1 · x", header: "q1", options: [{ label: "A", description: "a" }, { label: "B", description: "b" }], multiSelect: false };
     const reordered = { multiSelect: false, options: [{ description: "a", label: "A" }, { description: "b", label: "B" }], header: "q1", question: "q1 · x", extra: 1 };

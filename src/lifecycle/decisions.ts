@@ -91,14 +91,15 @@ function costLine(raw: string): string | { problem: string } {
 export function checkOptionCosts(options: string[], given: Map<string, string>, recommended: string[], downside: string | null): OptionCosts | { problem: string } {
   const stray = [...given.keys()].find((o) => !options.includes(o));
   if (stray !== undefined) return { problem: `a consequence names "${sanitizeLine(stray, 40)}", which is not one of the options (${options.join(", ")})` };
-  const consequences: Record<string, string> = {};
+  const lines: [string, string][] = [];
   for (const option of options) {
     const raw = given.get(option);
     if (raw === undefined) return { problem: `option "${option}" has no consequence: say what happens if it is picked, what waits or is blocked, and what breaks if it is wrong` };
     const line = costLine(raw);
     if (typeof line !== "string") return { problem: `the consequence of "${option}" ${line.problem}` };
-    consequences[option] = line;
+    lines.push([option, line]);
   }
+  const consequences = Object.fromEntries(lines);
   if (downside === null) {
     if (recommended.length === 0) return { consequences, downside: null };
     return { problem: `the recommendation (${recommended.join(", ")}) has no downside: name its main cost, so the user sees what they accept` };
@@ -116,17 +117,17 @@ export function recommendedChoices(d: Pick<DecisionRow, "kind" | "recommendation
 
 /** A decision's option costs as stored, each a clean capped line; empty for older rows and standalone decisions. */
 export function optionCostsOf(d: Pick<DecisionRow, "consequences" | "downside">): OptionCosts {
-  const consequences: Record<string, string> = {};
+  const lines: [string, string][] = [];
   try {
     const parsed: unknown = d.consequences ? JSON.parse(d.consequences) : {};
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const [option, text] of Object.entries(parsed)) if (typeof text === "string" && text.trim()) consequences[option] = sanitizeLine(text, MAX_COST_CHARS);
+      for (const [option, text] of Object.entries(parsed)) if (typeof text === "string" && text.trim()) lines.push([option, sanitizeLine(text, MAX_COST_CHARS)]);
     }
   } catch {
     // A row the daemon wrote is JSON; an unreadable one shows the fallback text, never an error.
   }
   const downside = d.downside ? sanitizeLine(d.downside, MAX_COST_CHARS) : "";
-  return { consequences, downside: downside || null };
+  return { consequences: Object.fromEntries(lines), downside: downside || null };
 }
 
 /** answered_via of a deadline default (src/attention/deadline-defaults.ts): a policy answer the user may undo. */

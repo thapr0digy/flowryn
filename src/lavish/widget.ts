@@ -150,7 +150,7 @@ const RENDERER = String.raw`
           el("span", { text: o }),
           rec ? el("span", { "class": "fq-rec", text: "recommended" }) : null,
         ]));
-        var cost = costs[o] || "";
+        var cost = Object.prototype.hasOwnProperty.call(costs, o) ? costs[o] : "";
         if (rec && q.downside) cost = (cost ? cost + " · " : "") + "Downside: " + q.downside;
         if (cost) box.appendChild(el("div", { "class": "fq-meta fq-cost", "data-option": o, text: cost }));
       });
