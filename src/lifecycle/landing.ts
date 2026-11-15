@@ -20,6 +20,9 @@ import { getRunWithPolicy, isTerminal, runBase, taskTitle, type RunWithPolicy } 
 import { releaseLeases } from "../sched/pools.ts";
 import { closeMergeGate } from "./stages.ts";
 import { dismissRunQuestions } from "./gate-questions.ts";
+import { failedReleases, projectRelease, runRelease } from "./release.ts";
+import { releaseEnv } from "../verify/runner.ts";
+import type { FlowrynConfig } from "../config/config.ts";
 
 /**
  * Landing and cleanup (design sections 8 and 14). A task is landed only when
@@ -95,6 +98,8 @@ export interface LandingDeps {
   treehouse?(): { bin: string; worktreeRoot: string } | null;
   /** Remove the run's temp directory (src/lifecycle/run-tmp.ts); throws when it cannot. */
   removeRunTmp?(runId: string): "removed" | "absent" | "not_ours";
+  /** The live config, for the project's release commands (src/lifecycle/release.ts); absent, none run. */
+  config?(): FlowrynConfig;
   /** Apply the backlog intents just recorded (the task done) without waiting for the journal's next pass. */
   kickJournal(): void;
   log(line: string): void;
@@ -177,6 +182,28 @@ function removeTmp(deps: LandingDeps, run: RunWithPolicy): void {
 }
 
 /**
+ * The project's release commands, run in the run's worktree before it goes (src/policy/cleanup.ts), or
+ * null when the project has none. Each failure is logged by the runner; any failure also appends
+ * run.release_failed, and the cleanup goes on.
+ */
+function releaseStep(deps: LandingDeps, run: RunWithPolicy, projectId: string): ((worktree: string) => Promise<{ ok: boolean }>) | null {
+  const label = `cleanup ${run.task_id}`;
+  const commands = projectRelease(deps.config?.() ?? null, projectId, (line) => deps.log(`${label}: ${line}`));
+  if (commands.length === 0) return null;
+  return async (worktree) => {
+    const results = await runRelease(commands, { cwd: worktree, env: releaseEnv(deps.db, projectId), label, log: deps.log });
+    const failed = failedReleases(results);
+    if (failed.length === 0) return { ok: true };
+    try {
+      tx(deps.db, () => appendEvent(deps.db, { source: "daemon", kind: "run.release_failed", runId: run.id, taskId: run.task_id, payload: { worktree, failed }, ts: deps.now() }));
+    } catch (error) {
+      deps.log(`${label}: could not record the failed release: ${(error as Error).message}`);
+    }
+    return { ok: false };
+  };
+}
+
+/**
  * How a run's pool worktree goes back (src/runtime/treehouse.ts), or null for
  * a git worktree. With treehouse gone since the launch, the return refuses:
  * removing the slot with git would leave treehouse holding its lease for good.
@@ -204,6 +231,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
   const github = deps.github();
   const delivered = deliveredOf(db, run.task_id);
   const returnWorktree = poolReturn(deps, run, project.id);
+  const release = releaseStep(deps, run, project.id);
   // Your chat answer is used up before anything is removed, so a grant that ended meanwhile removes nothing; a guard refusal after it spends it.
   const usedGrant = opts.discardGrant ? tx(db, () => takeGrant(db, opts.discardGrant!.grant, `discard ${run.task_id}`, deps.now())) : null;
   const outcome = await runCleanup(
@@ -231,6 +259,7 @@ export async function cleanupRun(deps: LandingDeps, runId: string, opts: Cleanup
       log: (line) => deps.log(`cleanup ${run.task_id}: ${line}`),
       exitWorker: () => deps.exitWorker(run.id),
       ...(returnWorktree ? { returnWorktree } : {}),
+      ...(release ? { release } : {}),
     },
   );
   const now = deps.now();

@@ -8,7 +8,8 @@
  * recorded and shown by doctor.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeFleetEnv, type FleetEnv } from "../helpers/fleet-env.ts";
 import { waitUntil } from "../helpers/harness.ts";
@@ -97,6 +98,45 @@ describe("run worktrees from the treehouse pool", () => {
       expect(git(slot, ["status", "--porcelain"]).out).toBe("");
       expect(git(slot, ["rev-parse", "HEAD"]).out).toBe(git(env.repo, ["rev-parse", "HEAD"]).out);
       expect(readFileSync(join(slot, "warm.cache"), "utf8")).toContain("warm");
+    },
+    { timeout: 90_000 },
+  );
+
+  test(
+    "the project's release commands run in the slot, branch still checked out, before it goes back; a failing one is recorded and the cleanup completes",
+    async () => {
+      const scripts = mkdtempSync(join(tmpdir(), "fw-release-"));
+      const seen = join(scripts, "seen.log");
+      const release = join(scripts, "release");
+      writeFileSync(release, `#!/bin/sh\necho "$(pwd) $(git branch --show-current)" >> ${seen}\n`);
+      const broken = join(scripts, "broken");
+      writeFileSync(broken, '#!/bin/sh\necho "no such container" >&2\nexit 1\n');
+      chmodSync(release, 0o755);
+      chmodSync(broken, 0o755);
+      try {
+        const env = (fleet = await makeFleetEnv({ worktreeProvider: "treehouse", extraConfig: `[projects.web]\nrelease = ${JSON.stringify([release, broken])}\n` }));
+        const { task, run } = await env.dispatch("Build\nFAKE: commit a.txt hello\nFAKE: sleep 60000", { kind: "ship" });
+        const busy = await env.waitRun(run, (r) => r.liveness === "busy", "busy");
+        await waitUntil(() => git(busy.worktree_path, ["log", "--oneline", "-1"]).out.includes("a.txt"), 10_000, "the commit");
+        expect((await env.json(["cancel", task])).code).toBe(0);
+        await env.waitRun(run, (r) => r.state === "cancelled", "the cancel to finish");
+        expect(git(env.repo, ["merge", "-q", "--ff-only", busy.branch]).code).toBe(0);
+        expect(existsSync(seen)).toBe(false);
+
+        const cleaned = await env.json(["cleanup", task]);
+        expect(cleaned.code).toBe(0);
+        expect(readFileSync(seen, "utf8")).toBe(`${realpathSync(busy.worktree_path)} ${busy.branch}\n`);
+        const steps = events(env, run, "cleanup.done")[0]!.steps as string[];
+        expect(steps).toContain("release:failed");
+        expect(steps.indexOf("release:failed")).toBeLessThan(steps.indexOf("worktree_return:ok"));
+        expect(events(env, run, "run.release_failed")).toEqual([
+          { worktree: busy.worktree_path, failed: [expect.objectContaining({ command: broken, code: 1, ok: false, tail: "no such container" })] },
+        ]);
+        expect(env.run(run).cleanup).toBe("done");
+        expect(readFileSync(join(stateFiles(env.h.stateDir).logs, "flowrynd.log"), "utf8")).toContain(`cleanup ${task}: release ${broken} failed (code 1): no such container`);
+      } finally {
+        rmSync(scripts, { recursive: true, force: true });
+      }
     },
     { timeout: 90_000 },
   );

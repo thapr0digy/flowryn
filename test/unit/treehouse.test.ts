@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupConfig } from "../../src/config/delivery.ts";
 import { parseConfig } from "../../src/config/config.ts";
-import { runCleanup } from "../../src/policy/cleanup.ts";
+import { runCleanup, type CleanupDeps } from "../../src/policy/cleanup.ts";
 import { gitRunner } from "../../src/policy/git.ts";
 import { acquireSlot, adoptSlot, leaseHolder, parseLease, parseStatus, poolRoot, poolSlots, poolStatus, returnSlot, treehouseVersion } from "../../src/runtime/treehouse.ts";
 import { worktreeChecks, VERIFIED_TREEHOUSE } from "../../src/doctor/doctor.ts";
@@ -190,7 +190,7 @@ describe("leases that would otherwise stay held", () => {
 
 describe("the cleanup's return path", () => {
   const config = cleanupConfig(parseConfig('data_dir = "/tmp/d"\nstate_dir = "/tmp/s"\n', "/tmp/h"));
-  function cleanup(s: Scratch, worktree: string, lease: string, discardApproved: boolean, returned: string[]) {
+  function cleanup(s: Scratch, worktree: string, lease: string, discardApproved: boolean, returned: string[], more: Partial<CleanupDeps> = {}) {
     return runCleanup(
       { guard: { mode: "local-only", kind: "ship", worktree, branch: "flowryn/t", defaultBranch: "main", repo: null, recordedPrUrl: null, discardApproved }, primary: s.repo },
       {
@@ -206,6 +206,7 @@ describe("the cleanup's return path", () => {
           returned.push(`${path} ${discard ? "force" : "plain"}`);
           return returnSlot(s.bin, s.root, path, lease, discard);
         },
+        ...more,
       },
     );
   }
@@ -265,6 +266,69 @@ describe("the cleanup's return path", () => {
     const outcome = await cleanup(s, slot.path, slot.lease_id, false, returned);
     expect(outcome).toMatchObject({ outcome: "removed", branchDeleted: true, discardedHead: null });
     expect(returned).toEqual([`${slot.path} plain`]);
+  });
+
+  test("assumption: the release runs once, in the worktree with its branch still checked out, after the worker stops and before the reap and the return", async () => {
+    const s = scratch();
+    const slot = await leased(s);
+    sh(slot.path, ["switch", "-q", "-c", "flowryn/t"]);
+    sh(s.repo, ["merge", "-q", "--ff-only", "flowryn/t"]);
+    const order: string[] = [];
+    const returned: string[] = [];
+    const outcome = await cleanup(s, slot.path, slot.lease_id, false, returned, {
+      exitWorker: async () => {
+        order.push("exit");
+        return { ok: true, detail: "" };
+      },
+      release: async (worktree) => {
+        order.push(`release ${worktree} on ${git(worktree, ["branch", "--show-current"]).out}`);
+        return { ok: true };
+      },
+      ps: async () => {
+        order.push("reap");
+        return "";
+      },
+    });
+    expect(outcome).toMatchObject({ outcome: "removed", branchDeleted: true });
+    expect(order.filter((o) => o.startsWith("release"))).toEqual([`release ${slot.path} on flowryn/t`]);
+    expect(order.indexOf(`release ${slot.path} on flowryn/t`)).toBe(order.indexOf("exit") + 1);
+    const at = (prefix: string) => outcome.steps.findIndex((step) => step.startsWith(prefix));
+    expect(at("worker_exit:ok")).toBeLessThan(at("release:ok"));
+    expect(at("release:ok")).toBeLessThan(at("reap:"));
+    expect(at("reap:")).toBeLessThan(at("worktree_return:ok"));
+  });
+
+  test("assumption: a failed release never refuses the cleanup; the slot still goes back", async () => {
+    const s = scratch();
+    const slot = await leased(s);
+    sh(slot.path, ["switch", "-q", "-c", "flowryn/t"]);
+    sh(s.repo, ["merge", "-q", "--ff-only", "flowryn/t"]);
+    const returned: string[] = [];
+    const outcome = await cleanup(s, slot.path, slot.lease_id, false, returned, { release: async () => ({ ok: false }) });
+    expect(outcome).toMatchObject({ outcome: "removed", branchDeleted: true });
+    expect(outcome.steps).toContain("release:failed");
+    expect(returned).toEqual([`${slot.path} plain`]);
+  });
+
+  test("no release runs for a refused verdict, nor for a worktree already gone", async () => {
+    const s = scratch();
+    const slot = await leased(s);
+    sh(slot.path, ["switch", "-q", "-c", "flowryn/t"]);
+    writeFileSync(join(slot.path, "dirty.txt"), "uncommitted\n");
+    const released: string[] = [];
+    const release = async (worktree: string) => {
+      released.push(worktree);
+      return { ok: true };
+    };
+    const refused = await cleanup(s, slot.path, slot.lease_id, false, [], { release });
+    expect(refused.outcome).toBe("refused");
+    rmSync(join(slot.path, "dirty.txt"));
+    sh(s.repo, ["merge", "-q", "--ff-only", "flowryn/t"]);
+    rmSync(slot.path, { recursive: true, force: true });
+    const gone = await cleanup(s, slot.path, slot.lease_id, false, [], { release });
+    expect(gone.outcome).toBe("removed");
+    expect(released).toEqual([]);
+    expect(gone.steps.some((step) => step.startsWith("release:"))).toBe(false);
   });
 
   test("a failed return refuses the cleanup and keeps the slot, its branch and its head", async () => {

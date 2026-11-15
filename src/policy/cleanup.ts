@@ -13,7 +13,9 @@ import { reapUnder } from "./reap.ts";
  * a git index.lock left in the worktree is waited for, cleared only when
  * provably stale, and the verdict taken again; the task's own parked
  * no-mistakes run is aborted (proven its own, never another branch's); the
- * worker stops; leaked processes are reaped by identity; and last the
+ * worker stops; the project's release commands free the worktree's own
+ * services (`release`, never a refusal); leaked processes are reaped by
+ * identity (the release's leftovers too); and last the
  * worktree is removed, with --force only for an approved discard, and its
  * branch deleted. A pool worktree is returned to its pool instead
  * (`returnWorktree`), forced likewise only for an approved discard. A worktree already gone is pruned; its branch goes only
@@ -56,6 +58,12 @@ export interface CleanupDeps {
    * fixtures have none.
    */
   returnWorktree?(path: string, discard: boolean): Promise<{ ok: boolean; detail: string }>;
+  /**
+   * Free the worktree's own services (src/lifecycle/release.ts) once the worker has stopped, before the reap
+   * and the return or removal: after a return the next run may hold the slot. A failure is the caller's to
+   * record and never refuses the cleanup. Absent, nothing runs; the fixtures have none.
+   */
+  release?(worktree: string): Promise<{ ok: boolean }>;
   /** Stop the worker's harness by its recorded identity; the fixtures have no worker. */
   exitWorker?(): Promise<{ ok: boolean; detail: string }>;
   kill?(pid: number, signal: NodeJS.Signals): void;
@@ -183,6 +191,11 @@ async function cleanupInOrder(req: CleanupRequest, deps: CleanupDeps, steps: str
     const exited = await deps.exitWorker();
     steps.push(`worker_exit:${exited.ok ? "ok" : "failed"}`);
     if (!exited.ok) return result("refused", "worker_did_not_exit", `the worker did not stop: ${exited.detail}`, { verdict, lock, aborted });
+  }
+
+  if (deps.release && existsSync(req.guard.worktree)) {
+    const released = await deps.release(req.guard.worktree);
+    steps.push(`release:${released.ok ? "ok" : "failed"}`);
   }
 
   const reap = await reapUnder([req.guard.worktree], { lsof: deps.lsof, ps: deps.ps, graceMs: deps.config.reap_grace_ms, passes: deps.config.reap_passes, kill: deps.kill, log: deps.log });
