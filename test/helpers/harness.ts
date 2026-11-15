@@ -293,6 +293,12 @@ export function makeHome(options: HomeOptions = {}): TestHome {
   };
 }
 
+/** The option costs a worker ask must carry: a `--consequence` per comma-separated option, and with a recommendation its `--downside`. */
+export function askCosts(options: string, recommend?: string): string[] {
+  const consequences = options.split(",").flatMap((o) => ["--consequence", `${o.trim()}: the work goes on as ${o.trim()}`]);
+  return recommend === undefined ? consequences : [...consequences, "--downside", `${recommend} may need redoing`];
+}
+
 /** Give the home a leader lease (of `scope`, default the implicit one) and return its token (the lease manager itself is M3). */
 export function seedLeader(h: TestHome, scope = "default"): string {
   const token = mintToken("leader");

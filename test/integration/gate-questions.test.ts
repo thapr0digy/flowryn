@@ -33,8 +33,8 @@ afterEach(async () => {
 const PAGE = filledDesignPage({ widget: true });
 const QUESTIONS = JSON.stringify({
   questions: [
-    { key: "token-store", kind: "single", question: "Where do cached tokens live?", options: ["db", "file"], recommend: "db", blocks: "which store TokenCache writes to" },
-    { key: "harnesses", kind: "multi", question: "Which harnesses first?", options: ["claude", "pi"], recommend: ["claude"], blocks: "which adapters the build touches" },
+    { key: "token-store", kind: "single", question: "Where do cached tokens live?", options: [{ label: "db", consequence: "tokens survive restarts" }, { label: "file", consequence: "no migration; two daemons race" }], recommend: "db", recommended_downside: "a migration first", blocks: "which store TokenCache writes to" },
+    { key: "harnesses", kind: "multi", question: "Which harnesses first?", options: [{ label: "claude", consequence: "the Claude adapter first" }, { label: "pi", consequence: "the Pi adapter first" }], recommend: ["claude"], recommended_downside: "Pi waits a release", blocks: "which adapters the build touches" },
     { key: "verb-name", kind: "text", question: "What is the verb called?", recommend: "flowryn tokens", blocks: "the CLI name in code and docs" },
   ],
   decided: [{ choice: "poller home", picked: "src/lavish/poller.ts", why: "one child per gate" }],

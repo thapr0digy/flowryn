@@ -1,7 +1,7 @@
 import { FlowrynError } from "../api/errors.ts";
 import type { MergeConfig } from "../config/merge.ts";
 import type { Db } from "../db/db.ts";
-import { captainAnswerable, getDecision } from "../lifecycle/decisions.ts";
+import { captainAnswerable, getDecision, optionCostsOf, recommendedChoices } from "../lifecycle/decisions.ts";
 import { deliveredOf, prEvidence } from "../lifecycle/delivery.ts";
 import { pendingPlanLine } from "../lifecycle/plans.ts";
 import { getProject } from "../lifecycle/projects.ts";
@@ -99,7 +99,14 @@ function decisionForm(db: Db, id: string): ChatForm {
   if ((d.kind ?? "single") === "text" || opts.length < MIN_OPTIONS || opts.length > MAX_OPTIONS) {
     throw new FlowrynError("not_ready", `decision ${id} has ${opts.length} options; a chat question takes ${MIN_OPTIONS} to ${MAX_OPTIONS}`, `ask it as before: flowryn decide ${id} <choice> --by captain (Claude prompts the user)`);
   }
-  const labelOf = (o: string) => (o === d.recommendation ? `${o}${RECOMMENDED}` : o);
+  const recommended = new Set(recommendedChoices(d));
+  const labelOf = (o: string) => (recommended.has(o) ? `${o}${RECOMMENDED}` : o);
+  const costs = optionCostsOf(d);
+  // The worker's own line of what each option costs (docs/notes/2026-11-15-worker-questions-carry-gn.md); a question asked before they were required says only what the answer records.
+  const describe = (o: string) => {
+    const consequence = Object.hasOwn(costs.consequences, o) ? costs.consequences[o]! : `Record "${o}" as your answer to ${d.id}`;
+    return recommended.has(o) && costs.downside ? `${consequence.replace(/[.;\s]+$/, "")}. Downside: ${costs.downside}` : consequence;
+  };
   return {
     ref: d.id,
     action: "decide",
@@ -107,7 +114,7 @@ function decisionForm(db: Db, id: string): ChatForm {
     question: {
       question: `${d.id}${SEPARATOR}${sanitizeLine(d.question, 400)}`,
       header: d.id,
-      options: opts.map((o) => option(labelOf(o), `Record "${o}" as your answer to ${d.id}`)),
+      options: opts.map((o) => option(labelOf(o), describe(o))),
       multiSelect: d.kind === "multi",
     },
     choices: opts.map((o) => ({ label: labelOf(o), choice: o })),

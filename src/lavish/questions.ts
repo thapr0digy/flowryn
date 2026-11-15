@@ -1,5 +1,5 @@
 import { FlowrynError } from "../api/errors.ts";
-import { DECISION_KEY, DECISION_OPTION } from "../lifecycle/decisions.ts";
+import { checkOptionCosts, DECISION_KEY, DECISION_OPTION, MAX_COST_CHARS, type OptionCosts } from "../lifecycle/decisions.ts";
 import { MAX_STORED_TEXT_CHARS, sanitizeBlock, sanitizeLine } from "../util/sanitize.ts";
 
 /**
@@ -39,6 +39,10 @@ export interface GateQuestion {
   recommend: string[];
   blocks: string;
   why: string | null;
+  /** Each option's consequence, by option; empty for a text question. */
+  consequences: Record<string, string>;
+  /** The recommendation's main downside. */
+  downside: string | null;
 }
 
 export interface DecidedChoice {
@@ -77,16 +81,34 @@ function text(value: unknown, where: string, max: number, opts: { required: bool
   return cleaned;
 }
 
-function options(value: unknown, where: string): string[] {
+/** An option as the file shows it, quoted in a refusal. */
+const OPTION_EXAMPLE = '{"label": "keychain", "consequence": "tokens survive restarts; the first run shows a keychain prompt"}';
+
+/** A choice question's options, each `{label, consequence}`: the labels, and each one's consequence by label. */
+function options(value: unknown, where: string): { labels: string[]; consequences: Map<string, string> } {
   if (!Array.isArray(value)) throw bad(`${where} must be a list of ${MIN_OPTIONS} to ${MAX_OPTIONS} options`);
-  const list = value.map((o, i) => {
-    if (typeof o !== "string" || !DECISION_OPTION.test(o.trim())) throw bad(`${where}[${i}] must be short: letters, digits, spaces, _ . - (at most 40)`);
-    if (o.trim().toLowerCase() === OTHER_ANSWER) throw bad(`${where}[${i}]: "${OTHER_ANSWER}" is reserved; every choice question already offers it, with the user's words`);
-    return o.trim();
+  const consequences = new Map<string, string>();
+  const labels = value.map((raw, i) => {
+    const at = `${where}[${i}]`;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw bad(`${at} must be an option with its consequence, such as ${OPTION_EXAMPLE}`);
+    const o = raw as Record<string, unknown>;
+    const label = typeof o.label === "string" ? o.label.trim() : "";
+    if (!DECISION_OPTION.test(label)) throw bad(`${at}.label must be short: letters, digits, spaces, _ . - (at most 40)`);
+    if (label.toLowerCase() === OTHER_ANSWER) throw bad(`${at}: "${OTHER_ANSWER}" is reserved; every choice question already offers it, with the user's words`);
+    if (typeof o.consequence === "string" && !consequences.has(label)) consequences.set(label, o.consequence);
+    return label;
   });
-  if (list.length < MIN_OPTIONS || list.length > MAX_OPTIONS) throw bad(`${where} needs ${MIN_OPTIONS} to ${MAX_OPTIONS} options; a question with one answer is a decision you make yourself`);
-  if (new Set(list).size !== list.length) throw bad(`${where} lists an option twice`);
-  return list;
+  if (labels.length < MIN_OPTIONS || labels.length > MAX_OPTIONS) throw bad(`${where} needs ${MIN_OPTIONS} to ${MAX_OPTIONS} options; a question with one answer is a decision you make yourself`);
+  if (new Set(labels).size !== labels.length) throw bad(`${where} lists an option twice`);
+  return { labels, consequences };
+}
+
+/** A question's costs, checked: every option's consequence and, with a recommendation, its downside. */
+function costs(where: string, labels: string[], given: Map<string, string>, recommend: string[], downside: unknown): OptionCosts {
+  if (downside !== undefined && downside !== null && typeof downside !== "string") throw bad(`${where}.recommended_downside must be a string`);
+  const checked = checkOptionCosts(labels, given, recommend, typeof downside === "string" ? downside : null);
+  if ("problem" in checked) throw bad(`${where}: ${checked.problem}. Each option is ${OPTION_EXAMPLE}, and the question has "recommended_downside": "<its main cost>"`);
+  return checked;
 }
 
 function question(raw: unknown, index: number): GateQuestion {
@@ -102,15 +124,17 @@ function question(raw: unknown, index: number): GateQuestion {
   if (kind === "text") {
     if (q.options !== undefined) throw bad(`${where} is a text question; it takes no options`);
     const recommend = text(q.recommend, `${where}.recommend (your default answer)`, MAX_TEXT_RECOMMEND)!;
-    return { key, kind, question: body, options: [], recommend: [recommend], blocks, why };
+    const downside = text(q.recommended_downside, `${where}.recommended_downside`, MAX_COST_CHARS, { required: false });
+    return { key, kind, question: body, options: [], recommend: [recommend], blocks, why, consequences: {}, downside };
   }
-  const opts = options(q.options, `${where}.options`);
+  const { labels, consequences } = options(q.options, `${where}.options`);
   const rec = kind === "multi" ? q.recommend : [q.recommend];
-  if (!Array.isArray(rec) || rec.length === 0 || rec.some((r) => typeof r !== "string" || !opts.includes(r.trim()))) {
+  if (!Array.isArray(rec) || rec.length === 0 || rec.some((r) => typeof r !== "string" || !labels.includes(r.trim()))) {
     throw bad(kind === "multi" ? `${where}.recommend must be a non-empty list of its options` : `${where}.recommend must be one of its options`);
   }
   const recommend = [...new Set((rec as string[]).map((r) => r.trim()))];
-  return { key, kind, question: body, options: opts, recommend, blocks, why };
+  const checked = costs(where, labels, consequences, recommend, q.recommended_downside);
+  return { key, kind, question: body, options: labels, recommend, blocks, why, consequences: checked.consequences, downside: checked.downside };
 }
 
 function decided(raw: unknown, index: number): DecidedChoice {

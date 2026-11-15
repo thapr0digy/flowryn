@@ -31,7 +31,7 @@ const NOW = 1_000_000;
 const HEAD = "abc123";
 
 const QUESTIONS = {
-  questions: [{ key: "store", kind: "single", question: "Where?", options: ["db", "file"], recommend: "db", blocks: "which store the cache writes to" }],
+  questions: [{ key: "store", kind: "single", question: "Where?", options: [{ label: "db", consequence: "tokens survive restarts" }, { label: "file", consequence: "no migration; two daemons race" }], recommend: "db", recommended_downside: "a migration first", blocks: "which store the cache writes to" }],
   decided: [],
 };
 

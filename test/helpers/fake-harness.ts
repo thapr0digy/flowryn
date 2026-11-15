@@ -365,7 +365,8 @@ async function runStep(step: string): Promise<"continue" | "end-turn" | "await-s
     case "ask": {
       const [options = "yes,no", ...words] = rest;
       await tool(async () => {
-        const result = await flowryn(["ask", "--options", options, "--blocking", "--blocks", "the rest of this fake task", "--body-file", "-"], words.join(" ") || "which one?");
+        const costs = options.split(",").flatMap((o) => ["--consequence", `${o.trim()}: the fake task goes on as ${o.trim()}`]);
+        const result = await flowryn(["ask", "--options", options, ...costs, "--blocking", "--blocks", "the rest of this fake task", "--body-file", "-"], words.join(" ") || "which one?");
         log(`ask -> ${result.code} ${result.stdout.trim()}`);
       });
       return "end-turn";

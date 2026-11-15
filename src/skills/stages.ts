@@ -39,10 +39,11 @@ Goal: a design the user approves in Lavish, plus a phase plan when the feature i
 3. Questions: only a real decision you cannot proceed without; decide and record the rest. Write \`$FLOWRYN_REPORT_DIR/design/questions.json\`:
 
    {"questions": [{"key": "token-store", "kind": "single", "question": "Where do cached tokens live?",
-     "options": ["db", "file"], "recommend": "db", "blocks": "which store TokenCache writes to", "why": "..."}],
+     "options": [{"label": "db", "consequence": "survives restarts"}, {"label": "file", "consequence": "two daemons race"}],
+     "recommend": "db", "recommended_downside": "a migration first", "blocks": "which store TokenCache writes to", "why": "..."}],
     "decided": [{"choice": "poller home", "picked": "src/lavish/poller.ts", "why": "..."}]}
 
-   kind: single, multi (recommend is a list) or text (recommend is your default, no options). At most 5 questions, 2 to 8 short options (never "other": the widget offers it), blocks names what waits. The template's widget (\`<section id="flowryn-questions">\` in What I need from you) is the only place a question appears: never list them as text or write your own form.
+   kind: single, multi (recommend is a list) or text (recommend is your default, no options). At most 5 questions, 2 to 8 short options (never "other": the widget offers it), blocks names what waits. Each option's consequence: what happens, what waits, what breaks if wrong (one line, at most 200 characters); the user weighs options on them and the downside. The template's widget (\`<section id="flowryn-questions">\` in What I need from you) is the only place a question appears: never list them as text or write your own form.
 4. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL; pass it as it is. Only without lavish-axi, use the page's file:// URL.
 5. A phased feature (this task is phase 1): \`$FLOWRYN_REPORT_DIR/plan.md\`, one section per later phase:
 
@@ -78,7 +79,7 @@ Goal: the change the approved design describes, with tests that prove it and tes
 7. Finish: commit everything, write the handoff (\`$FLOWRYN_BIN template handoff\`: ## Done, ## Deviations from the spec and why, ## Risks), then \`$FLOWRYN_BIN stage begin <next stage> --handoff-file <file>\` and go on at once with the steps its reply gives, in the same turn. End your turn only on stage_waiting: a steer starts the stage. The next stage gets your handoff.
 
 Rules:
-- A test you cannot make pass: \`$FLOWRYN_BIN ask --options a,b --blocks <what waits> --body-file -\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
+- A test you cannot make pass: \`$FLOWRYN_BIN ask --options a,b --consequence "a: <effect>" (each) --blocks <what waits> --body-file -\` or \`$FLOWRYN_BIN report blocked --body-file -\`. Never skip, weaken or delete a test to get green.
 - A test that fails the same way on the base branch (outside your change): \`$FLOWRYN_BIN report finding --body-file -\` with the failure, and go on.
 - Stay inside your worktree and your branch.
 - Write the docs the change needs where the project's AGENTS.md or CLAUDE.md says, as a new file when it says so.
@@ -116,7 +117,7 @@ Goal: one file of prose (a plan, a note, a comparison, a letter) that the user r
 1. Read the task file and the repository: its AGENTS.md, CLAUDE.md or README if it has one, and the notes near where this file belongs. Follow its conventions for names, folders and front matter.
 2. Write the draft as one Markdown (.md) or plain text (.txt) file in your worktree, at most 1 MB. Do not commit yet.
 3. Render the review page: \`$FLOWRYN_BIN draft render <file>\` (its path from the worktree's top level). Flowryn writes \`$FLOWRYN_REPORT_DIR/draft/draft.html\` from the file itself; never write or edit that page by hand (\`stage done\` renders the file again and refuses a page that differs). Raw HTML in the file is shown as text, and so is a link that is not http(s), mailto or relative, or an image that is not relative.
-4. Questions for the user: only what you truly cannot proceed without; decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/draft/questions.json\` in the flowryn-design skill's shape (at most 5, each with options, a recommendation and what it blocks; recorded choices under "decided"). The page already mounts the question widget; never list questions in the file as text.
+4. Questions for the user: only what you truly cannot proceed without; decide everything else. Write them to \`$FLOWRYN_REPORT_DIR/draft/questions.json\` in the flowryn-design skill's shape (at most 5, each with costed options, a recommendation, its downside and what it blocks; recorded choices under "decided"). The page already mounts the question widget; never list questions in the file as text.
 5. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/draft/draft.html\` prints its URL; pass it as it is.
 6. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/draft/draft.html [--questions-file $FLOWRYN_REPORT_DIR/draft/questions.json]\`. The verdict: changes with the user's words (edit the file, render again, host it again, stage done again), or approved.
 7. After approval (the final stage): commit the file exactly as approved and \`$FLOWRYN_BIN deliver --local\`. A file that differs from the approved one, or any other file your branch changes, is refused; a change needs a new review.

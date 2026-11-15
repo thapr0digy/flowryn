@@ -280,6 +280,12 @@ export function stringArg(args: Args, name: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/** A repeatable flag's values, empty when it was not given. */
+export function listArg(args: Args, name: string): string[] {
+  const value = args[name];
+  return Array.isArray(value) ? value : [];
+}
+
 export function intArg(args: Args, name: string): number | undefined {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
