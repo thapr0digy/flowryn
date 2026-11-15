@@ -54,7 +54,8 @@ function projectsView(config: FlowrynConfig): Record<string, unknown> {
     const verify = verifyConfig(config, id);
     const maxWorkers = projectMaxWorkers(config, id);
     const reviewModel = projectReviewModel(config, id);
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landingMode(config, id) === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id) } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
+    // The config alone: a local-only project (its mode is in the database) also queues when landing is unset.
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landingMode(config, id, null) === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, null) } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
   }
   return out;
 }

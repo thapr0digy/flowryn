@@ -223,20 +223,32 @@ export function autoMergeEnabled(config: FlowrynConfig, projectId: string, proje
 
 /**
  * `[projects.<id>] landing` (docs/notes/2026-10-30-landing-queue-the-65.md):
- * "queue" has the daemon land the project's approved and routine PRs one at a
+ * "queue" has the daemon land the project's approved and routine work one at a
  * time, merging its base into each first (src/verify/landing-queue.ts);
- * "manual" (the default) leaves landing to the merge verb. Throws
- * config_invalid like verifyConfig (a queue is refused without verify steps).
+ * "manual" leaves landing to the merge verb. Unset, a local-only project with
+ * verify steps queues (docs/notes/2026-11-15-local-only-auto-x9.md) and any
+ * other project is manual. `deliveryMode` is the project's (or the run's)
+ * delivery mode; null reads the config alone. Throws config_invalid like
+ * verifyConfig (a queue is refused without verify steps).
  */
-export function landingMode(config: FlowrynConfig, projectId: string): LandingMode {
+export function landingMode(config: FlowrynConfig, projectId: string, deliveryMode: string | null): LandingMode {
   if (!verifyConfig(config, projectId)) return "manual";
-  return projectTable(config, projectId).landing === "queue" ? "queue" : "manual";
+  const written = projectTable(config, projectId).landing;
+  if (written === undefined) return deliveryMode === "local-only" ? "queue" : "manual";
+  return written === "queue" ? "queue" : "manual";
 }
 
 /** The deepest landing train a project may set: each car beyond the first holds a validation slot. */
 export const MAX_TRAIN_DEPTH = 5;
 /** How many entries of a line verify at once when unset: the head of line and one speculative car. */
 export const DEFAULT_TRAIN_DEPTH = 2;
+/**
+ * How long a local-only line waits on the entry whose turn it is while its worker is busy or its
+ * checkout has uncommitted changes, before the entries behind it go ahead (it keeps its place).
+ */
+export const LOCAL_TURN_WAIT_MS = 5 * 60_000;
+/** Turns a local-only entry may be passed over that way; at the last it is held for the leader. */
+export const MAX_SKIPPED_TURNS = 3;
 
 function checkTrainDepth(value: unknown, where: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_TRAIN_DEPTH) {
@@ -250,9 +262,9 @@ function checkTrainDepth(value: unknown, where: string): number {
  * many entries of a queue project's line verify at once, the head of line included; 1 turns the
  * train off. Never throws: an invalid table was refused by the daemon, and no train runs on it.
  */
-export function landingTrainDepth(config: FlowrynConfig, projectId: string): number {
+export function landingTrainDepth(config: FlowrynConfig, projectId: string, deliveryMode: string | null): number {
   try {
-    if (!landingQueued(config, projectId)) return 1;
+    if (!landingQueued(config, projectId, deliveryMode)) return 1;
     const raw = projectTable(config, projectId).landing_train_depth;
     return raw === undefined ? DEFAULT_TRAIN_DEPTH : checkTrainDepth(raw, `[projects.${projectId}]`);
   } catch {
@@ -261,9 +273,9 @@ export function landingTrainDepth(config: FlowrynConfig, projectId: string): num
 }
 
 /** landingMode for a pass that must not throw: an invalid table was refused by the daemon, and nothing queues on it. */
-export function landingQueued(config: FlowrynConfig, projectId: string): boolean {
+export function landingQueued(config: FlowrynConfig, projectId: string, deliveryMode: string | null): boolean {
   try {
-    return landingMode(config, projectId) === "queue";
+    return landingMode(config, projectId, deliveryMode) === "queue";
   } catch {
     return false;
   }

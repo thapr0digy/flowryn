@@ -293,18 +293,21 @@ export function carryDelivery(db: Db, run: RunWithPolicy, delivered: Delivered, 
 
 /**
  * The landing queue merged the run's base into its delivered head itself and
- * pushed it (src/verify/landing-queue.ts): the delivery moves to the new head
- * as the watcher's carry moves it, for any work, since the daemon made the
- * merge (the queue decides what becomes of a human approval). Standing
- * records are voided; the new head's verify is queued. Call inside a
+ * pushed it, or, local-only, fast-forwarded the worktree to its merge
+ * (src/verify/landing-queue.ts): the delivery moves to the new head as the
+ * watcher's carry moves it, for any work, since the daemon made the merge (the
+ * queue decides what becomes of a human approval). Standing records are
+ * voided; the new head's verify is queued when `carry.verifyPolicy` is set (a
+ * local merge's was queued when the queue built it). Call inside a
  * transaction, with a proof of exactly delivered.head to pr.headSha.
  */
 export function carryLanding(db: Db, run: RunWithPolicy, delivered: Delivered, pr: Pick<PullRequest, "headSha" | "number" | "headRef">, carry: Carry, now: number): { request: string | null } {
-  db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES (?1, ?2, 'pr', ?3, ?4, ?5, ?6)").run(artifactId(now), run.task_id, delivered.ref, pr.headSha, now, delivered.head);
+  db.query("INSERT INTO artifacts (id, task_id, kind, ref, head_sha, created_at, carried_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)").run(artifactId(now), run.task_id, delivered.kind, delivered.ref, pr.headSha, now, delivered.head);
   voidApprovals(db, run.task_id, now, `the landing queue merged the base into it at ${pr.headSha.slice(0, 8)}`);
   const { request, note, seq } = noteCarried(db, run, { ref: delivered.ref, pr, carry, source: "daemon", via: "landing" }, now);
   const title = taskTitle(db, run.task_id);
-  const what = run.sensitive ? `Sensitive PR waits for your approval: ${title} (${run.project_id})` : `PR ready: ${title} (${run.project_id})`;
+  const thing = delivered.kind === "pr" ? "PR" : "Branch";
+  const what = run.sensitive ? `Sensitive ${delivered.kind === "pr" ? "PR" : "local-only branch"} waits for your approval: ${title} (${run.project_id})` : `${thing} ready: ${title} (${run.project_id})`;
   openReadyItem(db, run, seq, `${what}; ${note}`, now);
   return { request };
 }

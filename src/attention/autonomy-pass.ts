@@ -278,7 +278,7 @@ function startMerges(db: Db, config: FlowrynConfig, now: number, out: AutonomyOu
   const ready = db.query("SELECT id FROM runs WHERE state = 'ready'").all() as { id: string }[];
   for (const { id } of ready) {
     const run = getRunWithPolicy(db, id);
-    if (!run || run.kind !== "ship" || run.stacked_on || !autonomyForRun(db, run, now) || landingQueued(config, run.project_id)) continue;
+    if (!run || run.kind !== "ship" || run.stacked_on || !autonomyForRun(db, run, now) || landingQueued(config, run.project_id, run.delivery_mode)) continue;
     let steps: ReturnType<typeof verifyConfig> = null;
     try {
       steps = verifyConfig(config, run.project_id);

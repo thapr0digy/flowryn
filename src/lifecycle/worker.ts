@@ -544,10 +544,11 @@ const deliver: VerbSpec = {
       if (steered.length > 0) data.stacked_steered = steered.join(" ");
       if (run.stage_state !== "done") recordStageDelivered(ctx.db, run, finished, now, handoff);
       const ship = outcome.ship;
-      // A queue project's PR waits its turn in the landing queue (src/verify/landing-queue.ts), which merges it;
-      // its verify starts now all the same, so a failure goes back to the worker before its turn comes.
-      if (ship.kind === "pr" && deliveredToQueue(ctx.db, ctx.config(), run, ship.pr.headSha, now)) {
-        const verify = startAutoVerify(ctx.db, ctx.config(), run, { ref: ship.url, head: ship.pr.headSha, prNumber: ship.pr.number, headRef: ship.pr.headRef, worktree: null }, now);
+      // A queue project's delivery waits its turn in the landing queue (src/verify/landing-queue.ts), which merges it.
+      // A PR's verify starts now all the same, so a failure goes back to the worker before its turn comes; a local
+      // branch's one verify is of its merge onto the entry ahead, which the queue builds and queues itself.
+      if (deliveredToQueue(ctx.db, ctx.config(), run, ship.kind === "pr" ? ship.pr.headSha : ship.head, now)) {
+        const verify = ship.kind === "pr" ? startAutoVerify(ctx.db, ctx.config(), run, { ref: ship.url, head: ship.pr.headSha, prNumber: ship.pr.number, headRef: ship.pr.headRef, worktree: null }, now) : null;
         // The watcher's pass kicks the auto-merger, whose pass takes it into the line.
         ctx.delivery.watch(run.id);
         return { data: { ...data, landing: "queue", ...(verify ? { auto_verify: verify.id } : {}) }, hints: ["end your turn"] };

@@ -171,7 +171,8 @@ describe("flowryn verify", () => {
   test(
     "local-only work: merge refuses verify_required; flowryn verify takes the task and tests its worktree head; the merge then lands on it",
     async () => {
-      env = await makeShipEnv({ mode: "local-only", extraConfig: VERIFY_CONFIG });
+      // A local-only project with verify steps queues its landings by default; this one merges by hand.
+      env = await makeShipEnv({ mode: "local-only", extraConfig: `${VERIFY_CONFIG}landing = "manual"\n` });
       const e = env;
       const steps = "FAKE: commit local.txt local\nFAKE: deliver-local\n";
       const dispatched = await e.fleet.json(["dispatch", "web", "--kind", "ship", "--harness", "claude", "--body-file", "-"], { env: { FLOWRYN_TOKEN: e.leaderToken() }, stdin: `local\n${steps}FAKE: sleep 120000` });
