@@ -135,7 +135,7 @@ function queueMerge(ctx: HandlerCtx, prepared: QueuedMerge): HandlerResult {
   const place = placeOf(ctx.db, entry);
   return {
     data: { task: run.task_id, run: run.id, landing: entry.id, position: place ? `${place.position} of ${place.of}` : "-", head: facts.head, approval: approval ?? "-", channel: channelOf(chosen.choice!), state: "queued" },
-    hints: [`the landing queue merges origin/${facts.pr?.baseRef ?? "main"} into it, verifies and merges it in turn: flowryn show ${run.task_id}`],
+    hints: [`the landing queue merges ${facts.pr ? `origin/${facts.pr.baseRef}` : facts.project.default_branch} into it, verifies and merges it in turn: flowryn show ${run.task_id}`],
   };
 }
 
