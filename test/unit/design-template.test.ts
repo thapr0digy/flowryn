@@ -159,6 +159,14 @@ describe("the design page check", () => {
     expect(designPageProblems(filled({ "{{GAPS}}": findings }))).toEqual([]);
   });
 
+  test("assumption: hard-wrapped check names and verdicts still count", () => {
+    const wrap = (html: string) => html.replace(/ /g, "\n    ");
+    expect(designPageProblems(filled({ "{{GAPS}}": wrap(cleanGapCheck()) }))).toEqual([]);
+    expect(designPageProblems(filled({ "{{GAPS}}": wrap(cleanGapCheck("needs another design pass")) }))).toEqual([
+      "the gap check says the design needs another design pass: revise the page and spec, check again, then run stage done",
+    ]);
+  });
+
   test("assumption: the gaps part is folded, between the risks part and the detail", () => {
     expect(designPageProblems(filled().replace('<details data-section="gaps">', '<details data-section="gaps" open>'))).toEqual(["the gaps part must start folded: drop open from its <details>"]);
     const gaps = /<details data-section="gaps">[\s\S]*?<\/details>\n/.exec(filled())![0];

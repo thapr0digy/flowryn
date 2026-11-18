@@ -284,7 +284,7 @@ function gapsProblems(html: string, last: Part, detail: { start: number } | null
   if (gaps.end === null) return [...problems, "the gaps part's <details> is never closed: end it with </details>"];
   const part = html.slice(gaps.start, gaps.end);
   if (part.includes("{{GAPS}}")) return problems;
-  const text = textOf(part.replace(/<summary\b[\s\S]*?<\/summary>/i, " "));
+  const text = textOf(part.replace(/<summary\b[\s\S]*?<\/summary>/i, " ")).replace(/\s+/g, " ");
   if (!/\p{L}/u.test(text)) return [...problems, `the gaps part is empty; ${GAPS_HOW} and record it, every check included ("none" when clean)`];
   const verdicts = DESIGN_GAP_VERDICTS.toSorted((a, b) => b.length - a.length);
   const verdict = new RegExp(`\\bVerdict:\\s*(${verdicts.join("|")})\\b`, "i").exec(text)?.[1]?.toLowerCase();
