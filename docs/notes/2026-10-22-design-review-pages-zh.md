@@ -17,6 +17,8 @@ The flowryn-design skill ships `design-template.html` beside its SKILL.md (`DESI
 7. `risks` "Risks, and how we'd know it's wrong".
 8. `<details data-section="detail">`, folded and last: files, APIs, data and identifiers, the assumptions the build must test, every choice and why, sources, and what could not be checked.
 
+A folded `<details data-section="gaps">` ("Gaps checked") now sits between the risks and the detail; its contents and check are in docs/notes/2026-11-18-design-stage-runs-ed.md.
+
 The outline comes from Google design docs (context, goals and non-goals, alternatives considered, no pasted code), the Rust RFC template (one-paragraph summary, guide-level before reference-level, drawbacks, rationale and alternatives), PEP 12 (rejected ideas, open issues), Oxide RFD 1, Squarespace's "Yes, if" RFCs (the reviewer's ask up front), Nygard's ADRs (consequences, negative ones included), Gergely Orosz's survey of RFC templates, Will Larson ("start from the problem", minimal templates), Diátaxis (reference apart from explanation) and the US Federal Plain Language Guidelines. The design page under `~/.flowryn/data/design-review-pages-zh/design/` lists the links; it is also the passing fixture `fixtures/design-page/good.html`.
 
 ## The check
@@ -32,6 +34,7 @@ The outline comes from Google design docs (context, goals and non-goals, alterna
 - a code-shaped word shows above the fold (SVG labels included): an inner underscore, a lowercase start with a capital inside, a path with a file extension (or a bare file name with a code extension; a web address such as `https://example.com` or `github.com/org/repo` is not a path), a leading `--`, a trailing `()`. Product names such as macOS and iPhone are allowed (`MIXED_CASE_NAMES` in `src/skills/review-page.ts`), and so is any term the page defines with `<dfn>`; `<kbd>` marks what the user types and is not checked. Up to 10 are named;
 - a `<code>` or `<pre>` element shows above the fold outside the figure;
 - with `--questions-file`, the widget is not inside "What I need from you".
+- the gaps part is missing or malformed (docs/notes/2026-11-18-design-stage-runs-ed.md).
 
 Plain-English jargon ("digest", "follow-up batch") has no shape to catch. The skill forbids undefined internal terms, and the reviewer judges them.
 
