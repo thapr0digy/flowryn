@@ -17,6 +17,7 @@ import { judgeHost, parseVmStat, type HostVerdict } from "../../src/sched/host.t
 import { fullPools, grantJobLease, grantLeases, leaseProcesses, liveCounts, liveJobLeases, OverCapacity, poolHolders, recordJobProcess, releaseJobLeases, releaseLeases, runLeases } from "../../src/sched/pools.ts";
 import { EXIT_BACKOFF_MAX_MS, Scheduler } from "../../src/sched/scheduler.ts";
 import { claimProbe, clearUsageLimit, noteProbeReply, noteUsageLimit, resumeCommand, usageGate, usagePause } from "../../src/sched/usage.ts";
+import { DESIGN_GAP_CHECK, DESIGN_GAP_CHECK_FILE } from "../../src/skills/design-gap-check.ts";
 import { skillPath, STAGE_SKILLS, writeStageSkills } from "../../src/skills/stages.ts";
 
 const HOME = "/tmp/fw-m5";
@@ -281,6 +282,8 @@ describe("stage text", () => {
     for (const skill of STAGE_SKILLS) expect(Bun.file(skillPath(dir, skill.name)!).size).toBeGreaterThan(100);
     // The pages a human reviews are written plainly: the design page and the QA card each say so in the skill the worker reads.
     for (const name of ["flowryn-design", "flowryn-visual-qa"]) expect(await Bun.file(skillPath(dir, name)!).text()).toContain("not the terse reply style");
+    // The gap check sits beside the design SKILL.md for any harness, and in the Claude plugin.
+    for (const at of [join(dir, "skills", "flowryn-design"), join(files.claudePlugin, "skills", "flowryn-design")]) expect(await Bun.file(join(at, DESIGN_GAP_CHECK_FILE)).text()).toBe(DESIGN_GAP_CHECK);
     expect(Bun.file(join(files.claudePlugin, ".claude-plugin", "plugin.json")).size).toBeGreaterThan(10);
     const feature = DEFAULT_WORKFLOWS["feature-ui"]!;
     const delivery = { kind: "ship" as const, mode: "local-only" as const, defaultBranch: "main" };

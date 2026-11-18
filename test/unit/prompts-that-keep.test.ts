@@ -28,7 +28,8 @@ const count = (haystack: string, needle: string) => haystack.split(needle).lengt
 describe("rendered sizes stay under fixed limits", () => {
   const limits: [string, number][] = [
     // 3,600 -> 3,900: the questions.json example gives each option its consequence (docs/notes/2026-11-15-worker-questions-carry-gn.md).
-    ["flowryn-design", 3_900],
+    // 3,900 -> 4,200: the gap check step, its detail in design-gap-check.md (docs/notes/2026-11-18-design-stage-runs-ed.md).
+    ["flowryn-design", 4_200],
     ["flowryn-build-test", 3_200],
     ["flowryn-visual-qa", 4_800],
     ["flowryn-draft", 2_400],
@@ -59,8 +60,8 @@ describe("each rule once", () => {
     expect(text(feature, 0)).toContain(REVIEW_GATE_TEXT);
   });
 
-  test("design step 6 no longer restates the gate paragraph", () => {
-    const step6 = skill("flowryn-design").split("\n").find((l) => l.startsWith("6. Finish"))!;
+  test("design's finish step no longer restates the gate paragraph", () => {
+    const step6 = skill("flowryn-design").split("\n").find((l) => l.startsWith("7. Finish"))!;
     expect(step6).not.toContain("end your turn");
     expect(step6).not.toContain("lavish-axi poll");
     expect(step6.length).toBeLessThan(300);

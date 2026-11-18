@@ -11,14 +11,16 @@ import {
   designPageProblems,
 } from "../../src/skills/design-template.ts";
 import { STAGE_SKILLS } from "../../src/skills/stages.ts";
-import { filledDesignPage } from "../helpers/design-page.ts";
+import { DESIGN_GAP_CHECK, DESIGN_GAP_CHECK_FILE, DESIGN_GAP_CHECKS } from "../../src/skills/design-gap-check.ts";
+import { cleanGapCheck, filledDesignPage } from "../helpers/design-page.ts";
 
 /** The design page of the task that brought in this standard: the first page written to it. */
 const GOOD = readFileSync(join(import.meta.dir, "..", "..", "fixtures", "design-page", "good.html"), "utf8");
 
 function filled(overrides: Record<string, string> = {}): string {
   let page = DESIGN_TEMPLATE;
-  for (const slot of DESIGN_PLACEHOLDERS) page = page.replaceAll(slot, overrides[slot] ?? "Said in plain words.");
+  const fills: Record<string, string> = { "{{GAPS}}": cleanGapCheck(), ...overrides };
+  for (const slot of DESIGN_PLACEHOLDERS) page = page.replaceAll(slot, fills[slot] ?? "Said in plain words.");
   return page;
 }
 
@@ -115,7 +117,7 @@ describe("the design page check", () => {
     expect(designPageProblems(filled().replace('<details data-section="detail">', '<details data-section="detail" open>'))).toEqual(["the implementation detail must start folded: drop open from its <details>"]);
     const risks = /<section data-section="risks">[\s\S]*?<\/section>\n/.exec(filled())![0];
     const early = filled().replace(risks, "").replace("</body>", `${risks}</body>`);
-    expect(designPageProblems(early)).toEqual(["the folded implementation detail must come after every other part"]);
+    expect(designPageProblems(early)).toEqual(["the folded implementation detail must come after every other part", "the folded gaps part must come after every other part and before the implementation detail"]);
     const trailing = filled().replace("</body>", "<p>Appendix in plain words.</p></body>");
     expect(designPageProblems(trailing)).toEqual(["nothing a reader sees may follow the folded implementation detail: move it into the detail or above it"]);
     const scripted = filled().replace("</body>", '<!-- a note --><script src="extra.js"></script>\n</body>');
@@ -125,8 +127,59 @@ describe("the design page check", () => {
     expect(designPageProblems(filled().replace("</body>", ""))).toEqual([]);
     expect(designPageProblems(filled().replace("</body>", "<div><p></p></div></body>"))).toEqual([]);
     expect(designPageProblems(filled().replace("</body>", '<img src="extra.png"></body>'))).toEqual(["nothing a reader sees may follow the folded implementation detail: move it into the detail or above it"]);
-    const unclosed = filled().replace("</details>", "");
+    const unclosed = filled().replace("</details>\n</body>", "\n</body>");
     expect(designPageProblems(unclosed)).toEqual(["the implementation detail's <details> is never closed: end it with </details>"]);
+  });
+
+  test("assumption: stage done refuses a page without the gap check's folded part", () => {
+    const without = filled().replace(/<details data-section="gaps">[\s\S]*?<\/details>\n/, "");
+    expect(without).not.toContain('data-section="gaps"');
+    expect(designPageProblems(without)).toEqual([
+      `the gap check's findings must be on the page, folded: <details data-section="gaps"> before the implementation detail; run the gap check in ${DESIGN_GAP_CHECK_FILE} (beside the flowryn-design skill)`,
+    ]);
+  });
+
+  test("assumption: an empty gaps part is refused; a clean check still names every check", () => {
+    expect(designPageProblems(filled({ "{{GAPS}}": "<p> </p>" }))).toEqual([
+      `the gaps part is empty; run the gap check in ${DESIGN_GAP_CHECK_FILE} (beside the flowryn-design skill) and record it, every check included ("none" when clean)`,
+    ]);
+    const skipped = filled({ "{{GAPS}}": cleanGapCheck().replace("<td>Reference parity</td>", "<td></td>").replace("<td>Stale data</td>", "<td></td>") });
+    expect(designPageProblems(skipped)).toEqual(['the gaps part skips checks: "Stale data", "Reference parity"; name every check, with "none" when clean']);
+    expect(designPageProblems(filled({ "{{GAPS}}": "<p>Verdict: ready. Nothing found.</p>" }))[0]).toStartWith(`the gaps part skips checks: ${DESIGN_GAP_CHECKS.map((c) => `"${c.name}"`).join(", ")}`);
+  });
+
+  test("assumption: the gaps part needs a verdict, and one asking for another pass is refused", () => {
+    expect(designPageProblems(filled({ "{{GAPS}}": cleanGapCheck().replace("Verdict: ready", "All good") }))).toEqual([
+      'the gaps part needs its verdict line: "Verdict: ready", "Verdict: ready with the fixes below", "Verdict: needs another design pass"',
+    ]);
+    expect(designPageProblems(filled({ "{{GAPS}}": cleanGapCheck("needs another design pass") }))).toEqual([
+      "the gap check says the design needs another design pass: revise the page and spec, check again, then run stage done",
+    ]);
+    const findings = `${cleanGapCheck("<strong>Ready with the fixes below</strong>")}<h3>Gaps</h3><ol><li>No exceptions panel. Evidence: the rules mockup. Folded into phase 2.</li></ol><p>Not copying: none.</p>`;
+    expect(designPageProblems(filled({ "{{GAPS}}": findings }))).toEqual([]);
+  });
+
+  test("assumption: the gaps part is folded, between the risks part and the detail", () => {
+    expect(designPageProblems(filled().replace('<details data-section="gaps">', '<details data-section="gaps" open>'))).toEqual(["the gaps part must start folded: drop open from its <details>"]);
+    const gaps = /<details data-section="gaps">[\s\S]*?<\/details>\n/.exec(filled())![0];
+    const after = filled().replace(gaps, "").replace("</body>", `${gaps}</body>`);
+    expect(designPageProblems(after)).toEqual([
+      "nothing a reader sees may follow the folded implementation detail: move it into the detail or above it",
+      "the folded gaps part must come after every other part and before the implementation detail",
+    ]);
+  });
+
+  test("the gap check ships beside the design skill, names every check, and the skill runs it before hosting", () => {
+    const skill = STAGE_SKILLS.find((s) => s.name === "flowryn-design")!;
+    expect(skill.files?.[DESIGN_GAP_CHECK_FILE]).toBe(DESIGN_GAP_CHECK);
+    expect(DESIGN_GAP_CHECKS).toHaveLength(13);
+    for (const check of DESIGN_GAP_CHECKS) expect(DESIGN_GAP_CHECK).toContain(`| ${check.name} |`);
+    expect(DESIGN_GAP_CHECK).not.toContain("~/.claude");
+    const lines = skill.body.split("\n");
+    const check = lines.findIndex((l) => l.includes(DESIGN_GAP_CHECK_FILE));
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(lines.findIndex((l) => l.includes("lavish-axi --no-open")));
+    expect(check).toBeLessThan(lines.findIndex((l) => l.includes("stage done --review")));
   });
 
   test("code names above the fold are named; a <dfn> term, <kbd> text and product names pass", () => {
