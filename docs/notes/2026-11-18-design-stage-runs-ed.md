@@ -10,7 +10,7 @@ Every Flowryn design stage, Claude or Pi, any project, now checks its own design
 The flowryn-design skill gains step 5, before hosting the page: run `design-gap-check.md` (written next to the skill's SKILL.md, so any harness reads it) on the page, the spec and the plan. The file holds the checklist the leader's user skill uses, adapted to the stage:
 
 - gather the page, spec and named mockups read whole, the user's words and carried decisions from the task file, the code the design builds on (verify every capability claim; look for ones it forgot), and landed or in-flight work that changes its data;
-- run 13 checks, writing "none" when clean: source fidelity, decisions honoured, code truth, stale data, unknown and failure states, lifecycle completeness, exceptions and ownership, where results surface, reference parity, reuse and fit, security and abuse, getting started, layout and accessibility;
+- run 14 checks, writing "none" when clean, starting with simplest secure option (is there a simpler design that is still security conscious? every new piece of infrastructure, key, credential, service, setting or cross-repo change must say why a simpler secure path, such as trust-on-first-use with pinned keys or reusing an existing table or flow, is not enough; if it is enough, the finding is "simplify"), then source fidelity, decisions honoured, code truth, stale data, unknown and failure states, lifecycle completeness, exceptions and ownership, where results surface, reference parity, reuse and fit, security and abuse, getting started, layout and accessibility;
 - fold each accepted finding into the page, spec or plan phase; a finding only the user can settle becomes a question in `questions.json`; a substantial one means revise and check again.
 
 ## What `stage done` checks
@@ -21,7 +21,7 @@ The design template has a new folded part, `<details data-section="gaps">` ("Gap
 - is empty;
 - has no verdict line: `Verdict: ready`, `Verdict: ready with the fixes below` or `Verdict: needs another design pass`;
 - says `needs another design pass` (revise first; the page is not ready for review);
-- does not name every one of the 13 checks (a clean check still lists them, each "none").
+- does not name every one of the 14 checks (a clean check still lists them, each "none").
 
 The findings' quality (evidence, what each changed) is the worker's judgement and the reviewer's to judge; the check proves only the shape, like the rest of the design page check. Plain code, no model.
 
@@ -31,6 +31,7 @@ The findings' quality (evidence, what each changed) is the worker's judgement an
 - The checklist is a file next to the skill (as `qa-method.md` is for QA), not inline: the design skill body stays within its budget. The body's size limit in `test/unit/prompts-that-keep.test.ts` moved from 3,900 to 4,200 characters for the new step.
 - The gaps part is folded and its summary is two words, so it costs the visible 500-word budget almost nothing.
 - The leader's user skill (`~/.claude/skills/design-gap-check`) stays for scouts' mockups and the leader's own reviews; the stage file does not depend on it.
+- Simplest secure option (added 2026-11-19) runs first: an overcomplicated design wastes every later check. It came from Signal's agent-binding design, which first proposed hand-kept machine-id lists, then Vault-signed vouchers with devops changes, when trust-on-first-use with pinned keys and Decide items for conflicts was enough. The skill's gap-check step also says to prefer the simplest security-conscious design (body limit unchanged).
 - `CONTRACT_REVISIONS` is unchanged: the contract suite does not exercise design pages.
 
 ## Tests

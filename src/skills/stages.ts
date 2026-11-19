@@ -52,7 +52,7 @@ Goal: a design the user approves in Lavish, plus a phase plan when the feature i
    <what it does, and how to tell it is done>
 
    (\`workflow:\` is optional.) Approving the design approves the plan; each phase starts once the one before has landed.
-5. Gap check: run \`${DESIGN_GAP_CHECK_FILE}\` (next to this SKILL.md) on your page, spec and plan. Fold each accepted finding into them, and record the verdict, every check and the numbered findings in the page's folded "Gaps checked" part. A substantial finding means revise, then check again.
+5. Gap check: run \`${DESIGN_GAP_CHECK_FILE}\` (next to this SKILL.md) on your page, spec and plan; prefer the simplest security-conscious design. Fold each accepted finding into them and record the verdict, every check and numbered findings in the folded "Gaps checked" part. A substantial finding: revise, then check again.
 6. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL; pass it as it is. Only without lavish-axi, use the page's file:// URL.
 7. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/design/design.html [--plan-file $FLOWRYN_REPORT_DIR/plan.md] [--questions-file $FLOWRYN_REPORT_DIR/design/questions.json]\`. Changes come with the user's words: revise, then stage done again.
 

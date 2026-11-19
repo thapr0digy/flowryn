@@ -145,6 +145,8 @@ describe("the design page check", () => {
     ]);
     const skipped = filled({ "{{GAPS}}": cleanGapCheck().replace("<td>Reference parity</td>", "<td></td>").replace("<td>Stale data</td>", "<td></td>") });
     expect(designPageProblems(skipped)).toEqual(['the gaps part skips checks: "Stale data", "Reference parity"; name every check, with "none" when clean']);
+    const notSimplest = filled({ "{{GAPS}}": cleanGapCheck().replace("<td>Simplest secure option</td>", "<td></td>") });
+    expect(designPageProblems(notSimplest)).toEqual(['the gaps part skips checks: "Simplest secure option"; name every check, with "none" when clean']);
     expect(designPageProblems(filled({ "{{GAPS}}": "<p>Verdict: ready. Nothing found.</p>" }))[0]).toStartWith(`the gaps part skips checks: ${DESIGN_GAP_CHECKS.map((c) => `"${c.name}"`).join(", ")}`);
   });
 
@@ -180,7 +182,10 @@ describe("the design page check", () => {
   test("the gap check ships beside the design skill, names every check, and the skill runs it before hosting", () => {
     const skill = STAGE_SKILLS.find((s) => s.name === "flowryn-design")!;
     expect(skill.files?.[DESIGN_GAP_CHECK_FILE]).toBe(DESIGN_GAP_CHECK);
-    expect(DESIGN_GAP_CHECKS).toHaveLength(13);
+    expect(DESIGN_GAP_CHECKS).toHaveLength(14);
+    expect(DESIGN_GAP_CHECKS[0].name).toBe("Simplest secure option");
+    expect(DESIGN_GAP_CHECK).toContain("| 1 | Simplest secure option | Is there a simpler design that is still security conscious?");
+    expect(skill.body).toContain("prefer the simplest security-conscious design");
     for (const check of DESIGN_GAP_CHECKS) expect(DESIGN_GAP_CHECK).toContain(`| ${check.name} |`);
     expect(DESIGN_GAP_CHECK).not.toContain("~/.claude");
     const lines = skill.body.split("\n");
