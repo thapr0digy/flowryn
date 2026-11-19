@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureDir, writeFileAtomic } from "../util/fsx.ts";
 import { VERSION } from "../version.ts";
+import { DESIGN_GAP_CHECK, DESIGN_GAP_CHECK_FILE } from "./design-gap-check.ts";
 import { DESIGN_TEMPLATE, DESIGN_TEMPLATE_FILE, DESIGN_TLDR_WORDS_MAX, DESIGN_VISIBLE_WORDS_MAX } from "./design-template.ts";
 import { QA_METHOD, QA_METHOD_FILE, QA_VIEWPORTS } from "./qa-method.ts";
 import { QA_PROBE, QA_PROBE_FILE } from "./qa-probe.ts";
@@ -11,7 +12,7 @@ import { QA_CARD_WORDS_MAX, QA_CHECKLIST, QA_NOTHING_VISIBLE, QA_SEVERITIES, QA_
  * The stage skills (design section 11; the draft one is notes projects'): Flowryn owns when and whether
  * a stage runs; these hold how. Each has a description of at most 60 tokens
  * (always loaded) and a body of at most 1.5k tokens (read on demand), plus
- * any files it names (the design and QA pages' templates, the QA method and probe), written next to it. The
+ * any files it names (the design and QA pages' templates, the design gap check, the QA method and probe), written next to it. The
  * launcher writes them under `<state_dir>/skills/`, loads them into a Claude
  * worker as a plugin, and every stage start names the SKILL.md path, so a Pi
  * worker (or any harness) reads the same file.
@@ -33,7 +34,7 @@ const DESIGN_BODY = `# Flowryn design stage
 Goal: a design the user approves in Lavish, plus a phase plan when the feature is bigger than one change. No product code.
 
 1. Read the task file and the project (AGENTS.md or CLAUDE.md, README, the code the task touches); note its constraints.
-2. The page, for an engineer who has not read the code and must judge it in two minutes: copy \`${DESIGN_TEMPLATE_FILE}\` (next to this SKILL.md) to \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree) and fill every {{SLOT}}, in order: In short (problem and change, at most ${DESIGN_TLDR_WORDS_MAX} words); What I need from you (approve or send changes, and the two or three calls worth a look); What changes for you (before and after, as the user notices it); Goals and non-goals; How it works (a diagram, then a few steps); Other ways (doing nothing included); Risks, and how we'd know it's wrong. Folded and last: files, APIs, data, identifiers, the assumptions the build must test, every choice and why, sources, what you could not check.
+2. The page, for an engineer who has not read the code and must judge it in two minutes: copy \`${DESIGN_TEMPLATE_FILE}\` (next to this SKILL.md) to \`$FLOWRYN_REPORT_DIR/design/design.html\` (outside your worktree) and fill every {{SLOT}}, in order: In short (problem and change, at most ${DESIGN_TLDR_WORDS_MAX} words); What I need from you (approve or send changes, and the two or three calls worth a look); What changes for you (before and after, as the user notices it); Goals and non-goals; How it works (a diagram, then a few steps); Other ways (doing nothing included); Risks, and how we'd know it's wrong. Folded: Gaps checked (step 5); last, files, APIs, data, identifiers, the assumptions the build must test, every choice and why, sources, what you could not check.
    Above the fold, plain words (not the terse reply style): no code names (an underscore, an inner capital, a path, a --flag, a call()), no \`<code>\` or \`<pre>\`, no unexplained internal term (\`<dfn>\` on first use, \`<kbd>\` for what the user types); at most ${DESIGN_VISIBLE_WORDS_MAX} words, diagrams aside. \`stage done\` refuses a page that breaks them.
    The build spec, for later stages: \`$FLOWRYN_REPORT_DIR/design/spec.md\` (\`$FLOWRYN_BIN template spec\`): ## Approach, ## Files and interfaces, ## Data and schema, ## Error handling, ## Security (threat surface, secrets, input validation, authorization), ## Test plan (a test per assumption), ## Rejected alternatives. Link it from the folded detail (\`<a href="spec.md">\`). The review approves page and spec together as pinned; a revision during review counts once you answer on the page (\`review reply\`).
 3. Questions: only a real decision you cannot proceed without; decide and record the rest. Write \`$FLOWRYN_REPORT_DIR/design/questions.json\`:
@@ -44,15 +45,16 @@ Goal: a design the user approves in Lavish, plus a phase plan when the feature i
     "decided": [{"choice": "poller home", "picked": "src/lavish/poller.ts", "why": "..."}]}
 
    kind: single, multi (recommend is a list) or text (recommend is your default, no options). At most 5 questions, 2 to 8 short options (never "other": the widget offers it), blocks names what waits. Each option's consequence: what happens, what waits, what breaks if wrong (one line, at most 200 characters); the user weighs options on them and the downside. The template's widget (\`<section id="flowryn-questions">\` in What I need from you) is the only place a question appears: never list them as text or write your own form.
-4. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL; pass it as it is. Only without lavish-axi, use the page's file:// URL.
-5. A phased feature (this task is phase 1): \`$FLOWRYN_REPORT_DIR/plan.md\`, one section per later phase:
+4. A phased feature (this task is phase 1): \`$FLOWRYN_REPORT_DIR/plan.md\`, one section per later phase:
 
    ## Phase 2: <title>
    workflow: fix
    <what it does, and how to tell it is done>
 
    (\`workflow:\` is optional.) Approving the design approves the plan; each phase starts once the one before has landed.
-6. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/design/design.html [--plan-file $FLOWRYN_REPORT_DIR/plan.md] [--questions-file $FLOWRYN_REPORT_DIR/design/questions.json]\`. Changes come with the user's words: revise, then stage done again.
+5. Gap check: run \`${DESIGN_GAP_CHECK_FILE}\` (next to this SKILL.md) on your page, spec and plan. Fold each accepted finding into them, and record the verdict, every check and the numbered findings in the page's folded "Gaps checked" part. A substantial finding means revise, then check again.
+6. Host it: \`lavish-axi --no-open $FLOWRYN_REPORT_DIR/design/design.html\` prints its URL; pass it as it is. Only without lavish-axi, use the page's file:// URL.
+7. Finish: \`$FLOWRYN_BIN stage done --review <url> --page $FLOWRYN_REPORT_DIR/design/design.html [--plan-file $FLOWRYN_REPORT_DIR/plan.md] [--questions-file $FLOWRYN_REPORT_DIR/design/questions.json]\`. Changes come with the user's words: revise, then stage done again.
 
 Rules:
 - Only the user passes a review gate; never assume approval before the steer says so.
@@ -133,7 +135,7 @@ export const STAGE_SKILLS: readonly StageSkill[] = [
     name: "flowryn-design",
     description: "Flowryn design stage: turn the task into a design page reviewed in Lavish and, for a phased feature, a phase plan. Use when your Flowryn stage is design.",
     body: DESIGN_BODY,
-    files: { [DESIGN_TEMPLATE_FILE]: DESIGN_TEMPLATE },
+    files: { [DESIGN_TEMPLATE_FILE]: DESIGN_TEMPLATE, [DESIGN_GAP_CHECK_FILE]: DESIGN_GAP_CHECK },
   },
   {
     name: "flowryn-build-test",

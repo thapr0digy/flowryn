@@ -1,5 +1,6 @@
 import { codeElements, codeShapedTerms, definedTerms, dropElements, nameSome, opensUnfolded, textOf, visibleMarkup, wordCount } from "./review-page.ts";
 import { WIDGET_MOUNT } from "../lavish/widget.ts";
+import { DESIGN_GAP_CHECK_FILE, DESIGN_GAP_CHECKS, DESIGN_GAP_REVISE_VERDICT, DESIGN_GAP_VERDICTS } from "./design-gap-check.ts";
 
 /**
  * The design page's fixed template and its check (docs/notes/2026-10-22-design-review-pages-zh.md).
@@ -20,6 +21,9 @@ export const DESIGN_SECTIONS = ["tldr", "ask", "change", "goals", "how", "altern
 /** The folded last part: files, identifiers, tests, choices, sources. */
 export const DESIGN_DETAIL_SECTION = "detail";
 
+/** The folded part before it: the gap check's verdict, its checks and numbered findings (design-gap-check.ts). */
+export const DESIGN_GAPS_SECTION = "gaps";
+
 /** Words a reader sees before unfolding anything, diagrams aside: about two minutes of reading. */
 export const DESIGN_VISIBLE_WORDS_MAX = 500;
 
@@ -39,6 +43,7 @@ export const DESIGN_PLACEHOLDERS = [
   "{{HOW}}",
   "{{ALTERNATIVES}}",
   "{{RISKS}}",
+  "{{GAPS}}",
   "{{DETAIL}}",
 ] as const;
 
@@ -68,6 +73,8 @@ export const DESIGN_TEMPLATE = `<!doctype html>
   HOW          the mechanism in a few numbered steps, in words.
   ALTERNATIVES the other ways, doing nothing included, and why each lost.
   RISKS        what could go wrong, the sign we would see, and what we would do.
+  GAPS         folded: the gap check run on this page and its spec, as ${DESIGN_GAP_CHECK_FILE} says: the verdict line,
+               every check by name ("none" when clean), the numbered findings with evidence and what each changed.
   DETAIL       folded: files and identifiers, data and APIs, the assumptions the build must test, every choice you
                made and why, sources, and what you could not check (mark guesses as guesses).
 -->
@@ -129,7 +136,11 @@ ${CHANGE_HEADER}
 <h2>Risks, and how we’d know it’s wrong</h2>
 {{RISKS}}
 </section>
-<details data-section="detail">
+<details data-section="${DESIGN_GAPS_SECTION}">
+<summary>Gaps checked</summary>
+{{GAPS}}
+</details>
+<details data-section="${DESIGN_DETAIL_SECTION}">
 <summary>Implementation detail: files, tests, choices, sources</summary>
 {{DETAIL}}
 </details>
@@ -165,8 +176,8 @@ function findSection(html: string, name: string): Part | null {
   return { name, start: open.index, end: elementEnd(html, "section", open.index) ?? html.length };
 }
 
-function findDetail(html: string): { start: number; end: number | null; tag: string } | null {
-  const open = new RegExp(`<details\\b[^>]*\\bdata-section\\s*=\\s*["']${DESIGN_DETAIL_SECTION}["'][^>]*>`, "i").exec(html);
+function findFolded(html: string, name: string): { start: number; end: number | null; tag: string } | null {
+  const open = new RegExp(`<details\\b[^>]*\\bdata-section\\s*=\\s*["']${name}["'][^>]*>`, "i").exec(html);
   return open ? { start: open.index, end: elementEnd(html, "details", open.index), tag: open[0] } : null;
 }
 
@@ -234,7 +245,7 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
   const how = found.find((p) => p.name === "how");
   if (how && !/<figure\b/i.test(html.slice(how.start, how.end))) problems.push('"How it works" needs a diagram: a <figure> holding an inline <svg>, an <img> or a drawn <pre>');
 
-  const detail = findDetail(html);
+  const detail = findFolded(html, DESIGN_DETAIL_SECTION);
   const last = found[found.length - 1];
   if (!detail) {
     if (found.length > 0) problems.push(`the implementation detail must be folded, last: <details data-section="${DESIGN_DETAIL_SECTION}">`);
@@ -244,6 +255,8 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
     else if (detail.end === null) problems.push("the implementation detail's <details> is never closed: end it with </details>");
     else if (showsAfter(html, detail.end)) problems.push("nothing a reader sees may follow the folded implementation detail: move it into the detail or above it");
   }
+
+  if (found.length > 0) problems.push(...gapsProblems(html, last!, detail));
 
   const visible = visibleMarkup(html);
   const words = wordCount(textOf(visibleMarkup(html, { withoutDiagrams: true })));
@@ -256,5 +269,29 @@ export function designPageProblems(html: string, opts: { widget?: boolean } = {}
 
   const ask = found.find((p) => p.name === "ask");
   if (opts.widget && ask && !html.slice(ask.start, ask.end).includes(WIDGET_MOUNT)) problems.push(`the question widget (<section ${WIDGET_MOUNT}>) belongs in "What I need from you"`);
+  return problems;
+}
+
+const GAPS_HOW = `run the gap check in ${DESIGN_GAP_CHECK_FILE} (beside the flowryn-design skill)`;
+
+/** What is wrong with the folded gaps part: missing, unfolded, out of place, without a verdict, or skipping a check. */
+function gapsProblems(html: string, last: Part, detail: { start: number } | null): string[] {
+  const gaps = findFolded(html, DESIGN_GAPS_SECTION);
+  if (!gaps) return [`the gap check's findings must be on the page, folded: <details data-section="${DESIGN_GAPS_SECTION}"> before the implementation detail; ${GAPS_HOW}`];
+  const problems: string[] = [];
+  if (opensUnfolded(gaps.tag)) problems.push("the gaps part must start folded: drop open from its <details>");
+  if (gaps.start < last.end || (detail && gaps.start > detail.start)) problems.push("the folded gaps part must come after every other part and before the implementation detail");
+  if (gaps.end === null) return [...problems, "the gaps part's <details> is never closed: end it with </details>"];
+  const part = html.slice(gaps.start, gaps.end);
+  if (part.includes("{{GAPS}}")) return problems;
+  const text = textOf(part.replace(/<summary\b[\s\S]*?<\/summary>/i, " ")).replace(/\s+/g, " ");
+  if (!/\p{L}/u.test(text)) return [...problems, `the gaps part is empty; ${GAPS_HOW} and record it, every check included ("none" when clean)`];
+  const verdicts = DESIGN_GAP_VERDICTS.toSorted((a, b) => b.length - a.length);
+  const verdict = new RegExp(`\\bVerdict:\\s*(${verdicts.join("|")})\\b`, "i").exec(text)?.[1]?.toLowerCase();
+  if (!verdict) problems.push(`the gaps part needs its verdict line: ${DESIGN_GAP_VERDICTS.map((v) => `"Verdict: ${v}"`).join(", ")}`);
+  else if (verdict === DESIGN_GAP_REVISE_VERDICT) problems.push(`the gap check says the design ${DESIGN_GAP_REVISE_VERDICT}: revise the page and spec, check again, then run stage done`);
+  const lower = text.toLowerCase();
+  const skipped = DESIGN_GAP_CHECKS.filter((c) => !lower.includes(c.name.toLowerCase())).map((c) => `"${c.name}"`);
+  if (skipped.length > 0) problems.push(`the gaps part skips checks: ${skipped.join(", ")}; name every check, with "none" when clean`);
   return problems;
 }

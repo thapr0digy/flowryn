@@ -39,7 +39,7 @@ pre{background:var(--code);padding:10px;border-radius:6px;overflow-x:auto;font-s
 
 <section data-section="ask">
 <h2>What I need from you</h2>
-<p>Approve, or send changes. No questions; the rest is decided (folded section). Worth a look:</p>
+<p>Approve, or send changes. No questions; the rest is decided below. Worth a look:</p>
 <ul>
 <li><strong>500 visible words at most</strong>, about two minutes. Diagrams don’t count.</li>
 <li><strong>Code names are caught by shape</strong>: underscores, mixed case, file paths, flags. Plain-English jargon has no shape, so the instructions forbid it and you judge it.</li>
@@ -88,7 +88,7 @@ pre{background:var(--code);padding:10px;border-radius:6px;overflow-x:auto;font-s
 <section data-section="alternatives">
 <h2>Other ways we could do it</h2>
 <ul>
-<li><strong>New instructions, no check.</strong> Cheapest, but the old ones asked for clear pages and drifted anyway.</li>
+<li><strong>New instructions, no check.</strong> Cheapest, but the old ones asked for clear pages and drifted.</li>
 <li><strong>A model grades readability.</strong> Catches jargon, but varies between runs, costs money, and the task rules it out.</li>
 <li><strong>Flowryn generates the page from data.</strong> Tightest shape, but loses free-form diagrams and tables.</li>
 <li><strong>Do nothing.</strong> Pages stay hard to judge.</li>
@@ -103,6 +103,36 @@ pre{background:var(--code);padding:10px;border-radius:6px;overflow-x:auto;font-s
 <li><strong>Product names trip the code-name rule</strong> (like macOS). A refusal names it; a short allow-list covers common ones, and a page can define any term.</li>
 </ul>
 </section>
+
+<details data-section="gaps">
+<summary>Gaps checked</summary>
+<p>Verdict: ready with the fixes below</p>
+<div class="wrap"><table>
+<tr><th>#</th><th>Check</th><th>Result</th></tr>
+<tr><td>1</td><td>Source fidelity</td><td>none</td></tr>
+<tr><td>2</td><td>Decisions honoured</td><td>none</td></tr>
+<tr><td>3</td><td>Code truth</td><td>1</td></tr>
+<tr><td>4</td><td>Stale data</td><td>none</td></tr>
+<tr><td>5</td><td>Unknown and failure states</td><td>2</td></tr>
+<tr><td>6</td><td>Lifecycle completeness</td><td>none</td></tr>
+<tr><td>7</td><td>Exceptions and ownership</td><td>none</td></tr>
+<tr><td>8</td><td>Where results surface</td><td>none</td></tr>
+<tr><td>9</td><td>Reference parity</td><td>none</td></tr>
+<tr><td>10</td><td>Reuse and fit</td><td>none</td></tr>
+<tr><td>11</td><td>Security and abuse</td><td>none</td></tr>
+<tr><td>12</td><td>Getting started</td><td>none</td></tr>
+<tr><td>13</td><td>Layout and accessibility</td><td>none</td></tr>
+</table></div>
+<h3>Issues</h3>
+<ol>
+<li>The first draft said QA cards were unchecked; the QA stage already checks its card’s words. Evidence: <code>qaPageProblems</code> in <code>src/skills/qa-template.ts</code>. Fix: share the word counter. Changed: the How it works steps and the spec’s files list.</li>
+</ol>
+<h3>Gaps</h3>
+<ol start="2">
+<li>A page handed in while the rules change had no path. Evidence: the in-flight design runs. Fix: refuse its next hand-in once, naming the template. Changed: What I need from you, third point.</li>
+</ol>
+<p>Not copying: Google’s long background section; the reviewer has the task.</p>
+</details>
 
 <details data-section="detail">
 <summary>Implementation detail: files, rules, tests, sources</summary>
