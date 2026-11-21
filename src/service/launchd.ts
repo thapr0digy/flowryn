@@ -177,13 +177,33 @@ function userDomains(): [gui: string, user: string] {
   return [`gui/${uid}`, `user/${uid}`];
 }
 
-/** The agent as launchd prints it, with the domain it is loaded in; null when it is loaded in neither. */
-export async function printAgent(label: string, deps: LaunchdDeps): Promise<{ domain: string; output: string } | null> {
+interface LoadedAgent {
+  domain: string;
+  output: string;
+}
+
+/** Every copy of the agent launchd has loaded: the Aqua+Background plist can be loaded in gui/<uid> and user/<uid> at once. */
+async function loadedAgents(label: string, deps: LaunchdDeps): Promise<LoadedAgent[]> {
+  const loaded: LoadedAgent[] = [];
   for (const domain of userDomains()) {
     const printed = await deps.launchctl(["print", `${domain}/${label}`]);
-    if (printed.exitCode === 0) return { domain, output: printed.output };
+    if (printed.exitCode === 0) loaded.push({ domain, output: printed.output });
   }
-  return null;
+  return loaded;
+}
+
+function runningPid(output: string): number | null {
+  const match = /^\s*pid = (\d+)\s*$/m.exec(output);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The agent as launchd prints it, with the domain it is loaded in: the copy
+ * that runs a pid, else the first loaded copy; null when it is loaded in neither.
+ */
+export async function printAgent(label: string, deps: LaunchdDeps): Promise<LoadedAgent | null> {
+  const loaded = await loadedAgents(label, deps);
+  return loaded.find((agent) => runningPid(agent.output) !== null) ?? loaded[0] ?? null;
 }
 
 /** The domain a bootstrap loads the agent into: gui/<uid> while a desktop session exists, else user/<uid>. */
@@ -203,17 +223,19 @@ export async function isLoaded(label: string): Promise<boolean> {
 }
 
 /**
- * Boot the agent out of the domain it is loaded in and wait until launchd has
- * actually unloaded it: bootout returns before the service is gone, and a
- * bootstrap in that window fails with "5: Input/output error". Returns false
- * when it was still loaded at the timeout.
+ * Boot the agent out of every domain it is loaded in and wait until launchd
+ * has actually unloaded it from all of them: bootout returns before the
+ * service is gone, and a bootstrap in that window fails with "5: Input/output
+ * error". Returns false when it was still loaded at the timeout.
  */
 export async function unloadAgent(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<boolean> {
-  const agent = await printAgent(label, deps);
-  if (agent === null) return true;
-  const target = `${agent.domain}/${label}`;
-  const loaded = async () => (await deps.launchctl(["print", target])).exitCode === 0;
-  await deps.launchctl(["bootout", target]);
+  const targets = (await loadedAgents(label, deps)).map((agent) => `${agent.domain}/${label}`);
+  if (targets.length === 0) return true;
+  const loaded = async () => {
+    for (const target of targets) if ((await deps.launchctl(["print", target])).exitCode === 0) return true;
+    return false;
+  };
+  for (const target of targets) await deps.launchctl(["bootout", target]);
   for (let waited = 0; waited < deps.unloadTimeoutMs; waited += deps.unloadPollMs) {
     if (!(await loaded())) return true;
     await deps.sleep(deps.unloadPollMs);
@@ -241,12 +263,17 @@ export async function loadAgent(label: string, path: string, deps: LaunchdDeps =
   throw new Error(`launchctl bootstrap ${domain} ${path} failed after ${attempts} attempts (exit ${last.exitCode}: ${last.output || "no output"})${hint}`);
 }
 
+/** The plist `daemon install` writes (and `--print` shows): rendered for the domain a bootstrap loads it into. */
+export async function servicePlist(spec: PlistSpec, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<string> {
+  return renderPlist(spec, await bootstrapDomain(deps));
+}
+
 /** Write the plist for the domain it loads into and (re)load it; launchd then starts the daemon (RunAtLoad). */
 export async function installService(spec: PlistSpec, path: string): Promise<void> {
   if (process.platform !== "darwin") throw new Error("launchd service install is macOS only; on Linux use a systemd user unit (after v1)");
   ensureDir(spec.logDir, 0o700);
   ensureDir(dirname(path), 0o755);
-  writeFileAtomic(path, renderPlist(spec, await bootstrapDomain()), 0o644);
+  writeFileAtomic(path, await servicePlist(spec), 0o644);
   const lint = Bun.spawnSync(["/usr/bin/plutil", "-lint", path]);
   if (lint.exitCode !== 0) throw new Error(`plutil rejected ${path}: ${lint.stdout.toString()}${lint.stderr.toString()}`);
   await loadAgent(spec.label, path);
@@ -269,9 +296,7 @@ export async function kickstart(label: string, deps: LaunchdDeps = LAUNCHD_DEPS)
 /** The running pid launchd reports for the agent, or null when it is not loaded or not running. */
 export async function agentPid(label: string, deps: LaunchdDeps = LAUNCHD_DEPS): Promise<number | null> {
   const printed = await printAgent(label, deps);
-  if (printed === null) return null;
-  const match = /^\s*pid = (\d+)\s*$/m.exec(printed.output);
-  return match ? Number(match[1]) : null;
+  return printed === null ? null : runningPid(printed.output);
 }
 
 /** The parts of an installed plist a restart depends on. */

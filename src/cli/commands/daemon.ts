@@ -12,7 +12,7 @@ import { adoptedLine, readAdoptedMarker } from "../../lifecycle/home-adopt.ts";
 import { PING_VERB, RESTART_VERB, STOP_VERB, systemVerbs } from "../../daemon/system-verbs.ts";
 import type { DaemonSnapshot } from "../../daemon/restart.ts";
 import { callServerVerb } from "../client.ts";
-import { LAUNCHD_DEPS, agentPid, installService, isLoaded, kickstart, loadAgent, plistPath, plistSpecFor, renderPlist, serviceLabel, selfCommand, uninstallService } from "../../service/launchd.ts";
+import { LAUNCHD_DEPS, agentPid, installService, isLoaded, kickstart, loadAgent, plistPath, plistSpecFor, serviceLabel, servicePlist, selfCommand, uninstallService } from "../../service/launchd.ts";
 import { RELAUNCH_ANSWER_MS, RELAUNCH_BOOTSTRAP_BACKOFF_MS, RELAUNCH_BOUND_MS, RELAUNCH_POLL_MS, RELAUNCH_UNLOAD_TIMEOUT_MS, relaunch } from "../../service/relaunch.ts";
 import { RECOVERY_COMMAND, type RestartFailure, clearRestartFailure, failureLine, readRestartFailure, writeRestartFailure } from "../../service/restart-failure.ts";
 import { fileLogger } from "../../daemon/logger.ts";
@@ -358,7 +358,7 @@ const install: VerbSpec = {
     const spec = plistSpecFor(config, home, io.env);
     const path = plistPath(spec.label);
     if (boolArg(args, "print")) {
-      io.stdout(renderPlist(spec));
+      io.stdout(await servicePlist(spec));
       return EXIT.ok;
     }
     await installService(spec, path);
