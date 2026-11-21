@@ -1,4 +1,4 @@
-import { type LaunchdDeps, launchdDomain, loadAgent } from "./launchd.ts";
+import { type LaunchdDeps, launchdDomain, loadAgent, printAgent } from "./launchd.ts";
 import { RECOVERY_COMMAND, failureLine, type RestartFailure } from "./restart-failure.ts";
 
 /**
@@ -73,8 +73,8 @@ async function waitForNew(plan: RelaunchPlan, deps: RelaunchDeps): Promise<numbe
 
 /** The state lines of `launchctl print` for the agent, on one line ("not loaded" when it is not). */
 export async function launchdState(label: string, deps: LaunchdDeps): Promise<{ loaded: boolean; summary: string }> {
-  const printed = await deps.launchctl(["print", `${launchdDomain()}/${label}`]);
-  if (printed.exitCode !== 0) return { loaded: false, summary: "not loaded" };
+  const printed = await printAgent(label, deps);
+  if (printed === null) return { loaded: false, summary: "not loaded" };
   const wanted = /^\t(state|pid|runs|last exit code|properties) = (.*)$/;
   const lines = printed.output
     .split("\n")
@@ -115,7 +115,7 @@ export async function relaunch(plan: RelaunchPlan, deps: RelaunchDeps): Promise<
   const before = await launchdState(plan.label, deps.launchd);
   if (!before.loaded) await bootstrap(plan, deps, steps, "fallback bootstrap");
   else {
-    const kicked = await deps.launchd.launchctl(["kickstart", `${launchdDomain()}/${plan.label}`]);
+    const kicked = await deps.launchd.launchctl(["kickstart", `${await launchdDomain(plan.label, deps.launchd)}/${plan.label}`]);
     steps.push(`fallback kickstart (${before.summary}): ${kicked.exitCode === 0 ? "asked" : `exit ${kicked.exitCode}: ${kicked.output || "no output"}`}`);
     deps.log(`relaunch: ${steps.at(-1)}`);
   }
