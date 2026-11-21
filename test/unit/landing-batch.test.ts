@@ -141,19 +141,21 @@ function failedStep(name: string, log: string): VerifyStep[] {
   return [{ name, state: "failed", exit: 1, ms: 10, log: join("..", "steps", id, "step.log"), tests: null, detail: null }];
 }
 
+/** A step the runner killed at its deadline. */
+const timedOut = (): VerifyStep[] => [{ name: "bun test", state: "failed", exit: 124, ms: 10, log: "x.log", tests: null, detail: null, attempts: 1, hangs: 1 }];
+
 /** What a send-back tells the worker: its last stage's start note. */
 const note = (s: Ship) => (db.query("SELECT stage_note FROM runs WHERE id = ?1").get(s.run) as { stage_note: string | null }).stage_note ?? "";
 const runState = (s: Ship) => getRunWithPolicy(db, s.run)!.state;
 
 describe("config", () => {
   test("batch needs verify steps and a local-only project; light_verify only with batch; a batch project queues, with no train", () => {
-    const at = (text: string) => parseConfig(text, dir);
     expect(landingMode(config(), "web", "local-only")).toBe("batch");
     expect(landingMode(config(), "web", null)).toBe("batch");
     expect(() => landingMode(config(), "web", "direct-PR")).toThrow(/landing = "batch" is for local-only projects/);
-    expect(() => verifyConfig(at(`[projects.web]\nlanding = "batch"\n`), "web")).toThrow(/landing = "batch" needs verify steps/);
-    expect(() => verifyConfig(at(`[projects.web]\nverify = ["x"]\nlight_verify = ["y"]\n`), "web")).toThrow(/light_verify is the light check of landing = "batch"/);
-    expect(() => verifyConfig(at(`[projects.web]\nverify = ["x"]\nlanding = "batch"\nlight_verify = [{ review = true }]\n`), "web")).toThrow(/light_verify cannot hold the review step/);
+    expect(() => verifyConfig(parseConfig(`[projects.web]\nlanding = "batch"\n`, dir), "web")).toThrow(/landing = "batch" needs verify steps/);
+    expect(() => verifyConfig(parseConfig(`[projects.web]\nverify = ["x"]\nlight_verify = ["y"]\n`, dir), "web")).toThrow(/light_verify is the light check of landing = "batch"/);
+    expect(() => verifyConfig(parseConfig(`[projects.web]\nverify = ["x"]\nlanding = "batch"\nlight_verify = [{ review = true }]\n`, dir), "web")).toThrow(/light_verify cannot hold the review step/);
     expect(landingQueued(config(), "web", "local-only")).toBe(true);
     expect(landingBatched(config(), "web", "local-only")).toBe(true);
     expect(landingQueued(config(), "web", "direct-PR")).toBe(false);
@@ -369,7 +371,6 @@ describe("a red batch", () => {
     const lq = queue();
     await lq.pass();
     const b = batchOf();
-    const timedOut = (): VerifyStep[] => [{ name: "bun test", state: "failed", exit: 124, ms: 10, log: "x.log", tests: null, detail: null, attempts: 1, hangs: 1 }];
     verifyBatch("failed", timedOut());
     await lq.pass();
     const rerun = getBatch(db, b.id)!;

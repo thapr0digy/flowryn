@@ -8,7 +8,7 @@ Research report recommendation 2 (`~/.flowryn/data/research-improving-flowr-6e/r
 
 ## What it does
 
-`[projects.<id>] landing = "queue" | "manual"` (default `"manual"`; a local-only project with verify steps defaults to `"queue"`: docs/notes/2026-11-15-local-only-auto-x9.md). With `"queue"`:
+`[projects.<id>] landing = "queue" | "manual"` (default `"manual"`; a local-only project with verify steps defaults to `"queue"`: docs/notes/2026-11-15-local-only-auto-x9.md). A local-only project may also set `"batch"`, which lands its ready branches together with one verify per batch: docs/notes/2026-11-21-landing-batches-one-27.md. With `"queue"`:
 
 - A ready PR joins its project's line when its work is routine (yolo, not sensitive), or when a human approved its merge: the leader's `flowryn merge <task>` (its Claude prompt, chat grant or Pi confirm), or `flowryn approve <task>` in your shell.
 - The first entry that can go is brought up to date in the run's own worktree:

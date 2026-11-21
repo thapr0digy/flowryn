@@ -427,10 +427,9 @@ export class LandingBatches {
       });
       queued = true;
     }
-    if (queued) {
-      tx(db, () => this.ops.refreshLine(project.id));
-      this.deps.kickScheduler();
-    }
+    // Each entry's pr_ready line says where its light check stands; a write only where it changed.
+    tx(db, () => this.ops.refreshLine(project.id));
+    if (queued) this.deps.kickScheduler();
     return eligible;
   }
 
