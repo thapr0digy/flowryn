@@ -1014,6 +1014,20 @@ ALTER TABLE landing_queue ADD COLUMN batch_id TEXT;
 ALTER TABLE landing_queue ADD COLUMN batch_pos INTEGER;
 `;
 
+/**
+ * Migration 65, a red landing batch fixed forward (docs/notes/2026-11-21-landing-batches-one-27.md,
+ * phase 2): the batch's one fix task, the head it starts from, where it stands and since when.
+ * `fixing` is a live state, so the one-live-batch index is rebuilt with it.
+ */
+const BATCH_FIX_SQL = /* sql */ `
+ALTER TABLE landing_batches ADD COLUMN fix_task TEXT;
+ALTER TABLE landing_batches ADD COLUMN fix_base TEXT;
+ALTER TABLE landing_batches ADD COLUMN fix_state TEXT;
+ALTER TABLE landing_batches ADD COLUMN fix_since INTEGER;
+DROP INDEX landing_batches_live;
+CREATE UNIQUE INDEX landing_batches_live ON landing_batches(project_id) WHERE state IN ('verifying','fixing','landing','held');
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1308,6 +1322,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 62, name: "decisions-nm-record", sql: NM_RECORD_SQL },
   { version: 63, name: "decisions-option-costs", sql: OPTION_COSTS_SQL },
   { version: 64, name: "landing-batches", sql: LANDING_BATCHES_SQL },
+  { version: 65, name: "batch-fix", sql: BATCH_FIX_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

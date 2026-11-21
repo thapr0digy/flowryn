@@ -18,7 +18,7 @@ import { createAutoMerge, getAutoMerge, HOLD_RELEASED, setReadyProgress, superse
 import { landingBatched, landingQueued, landingTrainDepth, LOCAL_TURN_WAIT_MS, MAX_INTEGRATIONS, MAX_SKIPPED_TURNS, verifyConfig } from "./config.ts";
 import { mergeInStore } from "./object-merge.ts";
 import { verifyPolicyId } from "./policy.ts";
-import { LIVE_BATCH_SQL, liveBatch as liveBatchOf, markBatching, projectBatches } from "./batch-store.ts";
+import { isBatchFix, LIVE_BATCH_SQL, liveBatch as liveBatchOf, markBatching, projectBatches } from "./batch-store.ts";
 import { batchCell, batchProgress, LandingBatches, type LineOps } from "./landing-batch.ts";
 import type { DeliveryServices } from "../policy/services.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
@@ -808,9 +808,9 @@ export class LandingQueue implements LandingHooks {
     await this.batches.build(project, eligible);
   }
 
-  /** A batch project's waiting entries a batch may take: every one that is not sensitive, in line order. */
+  /** A batch project's waiting entries a batch may take: every one that is not sensitive and not a batch's fix (it joins its own batch), in line order. */
   private batchable(projectId: string): LandingRow[] {
-    return projectLine(this.deps.db, projectId).filter((r) => r.state === "waiting" && !this.sensitive(r));
+    return projectLine(this.deps.db, projectId).filter((r) => r.state === "waiting" && !this.sensitive(r) && !isBatchFix(this.deps.db, r.task_id));
   }
 
   private sensitive(row: LandingRow): boolean {
