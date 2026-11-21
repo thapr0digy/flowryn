@@ -138,6 +138,13 @@ function batchStage(db: Db, batch: BatchRow): string {
 }
 
 /** A fence for `text` that no run of backticks in it closes. */
+/** The batch's detail without a fix fate an earlier hold put in front of it: the verify failure the fix was opened for. */
+function redDetail(batch: BatchRow): string | null {
+  if (!batch.detail?.startsWith(`its fix ${batch.fix_task} `)) return batch.detail;
+  const cut = batch.detail.indexOf("; ");
+  return cut < 0 ? null : batch.detail.slice(cut + 2);
+}
+
 function fenceFor(text: string): string {
   const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
   return "`".repeat(Math.max(3, longest + 1));
@@ -423,13 +430,13 @@ export class LandingBatches {
       this.deps.kickScheduler();
       return;
     }
-    if (batch.state !== "fixing") return;
+    if (batch.state !== "fixing" && batch.state !== "held") return;
     const ended = run && isTerminal(run.state) ? `its fix ${task} ${run.state}` : db.query("SELECT 1 FROM drops WHERE task_id = ?1").get(task) ? `its fix ${task} was dropped` : null;
-    const late = this.deps.now() - (batch.fix_since ?? batch.state_since) > FIX_DEADLINE_MS ? `its fix ${task} was not delivered within ${FIX_DEADLINE_MS / 60_000} min` : null;
+    const late = batch.state === "fixing" && this.deps.now() - (batch.fix_since ?? batch.state_since) > FIX_DEADLINE_MS ? `its fix ${task} was not delivered within ${FIX_DEADLINE_MS / 60_000} min` : null;
     if (!ended && !late) return;
     tx(db, () => {
       const fresh = getBatch(db, batch.id);
-      if (fresh?.state !== "fixing") return;
+      if (fresh?.state !== batch.state || fresh.fix_state !== "open") return;
       if (ended) db.query("UPDATE landing_batches SET fix_state = 'ended' WHERE id = ?1").run(batch.id);
       this.holdForFix(getBatch(db, batch.id)!, ended ?? late!);
     });
@@ -458,7 +465,8 @@ export class LandingBatches {
   /** Hold a batch whose fix did not come through, keeping the verify failure as its reason (drop and retry offer as for any red). Call inside a transaction. */
   private holdForFix(batch: BatchRow, why: string): void {
     // The fix's fate first: the item line keeps only the start of the reason.
-    const detail = batch.detail ? `${why}; ${batch.detail}` : why;
+    const red = redDetail(batch);
+    const detail = red ? `${why}; ${red}` : why;
     this.hold(batch, "verify_failed", detail, batch.culprit, batch.verification_id);
   }
 

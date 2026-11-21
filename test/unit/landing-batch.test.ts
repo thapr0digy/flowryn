@@ -550,6 +550,38 @@ describe("fix forward", () => {
     expect(task).toBe(row(fix).task_id);
   });
 
+  test("a late fix that then fails ends: the hold names its failure in place of its lateness", async () => {
+    const { lq, b } = await redBatch();
+    const task = getBatch(db, b.id)!.fix_task!;
+    now += FIX_DEADLINE_MS + 1;
+    await lq.pass();
+    const late = getBatch(db, b.id)!;
+    expect(late).toMatchObject({ state: "held", fix_state: "open" });
+    const red = late.detail!.slice(late.detail!.indexOf("; ") + 2);
+
+    const fix = deliverFix(b);
+    tx(db, () => db.query("UPDATE runs SET state = 'failed' WHERE id = ?1").run(fix.run));
+    await lq.pass();
+    const held = getBatch(db, b.id)!;
+    expect(held).toMatchObject({ state: "held", reason: "verify_failed", fix_state: "ended" });
+    expect(held.detail).toBe(`its fix ${task} failed; ${red}`);
+    const items = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { line: string }[];
+    expect(items).toEqual([{ line: expect.stringContaining(`its fix ${task} failed`) }]);
+    expect(items[0]!.line).not.toContain("within 60 min");
+  });
+
+  test("a late fix delivered off the batch head names that fate once, before the verify failure", async () => {
+    const { lq, b } = await redBatch();
+    const task = getBatch(db, b.id)!.fix_task!;
+    now += FIX_DEADLINE_MS + 1;
+    await lq.pass();
+    const late = getBatch(db, b.id)!.detail!;
+    const red = late.slice(late.indexOf("; ") + 2);
+    ship(9, { "pkg/store/fix.go": "package store\n" }, { task, from: "main" });
+    await lq.pass();
+    expect(getBatch(db, b.id)!.detail).toBe(`its fix ${task} was delivered off the batch head; ${red}`);
+  });
+
   test("a fix whose run fails holds the batch", async () => {
     const first = await redBatch();
     const fix = deliverFix(first.b);
