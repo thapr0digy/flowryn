@@ -20,7 +20,7 @@ import { compileGlob } from "./changed.ts";
 /** One entry of `verify`: a step, or a group of two or more steps run in parallel. */
 export type VerifyItem = string | string[];
 
-export const LANDING_MODES = ["queue", "manual"] as const;
+export const LANDING_MODES = ["queue", "batch", "manual"] as const;
 export type LandingMode = (typeof LANDING_MODES)[number];
 
 /** The review step's name in a verification's steps: no shell command is ever spelled like this. */
@@ -54,12 +54,18 @@ export interface VerifyConfig {
   timeout_ms: number;
   /** Every step's own deadline, from verify_step_timeout_min; null: each step's deadline comes from its history. */
   step_timeout_ms: number | null;
+  /**
+   * A batch project's light check (`light_verify`, docs/notes/2026-11-21-landing-batches-one-27.md):
+   * the short steps each delivered branch runs alone before it may join a batch; null when unset.
+   * Not part of the verify policy: the light check has its own (lightVerifyConfig).
+   */
+  light?: { steps: VerifyItem[]; when_changed?: (readonly string[] | null)[] } | null;
 }
 
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 30;
 
 // scope and account are read by src/config/accounts.ts, max_workers and review_model by src/config/workflows.ts, release by src/lifecycle/release.ts.
-const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "scope", "account", "max_workers", "review_model", "release"]);
+const KNOWN = new Set(["verify", "verify_binary", "verify_timeout_min", "verify_step_timeout_min", "auto_merge", "auto_verify", "landing", "landing_train_depth", "light_verify", "scope", "account", "max_workers", "review_model", "release"]);
 
 /** What to paste for a bun project, shown when a project has no verify steps. */
 export function verifySnippet(projectId: string): string {
@@ -166,7 +172,8 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   for (const key of Object.keys(raw)) if (!KNOWN.has(key)) throw new FlowrynError("config_invalid", `${where} ${key} is not a known setting (${[...KNOWN].join(", ")})`);
   if (raw.auto_merge !== undefined && typeof raw.auto_merge !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_merge must be true or false`);
   if (raw.auto_verify !== undefined && typeof raw.auto_verify !== "boolean") throw new FlowrynError("config_invalid", `${where} auto_verify must be true or false`);
-  if (raw.landing !== undefined && !LANDING_MODES.includes(raw.landing as LandingMode)) throw new FlowrynError("config_invalid", `${where} landing must be "queue" or "manual"`);
+  if (raw.landing !== undefined && !LANDING_MODES.includes(raw.landing as LandingMode)) throw new FlowrynError("config_invalid", `${where} landing must be "queue", "batch" or "manual"`);
+  if (raw.light_verify !== undefined && raw.landing !== "batch") throw new FlowrynError("config_invalid", `${where} light_verify is the light check of landing = "batch"; set landing = "batch" or remove it`);
   if (raw.landing_train_depth !== undefined) checkTrainDepth(raw.landing_train_depth, where);
   parseRelease(raw.release, where);
   if (raw.verify === undefined) {
@@ -174,6 +181,7 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
     if (raw.auto_merge === true) throw new FlowrynError("config_invalid", `${where} auto_merge needs verify steps: without them the merge gate passes a PR that has no checks`);
     // The queue re-verifies each PR at main's tip before it merges: with no steps there is nothing to re-verify.
     if (raw.landing === "queue") throw new FlowrynError("config_invalid", `${where} landing = "queue" needs verify steps: the queue verifies each PR again after merging main into it`);
+    if (raw.landing === "batch") throw new FlowrynError("config_invalid", `${where} landing = "batch" needs verify steps: each batch is verified with them once before it lands`);
     return null;
   }
   const read = readItems(raw.verify, where);
@@ -189,7 +197,28 @@ export function verifyConfig(config: FlowrynConfig, projectId: string): VerifyCo
   const timeout_ms = positiveMinutes(raw.verify_timeout_min ?? DEFAULT_VERIFY_TIMEOUT_MIN, where, "verify_timeout_min");
   const step_timeout_ms = raw.verify_step_timeout_min === undefined ? null : positiveMinutes(raw.verify_step_timeout_min, where, "verify_step_timeout_min");
   const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
-  return { steps: read.items, ...(when_changed ? { when_changed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms };
+  const light = readLight(raw.light_verify, where);
+  return { steps: read.items, ...(when_changed ? { when_changed } : {}), review: read.review, binary, timeout_ms, step_timeout_ms, ...(light ? { light } : {}) };
+}
+
+/** `light_verify`: the verify grammar without a review step; null when unset. */
+function readLight(raw: unknown, where: string): VerifyConfig["light"] {
+  if (raw === undefined) return null;
+  const read = readItems(raw, `${where} light_verify:`);
+  if (!read) throw new FlowrynError("config_invalid", `${where} light_verify must be a non-empty list of commands (or { run, when_changed } tables), or of lists of commands run in parallel`);
+  if (read.review) throw new FlowrynError("config_invalid", `${where} light_verify cannot hold the review step: it belongs in verify`);
+  const when_changed = read.when.some((w) => w !== null) ? read.when : undefined;
+  return { steps: read.items, ...(when_changed ? { when_changed } : {}) };
+}
+
+/**
+ * The light check as a verify config of its own: its steps, the full verify's deadlines, no
+ * review and no kept binary. Its policy id (verifyPolicyId) is what tells a light request from
+ * a full one in the verify queue. Null when the project has no light check.
+ */
+export function lightVerifyConfig(config: VerifyConfig): VerifyConfig | null {
+  if (!config.light) return null;
+  return { steps: config.light.steps, ...(config.light.when_changed ? { when_changed: config.light.when_changed } : {}), review: null, binary: null, timeout_ms: config.timeout_ms, step_timeout_ms: config.step_timeout_ms };
 }
 
 /**
@@ -227,14 +256,22 @@ export function autoMergeEnabled(config: FlowrynConfig, projectId: string, proje
  * time, merging its base into each first (src/verify/landing-queue.ts);
  * "manual" leaves landing to the merge verb. Unset, a local-only project with
  * verify steps queues (docs/notes/2026-11-15-local-only-auto-x9.md) and any
- * other project is manual. `deliveryMode` is the project's (or the run's)
+ * other project is manual. "batch" (docs/notes/2026-11-21-landing-batches-one-27.md)
+ * lands a local-only project's ready branches together, one verify per batch
+ * (src/verify/landing-batch.ts); it is a queue too, so every "does this project
+ * queue" check holds for it. `deliveryMode` is the project's (or the run's)
  * delivery mode; null reads the config alone. Throws config_invalid like
- * verifyConfig (a queue is refused without verify steps).
+ * verifyConfig (a queue is refused without verify steps), and for "batch" on a
+ * project known not to be local-only.
  */
 export function landingMode(config: FlowrynConfig, projectId: string, deliveryMode: string | null): LandingMode {
   if (!verifyConfig(config, projectId)) return "manual";
   const written = projectTable(config, projectId).landing;
   if (written === undefined) return deliveryMode === "local-only" ? "queue" : "manual";
+  if (written === "batch") {
+    if (deliveryMode !== null && deliveryMode !== "local-only") throw new FlowrynError("config_invalid", `[projects.${projectId}] landing = "batch" is for local-only projects; this one delivers ${deliveryMode}`);
+    return "batch";
+  }
   return written === "queue" ? "queue" : "manual";
 }
 
@@ -264,7 +301,7 @@ function checkTrainDepth(value: unknown, where: string): number {
  */
 export function landingTrainDepth(config: FlowrynConfig, projectId: string, deliveryMode: string | null): number {
   try {
-    if (!landingQueued(config, projectId, deliveryMode)) return 1;
+    if (landingMode(config, projectId, deliveryMode) !== "queue") return 1;
     const raw = projectTable(config, projectId).landing_train_depth;
     return raw === undefined ? DEFAULT_TRAIN_DEPTH : checkTrainDepth(raw, `[projects.${projectId}]`);
   } catch {
@@ -272,11 +309,26 @@ export function landingTrainDepth(config: FlowrynConfig, projectId: string, deli
   }
 }
 
-/** landingMode for a pass that must not throw: an invalid table was refused by the daemon, and nothing queues on it. */
+/** landingMode for a pass that must not throw: an invalid table was refused by the daemon, and nothing queues on it. A batch project queues too. */
 export function landingQueued(config: FlowrynConfig, projectId: string, deliveryMode: string | null): boolean {
   try {
-    return landingMode(config, projectId, deliveryMode) === "queue";
+    return landingMode(config, projectId, deliveryMode) !== "manual";
   } catch {
     return false;
   }
 }
+
+/** Whether the project lands in batches; never throws, as landingQueued. */
+export function landingBatched(config: FlowrynConfig, projectId: string, deliveryMode: string | null): boolean {
+  try {
+    return landingMode(config, projectId, deliveryMode) === "batch";
+  } catch {
+    return false;
+  }
+}
+
+/** Times one landing entry (or batch) is rebuilt on a base that moved under it before it is held. */
+export const MAX_INTEGRATIONS = 3;
+
+/** The most branches one landing batch takes: a red batch holds them all, so it stays small. */
+export const MAX_BATCH = 8;

@@ -984,6 +984,36 @@ ALTER TABLE decisions ADD COLUMN consequences TEXT;
 ALTER TABLE decisions ADD COLUMN downside TEXT;
 `;
 
+/**
+ * Migration 64, landing batches (docs/notes/2026-11-21-landing-batches-one-27.md): a batch
+ * project's ready branches merged onto local main in one batch head (object store only) and
+ * verified once. Members are landing_queue rows with batch_id and their place in it. At most
+ * one live batch per project (verifying, landing, held).
+ */
+const LANDING_BATCHES_SQL = /* sql */ `
+CREATE TABLE landing_batches (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  base_sha TEXT NOT NULL,
+  head_sha TEXT NOT NULL,
+  request_id TEXT,
+  verification_id TEXT,
+  integrations INTEGER NOT NULL DEFAULT 0,
+  retried_head TEXT,
+  item_id TEXT,
+  culprit TEXT,
+  reason TEXT,
+  detail TEXT,
+  created_at INTEGER NOT NULL,
+  state_since INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX landing_batches_live ON landing_batches(project_id) WHERE state IN ('verifying','landing','held');
+ALTER TABLE landing_queue ADD COLUMN batch_id TEXT;
+ALTER TABLE landing_queue ADD COLUMN batch_pos INTEGER;
+`;
+
 const RESERVED_CLASS_SQL = /* sql */ `
 ALTER TABLE decisions ADD COLUMN reserved_class TEXT;
 `;
@@ -1277,6 +1307,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 61, name: "prompt-episodes", sql: PROMPT_EPISODES_SQL },
   { version: 62, name: "decisions-nm-record", sql: NM_RECORD_SQL },
   { version: 63, name: "decisions-option-costs", sql: OPTION_COSTS_SQL },
+  { version: 64, name: "landing-batches", sql: LANDING_BATCHES_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

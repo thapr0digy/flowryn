@@ -3,6 +3,7 @@ import { pendingIntents } from "../journal/journal.ts";
 import { boolArg, intArg, type VerbSpec } from "../api/verbs.ts";
 import { FlowrynError } from "../api/errors.ts";
 import { effectiveConfig, resolveEnv, redactConfig } from "../config/effective.ts";
+import { deliveryModes } from "../lifecycle/projects.ts";
 import { DEFAULT_WAIT_MIN, MAX_WAIT_MIN, handoffPending, lastDropped, readPending, type Preflight } from "./restart.ts";
 
 /**
@@ -71,7 +72,7 @@ export function systemVerbs(): VerbSpec[] {
       read(ctx) {
         // The read-only fallback has only the file on disk, which is not what a running daemon accepted.
         if (!ctx.info) throw new FlowrynError("daemon_unavailable", "the daemon is not running, so it has no accepted configuration", "flowryn daemon status");
-        const snapshot = effectiveConfig(ctx.config);
+        const snapshot = effectiveConfig(ctx.config, process.env, deliveryModes(ctx.db));
         const status = ctx.configStatus;
         return {
           data: {

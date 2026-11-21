@@ -34,6 +34,7 @@ import { shellWord } from "../util/shell-word.ts";
 import { grantActor, takeGrant, voidItemGrants } from "./grants.ts";
 import { autonomyForRun, mintAutonomyApproval, type AutonomyRow } from "./autonomy.ts";
 import { findAwayApproval } from "../attention/away-merge.ts";
+import { batchRef, landingBatchOfRun } from "../verify/batch-store.ts";
 import { shortPolicy } from "../verify/policy.ts";
 import { finishedAtHead, finishedAtHeadUnderOther, lastPassed, type Verification } from "../verify/store.ts";
 
@@ -188,8 +189,13 @@ export async function gatherFacts(mc: MergeContext, run: RunWithPolicy, project:
   const head = (await out(mc.git, run.worktree_path, ["rev-parse", "HEAD"])) ?? "";
   const primaryBranch = await out(mc.git, project.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const status = await out(mc.git, project.path, ["status", "--porcelain", "--untracked-files=no"]);
-  const fastForward = head !== "" && (await mc.git(["merge-base", "--is-ancestor", `refs/heads/${project.default_branch}`, head], project.path)).code === 0;
-  const local = localEvidence(mc, project.id, base.ref, head, []);
+  // A landing batch's member (docs/notes/2026-11-21-landing-batches-one-27.md) lands at its batch's head: the fast-forward
+  // and the verify evidence are the batch's, and count only while that head holds both main and this head.
+  const batch = head === "" ? null : landingBatchOfRun(mc.db, run.id);
+  const ancestor = async (a: string, b: string) => (await mc.git(["merge-base", "--is-ancestor", a, b], project.path)).code === 0;
+  const fastForward =
+    head !== "" && (batch ? (await ancestor(`refs/heads/${project.default_branch}`, batch.head_sha)) && (await ancestor(head, batch.head_sha)) : await ancestor(`refs/heads/${project.default_branch}`, head));
+  const local = batch ? localEvidence(mc, project.id, batchRef(project.id, batch.id), batch.head_sha, []) : localEvidence(mc, project.id, base.ref, head, []);
   const commits = head === "" ? null : await branchCommits(mc.git, project.path, project.default_branch, head);
   return { ...base, head, primaryBranch, primaryDirty: status === null || status.length > 0, fastForward, commits, ...(local ? { local } : {}) };
 }

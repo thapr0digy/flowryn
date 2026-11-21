@@ -153,12 +153,14 @@ export function sendBackText(v: Verification, step: VerifyStep, label = "Auto-me
  * timeout), as its own request was made (same PR, branch, worktree, PATH and
  * source), with its verify.auto_rerun event. A queued verify of that head is
  * joined instead. Throws with the reason when none can be queued (the project
- * has no verify steps now, its config is invalid). Call inside a transaction.
+ * has no verify steps now, its config is invalid). `policy`: the step list to
+ * run again when it is not the project's verify (a landing batch's light
+ * check). Call inside a transaction.
  */
-export function queueAutoRerun(db: Db, config: FlowrynConfig, v: Verification, step: VerifyStep, runId: string | null, now: number): VerifyRequest {
+export function queueAutoRerun(db: Db, config: FlowrynConfig, v: Verification, step: VerifyStep, runId: string | null, now: number, policy?: string): VerifyRequest {
   const verify = verifyConfig(config, v.project_id);
   if (!verify) throw new Error(`project ${v.project_id} has no verify steps now`);
-  const policy = verifyPolicyId(verify);
+  policy ??= verifyPolicyId(verify);
   const from = requestOf(db, v.id);
   const request =
     findQueued(db, v.pr_url, v.head_sha, policy) ??

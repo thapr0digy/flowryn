@@ -82,7 +82,7 @@ export interface AwayEnded {
  * you only when it opened a decision reserved for you. What wakes the leader
  * no longer depends on away: every action item does (LEADER_ROUTE in items.ts).
  */
-export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed", "auto_merge_held"];
+export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_requested", "checks_red", "pr_ready", "report_ready", "user_acted", "landed", "auto_merge_held", "landing_batch_held"];
 
 /**
  * SQL for "item `i` wakes the leader while away", with `?<since>` the away
@@ -90,7 +90,7 @@ export const AWAY_WAKE_KINDS: readonly ItemKind[] = ["gate_ready", "pass_request
  */
 export function awayWakeSql(sinceParam: string): string {
   return `(${sinceParam} IS NOT NULL AND i.opened_at >= ${sinceParam} AND (
-      i.kind IN ('gate_ready','pass_requested','checks_red','user_acted','landed','auto_merge_held')
+      i.kind IN ('gate_ready','pass_requested','checks_red','user_acted','landed','auto_merge_held','landing_batch_held')
       OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy ap WHERE ap.task_id = i.task_id AND ap.yolo = 0))
       OR (i.kind = 'report_ready' AND EXISTS (SELECT 1 FROM decisions ad WHERE ad.origin = i.task_id AND ad.state = 'open' AND ad.reserved_reason IS NOT NULL))))`;
 }

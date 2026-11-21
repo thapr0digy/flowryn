@@ -10,6 +10,7 @@ import type { FlowrynConfig } from "../config/config.ts";
 import { lensFor, projectScopeById, requireInScope } from "../leader/scope.ts";
 import { normalizeRemote } from "../config/accounts.ts";
 import { relinkWorktrees } from "./relink.ts";
+import { landingMode } from "../verify/config.ts";
 
 export const DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"] as const;
 export const HARNESSES = ["claude", "pi"] as const;
@@ -101,6 +102,12 @@ export function insertProject(db: Db, row: ProjectRow): void {
   appendEvent(db, { source: "cli", kind: "project.added", payload: { ...row } });
 }
 
+/** Each registered project's delivery mode, for the config checks that depend on it. */
+export function deliveryModes(db: Db): Record<string, string> {
+  const rows = db.query("SELECT id, delivery_mode FROM projects").all() as { id: string; delivery_mode: string }[];
+  return Object.fromEntries(rows.map((r) => [r.id, r.delivery_mode]));
+}
+
 export function listProjects(db: Db): ProjectRow[] {
   return db.query("SELECT * FROM projects ORDER BY priority, id").all() as ProjectRow[];
 }
@@ -178,6 +185,7 @@ const projectAdd: VerbSpec = {
     const kind = oneOf(stringArg(args, "kind"), PROJECT_KINDS, "kind") ?? "code";
     const mode = oneOf(stringArg(args, "mode"), DELIVERY_MODES, "mode") ?? (kind === "notes" ? "local-only" : "no-mistakes");
     requireNotesLocal(kind, mode, id);
+    landingMode(ctx.config(), id, mode);
     const repoUrl = stringArg(args, "repo-url") ?? facts.repoUrl ?? "";
     if (repoUrl === "" && mode !== "local-only") {
       throw new FlowrynError("invalid_project", `${facts.path} has no origin remote`, "pass --repo-url, or --mode local-only (or --kind notes)");
@@ -274,6 +282,7 @@ const projectSet: VerbSpec = {
     const next = { ...current, ...updates };
     if (moved) requireSameRepository(ctx.db, next, moved);
     requireNotesLocal(next.kind, next.delivery_mode, id);
+    landingMode(ctx.config(), id, next.delivery_mode);
     if (next.repo_url === "" && next.delivery_mode !== "local-only") {
       throw new FlowrynError("invalid_project", `project ${id} has no remote, so its mode must stay local-only`, "pass --repo-url too");
     }

@@ -13,6 +13,8 @@ import { capacityConfig } from "../config/workflows.ts";
 import type { HostVerdict } from "../sched/host.ts";
 import { tx } from "../db/db.ts";
 import { verifyConfig, verifySnippet, type VerifyConfig } from "./config.ts";
+import { LandingBatches } from "./landing-batch.ts";
+import { lineOps } from "./landing-queue.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { findQueued, getRequest, insertRequest, positionOf, queuedRequests, rememberVerifyPath, requeuedFrom, type VerifyRequest } from "./queue.ts";
 import { isVerifying, readTail, type VerifyDeps } from "./runner.ts";
@@ -282,4 +284,44 @@ const verifyShow: VerbSpec = {
   },
 };
 
-export const VERIFY_VERBS: readonly VerbSpec[] = [verifyStart, verifyShow];
+/** The landing batches as a verb drives them: the line's own moves, and the daemon's git and merge services. */
+function batchesOf(ctx: HandlerCtx): LandingBatches {
+  const kickScheduler = () => ctx.sched.kick();
+  return new LandingBatches({ db: ctx.db, config: ctx.config, git: ctx.delivery.git, now: ctx.now, log: ctx.log, kickScheduler, delivery: ctx.delivery }, lineOps({ db: ctx.db, now: ctx.now, kickScheduler }));
+}
+
+/** A batch's members are in one project's scope: the verb checks the batch's project. */
+const batchScope = { kind: "ref", arg: "batch" } as const;
+
+const batchDrop: VerbSpec = {
+  name: "batch drop",
+  summary: "Drop one branch from a held landing batch: it goes back to its worker with the failing log, and the rest are verified again",
+  positionals: [
+    { name: "batch", required: true, help: "the held landing batch (lb<n>)" },
+    { name: "task", required: true, help: "the branch's task to drop", complete: "task" },
+  ],
+  flags: {},
+  kind: "mutation",
+  roles: ["leader", "human"],
+  scope: batchScope,
+  apply(ctx, args) {
+    const { batch, dropped } = batchesOf(ctx).drop(stringArg(args, "batch")!, stringArg(args, "task")!, "cli");
+    return { data: { batch: batch.id, dropped: dropped.task_id, state: dropped.state, next: "a new batch of the rest is built and verified" }, hints: [`flowryn show ${batch.id}`] };
+  },
+};
+
+const batchRetry: VerbSpec = {
+  name: "batch retry",
+  summary: "Retry a held landing batch: a failed verify runs once more at the same head (once per head); a batch held for main moving or a cancelled verify is rebuilt on main",
+  positionals: [{ name: "batch", required: true, help: "the held landing batch (lb<n>)" }],
+  flags: {},
+  kind: "mutation",
+  roles: ["leader", "human"],
+  scope: batchScope,
+  apply(ctx, args) {
+    const batch = batchesOf(ctx).retry(stringArg(args, "batch")!, "cli");
+    return { data: { batch: batch.id, state: batch.state, head: batch.head_sha.slice(0, 8), request: batch.request_id ?? "-" }, hints: [`flowryn show ${batch.id}`] };
+  },
+};
+
+export const VERIFY_VERBS: readonly VerbSpec[] = [verifyStart, verifyShow, batchDrop, batchRetry];
