@@ -11,7 +11,8 @@ import { isForgeOutage } from "../reconcile/forge-health.ts";
 import type { HostVerdict } from "../sched/host.ts";
 import { fullPools, grantJobLease, liveCounts, liveJobLeases, OverCapacity, poolHolders } from "../sched/pools.ts";
 import { hostState } from "../sched/scheduler.ts";
-import { verifyConfig, type VerifyConfig } from "./config.ts";
+import { BATCH_REF_PREFIX, liveBatchAt } from "./batch-store.ts";
+import { lightVerifyConfig, verifyConfig, type VerifyConfig } from "./config.ts";
 import { verifyPolicyId } from "./policy.ts";
 import { cancelRequest, clearWaiting, getRequest, markStarted, markWaiting, positionOf, queuedRequests, type OwnWait, type VerifyRequest } from "./queue.ts";
 import { initialSteps, runVerification, type VerifyDeps, type VerifyPlan } from "./runner.ts";
@@ -230,6 +231,18 @@ async function stillWanted(deps: QueueDeps, request: VerifyRequest): Promise<Wan
   }
   if (!config) return { cancel: `project ${request.project_id} has no verify steps now` };
   if (request.pr_number === null && request.worktree === null) {
+    // A landing batch's head (src/verify/landing-batch.ts): in the object store, wanted while its batch is live at that head.
+    if (request.pr_url.startsWith(BATCH_REF_PREFIX)) {
+      if (!liveBatchAt(deps.db, request.pr_url, request.head_sha)) return { cancel: `the landing batch ${request.pr_url.slice(BATCH_REF_PREFIX.length)} no longer tests ${request.head_sha.slice(0, 8)}` };
+      return { start: config, projectPath, base: null };
+    }
+    // A batch project's light check: the entry's delivered head alone, with light_verify, while the entry waits at it.
+    const light = lightVerifyConfig(config);
+    if (light && request.policy_id === verifyPolicyId(light)) {
+      const waits = deps.db.query("SELECT 1 FROM landing_queue WHERE ref = ?1 AND head_sha = ?2 AND state = 'waiting'").get(request.pr_url, request.head_sha);
+      if (!waits) return { cancel: `no landing entry waits at ${request.head_sha.slice(0, 8)} for its light check now` };
+      return { start: light, projectPath, base: null };
+    }
     // A landing train's candidate (src/verify/landing-queue.ts): in the object store, never pushed; wanted while its entry keeps it.
     const kept = deps.db.query("SELECT 1 FROM landing_queue WHERE ref = ?1 AND train_head = ?2 AND state IN ('waiting','landing')").get(request.pr_url, request.head_sha);
     if (!kept) return { cancel: `the landing train no longer tests ${request.head_sha.slice(0, 8)}` };

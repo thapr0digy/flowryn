@@ -23,7 +23,7 @@ import { deliveredOf, recordDelivery, verifyLocalDelivery, verifyPrDelivery, typ
 import { steerStackedOnRedelivery } from "./stacks.ts";
 import { cleanMainMerge } from "../policy/clean-merge.ts";
 import type { GitRunner } from "../policy/landed.ts";
-import { verifyConfig } from "../verify/config.ts";
+import { landingBatched, verifyConfig } from "../verify/config.ts";
 import { verifyPolicyId } from "../verify/policy.ts";
 import { getRunWithPolicy, holdReason, isTerminal, runBase, taskTitle, type RunWithPolicy } from "./runs.ts";
 import { ackSteer, getMessage, unackedSteers } from "./steers.ts";
@@ -551,7 +551,9 @@ const deliver: VerbSpec = {
         const verify = ship.kind === "pr" ? startAutoVerify(ctx.db, ctx.config(), run, { ref: ship.url, head: ship.pr.headSha, prNumber: ship.pr.number, headRef: ship.pr.headRef, worktree: null }, now) : null;
         // The watcher's pass kicks the auto-merger, whose pass takes it into the line.
         ctx.delivery.watch(run.id);
-        return { data: { ...data, landing: "queue", ...(verify ? { auto_verify: verify.id } : {}) }, hints: ["end your turn"] };
+        // A batch project's branch gets its light check, then lands in a batch (src/verify/landing-batch.ts).
+        const landing = landingBatched(ctx.config(), run.project_id, run.delivery_mode) ? "batch" : "queue";
+        return { data: { ...data, landing, ...(verify ? { auto_verify: verify.id } : {}) }, hints: ["end your turn"] };
       }
       // A yolo delivery on a project that auto-merges is verified and merged by the daemon; any other is verified by it (src/verify/auto-merge.ts).
       const auto = startAutoMerge(

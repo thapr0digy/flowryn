@@ -171,6 +171,10 @@ export function refScope(db: Db, config: FlowrynConfig, ref: string): ThingScope
     const i = db.query("SELECT i.task_id, r.task_id AS run_task FROM items i LEFT JOIN runs r ON r.id = i.run_id WHERE i.id = ?1").get(ref) as { task_id: string | null; run_task: string | null } | null;
     if (i) return ofTask(i.task_id ?? i.run_task);
   }
+  if (/^lb\d+$/.test(ref)) {
+    const b = db.query("SELECT project_id FROM landing_batches WHERE id = ?1").get(ref) as { project_id: string } | null;
+    if (b) return projectScopeById(db, config, b.project_id);
+  }
   if (/^vq?\d+$/.test(ref)) {
     const v = db.query(`SELECT project_id, task_id FROM ${ref.startsWith("vq") ? "verify_queue" : "verifications"} WHERE id = ?1`).get(ref) as { project_id: string; task_id: string | null } | null;
     if (v) return v.task_id ? ofTask(v.task_id) : projectScopeById(db, config, v.project_id);

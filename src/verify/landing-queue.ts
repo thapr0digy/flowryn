@@ -15,8 +15,12 @@ import type { GitRunner } from "../policy/landed.ts";
 import { sendConflictBack, settleHeadMove } from "../reconcile/delivery.ts";
 import { sanitizeLine } from "../util/sanitize.ts";
 import { createAutoMerge, getAutoMerge, HOLD_RELEASED, setReadyProgress, supersedeAutoMerge, type AutoMergeRow, type LandingHooks } from "./auto-merge.ts";
-import { landingQueued, landingTrainDepth, LOCAL_TURN_WAIT_MS, MAX_SKIPPED_TURNS, verifyConfig } from "./config.ts";
+import { landingBatched, landingQueued, landingTrainDepth, LOCAL_TURN_WAIT_MS, MAX_INTEGRATIONS, MAX_SKIPPED_TURNS, verifyConfig } from "./config.ts";
+import { mergeInStore } from "./object-merge.ts";
 import { verifyPolicyId } from "./policy.ts";
+import { LIVE_BATCH_SQL, liveBatch as liveBatchOf } from "./batch-store.ts";
+import { batchCell, batchProgress, LandingBatches, type LineOps } from "./landing-batch.ts";
+import type { DeliveryServices } from "../policy/services.ts";
 import { autoVerifyPath, cancelRequest, findQueued, getRequest, insertRequest, rerankRequest } from "./queue.ts";
 import { routeVerifyOutcome, SENT_BACK_KIND, sendBackText, sentBackPayload } from "./route.ts";
 import { finishedAtHead, getVerification, interruptedByStop, type Verification } from "./store.ts";
@@ -74,8 +78,8 @@ export const LANDING_STATES = ["waiting", "landing", "landed", "left"] as const;
 export type LandingState = (typeof LANDING_STATES)[number];
 const LIVE_SQL = "state IN ('waiting','landing')";
 
-/** Times one entry is brought up to date with its base before it is held: the base keeps moving under it. */
-export const MAX_INTEGRATIONS = 3;
+/** Times one entry (or a landing batch) is brought up to date with its base before it is held: the base keeps moving under it. */
+export { MAX_INTEGRATIONS };
 /** A landing fetch or push: the network, not a local read, so longer than the merge proof's git calls. */
 export const LANDING_NET_TIMEOUT_MS = 120_000;
 /** How long the head of line may wait on a busy worker or a changed worktree before it is held. */
@@ -121,6 +125,9 @@ export interface LandingRow {
   train_base: string | null;
   /** The candidate's verify request. */
   train_request: string | null;
+  /** A batch project's entry: the landing batch it is in (migration 64; kept once it left or landed), and its place there. */
+  batch_id: string | null;
+  batch_pos: number | null;
 }
 
 export function getLanding(db: Db, id: string): LandingRow | null {
@@ -186,8 +193,20 @@ function skipTurn(db: Db, row: LandingRow, by: LandingRow, now: number): void {
   if (skipped >= MAX_SKIPPED_TURNS) leave(db, row, "turns_skipped", `passed over ${skipped} times while its worker was not ready (${why})`, now, { next: `flowryn show ${row.task_id}` });
 }
 
+/**
+ * Whether an entry is a batch project's (docs/notes/2026-11-21-landing-batches-one-27.md): in a
+ * batch now or before, its light check queued, or its project has batched. Read from the rows, so
+ * the views need no config.
+ */
+function batchEntry(db: Db, row: LandingRow): boolean {
+  if (row.batch_id !== null) return true;
+  if (db.query("SELECT 1 FROM landing_batches WHERE project_id = ?1 LIMIT 1").get(row.project_id)) return true;
+  return db.query("SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'landing.light_queued' AND json_extract(payload, '$.landing') = ?2 LIMIT 1").get(row.run_id, row.id) !== null;
+}
+
 /** What `show`, `fleet` and the pr_ready line say of an entry. */
 export function landingProgress(db: Db, row: LandingRow): string {
+  if (row.state !== "landed" && row.state !== "left" && batchEntry(db, row) && !(row.state === "landing" && row.batch_id === null)) return batchProgress(db, row);
   const verify = isLocal(row) ? candidateVerify(db, row) : null;
   if (row.state === "landing") return `landing queue: first in line${isLocal(row) && row.detail ? `, ${row.detail}` : ""}${verify ? `, ${verify}` : ""} (${row.id})`;
   if (row.state === "waiting") {
@@ -204,6 +223,7 @@ export function landingProgress(db: Db, row: LandingRow): string {
 
 /** The fleet's needs cell for a run in a line: its place, and for a local-only entry its candidate's verify. */
 export function landingCell(db: Db, row: LandingRow): string {
+  if (batchEntry(db, row) && !(row.state === "landing" && row.batch_id === null)) return batchCell(db, row);
   if (row.state === "landing") return `landing${isLocal(row) ? ` ${candidateVerify(db, row) ?? ""}`.trimEnd() : ""}`;
   const place = placeOf(db, row);
   const verify = isLocal(row) && row.train_base ? candidateVerify(db, row) : null;
@@ -222,6 +242,8 @@ interface MoveFields {
   train_head?: string | null;
   train_base?: string | null;
   train_request?: string | null;
+  batch_id?: string | null;
+  batch_pos?: number | null;
 }
 
 /** Move an entry to `to` with its `landing.<to>` event. Call inside a transaction. */
@@ -229,8 +251,8 @@ function move(db: Db, row: LandingRow, to: LandingState, fields: MoveFields, now
   const next: LandingRow = { ...row, ...fields, state: to, state_since: to === row.state ? row.state_since : now, updated_at: now };
   db.query(
     `UPDATE landing_queue SET state = ?2, head_sha = ?3, approval_id = ?4, auto_merge_id = ?5, integrations = ?6, reason = ?7, detail = ?8, blocked_since = ?9, state_since = ?10, updated_at = ?11,
-       train_head = ?12, train_base = ?13, train_request = ?14 WHERE id = ?1`,
-  ).run(row.id, to, next.head_sha, next.approval_id, next.auto_merge_id, next.integrations, next.reason, next.detail, next.blocked_since, next.state_since, now, next.train_head, next.train_base, next.train_request);
+       train_head = ?12, train_base = ?13, train_request = ?14, batch_id = ?15, batch_pos = ?16 WHERE id = ?1`,
+  ).run(row.id, to, next.head_sha, next.approval_id, next.auto_merge_id, next.integrations, next.reason, next.detail, next.blocked_since, next.state_since, now, next.train_head, next.train_base, next.train_request, next.batch_id, next.batch_pos);
   const event = appendEvent(db, {
     source,
     kind: `landing.${to}`,
@@ -247,6 +269,7 @@ function move(db: Db, row: LandingRow, to: LandingState, fields: MoveFields, now
       detail: next.detail,
       train_head: next.train_head,
       train_base: next.train_base,
+      ...(next.batch_id || row.batch_id ? { batch: next.batch_id, batch_pos: next.batch_pos } : {}),
     },
     ts: now,
   });
@@ -351,6 +374,33 @@ export function deliveredToQueue(db: Db, config: FlowrynConfig, run: RunWithPoli
   return true;
 }
 
+/** The entry leaves the line for a conflict with `base`, and its ship is sent back as the conflict nudge sends it. Returns whether it left. */
+function sendConflict(deps: Pick<LandingQueueDeps, "db" | "now" | "kickScheduler">, row: LandingRow, run: RunWithPolicy, delivered: Delivered, base: string, files: string[]): boolean {
+  const { db } = deps;
+  const where = delivered.kind === "pr" ? `origin/${base}` : base;
+  const outcome = tx(db, () => {
+    const fresh = getLanding(db, row.id);
+    const current = getRunWithPolicy(db, run.id);
+    if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready") return null;
+    const now = deps.now();
+    leave(db, fresh, "conflict", `merging ${where} conflicts in ${files.length} file(s): ${files.slice(0, 5).join(", ")}`, now);
+    return sendConflictBack(db, current, delivered, { url: delivered.kind === "pr" ? delivered.ref : approvalRef(delivered), base, head: delivered.head, files, source: "daemon" }, taskTitle(db, current.task_id), now);
+  });
+  if (outcome) deps.kickScheduler();
+  return outcome !== null;
+}
+
+/** The line's own moves, for landing batches (src/verify/landing-batch.ts): an entry's state and events stay here. */
+export function lineOps(deps: Pick<LandingQueueDeps, "db" | "now" | "kickScheduler">): LineOps {
+  const { db } = deps;
+  return {
+    move: (row, to, fields, now, source) => move(db, row, to, fields, now, source).row,
+    leave: (row, reason, detail, now, hold) => leave(db, row, reason, detail, now, hold),
+    sendConflict: (row, run, delivered, base, files) => sendConflict(deps, row, run, delivered, base, files),
+    refreshLine: (projectId) => refreshLine(db, projectId),
+  };
+}
+
 /** Whether the run can join a line: a ready ship's PR (local-only: its branch) on its project's default branch, not stacked. */
 function canQueue(db: Db, run: RunWithPolicy, delivered: Delivered | null): delivered is Delivered {
   if (run.kind !== "ship" || run.state !== "ready" || run.stacked_on || !delivered) return false;
@@ -374,6 +424,8 @@ export interface LandingQueueDeps {
   log(message: string): void;
   /** A ship sent back for a conflict waits for a grant, and a train candidate's verify for a slot: the scheduler looks now. */
   kickScheduler(): void;
+  /** The merge verb's services, with which a green landing batch lands (src/verify/landing-batch.ts). */
+  delivery?: DeliveryServices;
 }
 
 type HeadOutcome = "started" | "blocked" | "left";
@@ -389,9 +441,11 @@ type Built = { head: string } | { conflict: string[] } | null;
  */
 export class LandingQueue implements LandingHooks {
   private readonly deps: LandingQueueDeps;
+  readonly batches: LandingBatches;
 
   constructor(deps: LandingQueueDeps) {
     this.deps = deps;
+    this.batches = new LandingBatches({ db: deps.db, config: deps.config, git: deps.git, now: deps.now, log: deps.log, kickScheduler: deps.kickScheduler, delivery: deps.delivery }, lineOps(deps));
   }
 
   async pass(): Promise<void> {
@@ -401,7 +455,7 @@ export class LandingQueue implements LandingHooks {
       for (const row of liveLandings(db)) this.settle(row, now);
       this.enqueueReady(now);
     });
-    const projects = new Set(liveLandings(db).map((r) => r.project_id));
+    const projects = new Set([...liveLandings(db).map((r) => r.project_id), ...(db.query(`SELECT project_id FROM landing_batches WHERE ${LIVE_BATCH_SQL}`).all() as { project_id: string }[]).map((r) => r.project_id)]);
     for (const projectId of projects) {
       try {
         await this.advanceProject(projectId);
@@ -432,6 +486,8 @@ export class LandingQueue implements LandingHooks {
     }
     if (!delivered || delivered.head !== row.head_sha) return void leave(db, row, "redelivered", `delivered again at ${delivered?.head.slice(0, 8) ?? "-"}`, now);
     if (row.state !== "landing") return;
+    // A landing batch's member: its batch lands it (src/verify/landing-batch.ts), with no auto-merge of its own.
+    if (row.batch_id !== null) return;
     const auto = row.auto_merge_id ? getAutoMerge(db, row.auto_merge_id) : null;
     if (!auto) return void leave(db, row, "auto_merge_gone", `its auto-merge ${row.auto_merge_id ?? "-"} is gone`, now);
     if (auto.state === "merged") {
@@ -479,7 +535,12 @@ export class LandingQueue implements LandingHooks {
   /** Bring the first entry that can go up to date and start its landing; the rest wait their turn. */
   private async advanceProject(projectId: string): Promise<void> {
     const project = getProject(this.deps.db, projectId);
-    if (project?.delivery_mode === "local-only") return this.advanceLocal(project);
+    if (project?.delivery_mode === "local-only") {
+      // A live batch is driven (or, once the project stops batching, dissolved) before anything else lands.
+      if (await this.batches.drive(project)) return;
+      if (landingBatched(this.deps.config(), project.id, project.delivery_mode)) return this.advanceBatchProject(project);
+      return this.advanceLocal(project);
+    }
     const line = projectLine(this.deps.db, projectId);
     if (!line.some((r) => r.state === "landing")) {
       for (const row of line) {
@@ -574,25 +635,19 @@ export class LandingQueue implements LandingHooks {
     if (holds?.code === 0) {
       sha = row.head_sha;
     } else {
-      const merged = await git(["merge-tree", "--write-tree", "--no-messages", "--name-only", row.head_sha, base], project.path);
-      if (merged.code === 1) {
-        const files = [...new Set(merged.stdout.split("\n").slice(1).map((f) => f.trim()).filter((f) => f.length > 0))];
+      const message = local ? localMergeMessage(base, run.branch, onMain ? { main: project.default_branch } : null) : trainMergeMessage(base, run.branch);
+      const merged = await mergeInStore(git, project.path, row.head_sha, base, message);
+      if ("conflict" in merged) {
+        const files = merged.conflict;
         const why = `merging ${base.slice(0, 8)} into ${row.head_sha.slice(0, 8)} conflicts${files.length > 0 ? ` in ${files.slice(0, 5).join(", ")}` : ""}`;
         tx(db, () => appendEvent(db, { source: "daemon", kind: "landing.train_skipped", runId: row.run_id, taskId: row.task_id, payload: { landing: row.id, head: row.head_sha, base, why, files: files.slice(0, 20) }, ts: this.deps.now() }));
         return { conflict: files };
       }
-      if (merged.code !== 0) {
-        this.deps.log(`landing queue ${row.id}: git merge-tree exited ${merged.code}: ${merged.stderr.trim()}`);
+      if ("error" in merged) {
+        this.deps.log(`landing queue ${row.id}: ${merged.error}`);
         return null;
       }
-      const tree = merged.stdout.split("\n")[0]?.trim() ?? "";
-      const message = local ? localMergeMessage(base, run.branch, onMain ? { main: project.default_branch } : null) : trainMergeMessage(base, run.branch);
-      const commit = await git(["commit-tree", tree, "-p", row.head_sha, "-p", base, "-m", message], project.path);
-      sha = commit.stdout.trim();
-      if (commit.code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
-        this.deps.log(`landing queue ${row.id}: git commit-tree failed: ${commit.stderr.trim()}`);
-        return null;
-      }
+      sha = merged.head;
     }
     const rank = onMain ? 0 : TRAIN_RANK;
     return tx(db, () => {
@@ -720,7 +775,7 @@ export class LandingQueue implements LandingHooks {
       const main = await this.mainTip(project);
       if (!main) return;
       const changed = await this.speculateLocal(project, main);
-      const line = projectLine(this.deps.db, project.id);
+      const line = this.localLine(project);
       if (line.some((r) => r.state === "landing")) return;
       let left = changed;
       for (const row of line) {
@@ -732,6 +787,34 @@ export class LandingQueue implements LandingHooks {
       }
       if (!left) return;
     }
+  }
+
+  /**
+   * A batch project with no live batch (docs/notes/2026-11-21-landing-batches-one-27.md): a
+   * sensitive entry first in line lands alone through the local line, with your record at the
+   * head that lands; otherwise (or once it cannot start) the other entries form a batch.
+   */
+  private async advanceBatchProject(project: ProjectRow): Promise<void> {
+    const { db } = this.deps;
+    const landingAlone = () => projectLine(db, project.id).some((r) => r.state === "landing");
+    if (landingAlone()) return;
+    const oldest = projectLine(db, project.id).find((r) => r.state === "waiting");
+    if (!oldest) return;
+    if (this.sensitive(oldest)) {
+      await this.advanceLocal(project);
+      if (landingAlone() || liveBatchOf(db, project.id)) return;
+    }
+    await this.batches.build(project, projectLine(db, project.id).filter((r) => r.state === "waiting" && !this.sensitive(r)));
+  }
+
+  private sensitive(row: LandingRow): boolean {
+    return getRunWithPolicy(this.deps.db, row.run_id)?.sensitive === 1;
+  }
+
+  /** The entries the local line lands one at a time: all of them, or a batch project's sensitive ones. */
+  private localLine(project: ProjectRow): LandingRow[] {
+    const line = projectLine(this.deps.db, project.id);
+    return landingBatched(this.deps.config(), project.id, project.delivery_mode) ? line.filter((r) => r.batch_id === null && this.sensitive(r)) : line;
   }
 
   /** Local main's tip, or null (logged) when git cannot read it. */
@@ -757,7 +840,7 @@ export class LandingQueue implements LandingHooks {
   private async speculateLocal(project: ProjectRow, main: string): Promise<boolean> {
     const { db } = this.deps;
     const depth = landingTrainDepth(this.deps.config(), project.id, project.delivery_mode);
-    const line = projectLine(db, project.id);
+    const line = this.localLine(project);
     const head = line.find((r) => r.state === "landing");
     const drop = (row: LandingRow, why: string) => tx(db, () => dropCandidate(db, getLanding(db, row.id) ?? row, why, this.deps.now()));
     let base: string | null = head ? head.head_sha : main;
@@ -965,18 +1048,7 @@ export class LandingQueue implements LandingHooks {
 
   /** The entry leaves the line for a conflict with `base`, and its ship is sent back as the conflict nudge sends it. Returns whether it left. */
   private sendConflict(row: LandingRow, run: RunWithPolicy, delivered: Delivered, base: string, files: string[]): boolean {
-    const { db } = this.deps;
-    const where = delivered.kind === "pr" ? `origin/${base}` : base;
-    const outcome = tx(db, () => {
-      const fresh = getLanding(db, row.id);
-      const current = getRunWithPolicy(db, run.id);
-      if (!fresh || fresh.state !== "waiting" || !current || current.state !== "ready") return null;
-      const now = this.deps.now();
-      leave(db, fresh, "conflict", `merging ${where} conflicts in ${files.length} file(s): ${files.slice(0, 5).join(", ")}`, now);
-      return sendConflictBack(db, current, delivered, { url: delivered.kind === "pr" ? delivered.ref : approvalRef(delivered), base, head: delivered.head, files, source: "daemon" }, taskTitle(db, current.task_id), now);
-    });
-    if (outcome) this.deps.kickScheduler();
-    return outcome !== null;
+    return sendConflict(this.deps, row, run, delivered, base, files);
   }
 
   /**

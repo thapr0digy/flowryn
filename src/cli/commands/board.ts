@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { landingBoardLines } from "../../verify/landing-batch.ts";
 import { errorReply } from "../../api/envelope.ts";
 import { boolArg, type CliIo, type VerbSpec } from "../../api/verbs.ts";
 import { openActionable } from "../../attention/router.ts";
@@ -98,6 +99,10 @@ export function boardFrame(db: Db, facts: BoardFacts, ageMs: number): string[] {
   for (const r of runs.slice(0, MAX_ROWS.fleet)) {
     lines.push(`  ${pad(r.task_id, 28)} ${pad(r.kind, 6)} ${pad(r.project_id, 12)} ${pad(r.state, 10)} ${pad(r.liveness, 14)} ${age(now, r.started_at)}`);
   }
+
+  // Landing batches (docs/notes/2026-11-21-landing-batches-one-27.md): only once a project has batched.
+  const landing = landingBoardLines(db);
+  if (landing.length > 0) lines.push("", "LANDING", ...landing);
 
   // The same queued set as `flowryn fleet` and the briefing's count.
   const queued = queuedWork(db);

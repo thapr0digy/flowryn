@@ -629,6 +629,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<number> {
       now: Date.now,
       log,
       kickScheduler: () => scheduler?.kick(),
+      delivery,
     });
     const noCi = async (projectId: string): Promise<boolean> => {
       const project = getProject(database, projectId);

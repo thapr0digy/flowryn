@@ -5,6 +5,8 @@ import { askLines, askView } from "../ask/view.ts";
 import { ASK_ID, getAsk } from "../ask/store.ts";
 import { latestVerification, verificationLine } from "../verify/store.ts";
 import { autoMergeLine, latestAutoMerge } from "../verify/auto-merge.ts";
+import { getBatch } from "../verify/batch-store.ts";
+import { batchView } from "../verify/landing-batch.ts";
 import { landingCell, landingProgress, latestLanding, liveLanding } from "../verify/landing-queue.ts";
 import { awayLine, getAway } from "../attention/away.ts";
 import { waitedLabel } from "../attention/deadline-defaults.ts";
@@ -862,8 +864,8 @@ function validationView(ctx: ReadCtx, id: string, full: boolean): HandlerResult 
 /** `flowryn show <task|run>`: one run in detail, at most about 40 lines; --full prints every title, line and body whole. */
 const show: VerbSpec = {
   name: "show",
-  summary: "One task, run, item, decision, plan, divergence, review gate, validator round (j<N>), chat-answer grant, leader session or unattended-mode grant (autonomy, u<N>) in detail; --full for untruncated text",
-  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), validator round (j<N>), grant (c<N>), leader session (L<N>) id, or autonomy (the latest unattended-mode grant) / u<N>", complete: "task" }],
+  summary: "One task, run, item, decision, plan, divergence, review gate, validator round (j<N>), chat-answer grant, leader session, unattended-mode grant (autonomy, u<N>) or landing batch (lb<N>) in detail; --full for untruncated text",
+  positionals: [{ name: "target", required: true, help: "task, run, item, decision, plan, divergence, gate (g<N>), validator round (j<N>), grant (c<N>), leader session (L<N>) id, autonomy (the latest unattended-mode grant) / u<N>, or landing batch (lb<N>)", complete: "task" }],
   flags: {
     full: { type: "boolean", help: "untruncated titles, lines and bodies" },
     why: { type: "boolean", help: "each recorded reason the run waits, whole: its rule, facts with their observation times, and who can end it" },
@@ -915,6 +917,8 @@ const show: VerbSpec = {
     if (gateRun) target = gateRun.run_id;
     const ask = ASK_ID.test(target) ? getAsk(ctx.db, target) : null;
     if (ask) return askView(ctx, ask, text.full);
+    const batch = /^lb\d+$/.test(target) ? getBatch(ctx.db, target) : null;
+    if (batch) return { data: batchView(ctx.db, batch), hints: batch.state === "held" ? [`flowryn batch drop ${batch.id} ${batch.culprit ?? "<task>"}`, `flowryn batch retry ${batch.id}`] : ["flowryn fleet"] };
     const plan = /^p\d+$/.test(target) ? planView(ctx.db, target, text.full) : null;
     if (plan) return { data: plan, hints: text.full ? ["flowryn fleet"] : ["flowryn fleet", `flowryn show ${target} --full`] };
     const divergence = /^d\d+$/.test(target) ? getDivergence(ctx.db, target) : null;

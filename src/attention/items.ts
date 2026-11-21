@@ -151,6 +151,7 @@ export const LANE_TABLE = {
   landed: { lane: "P1", class: "actionable" },
   pr_conflict: { lane: "P1", class: "actionable" },
   auto_merge_held: { lane: "P1", class: "actionable" },
+  landing_batch_held: { lane: "P1", class: "actionable" },
   wait_expired: { lane: "P1", class: "actionable" },
   autonomy_parked: { lane: "P1", class: "actionable" },
   validator_failed: { lane: "P1", class: "actionable" },
@@ -263,6 +264,8 @@ export const LEADER_ROUTE: Record<ItemKind, LeaderRoute> = {
   landed: "act",
   pr_conflict: "act",
   auto_merge_held: "act",
+  // A landing batch that cannot go on without the leader (src/verify/landing-batch.ts): a red verify, a refused fast-forward.
+  landing_batch_held: "act",
   wait_expired: "act",
   autonomy_parked: "user",
   // The review-gate validator (src/attention/gate-validator.ts): a failure or a held pass waits for the user's morning
@@ -312,7 +315,7 @@ export const LEADER_WAKE_SQL = `(i.kind IN (${LEADER_WAKE_KINDS.filter((k) => k 
  * session, a merge that landed, a held auto-merge, a review pass you asked
  * for, and a yolo task's ready PR. Ordering only; LEADER_WAKE_SQL decides wakes.
  */
-export const FOLLOW_UP_FIRST_SQL = `(i.kind IN ('user_acted', 'pass_requested', 'landed', 'auto_merge_held')
+export const FOLLOW_UP_FIRST_SQL = `(i.kind IN ('user_acted', 'pass_requested', 'landed', 'auto_merge_held', 'landing_batch_held')
     OR (i.kind = 'pr_ready' AND EXISTS (SELECT 1 FROM task_policy wp WHERE wp.task_id = i.task_id AND wp.yolo = 1) AND NOT ${DAEMON_MERGING_SQL}))`;
 
 export interface ItemRow {
@@ -392,6 +395,11 @@ export function resolveItems(db: Db, kind: ItemKind, taskId: string | null, reso
     )
     .run(kind, taskId, resolvedBy, now);
   return result.changes;
+}
+
+/** Resolve one open item by its id (one with no task or run, such as a held landing batch's). */
+export function resolveItem(db: Db, id: string, resolvedBy: string, now = Date.now()): number {
+  return db.query("UPDATE items SET state = 'resolved', resolved_by = ?2, resolved_at = ?3 WHERE id = ?1 AND state IN ('open','presented')").run(id, resolvedBy, now).changes;
 }
 
 /** Resolve the open items that carry one decision. */

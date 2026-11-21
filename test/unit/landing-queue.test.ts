@@ -138,7 +138,7 @@ describe("[projects.<id>] landing", () => {
     expect(landingMode(config(`[projects.web]\nverify = ["bun test"]\n`), "web", "direct-PR")).toBe("manual");
     expect(landingMode(config(QUEUE), "web", "direct-PR")).toBe("queue");
     expect(() => landingMode(config(`[projects.web]\nlanding = "queue"\n`), "web", "direct-PR")).toThrow(/landing = "queue" needs verify steps/);
-    expect(() => landingMode(config(`[projects.web]\nverify = ["x"]\nlanding = "fifo"\n`), "web", "direct-PR")).toThrow(/landing must be "queue" or "manual"/);
+    expect(() => landingMode(config(`[projects.web]\nverify = ["x"]\nlanding = "fifo"\n`), "web", "direct-PR")).toThrow(/landing must be "queue", "batch" or "manual"/);
     expect(landingQueued(config(`[projects.web]\nlanding = "fifo"\n`), "web", "direct-PR")).toBe(false);
     expect(JSON.stringify(effectiveConfig(config(QUEUE)))).toContain('"landing":"queue"');
   });
