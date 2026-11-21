@@ -55,10 +55,10 @@ function projectsView(config: FlowrynConfig, _env: NodeJS.ProcessEnv, modes: Rea
     const verify = verifyConfig(config, id);
     const maxWorkers = projectMaxWorkers(config, id);
     const reviewModel = projectReviewModel(config, id);
-    // Without the project's delivery mode (the file alone), a local-only project also queues when landing is unset.
-    const mode = modes[id] ?? null;
-    const landing = landingMode(config, id, mode);
-    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landing === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, mode) } : landing === "batch" ? { landing: "batch" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
+    // The config alone: a local-only project (its mode is in the database) also queues when landing is unset.
+    landingMode(config, id, modes[id] ?? null);
+    const landing = landingMode(config, id, null);
+    out[id] = { ...(verify ? { ...verify, ...(autoMergeSetting(config, id) !== null ? { auto_merge: autoMergeSetting(config, id) } : {}), ...(landing === "queue" ? { landing: "queue", landing_train_depth: landingTrainDepth(config, id, null) } : landing === "batch" ? { landing: "batch" } : {}) } : { verify: "none" }), ...(maxWorkers !== null ? { max_workers: maxWorkers } : {}), ...(reviewModel !== null ? { review_model: reviewModel } : {}) };
   }
   return out;
 }

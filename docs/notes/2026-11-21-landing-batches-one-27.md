@@ -18,7 +18,7 @@ light_verify = ["make fmt-check", "make vet", "go build ./..."]
 - `landing = "batch"`: a third landing mode beside `"queue"` and `"manual"`, for local-only projects only. It needs `verify` steps (`config_invalid` otherwise) and is refused (`config_invalid`) on a project that delivers PRs: the daemon refuses such a config at start and on SIGHUP, `flowryn project add`/`project set --mode` refuse the mode, and `flowryn config` lists it under `problems`. It is a queue for every "does this project queue" check (no direct auto-merge at delivery, unattended mode defers to the line, the rebuild hold); `landing_train_depth` does not apply.
 - `light_verify` (optional): the light check, in the `verify` grammar (strings, parallel groups, `{ run, when_changed }` tables; no `{ review = true }`), refused unless `landing = "batch"`. It runs with the verify's deadlines. Unset, a branch may join a batch as soon as it is in line. Keep the changed-tests step in `verify`: on a batch head it sees the union of the batch's changes once.
 
-`flowryn config` shows `landing: "batch"` and the light steps under `light`, judging each registered project by its delivery mode.
+`flowryn config` shows `landing: "batch"` and the light steps under `light`; the running daemon lists a project whose delivery mode refuses it under `problems`.
 
 ## What happens
 

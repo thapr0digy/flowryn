@@ -169,6 +169,8 @@ describe("config", () => {
 
   test("batch on a project that delivers PRs is refused where the project's mode is known: the effective config and project set", () => {
     expect(effectiveConfig(config(), {}, { web: "local-only" })).toMatchObject({ problems: [], sections: { projects: { web: { landing: "batch" } } } });
+    const queueProject = parseConfig(`[projects.web]\nverify = ${JSON.stringify(STEPS)}\n`, dir);
+    expect(effectiveConfig(queueProject, {}, { web: "local-only" }).sections.projects).toEqual(effectiveConfig(queueProject, {}).sections.projects);
     expect(effectiveConfig(config(), {}, { web: "direct-PR" }).problems).toEqual([expect.stringContaining(`landing = "batch" is for local-only projects; this one delivers direct-PR`)]);
     const projectSet = PROJECT_VERBS.find((v) => v.name === "project set")!;
     const ctx = { db, config: () => config() } as never;
