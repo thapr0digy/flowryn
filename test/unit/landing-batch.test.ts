@@ -582,6 +582,26 @@ describe("fix forward", () => {
     expect(getBatch(db, b.id)!.detail).toBe(`its fix ${task} was delivered off the batch head; ${red}`);
   });
 
+  test("a batch held because main kept moving keeps that hold when its fix then fails", async () => {
+    const { lq, b } = await redBatch();
+    tx(db, () => db.query("UPDATE landing_batches SET integrations = 99 WHERE id = ?1").run(b.id));
+    writeFileSync(join(primary, "hand.txt"), "x\n");
+    sh(primary, ["add", "."]);
+    sh(primary, ["commit", "-q", "-m", "by hand"]);
+    await lq.pass();
+    expect(getBatch(db, b.id)).toMatchObject({ state: "held", reason: "base_moving", fix_state: "open" });
+
+    const fix = deliverFix(b);
+    tx(db, () => db.query("UPDATE runs SET state = 'failed' WHERE id = ?1").run(fix.run));
+    await lq.pass();
+    const held = getBatch(db, b.id)!;
+    expect(held).toMatchObject({ state: "held", reason: "base_moving", fix_state: "ended" });
+    expect(held.detail).toStartWith(`its fix ${fix.task} failed; main moved under the batch`);
+    const items = db.query("SELECT line FROM items WHERE kind = 'landing_batch_held' AND state = 'open'").all() as { line: string }[];
+    expect(items).toHaveLength(1);
+    expect(items[0]!.line).toEndWith(`Next: flowryn batch retry ${b.id}`);
+  });
+
   test("a fix whose run fails holds the batch", async () => {
     const first = await redBatch();
     const fix = deliverFix(first.b);

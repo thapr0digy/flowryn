@@ -137,14 +137,14 @@ function batchStage(db: Db, batch: BatchRow): string {
   return "landing";
 }
 
-/** A fence for `text` that no run of backticks in it closes. */
-/** The batch's detail without a fix fate an earlier hold put in front of it: the verify failure the fix was opened for. */
-function redDetail(batch: BatchRow): string | null {
+/** The batch's detail without a fix fate an earlier hold put in front of it: why it waits or is held. */
+function detailBeforeFixFate(batch: BatchRow): string | null {
   if (!batch.detail?.startsWith(`its fix ${batch.fix_task} `)) return batch.detail;
   const cut = batch.detail.indexOf("; ");
   return cut < 0 ? null : batch.detail.slice(cut + 2);
 }
 
+/** A fence for `text` that no run of backticks in it closes. */
 function fenceFor(text: string): string {
   const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
   return "`".repeat(Math.max(3, longest + 1));
@@ -462,12 +462,16 @@ export class LandingBatches {
     this.ops.refreshLine(fresh.project_id);
   }
 
-  /** Hold a batch whose fix did not come through, keeping the verify failure as its reason (drop and retry offer as for any red). Call inside a transaction. */
+  /**
+   * Hold a batch whose fix did not come through, keeping the verify failure as its reason (drop and
+   * retry offer as for any red); a batch already held for something else keeps that reason. Call inside a transaction.
+   */
   private holdForFix(batch: BatchRow, why: string): void {
     // The fix's fate first: the item line keeps only the start of the reason.
-    const red = redDetail(batch);
-    const detail = red ? `${why}; ${red}` : why;
-    this.hold(batch, "verify_failed", detail, batch.culprit, batch.verification_id);
+    const before = detailBeforeFixFate(batch);
+    const detail = before ? `${why}; ${before}` : why;
+    const reason = batch.state === "held" && batch.reason ? batch.reason : "verify_failed";
+    this.hold(batch, reason, detail, batch.culprit, batch.verification_id);
   }
 
   /**
